@@ -13,13 +13,58 @@
  * Gate: requires NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY.
  */
 
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import {
   HAS_LIVE_DB,
   createLiveAdminClient,
   createTestUser,
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
+
+/**
+ * Phase B follow-up: `getMyAllocationDashboard` now asserts
+ * `auth.uid() === userId` (audit-2026-05-07 H-0502 backstop). A live-DB
+ * test that calls the function with an admin-seeded userId must spoof
+ * the server client's `auth.getUser()` to return that user — otherwise
+ * the backstop throws before any DB query runs. We hoist a mutable
+ * `mockAuthUserId` so each call can switch its caller identity.
+ */
+const authMock = vi.hoisted(() => ({ userId: null as string | null }));
+
+vi.mock("@/lib/supabase/server", async () => {
+  // Use the live admin client for actual SELECTs but override auth.getUser
+  // to return whichever test user the current call wants to impersonate.
+  const helpers = await import("@/lib/test-helpers/live-db");
+  return {
+    createClient: async () => {
+      if (!helpers.HAS_LIVE_DB) {
+        return {
+          from: () => ({}),
+          auth: {
+            getUser: async () => ({
+              data: { user: null },
+              error: null,
+            }),
+          },
+        };
+      }
+      const base = helpers.createLiveAdminClient();
+      // Swap the auth surface for a controllable stub.
+      const proxied: typeof base = Object.create(base);
+      Object.defineProperty(proxied, "auth", {
+        value: {
+          getUser: async () => ({
+            data: {
+              user: authMock.userId ? { id: authMock.userId } : null,
+            },
+            error: null,
+          }),
+        },
+      });
+      return proxied;
+    },
+  };
+});
 
 describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", () => {
   const toCleanup = {
@@ -159,8 +204,10 @@ describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", (
         toCleanup.outcomeIds.push((outcome as { id: string }).id);
       }
 
-      // Call getMyAllocationDashboard for allocator 1 — assert nested join
+      // Call getMyAllocationDashboard for allocator 1 — sign in as alloc1
+      // first so the H-0502 auth backstop passes.
       const { getMyAllocationDashboard } = await import("@/lib/queries");
+      authMock.userId = alloc1;
       const result1 = await getMyAllocationDashboard(alloc1);
       expect(result1.outcomes).toBeDefined();
       expect(result1.outcomes.length).toBeGreaterThanOrEqual(1);
@@ -172,11 +219,22 @@ describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", (
       expect(o1.replacement_strategy?.id).toBe(S_REPL_ID);
       expect(o1.replacement_strategy?.name).toBe(S_REPL_NAME);
 
-      // Cross-allocator isolation
+      // Cross-allocator isolation — switch identity to alloc2 first.
+      authMock.userId = alloc2;
       const result2 = await getMyAllocationDashboard(alloc2);
       expect(result2.outcomes.length).toBeGreaterThanOrEqual(1);
       const o2 = result2.outcomes[0];
       expect(o2.id).not.toBe(o1.id); // different outcome id
+
+      // Phase B pr-test-analyzer F3 — cross-tenant exfiltration probe.
+      // alloc2 (signed in) tries to call getMyAllocationDashboard(alloc1).
+      // The H-0502 backstop must throw BEFORE any data is returned;
+      // mocks above use admin client for actual SELECTs but the backstop
+      // gates the return value channel.
+      authMock.userId = alloc2;
+      await expect(getMyAllocationDashboard(alloc1)).rejects.toThrow(
+        /userId does not match authenticated user/,
+      );
     },
     60_000,
   );

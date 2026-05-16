@@ -4,11 +4,24 @@ import pandas as pd
 import numpy as np
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypedDict
 
 from .transforms import downsample_series, cap_data_points
 
 logger = logging.getLogger("quantalyze.analytics.metrics")
+
+
+# Audit 2026-05-07 H-0730: every series helper in this file returns the same
+# concrete shape {date: str, value: float} but typed it as
+# `list[dict[str, Any]]`, erasing the contract. TS consumers
+# (HeadlineMetricsPanel / ReturnsDistributionPanel) type the same shape
+# explicitly. Mirroring it here with a TypedDict means a renamed key (`val`
+# instead of `value`) would surface at type-check time instead of as runtime
+# NaN on the React side — the same drift class that produced the v0.17.1
+# KPI-17 column saga.
+class SeriesPoint(TypedDict):
+    date: str
+    value: float
 
 
 # Phase 12 / Pitfall 11: minimum acceptable return for Sortino.
@@ -17,6 +30,79 @@ logger = logging.getLogger("quantalyze.analytics.metrics")
 # by the `test_rolling_sortino_converges_to_scalar_at_full_window` test, which
 # asserts the rolling helper at window == period agrees with the scalar to within 0.05.
 MAR: float = 0.0
+
+# H-0728: Catastrophic-loss floor. `np.log1p(r)` is NaN for r <= -1
+# (a 100%+ loss day — liquidation event, gap-down, leveraged blow-up).
+# We clamp returns to (-1 + 1e-9) before log1p so the event surfaces as a
+# very large negative log return rather than disappearing through
+# `_finalize_rolling.dropna()`. `log1p(-1 + 1e-9) ≈ -20.72`.
+_LOG_RETURN_FLOOR: float = -1.0 + 1e-9
+
+# H-0710 / H-0713 / H-0723 dispatch table: (result_key, qs.stats attribute name).
+# `r_squared` (needs benchmark) and `time_in_market` (not a qs call) are handled
+# inline since their shapes differ from the single-arg pattern below.
+_QSTATS_SINGLE_ARG_SCALARS: tuple[tuple[str, str], ...] = (
+    ("recovery_factor", "recovery_factor"),
+    ("ulcer_index", "ulcer_index"),
+    ("upi", "ulcer_performance_index"),
+    ("kelly_criterion", "kelly_criterion"),
+    ("probabilistic_sharpe_ratio", "probabilistic_ratio"),
+    ("common_sense_ratio", "common_sense_ratio"),
+    ("cpc_index", "cpc_index"),
+    ("serenity_index", "serenity_index"),
+)
+
+
+def _drop_nonfinite(series: pd.Series) -> pd.Series:
+    """Single source of truth: drop NaN AND ±Inf rows. Used by every series
+    helper that writes to JSONB (Postgres rejects NaN — H-0715/H-0720 class).
+    """
+    return series.replace([np.inf, -np.inf], np.nan).dropna()
+
+
+def _format_series_points(
+    series: pd.Series, decimals: int
+) -> list[SeriesPoint]:
+    """Vectorized {date, value} dict construction. Replaces the per-row
+    `d.strftime + round(float(v), n)` comprehension hot-path.
+
+    Uses Python's `round(float, n)` (not `Series.round`) because the two use
+    different rounding strategies on binary floats — Series.round uses NumPy
+    half-to-even on the IEEE representation; Python round uses float-aware
+    decimal rounding. Matching the pre-helper contract keeps stored JSONB
+    values byte-stable across the refactor.
+    """
+    if len(series) == 0:
+        return []
+    if not isinstance(series.index, pd.DatetimeIndex):
+        raise TypeError(
+            f"_format_series_points requires a DatetimeIndex; got {type(series.index).__name__}"
+        )
+    dates = series.index.strftime("%Y-%m-%d").tolist()
+    values = [round(float(v), decimals) for v in series.tolist()]
+    return [{"date": d, "value": v} for d, v in zip(dates, values, strict=True)]
+
+
+def _safe_qstats_scalar(
+    name: str,
+    fn: Any,
+    returns: pd.Series,
+    returns_len: int | None,
+) -> float | None:
+    """Run a single-arg qs.stats scalar, returning None and logging on failure.
+
+    Failure-soft contract (H-0710 / H-0713 / H-0723): one failing scalar must
+    not take down the other nine. Logs include the scalar `name` so operators
+    can spot silent regressions in Railway logs without inferring from latency.
+    """
+    try:
+        return _safe_float(fn(returns))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar %s failed (returns_len=%s): %s",
+            name, returns_len, exc, exc_info=True,
+        )
+        return None
 
 
 @dataclass
@@ -51,6 +137,20 @@ class MetricsResult:
     def __getitem__(self, key: str) -> Any:
         # Backward-compat shim: old callers expected a bare dict; proxy
         # subscript access to metrics_json so legacy tests still work.
+        #
+        # Audit 2026-05-07 H-0727: `__getitem__` proxies to `metrics_json`
+        # ONLY — sibling_kinds is invisible under subscript by design (split
+        # storage per D-01/D-02). A refactor that mechanically replaces
+        # `result.sibling_kinds[kind]` with `result[kind]` "looks fine" in
+        # review but silently KeyErrors in production for every sibling kind.
+        # We detect the most likely misuse pattern explicitly so operators
+        # see a descriptive error pointing to `.sibling_kinds[...]`.
+        if key not in self.metrics_json and key in self.sibling_kinds:
+            raise KeyError(
+                f"MetricsResult subscript does NOT proxy sibling_kinds; "
+                f"use `result.sibling_kinds[{key!r}]` for split-storage kinds "
+                f"(D-01/D-02). See metrics.py:MetricsResult docstring."
+            )
         return self.metrics_json[key]
 
     def __contains__(self, key: str) -> bool:
@@ -103,7 +203,7 @@ def sanitize_metrics(data: dict[str, Any]) -> dict[str, Any]:
 def compute_all_metrics(
     returns: pd.Series,
     benchmark_returns: pd.Series | None = None,
-) -> "MetricsResult":
+) -> MetricsResult:  # H-0729: in-module class, no forward-ref needed.
     """Compute all analytics from a daily returns series.
 
     Phase 12: returns a `MetricsResult` dataclass (NOT a bare dict) split per D-01/D-02:
@@ -125,18 +225,47 @@ def compute_all_metrics(
     if len(returns) < 2:
         raise ValueError("Insufficient trade history. At least 2 trading days required.")
 
+    # Red-team F3: NaN in `returns` propagates through `cumprod` so one upstream
+    # gap day silently truncates the equity curve at the gap (post-NaN rows
+    # drop out at serialization). For chart-feeding paths, treat NaN as a
+    # 0-return day so equity carries forward. The unmodified `returns` is still
+    # used for statistics (qs.stats.* handle NaN per their own contracts).
+    nan_in_returns = int(returns.isna().sum())
+    if nan_in_returns > 0:
+        logger.warning(
+            "compute_all_metrics: %d NaN day(s) in returns (returns_len=%d); "
+            "chart paths use fillna(0), statistics keep NaN handling",
+            nan_in_returns, len(returns),
+        )
+    # Red-team F6: an r <= -1 day produces non-positive equity after cumprod
+    # (oscillating sign on subsequent multiplications). Surface upstream-data
+    # corruption so operators can fix it at ingestion rather than chasing a
+    # nonsensical equity chart.
+    catastrophic_count = int((returns <= -1.0).sum())
+    if catastrophic_count > 0:
+        logger.warning(
+            "compute_all_metrics: %d return(s) <= -1.0 (>=100%% loss day) in returns "
+            "(returns_len=%d). Equity curve may show sign flips — check upstream CSV.",
+            catastrophic_count, len(returns),
+        )
+    returns_for_chart = returns.fillna(0)
+
     # Core metrics (safe_float handles NaN/Inf from quantstats)
-    cumulative = (1 + returns).cumprod()
+    cumulative = (1 + returns_for_chart).cumprod()
     total_return = _safe_float(cumulative.iloc[-1] - 1)
     cagr = _safe_float(qs.stats.cagr(returns))
     volatility = _safe_float(qs.stats.volatility(returns))
     sharpe = _safe_float(qs.stats.sharpe(returns))
-    sortino = _safe_float(qs.stats.sortino(returns))
+    # Audit 2026-05-07 H-0725: pass `rf=MAR` explicitly so the scalar sortino
+    # and `_rolling_sortino` share the SAME minimum acceptable return constant.
+    # Relying on qs.stats.sortino's implicit `rf=0` default silently diverges
+    # the moment MAR is ever tuned away from 0.
+    sortino = _safe_float(qs.stats.sortino(returns, rf=MAR))
     calmar = _safe_float(qs.stats.calmar(returns))
     max_dd = _safe_float(qs.stats.max_drawdown(returns))
 
-    # Drawdown series
-    dd_series = qs.stats.to_drawdown_series(returns)
+    # Drawdown series — chart continuity per F3 (same fillna(0) rationale).
+    dd_series = qs.stats.to_drawdown_series(returns_for_chart)
     dd_duration = _max_dd_duration(dd_series)
 
     # Monthly returns (computed once, reused for grid + best/worst + VaR)
@@ -153,14 +282,19 @@ def compute_all_metrics(
     # Return quantiles
     quantiles = _return_quantiles(returns)
 
-    # Equity curve + drawdown as time series
+    # Equity curve + drawdown as time series.
+    # H-0715 defense-in-depth: scrub NaN/Inf at the helper boundary, not just at
+    # the sanitize_metrics tail — JSONB rejects NaN and one upstream gap day
+    # propagates through `(1+returns).cumprod()` to every subsequent row.
+    _cumulative_clean = _drop_nonfinite(cumulative)
     returns_series = [
         {"date": d.strftime("%Y-%m-%d"), "value": float(v)}
-        for d, v in cumulative.items()
+        for d, v in _cumulative_clean.items()
     ]
+    _dd_clean = _drop_nonfinite(dd_series)
     drawdown_series = [
         {"date": d.strftime("%Y-%m-%d"), "value": float(v)}
-        for d, v in dd_series.items()
+        for d, v in _dd_clean.items()
     ]
 
     # Sparklines (downsampled)
@@ -381,11 +515,14 @@ def compute_all_metrics(
             strat_end = returns.index.max()
             bm_slice = benchmark_returns[(benchmark_returns.index >= strat_start) & (benchmark_returns.index <= strat_end)]
             if len(bm_slice) > 0:
-                bm_cumulative = (1 + bm_slice).cumprod()
-                metrics_json["benchmark_returns"] = [
-                    {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 6)}
-                    for d, v in bm_cumulative.items()
-                ]
+                # F3: fillna(0) so a single missing benchmark day doesn't
+                # truncate the entire benchmark curve via NaN propagation.
+                bm_cumulative = (1 + bm_slice.fillna(0)).cumprod()
+                # H-0715/H-0720 defense-in-depth: scrub NaN/Inf + cap payload.
+                # Defensive scrub remains in case bm_slice contained ±Inf.
+                metrics_json["benchmark_returns"] = cap_data_points(
+                    _format_series_points(_drop_nonfinite(bm_cumulative), 6)
+                )
         except Exception as exc:  # noqa: BLE001
             # audit-2026-05-07 G11.E.3: silently dropping benchmark_returns also
             # kills the client-side correlation fallback in
@@ -439,16 +576,27 @@ def compute_all_metrics(
     # Heavy-series storage per D-02 — these go to strategy_analytics_series via
     # the atomic batch RPC (M-Grok-1) at the runner level, NOT into metrics_json.
     has_benchmark = benchmark_returns is not None and len(benchmark_returns) > 0
+    # H-0711: compute rolling alpha + beta from ONE rolling_greeks pass.
+    if has_benchmark:
+        rolling_alpha_series, rolling_beta_series = _rolling_alpha_beta(
+            returns, benchmark_returns, 90
+        )
+    else:
+        rolling_alpha_series, rolling_beta_series = [], []
+    # H-0721: hoist the window-independent neg_sq derivation ONCE so the three
+    # _rolling_sortino windows (63/126/252) share it instead of re-materializing
+    # the boolean-mask + squaring on every call.
+    sortino_neg_sq = (returns.where(returns < MAR, 0.0)) ** 2
     sibling_kinds: dict[str, Any] = {
         "daily_returns_grid": _daily_returns_grid_from_series(returns),
-        "rolling_sortino_3m": _rolling_sortino(returns, 63),
-        "rolling_sortino_6m": _rolling_sortino(returns, 126),
-        "rolling_sortino_12m": _rolling_sortino(returns, 252),
+        "rolling_sortino_3m": _rolling_sortino_from_components(returns, sortino_neg_sq, 63),
+        "rolling_sortino_6m": _rolling_sortino_from_components(returns, sortino_neg_sq, 126),
+        "rolling_sortino_12m": _rolling_sortino_from_components(returns, sortino_neg_sq, 252),
         "rolling_volatility_3m": _rolling_volatility(returns, 63),
         "rolling_volatility_6m": _rolling_volatility(returns, 126),
         "rolling_volatility_12m": _rolling_volatility(returns, 252),
-        "rolling_alpha": _rolling_alpha(returns, benchmark_returns, 90) if has_benchmark else [],
-        "rolling_beta": _rolling_beta(returns, benchmark_returns, 90) if has_benchmark else [],
+        "rolling_alpha": rolling_alpha_series,
+        "rolling_beta": rolling_beta_series,
         "log_returns_series": _log_returns_series(returns),
     }
 
@@ -509,7 +657,7 @@ def _monthly_returns_grid_from_series(monthly: pd.Series) -> dict[str, dict[str,
     return grid
 
 
-def _daily_returns_grid_from_series(returns: pd.Series) -> list[dict[str, Any]]:
+def _daily_returns_grid_from_series(returns: pd.Series) -> list[SeriesPoint]:
     """Flat per-day return list. Sibling-table kind = 'daily_returns_grid'.
 
     Output shape: [{date: 'YYYY-MM-DD', value: float}, …].
@@ -520,34 +668,66 @@ def _daily_returns_grid_from_series(returns: pd.Series) -> list[dict[str, Any]]:
     Mirrors `_monthly_returns_grid_from_series` template above (D-03 storage
     decision: flat list serializes smaller and matches per-date shape of every
     other series kind per RESEARCH.md §5b).
+
+    Audit 2026-05-07 H-0715: previously this helper iterated `returns.items()`
+    with NO NaN/Inf filter — every other series helper routes through
+    `_finalize_rolling` which scrubs NaN. A single NaN value (gap day, upstream
+    backfill, attacker-crafted CSV import) would become `round(float(nan), 6)
+    == nan` in the comprehension; Postgres JSONB then rejects NaN, failing
+    the atomic batch upsert and knocking out ALL 12 sibling kinds for the
+    strategy. We now drop NaN/Inf rows here.
+
+    Audit 2026-05-07 H-0720: previously the output bypassed `cap_data_points`
+    that every other series helper uses (a 10-year backtest could emit ~2,520
+    raw rows). Routing through the same chokepoint as `_finalize_rolling` keeps
+    payload sizes bounded.
     """
     if len(returns) == 0:
         return []
-    return [
-        {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 6)}
-        for d, v in returns.items()
-    ]
+    # H-0715: scrub NaN/Inf before serialization — Postgres JSONB rejects NaN.
+    # H-0720: enforce payload cap (shared chokepoint with _finalize_rolling).
+    return cap_data_points(_format_series_points(_drop_nonfinite(returns), 6))
 
 
 def compute_qstats_scalars(
     returns: pd.Series,
     benchmark: pd.Series | None,
-) -> dict[str, float | None]:
+) -> dict[str, float | None | str]:
     """METRICS-11: Compute the 10 new qstats scalars.
 
-    Each scalar is wrapped in try/except so a single qs failure doesn't take
-    down the whole metrics computation (mirrors existing pattern at
-    metrics.py:97-138). All keys are always present in the output dict; the
-    value is None when the underlying computation fails or input is missing
-    (e.g., r_squared without benchmark).
+    Audit 2026-05-07 H-0710 / H-0713 / H-0723:
+        Each scalar is still wrapped in try/except so a single qs failure
+        doesn't take down the whole metrics computation, but each `except`
+        now emits `logger.warning(..., exc_info=True)` with the scalar name
+        + returns length context. This converts "10 scalars silently degrade
+        to None" into a triggerable operator signal (Railway log). Also closes
+        the timing-oracle side channel insofar as the per-scalar throw is now
+        attributable in logs rather than only inferrable from latency.
+
+    Audit 2026-05-07 H-0718:
+        `r_squared` previously collapsed three states ('no benchmark',
+        'benchmark present but qs raised', 'benchmark present + qs returned
+        NaN/Inf') into the single None sentinel. We now emit a companion
+        `r_squared_status` key with one of 'no_benchmark' | 'ok' | 'error'
+        so operators can disambiguate the failure mode without reading logs.
+
+    Audit 2026-05-07 H-0724:
+        `time_in_market` previously used `qs.stats.exposure(returns)`, whose
+        internal `_ceil(ex * 100) / 100` rounds UP to the nearest percent
+        (e.g., 1 active day in 252 displays as 1% instead of 0.4%). We now
+        compute the unbiased fraction directly: `(returns != 0).sum() / len(returns)`.
+
+    All keys are always present in the output dict; the value is None when
+    the underlying computation fails or input is missing.
 
     Output keys (D-01 sibling-table contract):
         recovery_factor, ulcer_index, upi (ulcer_performance_index),
         kelly_criterion, probabilistic_sharpe_ratio (qs.stats.probabilistic_ratio),
         common_sense_ratio, cpc_index, serenity_index, r_squared (vs benchmark),
-        time_in_market (qstats name = `exposure`, output key per CONTEXT.md).
+        time_in_market (fraction in [0, 1], not ceil-rounded percent),
+        r_squared_status (companion: 'no_benchmark' | 'ok' | 'error').
     """
-    result: dict[str, float | None] = {
+    result: dict[str, float | None | str] = {
         "recovery_factor": None,
         "ulcer_index": None,
         "upi": None,
@@ -557,55 +737,50 @@ def compute_qstats_scalars(
         "cpc_index": None,
         "serenity_index": None,
         "r_squared": None,
+        "r_squared_status": "no_benchmark",
         "time_in_market": None,
     }
+    returns_len = len(returns) if returns is not None else None
 
+    for result_key, qs_attr in _QSTATS_SINGLE_ARG_SCALARS:
+        result[result_key] = _safe_qstats_scalar(
+            result_key, getattr(qs.stats, qs_attr), returns, returns_len
+        )
+
+    # H-0718: distinguish 'no benchmark' (default), 'ok', and 'error' for r_squared.
+    # Red-team F7: collapse NaN/Inf into 'error' (not 'ok') — qs may return a
+    # finite-looking number that `_safe_float` then strips to None; status must
+    # not promise 'ok' when r_squared is actually None.
+    if benchmark is not None and len(benchmark) > 0:
+        try:
+            r_squared_val = _safe_float(qs.stats.r_squared(returns, benchmark))
+            result["r_squared"] = r_squared_val
+            result["r_squared_status"] = "ok" if r_squared_val is not None else "error"
+        except Exception as exc:  # noqa: BLE001
+            result["r_squared_status"] = "error"
+            logger.warning(
+                "qstats scalar r_squared failed (returns_len=%s, benchmark_len=%s): %s",
+                returns_len, len(benchmark), exc, exc_info=True,
+            )
+    # H-0724: unbiased time-in-market fraction (qs.stats.exposure ceil-rounds UP).
+    # NaN-aware: `returns != 0` evaluates `NaN != 0 → True` in pandas, which
+    # would inflate the fraction whenever upstream CSV gaps inject NaN. Mirror
+    # qs.stats.exposure's `(~isnan(r)) & (r != 0)` predicate exactly.
     try:
-        result["recovery_factor"] = _safe_float(qs.stats.recovery_factor(returns))
-    except Exception:
-        pass
-    try:
-        result["ulcer_index"] = _safe_float(qs.stats.ulcer_index(returns))
-    except Exception:
-        pass
-    try:
-        result["upi"] = _safe_float(qs.stats.ulcer_performance_index(returns))
-    except Exception:
-        pass
-    try:
-        result["kelly_criterion"] = _safe_float(qs.stats.kelly_criterion(returns))
-    except Exception:
-        pass
-    try:
-        result["probabilistic_sharpe_ratio"] = _safe_float(qs.stats.probabilistic_ratio(returns))
-    except Exception:
-        pass
-    try:
-        result["common_sense_ratio"] = _safe_float(qs.stats.common_sense_ratio(returns))
-    except Exception:
-        pass
-    try:
-        result["cpc_index"] = _safe_float(qs.stats.cpc_index(returns))
-    except Exception:
-        pass
-    try:
-        result["serenity_index"] = _safe_float(qs.stats.serenity_index(returns))
-    except Exception:
-        pass
-    try:
-        if benchmark is not None and len(benchmark) > 0:
-            result["r_squared"] = _safe_float(qs.stats.r_squared(returns, benchmark))
-    except Exception:
-        pass
-    try:
-        result["time_in_market"] = _safe_float(qs.stats.exposure(returns))
-    except Exception:
-        pass
+        if returns_len:
+            result["time_in_market"] = _safe_float(
+                (returns.notna() & (returns != 0)).sum() / returns_len
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar time_in_market failed (returns_len=%s): %s",
+            returns_len, exc, exc_info=True,
+        )
 
     return result
 
 
-def _finalize_rolling(series: pd.Series) -> list[dict[str, Any]]:
+def _finalize_rolling(series: pd.Series) -> list[SeriesPoint]:
     """Drop NaN/±inf, format as {date, value} rounded to 4 decimals, cap size.
 
     Audit 2026-05-07 G11.E.17: when a significant fraction of points are
@@ -622,7 +797,7 @@ def _finalize_rolling(series: pd.Series) -> list[dict[str, Any]]:
     a follow-up: this fix surfaces the signal in server logs.
     """
     total = len(series)
-    cleaned = series.dropna().replace([np.inf, -np.inf], np.nan).dropna()
+    cleaned = _drop_nonfinite(series)
     dropped = total - len(cleaned)
     # 10% threshold — below that, the legitimate window-warmup phase of
     # any rolling indicator dominates and we'd spam the log on every
@@ -634,14 +809,10 @@ def _finalize_rolling(series: pd.Series) -> list[dict[str, Any]]:
             total,
             100.0 * dropped / total,
         )
-    result = [
-        {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 4)}
-        for d, v in cleaned.items()
-    ]
-    return cap_data_points(result)
+    return cap_data_points(_format_series_points(cleaned, 4))
 
 
-def _rolling_sharpe(returns: pd.Series, window: int) -> list[dict[str, Any]]:
+def _rolling_sharpe(returns: pd.Series, window: int) -> list[SeriesPoint]:
     """Compute rolling annualized Sharpe using vectorized pandas rolling."""
     if len(returns) < window:
         return []
@@ -650,7 +821,47 @@ def _rolling_sharpe(returns: pd.Series, window: int) -> list[dict[str, Any]]:
     return _finalize_rolling((roll_mean / roll_std) * np.sqrt(252))
 
 
-def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[dict[str, Any]]:
+def _rolling_sortino_from_components(
+    returns: pd.Series, neg_sq: pd.Series, window: int
+) -> list[SeriesPoint]:
+    """Window-parameterized inner for `_rolling_sortino`.
+
+    Audit 2026-05-07 H-0721: `_rolling_sortino` was being called 3x (windows
+    63/126/252) on the same returns series. The `neg_sq = (returns.where(...))**2`
+    derivation depends only on (returns, MAR) — NOT on window — and was being
+    rebuilt from scratch on every call. Splitting this inner lets the caller
+    materialize `neg_sq` once and pass it into all three window passes.
+
+    Audit 2026-05-07 H-0712 / H-0716: when a rolling window contains zero
+    returns below MAR (an all-winning window — the strategy's BEST state),
+    `neg_sq.rolling(window).sum() == 0`, `roll_dstd == 0`, and
+    `roll_mean / roll_dstd` → ±Inf. Python emits a divide-by-zero RuntimeWarning
+    that nobody catches; `_finalize_rolling` then scrubs Inf → NaN → dropna(),
+    silently removing the windows where the strategy performed BEST. We now
+    do the divide-by-zero check EXPLICITLY via `np.where(roll_dstd > 0, ...,
+    np.nan)` so (a) no RuntimeWarning is emitted on healthy strategies and
+    (b) the intent (undefined-but-good is treated as 'point absent') is visible
+    in the code. The provenance issue (UI cannot tell warmup from undefined
+    from error) is documented in H-0717 and is out of scope here as it requires
+    a downstream contract change.
+
+    Mirrors qs.stats.sortino math (downside RMS / N, NOT pandas std / N-1) per
+    the contract documented in `_rolling_sortino`.
+    """
+    if len(returns) < window:
+        return []
+    roll_dstd = (neg_sq.rolling(window).sum() / window) ** 0.5
+    roll_mean = returns.rolling(window).mean()
+    # H-0712 / H-0716: explicit divide-by-zero guard. roll_dstd is a pandas
+    # Series; the boolean comparison produces a Series mask we feed into
+    # np.where. NaN-where-undefined preserves the index so _finalize_rolling
+    # can attach the original dates to the surviving points.
+    ratio = np.where(roll_dstd > 0, roll_mean / roll_dstd, np.nan)
+    ratio_series = pd.Series(ratio, index=returns.index)
+    return _finalize_rolling(ratio_series * np.sqrt(252))
+
+
+def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[SeriesPoint]:
     """Compute rolling annualized Sortino using downside RMS (MAR-floored).
 
     Pitfall 11 single source of truth: this MUST mirror `qs.stats.sortino`'s
@@ -676,13 +887,11 @@ def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[
     if len(returns) < window:
         return []
     neg_sq = (returns.where(returns < mar, 0.0)) ** 2
-    roll_dstd = (neg_sq.rolling(window).sum() / window) ** 0.5
-    roll_mean = returns.rolling(window).mean()
     # _finalize_rolling scrubs NaN/Inf so the consumer never sees them.
-    return _finalize_rolling((roll_mean / roll_dstd) * np.sqrt(252))
+    return _rolling_sortino_from_components(returns, neg_sq, window)
 
 
-def _rolling_volatility(returns: pd.Series, window: int) -> list[dict[str, Any]]:
+def _rolling_volatility(returns: pd.Series, window: int) -> list[SeriesPoint]:
     """Annualized rolling volatility = std * sqrt(252).
 
     Mirrors `qs.stats.volatility` (which is `returns.std() * sqrt(252)`) on a
@@ -693,45 +902,118 @@ def _rolling_volatility(returns: pd.Series, window: int) -> list[dict[str, Any]]
     return _finalize_rolling(returns.rolling(window).std() * np.sqrt(252))
 
 
-def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[dict[str, Any]]:
+def _rolling_alpha_beta(
+    returns: pd.Series, benchmark: pd.Series, window: int = 90
+) -> tuple[list[SeriesPoint], list[SeriesPoint]]:
+    """Rolling (alpha, beta) projections from ONE `qs.stats.rolling_greeks` call.
+
+    Audit 2026-05-07 H-0711: previously `_rolling_alpha` and `_rolling_beta`
+    each independently called `qs.stats.rolling_greeks(returns, benchmark, window)`
+    — doubling the rolling OLS regression work on every analytics run. The
+    expensive part is the regression; alpha and beta come out of the SAME pass
+    on the same DataFrame. This helper computes greeks once and returns both
+    projections.
+
+    Audit 2026-05-07 H-0726: scalar greeks computation upstream aligns returns
+    and benchmark via `returns.align(benchmark, join='inner')` before calling
+    qs; the rolling pair was passing raw un-aligned series, letting qs internally
+    NaN-pad or shift across mismatched trading calendars. We now (1) align the
+    two series before calling rolling_greeks, (2) validate that BOTH the
+    strategy AND the benchmark have at least `window` aligned observations
+    (the old guard only checked `len(returns) < window`, allowing a too-short
+    benchmark to slip through), and (3) log a WARNING when the qs DataFrame
+    is missing the expected alpha/beta columns instead of silently returning
+    empty lists — that path masked qs version drift.
+    """
+    if returns is None or benchmark is None:
+        return [], []
+    aligned_returns, aligned_benchmark = returns.align(benchmark, join="inner")
+    aligned_n = len(aligned_returns)
+    if aligned_n < window:
+        return [], []
+    try:
+        greeks = qs.stats.rolling_greeks(aligned_returns, aligned_benchmark, window)
+    except Exception as exc:  # noqa: BLE001
+        # H-0726.3: surface qs-side rolling_greeks failures explicitly instead
+        # of letting them propagate to the caller's `except Exception` (or worse,
+        # to an uncaught path on a new qs version).
+        logger.warning(
+            "rolling_greeks failed (aligned_n=%s, window=%s): %s",
+            aligned_n, window, exc, exc_info=True,
+        )
+        return [], []
+    columns = set(getattr(greeks, "columns", []))
+    if "alpha" not in columns or "beta" not in columns:
+        # H-0726.3: silent fallback on missing columns previously masked qs
+        # version drift (column rename). Log it so a future qs bump that drops
+        # one of the columns produces an operator-visible signal.
+        logger.warning(
+            "rolling_greeks missing expected alpha/beta columns (got %s)",
+            sorted(columns),
+        )
+        return [], []
+    return _finalize_rolling(greeks["alpha"]), _finalize_rolling(greeks["beta"])
+
+
+def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[SeriesPoint]:
     """Rolling alpha vs benchmark via qs.stats.rolling_greeks.
 
-    Window default 90d trading per UC#6 BTC-only scope. qs.stats.rolling_greeks
-    returns a DataFrame with columns ["beta", "alpha"]; we project the alpha
-    column and finalize.
+    Thin wrapper around `_rolling_alpha_beta` retained for backward compat with
+    tests that import the public helper directly. Production code paths
+    (`compute_all_metrics`) call `_rolling_alpha_beta` once so the underlying
+    OLS regression runs ONCE per analytics run, not twice (H-0711).
+
+    Window default 90d trading per UC#6 BTC-only scope.
     """
-    if benchmark is None or len(returns) < window:
-        return []
-    greeks = qs.stats.rolling_greeks(returns, benchmark, window)
-    if "alpha" not in greeks:
-        return []
-    return _finalize_rolling(greeks["alpha"])
+    alpha, _ = _rolling_alpha_beta(returns, benchmark, window)
+    return alpha
 
 
-def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[dict[str, Any]]:
-    """Rolling beta vs benchmark via qs.stats.rolling_greeks."""
-    if benchmark is None or len(returns) < window:
-        return []
-    greeks = qs.stats.rolling_greeks(returns, benchmark, window)
-    if "beta" not in greeks:
-        return []
-    return _finalize_rolling(greeks["beta"])
+def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[SeriesPoint]:
+    """Rolling beta vs benchmark via qs.stats.rolling_greeks.
+
+    Thin wrapper around `_rolling_alpha_beta` retained for backward compat.
+    See `_rolling_alpha` docstring for rationale.
+    """
+    _, beta = _rolling_alpha_beta(returns, benchmark, window)
+    return beta
 
 
-def _log_returns_series(returns: pd.Series) -> list[dict[str, Any]]:
-    """Log returns series = np.log1p(returns).
+def _log_returns_series(returns: pd.Series) -> list[SeriesPoint]:
+    """Cumulative log-equity series = `np.log1p(returns).cumsum()`.
 
-    Same length as input (no window dropoff). Used by EquityCurve "Log Returns"
-    toggle (METRICS-12). Routed through _finalize_rolling for NaN/Inf scrubbing
-    + cap_data_points consistency with the other series helpers.
+    Audit 2026-05-07 H-0719: this helper previously returned per-period
+    `np.log1p(returns)` — values oscillating around zero (e.g. 0.005, -0.012,
+    0.003). The TS consumer (HeadlineMetricsPanel.tsx) feeds the output
+    directly into an EquityCurve renderer; for a 'Log Returns' toggle on an
+    equity curve the meaningful payload is the CUMULATIVE log equity
+    (`np.log((1+returns).cumprod())`, equivalently `np.log1p(returns).cumsum()`),
+    which trends monotonically with the equity curve on a log axis. The
+    per-period series rendered as noise hovering around zero. We now emit
+    cumulative log equity so the toggle is semantically meaningful.
+
+    Audit 2026-05-07 H-0728: `np.log1p(r)` is NaN for r <= -1 (a 100%+ loss
+    day — liquidation event). `_finalize_rolling.dropna()` would silently
+    remove the SINGLE most important day from the time series. We clamp
+    returns to `_LOG_RETURN_FLOOR = -1 + 1e-9` before log1p so the
+    catastrophic event surfaces as a very large negative log return
+    (`log1p(-1+1e-9) ≈ -20.72`) instead of vanishing. Same length as input
+    (no window dropoff). Routed through _finalize_rolling for NaN/Inf scrubbing
+    (any non-finite returns survive the clamp via dropna) + cap_data_points
+    consistency with the other series helpers.
     """
     if len(returns) == 0:
         return []
-    log_rets = np.log1p(returns)
-    return _finalize_rolling(pd.Series(log_rets, index=returns.index))
+    # H-0728: clamp to keep r <= -1 within log1p's domain. Anything > -1 is
+    # unchanged so this is a no-op for non-catastrophic strategies.
+    clamped = returns.clip(lower=_LOG_RETURN_FLOOR)
+    log_rets = np.log1p(clamped)
+    # H-0719: cumulative log equity, not per-period log returns.
+    cumulative = log_rets.cumsum()
+    return _finalize_rolling(pd.Series(cumulative, index=returns.index))
 
 
-def _rolling_correlation(a: pd.Series, b: pd.Series, window: int) -> list[dict[str, Any]]:
+def _rolling_correlation(a: pd.Series, b: pd.Series, window: int) -> list[SeriesPoint]:
     """Vectorized rolling Pearson correlation between two aligned series."""
     if len(a) < window:
         return []

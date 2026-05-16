@@ -42,8 +42,18 @@ const recorders = vi.hoisted(() => {
     // Records the `.select(cols)` argument used against the strategies
     // table so the path-extraction contract can assert no `select *` regressions.
     strategySelectCols: [] as string[],
+    // Phase B pr-test-analyzer F1 — captureToSentry call recorder.
+    // H-0488 / Phase B follow-up: a regression that drops Sentry capture
+    // from the RPC-error or shape-mismatch paths would otherwise be invisible.
+    sentryCalls: [] as Array<{ err: unknown; opts: unknown }>,
   };
 });
+
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: (err: unknown, opts: unknown) => {
+    recorders.sentryCalls.push({ err, opts });
+  },
+}));
 
 const buildChain = (data: unknown, recordStrategySelect = false) => {
   const chain: Record<string, unknown> = {};
@@ -179,6 +189,7 @@ beforeEach(() => {
   recorders.favoritesSelectCalls = [];
   recorders.favoritesEqCalls = [];
   recorders.strategySelectCols = [];
+  recorders.sentryCalls = [];
 });
 
 describe("getStrategyDetail — disclosure tier redaction", () => {
@@ -333,6 +344,138 @@ describe("fetchStrategyLazyMetrics — RPC consumer (Plan 12-08 / METRICS-15)", 
     const result = await fetchStrategyLazyMetrics("strategy-id", "overview");
     expect(result).toEqual({});
   });
+
+  // audit-2026-05-07 H-0489/H-0494: the RPC response is `any` and the
+  // function previously did `(data ?? {}) as LazyMetricsPayload`, which
+  // accepted ANY shape (arrays, primitives, false, 0). A typo'd panelId
+  // / SECURITY DEFINER mis-return would silently corrupt every consumer
+  // that destructures `payload.rolling_sortino_3m`. Reject non-plain-object
+  // payloads at the boundary and collapse to `{}` to match the
+  // visibility-miss contract.
+  it("returns {} when RPC returns an array (non-object payload)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    recorders.rpcResponse = { data: [1, 2, 3] as unknown, error: null };
+    const result = await fetchStrategyLazyMetrics("strategy-id", "rolling");
+    expect(result).toEqual({});
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("unexpected RPC payload shape"),
+      expect.objectContaining({ type: "array" }),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("returns {} when RPC returns a primitive (false / number / string)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    recorders.rpcResponse = { data: false as unknown, error: null };
+    expect(await fetchStrategyLazyMetrics("strategy-id", "rolling")).toEqual({});
+    recorders.rpcResponse = { data: 0 as unknown, error: null };
+    expect(await fetchStrategyLazyMetrics("strategy-id", "rolling")).toEqual({});
+    recorders.rpcResponse = { data: "oops" as unknown, error: null };
+    expect(await fetchStrategyLazyMetrics("strategy-id", "rolling")).toEqual({});
+    errSpy.mockRestore();
+  });
+
+  // Phase B pr-test-analyzer F1 — audit-2026-05-07 H-0488 contract:
+  // RPC errors must escalate to Sentry, not just console.error (Vercel
+  // runtime logs are not monitored continuously).
+  it("captures the RPC error to Sentry with op + panel_id + rpc_code tags", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const rpcError = { message: "rls denied", code: "PGRST301" };
+    recorders.rpcResponse = { data: null, error: rpcError };
+    await fetchStrategyLazyMetrics("strategy-id", "rolling");
+    expect(recorders.sentryCalls).toHaveLength(1);
+    expect(recorders.sentryCalls[0].err).toBe(rpcError);
+    expect(recorders.sentryCalls[0].opts).toEqual(
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          op: "fetchStrategyLazyMetrics",
+          panel_id: "rolling",
+          rpc_code: "PGRST301",
+        }),
+        level: "error",
+      }),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("defaults rpc_code to 'unknown' when error.code is absent", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    recorders.rpcResponse = {
+      data: null,
+      error: { message: "no code field" },
+    };
+    await fetchStrategyLazyMetrics("strategy-id", "exposure");
+    expect(recorders.sentryCalls).toHaveLength(1);
+    expect(
+      (recorders.sentryCalls[0].opts as { tags: { rpc_code: string } }).tags
+        .rpc_code,
+    ).toBe("unknown");
+    errSpy.mockRestore();
+  });
+
+  // Phase B silent-failure F3 + type-design F4: shape-mismatch path must
+  // ALSO escalate to Sentry (a SECURITY DEFINER return-type drift was
+  // previously invisible because only the error-channel went to Sentry).
+  it("captures shape-mismatch (array payload) to Sentry with reason=unexpected_payload_shape", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    recorders.rpcResponse = { data: [1, 2, 3] as unknown, error: null };
+    await fetchStrategyLazyMetrics("strategy-id", "rolling");
+    expect(recorders.sentryCalls).toHaveLength(1);
+    expect(recorders.sentryCalls[0].opts).toEqual(
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          op: "fetchStrategyLazyMetrics",
+          panel_id: "rolling",
+          reason: "unexpected_payload_shape",
+        }),
+        level: "error",
+      }),
+    );
+    errSpy.mockRestore();
+  });
+
+  // Phase B silent-failure F2: a legitimate `null` data ("visibility miss")
+  // must NOT log or escalate — only real shape regressions should.
+  it("does NOT log or capture on null data (legitimate visibility miss)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    recorders.rpcResponse = { data: null, error: null };
+    await fetchStrategyLazyMetrics("strategy-id", "rolling");
+    expect(errSpy).not.toHaveBeenCalled();
+    expect(recorders.sentryCalls).toHaveLength(0);
+    errSpy.mockRestore();
+  });
+
+  // Phase B type-design F4: unexpected keys (e.g. SQL CASE typo
+  // `rollig_sortino_3m`) must be filtered out AND escalated to Sentry.
+  it("filters unexpected keys from the payload and captures to Sentry", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    recorders.rpcResponse = {
+      data: {
+        rolling_sortino_3m: [{ date: "2026-01-01", value: 1.0 }],
+        rollig_sortino_typo: [{ date: "2026-01-01", value: 99 }],
+      },
+      error: null,
+    };
+    const result = await fetchStrategyLazyMetrics("strategy-id", "rolling");
+    expect(result).toEqual({
+      rolling_sortino_3m: [{ date: "2026-01-01", value: 1.0 }],
+    });
+    expect(recorders.sentryCalls).toHaveLength(1);
+    expect(recorders.sentryCalls[0].opts).toEqual(
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          op: "fetchStrategyLazyMetrics",
+          panel_id: "rolling",
+          reason: "unexpected_payload_keys",
+        }),
+      }),
+    );
+    expect(
+      (recorders.sentryCalls[0].opts as { extra: { unexpected: string[] } })
+        .extra.unexpected,
+    ).toEqual(["rollig_sortino_typo"]);
+    errSpy.mockRestore();
+  });
 });
 
 /**
@@ -391,6 +534,66 @@ describe("getMyWatchlist (Plan 13-01 / DISCO-01)", () => {
     // Single eq filter on user_id (other filters would be a security regression
     // — the function is meant to read ALL of the user's favorites).
     expect(recorders.favoritesEqCalls).toEqual([["user_id", USER_ID]]);
+  });
+
+  // audit-2026-05-07 H-0490 regression: rows with null/undefined
+  // strategy_id must NOT make it into the Set. The old code did
+  // `data.map((row) => row.strategy_id as string)` which let `null` /
+  // `undefined` flow through as Set members; `Set.has(undefined)` then
+  // returns true for any caller probing with `s.id` that itself happens
+  // to be undefined, falsely flagging unrelated strategies as starred.
+  it("drops rows where strategy_id is null or undefined (column-drift defence)", async () => {
+    recorders.favoritesResponse = {
+      data: [
+        { strategy_id: "cccccccc-0001-4000-8000-000000000001" },
+        { strategy_id: null },
+        { strategy_id: undefined },
+        { strategy_id: "" },
+        { strategy_id: "cccccccc-0001-4000-8000-000000000002" },
+      ],
+      error: null,
+    };
+    const result = await getMyWatchlist(USER_ID);
+    expect(result).toBeInstanceOf(Set);
+    if (!result) throw new Error("expected Set, got null");
+    expect(result.size).toBe(2);
+    expect(result.has("cccccccc-0001-4000-8000-000000000001")).toBe(true);
+    expect(result.has("cccccccc-0001-4000-8000-000000000002")).toBe(true);
+    // Critically: the set must NOT contain undefined — Set.has(undefined)
+    // would otherwise return true for callers probing with `s.id`
+    // when `s.id` is also undefined (the false-star regression).
+    expect(result.has(undefined as unknown as string)).toBe(false);
+    expect(result.has(null as unknown as string)).toBe(false);
+    expect(result.has("")).toBe(false);
+  });
+
+  // Phase B pr-test-analyzer F4: the typeof guard must accept ONLY
+  // non-empty strings. A future regression to `if (sid != null)` would
+  // re-admit numbers / booleans / arrays / objects, breaking the contract.
+  it("drops rows where strategy_id is a non-string truthy value (type-drift defence)", async () => {
+    recorders.favoritesResponse = {
+      data: [
+        { strategy_id: 123 },
+        { strategy_id: true },
+        { strategy_id: ["nested-id"] },
+        { strategy_id: { id: "obj" } },
+      ],
+      error: null,
+    };
+    const result = await getMyWatchlist(USER_ID);
+    expect(result).toBeInstanceOf(Set);
+    if (!result) throw new Error("expected Set, got null");
+    expect(result.size).toBe(0);
+  });
+
+  // Phase B pr-test-analyzer F10: an RLS-blocked SELECT can return
+  // { data: null, error: null }. Function must collapse to an empty Set
+  // (not null — null is reserved for explicit error states).
+  it("returns an empty Set when data is null and error is null (RLS-block edge case)", async () => {
+    recorders.favoritesResponse = { data: null, error: null };
+    const result = await getMyWatchlist(USER_ID);
+    expect(result).toBeInstanceOf(Set);
+    expect((result as Set<string>).size).toBe(0);
   });
 });
 

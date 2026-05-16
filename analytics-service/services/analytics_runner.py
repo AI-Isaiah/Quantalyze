@@ -55,6 +55,31 @@ from services.transforms import trades_to_daily_returns_with_status
 logger = logging.getLogger("quantalyze.analytics.runner")
 
 
+# ---------------------------------------------------------------------------
+# Tunable numeric constants (audit-2026-05-07 / H-0644/H-0654, H-0645/H-0653,
+# H-0652). Lifted from inline literals so the rationale is named once.
+# ---------------------------------------------------------------------------
+
+# A NUMERIC residual returned by PostgREST (e.g. 1e-15 from a partial-fill
+# close) must not be treated as a real position. Tolerance sits below any
+# meaningful dollar amount. See H-0644 / H-0654.
+POSITION_SIZE_ZERO_TOLERANCE_USD = 1e-9
+
+# `win_rate` is documented as a fraction in [0,1] but the producer
+# (`reconstruct_positions`) is an unenforced cross-module contract — values
+# clearly outside that range (e.g. 60.0 == 60%) get rescaled. The threshold
+# is > 1.5 (not > 1.0) so a 1.0001 ULP drift from `winners/total` at 100%
+# winners stays fractional instead of being misclassified as a percent. See
+# H-0645 / H-0653 + the red-team follow-up.
+WIN_RATE_PERCENT_HEURISTIC_THRESHOLD = 1.5
+
+# SQN scaling factor is capped at sqrt(min(N, 100)) — Van Tharp's original
+# 1997 definition. quantstats has no SQN parity oracle so the golden fixture
+# is self-anchored against this cap. Changing this constant requires
+# regenerating the golden fixture in the same change. See H-0652.
+SQN_TRADE_COUNT_CAP = 100
+
+
 def _merge_into_top_level_flags(
     target: dict | None,
     source: dict | None,
@@ -75,6 +100,15 @@ def _merge_into_top_level_flags(
       - booleans: OR-merge (any True wins)
       - ints / floats: sum (counters accumulate)
       - everything else (e.g. lists, strings): replace (last write wins)
+
+    Single-producer invariant on `*_truncated_kept` / `*_truncated_total`
+    counter keys: each list-truncation key name (e.g.
+    `turnover_nav_missing_dates_truncated_kept`,
+    `realized_pnl_per_trade_truncated_total`) is emitted by EXACTLY ONE
+    producer (named after the specific list it caps). The int-sum rule
+    above would otherwise double-count under a hypothetical cross-
+    producer key collision and make `_kept` exceed its cardinality cap.
+    New producers MUST keep their truncation keys uniquely namespaced.
 
     Returns the (possibly None) target dict. None is preserved when both
     sides are empty so the upsert payload can keep emitting `null` rather
@@ -98,7 +132,6 @@ def _merge_into_top_level_flags(
 async def _load_position_time_series(
     strategy_id: str,
     supabase,
-    account_balance: float | None,
 ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], dict[str, float]]:
     """H-A1: derive (positions_by_date, prices_by_date, nav_by_date) from
     `position_snapshots`.
@@ -117,10 +150,10 @@ async def _load_position_time_series(
     Args:
         strategy_id: UUID string of the strategy.
         supabase: PostgREST client (service-role).
-        account_balance: optional USD account balance from `api_keys`. Kept
-            in the signature so callers can probe its presence, but the
-            value is NOT written into the returned nav_by_date — see
-            audit-2026-05-07 C-0221 below.
+
+    The tenant's `api_keys.account_balance_usdt` is deliberately NOT a
+    parameter of this function — see audit-2026-05-07 C-0221 below. Removing
+    it from the signature makes the leak impossible by construction.
 
     Returns:
         positions_by_date: { 'YYYY-MM-DD': { symbol: signed_size_usd } }
@@ -143,7 +176,8 @@ async def _load_position_time_series(
     Mitigation: we now publish a PER-STRATEGY stable NAV proxy that contains
     no tenant-secret information. Specifically:
 
-      * NAV[d] = max(1.0, max_t sum(|positions[t]|))
+      * NAV[d] = max_gross_exposure if max_gross_exposure > 0 else 1.0,
+        where max_gross_exposure = max_t sum(|positions[t]|).
         — the rolling/full-run maximum gross exposure observed across all
         snapshot dates. Constant within a run (no per-day variation), so
         turnover_series == Σ(|Δposition × price|) / max_gross_exposure for
@@ -153,8 +187,8 @@ async def _load_position_time_series(
         as exposure_series) so leaking it adds no new information.
 
       * If positions_by_date is empty or max_gross_exposure is 0, NAV
-        defaults to 1.0 (gives a degenerate but non-error series; the
-        upstream turnover_series builder also short-circuits to 0.0).
+        defaults to 1.0 (degenerate but non-error series; the upstream
+        turnover_series builder also short-circuits on nav <= 0).
 
     Known trade-off (documented per H-0636 fix preference (b)): an attacker
     with access to BOTH `exposure_series` (already published per-day) AND
@@ -167,9 +201,6 @@ async def _load_position_time_series(
     strategies. Preferred alternative would be H-0636 option (a): require
     account_balance and emit `data_quality_flags.turnover_unavailable`
     otherwise — tracked in the follow-up backlog.
-
-    The `account_balance` parameter is retained in the signature for caller
-    compatibility but is NEVER written into the returned grid.
     """
     # Audit-2026-05-07 H-0629 / H-0643: paginate the snapshot fetch. The
     # bare SELECT was bounded only by PostgREST's per-response cap
@@ -210,12 +241,9 @@ async def _load_position_time_series(
         except (TypeError, ValueError):
             size_usd = 0.0
         # Skip flat or near-zero-size rows (per migration 034 comment they're
-        # usually not stored, but defensive). Audit-2026-05-07 H-0644 / H-0654:
-        # `size_usd == 0.0` exact-float equality fails on NUMERIC residuals
-        # round-tripped through PostgREST (e.g. 1e-15 from a partial-fill
-        # close), producing phantom positions in the turnover/exposure grids.
-        # Use a tight tolerance below any meaningful dollar amount.
-        if side == "flat" or abs(size_usd) < 1e-9:
+        # usually not stored, but defensive). H-0644 / H-0654 motivates the
+        # tolerance — see POSITION_SIZE_ZERO_TOLERANCE_USD docstring.
+        if side == "flat" or abs(size_usd) < POSITION_SIZE_ZERO_TOLERANCE_USD:
             continue
         signed = size_usd if side == "long" else -size_usd
         positions_by_date.setdefault(d, {})[sym] = signed
@@ -228,24 +256,24 @@ async def _load_position_time_series(
 
     # Build nav_by_date. Audit-2026-05-07 C-0221 + H-0636: NEVER write
     # `float(account_balance)` here — that leaks the raw tenant USDT balance
-    # through the published `turnover_series` sibling row. NEVER write 1.0
-    # constant either: that makes turnover_series leak the raw dollar
-    # position-change magnitude (numerator with denominator=1).
+    # through the published `turnover_series` sibling row. Do NOT write 1.0
+    # as a constant denominator FOR NON-EMPTY POSITION BOOKS: that makes
+    # turnover_series leak the raw dollar position-change magnitude
+    # (numerator with denominator=1). 1.0 IS used as a degenerate fallback
+    # ONLY when max_gross_exposure is 0 (no positions to leak).
     #
     # Use the per-strategy rolling maximum gross exposure as a stable proxy:
     # constant within the run, contains no balance information, and
     # gross-exposure shape is already published in exposure_series so it
-    # adds no new disclosure surface. Defaults to 1.0 when the max is 0 to
-    # avoid divide-by-zero downstream (compute_turnover_series_with_flags
-    # short-circuits on nav <= 0 anyway, so this is belt-and-braces).
+    # adds no new disclosure surface. The 1.0 fallback avoids divide-by-zero
+    # downstream (compute_turnover_series_with_flags short-circuits on
+    # nav <= 0 anyway, so this is belt-and-braces).
     max_gross_exposure = max(
         (sum(abs(v) for v in pos_map.values()) for pos_map in positions_by_date.values()),
         default=0.0,
     )
     nav_proxy = max_gross_exposure if max_gross_exposure > 0 else 1.0
     nav_by_date: dict[str, float] = {d: nav_proxy for d in positions_by_date}
-    # `account_balance` is intentionally NOT consumed below — see docstring.
-    _ = account_balance
 
     return positions_by_date, prices_by_date, nav_by_date
 
@@ -438,7 +466,7 @@ def _compute_derived_trade_metrics(
     win_rate = _safe_float(trade_metrics_from_positions.get("win_rate")) or 0.0
     if win_rate < 0:
         win_rate = 0.0
-    elif win_rate > 1.5:
+    elif win_rate > WIN_RATE_PERCENT_HEURISTIC_THRESHOLD:
         win_rate = win_rate / 100.0
     win_rate = min(win_rate, 1.0)
     # Per-trade aggregations below filter non-finite pnl via `_safe_float`,
@@ -532,7 +560,7 @@ def _compute_derived_trade_metrics(
             std_r = math.sqrt(var_r) if var_r > 0 else 0.0
             if std_r > 0:
                 out["sqn"] = (mean_r / std_r) * math.sqrt(
-                    min(len(r_multiples), 100)
+                    min(len(r_multiples), SQN_TRADE_COUNT_CAP)
                 )
 
     # Profit Factor segmented by side — same `_finite_pnl` coercion so a
@@ -815,14 +843,15 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 if balance_raw is not None:
                     account_balance = float(balance_raw)
                 else:
-                    # api_key exists but no balance configured — turnover
-                    # falls back to gross-exposure NAV proxy. Genuine
-                    # degraded state.
+                    # api_key exists but no balance configured. Post-C-0221
+                    # NAV semantics are unchanged (always `max_gross_exposure`,
+                    # per _load_position_time_series); the flag exists only
+                    # to surface the degraded state in the owner UI.
                     account_balance_unavailable = True
             else:
                 # No api_key linked at all — common for demo / paper
-                # strategies. Same fallback denominator, but distinct flag
-                # so the UI text doesn't imply something needs fixing.
+                # strategies. NAV proxy still unconditional; distinct flag so
+                # the UI text doesn't imply something needs fixing.
                 no_linked_api_key = True
         except Exception:  # noqa: BLE001
             # Use exception() to capture the full traceback in logs;
@@ -940,9 +969,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 positions_by_date,
                 prices_by_date,
                 nav_by_date,
-            ) = await _load_position_time_series(
-                strategy_id, supabase, account_balance
-            )
+            ) = await _load_position_time_series(strategy_id, supabase)
         except PaginatedSelectTruncated:
             # Audit #52 fail-loud contract: a 1M-row strategy hitting the
             # pagination hard cap must surface as a stable typed error so
@@ -1368,6 +1395,36 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         return {"status": "complete", "strategy_id": strategy_id}
 
     except HTTPException:
+        raise
+    except PaginatedSelectTruncated as trunc:
+        # Phase C red-team Finding 1: the broad `except Exception` below
+        # would swallow this typed exception, mapping it to a generic
+        # HTTPException(500). The worker dispatcher's classify_exception
+        # then tags 500 as `unknown` → indefinite retry on a permanent
+        # data-shape fault. Handle the truncation distinctly: persist a
+        # SPECIFIC computation_error that preserves the page count + hint,
+        # then re-raise the typed exception so callers (and the dispatcher)
+        # can classify it as a permanent fault.
+        logger.error(
+            "Compute analytics: pagination truncation for %s "
+            "(page_count=%d, page_size=%d, hint=%s)",
+            strategy_id, trunc.page_count, trunc.page_size, trunc.hint or "n/a",
+        )
+        await db_execute(
+            lambda: supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    "computation_status": "failed",
+                    "computation_error": (
+                        f"Analytics aborted: dataset exceeds "
+                        f"{trunc.page_count * trunc.page_size:,} rows "
+                        f"({trunc.hint or 'unknown source'}); operator "
+                        "intervention required."
+                    ),
+                },
+                on_conflict="strategy_id",
+            ).execute()
+        )
         raise
     except Exception as e:
         logger.error(

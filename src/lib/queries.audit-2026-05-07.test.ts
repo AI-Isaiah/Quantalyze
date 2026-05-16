@@ -38,12 +38,17 @@ const buildResult = vi.hoisted(() => ({
   countByTable: {} as Record<string, number>,
   // For `.maybeSingle()` results — keyed by table.
   maybeSingleByTable: {} as Record<string, MockResult>,
+  // audit-2026-05-07 H-0502: getMyAllocationDashboard now asserts
+  // auth.uid() === userId. Tests that exercise the happy path keep
+  // authUserId = "user-1"; the H-0502 mismatch test overrides it.
+  authUserId: "user-1" as string | null,
 }));
 
 function reset() {
   buildResult.byTable = {};
   buildResult.countByTable = {};
   buildResult.maybeSingleByTable = {};
+  buildResult.authUserId = "user-1";
 }
 
 function chainFor(table: string) {
@@ -95,7 +100,11 @@ vi.mock("@/lib/supabase/server", () => ({
     from: (table: string) => chainFor(table),
     auth: {
       getUser: async () => ({
-        data: { user: { id: "user-1" } },
+        data: {
+          user: buildResult.authUserId
+            ? { id: buildResult.authUserId }
+            : null,
+        },
         error: null,
       }),
     },
@@ -388,6 +397,170 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
     );
   });
 
+  // Phase B pr-test-analyzer F2: H-0484 explicit field copy now uses runtime
+  // typeof guards. Every BridgeOutcome key must propagate from the raw
+  // PostgREST row to the outcome dict — a regression that drops a key from
+  // `pickBridgeOutcomeFields` (e.g. removes `needs_recompute` after a
+  // schema rename) would otherwise produce `{ needs_recompute: false }`
+  // silently. This test seeds distinctive values for every nullable +
+  // boolean field and pins them on the response.
+  it("propagates every BridgeOutcome field from the raw row", async () => {
+    buildResult.byTable["bridge_outcomes"] = {
+      data: [
+        {
+          id: "field-pin-1",
+          strategy_id: "s-pin",
+          match_decision_id: "md-pin",
+          kind: "rejected",
+          percent_allocated: 17.5,
+          allocated_at: "2026-04-10",
+          rejection_reason: "timing_wrong",
+          note: "Distinctive note value",
+          delta_30d: 0.012,
+          delta_90d: -0.034,
+          delta_180d: 0.056,
+          estimated_delta_bps: 42,
+          estimated_days: 90,
+          needs_recompute: true,
+          created_at: "2026-04-15T08:00:00Z",
+          replacement_strategy: {
+            id: "s-pin",
+            name: "Pin Strategy",
+            codename: null,
+            disclosure_tier: "institutional",
+          },
+          match_decision: null,
+        },
+      ],
+      error: null,
+    };
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const payload = await getMyAllocationDashboard("user-1");
+    const outcome = payload.outcomes.find((o) => o.id === "field-pin-1");
+    expect(outcome).toBeDefined();
+    expect(outcome!.kind).toBe("rejected");
+    expect(outcome!.percent_allocated).toBe(17.5);
+    expect(outcome!.allocated_at).toBe("2026-04-10");
+    expect(outcome!.rejection_reason).toBe("timing_wrong");
+    expect(outcome!.note).toBe("Distinctive note value");
+    expect(outcome!.delta_30d).toBe(0.012);
+    expect(outcome!.delta_90d).toBe(-0.034);
+    expect(outcome!.delta_180d).toBe(0.056);
+    expect(outcome!.estimated_delta_bps).toBe(42);
+    expect(outcome!.estimated_days).toBe(90);
+    expect(outcome!.needs_recompute).toBe(true);
+    expect(outcome!.created_at).toBe("2026-04-15T08:00:00Z");
+    expect(outcome!.match_decision_id).toBe("md-pin");
+  });
+
+  // Phase B type-design F2 + code-reviewer F2: a row missing a REQUIRED
+  // BridgeOutcome field (id / created_at) must throw — the previous
+  // `row.id as string` cast silently produced `{ id: undefined }`.
+  it("throws when a required field (id) is missing on a bridge_outcomes row", async () => {
+    buildResult.byTable["bridge_outcomes"] = {
+      data: [
+        {
+          // id intentionally missing — simulates a SELECT column drop
+          strategy_id: "s-missing",
+          kind: "allocated",
+          percent_allocated: 10,
+          allocated_at: "2026-04-01",
+          rejection_reason: null,
+          note: null,
+          delta_30d: null,
+          delta_90d: null,
+          delta_180d: null,
+          estimated_delta_bps: null,
+          estimated_days: null,
+          needs_recompute: false,
+          created_at: "2026-04-15T00:00:00Z",
+          replacement_strategy: null,
+          match_decision: null,
+        },
+      ],
+      error: null,
+    };
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    await expect(getMyAllocationDashboard("user-1")).rejects.toThrow(
+      /missing required id/,
+    );
+  });
+
+  // Phase C red-team Finding 3: every other field uses a strict typeof
+  // guard but `needs_recompute` previously used `Boolean(...)`. `Boolean("false")
+  // === true`, so a column-type drift (BOOLEAN → TEXT) would silently flip
+  // the stale-data UI indicator. Strict `=== true` is the contract.
+  it("rejects non-boolean truthy values for needs_recompute (typeof discipline)", async () => {
+    buildResult.byTable["bridge_outcomes"] = {
+      data: [
+        {
+          id: "needs-recompute-string",
+          strategy_id: "s-x",
+          kind: "allocated",
+          percent_allocated: 10,
+          allocated_at: "2026-04-01",
+          rejection_reason: null,
+          note: null,
+          delta_30d: null,
+          delta_90d: null,
+          delta_180d: null,
+          estimated_delta_bps: null,
+          estimated_days: null,
+          needs_recompute: "false", // looks like a falsy intent
+          created_at: "2026-04-15T00:00:00Z",
+          replacement_strategy: null,
+          match_decision: null,
+        },
+      ],
+      error: null,
+    };
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const payload = await getMyAllocationDashboard("user-1");
+    const outcome = payload.outcomes.find(
+      (o) => o.id === "needs-recompute-string",
+    );
+    expect(outcome).toBeDefined();
+    // The string "false" must NOT coerce to true. Strict === true is the
+    // contract; any non-boolean value resolves to false.
+    expect(outcome!.needs_recompute).toBe(false);
+  });
+
+  // Phase B type-design F2: a row carrying an unknown `kind` (enum drift)
+  // must throw rather than silently passing through.
+  it("throws when a bridge_outcomes row carries an unknown kind value", async () => {
+    buildResult.byTable["bridge_outcomes"] = {
+      data: [
+        {
+          id: "bad-kind-1",
+          strategy_id: "s-bad",
+          kind: "totally_made_up",
+          percent_allocated: 10,
+          allocated_at: "2026-04-01",
+          rejection_reason: null,
+          note: null,
+          delta_30d: null,
+          delta_90d: null,
+          delta_180d: null,
+          estimated_delta_bps: null,
+          estimated_days: null,
+          needs_recompute: false,
+          created_at: "2026-04-15T00:00:00Z",
+          replacement_strategy: null,
+          match_decision: null,
+        },
+      ],
+      error: null,
+    };
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    await expect(getMyAllocationDashboard("user-1")).rejects.toThrow(
+      /invalid kind/,
+    );
+  });
+
   it("outcomes payload: institutional tier still surfaces canonical name verbatim", async () => {
     buildResult.byTable["bridge_outcomes"] = {
       data: [
@@ -425,6 +598,50 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
     expect(payload.outcomes[0].replacement_strategy?.name).toBe(
       "Institutional Strategy",
     );
+  });
+
+  // Phase C red-team Finding 2: the candidate-strategies SELECT used to
+  // destructure `{ data }`-only, so a Supabase error silently produced an
+  // empty `nameById` map → every flagged holding's `name` resolved to
+  // `undefined` → the `if (!name) return null` filter stripped EVERY entry.
+  // Allocators saw an empty flagged-holdings panel masking real breach
+  // signals. Now the function throws via assertOk so the error reaches
+  // error.tsx + Sentry.
+  it("throws when the candidate_strategies SELECT errors (no silent flagged-holdings drop)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    // Seed a flagged batch so the secondary `strategies` SELECT is actually
+    // triggered (candidateIds.length > 0).
+    buildResult.byTable["match_batches"] = {
+      data: [
+        {
+          id: "batch-flag-err",
+          holding_flags: [
+            {
+              holding_ref: "holding:binance:BTC:spot",
+              value_usd: 50000,
+              weight: 0.4,
+              breach_reasons: ["max_weight"],
+              top_candidate_strategy_id: "s-error-cand",
+              top_candidate_composite: 80,
+              flagged: true,
+            },
+          ],
+        },
+      ],
+      error: null,
+    };
+    // Force the secondary strategies SELECT to error.
+    buildResult.byTable["strategies"] = {
+      data: null,
+      error: { message: "rls denied on strategies" },
+    };
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    await expect(getMyAllocationDashboard("user-1")).rejects.toThrow(
+      /flagged_candidate_strategies: rls denied on strategies/,
+    );
+    errSpy.mockRestore();
   });
 
   it("flaggedHoldings.top_candidate_name is redacted for exploratory candidate strategies (was: leaked canonical name)", async () => {
@@ -468,5 +685,58 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
     expect(payload.flaggedHoldings[0].top_candidate_name).not.toBe(
       "Leaked Candidate Name",
     );
+  });
+});
+
+describe("getMyAllocationDashboard — audit-2026-05-07 H-0502 / C-0172 / H-0481 (auth backstop)", () => {
+  it("throws when the userId argument does not match the authenticated user", async () => {
+    // Simulate a caller passing a userId that wasn't sourced from
+    // auth.getUser() (the foot-gun: a future caller takes the id from
+    // a query param / header / cookie without auth verification). The
+    // admin-client reads below would otherwise happily return THAT
+    // user's full holdings + outcomes history.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    buildResult.authUserId = "attacker"; // logged-in as attacker, queries victim
+    const { getMyAllocationDashboard } = await import("./queries");
+    await expect(getMyAllocationDashboard("victim")).rejects.toThrow(
+      /userId does not match authenticated user/,
+    );
+    errSpy.mockRestore();
+  });
+
+  it("throws when there is no authenticated user at all", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    buildResult.authUserId = null;
+    const { getMyAllocationDashboard } = await import("./queries");
+    await expect(getMyAllocationDashboard("user-1")).rejects.toThrow(
+      /userId does not match authenticated user/,
+    );
+    errSpy.mockRestore();
+  });
+});
+
+describe("getUserApiKeys — audit-2026-05-07 H-0499", () => {
+  it("throws when supabase reports an error (was: silently empty array)", async () => {
+    // Force the api_keys chain to resolve with an error. Previously the
+    // function only destructured `data` and returned `[]`, so a real RLS
+    // / grant / schema-drift failure rendered the empty-state
+    // "connect your first exchange" UI for allocators who actually had
+    // keys, masking the regression on a money-display path.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    buildResult.byTable["api_keys"] = {
+      data: null,
+      error: { message: "permission denied for table api_keys" },
+    };
+    const { getUserApiKeys } = await import("./queries");
+    await expect(getUserApiKeys("user-1")).rejects.toThrow(
+      /getUserApiKeys failed: permission denied for table api_keys/,
+    );
+    errSpy.mockRestore();
+  });
+
+  it("returns an empty array when no rows exist (no error, no data)", async () => {
+    buildResult.byTable["api_keys"] = { data: [], error: null };
+    const { getUserApiKeys } = await import("./queries");
+    await expect(getUserApiKeys("user-1")).resolves.toEqual([]);
   });
 });

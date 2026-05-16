@@ -34,8 +34,14 @@ class PaginatedSelectTruncated(RuntimeError):
     partially-loaded window reported stable-looking numbers from corrupt
     data.
 
-    ``hint`` is intentionally count-only (e.g. ``"compute_hit_rate
-    n_allocators=N"``) — never raw UUIDs — so log volume stays bounded.
+    Carries ``page_count``, ``page_size``, and a ``hint`` string for log
+    triage. Callers typically pass count-only hints (e.g.
+    ``"compute_hit_rate n_allocators=N"``) but may pass single-strategy
+    UUIDs (e.g. ``"position_snapshots strategy_id=<uuid>"``) when the
+    query is per-strategy and the operator value of having the UUID
+    in the error outweighs log cardinality. The hint flows into the
+    client-visible 503 detail in `routers/match.py`, so callers must
+    not embed multi-tenant or PII payloads.
     """
 
     def __init__(self, page_count: int, page_size: int, hint: str | None = None) -> None:

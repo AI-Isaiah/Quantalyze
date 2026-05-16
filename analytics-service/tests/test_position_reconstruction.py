@@ -456,11 +456,23 @@ async def test_exposure_metrics_includes_series() -> None:
 
 @pytest.mark.asyncio
 async def test_exposure_metrics_empty_when_no_snapshots() -> None:
-    """METRICS-05: empty input still returns empty dict (no exposure_series key)."""
+    """Audit H-0747: empty position_snapshots must NOT return a bare {} —
+    that was the silent-failure pin VolumeExposureTab rendered as $0
+    across all exposure cards. The contract is now: return a
+    data_quality_flags marker so dashboards can render an explicit
+    'no data' state. Aggregate keys are NOT populated (no spurious zeros)."""
     mock = _make_exposure_snapshots_mock([])
     with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
         result = await compute_exposure_metrics("strat-1", mock)
-    assert result == {}
+    # Must not regress to bare {} (silent fail) and must not invent
+    # zero aggregates.
+    assert result.get("data_quality_flags", {}).get(
+        "exposure_metrics_no_snapshots"
+    ) is True
+    assert "mean_gross_exposure" not in result
+    assert "exposure_series" not in result
+
+
 
 
 def test_turnover_series_contract() -> None:
@@ -875,6 +887,70 @@ class TestExposureSharedApiKeyGuard:
         assert (
             result.get("data_quality_flags", {}).get(
                 "exposure_metrics_skipped_shared_api_key"
+            ) is True
+        )
+
+    @pytest.mark.asyncio
+    async def test_apikey_lookup_failure_flags_fail_open(self) -> None:
+        """Audit H-0738: when the api_key_id lookup raises, the
+        contamination guard cannot run. The pre-fix code silently
+        swallowed the error and proceeded — collapsing 'safe
+        publish' and 'unverified publish' into the same output shape.
+        Post-fix the output must surface
+        `exposure_metrics_apikey_lookup_failed=True` so security
+        reviewers and downstream consumers can distinguish the trust
+        states without having to re-derive them from worker logs."""
+
+        mock = MagicMock()
+
+        # strategies.select(...).eq(...).limit(1).execute() RAISES
+        strategies_table = MagicMock()
+        select_handle = MagicMock()
+        eq_handle = MagicMock()
+        limit_handle = MagicMock()
+        limit_handle.execute.side_effect = RuntimeError(
+            "transient DB error on strategies lookup"
+        )
+        eq_handle.limit.return_value = limit_handle
+        select_handle.eq.return_value = eq_handle
+        strategies_table.select.return_value = select_handle
+
+        # position_snapshots returns one valid row so exposure is
+        # ACTUALLY computed (the fail-open path) rather than
+        # short-circuiting on no-snapshots.
+        snapshots_table = MagicMock()
+        sn_sel = MagicMock()
+        sn_eq = MagicMock()
+        sn_order = MagicMock()
+        sn_order.execute.return_value = MagicMock(data=[
+            {"snapshot_date": "2024-01-01", "side": "long", "size_usd": 500.0},
+        ])
+        sn_eq.order.return_value = sn_order
+        sn_sel.eq.return_value = sn_eq
+        snapshots_table.select.return_value = sn_sel
+
+        def _table(name: str):
+            if name == "strategies":
+                return strategies_table
+            if name == "position_snapshots":
+                return snapshots_table
+            return MagicMock()
+
+        mock.table = _table
+
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ):
+            result = await compute_exposure_metrics("strat-A", mock)
+
+        # Fail-open publish: aggregates ARE present.
+        assert "mean_gross_exposure" in result
+        # But the marker MUST be present so the trust state is
+        # discriminable — this is the H-0738 contract.
+        assert (
+            result.get("data_quality_flags", {}).get(
+                "exposure_metrics_apikey_lookup_failed"
             ) is True
         )
 
@@ -1916,3 +1992,641 @@ class TestReconstructIdempotency:
             "Lock not released after CancelledError — future reconstructs "
             "for this strategy_id will deadlock."
         )
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 H-0745: duration parse failure surfaces via
+# data_quality_flags rather than silently dropping duration_days.
+# ---------------------------------------------------------------------------
+class TestDurationParseFailureSurfaced:
+    """A closed position whose timestamps fail ISO parsing must surface
+    `duration_parse_errors` in the position's data_quality_flags. Before
+    the fix the except clause was `pass` — duration_days/duration_seconds
+    became silently None, indistinguishable from an open position when
+    rendered on the allocator dashboard."""
+
+    def test_unparseable_close_time_flags_position(self) -> None:
+        fills = [
+            _make_fill(
+                side="buy", price=100.0, quantity=1.0,
+                timestamp="2024-01-01T00:00:00+00:00",
+            ),
+            _make_fill(
+                side="sell", price=110.0, quantity=1.0,
+                timestamp="not-a-valid-iso-timestamp",
+            ),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-parse-fail")
+
+        assert len(positions) == 1
+        pos = positions[0]
+        # The position still closes (FIFO matching is independent of
+        # duration math) but duration values are None because the parse
+        # failed — and the quality flag must surface that fact.
+        assert pos["status"] == "closed"
+        assert pos["duration_days"] is None
+        assert pos["duration_seconds"] is None
+        flags = pos.get("data_quality_flags") or {}
+        assert flags.get("duration_parse_errors") == 1, (
+            "duration_parse_errors counter must be set when ISO parsing "
+            "fails; otherwise the silent-None duration is indistinguishable "
+            "from a still-open position downstream."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 H-0744: compute_turnover_series differentiates
+# NAV-missing (data not ingested) from NAV<=0 (margin call) from
+# genuine quiet day, preserving prev_positions across NAV gaps.
+# ---------------------------------------------------------------------------
+class TestTurnoverNavGapsDifferentiated:
+    """Three previously-indistinguishable cases must now be visibly
+    distinct in the output:
+      1) NAV row absent for a date → turnover=None + nav_missing flag
+      2) NAV row present but <= 0 → turnover=0.0 + nav_invalid flag
+      3) NAV row valid → turnover computed as before
+
+    Also: across both gap kinds, `prev_positions` is preserved so the
+    delta on the next valid day is measured against the LAST valid
+    snapshot, not the snapshot inside the gap (the pre-fix behavior
+    silently zeroed the next-day delta as a side effect of advancing
+    prev_positions through the gap).
+    """
+
+    def test_missing_nav_date_emits_none_turnover_and_flag(self) -> None:
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 0.0},
+            "2025-01-02": {"BTC": 1.0},  # NAV row absent for this date
+            "2025-01-03": {"BTC": 1.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+            "2025-01-03": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            # 2025-01-02 deliberately missing
+            "2025-01-03": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        days = {p["date"]: p["turnover"] for p in series}
+        # NAV-missing day → None (not 0.0). Distinguishes the case
+        # from a true quiet day or a NAV-invalid day.
+        assert days["2025-01-02"] is None
+        assert flags.get("turnover_nav_missing_dates") == ["2025-01-02"]
+
+    def test_invalid_nav_date_emits_zero_and_separate_flag(self) -> None:
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 0.0},
+            "2025-01-02": {"BTC": 1.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 0.0,  # present-but-invalid
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        days = {p["date"]: p["turnover"] for p in series}
+        # T-12-04-02 short-circuit preserved (turnover=0.0) but now
+        # discriminable from a missing NAV row via the separate flag.
+        assert days["2025-01-02"] == 0.0
+        assert flags.get("turnover_nav_invalid_dates") == ["2025-01-02"]
+        # AND nav_missing_dates must NOT trigger for present-but-invalid.
+        assert "turnover_nav_missing_dates" not in flags
+
+    def test_prev_positions_preserved_across_nav_gap(self) -> None:
+        """The next valid date after a NAV gap must measure delta
+        against the LAST valid snapshot — not against the snapshot
+        inside the gap. Pre-fix, prev_positions was silently
+        advanced through the nav<=0 branch, zeroing the recovery
+        day's true turnover."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},   # baseline
+            "2025-01-02": {"BTC": 5.0},   # NAV invalid (margin call)
+            "2025-01-03": {"BTC": 5.0},   # recovery — no NEW rebalance
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+            "2025-01-03": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 0.0,   # invalid
+            "2025-01-03": 10000.0,
+        }
+        series, _flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        days = {p["date"]: p["turnover"] for p in series}
+        # Day 3 delta is measured vs Day 1 (last valid snapshot), so
+        # the change from 1.0 → 5.0 BTC is captured: |4 * 100| / 10000.
+        # Pre-fix, prev_positions advanced to Day 2's {BTC: 5.0} and
+        # Day 3 turnover was silently 0.0.
+        assert days["2025-01-03"] == pytest.approx(0.04, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 H-0736: cardinality caps on unbounded JSONB payloads
+# (realized_pnl_per_trade, exposure_series). Truncation surfaces a flag
+# so the dashboard can warn the allocator the derived KPIs are partial.
+# ---------------------------------------------------------------------------
+class TestUnboundedJsonbCaps:
+    """A fill-flood or snapshot-flood on a single strategy must NOT
+    inflate strategy_analytics JSONB without bound. The cap keeps the
+    PostgREST response sizes deterministic and flips a flag so the
+    dashboard can warn allocators the per-trade / per-date series is
+    truncated."""
+
+    @pytest.mark.asyncio
+    async def test_realized_pnl_per_trade_capped_with_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When N closed positions > cap, only the first `cap` records
+        are persisted to realized_pnl_per_trade and the data_quality
+        flag set surfaces truncation."""
+        import services.position_reconstruction as pr_mod
+
+        # Use a small cap so the test stays fast (3 closed positions,
+        # cap=2 → truncated to first 2).
+        monkeypatch.setattr(pr_mod, "_REALIZED_PNL_PER_TRADE_CAP", 2)
+
+        # 3 closed long positions (buy → sell → buy → sell → buy → sell)
+        fills = []
+        for i in range(3):
+            fills.append({
+                "symbol": "BTCUSDT", "exchange": "binance", "side": "buy",
+                "price": 100.0 + i, "quantity": 1.0, "fee": 0.0,
+                "timestamp": f"2024-01-0{i*2+1}T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            })
+            fills.append({
+                "symbol": "BTCUSDT", "exchange": "binance", "side": "sell",
+                "price": 110.0 + i, "quantity": 1.0, "fee": 0.0,
+                "timestamp": f"2024-01-0{i*2+2}T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            })
+
+        mock_supabase = _make_mock_supabase(fills=fills)
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ):
+            out = await reconstruct_positions("strat-1", mock_supabase)
+
+        # All 3 positions reach the aggregate KPIs — closed_positions etc.
+        assert out["closed_positions"] == 3
+        assert out["winners_count"] == 3
+        # But realized_pnl_per_trade is truncated to the cap.
+        assert len(out["realized_pnl_per_trade"]) == 2
+        flags = out.get("data_quality_flags") or {}
+        assert flags.get("realized_pnl_per_trade_truncated") is True
+        assert flags.get("realized_pnl_per_trade_truncated_kept") == 2
+        assert flags.get("realized_pnl_per_trade_truncated_total") == 3
+
+    @pytest.mark.asyncio
+    async def test_realized_pnl_per_trade_no_flag_below_cap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Strategies below the cap MUST NOT carry the truncation flag
+        — pinning the no-false-positive contract."""
+        import services.position_reconstruction as pr_mod
+
+        monkeypatch.setattr(pr_mod, "_REALIZED_PNL_PER_TRADE_CAP", 10_000)
+
+        fills = [
+            {"symbol": "BTCUSDT", "exchange": "binance", "side": "buy",
+             "price": 100.0, "quantity": 1.0, "fee": 0.0,
+             "timestamp": "2024-01-01T00:00:00+00:00",
+             "raw_data": {}, "is_fill": True},
+            {"symbol": "BTCUSDT", "exchange": "binance", "side": "sell",
+             "price": 110.0, "quantity": 1.0, "fee": 0.0,
+             "timestamp": "2024-01-02T00:00:00+00:00",
+             "raw_data": {}, "is_fill": True},
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ):
+            out = await reconstruct_positions("strat-1", mock_supabase)
+        flags = out.get("data_quality_flags") or {}
+        assert "realized_pnl_per_trade_truncated" not in flags
+
+    @pytest.mark.asyncio
+    async def test_exposure_series_capped_with_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """exposure_series persisted to JSONB is capped at
+        _EXPOSURE_SERIES_CAP; aggregates (mean/std/max) still see the
+        full set so KPIs do NOT degrade — only the per-date list."""
+        import services.position_reconstruction as pr_mod
+
+        monkeypatch.setattr(pr_mod, "_EXPOSURE_SERIES_CAP", 2)
+
+        # 3 distinct snapshot dates → exposure_series_records expected
+        # to be 3 pre-cap, 2 post-cap.
+        snaps = [
+            {"snapshot_date": "2024-01-01", "side": "long", "size_usd": 500.0},
+            {"snapshot_date": "2024-01-02", "side": "long", "size_usd": 600.0},
+            {"snapshot_date": "2024-01-03", "side": "long", "size_usd": 700.0},
+        ]
+        mock = _make_exposure_snapshots_mock(snaps)
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ):
+            result = await compute_exposure_metrics("strat-1", mock)
+
+        assert "mean_gross_exposure" in result
+        # Aggregates over the FULL set, not the capped one.
+        assert result["mean_gross_exposure"] == pytest.approx(600.0)
+        # exposure_series truncated to 2.
+        assert len(result["exposure_series"]) == 2
+        flags = result.get("data_quality_flags") or {}
+        assert flags.get("exposure_series_truncated") is True
+        assert flags.get("exposure_series_truncated_kept") == 2
+        assert flags.get("exposure_series_truncated_total") == 3
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 H-0741: compute_turnover_series type-coerces inputs
+# and surfaces dropped dates in flags['turnover_series_dropped_dates'].
+# ---------------------------------------------------------------------------
+class TestTurnoverSeriesTypeValidation:
+    """Inputs from Supabase arrive as Decimal (numeric driver default)
+    or occasionally None for unpopulated rows. Pre-fix the loop either
+    (a) raised AttributeError on a None payload (propagating up and
+    silently committing the partial series built so far), or (b)
+    silently produced Decimal arithmetic results that round-tripped to
+    JSONB via str() with no float-precision contract. Validate at the
+    top of the loop and surface dropped dates."""
+
+    def test_none_positions_for_date_dropped_with_flag(self) -> None:
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},
+            "2025-01-02": None,  # type: ignore[dict-item]   # injected by caller bug
+            "2025-01-03": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+            "2025-01-03": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10000.0,
+            "2025-01-03": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        days_in_series = {row["date"] for row in series}
+        # The bad date is omitted from the series and surfaced via flags.
+        assert "2025-01-02" not in days_in_series
+        assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]
+        # Day 3 still computes — prev_positions kept on Day 1 across
+        # the dropped Day 2, so delta = (2.0 - 1.0) BTC = $100 / NAV.
+        days = {row["date"]: row["turnover"] for row in series}
+        assert days["2025-01-03"] == pytest.approx(0.01, abs=1e-9)
+
+    def test_decimal_nav_coerced_to_float(self) -> None:
+        """Supabase numeric values arrive as `Decimal`. Coercion to
+        float must not raise; the math path must still produce a
+        plain float turnover (not a Decimal that JSONB renders as
+        str)."""
+        from decimal import Decimal as _D
+
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": _D("0")},
+            "2025-01-02": {"BTC": _D("1")},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": _D("100")},
+            "2025-01-02": {"BTC": _D("100")},
+        }
+        nav_by_date = {
+            "2025-01-01": _D("10000"),
+            "2025-01-02": _D("10000"),
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        # No dates dropped: every value coerces to float cleanly.
+        assert "turnover_series_dropped_dates" not in flags
+        days = {row["date"]: row["turnover"] for row in series}
+        assert isinstance(days["2025-01-02"], float)
+        assert days["2025-01-02"] == pytest.approx(0.01, abs=1e-9)
+
+    def test_unparseable_scalar_value_dropped(self) -> None:
+        """A symbol value that can't be coerced to float (e.g. a stray
+        string from a bad CSV import) drops the date rather than
+        propagating up."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},
+            "2025-01-02": {"BTC": "not-a-number"},  # type: ignore[dict-item]
+            "2025-01-03": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+            "2025-01-03": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10000.0,
+            "2025-01-03": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]
+
+    def test_nan_value_rejected_not_silently_propagated(self) -> None:
+        """Specialist-pass follow-up to H-0741: `float(Decimal('NaN'))`
+        returns nan, propagating silently through arithmetic to a
+        turnover=nan value in JSONB. The contract is to reject non-
+        finite values and record the date in dropped_dates instead."""
+        from decimal import Decimal as _D
+
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},
+            "2025-01-02": {"BTC": _D("NaN")},
+            "2025-01-03": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+            "2025-01-03": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10000.0,
+            "2025-01-03": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        # The NaN date is recorded as dropped; downstream rows are
+        # finite numerics, never nan.
+        assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]
+        for row in series:
+            t = row["turnover"]
+            if t is not None:
+                # Reject NaN: NaN != NaN, so this catches a regression
+                # if the float coercion path ever lets NaN through.
+                assert t == t, f"turnover NaN leaked to JSONB row {row!r}"
+
+    def test_flag_list_capped_against_grid_flood(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Red-team pass: an attacker-controlled grid with 10⁶ distinct
+        dates could otherwise fill `turnover_nav_missing_dates` (and
+        siblings) unboundedly into strategy_analytics.data_quality_flags.
+        Cap each list at _FLAG_LIST_CAP and emit sibling counter keys
+        (`*_truncated`, `*_truncated_kept`, `*_truncated_total`) — same
+        convention used at the realized_pnl_per_trade and exposure_series
+        cap sites, so the list[str] payload stays semantically pure."""
+        import services.position_reconstruction as pr_mod
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        monkeypatch.setattr(pr_mod, "_FLAG_LIST_CAP", 3)
+
+        # 5 dates, NAV present only on day 1 → 4 nav-missing dates
+        # (days 2-5), capped to 3 with sibling counters reporting the
+        # 4-total/3-kept partition.
+        positions_by_date = {
+            f"2025-01-{i:02d}": {"BTC": float(i)} for i in range(1, 6)
+        }
+        prices_by_date = {
+            f"2025-01-{i:02d}": {"BTC": 100.0} for i in range(1, 6)
+        }
+        nav_by_date: dict[str, float] = {"2025-01-01": 10000.0}
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        nav_missing = flags.get("turnover_nav_missing_dates", [])
+        assert len(nav_missing) == 3
+        # No sentinel string pollutes the date list.
+        for entry in nav_missing:
+            assert not entry.startswith("__truncated__")
+        # Sibling counters encode the partial-window state.
+        assert flags.get("turnover_nav_missing_dates_truncated") is True
+        assert flags.get("turnover_nav_missing_dates_truncated_kept") == 3
+        assert flags.get("turnover_nav_missing_dates_truncated_total") == 4
+
+    def test_flag_list_capped_nav_invalid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sibling test: `turnover_nav_invalid_dates` cap path. Days
+        2-5 carry NAV<=0; with cap=3 the helper emits 3 kept dates +
+        sibling counters reporting the 4/3 partition. Guards against
+        a miswired call site that swaps list-name arguments."""
+        import services.position_reconstruction as pr_mod
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        monkeypatch.setattr(pr_mod, "_FLAG_LIST_CAP", 3)
+
+        positions_by_date = {
+            f"2025-01-{i:02d}": {"BTC": float(i)} for i in range(1, 6)
+        }
+        prices_by_date = {
+            f"2025-01-{i:02d}": {"BTC": 100.0} for i in range(1, 6)
+        }
+        # NAV present on every day but <=0 from day 2.
+        nav_by_date: dict[str, float] = {"2025-01-01": 10000.0}
+        for i in range(2, 6):
+            nav_by_date[f"2025-01-{i:02d}"] = 0.0
+        _series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert len(flags.get("turnover_nav_invalid_dates", [])) == 3
+        assert flags.get("turnover_nav_invalid_dates_truncated") is True
+        assert flags.get("turnover_nav_invalid_dates_truncated_kept") == 3
+        assert flags.get("turnover_nav_invalid_dates_truncated_total") == 4
+
+    def test_flag_list_capped_gap_dates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sibling test: `turnover_gap_dates` cap path. 5 dates each
+        spaced >1 day apart trigger 4 gap entries; cap=3 partitions
+        them as 3 kept + 1 truncated. Same miswire guard."""
+        import services.position_reconstruction as pr_mod
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        monkeypatch.setattr(pr_mod, "_FLAG_LIST_CAP", 3)
+
+        # Dates spaced 2 calendar days apart → every transition is a gap.
+        dates = [f"2025-01-{i:02d}" for i in (1, 3, 5, 7, 9)]
+        positions_by_date = {d: {"BTC": 1.0} for d in dates}
+        prices_by_date = {d: {"BTC": 100.0} for d in dates}
+        nav_by_date = {d: 10000.0 for d in dates}
+        _series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert len(flags.get("turnover_gap_dates", [])) == 3
+        assert flags.get("turnover_gap_dates_truncated") is True
+        assert flags.get("turnover_gap_dates_truncated_kept") == 3
+        assert flags.get("turnover_gap_dates_truncated_total") == 4
+
+    def test_flag_list_capped_dropped_dates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sibling test: `turnover_series_dropped_dates` cap path. Days
+        2-5 carry NaN positions that the coercion guard rejects; cap=3
+        partitions the 4 dropped dates as 3 kept + 1 truncated."""
+        import services.position_reconstruction as pr_mod
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        monkeypatch.setattr(pr_mod, "_FLAG_LIST_CAP", 3)
+
+        positions_by_date: dict[str, dict[str, float]] = {
+            "2025-01-01": {"BTC": 1.0},
+        }
+        for i in range(2, 6):
+            positions_by_date[f"2025-01-{i:02d}"] = {"BTC": float("nan")}
+        prices_by_date = {
+            f"2025-01-{i:02d}": {"BTC": 100.0} for i in range(1, 6)
+        }
+        nav_by_date = {
+            f"2025-01-{i:02d}": 10000.0 for i in range(1, 6)
+        }
+        _series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert len(flags.get("turnover_series_dropped_dates", [])) == 3
+        assert flags.get("turnover_series_dropped_dates_truncated") is True
+        assert flags.get("turnover_series_dropped_dates_truncated_kept") == 3
+        assert flags.get("turnover_series_dropped_dates_truncated_total") == 4
+
+    def test_inf_nav_rejected(self) -> None:
+        """Specialist-pass follow-up to H-0741: `float('inf')` NAV
+        would yield turnover=0.0 (any_finite / inf), masking real
+        rebalances. Reject up front."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},
+            "2025-01-02": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": float("inf"),
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]
+
+    def test_overflow_position_rejected(self) -> None:
+        """Specialist-pass red-team: `float(10**400)` raises
+        `OverflowError` (NOT `ValueError`). Pre-fix the caller's
+        `(AttributeError, TypeError, ValueError)` catch tuple missed
+        this, so a single poisoned position value would abort the
+        entire turnover loop instead of dropping just that date.
+        `_coerce_finite_float` now re-raises as `ValueError`.
+        """
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},
+            "2025-01-02": {"BTC": 10**400},  # overflows float
+            "2025-01-03": {"BTC": 3.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+            "2025-01-03": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10000.0,
+            "2025-01-03": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]
+        # Series still emits rows for 01-01 (first) and 01-03 (recovered)
+        # — overflow on 01-02 did NOT abort the whole loop.
+        emitted_dates = [row["date"] for row in series]
+        assert "2025-01-01" in emitted_dates
+        assert "2025-01-03" in emitted_dates
+
+    def test_overflow_nav_rejected(self) -> None:
+        """Mirror of test_overflow_position_rejected for the NAV
+        coercion path — same OverflowError-via-_coerce_finite_float
+        regression guard.
+        """
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},
+            "2025-01-02": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10**400,  # overflows float
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]

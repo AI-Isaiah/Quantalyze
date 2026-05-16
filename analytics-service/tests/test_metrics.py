@@ -1,7 +1,12 @@
-import pytest
+import logging
 import math
+import warnings
+
 import numpy as np
 import pandas as pd
+import pytest
+import quantstats as qs
+
 from services.metrics import compute_all_metrics, _safe_float, sanitize_metrics
 
 
@@ -316,9 +321,11 @@ class TestComputeAllMetrics:
 
 from services.metrics import (
     MAR,
+    MetricsResult,
     _rolling_sortino,
     _rolling_volatility,
     _rolling_alpha,
+    _rolling_alpha_beta,
     _rolling_beta,
     _log_returns_series,
 )
@@ -328,6 +335,51 @@ def test_mar_constant_is_zero():
     """Pitfall 11: MAR = 0.0 module-level constant for cross-runtime Sortino consistency."""
     assert MAR == 0.0
     assert isinstance(MAR, float)
+
+
+def test_metrics_result_subscript_rejects_sibling_kind_keys():
+    """Audit 2026-05-07 H-0727: `result[<sibling_kind>]` must raise a KeyError
+    that names the correct accessor (`result.sibling_kinds[...]`). The plain
+    proxy used to silently KeyError, which made a `result.sibling_kinds[k]`
+    → `result[k]` refactor look correct in review while breaking every sibling
+    kind in production.
+    """
+    result = MetricsResult(
+        metrics_json={"sharpe": 1.2},
+        sibling_kinds={"rolling_sortino_3m": [{"date": "2024-01-01", "value": 1.0}]},
+    )
+    # metrics_json access still works.
+    assert result["sharpe"] == 1.2
+    # Sibling-kind subscript raises a descriptive KeyError naming .sibling_kinds.
+    with pytest.raises(KeyError, match=r"sibling_kinds"):
+        _ = result["rolling_sortino_3m"]
+    # Direct attribute access remains the correct path.
+    assert result.sibling_kinds["rolling_sortino_3m"][0]["value"] == 1.0
+
+
+def test_scalar_sortino_passes_mar_as_rf(golden_returns, monkeypatch):
+    """Audit 2026-05-07 H-0725: compute_all_metrics must pass `rf=MAR` to
+    `qs.stats.sortino` explicitly. If the call relies on qs's default `rf=0`,
+    any future tune of MAR away from 0 silently diverges the scalar sortino
+    from `_rolling_sortino` (which IS MAR-floored).
+    """
+    import services.metrics as metrics_module
+
+    captured: dict[str, object] = {}
+    real_sortino = metrics_module.qs.stats.sortino
+
+    def spy_sortino(series, rf=None, **kwargs):
+        captured["rf"] = rf
+        return real_sortino(series, rf=rf, **kwargs) if rf is not None else real_sortino(series, **kwargs)
+
+    monkeypatch.setattr(metrics_module.qs.stats, "sortino", spy_sortino)
+    compute_all_metrics(golden_returns)
+    assert "rf" in captured, "compute_all_metrics did not call qs.stats.sortino"
+    # MAR is currently 0.0 — the contract is that the rf kwarg is forwarded explicitly
+    # (not omitted), so future MAR tunes flow through automatically.
+    assert captured["rf"] == MAR, (
+        f"qs.stats.sortino must be called with rf=MAR ({MAR}); got rf={captured['rf']}"
+    )
 
 
 def test_rolling_sortino_short_circuit_on_insufficient_data(empty_returns):
@@ -358,7 +410,6 @@ def test_rolling_sortino_converges_to_scalar_at_full_window():
     downside RMS = sqrt(sum(x^2 where x<MAR else 0) / N), NOT pandas .std() over a
     zero-floored series. Both formulas annualize via sqrt(252).
     """
-    import quantstats as qs
     np.random.seed(11)
     dates = pd.bdate_range("2024-01-01", periods=90)
     returns = pd.Series(np.random.normal(0.0005, 0.015, 90), index=dates, name="returns")
@@ -367,6 +418,45 @@ def test_rolling_sortino_converges_to_scalar_at_full_window():
     rolling_90 = _rolling_sortino(returns, 90)
     assert len(rolling_90) >= 1
     assert abs(rolling_90[-1]["value"] - scalar) < 0.05
+
+
+def test_rolling_sortino_all_positive_window_no_inf_no_warning():
+    """Audit 2026-05-07 H-0712 / H-0716: an all-positive returns window has
+    zero observations below MAR=0 → downside std = 0 → naive `roll_mean /
+    roll_dstd` produces ±Inf and a divide-by-zero RuntimeWarning. The fix
+    uses np.where to set those windows to NaN explicitly so:
+      (a) no RuntimeWarning is emitted to noisy logs / poison parity gates
+      (b) the result list contains no ±Inf rows
+    The 'best' windows are still dropped — fixing the provenance (warmup vs
+    undefined-but-good) is H-0717, which requires a downstream UI contract
+    change and is out of scope here.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    # All returns strictly > 0 — every window has zero downside.
+    returns = pd.Series(np.full(120, 0.005), index=dates, name="returns")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        # Must NOT raise — the divide-by-zero is handled explicitly via np.where.
+        result = _rolling_sortino(returns, 63)
+    # And the result must not contain any Inf entries.
+    for point in result:
+        assert not math.isinf(point["value"])
+
+
+def test_rolling_sortino_all_zero_window_no_inf():
+    """Audit 2026-05-07 H-0712: an all-zero returns window also produces
+    downside std = 0 (no observations < MAR=0 because none are strictly less
+    than 0). The numerator `roll_mean` is also 0 so the naive division is 0/0
+    → NaN, not Inf. Either way, no Inf/NaN survives in the output.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    returns = pd.Series(np.zeros(120), index=dates, name="returns")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = _rolling_sortino(returns, 63)
+    for point in result:
+        assert not math.isinf(point["value"])
+        assert not math.isnan(point["value"])
 
 
 def test_rolling_volatility_annualized(golden_returns):
@@ -402,6 +492,133 @@ def test_rolling_beta_returns_finalized_list(golden_returns, benchmark_returns):
     assert len(result) > 0
 
 
+def test_rolling_alpha_beta_single_rolling_greeks_call(
+    golden_returns, benchmark_returns, monkeypatch
+):
+    """Audit 2026-05-07 H-0711: rolling alpha + beta must share ONE
+    qs.stats.rolling_greeks pass. Previously _rolling_alpha and _rolling_beta
+    each called rolling_greeks independently, doubling the rolling-OLS work.
+    """
+    import services.metrics as metrics_module
+
+    call_count = {"n": 0}
+    real_rg = metrics_module.qs.stats.rolling_greeks
+
+    def counting_rolling_greeks(*args, **kwargs):
+        call_count["n"] += 1
+        return real_rg(*args, **kwargs)
+
+    monkeypatch.setattr(
+        metrics_module.qs.stats, "rolling_greeks", counting_rolling_greeks
+    )
+    result = compute_all_metrics(golden_returns, benchmark_returns)
+    # The siblings should still be populated...
+    assert len(result.sibling_kinds["rolling_alpha"]) > 0
+    assert len(result.sibling_kinds["rolling_beta"]) > 0
+    # ...from EXACTLY ONE rolling_greeks pass.
+    assert call_count["n"] == 1, (
+        f"rolling_greeks should be called once per analytics run; got {call_count['n']}"
+    )
+
+
+def test_rolling_alpha_beta_aligns_misaligned_series():
+    """Audit 2026-05-07 H-0726.1: rolling alpha/beta must inner-join the
+    returns and benchmark indexes BEFORE calling qs.stats.rolling_greeks.
+    Previously raw un-aligned series were passed, letting qs internally NaN-pad
+    across mismatched trading calendars and producing skewed greeks.
+    """
+    np.random.seed(31)
+    dates_strat = pd.bdate_range("2024-01-01", periods=200)
+    # Benchmark covers a partially-overlapping window — only ~150 days in
+    # common. With alignment, that's enough for window=90 rolling greeks.
+    # Without alignment qs sees 200 strat rows vs 200 bench rows with mismatched
+    # indexes and produces garbage (or raises) depending on version.
+    dates_bench = pd.bdate_range("2024-02-15", periods=200)
+    strat = pd.Series(np.random.normal(0.001, 0.01, 200), index=dates_strat, name="returns")
+    bench = pd.Series(np.random.normal(0.0005, 0.012, 200), index=dates_bench, name="BTC")
+
+    alpha, beta = _rolling_alpha_beta(strat, bench, 90)
+    # The helper aligned and produced output (the un-aligned implementation
+    # either raised or produced NaN-only output that finalize_rolling dropped).
+    assert isinstance(alpha, list)
+    assert isinstance(beta, list)
+    assert len(alpha) > 0
+    assert len(beta) > 0
+
+
+def test_rolling_alpha_beta_short_benchmark_returns_empty():
+    """Audit 2026-05-07 H-0726.2: a benchmark with fewer than `window` aligned
+    observations must return ([], []). The old guard only checked
+    `len(returns) < window`, letting a short benchmark slip through and either
+    raise or produce malformed greeks that hit the silent 'alpha not in greeks'
+    fallback.
+    """
+    np.random.seed(41)
+    dates_strat = pd.bdate_range("2024-01-01", periods=200)
+    # 50-day benchmark — less than window=90 after alignment.
+    dates_bench = pd.bdate_range("2024-01-01", periods=50)
+    strat = pd.Series(np.random.normal(0.001, 0.01, 200), index=dates_strat, name="returns")
+    bench = pd.Series(np.random.normal(0.0005, 0.012, 50), index=dates_bench, name="BTC")
+
+    alpha, beta = _rolling_alpha_beta(strat, bench, 90)
+    assert alpha == []
+    assert beta == []
+
+
+def test_rolling_alpha_beta_logs_warning_on_qs_failure(
+    golden_returns, benchmark_returns, monkeypatch, caplog
+):
+    """Audit 2026-05-07 H-0726.3: when qs.stats.rolling_greeks raises (e.g.
+    qs version drift, missing columns), the helper must emit a WARNING and
+    return ([], []) — NOT swallow it silently as before.
+    """
+    import services.metrics as metrics_module
+
+    def boom_rolling_greeks(_returns, _benchmark, _window):
+        raise RuntimeError("simulated qs.stats.rolling_greeks failure")
+
+    monkeypatch.setattr(
+        metrics_module.qs.stats, "rolling_greeks", boom_rolling_greeks
+    )
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        alpha, beta = _rolling_alpha_beta(golden_returns, benchmark_returns, 90)
+    assert alpha == []
+    assert beta == []
+    matching = [r for r in caplog.records if "rolling_greeks" in r.getMessage()]
+    assert matching, "rolling_greeks failure must emit WARNING with helper name"
+
+
+def test_rolling_sortino_single_neg_sq_in_compute_all_metrics(
+    golden_returns, monkeypatch
+):
+    """Audit 2026-05-07 H-0721: compute_all_metrics must materialize the
+    window-independent neg_sq series exactly ONCE across the three rolling
+    Sortino windows (63 / 126 / 252). The shared component is now passed to
+    `_rolling_sortino_from_components`.
+    """
+    import services.metrics as metrics_module
+
+    call_count = {"n": 0}
+    real_from_components = metrics_module._rolling_sortino_from_components
+    seen_neg_sq_ids: set[int] = set()
+
+    def counting_from_components(returns, neg_sq, window):
+        call_count["n"] += 1
+        seen_neg_sq_ids.add(id(neg_sq))
+        return real_from_components(returns, neg_sq, window)
+
+    monkeypatch.setattr(
+        metrics_module, "_rolling_sortino_from_components", counting_from_components
+    )
+    compute_all_metrics(golden_returns)
+    # Three windows → three calls, but the SAME neg_sq object is reused.
+    assert call_count["n"] == 3
+    assert len(seen_neg_sq_ids) == 1, (
+        "neg_sq must be materialized ONCE and reused across all three sortino windows"
+    )
+
+
 def test_log_returns_series_full_length(golden_returns):
     """METRICS-12: log_returns has same length as input (no window dropoff)."""
     result = _log_returns_series(golden_returns)
@@ -410,12 +627,58 @@ def test_log_returns_series_full_length(golden_returns):
 
 
 def test_log_returns_series_values(golden_returns):
-    """METRICS-12: values match np.log1p(returns)."""
-    expected = np.log1p(golden_returns)
+    """METRICS-12: values match cumulative `np.log1p(returns).cumsum()`.
+
+    Audit 2026-05-07 H-0719: the EquityCurve "Log Returns" toggle renders
+    this series on a log axis where the meaningful shape is cumulative log
+    equity, NOT per-period log returns. The previous contract (per-period)
+    rendered as noise hovering around 0.
+    """
+    expected = np.log1p(golden_returns).cumsum()
     result = _log_returns_series(golden_returns)
     # _finalize_rolling rounds to 4 decimals
     for point, exp in zip(result, expected):
         assert abs(point["value"] - round(float(exp), 4)) < 1e-4
+
+
+def test_log_returns_series_monotonic_when_returns_positive():
+    """Audit 2026-05-07 H-0719: cumulative log equity must be MONOTONIC
+    NON-DECREASING when every input return is non-negative. The old per-period
+    contract failed this — values oscillated around zero even on a strictly
+    upward-trending strategy.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=100)
+    returns = pd.Series(np.full(100, 0.001), index=dates, name="returns")
+    result = _log_returns_series(returns)
+    values = [p["value"] for p in result]
+    for i in range(len(values) - 1):
+        assert values[i + 1] >= values[i] - 1e-9, (
+            f"cumulative log equity must be monotonic for positive returns; "
+            f"got {values[i]} → {values[i+1]} at index {i}"
+        )
+
+
+def test_log_returns_series_preserves_catastrophic_loss():
+    """Audit 2026-05-07 H-0728: a return of -1 or worse (100%+ loss — a
+    liquidation event) previously hit `np.log1p(-1.05)` → NaN, which
+    `_finalize_rolling.dropna()` silently removed. The SINGLE most important
+    risk event for the strategy would vanish from the chart. We now clamp to
+    -1+1e-9 before log1p so the event surfaces as a large negative log
+    return (~-20.72), not a dropped row.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    values = np.array([0.01, 0.02, 0.01, -1.0, 0.005, -0.5, 0.003, 0.0, 0.004, 0.001])
+    returns = pd.Series(values, index=dates, name="returns")
+    result = _log_returns_series(returns)
+    # Catastrophic event preserved (no row dropped).
+    assert len(result) == 10
+    # The cumulative log equity at the catastrophic day must be very large
+    # negative — the strategy is essentially wiped out.
+    cat_idx = 3  # 4th day in the values array (zero-indexed)
+    assert result[cat_idx]["value"] < -19.0, (
+        "catastrophic-loss day must surface as a very negative cumulative "
+        f"log equity; got {result[cat_idx]['value']}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +692,7 @@ def test_log_returns_series_values(golden_returns):
 
 from services.metrics import (
     _daily_returns_grid_from_series,
+    _QSTATS_SINGLE_ARG_SCALARS,
     compute_qstats_scalars,
 )
 
@@ -458,27 +722,228 @@ def test_daily_returns_grid_empty_input(empty_returns):
     assert _daily_returns_grid_from_series(empty_returns) == []
 
 
+def test_daily_returns_grid_scrubs_nan_and_inf():
+    """Audit 2026-05-07 H-0715: a single NaN or Inf row must NOT appear in the
+    emitted list. Postgres JSONB rejects NaN, so an unscrubbed NaN would knock
+    out the entire atomic sibling-kind batch upsert for the strategy.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    values = np.array([0.01, 0.02, np.nan, -0.01, np.inf, 0.005, -np.inf, 0.003, 0.0, 0.004])
+    returns = pd.Series(values, index=dates, name="returns")
+    grid = _daily_returns_grid_from_series(returns)
+    # Only the 7 clean rows survive (3 dropped: NaN, +Inf, -Inf).
+    assert len(grid) == 7
+    for point in grid:
+        v = point["value"]
+        assert not math.isnan(v) and not math.isinf(v)
+
+
+def test_daily_returns_grid_caps_payload_size():
+    """Audit 2026-05-07 H-0720: a 10-year backtest must not bypass the
+    cap_data_points budget that every other series helper enforces. The cap
+    is 5000 points; we exercise a 7000-point series to prove the cap kicks in.
+    """
+    dates = pd.bdate_range("2010-01-01", periods=7000)
+    returns = pd.Series(np.full(7000, 0.001), index=dates, name="returns")
+    grid = _daily_returns_grid_from_series(returns)
+    # cap_data_points caps at 5000 (default) keeping the most recent.
+    assert len(grid) == 5000
+
+
 def test_qstats_scalars_complete_set(golden_returns, benchmark_returns):
-    """METRICS-11: all 10 new scalars present (None if computation fails)."""
+    """METRICS-11: all 10 new scalars present (None if computation fails).
+
+    Audit 2026-05-07 H-0718: also exposes `r_squared_status` companion field
+    so operators can disambiguate 'no benchmark' / 'ok' / 'error'.
+    """
     result = compute_qstats_scalars(golden_returns, benchmark_returns)
     expected_keys = {
         "recovery_factor", "ulcer_index", "upi", "kelly_criterion",
         "probabilistic_sharpe_ratio", "common_sense_ratio", "cpc_index",
         "serenity_index", "r_squared", "time_in_market",
+        "r_squared_status",
     }
     assert set(result.keys()) == expected_keys
     for key, val in result.items():
-        assert val is None or isinstance(val, (int, float))
+        if key == "r_squared_status":
+            assert val in {"no_benchmark", "ok", "error"}
+        else:
+            assert val is None or isinstance(val, (int, float))
 
 
 def test_qstats_scalars_handle_missing_benchmark(golden_returns):
-    """METRICS-11: r_squared returns None when benchmark missing (graceful)."""
+    """METRICS-11: r_squared returns None when benchmark missing (graceful).
+
+    Audit 2026-05-07 H-0718: `r_squared_status` must be 'no_benchmark' (not 'error')
+    when the caller did not pass a benchmark series.
+    """
     result = compute_qstats_scalars(golden_returns, None)
     assert result["r_squared"] is None
+    assert result["r_squared_status"] == "no_benchmark"
     # Non-benchmark scalars still computed (tolerate qs failures via try/except)
     expected_keys = {
         "recovery_factor", "ulcer_index", "upi", "kelly_criterion",
         "probabilistic_sharpe_ratio", "common_sense_ratio", "cpc_index",
         "serenity_index", "r_squared", "time_in_market",
+        "r_squared_status",
     }
     assert set(result.keys()) == expected_keys
+
+
+def test_qstats_scalars_logs_warning_on_qs_failure(golden_returns, caplog, monkeypatch):
+    """Audit 2026-05-07 H-0710 / H-0713 / H-0723: a qs.stats.* failure must emit
+    `logger.warning` with the scalar name + returns length so operators can detect
+    silent regressions. Failure-soft contract (other 9 scalars unaffected) is
+    preserved.
+    """
+    import services.metrics as metrics_module
+
+    def boom_recovery_factor(_returns):
+        raise RuntimeError("simulated qs.stats.recovery_factor failure")
+
+    monkeypatch.setattr(
+        metrics_module.qs.stats, "recovery_factor", boom_recovery_factor
+    )
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_qstats_scalars(golden_returns, None)
+
+    # The failing scalar is None as before, the other 9 are still computed.
+    assert result["recovery_factor"] is None
+    # And the failure produced a WARNING log naming the scalar.
+    failing_records = [
+        r for r in caplog.records
+        if "recovery_factor" in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert failing_records, (
+        "compute_qstats_scalars must log WARNING with scalar name on failure"
+    )
+
+
+def test_qstats_scalars_r_squared_status_error_on_qs_failure(
+    golden_returns, benchmark_returns, monkeypatch
+):
+    """Audit 2026-05-07 H-0718: when a benchmark IS present but qs.stats.r_squared
+    raises, the companion `r_squared_status` field must be 'error' (not 'no_benchmark'
+    and not 'ok'). This is the disambiguation that lets operators see the failure
+    state without trawling logs.
+    """
+    import services.metrics as metrics_module
+
+    def boom_r_squared(_returns, _benchmark):
+        raise RuntimeError("simulated qs.stats.r_squared failure")
+
+    monkeypatch.setattr(metrics_module.qs.stats, "r_squared", boom_r_squared)
+
+    result = compute_qstats_scalars(golden_returns, benchmark_returns)
+    assert result["r_squared"] is None
+    assert result["r_squared_status"] == "error"
+
+
+def test_qstats_scalars_r_squared_status_error_when_qs_returns_nan(
+    golden_returns, benchmark_returns, monkeypatch
+):
+    """Red-team F7: qs.stats.r_squared may RETURN NaN/Inf (not raise) — e.g.
+    zero-variance benchmark, degenerate covariance. `_safe_float` collapses
+    that to None, but the previous code unconditionally set status='ok'.
+    Status must be 'error' whenever the final r_squared value is None.
+    """
+    import services.metrics as metrics_module
+
+    def nan_r_squared(_returns, _benchmark):
+        return float("nan")
+
+    monkeypatch.setattr(metrics_module.qs.stats, "r_squared", nan_r_squared)
+
+    result = compute_qstats_scalars(golden_returns, benchmark_returns)
+    assert result["r_squared"] is None
+    assert result["r_squared_status"] == "error"
+
+
+def test_qstats_scalars_time_in_market_is_unbiased_fraction():
+    """Audit 2026-05-07 H-0724: `time_in_market` must be the true fraction
+    `(returns != 0).sum() / len(returns)`, NOT `qs.stats.exposure` which
+    ceil-rounds UP to the nearest 1% (a strategy with 1 active day in 252
+    would otherwise display as 1.0% instead of ~0.4%).
+    """
+    dates = pd.bdate_range("2024-01-01", periods=252)
+    # 1 non-zero return day in 252: true exposure ≈ 0.00397, qs.stats.exposure → 0.01
+    values = np.zeros(252)
+    values[100] = 0.05
+    returns = pd.Series(values, index=dates, name="returns")
+    result = compute_qstats_scalars(returns, None)
+    expected = 1.0 / 252.0
+    assert result["time_in_market"] is not None
+    # Must be the true fraction (< 0.005), NOT the ceil-rounded 0.01 from qs.
+    assert abs(result["time_in_market"] - expected) < 1e-9
+    assert result["time_in_market"] < 0.005
+
+
+def test_qstats_scalars_time_in_market_excludes_nan_rows():
+    """Specialist red-team: pandas evaluates `NaN != 0` as True, so the naive
+    `(returns != 0).sum() / len` counts upstream-CSV gap days as 'in market',
+    inflating the fraction. Mirrors qs.stats.exposure's NaN-exclusion predicate.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    # 2 active days, 3 zero days, 5 NaN gap days → true exposure = 2/10.
+    values = np.array([0.01, 0.0, np.nan, np.nan, 0.02, 0.0, np.nan, np.nan, np.nan, 0.0])
+    returns = pd.Series(values, index=dates, name="returns")
+    result = compute_qstats_scalars(returns, None)
+    assert result["time_in_market"] == pytest.approx(0.2, abs=1e-9)
+
+
+def test_qstats_scalars_r_squared_status_ok_when_benchmark_present(
+    golden_returns, benchmark_returns
+):
+    """Specialist test-gap: the 'ok' status was never explicitly pinned. A
+    regression that hard-coded 'no_benchmark' would have passed the membership
+    check in test_qstats_scalars_complete_set.
+    """
+    result = compute_qstats_scalars(golden_returns, benchmark_returns)
+    assert result["r_squared_status"] == "ok"
+    assert result["r_squared"] is not None
+
+
+def test_rolling_alpha_beta_zero_overlap_returns_empty():
+    """Specialist test-gap (H-0726.1 follow-up): when the inner-join produces
+    an EMPTY aligned index (completely disjoint date ranges), the helper must
+    short-circuit to ([], []) instead of letting qs.stats.rolling_greeks see
+    a zero-length input.
+    """
+    np.random.seed(53)
+    strat = pd.Series(
+        np.random.normal(0.001, 0.01, 100),
+        index=pd.bdate_range("2023-01-01", periods=100),
+        name="returns",
+    )
+    bench = pd.Series(
+        np.random.normal(0.0005, 0.012, 100),
+        index=pd.bdate_range("2024-06-01", periods=100),
+        name="BTC",
+    )
+    alpha, beta = _rolling_alpha_beta(strat, bench, 90)
+    assert alpha == []
+    assert beta == []
+
+
+@pytest.mark.parametrize("result_key,qs_attr", _QSTATS_SINGLE_ARG_SCALARS)
+def test_qstats_scalars_dispatch_table_per_entry(
+    golden_returns, caplog, monkeypatch, result_key, qs_attr
+):
+    """Specialist test-gap: the dispatch table (`_QSTATS_SINGLE_ARG_SCALARS`)
+    is the single source of truth for 8 (key, qs.stats attr) pairs after the
+    simplify refactor. A typo would silently produce None in production for
+    one scalar. Parametrize the failure path across every entry so a regression
+    fails the matching attribute's row, not a generic "scalar None" assertion.
+    """
+    import services.metrics as metrics_module
+
+    def boom(_returns):
+        raise RuntimeError(f"simulated qs.stats.{qs_attr} failure")
+
+    monkeypatch.setattr(metrics_module.qs.stats, qs_attr, boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_qstats_scalars(golden_returns, None)
+    assert result[result_key] is None
+    matching = [r for r in caplog.records if result_key in r.getMessage()]
+    assert matching, f"failure for qs.stats.{qs_attr} must log WARNING naming {result_key!r}"
