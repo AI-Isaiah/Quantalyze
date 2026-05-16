@@ -215,5 +215,3 @@ BEGIN
 END $$;
 
 COMMIT;
-</content>
-</invoke>
