@@ -178,6 +178,37 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   // signals (`holdingsEmpty`, `hasSyncing`) in the deps so the effect
   // re-runs when the ref div mounts.
   const widgetViewsFiredRef = useRef<Set<string>>(new Set());
+  // audit-2026-05-07 H-1199 c9 — record unknown widget ids so registry
+  // refactors that strand persisted layouts (e.g. equity-curve → equity-chart
+  // rename, the bridge-outcome-banner gap flagged in red-team #2) surface in
+  // dev tools / Sentry instead of disappearing into a friendly text note.
+  // Tracked via useRef so we only log a given id once per dashboard mount.
+  //
+  // retro audit (red-team L10 c7): cleared per-portfolio via the effect
+  // below so observability resets on data-identity changes (admin
+  // role-switch, in-tab navigation).
+  const unknownLoggedRef = useRef<Set<string>>(new Set());
+
+  // retro audit (red-team L8 c8): the widget_viewed dedup ref persists
+  // across `tweaks.showOutcomes` toggles. When a user hides outcomes
+  // then shows them again, the outcomes tile re-mounts but its id
+  // remains in the Set — telemetry never re-fires. Clear the dedup ref
+  // when the visible-tile composition changes via Tweaks, so the
+  // "fire once per session per widget" contract resets on a deliberate
+  // visibility toggle.
+  useEffect(() => {
+    widgetViewsFiredRef.current = new Set();
+  }, [tweaks.showOutcomes]);
+
+  // retro audit (red-team L10 c7): both refs live at component-instance
+  // scope, but the dashboard stays MOUNTED across portfolio switches
+  // (admin role-switch, in-tab navigation). Clear both per-portfolio so
+  // observability resets when the underlying data identity changes.
+  useEffect(() => {
+    widgetViewsFiredRef.current = new Set();
+    unknownLoggedRef.current = new Set();
+  }, [portfolio?.id]);
+
   useEffect(() => {
     if (typeof IntersectionObserver === "undefined") return;
     const root = dashboardContainerRef.current;
@@ -251,13 +282,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     },
     [config.tiles, moveWidget],
   );
-
-  // audit-2026-05-07 H-1199 c9 — record unknown widget ids so registry
-  // refactors that strand persisted layouts (e.g. equity-curve → equity-chart
-  // rename, the bridge-outcome-banner gap flagged in red-team #2) surface in
-  // dev tools / Sentry instead of disappearing into a friendly text note.
-  // Tracked via useRef so we only log a given id once per dashboard mount.
-  const unknownLoggedRef = useRef<Set<string>>(new Set());
 
   // Render dispatcher per tile.k. config.tiles[*].k IS a registry id
   // post-write-time-normalization (D-19), so we index WIDGET_COMPONENTS
