@@ -147,6 +147,16 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   // Phase 07 IntersectionObserver — fire widget_viewed once per session per
   // widget when 50% crosses the viewport. MutationObserver picks up tiles
   // added later by the picker.
+  //
+  // audit-2026-05-07 H-1197 c9 — the previous `[]`-deps effect ran once on
+  // mount, but the early-return at the bottom of the render body short-
+  // circuits BEFORE `dashboardContainerRef` mounts when the dashboard
+  // first paints as the empty-state path. If the allocator then connects
+  // a key and the dashboard transitions empty → populated, the dashboard
+  // container mounts but the observer effect never re-runs. Zero
+  // widget_viewed events fire for the entire session. Including the gate
+  // signals (`holdingsEmpty`, `hasSyncing`) in the deps so the effect
+  // re-runs when the ref div mounts.
   const widgetViewsFiredRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (typeof IntersectionObserver === "undefined") return;
@@ -185,7 +195,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       observer.disconnect();
       mutation.disconnect();
     };
-  }, []);
+  }, [holdingsEmpty, hasSyncing]);
 
   // D-04 keyboard-reorder + overflow-menu sentinel resolver. WidgetChrome
   // calls onMove(k, "prev" | "next" | "first" | "last" | <real-k>); resolve
@@ -222,6 +232,13 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     [config.tiles, moveWidget],
   );
 
+  // audit-2026-05-07 H-1199 c9 — record unknown widget ids so registry
+  // refactors that strand persisted layouts (e.g. equity-curve → equity-chart
+  // rename, the bridge-outcome-banner gap flagged in red-team #2) surface in
+  // dev tools / Sentry instead of disappearing into a friendly text note.
+  // Tracked via useRef so we only log a given id once per dashboard mount.
+  const unknownLoggedRef = useRef<Set<string>>(new Set());
+
   // Render dispatcher per tile.k. config.tiles[*].k IS a registry id
   // post-write-time-normalization (D-19), so we index WIDGET_COMPONENTS
   // directly. Unknown ids surface a visible fallback rather than crashing
@@ -230,6 +247,16 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     (k: string): React.ReactNode => {
       const Component = WIDGET_COMPONENTS[k];
       if (!Component) {
+        if (
+          typeof console !== "undefined" &&
+          !unknownLoggedRef.current.has(k)
+        ) {
+          unknownLoggedRef.current.add(k);
+          console.warn(
+            "[AllocationDashboardV2] unknown widget id in persisted layout — rendering Unknown placeholder",
+            { widget_id: k },
+          );
+        }
         return (
           <div
             className="rounded-md border border-border bg-surface p-3 text-xs text-text-muted"
