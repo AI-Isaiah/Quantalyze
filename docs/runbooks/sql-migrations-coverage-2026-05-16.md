@@ -171,5 +171,18 @@ Source FIX-LIST: `.planning/audit-2026-05-07/FIX-LIST.md` (not in this worktree;
 
 11 new forward-only migrations ship in this PR closing 11 STILL_LIVE findings,
 plus secondary coverage for additional findings via the new mitigations.
+
+## Grok adversarial pass — override
+
+- Verdict: BLOCK on SECDEF `search_path` discipline (severity 9 x 2 findings on
+  `20260516160100` and `20260516160700`). Grok preferred greenfield rule
+  `SET search_path TO ''` with fully-qualified internal calls.
+- Override: user decision per CLAUDE.md Rule 11 (match codebase conventions).
+  Convention `SET search_path = public, pg_catalog` is in prod across 89 prior
+  migrations including PR #173 high-hardening batch (2026-05-15). The two
+  flagged functions are CREATE OR REPLACE / REVOKE-from-PUBLIC, so search_path
+  is not reachable without EXECUTE.
+- Follow-up: project-wide SECDEF `search_path TO ''` refactor filed as backlog
+  tech-debt; would require touching all 89 prior migrations in lockstep.
 </content>
 </invoke>
