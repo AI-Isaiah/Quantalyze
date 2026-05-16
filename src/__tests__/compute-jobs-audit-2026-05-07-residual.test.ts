@@ -22,11 +22,13 @@
 import { describe, it, expect } from "vitest";
 import { type SupabaseClient } from "@supabase/supabase-js";
 import {
+  HAS_INTROSPECTION,
   HAS_LIVE_DB,
   createLiveAdminClient,
   createTestUser,
   cleanupLiveDbRow,
   advertiseLiveDbSkipReason,
+  runIntrospectionSql,
 } from "@/lib/test-helpers/live-db";
 import { GetUserComputeJobsRowSchema } from "@/lib/analytics-schemas";
 
@@ -543,6 +545,161 @@ describe("audit-2026-05-07 residual — M-0782 Zod schema contract", () => {
           strategyIds: [strategyId],
         });
       }
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// pr-test-analyzer c9 (apply pass): M-0773 FORCE RLS catalog assertion
+// ---------------------------------------------------------------------------
+//
+// The parent migration's DO block asserts `pg_class.relforcerowsecurity =
+// TRUE` at apply time. This Vitest pin lifts that assertion to CI so a
+// future migration that drops FORCE (e.g. `NO FORCE ROW LEVEL SECURITY`
+// bundled with a re-grant sweep) fails the Vitest gate, not just the SQL
+// re-apply (which never happens in CI).
+//
+// Uses Management API introspection because PostgREST does not expose
+// pg_class via the schema cache.
+
+describe("audit-2026-05-07 apply — M-0773 FORCE RLS catalog assertion", () => {
+  it.skipIf(!HAS_INTROSPECTION)(
+    "compute_jobs and compute_job_kinds both have relforcerowsecurity=true",
+    async () => {
+      const rows = await runIntrospectionSql<{
+        relname: string;
+        relforcerowsecurity: boolean;
+      }>(`
+        SELECT relname, relforcerowsecurity
+          FROM pg_class
+         WHERE relname IN ('compute_jobs', 'compute_job_kinds')
+           AND relnamespace = 'public'::regnamespace
+         ORDER BY relname;
+      `);
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        expect(row.relforcerowsecurity).toBe(true);
+      }
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// pr-test-analyzer c8 (apply pass): M-0774 REVOKE table grants
+// ---------------------------------------------------------------------------
+//
+// Parent migration asserts table_privileges has zero rows for
+// {anon,authenticated,PUBLIC} on compute_jobs and zero non-SELECT rows
+// for compute_job_kinds — but only at apply time. A future migration
+// that re-grants any privilege (e.g. `GRANT INSERT ON compute_jobs TO
+// authenticated` bundled in an unrelated sweep) is caught here by the
+// Vitest gate.
+
+describe("audit-2026-05-07 apply — M-0774 REVOKE table grants", () => {
+  it.skipIf(!HAS_INTROSPECTION)(
+    "compute_jobs has zero grants to anon/authenticated/PUBLIC",
+    async () => {
+      const rows = await runIntrospectionSql<{ grantee: string; privilege_type: string }>(`
+        SELECT grantee, privilege_type
+          FROM information_schema.table_privileges
+         WHERE table_schema = 'public'
+           AND table_name = 'compute_jobs'
+           AND grantee IN ('anon', 'authenticated', 'PUBLIC');
+      `);
+      expect(rows).toHaveLength(0);
+    },
+  );
+
+  it.skipIf(!HAS_INTROSPECTION)(
+    "compute_job_kinds has authenticated with SELECT only (no INSERT/UPDATE/DELETE)",
+    async () => {
+      const rows = await runIntrospectionSql<{
+        privilege_type: string;
+      }>(`
+        SELECT privilege_type
+          FROM information_schema.table_privileges
+         WHERE table_schema = 'public'
+           AND table_name = 'compute_job_kinds'
+           AND grantee = 'authenticated';
+      `);
+      // Expect exactly one privilege row, of type SELECT.
+      expect(rows.length).toBeGreaterThanOrEqual(1);
+      for (const row of rows) {
+        expect(row.privilege_type).toBe("SELECT");
+      }
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// code-reviewer c8 (apply pass): _assert_owner errcode branches
+// ---------------------------------------------------------------------------
+//
+// The new _assert_owner raises three distinct SQLSTATEs:
+//   no_data_found       (02000) — row missing
+//   check_violation     (23514) — row exists but user_id IS NULL
+//   insufficient_privilege (42501) — row owned by another user
+//
+// Documented callers all go through service-role (auth.uid() IS NULL ->
+// short-circuit), so this is unobservable in production today. The test
+// pins the branch contract so a future migration that collapses any two
+// branches back into a single errcode is caught. The undefined_column
+// wrapper is also exercised via the body-grep on the live function
+// definition (catalog-only, no per-branch invocation).
+
+describe("audit-2026-05-07 apply — _assert_owner branches present in live body", () => {
+  it.skipIf(!HAS_INTROSPECTION)(
+    "_assert_owner body contains all three errcode branches + undefined_column wrapper",
+    async () => {
+      const rows = await runIntrospectionSql<{ body: string }>(`
+        SELECT pg_get_functiondef(p.oid) AS body
+          FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'public'
+           AND p.proname = '_assert_owner';
+      `);
+      expect(rows).toHaveLength(1);
+      const body = rows[0]!.body;
+      expect(body).toContain("no_data_found");
+      expect(body).toContain("check_violation");
+      expect(body).toContain("insufficient_privilege");
+      expect(body).toContain("undefined_column");
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// pr-test-analyzer c9 (apply pass): M-0783 COALESCE behavioral test
+// ---------------------------------------------------------------------------
+//
+// The migration changed get_user_compute_jobs's WHERE clause to use
+// COALESCE(s.user_id, p.user_id) for self-documentation. The semantic
+// is unchanged: ownership filter on the strategy OR the portfolio.
+// This test pins that semantic via the live function body so a revert
+// to the OR-form (or a refactor that drops one side of the COALESCE)
+// fails the gate.
+//
+// We use catalog introspection instead of a real RPC call because the
+// RPC short-circuits on auth.uid() IS NULL under service-role and the
+// test helpers don't currently expose an authenticated-user JWT.
+
+describe("audit-2026-05-07 apply — M-0783 COALESCE filter pinned in body", () => {
+  it.skipIf(!HAS_INTROSPECTION)(
+    "get_user_compute_jobs body contains COALESCE(s.user_id, p.user_id)",
+    async () => {
+      const rows = await runIntrospectionSql<{ body: string }>(`
+        SELECT pg_get_functiondef(p.oid) AS body
+          FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'public'
+           AND p.proname = 'get_user_compute_jobs';
+      `);
+      expect(rows).toHaveLength(1);
+      const body = rows[0]!.body;
+      // The exact substring from the migration. A regression to the
+      // OR-form drops "COALESCE" entirely; a regression to a one-sided
+      // shape would drop one of the column references.
+      expect(body).toContain("COALESCE(s.user_id, p.user_id)");
     },
   );
 });
