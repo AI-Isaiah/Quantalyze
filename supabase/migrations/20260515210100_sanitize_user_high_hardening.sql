@@ -185,7 +185,7 @@ BEGIN
   SELECT email INTO v_target_email FROM profiles WHERE id = p_user_id;
 
   -- audit-2026-05-07 H-0908 + H-0909: detect organizations the target
-  -- user is the SOLE admin/owner of BEFORE deleting their org_members
+  -- user is the SOLE owner/admin of BEFORE deleting their organization_members
   -- row. Each match emits an audit_log row marking the org as orphaned
   -- so an operator can follow up (transfer ownership, archive the org,
   -- or hard-delete with consent of the remaining members). We do NOT
@@ -193,24 +193,31 @@ BEGIN
   -- remaining members under GDPR data-preservation rules.
   --
   -- "Sole admin" is computed as: row in organization_members where
-  -- (org_id, user_id=p_user_id, role='admin') exists AND no other
-  -- (org_id, user_id<>p_user_id, role='admin') exists.
+  -- (organization_id, user_id=p_user_id, role IN ('owner','admin')) exists AND
+  -- no other (organization_id, user_id<>p_user_id, role IN ('owner','admin'))
+  -- exists. Both 'owner' and 'admin' carry administrative authority per the
+  -- CHECK on organization_members.role in 20260405180928_organizations.sql.
   --
   -- Fail-soft: the orphan-emission is wrapped in BEGIN/EXCEPTION so a
-  -- failed audit insert never blocks the GDPR sanitize. The sanitize
-  -- proceeds, the operator sees the audit gap, and can replay the
-  -- emission manually.
+  -- failed audit insert never blocks the GDPR sanitize. The trap is
+  -- NARROW: only the SQLSTATEs that legitimately fire from the
+  -- log_audit_event_service body (role-gate rejection, audit_log shape /
+  -- size violations) are swallowed. Schema-drift errors such as
+  -- 42703 undefined_column or 42P01 undefined_table propagate so a
+  -- future column rename surfaces loudly at apply or runtime instead
+  -- of silently no-opping the orphan emission (see Q#2 / Q#3
+  -- audit-A findings).
   BEGIN
     FOR v_orphan_org_id IN
-      SELECT om1.org_id
+      SELECT om1.organization_id
         FROM organization_members om1
        WHERE om1.user_id = p_user_id
-         AND om1.role = 'admin'
+         AND om1.role IN ('owner', 'admin')
          AND NOT EXISTS (
            SELECT 1 FROM organization_members om2
-            WHERE om2.org_id = om1.org_id
+            WHERE om2.organization_id = om1.organization_id
               AND om2.user_id <> p_user_id
-              AND om2.role = 'admin'
+              AND om2.role IN ('owner', 'admin')
          )
     LOOP
       PERFORM public.log_audit_event_service(
@@ -219,16 +226,21 @@ BEGIN
         'organization',
         v_orphan_org_id,
         jsonb_build_object(
-          'reason',  'sole_admin_sanitized',
-          'org_id',  v_orphan_org_id,
+          'reason',           'sole_admin_sanitized',
+          'organization_id',  v_orphan_org_id,
           'sanitized_user_id', p_user_id
         )
       );
       v_orphan_count := v_orphan_count + 1;
     END LOOP;
-  EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'audit-2026-05-07 H-0908/H-0909: orphan-organization audit emission failed for user % (sqlstate=%, msg=%); sanitize continues',
-      p_user_id, SQLSTATE, SQLERRM;
+  EXCEPTION
+    WHEN unique_violation
+      OR check_violation
+      OR string_data_right_truncation
+      OR numeric_value_out_of_range
+      OR insufficient_privilege THEN
+      RAISE NOTICE 'audit-2026-05-07 H-0908/H-0909: orphan-organization audit emission failed for user % (sqlstate=%, msg=%); sanitize continues',
+        p_user_id, SQLSTATE, SQLERRM;
   END;
 
   -- mig 120 P914: NULL profiles.partner_tag in addition to existing columns.
@@ -330,9 +342,18 @@ BEGIN
         'completed_at',           now()
       )
     );
-  EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'audit-2026-05-07 H-0899/H-0905: sanitize audit emission failed for user % (sqlstate=%, msg=%); sanitize succeeded',
-      p_user_id, SQLSTATE, SQLERRM;
+  EXCEPTION
+    WHEN unique_violation
+      OR check_violation
+      OR string_data_right_truncation
+      OR numeric_value_out_of_range
+      OR insufficient_privilege THEN
+      -- Narrow trap (see Q#3 audit-A finding): swallow only audit-shape /
+      -- size / role-gate failures so the GDPR sanitize completes; schema-
+      -- drift errors (42703 undefined_column / 42P01 undefined_table /
+      -- 42883 undefined_function) propagate so they surface loudly.
+      RAISE NOTICE 'audit-2026-05-07 H-0899/H-0905: sanitize audit emission failed for user % (sqlstate=%, msg=%); sanitize succeeded',
+        p_user_id, SQLSTATE, SQLERRM;
   END;
 
   RETURN TRUE;
@@ -397,6 +418,32 @@ BEGIN
   IF v_body NOT LIKE '%organization.orphaned_by_sanitize%' THEN
     RAISE EXCEPTION 'audit-2026-05-07 H-0908/H-0909 verification failed: sanitize_user body lacks sole-admin orphan detection';
   END IF;
+  -- Regression gate for the Q#2 audit-A finding: the original body
+  -- referenced organization_members.org_id (non-existent column),
+  -- causing 42703 at runtime which the WHEN OTHERS trap swallowed and
+  -- silently no-opped every orphan-emission. The substring probe above
+  -- ('organization.orphaned_by_sanitize') passed because the action
+  -- string was still present in the body — the probe is shape-only.
+  -- Assert the loop binds to the real column name AND to the broadened
+  -- role filter so a future copy-edit cannot reintroduce the silent
+  -- failure.
+  IF v_body NOT LIKE '%om1.organization_id%' THEN
+    RAISE EXCEPTION 'audit-2026-05-07 H-0908/H-0909 verification failed: sole-admin loop does not reference organization_members.organization_id (regression to org_id?)';
+  END IF;
+  IF v_body NOT LIKE '%role IN (''owner'', ''admin'')%' THEN
+    RAISE EXCEPTION 'audit-2026-05-07 H-0908/H-0909 verification failed: sole-admin loop role filter must include both owner AND admin';
+  END IF;
+  -- Pre-flight: organization_members.organization_id column must exist.
+  -- Catches schema drift at apply time instead of letting it explode
+  -- silently inside the loop (which is the exact failure mode the
+  -- audit-A Q#2 finding identified).
+  PERFORM 1 FROM information_schema.columns
+   WHERE table_schema = 'public'
+     AND table_name = 'organization_members'
+     AND column_name = 'organization_id';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'audit-2026-05-07 sanitize_user pre-flight failed: organization_members.organization_id column missing';
+  END IF;
   -- Preservation gate — mig 120 sentinel + partner_tag + auth purge
   IF v_body NOT LIKE '%quantalyze.sanitize_in_progress%' THEN
     RAISE EXCEPTION 'audit-2026-05-07: sanitize_user lost mig 120 sentinel-progress signal';
@@ -407,6 +454,11 @@ BEGIN
   IF v_body NOT LIKE '%auth.refresh_tokens%' THEN
     RAISE EXCEPTION 'audit-2026-05-07: sanitize_user lost mig 120 auth purge';
   END IF;
+  -- audit-2026-05-07 R#3: sanitize_user is SECURITY DEFINER + REVOKEd
+  -- from PUBLIC/anon/authenticated above. Re-assert PUBLIC absence via
+  -- the mig 134 / C-0284 helper so any future inadvertent re-grant
+  -- aborts the migration.
+  PERFORM public._assert_no_public_execute('public.sanitize_user(uuid)');
 END $$;
 
 COMMIT;
