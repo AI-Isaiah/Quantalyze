@@ -722,8 +722,25 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
+      # retro-PR179-H1 / C-0293(c) extension: skip the playwright-report
+      # upload on the SEED-GATED code path. When E2E_TEST_DB_CONFIGURED is
+      # 'true', a failed run could be against the REAL-env rebuild (see
+      # the "Rebuild Next.js with real test-Supabase env" step above),
+      # and Playwright's trace.zip + on-failure screenshots embed
+      # NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY from
+      # the rebuilt bundle's .next/static/chunks/*.js it captured. The
+      # uploaded artifact would then sit in actions storage for 7 days
+      # with actions:read scope — re-opening the same exfil pivot path
+      # the C-0293(c) artifact-leak fix closed for nextjs-build.
+      #
+      # The unconditional spec set (auth/smoke/demo-public/demo-founder-view)
+      # runs against the PLACEHOLDER artifact and is safe to upload; we
+      # cannot easily distinguish which spec failed at this step, so we
+      # take the conservative cut: when the seed-gated path is wired,
+      # skip the upload entirely. Recovery: re-run locally with
+      # PWDEBUG=1 + the test-DB env in the developer's shell.
       - name: Upload Playwright report on failure
-        if: failure()
+        if: failure() && vars.E2E_TEST_DB_CONFIGURED != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: playwright-report
