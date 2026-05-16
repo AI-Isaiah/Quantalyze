@@ -44,11 +44,18 @@ import { emit as logAuditEvent } from "@/lib/audit";
  *
  * Audit emission
  * --------------
- * Both grant and revoke emit audit events via `logAuditEvent`. The
- * entity_type is `user_app_role` and entity_id is the TARGET user id
- * (the user being granted/revoked), not the row id of user_app_roles —
- * a (user_id, role) composite-key row doesn't have a stable UUID to
- * anchor on. Metadata carries the {role, granted_by|revoked_by} tuple.
+ * Both grant and revoke emit audit events via the AWAITED `logAuditEvent`
+ * (alias for the synchronous `emit` from @/lib/audit — see import comment
+ * above for the audit-2026-05-07 C-0065 rationale). The entity_type is
+ * `user_app_role` and entity_id is the TARGET user id (the user being
+ * granted/revoked), not the row id of user_app_roles — a (user_id, role)
+ * composite-key row doesn't have a stable UUID to anchor on. Metadata
+ * carries {role, granted_by|revoked_by} plus the audit-2026-05-07
+ * discriminators: `was_new_grant` (M-0288) on role.grant, `removed_rows`
+ * on role.revoke (always > 0 now per M-0287). A second
+ * `role.state_observed` event (C-0067) emits AFTER the post-mutation
+ * re-read carrying `holds_role` so concurrent grant+revoke races have
+ * a forensic anchor.
  *
  * We emit through the USER-scoped supabase client supplied by `withRole`
  * via the handler context so that `auth.uid()` inside the log_audit_event

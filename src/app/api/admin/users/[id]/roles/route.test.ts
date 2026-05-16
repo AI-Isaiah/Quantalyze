@@ -976,4 +976,75 @@ describe("synchronous audit emit — C-0065 (audit-2026-05-07)", () => {
     );
     expect(actions).toContain("role.grant");
   });
+
+  // Adversarial / red-team D.6 — when the synchronous emit throws
+  // (permission_denied per audit.ts:474), the route surfaces a 500.
+  // This is the correct fail-loud behavior: the prior after()-deferred
+  // emit would have swallowed this and the grant would have looked
+  // successful while the audit row silently dropped. With synchronous
+  // emit, the route signals the audit-emit failure to the caller so it
+  // can be investigated.
+  it("when role.grant audit emit throws (permission_denied), the route returns 500", async () => {
+    const rpcSpy = vi.fn<
+      (
+        name: string,
+        args: {
+          p_action: string;
+          p_entity_type: string;
+          p_entity_id: string;
+          p_metadata: Record<string, unknown>;
+        },
+      ) => Promise<{ data: unknown; error: unknown }>
+    >(async (_name, args) => {
+      // Simulate the permission_denied RPC error path that emit()
+      // re-throws (audit.ts:461-474).
+      if (args.p_action === "role.grant") {
+        return {
+          data: null,
+          error: { code: "42501", message: "permission denied" },
+        };
+      }
+      return { data: null, error: null };
+    });
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getUser: async () => ({
+            data: { user: TEST_ADMIN },
+            error: null,
+          }),
+        },
+        rpc: rpcSpy,
+        from: () => ({
+          select: () => ({
+            eq: async () => ({
+              data: [{ role: "admin" }],
+              error: null,
+            }),
+          }),
+        }),
+      }),
+    }));
+    const { POST } = await import("./route");
+    // The route should propagate the throw — we wrap in try/catch.
+    // Pre-fix (with after()-deferred emit) this would silently 200
+    // and the audit row would drop in the background scope.
+    let caught: unknown = null;
+    let res: Response | null = null;
+    try {
+      res = await POST(
+        makeReq({ action: "grant", role: "analyst" }),
+        makeCtx(),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    // emit() re-throws on permission_denied — the route does not
+    // wrap it, so the rejection bubbles to the caller. EITHER a
+    // thrown promise OR a 500 is acceptable evidence of fail-loud
+    // behavior; a 2xx would be the regression.
+    expect(res?.status === 500 || caught != null).toBe(true);
+    // The upsert MUST have run (we get to the audit emit only after).
+    expect(upsertSpy).toHaveBeenCalledTimes(1);
+  });
 });
