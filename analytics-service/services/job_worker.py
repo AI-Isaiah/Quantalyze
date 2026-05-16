@@ -884,7 +884,25 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # (benchmark_unavailable / sibling_kinds_failed / position_metrics_failed
     # etc.); an unconditional upsert with just our keys would clobber those
     # signals. Read the current row, merge in our keys, then upsert.
-    if phase2_failed:
+    #
+    # Known TOCTOU: per-strategy compute_jobs are serialized by status
+    # (pending → running) and analytics_runner runs in a separate
+    # compute_analytics job that is sequenced AFTER sync_trades via the
+    # fan-in mechanism (migration 032 STEP 11/12). The window where
+    # analytics_runner is running concurrently with this stamp is
+    # therefore empty in practice. The stamp itself is best-effort —
+    # losing a write here on a rare race means the next analytics_runner
+    # invocation re-emits all flags it owns; we just lose the phase2
+    # signal until the next sync_trades cron tick.
+    #
+    # Self-healing on success: when phase2_complete=True (the Phase 2
+    # batch loop committed every batch), we ALSO clear the lingering
+    # phase2_* keys if present so a recovered strategy stops looking
+    # "needs attention" to the admin. We skip the read entirely when
+    # phase2_failed=False AND phase2_complete=False (Phase 2 wasn't run,
+    # nothing to do).
+    needs_flag_write = phase2_failed or phase2_complete
+    if needs_flag_write:
         def _load_existing_flags() -> dict:
             res = (
                 ctx.supabase.table("strategy_analytics")
@@ -909,27 +927,44 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             )
             existing_flags = {}
 
-        existing_flags["phase2_fill_ingestion_failed"] = True
-        existing_flags["phase2_error"] = phase2_error_message or "unknown"
-        existing_flags["phase2_failed_at"] = datetime.now(timezone.utc).isoformat()
+        flag_was_set = existing_flags.get("phase2_fill_ingestion_failed") is True
 
-        def _flag_phase2_failure() -> None:
-            ctx.supabase.table("strategy_analytics").upsert(
-                {
-                    "strategy_id": strategy_id,
-                    "data_quality_flags": existing_flags,
-                },
-                on_conflict="strategy_id",
-            ).execute()
+        if phase2_failed:
+            existing_flags["phase2_fill_ingestion_failed"] = True
+            existing_flags["phase2_error"] = phase2_error_message or "unknown"
+            existing_flags["phase2_failed_at"] = datetime.now(timezone.utc).isoformat()
+            write_needed = True
+        else:
+            # phase2_complete=True. Clear the lingering flag if present.
+            if flag_was_set:
+                existing_flags.pop("phase2_fill_ingestion_failed", None)
+                existing_flags.pop("phase2_error", None)
+                existing_flags.pop("phase2_failed_at", None)
+                existing_flags["phase2_recovered_at"] = (
+                    datetime.now(timezone.utc).isoformat()
+                )
+                write_needed = True
+            else:
+                write_needed = False
 
-        try:
-            await db_execute(_flag_phase2_failure)
-        except Exception as flag_exc:  # noqa: BLE001
-            logger.warning(
-                "sync_trades: failed to stamp data_quality_flags."
-                "phase2_fill_ingestion_failed for strategy %s: %s",
-                strategy_id, flag_exc,
-            )
+        if write_needed:
+            def _stamp_phase2_flags() -> None:
+                ctx.supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "data_quality_flags": existing_flags,
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+
+            try:
+                await db_execute(_stamp_phase2_flags)
+            except Exception as flag_exc:  # noqa: BLE001
+                logger.warning(
+                    "sync_trades: failed to stamp data_quality_flags "
+                    "phase2_* for strategy %s: %s",
+                    strategy_id, flag_exc,
+                )
 
     # Checkpoint cursor after any successful fetch (empty or not). Survives
     # downstream analytics/reconstruction failure. Best-effort — a missed
