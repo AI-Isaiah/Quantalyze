@@ -84,12 +84,7 @@ BEGIN
   ) INTO v_missing;
 
   IF array_length(v_missing, 1) > 0 THEN
-    RAISE EXCEPTION
-      'audit-2026-05-07 H-0954/H-0959: match_decision_kind is missing required value(s): %. Present: %. ' ||
-      'Remediation: apply the following out-of-transaction (cannot run inside BEGIN/COMMIT): ' ||
-      'ALTER TYPE public.match_decision_kind ADD VALUE IF NOT EXISTS ''<value>''; per missing value. ' ||
-      'Then re-run this migration. Note: ADD VALUE is allowed inside a tx in PG >= 12 ONLY if the new value '||
-      'is not USED in the same tx — Supabase migration runner wraps files, so apply via psql.',
+    RAISE EXCEPTION $msg$audit-2026-05-07 H-0954/H-0959: match_decision_kind is missing required value(s): %. Present: %. Remediation: apply the following out-of-transaction (cannot run inside BEGIN/COMMIT): ALTER TYPE public.match_decision_kind ADD VALUE IF NOT EXISTS '<value>'; per missing value. Then re-run this migration. Note: ADD VALUE is allowed inside a tx in PG >= 12 ONLY if the new value is not USED in the same tx — Supabase migration runner wraps files, so apply via psql.$msg$,
       array_to_string(v_missing, ', '),
       array_to_string(COALESCE(v_present, ARRAY[]::text[]), ', ');
   END IF;
