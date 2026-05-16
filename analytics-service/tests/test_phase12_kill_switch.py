@@ -1359,6 +1359,35 @@ class TestBoundedConcurrency:
         assert fails[0][0] == sids[fail_idx]
         assert "simulated mid-batch failure" in fails[0][1]
 
+    @pytest.mark.asyncio
+    async def test_baseexception_in_one_cutover_does_not_drop_others(
+        self, monkeypatch
+    ) -> None:
+        """Red-team: if `cutover_strategy` ever leaks a BaseException
+        subclass (MemoryError, KeyboardInterrupt re-raise, custom
+        BaseException), `return_exceptions=True` on gather must still
+        capture the surviving strategies' results so the audit log
+        records what DID land. The leaked exception lands in the
+        failures list as repr(exc); main() still writes audit + stderr."""
+        sids = [_uuid_for(f"baseexc-{i}") for i in range(3)]
+        leak_idx = 1
+
+        async def fake_cutover(sid: str) -> int:
+            if sid == sids[leak_idx]:
+                # MemoryError is a BaseException subclass that bypasses
+                # the inner `except Exception` guard in _one.
+                raise MemoryError("simulated allocator fault")
+            return 7
+
+        monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
+        total, fails = await ks._run_cutovers_bounded(sids, concurrency=3)
+        # 2 surviving cutovers × 7 keys = 14; 1 BaseException captured.
+        assert total == 14
+        assert len(fails) == 1
+        # The failing sid is the one we sabotaged.
+        assert fails[0][0] == sids[leak_idx]
+        assert "MemoryError" in fails[0][1]
+
 
 # --- M-0640: Bytes NewType + Final typing ----------------------------------
 

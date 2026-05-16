@@ -665,6 +665,15 @@ def _atomic_append_todos(content_to_append: str) -> None:
     swap completes and the new content is visible, or the original
     file is untouched.
 
+    Red-team caveat: tempfile + os.replace is ATOMIC against truncation
+    but NOT serializable against concurrent appends. Two processes that
+    both append at the same time will each succeed (no truncation), but
+    only the LAST process's `os.replace` survives — the other's append
+    is lost in TODOS.md. The mitigation is that main() ALSO prints the
+    audit line to stderr unconditionally, which the deploy log captures.
+    So a concurrent-append loss is recoverable from the deploy log even
+    though TODOS.md only records one of the two trigger events.
+
     M-0637: when TODOS_PATH is missing (the audit is being written from
     a deployed container where `.planning/` is not shipped), the audit
     line is ALSO emitted to stderr by the caller — this helper still
@@ -733,6 +742,12 @@ async def _run_cutovers_bounded(
     # successes and failures without an unhandled exception aborting the
     # whole batch. Per-strategy try/except is INSIDE the helper so a
     # bug-free strategy is not starved by a failure on another.
+    #
+    # Red-team: we catch `Exception` (not `BaseException`) so KeyboardInterrupt
+    # / SystemExit / CancelledError still propagate. `return_exceptions=True`
+    # on gather is the secondary defense: even if a future refactor leaks a
+    # BaseException out of _one, the surviving cutovers' results are still
+    # collected so the audit log captures what DID land.
     async def _one(sid: str) -> tuple[str, int, str | None]:
         async with sem:
             try:
@@ -741,7 +756,20 @@ async def _run_cutovers_bounded(
             except Exception as exc:
                 return (sid, 0, repr(exc))
 
-    results = await asyncio.gather(*(_one(sid) for sid in strategy_ids))
+    raw_results = await asyncio.gather(
+        *(_one(sid) for sid in strategy_ids),
+        return_exceptions=True,
+    )
+    # With return_exceptions=True, gather returns an Exception object in the
+    # result slot for any awaitable that raised. Each slot is either a normal
+    # 3-tuple OR an Exception — we synthesize a failure tuple for the latter
+    # so the downstream loop's unpacking remains uniform.
+    results: list[tuple[str, int, str | None]] = []
+    for sid, slot in zip(strategy_ids, raw_results):
+        if isinstance(slot, BaseException):
+            results.append((sid, 0, repr(slot)))
+        else:
+            results.append(slot)
     total_moved = 0
     failures: list[tuple[str, str]] = []
     for sid, moved, error in results:
