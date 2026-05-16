@@ -68,10 +68,29 @@ permissions:
 jobs:
   plan:
     runs-on: ubuntu-latest
+    # retro-PR179-M-env-gate: the plan job consumes SUPABASE_DB_PASSWORD
+    # at L80 + L96 to run `supabase link --project-ref` (which writes
+    # the password into a local supabase config file). The apply job
+    # already gates on `environment: production` (required-reviewer
+    # approval before SUPABASE_DB_PASSWORD is consumed); the plan job
+    # was previously ungated, so a compromised supabase/setup-cli SHA
+    # could exfiltrate the password WITHOUT the same approval.
+    #
+    # Symmetric gate: plan now also requires `environment: production`
+    # approval. The cost is one extra UI click per dispatch; the gain
+    # is that prod-credential exposure now ALWAYS routes through a
+    # required-reviewer surface, matching the apply job's contract.
+    environment: production
     outputs:
       configured: ${{ steps.check.outputs.configured }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          # retro-PR179-M-persist-chain: drop the default persisted
+          # GITHUB_TOKEN cred from .git/config. The plan job uses
+          # SUPABASE_ACCESS_TOKEN for DB ops; no GITHUB_TOKEN-backed
+          # git operations happen here.
+          persist-credentials: false
       - name: Check secrets are configured
         id: check
         env:
@@ -106,6 +125,11 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          # retro-PR179-M-persist-chain: drop the default persisted
+          # GITHUB_TOKEN cred from .git/config. The apply job uses
+          # SUPABASE_ACCESS_TOKEN; no GITHUB_TOKEN-backed git ops.
+          persist-credentials: false
       - uses: supabase/setup-cli@b60b5899c73b63a2d2d651b1e90db8d4c9392f51  # v1.6.0
         with:
           version: latest

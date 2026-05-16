@@ -420,4 +420,186 @@ describe("Critical regression guards", () => {
       ).toBe(true);
     });
   });
+
+  // PR #179 / C-0293 — CI hardening invariants.
+  //
+  // PR #179 pinned every `uses:` to a 40-char SHA, added workflow-level
+  // permissions blocks, and switched the frontend-build artifact to
+  // placeholder-only NEXT_PUBLIC_* values. The runbook prescribes
+  // verification (actionlint + manual `gh run download` grep) but
+  // nothing automated catches a regression at PR-review time. The
+  // retroactive specialist sequence (pr-test-analyzer) flagged three
+  // HIGH-conf gaps:
+  //
+  //   retro-PR179-H2 — no CI gate for SHA-pin policy
+  //   retro-PR179-H3 — no CI gate for placeholder-env-in-artifact
+  //   retro-PR179-H4 — no contract test for the rebuild step shape
+  //
+  // These guards encode the invariants at the source-text level, the
+  // same pattern as [CRITICAL-02] VERSION/package.json drift. Each test
+  // fails locally + in CI BEFORE any workflow runs, catching the
+  // exact regressions a future PR could silently land.
+  describe("[CRITICAL-C0293] CI hardening invariants (PR #179)", () => {
+    const WORKFLOW_FILES = [
+      ".github/workflows/ci.yml",
+      ".github/workflows/nightly.yml",
+      ".github/workflows/phase-19-stability.yml",
+      ".github/workflows/supabase-migrate.yml",
+    ];
+
+    // retro-PR179-H2: SHA-pin policy. Every `uses:` must reference a
+    // 40-character lowercase hex SHA — never a mutable tag (vN, main,
+    // latest) or a partial SHA. First-party reusable workflows (`./...`)
+    // are exempt; there are none in this repo today.
+    describe("SHA-pin policy: every `uses:` must reference a 40-char SHA", () => {
+      const SHA_RE = /^[a-f0-9]{40}$/;
+
+      for (const rel of WORKFLOW_FILES) {
+        it(`${rel} — every uses: ref is a 40-char SHA`, () => {
+          const src = readText(rel);
+          const usesLineRe = /^\s*-?\s*uses:\s*([^\s#]+)/gm;
+          const offenders: string[] = [];
+          let match: RegExpExecArray | null;
+          while ((match = usesLineRe.exec(src)) !== null) {
+            const fullRef = match[1];
+            // Skip first-party reusable workflows (./...) — none today.
+            if (fullRef.startsWith("./")) continue;
+            const atIdx = fullRef.lastIndexOf("@");
+            // No `@` at all is invalid for non-local refs.
+            if (atIdx < 0) {
+              offenders.push(`${fullRef} (no @ref)`);
+              continue;
+            }
+            const ref = fullRef.slice(atIdx + 1);
+            if (!SHA_RE.test(ref)) {
+              offenders.push(`${fullRef} (ref "${ref}" is not a 40-char SHA)`);
+            }
+          }
+          expect(
+            offenders.length,
+            `${rel} contains non-SHA-pinned uses references — C-0293(b) regression:\n  ${offenders.join("\n  ")}`,
+          ).toBe(0);
+        });
+      }
+    });
+
+    // retro-PR179-H2: workflow-level permissions block. Every workflow
+    // MUST declare `permissions:` at workflow level (defaulting to
+    // contents: read), so a missing/typo'd block can't fall back to
+    // the GITHUB_TOKEN repo default (contents: write etc.).
+    describe("Workflow-level permissions: every workflow declares the minimum scope", () => {
+      const PERMISSIONS_BLOCK_RE = /^permissions:\s*\n(?:\s+\S+:[\s\S]*?)(?=\n[^\s])/m;
+
+      for (const rel of WORKFLOW_FILES) {
+        it(`${rel} — declares a top-level permissions: block with contents: read`, () => {
+          const src = readText(rel);
+          const hasPermissions = PERMISSIONS_BLOCK_RE.test(src);
+          expect(
+            hasPermissions,
+            `${rel} has no top-level permissions: block — GITHUB_TOKEN would inherit repo default (writes)`,
+          ).toBe(true);
+          // contents: read must appear within the top-level block.
+          const block = src.match(PERMISSIONS_BLOCK_RE)?.[0] ?? "";
+          expect(
+            /contents:\s*read/.test(block),
+            `${rel} top-level permissions block does not include 'contents: read'`,
+          ).toBe(true);
+        });
+      }
+    });
+
+    // retro-PR179-H3: frontend-build artifact MUST be built with
+    // placeholder NEXT_PUBLIC_* values UNCONDITIONALLY. The previous
+    // seed-aware ternary leaked TEST_SUPABASE_URL/ANON_KEY into the
+    // uploaded artifact. A regression that re-introduces the ternary
+    // (or any non-placeholder value) re-opens the exfil pivot.
+    describe("frontend-build env: placeholder NEXT_PUBLIC_* values only", () => {
+      it("ci.yml frontend-build env block uses placeholder NEXT_PUBLIC_SUPABASE_URL", () => {
+        const src = readText(".github/workflows/ci.yml");
+        // Find the frontend-build job's `npm run build` step env block.
+        // The placeholder MUST appear directly in the env literal, not
+        // via a secret/var expression.
+        const buildEnvMatch = src.match(
+          /frontend-build:[\s\S]*?-\s*run:\s*npm run build[\s\S]*?env:\s*\n([\s\S]*?)(?=\n\s{0,6}-\s|\n[a-z])/,
+        );
+        expect(buildEnvMatch, "ci.yml: could not locate frontend-build npm run build env block").not.toBeNull();
+        const envBlock = buildEnvMatch![1];
+        expect(
+          /NEXT_PUBLIC_SUPABASE_URL:\s*https:\/\/placeholder\.supabase\.co/.test(envBlock),
+          "frontend-build env NEXT_PUBLIC_SUPABASE_URL is not the literal placeholder — C-0293(c) regression",
+        ).toBe(true);
+        expect(
+          /NEXT_PUBLIC_SUPABASE_ANON_KEY:\s*placeholder\b/.test(envBlock),
+          "frontend-build env NEXT_PUBLIC_SUPABASE_ANON_KEY is not the literal placeholder — C-0293(c) regression",
+        ).toBe(true);
+        // Defensive: secrets.TEST_SUPABASE_URL must NOT appear in the
+        // frontend-build env block (it belongs only in the rebuild
+        // step further down in the e2e job).
+        expect(
+          /secrets\.TEST_SUPABASE_URL/.test(envBlock),
+          "frontend-build env references secrets.TEST_SUPABASE_URL — C-0293(c) seed-aware ternary regression",
+        ).toBe(false);
+      });
+
+      // retro-PR179-H4: seed-gated rebuild step contract. The step
+      // MUST (a) be gated on vars.E2E_TEST_DB_CONFIGURED, (b) wipe
+      // .next/server + .next/static + the 3 manifests, (c) re-run
+      // `npm run build` with the REAL secrets in env.
+      it("ci.yml seed-gated rebuild step has the required shape (contract for C-0293(c) Path 2)", () => {
+        const src = readText(".github/workflows/ci.yml");
+        // The rebuild step's identifying name is unique in the file.
+        const rebuildMatch = src.match(
+          /-\s*name:\s*Rebuild Next\.js with real test-Supabase env[\s\S]*?(?=\n\s{0,6}-\s)/,
+        );
+        expect(rebuildMatch, "ci.yml: rebuild step name not found — Path 2 contract drifted").not.toBeNull();
+        const step = rebuildMatch![0];
+        // (a) gated on vars.E2E_TEST_DB_CONFIGURED
+        expect(
+          /if:\s*\$\{\{\s*vars\.E2E_TEST_DB_CONFIGURED\s*==\s*'true'\s*\}\}/.test(step),
+          "rebuild step not gated on vars.E2E_TEST_DB_CONFIGURED — would run on fork PRs and burn rebuild cost",
+        ).toBe(true);
+        // (b) wipes the placeholder manifests before rebuild
+        expect(
+          /rm\s+-rf\s+\.next\/server\s+\.next\/static/.test(step),
+          "rebuild step no longer wipes .next/server + .next/static — placeholder chunks could leak through",
+        ).toBe(true);
+        // (c) re-runs `npm run build` with REAL secrets in env (not
+        // placeholder values). secrets.TEST_SUPABASE_URL must appear
+        // in the env block.
+        expect(
+          /npm run build/.test(step),
+          "rebuild step no longer runs `npm run build`",
+        ).toBe(true);
+        expect(
+          /NEXT_PUBLIC_SUPABASE_URL:\s*\$\{\{\s*secrets\.TEST_SUPABASE_URL\s*\}\}/.test(step),
+          "rebuild step env no longer wires secrets.TEST_SUPABASE_URL — seed-gated specs would run against placeholder bundle",
+        ).toBe(true);
+        expect(
+          /NEXT_PUBLIC_SUPABASE_ANON_KEY:\s*\$\{\{\s*secrets\.TEST_SUPABASE_ANON_KEY\s*\}\}/.test(step),
+          "rebuild step env no longer wires secrets.TEST_SUPABASE_ANON_KEY",
+        ).toBe(true);
+      });
+    });
+
+    // retro-PR179-M (#20/#21): include-hidden-files: true on the
+    // frontend-build upload step. Without this flag, upload-artifact@v4
+    // silently excludes the dotfile-prefixed `.next/` directory and the
+    // e2e job crashes with "Could not find a production build". This is
+    // operational knowledge captured in YAML comments; the regression
+    // test pins the invariant.
+    describe("upload-artifact invariants", () => {
+      it("ci.yml frontend-build upload step must set include-hidden-files: true", () => {
+        const src = readText(".github/workflows/ci.yml");
+        const uploadMatch = src.match(
+          /-\s*name:\s*Upload \.next \+ public artifact for e2e[\s\S]*?(?=\n\s{0,6}-\s|\n[a-z])/,
+        );
+        expect(uploadMatch, "ci.yml: frontend-build upload step name not found").not.toBeNull();
+        const step = uploadMatch![0];
+        expect(
+          /include-hidden-files:\s*true/.test(step),
+          "frontend-build upload step missing include-hidden-files: true — .next/ silently excluded, e2e crashes",
+        ).toBe(true);
+      });
+    });
+  });
 });

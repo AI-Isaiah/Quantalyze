@@ -27,6 +27,13 @@ jobs:
     if: ${{ vars.STAGING_BASE_URL != '' && vars.STAGING_BASE_URL != ' ' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          # retro-PR179-M-persist-chain: drop the default persisted
+          # GITHUB_TOKEN cred from .git/config. The nightly probe
+          # does no git push; the persisted cred is pure attack
+          # surface for the playwright/lychee actions later in the
+          # job.
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: 20
@@ -54,13 +61,17 @@ jobs:
             exit 0
           fi
           npx playwright test e2e/portfolio-pdf-demo.spec.ts --grep @nightly
-      - name: Upload playwright report on failure
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with:
-          name: nightly-pdf-report
-          path: playwright-report/
-          retention-days: 14
+      # retro-PR179-H1 (twin) — REMOVED: the demo-PDF probe runs against
+      # staging with DEMO_PDF_SECRET in the auth path. On failure, the
+      # Playwright trace.zip + on-failure screenshots would embed the
+      # secret in the captured network log (the staging URL is a real
+      # production-shaped endpoint) and the artifact would have sat in
+      # actions storage for 14 days with actions:read scope. The next
+      # step ("Open GitHub issue on failure") still surfaces the run
+      # URL so a maintainer can re-run the probe locally with the
+      # secret already in their environment and capture a fresh trace.
+      # Re-introduce this upload only after a scrub step (unzip ->
+      # sed-redact -> rezip) lands in front of the upload action.
       - name: Open GitHub issue on failure
         if: failure()
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
@@ -102,6 +113,13 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          # retro-PR179-M-persist-chain: drop the default persisted
+          # GITHUB_TOKEN cred from .git/config. The nightly probe
+          # does no git push; the persisted cred is pure attack
+          # surface for the playwright/lychee actions later in the
+          # job.
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: 20
