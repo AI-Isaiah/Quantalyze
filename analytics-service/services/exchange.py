@@ -501,6 +501,18 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     dt = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc)
                     day_key = dt.strftime("%Y-%m-%d")
                     daily_totals[day_key] += pnl_val
+                else:
+                    # PR #181 take-2 silent-failure-hunter HIGH F4: pre-take2,
+                    # this guard had no else branch — bills with empty or
+                    # non-digit ts were silently dropped. A schema drift
+                    # (OKX returning ISO strings, leading whitespace, exponent
+                    # notation) would lose every bill from a page with no
+                    # operator signal. Mirror the Binance/Bybit fetch_daily_pnl
+                    # WARNING severity for cross-exchange triage consistency.
+                    logger.warning(
+                        "OKX bill dropped: unparseable ts=%r (billId=%s, billType=%s)",
+                        ts_raw, bill.get("billId"), bill.get("billType"),
+                    )
 
             logger.info(
                 "OKX: %d bills aggregated to %d daily PnL entries",
@@ -594,8 +606,19 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 params = {"category": "linear", "limit": 200}
                 result = await exchange.private_get_v5_position_closed_pnl(params)
                 items = result.get("result", {}).get("list", [])
-                for item in items:
-                    daily_pnl.append({
+                # PR #181 take-2 red-team HIGH F5: build the Bybit-branch rows
+                # locally first, run the ISO conversion as a pure build of a
+                # NEW list, and only mutate `daily_pnl` on full success. The
+                # prior in-place mutation could partially convert entries —
+                # if entry N succeeded but entry N+1 raised, daily_pnl held a
+                # mix of ISO strings and digit-string timestamps. Downstream
+                # `transforms.trades_to_daily_returns_with_status` then ran
+                # `pd.to_datetime(df['timestamp'])` on the mixed column and
+                # raised a cryptic format-mismatch error with NO link back to
+                # the Bybit WARNING. Atomic conversion preserves uniform
+                # timestamp format and keeps the failure mode localized.
+                bybit_rows = [
+                    {
                         "exchange": "bybit",
                         "symbol": item.get("symbol", "PORTFOLIO"),
                         "side": "buy" if float(item.get("closedPnl", 0)) >= 0 else "sell",
@@ -605,12 +628,25 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         "fee_currency": "USDT",
                         "timestamp": item.get("createdTime", ""),
                         "order_type": "daily_pnl",
-                    })
-                for entry in daily_pnl:
-                    if entry["timestamp"] and str(entry["timestamp"]).isdigit():
-                        from datetime import datetime, timezone
-                        ts = int(entry["timestamp"]) / 1000
-                        entry["timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+                    }
+                    for item in items
+                ]
+                # Build converted-timestamp variant in a fresh list. On full
+                # success, we extend daily_pnl with the converted rows. On
+                # mid-loop failure, the except clause runs without mutating
+                # daily_pnl (preserving caller-visible uniformity).
+                from datetime import datetime, timezone
+                converted_rows: list[dict[str, Any]] = []
+                for entry in bybit_rows:
+                    new_entry = dict(entry)
+                    ts_raw = entry["timestamp"]
+                    if ts_raw and str(ts_raw).isdigit():
+                        ts = int(ts_raw) / 1000
+                        new_entry["timestamp"] = datetime.fromtimestamp(
+                            ts, tz=timezone.utc
+                        ).isoformat()
+                    converted_rows.append(new_entry)
+                daily_pnl.extend(converted_rows)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Bybit closed_pnl fetch / ISO-conversion failed: %s",
@@ -1421,7 +1457,18 @@ async def fetch_mark_prices(
                 if sym in wanted:
                     try:
                         price = float(row["markPrice"])
-                    except (KeyError, TypeError, ValueError):
+                    except (KeyError, TypeError, ValueError) as exc:
+                        # PR #181 take-2 silent-failure-hunter HIGH F3:
+                        # the prior bare `continue` silently dropped any
+                        # row whose markPrice was missing or malformed.
+                        # Caller (per docstring above) treats absent
+                        # symbols as flat positions in equity-curve
+                        # recompute — schema drift would silently corrupt
+                        # valuation. Mirror the OKX per-symbol WARNING.
+                        logger.warning(
+                            "fetch_mark_prices Binance: dropping sym=%s unparseable markPrice=%r: %s",
+                            sym, row.get("markPrice"), exc,
+                        )
                         continue
                     result[sym] = price
                     _MARK_PRICE_CACHE[sym] = (
@@ -1442,7 +1489,14 @@ async def fetch_mark_prices(
                 if sym in wanted:
                     try:
                         price = float(row["markPrice"])
-                    except (KeyError, TypeError, ValueError):
+                    except (KeyError, TypeError, ValueError) as exc:
+                        # PR #181 take-2 silent-failure-hunter HIGH F3:
+                        # same silent-drop pattern as Binance — log the
+                        # symbol that was dropped so schema drift surfaces.
+                        logger.warning(
+                            "fetch_mark_prices Bybit: dropping sym=%s unparseable markPrice=%r: %s",
+                            sym, row.get("markPrice"), exc,
+                        )
                         continue
                     result[sym] = price
                     _MARK_PRICE_CACHE[sym] = (

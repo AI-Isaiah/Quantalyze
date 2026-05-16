@@ -1003,32 +1003,65 @@ def test_compute_all_metrics_inline_qstats_scalar_failures_log_warning(
     )
 
 
-def test_compute_all_metrics_gini_qstats_attribute_missing_logs_warning(
+def test_compute_all_metrics_does_not_call_qstats_gini(
     golden_returns, caplog
 ):
-    """audit-2026-05-07 silent-failure sweep — live regression discovered
-    during sweep. The current pinned quantstats version exposes no
-    `qs.stats.gini` attribute, so the inline `metrics_json["gini"] =
-    _safe_float(qs.stats.gini(returns))` call ALWAYS raises AttributeError.
-    Pre-sweep, this was silently swallowed by `except: pass` and the gini
-    field was missing for every analytics run with no operator signal.
-    Post-sweep, the same AttributeError is logged at WARNING naming
-    `gini`, so operators can see the pinned-qs-version drift instead of
-    inferring it from a missing dashboard field.
+    """PR #181 take-2 red-team F1: the `qs.stats.gini` call was removed
+    because the pinned quantstats==0.0.81 has no `gini` attribute and
+    the sweep's WARNING wrapper produced one permanent Railway log line
+    per analytics run with no resolution path. The dead call is gone;
+    `gini` is absent from metrics_json AND no WARNING fires that mentions
+    `gini`. If gini is re-introduced (manual implementation or qs
+    upgrade), this test should be replaced with a positive coverage
+    assertion (`mj['gini'] is not None`).
     """
-    # No monkeypatch — qs.stats.gini is genuinely absent on this version.
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
         result = compute_all_metrics(golden_returns)
     mj = result["metrics_json"]
-    assert "gini" not in mj or mj["gini"] is None
-    matching = [
+    assert "gini" not in mj, (
+        "PR #181 take-2 removed the dead qs.stats.gini call; the key must "
+        "no longer be present in metrics_json"
+    )
+    gini_warnings = [
         r for r in caplog.records
         if "gini" in r.getMessage() and r.levelno == logging.WARNING
     ]
-    assert matching, (
-        "metrics_json['gini'] = qs.stats.gini(...) raises AttributeError on "
-        "the pinned quantstats version; this must produce a WARNING log so "
-        "operators can spot it, not be silently swallowed by `except: pass`"
+    assert not gini_warnings, (
+        "PR #181 take-2 dropped the gini call site; no WARNING mentioning "
+        "'gini' should fire anymore (silencing the permanent noise floor)"
+    )
+
+
+def test_compute_all_metrics_var_1d_95_uses_correct_kwarg(
+    golden_returns, caplog
+):
+    """PR #181 take-2 red-team F2: pre-take2, the var_1d_95 call passed
+    `cutoff=0.05` but `qs.stats.value_at_risk`'s signature uses
+    `confidence=0.95`. Every analytics run raised TypeError; the
+    sweep's WARNING then made var_1d_95 a permanent Railway noise
+    floor. Post-take2 the call uses `confidence=0.95` and var_1d_95
+    is populated successfully — confirms the fix is wired and no
+    'cutoff' WARNING fires on the live qs version.
+    """
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    mj = result["metrics_json"]
+    # Positive coverage: var_1d_95 is populated (a finite negative
+    # number for healthy returns since it's the lower-tail VaR).
+    assert mj.get("var_1d_95") is not None, (
+        "PR #181 take-2 expects var_1d_95 to be populated on the live "
+        "quantstats version after the cutoff->confidence kwarg fix"
+    )
+    # Negative assertion: no var_1d_95 WARNING should fire about kwargs.
+    bad_warnings = [
+        r for r in caplog.records
+        if "var_1d_95" in r.getMessage()
+        and r.levelno == logging.WARNING
+        and ("cutoff" in r.getMessage() or "unexpected keyword" in r.getMessage())
+    ]
+    assert not bad_warnings, (
+        "PR #181 take-2 fixed the cutoff/confidence kwarg drift; no "
+        "WARNING about unexpected keyword 'cutoff' should fire anymore"
     )
 
 

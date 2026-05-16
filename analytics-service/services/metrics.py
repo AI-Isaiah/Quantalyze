@@ -343,22 +343,36 @@ def compute_all_metrics(
     # silent regressions instead of inferring from latency. Math is still
     # failure-soft (single qs failure must not take down compute_all_metrics);
     # only the observability changes.
-    returns_len_for_log = len(returns) if returns is not None else None
+    # PR #181 take-2 red-team F6: surface BOTH the raw input length and the
+    # post-NaN-drop length qs.stats actually consumes. quantstats internally
+    # filters NaN via `_utils._prepare_returns` before computing scalars; the
+    # raw `len(returns)` value in WARNING templates misdirects operators who
+    # try to reproduce the failure manually with the same length.
+    returns_len_for_log = len(returns)
+    returns_nonnan_len_for_log = int(returns.notna().sum())
     # fail-soft: optional scalar — single qs failure must not abort compute.
+    # PR #181 take-2 red-team F2: prior call passed `cutoff=0.05`; the
+    # pinned quantstats==0.0.81 signature uses `confidence=0.95` (NOT
+    # `cutoff`). Pre-take2 every analytics run raised TypeError here and
+    # var_1d_95 was missing from every factsheet; the sweep WARNINGs then
+    # made the permanent failure a Railway noise floor that erodes the
+    # signal value of the new fail-loud emissions.
     try:
-        metrics_json["var_1d_95"] = _safe_float(qs.stats.value_at_risk(returns, cutoff=0.05))
+        metrics_json["var_1d_95"] = _safe_float(
+            qs.stats.value_at_risk(returns, confidence=0.95)
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "qstats scalar var_1d_95 failed (returns_len=%s): %s",
-            returns_len_for_log, exc, exc_info=True,
+            "qstats scalar var_1d_95 failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
         )
     # fail-soft: optional scalar.
     try:
         metrics_json["cvar"] = _safe_float(qs.stats.cvar(returns))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "qstats scalar cvar failed (returns_len=%s): %s",
-            returns_len_for_log, exc, exc_info=True,
+            "qstats scalar cvar failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
         )
 
     metrics_json["mtd"] = _safe_float(returns[returns.index >= pd.Timestamp(returns.index[-1].replace(day=1))].add(1).prod() - 1)
@@ -383,40 +397,42 @@ def compute_all_metrics(
         # 'qstats scalar var_1m_99' line; accurate attribution lets them find
         # the right call site immediately.
         logger.warning(
-            "np.percentile scalar var_1m_99 failed (returns_len=%s, monthly_len=%s): %s",
-            returns_len_for_log, len(monthly_rets), exc, exc_info=True,
+            "np.percentile scalar var_1m_99 failed (returns_len=%s, nonnan_len=%s, monthly_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, len(monthly_rets), exc, exc_info=True,
         )
-    # fail-soft: optional scalar.
-    try:
-        metrics_json["gini"] = _safe_float(qs.stats.gini(returns))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "qstats scalar gini failed (returns_len=%s): %s",
-            returns_len_for_log, exc, exc_info=True,
-        )
+    # PR #181 take-2 red-team F1: `qs.stats.gini` does not exist on the
+    # pinned quantstats==0.0.81 (verified live: `hasattr(qs.stats, 'gini')
+    # == False`). The sweep's WARNING wrapped this site but left the dead
+    # call in place, producing one permanent Railway WARNING per analytics
+    # run that operators cannot resolve. The gini metric has been missing
+    # from every factsheet since the call was introduced; pre-sweep
+    # bare-pass swallowed the AttributeError. Removing the dead call drops
+    # the noise floor; if/when gini is needed it should be re-introduced
+    # as either (a) a manual numpy/pandas implementation, or (b) after a
+    # quantstats version bump that re-exposes the attribute.
     # fail-soft: optional scalar.
     try:
         metrics_json["omega"] = _safe_float(qs.stats.omega(returns))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "qstats scalar omega failed (returns_len=%s): %s",
-            returns_len_for_log, exc, exc_info=True,
+            "qstats scalar omega failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
         )
     # fail-soft: optional scalar.
     try:
         metrics_json["gain_pain"] = _safe_float(qs.stats.gain_to_pain_ratio(returns))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "qstats scalar gain_pain failed (returns_len=%s): %s",
-            returns_len_for_log, exc, exc_info=True,
+            "qstats scalar gain_pain failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
         )
     # fail-soft: optional scalar.
     try:
         metrics_json["tail_ratio"] = _safe_float(qs.stats.tail_ratio(returns))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "qstats scalar tail_ratio failed (returns_len=%s): %s",
-            returns_len_for_log, exc, exc_info=True,
+            "qstats scalar tail_ratio failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
         )
 
     # Distribution metrics
@@ -427,8 +443,8 @@ def compute_all_metrics(
         # review-cluster gate (audit-2026-05-07): log prefix is 'pandas'
         # not 'qstats scalar' — Series.skew is the call, not qs.stats.
         logger.warning(
-            "pandas scalar skewness failed (returns_len=%s): %s",
-            returns_len_for_log, exc, exc_info=True,
+            "pandas scalar skewness failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
         )
     # fail-soft: optional scalar (pandas Series.kurtosis, not qs.stats).
     try:
@@ -437,24 +453,24 @@ def compute_all_metrics(
         # review-cluster gate (audit-2026-05-07): log prefix is 'pandas'
         # not 'qstats scalar' — Series.kurtosis is the call, not qs.stats.
         logger.warning(
-            "pandas scalar kurtosis failed (returns_len=%s): %s",
-            returns_len_for_log, exc, exc_info=True,
+            "pandas scalar kurtosis failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
         )
     # fail-soft: optional scalar.
     try:
         metrics_json["smart_sharpe"] = _safe_float(qs.stats.smart_sharpe(returns))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "qstats scalar smart_sharpe failed (returns_len=%s): %s",
-            returns_len_for_log, exc, exc_info=True,
+            "qstats scalar smart_sharpe failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
         )
     # fail-soft: optional scalar.
     try:
         metrics_json["smart_sortino"] = _safe_float(qs.stats.smart_sortino(returns))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "qstats scalar smart_sortino failed (returns_len=%s): %s",
-            returns_len_for_log, exc, exc_info=True,
+            "qstats scalar smart_sortino failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
         )
 
     # Win/Loss metrics
@@ -474,8 +490,8 @@ def compute_all_metrics(
         metrics_json["profit_factor"] = _safe_float(qs.stats.profit_factor(returns))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "qstats scalar profit_factor failed (returns_len=%s): %s",
-            returns_len_for_log, exc, exc_info=True,
+            "qstats scalar profit_factor failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
         )
 
     # Risk of Ruin (Cox-Miller approximation)
@@ -567,8 +583,8 @@ def compute_all_metrics(
             metrics_json["outlier_loss_ratio"] = _safe_float((returns < mean_ret - outlier_threshold).mean())
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "outlier ratios failed (returns_len=%s): %s",
-            returns_len_for_log, exc, exc_info=True,
+            "outlier ratios failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
         )
 
     # Benchmark metrics (single greeks() call for alpha + beta)
