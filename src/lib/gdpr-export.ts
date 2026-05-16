@@ -1056,6 +1056,13 @@ async function fetchRowsForSpec(
   // that never satisfies the `Record<string, unknown>` index
   // signature. The cast is type-only; the runtime shape is verified
   // by the .filter((v): v is string) below.
+  //
+  // Type assumption: every parent table in the current manifest
+  // (strategies, portfolios) uses a UUID string PK. If a future
+  // manifest entry introduces a non-string PK (e.g., bigint), the
+  // filter below will drop ALL parent ids and the indirect child
+  // will silently return zero rows — re-examine `parent_id_column`
+  // + the filter widening in that PR.
   const parentRowsArr = ((parentRows ?? []) as unknown) as Array<
     Record<string, unknown>
   >;
