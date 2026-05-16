@@ -834,8 +834,19 @@ jobs:
       # take the conservative cut: when the seed-gated path is wired,
       # skip the upload entirely. Recovery: re-run locally with
       # PWDEBUG=1 + the test-DB env in the developer's shell.
+      #
+      # retro-PR188-F6 (red-team #37, HIGH/8): the prior gate was
+      # `!= 'true'` (fail-OPEN). Any non-`'true'` value — case mismatch
+      # ('True', 'TRUE'), '1', 'yes', a workflow_dispatch typo'd
+      # `'false'` — would fire the upload while the upstream rebuild
+      # step's `== 'true'` check might still treat the same value as
+      # truthy (GH expressions are case-sensitive for == but the
+      # operator skew amplifies any typo). Tighten to an EXPLICIT
+      # allow-list: upload ONLY when the variable is empty or the
+      # literal string 'false'. Every other value (including the
+      # documented 'true') keeps the artifact off the runner.
       - name: Upload Playwright report on failure
-        if: failure() && vars.E2E_TEST_DB_CONFIGURED != 'true'
+        if: failure() && (vars.E2E_TEST_DB_CONFIGURED == '' || vars.E2E_TEST_DB_CONFIGURED == 'false')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: playwright-report
