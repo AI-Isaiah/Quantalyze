@@ -735,6 +735,11 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         # row back to FAILED: by the time we get here the row is persisted
         # as COMPLETE above, and the user-visible analytics are correct.
         # Alerts are best-effort secondary signals.
+        # NOTE (red-team RT-4): silencing the alert failure at the wire
+        # level means monitoring must watch service logs for
+        # "Alert generation failed" rather than relying on the response
+        # 5xx rate. The logger.exception() below ensures the failure is
+        # visible to log aggregators.
         try:
             _generate_alerts(
                 supabase,
