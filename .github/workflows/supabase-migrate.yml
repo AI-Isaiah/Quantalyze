@@ -119,7 +119,8 @@ jobs:
       - uses: supabase/setup-cli@b60b5899c73b63a2d2d651b1e90db8d4c9392f51  # v1.6.0
         if: steps.check.outputs.configured == 'true'
         with:
-          version: latest
+          # Pinned to match the apply job's CLI version (see comment there).
+          version: 2.98.2
       - name: Plan — dry-run apply (remote vs local)
         if: steps.check.outputs.configured == 'true'
         env:
