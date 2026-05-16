@@ -29,16 +29,117 @@ from services.transforms import trades_to_daily_returns
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 logger = logging.getLogger("quantalyze.analytics")
+
+# Alert / matching thresholds. Named so config review and future tuning
+# don't have to chase bare literals scattered through the file.
+_DRAWDOWN_ALERT_THRESHOLD = -0.10        # drawdown ratio that triggers a medium alert
+_DRAWDOWN_HIGH_SEVERITY_THRESHOLD = -0.20  # below this we mark the alert "high"
+_CORRELATION_SPIKE_THRESHOLD = 0.70      # avg pairwise correlation that triggers a spike alert
+_REGIME_SHIFT_DELTA_THRESHOLD = 0.15     # rolling-corr delta that triggers a regime_shift alert
+_UNDERPERFORMANCE_GAP_THRESHOLD = 0.005  # min gap between worst and second-worst contribution
+_CONCENTRATION_MULTIPLIER = 1.5          # weight_pct over equal-weight that flags concentration_creep
+_REBALANCE_DRIFT_THRESHOLD = 0.05        # min weight drift to fire a rebalance_drift alert
+_REBALANCE_DRIFT_HIGH_THRESHOLD = 0.10   # above this we mark the alert "high"
+
+# Strategy matching (verify_strategy endpoint).
+_MATCH_CANDIDATE_LIMIT = 100
+_MATCH_CORRELATION_THRESHOLD = 0.95
+
+# How long an analytics row can sit in 'computing' before a watchdog is
+# allowed to reap it (queryable from the cron sweep).
+_COMPUTING_ROW_STALE_MINUTES = 30
+
+
 limiter = Limiter(key_func=get_remote_address)
+
+# Per-email sliding-window rate limit for verify_strategy. IP-only limiting
+# (slowapi) is decorative against rotated-IP attackers. We track recent
+# verification attempts in-process so a single email can't burn through the
+# IP-budget by rotating cloud IPs. NOT distributed-safe across workers; the
+# IP-based limiter is still authoritative for the global ceiling.
+_VERIFY_STRATEGY_EMAIL_RATE_LIMIT = 5          # max per window
+_VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC = 3600  # 1 hour
+_verify_strategy_email_attempts: dict[str, list[float]] = {}
+
+
+def _check_verify_strategy_email_rate(email: str) -> bool:
+    """Return True if the email is under the per-email rate budget.
+
+    Side-effect: prunes expired timestamps and records the current attempt
+    when the check passes. Returning False means the caller should reject
+    with HTTP 429 even though the IP-based limiter let the request through.
+    """
+    if not email:
+        return True
+    import time
+    now = time.monotonic()
+    cutoff = now - _VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC
+    bucket = _verify_strategy_email_attempts.get(email, [])
+    # Prune expired
+    bucket = [t for t in bucket if t >= cutoff]
+    if len(bucket) >= _VERIFY_STRATEGY_EMAIL_RATE_LIMIT:
+        _verify_strategy_email_attempts[email] = bucket
+        return False
+    bucket.append(now)
+    _verify_strategy_email_attempts[email] = bucket
+    return True
 
 
 def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
-    """Convert [{date, value}, ...] records to a DatetimeIndex pd.Series."""
+    """Convert [{date, value}, ...] records to a DatetimeIndex pd.Series.
+
+    Tolerates malformed records by skipping any entry missing ``date`` or
+    ``value`` and emitting a single warning. A single typo (legacy
+    ``{ts, val}`` row) used to raise KeyError that propagated up to the
+    outer catch and overwrote the real exception with the generic
+    "Analytics computation failed" message — masking schema drift.
+    """
     if not isinstance(raw, list) or not raw:
         return None
-    dates = [r["date"] for r in raw]
-    vals = [r["value"] for r in raw]
+
+    dates: list = []
+    vals: list = []
+    skipped = 0
+    for r in raw:
+        if not isinstance(r, dict):
+            skipped += 1
+            continue
+        d = r.get("date")
+        v = r.get("value")
+        if d is None or v is None:
+            skipped += 1
+            continue
+        dates.append(d)
+        vals.append(v)
+
+    if skipped:
+        logger.warning(
+            "_records_to_series: skipped %d malformed records for %s",
+            skipped, name or "<unnamed>",
+        )
+
+    if not dates:
+        return None
+
     return pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
+
+
+def _redact_credentials(message: str, req: "VerifyStrategyRequest") -> str:
+    """Strip raw api_key / api_secret / passphrase substrings from a log line.
+
+    CCXT auth-error messages embed the api_key verbatim in signature-mismatch
+    strings. Without redaction those land in Sentry breadcrumbs that the PII
+    scrubber doesn't touch.
+    """
+    safe = message
+    for needle in (
+        getattr(req, "api_key", None),
+        getattr(req, "api_secret", None),
+        getattr(req, "passphrase", None),
+    ):
+        if needle and isinstance(needle, str) and len(needle) >= 6:
+            safe = safe.replace(needle, "[REDACTED]")
+    return safe
 
 # Cron concurrency guard: allow at most 3 simultaneous portfolio computations.
 # NOTE: asyncio.Semaphore is process-local. Multi-worker/multi-pod deployments rely
@@ -75,8 +176,9 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
 
     def _fail(error_msg: str):
         # @audit-skip: compute-job failure state.
+        # error_msg is bounded to ~500 chars to keep the column readable.
         supabase.table("portfolio_analytics").update(
-            {"computation_status": "failed", "computation_error": error_msg}
+            {"computation_status": "failed", "computation_error": error_msg[:500]}
         ).eq("id", analytics_id).execute()
 
     try:
@@ -115,9 +217,19 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         strategy_twrs: dict[str, float] = {}
         strategy_aum: dict[str, float] = {}
 
+        # Telemetry — record sids dropped at each step so the persisted
+        # analytics row can flag partial-data computations. Project memory
+        # (v0.17.1 KPI-17 saga, PRs #95-#100) flagged the silent-drop pattern;
+        # we now warn-log AND persist counts so the dashboard can render a
+        # "computed from N of M strategies" badge instead of silently degrading.
+        missing_analytics_sids: list[str] = []
+        missing_returns_sids: list[str] = []
+        missing_equity_sids: list[str] = []
+
         for sid in strategy_ids:
             row = analytics_rows.get(sid)
             if not row:
+                missing_analytics_sids.append(sid)
                 continue
 
             s = _records_to_series(row.get("returns_series"), name=sid)
@@ -127,9 +239,30 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
                 eq = _records_to_series(row.get("equity_curve"), name=sid)
                 if eq is not None:
                     strategy_equity[sid] = eq
+                else:
+                    missing_equity_sids.append(sid)
+            else:
+                missing_returns_sids.append(sid)
 
             if row.get("total_aum"):
                 strategy_aum[sid] = float(row["total_aum"])
+
+        if missing_analytics_sids:
+            logger.warning(
+                "portfolio %s missing strategy_analytics rows for %d/%d strategies: %s",
+                portfolio_id, len(missing_analytics_sids), len(strategy_ids),
+                missing_analytics_sids,
+            )
+        if missing_returns_sids:
+            logger.warning(
+                "portfolio %s missing returns_series for %d strategies: %s",
+                portfolio_id, len(missing_returns_sids), missing_returns_sids,
+            )
+        if missing_equity_sids:
+            logger.warning(
+                "portfolio %s missing equity_curve for %d strategies: %s",
+                portfolio_id, len(missing_equity_sids), missing_equity_sids,
+            )
 
         if not strategy_returns:
             _fail("No returns data available for strategies in this portfolio.")
@@ -138,6 +271,13 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         # Renormalize weights to only the strategies that have data.
         # Without this, a missing high-weight strategy silently suppresses all returns
         # (e.g., 80% weight strategy missing → surviving 20% still gets 0.2× multiplier).
+        # We persist the dropped sids on the analytics row so the UI can render a
+        # "computed from N of M strategies" badge — silent renormalization to 100%
+        # is the canonical KPI-17 anti-pattern (project memory).
+        dropped_weight_total = sum(
+            w for sid, w in weights.items() if sid not in strategy_returns
+        )
+        dropped_for_renormalize = [sid for sid in weights if sid not in strategy_returns]
         available_sids = set(strategy_returns.keys())
         weights = {sid: w for sid, w in weights.items() if sid in available_sids}
         total_available_w = sum(weights.values()) or 1.0
@@ -185,9 +325,22 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         ordered_sids = list(df.columns)
         ordered_weights = [weights.get(sid, 0) for sid in ordered_sids]
 
-        # Covariance matrix for risk decomposition
-        cov_matrix = df.cov().values if len(df) > 5 else np.eye(len(ordered_sids))
-        risk_decomp_raw = compute_risk_decomposition(ordered_weights, cov_matrix)
+        # Covariance matrix for risk decomposition. When we have fewer than
+        # 6 days of overlap, df.cov() yields zeros/NaN and downstream risk
+        # numbers become noise. We previously substituted np.eye() and
+        # silently shipped fake variance to the dashboard; now we mark the
+        # row as insufficient history so the UI can flag it explicitly.
+        cov_history_sufficient = len(df) > 5
+        if cov_history_sufficient:
+            cov_matrix = df.cov().values
+            risk_decomp_raw = compute_risk_decomposition(ordered_weights, cov_matrix)
+        else:
+            cov_matrix = None
+            risk_decomp_raw = []
+            logger.warning(
+                "portfolio %s has %d days of overlap (<6); skipping risk decomposition",
+                portfolio_id, len(df),
+            )
 
         # Annotate risk decomposition with strategy names and weight pcts
         risk_decomp = []
@@ -200,14 +353,27 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
                 "weight_pct": _safe_float(ordered_weights[i] * 100),
             })
 
-        # Attribution
-        twrs_list = [strategy_twrs.get(sid, 0.0) for sid in ordered_sids]
-        port_twr_for_attr = portfolio_twr or 0.0
-        attribution_raw = compute_attribution(ordered_weights, twrs_list, port_twr_for_attr)
+        # Attribution — drop strategies that lack a TWR. Defaulting to 0.0
+        # fabricated allocation_effect numbers for missing-data strategies
+        # (w * (0 - portfolio_twr)) that the narrative could then pick up as
+        # "driven by X" when X actually has no measured return.
+        attribution_pairs = [
+            (sid, w) for sid, w in zip(ordered_sids, ordered_weights)
+            if sid in strategy_twrs
+        ]
+        if attribution_pairs:
+            attr_sids = [p[0] for p in attribution_pairs]
+            attr_weights = [p[1] for p in attribution_pairs]
+            attr_twrs = [strategy_twrs[sid] for sid in attr_sids]
+            port_twr_for_attr = portfolio_twr or 0.0
+            attribution_raw = compute_attribution(attr_weights, attr_twrs, port_twr_for_attr)
+        else:
+            attr_sids = []
+            attribution_raw = []
 
         attribution = []
         for i, attr in enumerate(attribution_raw):
-            sid = ordered_sids[i]
+            sid = attr_sids[i]
             attribution.append({
                 **attr,
                 "strategy_id": sid,
@@ -216,6 +382,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
 
         # Benchmark comparison (BTC)
         benchmark_comparison = None
+        benchmark_error: str | None = None
         try:
             benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
             if benchmark_rets is not None and not benchmark_stale:
@@ -231,8 +398,18 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
                         "portfolio_twr": portfolio_twr,
                         "stale": benchmark_stale,
                     }
+        except asyncio.CancelledError:
+            # Don't swallow cancellation — propagate.
+            raise
         except Exception as exc:
-            logger.warning("Benchmark fetch failed for portfolio %s: %s", portfolio_id, exc)
+            # Narrowed via re-raise above. Log with exc_info so traceback
+            # lands in Sentry; persist a sentinel so the UI can distinguish
+            # "fetch failed" from "no benchmark overlap".
+            benchmark_error = f"{type(exc).__name__}: {exc}"
+            logger.exception(
+                "Benchmark fetch failed for portfolio %s: %s",
+                portfolio_id, exc,
+            )
 
         # Portfolio equity curve
         cumulative = (1 + portfolio_returns_series).cumprod()
@@ -241,13 +418,39 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             for d, v in cumulative.items()
         ]
 
-        # Total AUM
-        total_aum = sum(strategy_aum.get(sid, 0) for sid in strategy_ids) or None
+        # Total AUM — only meaningful when every strategy reports AUM. A
+        # mix of $0 reporters and NULLs would otherwise collapse to None and
+        # be indistinguishable from "no strategies" / "all missing".
+        aum_known_count = sum(1 for sid in strategy_ids if sid in strategy_aum)
+        if aum_known_count == len(strategy_ids):
+            total_aum = sum(strategy_aum.get(sid, 0) for sid in strategy_ids) or 0.0
+        else:
+            total_aum = None  # at least one strategy has NULL AUM
 
-        # Portfolio-level sharpe and volatility
-        vol = portfolio_returns_series.std() * np.sqrt(252) if len(portfolio_returns_series) > 1 else None
-        mean_ret = portfolio_returns_series.mean() * 252 if len(portfolio_returns_series) > 1 else None
-        sharpe = _safe_float(mean_ret / vol) if vol and vol != 0 and mean_ret is not None else None
+        # Portfolio-level sharpe and volatility. Track WHY the metric is None
+        # so the dashboard can show the right empty-state instead of conflating
+        # "insufficient history" with "flat vol" with "broken compute".
+        vol_status = "ok"
+        sharpe_status = "ok"
+        if len(portfolio_returns_series) <= 1:
+            vol = None
+            mean_ret = None
+            sharpe = None
+            vol_status = "insufficient_history"
+            sharpe_status = "insufficient_history"
+        else:
+            vol = portfolio_returns_series.std() * np.sqrt(252)
+            mean_ret = portfolio_returns_series.mean() * 252
+            if vol is None or vol == 0 or np.isnan(vol):
+                sharpe = None
+                sharpe_status = "zero_volatility" if vol == 0 else "nan"
+            elif mean_ret is None or np.isnan(mean_ret):
+                sharpe = None
+                sharpe_status = "nan_mean"
+            else:
+                sharpe = _safe_float(mean_ret / vol)
+                if sharpe is None:
+                    sharpe_status = "nan"
 
         running_max = cumulative.cummax()
         drawdown = (cumulative - running_max) / running_max
@@ -278,8 +481,14 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
                 for month_str in monthly_returns[year_str]:
                     monthly_returns[year_str][month_str] -= 1.0
             analytics_payload["monthly_returns"] = monthly_returns
-        except Exception:
-            pass  # Monthly breakdown is best-effort
+        except (AttributeError, ValueError, TypeError, ZeroDivisionError) as exc:
+            # Narrowed catch: only expected build errors. Unexpected exceptions
+            # (e.g. KeyError on a renamed column) bubble up to the outer handler
+            # so we don't silently mask schema drift.
+            logger.warning(
+                "monthly_returns build failed for %s: %s",
+                portfolio_id, exc, exc_info=True,
+            )
 
         # Attach optimizer suggestions from last completed analytics (if any)
         try:
@@ -290,10 +499,40 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             ).order("computed_at", desc=True).limit(1).execute()
             if prev_analytics.data and prev_analytics.data[0].get("optimizer_suggestions"):
                 analytics_payload["optimizer_suggestions"] = prev_analytics.data[0]["optimizer_suggestions"]
-        except Exception:
-            pass  # Optimizer sentence is best-effort
+        except Exception as exc:
+            # Optimizer sentence is best-effort, but we MUST surface the failure
+            # in logs so transient Supabase issues don't silently drop the
+            # narrative recommendation. Project memory: monthly_returns swallow
+            # was the exact pattern flagged by silent-failure-hunter.
+            logger.warning(
+                "optimizer_suggestions fetch failed for %s: %s",
+                portfolio_id, exc, exc_info=True,
+            )
 
         narrative = generate_narrative(analytics_payload)
+
+        # Partial-data telemetry. Tracks WHY a dashboard might look smaller
+        # than expected so operators can tell "renormalized to subset" apart
+        # from "all strategies reported in full".
+        partial_data = bool(
+            missing_analytics_sids or missing_returns_sids or missing_equity_sids
+            or dropped_for_renormalize or benchmark_error
+            or not cov_history_sufficient
+        )
+        data_quality = {
+            "partial_data": partial_data,
+            "expected_strategy_count": len(strategy_ids),
+            "computed_strategy_count": len(strategy_returns),
+            "missing_analytics_sids": missing_analytics_sids,
+            "missing_returns_sids": missing_returns_sids,
+            "missing_equity_sids": missing_equity_sids,
+            "dropped_weight_total": _safe_float(dropped_weight_total),
+            "vol_status": vol_status,
+            "sharpe_status": sharpe_status,
+            "cov_history_sufficient": cov_history_sufficient,
+            "benchmark_error": benchmark_error,
+            "matching_status": None,  # populated only on verify_strategy
+        }
 
         # Persist results
         update_payload = sanitize_metrics({
@@ -315,6 +554,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             "benchmark_comparison": benchmark_comparison,
             "portfolio_equity_curve": portfolio_equity_curve,
             "rolling_correlation": rolling_corr,
+            "data_quality": data_quality,
         })
 
         supabase.table("portfolio_analytics").update(update_payload).eq(
@@ -343,7 +583,11 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             str(exc),
             exc_info=True,
         )
-        _fail("Analytics computation failed. Contact support if this persists.")
+        # Persist the exception class + truncated message so operators
+        # can identify the root cause from the row alone, without having
+        # to cross-reference Sentry by timestamp. Project memory KPI-17
+        # saga (PRs #95-#100) flagged this exact debug-the-DB-row need.
+        _fail(f"{type(exc).__name__}: {str(exc)[:400]}")
         raise HTTPException(status_code=500, detail="Portfolio analytics computation failed")
 
 
@@ -378,15 +622,15 @@ def _generate_alerts(
     """
     alerts = []
 
-    if max_drawdown is not None and max_drawdown < -0.10:
+    if max_drawdown is not None and max_drawdown < _DRAWDOWN_ALERT_THRESHOLD:
         alerts.append({
             "portfolio_id": portfolio_id,
             "alert_type": "drawdown",
-            "severity": "high" if max_drawdown < -0.20 else "medium",
+            "severity": "high" if max_drawdown < _DRAWDOWN_HIGH_SEVERITY_THRESHOLD else "medium",
             "message": f"Portfolio drawdown has reached {max_drawdown * 100:.1f}%.",
         })
 
-    if avg_pairwise_corr is not None and avg_pairwise_corr > 0.70:
+    if avg_pairwise_corr is not None and avg_pairwise_corr > _CORRELATION_SPIKE_THRESHOLD:
         alerts.append({
             "portfolio_id": portfolio_id,
             "alert_type": "correlation_spike",
@@ -399,7 +643,7 @@ def _generate_alerts(
 
     # ── Sprint 4: regime_shift ──────────────────────────────────────
     # Fires when the rolling correlation delta between the most recent and
-    # prior window exceeds 0.15 for any strategy pair.
+    # prior window exceeds _REGIME_SHIFT_DELTA_THRESHOLD for any strategy pair.
     if rolling_corr:
         window = 5
         best_delta = 0.0
@@ -408,8 +652,16 @@ def _generate_alerts(
         for series in rolling_corr.values():
             if not isinstance(series, list) or len(series) < window * 2:
                 continue
-            recent_vals = [p["value"] if isinstance(p, dict) else p for p in series[-window:]]
-            prior_vals = [p["value"] if isinstance(p, dict) else p for p in series[-window * 2:-window]]
+            recent_raw = [p["value"] if isinstance(p, dict) else p for p in series[-window:]]
+            prior_raw = [p["value"] if isinstance(p, dict) else p for p in series[-window * 2:-window]]
+            # _safe_float returns None for NaN at the rolling-window leading
+            # edge; sum([None, ...]) crashes. Filter before averaging so a
+            # transient leading-NaN doesn't propagate up through _generate_alerts
+            # and starve sibling alert types in the same call.
+            recent_vals = [x for x in recent_raw if x is not None]
+            prior_vals = [x for x in prior_raw if x is not None]
+            if not recent_vals or not prior_vals:
+                continue
             recent_avg = sum(recent_vals) / len(recent_vals)
             prior_avg = sum(prior_vals) / len(prior_vals)
             delta = abs(recent_avg - prior_avg)
@@ -417,7 +669,7 @@ def _generate_alerts(
                 best_delta = delta
                 best_recent = recent_avg
                 best_prior = prior_avg
-        if best_delta > 0.15:
+        if best_delta > _REGIME_SHIFT_DELTA_THRESHOLD:
             direction = "tightened" if best_recent > best_prior else "loosened"
             alerts.append({
                 "portfolio_id": portfolio_id,
@@ -442,7 +694,9 @@ def _generate_alerts(
         trail_distance = avg_contribution - worst.get("contribution", 0)
         if trail_distance > threshold:
             second = sorted_attr[1] if len(sorted_attr) > 1 else None
-            if not second or (second.get("contribution", 0) - worst.get("contribution", 0)) >= 0.005:
+            if not second or (
+                second.get("contribution", 0) - worst.get("contribution", 0)
+            ) >= _UNDERPERFORMANCE_GAP_THRESHOLD:
                 alerts.append({
                     "portfolio_id": portfolio_id,
                     "alert_type": "underperformance",
@@ -454,12 +708,12 @@ def _generate_alerts(
                 })
 
     # ── Sprint 4: concentration_creep ───────────────────────────────
-    # Fires when any strategy weight exceeds 1.5x the equal-weight baseline
-    # (only meaningful with 3+ strategies).
+    # Fires when any strategy weight exceeds _CONCENTRATION_MULTIPLIER × the
+    # equal-weight baseline (only meaningful with 3+ strategies).
     if risk_decomp and len(risk_decomp) >= 3:
         equal_weight = 100.0 / len(risk_decomp)
         top = max(risk_decomp, key=lambda r: r.get("weight_pct", 0))
-        if top.get("weight_pct", 0) >= equal_weight * 1.5:
+        if top.get("weight_pct", 0) >= equal_weight * _CONCENTRATION_MULTIPLIER:
             alerts.append({
                 "portfolio_id": portfolio_id,
                 "alert_type": "concentration_creep",
@@ -577,7 +831,7 @@ def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
                     "drift": drift,
                 }
 
-        if worst is None or worst["drift"] <= 0.05:
+        if worst is None or worst["drift"] <= _REBALANCE_DRIFT_THRESHOLD:
             return
 
         # Weekly dedup check: any unacked rebalance_drift for this
@@ -602,7 +856,7 @@ def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
         if existing.data:
             return
 
-        severity = "high" if worst["drift"] > 0.10 else "medium"
+        severity = "high" if worst["drift"] > _REBALANCE_DRIFT_HIGH_THRESHOLD else "medium"
         strategy_name = name_by_id.get(worst["strategy_id"], worst["strategy_id"])
         message = (
             f"{strategy_name}'s weight is {worst['actual'] * 100:.0f}% "
@@ -954,23 +1208,49 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
     portfolio, and return the metrics. The verification_id is generated
     locally via uuid.uuid4().
     """
+    # Defense-in-depth per-email rate limit (IP-only limit above is decorative
+    # against rotated-IP attackers). Composed with the slowapi IP budget.
+    if not _check_verify_strategy_email_rate((req.email or "").strip().lower()):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many verification attempts for this email. Try again later.",
+        )
+
     try:
         exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except Exception:
+    except Exception as exc:
+        # Capture exception class + redacted message for diagnostics. Project
+        # policy forbids empty catch blocks; opaque failures hide CCXT signature
+        # changes, ImportError on missing extras, and transient network errors.
+        logger.exception(
+            "verify_strategy: create_exchange failed (%s): %s",
+            type(exc).__name__, _redact_credentials(str(exc), req),
+        )
         raise HTTPException(status_code=400, detail="Failed to initialise exchange connection")
 
     try:
         validation = await validate_key_permissions(exchange)
     except Exception as exc:
-        logger.error("verify_strategy: key validation error: %s", exc)
+        # Redact api_key/api_secret/passphrase before logging — CCXT auth-error
+        # messages embed the api_key in signature-mismatch text, leaking it to
+        # Sentry breadcrumbs that the PII scrubber doesn't touch.
+        logger.error(
+            "verify_strategy: key validation error (%s): %s",
+            type(exc).__name__, _redact_credentials(str(exc), req),
+        )
         raise HTTPException(status_code=500, detail="Key validation failed. Please check your credentials.")
     finally:
         try:
             await exchange.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Don't break the response, but DO log — connection leaks and SSL
+            # shutdown errors are operator-relevant.
+            logger.warning(
+                "verify_strategy: exchange.close() failed (%s): %s",
+                type(exc).__name__, exc,
+            )
 
     if validation.get("error"):
         raise HTTPException(status_code=400, detail=validation["error"])
@@ -1021,11 +1301,18 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
         mean_ret = returns.mean() * 252 if len(returns) > 1 else None
         sharpe = _safe_float(mean_ret / vol) if vol and vol != 0 and mean_ret is not None else None
 
-        matched_strategy_id = None
+        matched_strategy_id: str | None = None
+        # Distinguish three outcomes the previous code collapsed:
+        #   matched / no_match / matching_unavailable
+        # so the user / dashboard can tell "no peer found" from "matching unavailable".
+        matching_status = "no_match"
         try:
+            # Order by recency so the slice is deterministic when the catalog
+            # exceeds the limit; otherwise Postgres returns a random 100-row
+            # window and the user's actual strategy may silently drop out.
             published_result = supabase.table("strategies").select("id").eq(
                 "status", "published"
-            ).limit(100).execute()
+            ).order("created_at", desc=True).limit(_MATCH_CANDIDATE_LIMIT).execute()
             published_ids = [row["id"] for row in (published_result.data or [])]
 
             if published_ids:
@@ -1046,11 +1333,23 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
                     aligned = pd.concat([returns.rename("_target"), df], axis=1).dropna()
                     if len(aligned) >= 30:
                         corrs = aligned.drop(columns=["_target"]).corrwith(aligned["_target"])
-                        best = corrs.idxmax()
-                        if corrs[best] > 0.95:
-                            matched_strategy_id = best
+                        # Filter NaN before idxmax — corrwith returns all-NaN when
+                        # every candidate has zero variance over the aligned window,
+                        # and corrs[NaN] raises KeyError.
+                        corrs_clean = corrs.dropna()
+                        if not corrs_clean.empty:
+                            best = corrs_clean.idxmax()
+                            if corrs_clean[best] > _MATCH_CORRELATION_THRESHOLD:
+                                matched_strategy_id = best
+                                matching_status = "matched"
         except Exception as exc:
-            logger.warning("verify_strategy: strategy matching failed: %s", exc)
+            # Surface the real cause; flag the outcome so callers can tell
+            # "we tried and didn't find" from "matching is down".
+            matching_status = "matching_unavailable"
+            logger.exception(
+                "verify_strategy: strategy matching failed (%s): %s",
+                type(exc).__name__, exc,
+            )
 
         results_payload = sanitize_metrics({
             "twr": twr,
