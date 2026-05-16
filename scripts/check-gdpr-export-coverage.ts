@@ -360,6 +360,46 @@ function readManifestTablesForParity(): Set<string> {
 }
 
 /**
+ * Audit 2026-05-07 red-team #9 (MED conf-8): walk the projected
+ * manifest entries and surface (bundle_name, source_table) pairs
+ * where the two diverge. Used by `enforceProjectionParity` to assert
+ * BOTH names are covered by the sanitize matrix (or both allowlisted
+ * with documented reasons), and to detect stale SANITIZE_PARITY_ALLOWLIST
+ * entries whose reason references a source_table that no longer exists
+ * in the matrix.
+ *
+ * Returns one entry per `kind: "projected"` literal in the manifest.
+ */
+function readProjectedManifestEntries(): Array<{
+  bundleName: string;
+  sourceTable: string;
+}> {
+  const src = readFileSync(MANIFEST_FILE, "utf8");
+  const arrMatch = src.match(
+    /USER_EXPORT_TABLES:\s*readonly\s+UserExportTable\[\]\s*=\s*\[([\s\S]*?)\]\s*as\s*const\s*;/,
+  );
+  if (!arrMatch) return [];
+  const body = arrMatch[1];
+  const out: Array<{ bundleName: string; sourceTable: string }> = [];
+  // Match `{ kind: "projected", ... }` blocks and extract their `table`
+  // + `source_table`. The negative-look-ahead-free strategy: find the
+  // `kind: "projected"` literal, then scan within a bounded window for
+  // the immediately-following `table:` and `source_table:` literals.
+  const projectedRe =
+    /\{\s*kind:\s*"projected"\s*,([\s\S]*?)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = projectedRe.exec(body)) !== null) {
+    const entryBody = m[1];
+    const tableMatch = entryBody.match(/\btable:\s*"([a-z0-9_]+)"/);
+    const sourceMatch = entryBody.match(/\bsource_table:\s*"([a-z0-9_]+)"/);
+    if (tableMatch && sourceMatch) {
+      out.push({ bundleName: tableMatch[1], sourceTable: sourceMatch[1] });
+    }
+  }
+  return out;
+}
+
+/**
  * P698 - per-table user-id filter audit.
  *
  * Walk every entry in USER_EXPORT_TABLES and assert each has an
@@ -569,6 +609,84 @@ function main(): void {
         "have a corresponding Art. 17 erasure policy. Without parity, a " +
         "deletion request can leave data the export keeps surfacing, or " +
         "purge data the user has no way to see was deleted.",
+    );
+    process.exit(1);
+  }
+
+  // Audit 2026-05-07 red-team #9 (MED conf-8): walk every projected
+  // entry whose bundle-name differs from its source_table and assert
+  // BOTH names are covered (by the matrix OR by the allowlist). The
+  // pre-fix parity check only required EITHER name to be covered —
+  // which let a future migration rename a source table (audit_log →
+  // audit_events) while leaving the allowlist's "projection of
+  // audit_log" reason dangling against a no-longer-existing source.
+  // The new sub-check ALSO surfaces stale allowlist entries: any
+  // allowlist key that isn't in `manifestForParity` is a typo or a
+  // renamed-and-forgotten entry; we surface it loud rather than
+  // letting it shadow a real coverage gap.
+  let projected: ReturnType<typeof readProjectedManifestEntries>;
+  try {
+    projected = readProjectedManifestEntries();
+  } catch (err) {
+    console.error(
+      "[check-gdpr-export-coverage] Failed to read projected entries:",
+      err instanceof Error ? err.message : err,
+    );
+    process.exit(2);
+  }
+  const projectionParityGaps: string[] = [];
+  for (const { bundleName, sourceTable } of projected) {
+    if (bundleName === sourceTable) continue;
+    // Both names must be covered. The bundle name's allowlist is in
+    // SANITIZE_PARITY_ALLOWLIST; the source_table covers via the
+    // sanitize matrix DELETE/UPDATE/comment-line scan.
+    const bundleCovered =
+      sanitizeCoverage.has(bundleName) ||
+      bundleName in SANITIZE_PARITY_ALLOWLIST;
+    const sourceCovered =
+      sanitizeCoverage.has(sourceTable) ||
+      sourceTable in SANITIZE_PARITY_ALLOWLIST;
+    if (!bundleCovered) {
+      projectionParityGaps.push(
+        `${bundleName} (projection of ${sourceTable}) -> bundle name not in sanitize matrix or allowlist`,
+      );
+    }
+    if (!sourceCovered) {
+      projectionParityGaps.push(
+        `${sourceTable} (source of projection ${bundleName}) -> source_table not in sanitize matrix or allowlist`,
+      );
+    }
+  }
+  // Stale allowlist detection: keys that don't appear in the manifest's
+  // table+source_table+parent_table union are dangling provenance
+  // comments. The previous check happily skipped them; we now surface
+  // them so a future operator who renames a source table can't leave
+  // a misleading allowlist reason behind.
+  const staleAllowlistKeys: string[] = [];
+  for (const key of Object.keys(SANITIZE_PARITY_ALLOWLIST)) {
+    if (!manifestForParity.has(key)) {
+      staleAllowlistKeys.push(key);
+    }
+  }
+  if (projectionParityGaps.length > 0 || staleAllowlistKeys.length > 0) {
+    console.error(
+      "[check-gdpr-export-coverage] FAIL (audit-2026-05-07 red-team #9) - " +
+        "projection parity / allowlist consistency failure(s):",
+    );
+    for (const g of projectionParityGaps) console.error(`  - ${g}`);
+    for (const k of staleAllowlistKeys) {
+      console.error(
+        `  - SANITIZE_PARITY_ALLOWLIST has stale entry "${k}" — no matching ` +
+          `table/source_table/parent_table in USER_EXPORT_TABLES. Remove the ` +
+          `allowlist entry OR re-add the manifest entry it documents.`,
+      );
+    }
+    console.error(
+      "\nProjection parity: when a projected entry's bundle-facing name " +
+        "differs from its underlying source_table (e.g. audit_log_for_user " +
+        "projects audit_log), the sanitize matrix MUST cover BOTH names. A " +
+        "source-table rename without an allowlist update silently leaves " +
+        "the projection's provenance dangling.",
     );
     process.exit(1);
   }
