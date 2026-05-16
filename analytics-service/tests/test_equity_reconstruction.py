@@ -2215,10 +2215,19 @@ async def test_stale_snapshots_replaced_when_sibling_is_disconnected(monkeypatch
     # New (active) key the user just uploaded + disconnected prior key.
     fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
         "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "sync_status": "ok",
         "disconnected_at": None,
     }
+    # SPEC-PTA-8 (specialist apply 2026-05-16): mirror production-shape
+    # api_keys row so the ONLY remaining sibling-exclusion path is the
+    # ``disconnected_at`` filter. Pre-fix this fixture omitted is_active /
+    # sync_status, so the FakeTable's missing-key comparison excluded the
+    # row via the is_active filter and the test would still pass if a
+    # regression silently dropped the disconnected_at clause from
+    # _allocator_has_other_api_keys.
     fake_supabase.store[("api_keys", (API_KEY_ID_2,))] = {
         "id": API_KEY_ID_2, "user_id": ALLOCATOR_ID, "exchange": "okx",
+        "is_active": True, "sync_status": "ok",
         "disconnected_at": "2026-04-20T12:00:00+00:00",  # soft-disconnected
     }
 
@@ -3458,3 +3467,609 @@ async def test_m1029_purge_failure_bubbles_to_outer_handler(monkeypatch):
 
     actions = [c.kwargs.get("action") for c in audit_mock.call_args_list]
     assert "allocator.equity.reconstruct_failed" in actions, actions
+
+
+# ---------------------------------------------------------------------------
+# Specialist-apply 2026-05-16 regression suite (PR-Y1 + audit-2026-05-07)
+# ---------------------------------------------------------------------------
+
+# ---- PTA-5: split_holdings_symbol_to_base_quote longest-first ordering ----
+
+def test_pta5_split_holdings_longest_first_prevents_usdc_collapse():
+    """Pin the longest-first stablecoin ordering. Without it ``BTCUSDC``
+    would split as ``('BTC','USD')`` with a 'C' orphan because USD is a
+    valid suffix prefix of USDC. The existing h1157 test only proves
+    USDC is recognised, NOT that it is preferred over USD."""
+    from services.equity_reconstruction import (
+        split_holdings_symbol_to_base_quote,
+        _STABLECOINS_LONGEST_FIRST,
+    )
+
+    # Order invariant: USDC must precede USD so endswith() picks the
+    # longer suffix first.
+    idx_usdc = _STABLECOINS_LONGEST_FIRST.index("USDC")
+    idx_usd = _STABLECOINS_LONGEST_FIRST.index("USD")
+    assert idx_usdc < idx_usd, _STABLECOINS_LONGEST_FIRST
+
+    assert split_holdings_symbol_to_base_quote("BTCUSDC") == ("BTC", "USDC")
+    assert split_holdings_symbol_to_base_quote("ETHUSDT") == ("ETH", "USDT")
+    assert split_holdings_symbol_to_base_quote("") == ("", "USDT")
+    assert split_holdings_symbol_to_base_quote("UNKNOWNTOKEN") == (
+        "UNKNOWNTOKEN", "USDT",
+    )
+
+
+# ---- PTA-6: _result_row_count bool/False guard ---------------------------
+
+def test_pta6_result_row_count_excludes_bool_masquerading_as_int():
+    """Stage-D red-team `isinstance(count, bool)` exclusion must remain.
+    Pre-guard a `count=False` from an older supabase-py / mock would be
+    accepted as int 0 (bool subclasses int in Python) and collapse a
+    non-empty result to zero."""
+    from services.equity_reconstruction import _result_row_count
+
+    class R:  # count=False; data has 2 rows. Must fall through to len(data).
+        count = False
+        data = [{"a": 1}, {"b": 2}]
+
+    class R2:  # count=True (also bool); must fall through to len(data).
+        count = True
+        data = [{"a": 1}]
+
+    class R3:  # count is an int; pass through unchanged.
+        count = 5
+        data: list = []
+
+    class R4:  # no count attr; len(data) wins.
+        data = [{"x": 1}, {"y": 2}, {"z": 3}]
+
+    assert _result_row_count(R()) == 2
+    assert _result_row_count(R2()) == 1
+    assert _result_row_count(R3()) == 5
+    assert _result_row_count(R4()) == 3
+
+
+# ---- PTA-11: _is_inverse_perp dated-FUTURES suffix tolerance --------------
+
+def test_pta11_is_inverse_perp_tolerates_dated_futures_suffix():
+    """`_is_inverse_perp` strips `-YYMMDD` before settle vs base
+    comparison so dated inverse futures (`BTC/USD:BTC-251226`) are
+    still detected. A regression that drops the .split('-')[0] would
+    silently misclassify dated inverse FUTURES as linear and let
+    cost-in-BASE values poison position state."""
+    from services.equity_reconstruction import _is_inverse_perp
+
+    assert _is_inverse_perp("BTC/USD:BTC-251226") is True
+    assert _is_inverse_perp("ETH/USD:ETH-260327") is True
+    # Linear-future dated symbols still linear.
+    assert _is_inverse_perp("BTC/USDT:USDT-251226") is False
+    assert _is_inverse_perp("ETH/USDT:USDT-260327") is False
+
+
+# ---- PTA-10: OKX FUTURES dated-suffix fallback path ----------------------
+
+def test_pta10_okx_futures_dated_suffix_strip_fallback():
+    """The dated-FUTURES suffix-strip fallback must keep working when
+    the dated symbol itself is NOT pre-populated in the table — the
+    base symbol entry covers it. Pin against the BTC/ETH-only fixture
+    in OKX_FUTURES_CONTRACT_SIZE."""
+    from services.equity_reconstruction import (
+        _resolve_perp_amt_base,
+        _PerpAmtSource,
+        OKX_FUTURES_CONTRACT_SIZE,
+    )
+
+    # The dated symbol is NOT in the table; the base IS. Suffix-strip
+    # must fall through to the base entry.
+    assert "ETH/USDT:USDT-260327" not in OKX_FUTURES_CONTRACT_SIZE
+    assert "ETH/USDT:USDT" in OKX_FUTURES_CONTRACT_SIZE
+
+    broken_cost = 100.0 * 2_000.0  # contractSize NOT applied
+    recovered, source, _drift = _resolve_perp_amt_base(
+        "ETH/USDT:USDT-260327",
+        amount=100.0, price=2_000.0, cost=broken_cost,
+        inst_type="FUTURES", venue="okx",
+    )
+    expected = 100.0 * OKX_FUTURES_CONTRACT_SIZE["ETH/USDT:USDT"]
+    assert recovered == pytest.approx(expected, abs=0.0001), recovered
+    assert source == _PerpAmtSource.CTVAL_TABLE, source
+
+
+# ---- PTA-13: FALLBACK_AMOUNT branch (price<=0) ---------------------------
+
+def test_pta13_resolve_perp_amt_base_zero_or_negative_price_falls_back():
+    """price<=0 returns (amount, FALLBACK_AMOUNT, None). The caller
+    pre-filters this path, but the contract is public and tests
+    pin it so a downstream consumer can rely on the shape."""
+    from services.equity_reconstruction import (
+        _resolve_perp_amt_base,
+        _PerpAmtSource,
+    )
+
+    recovered, source, drift = _resolve_perp_amt_base(
+        "ETH/USDT:USDT",
+        amount=10.0, price=0.0, cost=20000.0,
+        inst_type="SWAP", venue="okx",
+    )
+    assert recovered == 10.0
+    assert source == _PerpAmtSource.FALLBACK_AMOUNT, source
+    assert drift is None
+
+    recovered2, source2, _ = _resolve_perp_amt_base(
+        "ETH/USDT:USDT",
+        amount=10.0, price=-5.0, cost=0.0,
+        inst_type="SWAP", venue="okx",
+    )
+    assert source2 == _PerpAmtSource.FALLBACK_AMOUNT, source2
+
+
+# ---- PTA-14: amt_explicit<=0 safety fallback ------------------------------
+
+def test_pta14_resolve_perp_amt_base_zero_explicit_falls_back_to_cost():
+    """Guard against negative-or-zero amount*ctval propagating into
+    perp replay state. A flipped comparator would silently invert
+    positions."""
+    from services.equity_reconstruction import (
+        _resolve_perp_amt_base,
+        _PerpAmtSource,
+    )
+
+    # amount=0 → amt_explicit = 0*ctval = 0 → must fall back to cost/price.
+    recovered, source, _drift = _resolve_perp_amt_base(
+        "ETH/USDT:USDT",
+        amount=0.0, price=2_000.0, cost=200.0,
+        inst_type="SWAP", venue="okx",
+    )
+    assert source == _PerpAmtSource.COST_DIV_PRICE, source
+    assert recovered == pytest.approx(200.0 / 2_000.0, abs=1e-9)
+
+
+# ---- PTA-1 / SPEC-CR-1: reconstruct_unexpected_noop only on sole-key -----
+
+@pytest.mark.asyncio
+async def test_pta1_unexpected_noop_audit_fires_when_rows_collide_sole_key(
+    monkeypatch,
+):
+    """Sole-key path with rows in hand but persist count==0 (e.g. every
+    snapshot collides against a leftover row) must stamp
+    ``reconstruct_unexpected_noop`` — exactly the silent-regression
+    pattern H-1168 was meant to expose."""
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=4)
+
+    # Sole-key allocator (no siblings).
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "sync_status": "ok", "disconnected_at": None,
+    }
+
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50_000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + d * day_ms, 50_000.0) for d in range(5)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    # Force persist_equity_snapshots to report count=0 with non-empty rows
+    # → simulates ON CONFLICT DO NOTHING collisions on a sole-key reconstruct.
+    async def _fake_persist(supabase, rows, allocator_id, depth_months):
+        return 0
+
+    monkeypatch.setattr(er, "persist_equity_snapshots", _fake_persist)
+
+    job = {
+        "id": "pta1-noop",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    actions = [c.kwargs.get("action") for c in audit_mock.call_args_list]
+    assert "allocator.equity.reconstruct_unexpected_noop" in actions, actions
+    assert "allocator.equity.reconstruct_complete" not in actions
+    assert "allocator.equity.reconstruct_no_data" not in actions
+
+
+# ---- SPEC-CR-1: multi-key adds DO NOT stamp unexpected_noop --------------
+
+@pytest.mark.asyncio
+async def test_pta1_multikey_count_zero_with_rows_is_NOT_unexpected_noop(
+    monkeypatch,
+):
+    """A multi-key allocator legitimately collides on ON CONFLICT DO
+    NOTHING against a sibling's snapshots. The new audit kind must NOT
+    fire there — that's the T-07-V5b aggregation invariant, not a
+    silent regression."""
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=4)
+
+    # Two ACTIVE sibling keys → has_siblings=True.
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "sync_status": "ok", "disconnected_at": None,
+    }
+    fake_supabase.store[("api_keys", (API_KEY_ID_2,))] = {
+        "id": API_KEY_ID_2, "user_id": ALLOCATOR_ID, "exchange": "okx",
+        "is_active": True, "sync_status": "ok", "disconnected_at": None,
+    }
+
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50_000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + d * day_ms, 50_000.0) for d in range(5)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    async def _fake_persist(supabase, rows, allocator_id, depth_months):
+        return 0  # DO NOTHING collided across the board
+
+    monkeypatch.setattr(er, "persist_equity_snapshots", _fake_persist)
+
+    job = {
+        "id": "pta1-multikey-noop",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    actions = [c.kwargs.get("action") for c in audit_mock.call_args_list]
+    # Multi-key DO-NOTHING is the expected aggregation invariant — must
+    # land as ``reconstruct_complete``, NOT unexpected_noop.
+    assert "allocator.equity.reconstruct_complete" in actions, actions
+    assert "allocator.equity.reconstruct_unexpected_noop" not in actions, actions
+
+
+# ---- PTA-2: sibling_lookup_failed audit at caller site -------------------
+
+@pytest.mark.asyncio
+async def test_pta2_sibling_lookup_failure_emits_caller_audit_and_skips_purge(
+    monkeypatch,
+):
+    """When _allocator_has_other_api_keys returns lookup_failed=True, the
+    caller emits ``sibling_lookup_failed`` audit AND skips purge.
+    Pre-test: only the helper-level lookup_failed flag was pinned."""
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=4)
+
+    # Seed stale rows that MUST survive (purge gets skipped).
+    for d in range(5):
+        asof = (start_date + timedelta(days=d)).date().isoformat()
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID, "asof": asof,
+            "value_usd": -999_999.0,
+            "breakdown": {"STALE": -999_999.0},
+            "source": "exchange_primary",
+        }
+
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "sync_status": "ok", "disconnected_at": None,
+    }
+
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50_000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + d * day_ms, 50_000.0) for d in range(5)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    async def _fake_sibling(*_a, **_k):
+        return er.SiblingCheckResult(
+            has_siblings=True,
+            lookup_failed=True,
+            error_message="db boom",
+        )
+
+    monkeypatch.setattr(er, "_allocator_has_other_api_keys", _fake_sibling)
+
+    job = {
+        "id": "pta2-sibling-fail",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    actions = [c.kwargs.get("action") for c in audit_mock.call_args_list]
+    assert "allocator.equity.sibling_lookup_failed" in actions, actions
+
+    # The fail-safe pretends siblings exist, so purge MUST be skipped:
+    # stale sentinel rows survive.
+    stored = fake_supabase.rows_for("allocator_equity_snapshots")
+    stale_survivors = [r for r in stored if r.get("value_usd") == -999_999.0]
+    assert stale_survivors, (
+        "sibling_lookup_failed must trigger fail_safe_skip_purge — stale "
+        "rows must survive when the lookup errored."
+    )
+
+    # Main audit metadata records sibling_check_failed=True.
+    main_audit_calls = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action", "").startswith("allocator.equity.reconstruct_")
+        and c.kwargs.get("action") != "allocator.equity.sibling_lookup_failed"
+    ]
+    assert main_audit_calls, audit_mock.call_args_list
+    main_meta = main_audit_calls[-1].kwargs.get("metadata") or {}
+    assert main_meta.get("sibling_check_failed") is True, main_meta
+
+
+# ---- PTA-7: refresh non-numeric upnl branch ------------------------------
+
+@pytest.mark.asyncio
+async def test_pta7_refresh_skips_non_numeric_upnl(monkeypatch):
+    """A non-numeric ``unrealized_pnl_usd`` (string, list, NaN-str) must
+    be skipped and logged — NOT swallowed by a broad except that would
+    re-introduce the silent-drop anti-pattern."""
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    today = date(2026, 4, 15)
+    today_iso = today.isoformat()
+
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "okx",
+        "is_active": True, "sync_status": "ok", "disconnected_at": None,
+    }
+
+    # Seed holdings rows: spot USDT + a derivative with garbage upnl.
+    fake_supabase.store[
+        ("allocator_holdings", (ALLOCATOR_ID, today_iso, "USDT"))
+    ] = {
+        "allocator_id": ALLOCATOR_ID, "asof": today_iso, "symbol": "USDT",
+        "holding_type": "spot", "value_usd": 100.0,
+    }
+    fake_supabase.store[
+        ("allocator_holdings", (ALLOCATOR_ID, today_iso, "BTCUSDT"))
+    ] = {
+        "allocator_id": ALLOCATOR_ID, "asof": today_iso, "symbol": "BTCUSDT",
+        "holding_type": "derivative", "value_usd": 1000.0,
+        "unrealized_pnl_usd": "not_a_number",
+    }
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.close = AsyncMock()
+    _install_fake_preflight(monkeypatch, "okx", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    job = {
+        "id": "pta7-refresh",
+        "kind": "refresh_allocator_equity_daily",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_refresh_allocator_equity_daily_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    actions = [c.kwargs.get("action") for c in audit_mock.call_args_list]
+    # Refresh must complete (loop didn't crash).
+    assert "allocator.equity.refresh_complete" in actions, actions
+    # Garbage-upnl row was SKIPPED → no breakdown entry for BTC:USDT:PERP,
+    # but spot USDT entry should still be present.
+    rows = fake_supabase.rows_for("allocator_equity_snapshots")
+    assert rows, "Refresh failed to upsert any snapshot"
+    breakdown = rows[-1].get("breakdown", {})
+    assert "BTC:USDT:PERP" not in breakdown, breakdown
+    assert "USDT" in breakdown, breakdown
+
+
+# ---- PTA-9: telemetry keys surface into reconstruct audit metadata -------
+
+@pytest.mark.asyncio
+async def test_pta9_telemetry_surfaces_into_reconstruct_complete_audit(
+    monkeypatch,
+):
+    """End-to-end audit-payload integrity: the reconstruct audit metadata
+    must carry the C-0326/9/30 telemetry keys (typo / accidental key
+    rename / drop is otherwise invisible)."""
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=4)
+
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "sync_status": "ok", "disconnected_at": None,
+    }
+
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50_000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + d * day_ms, 50_000.0) for d in range(5)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    job = {
+        "id": "pta9-telemetry",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    # Find the main reconstruct audit emission.
+    main_calls = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action", "").startswith("allocator.equity.reconstruct_")
+        and "failed" not in c.kwargs.get("action", "")
+    ]
+    assert main_calls, audit_mock.call_args_list
+    meta = main_calls[-1].kwargs.get("metadata") or {}
+
+    # All five telemetry surfaces must be present (even if empty list).
+    for key in (
+        "skipped_symbols",
+        "unknown_perp_symbols",
+        "inverse_perp_symbols",
+        "ctval_drift_warnings",
+        "sibling_check_failed",
+    ):
+        assert key in meta, f"missing telemetry key {key}: {meta}"
+    assert meta["sibling_check_failed"] is False, meta
+
+
+# ---- SPEC-SFH-4: refresh perp_upnl_missing aggregation -------------------
+
+@pytest.mark.asyncio
+async def test_spec_sfh4_refresh_perp_upnl_missing_is_aggregated(monkeypatch):
+    """Pre-fix: every derivative row with NULL upnl emitted its own audit
+    event each daily refresh (unbounded inflation of audit_events).
+    Post-fix: ONE event per handler run carrying a symbols list."""
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    today = date(2026, 4, 15)
+    today_iso = today.isoformat()
+
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "okx",
+        "is_active": True, "sync_status": "ok", "disconnected_at": None,
+    }
+
+    # Three derivative rows all with NULL upnl.
+    for sym in ("BTCUSDT", "ETHUSDT", "SOLUSDT"):
+        fake_supabase.store[
+            ("allocator_holdings", (ALLOCATOR_ID, today_iso, sym))
+        ] = {
+            "allocator_id": ALLOCATOR_ID, "asof": today_iso, "symbol": sym,
+            "holding_type": "derivative", "value_usd": 1000.0,
+            "unrealized_pnl_usd": None,
+        }
+    fake_supabase.store[
+        ("allocator_holdings", (ALLOCATOR_ID, today_iso, "USDT"))
+    ] = {
+        "allocator_id": ALLOCATOR_ID, "asof": today_iso, "symbol": "USDT",
+        "holding_type": "spot", "value_usd": 50.0,
+    }
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.close = AsyncMock()
+    _install_fake_preflight(monkeypatch, "okx", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    job = {
+        "id": "sfh4-batch",
+        "kind": "refresh_allocator_equity_daily",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_refresh_allocator_equity_daily_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    upnl_missing_calls = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.perp_upnl_missing"
+    ]
+    # Exactly ONE event for the whole handler run (was previously N).
+    assert len(upnl_missing_calls) == 1, upnl_missing_calls
+    meta = upnl_missing_calls[0].kwargs.get("metadata") or {}
+    assert "symbols" in meta and "missing_count" in meta, meta
+    assert sorted(meta["symbols"]) == ["BTCUSDT", "ETHUSDT", "SOLUSDT"], meta
+    assert meta["missing_count"] == 3, meta
