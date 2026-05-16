@@ -1,6 +1,7 @@
 import asyncio
 import enum
 import logging
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -9,6 +10,36 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+
+from models.schemas import (
+    BridgeRequest,
+    PortfolioAnalyticsRequest,
+    PortfolioAnalyticsResponse,
+    PortfolioBridgeResponse,
+    PortfolioOptimizerRequest,
+    PortfolioOptimizerResponse,
+    VerifyStrategyRequest,
+    VerifyStrategyResponse,
+)
+from services.audit import log_audit_event
+from services.benchmark import get_benchmark_returns
+from services.db import get_supabase
+from services.encryption import decrypt_credentials, encrypt_credentials, get_kek
+from services.exchange import create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions
+from services.metrics import _safe_float, sanitize_metrics
+from services.portfolio_metrics import compute_twr, compute_mwr, compute_period_returns
+from services.portfolio_optimizer import find_improvement_candidates, generate_narrative
+from services.portfolio_risk import (
+    compute_attribution,
+    compute_avg_pairwise_correlation,
+    compute_correlation_matrix,
+    compute_risk_decomposition,
+    compute_rolling_correlation,
+)
+from services.transforms import trades_to_daily_returns
+
+router = APIRouter(prefix="/api", tags=["portfolio"])
+logger = logging.getLogger("quantalyze.analytics")
 
 
 # Audit M-0620 — canonical enums for the literal strings the DB CHECK
@@ -62,36 +93,6 @@ def _to_utc_iso(value: datetime | pd.Timestamp) -> str:
         return value.isoformat()
     raise TypeError(f"_to_utc_iso: unsupported value type {type(value).__name__}")
 
-from models.schemas import (
-    BridgeRequest,
-    PortfolioAnalyticsRequest,
-    PortfolioAnalyticsResponse,
-    PortfolioBridgeResponse,
-    PortfolioOptimizerRequest,
-    PortfolioOptimizerResponse,
-    VerifyStrategyRequest,
-    VerifyStrategyResponse,
-)
-from services.audit import log_audit_event
-from services.benchmark import get_benchmark_returns
-from services.db import get_supabase
-from services.encryption import decrypt_credentials, encrypt_credentials, get_kek
-from services.exchange import create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions
-from services.metrics import _safe_float, sanitize_metrics
-from services.portfolio_metrics import compute_twr, compute_mwr, compute_period_returns
-from services.portfolio_optimizer import find_improvement_candidates, generate_narrative
-from services.portfolio_risk import (
-    compute_attribution,
-    compute_avg_pairwise_correlation,
-    compute_correlation_matrix,
-    compute_risk_decomposition,
-    compute_rolling_correlation,
-)
-from services.transforms import trades_to_daily_returns
-
-router = APIRouter(prefix="/api", tags=["portfolio"])
-logger = logging.getLogger("quantalyze.analytics")
-
 # Alert / matching thresholds. Named so config review and future tuning
 # don't have to chase bare literals scattered through the file.
 _DRAWDOWN_ALERT_THRESHOLD = -0.10        # drawdown ratio that triggers a medium alert
@@ -133,7 +134,6 @@ def _check_verify_strategy_email_rate(email: str) -> bool:
     """
     if not email:
         return True
-    import time
     now = time.monotonic()
     cutoff = now - _VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC
     bucket = _verify_strategy_email_attempts.get(email, [])
@@ -161,7 +161,6 @@ def _verify_strategy_idempotency_key(email: str, exchange: str, ik: str) -> str:
 
 
 def _verify_strategy_idempotency_lookup(email: str, exchange: str, ik: str) -> dict | None:
-    import time
     key = _verify_strategy_idempotency_key(email, exchange, ik)
     entry = _verify_strategy_idempotency.get(key)
     if not entry:
@@ -174,7 +173,6 @@ def _verify_strategy_idempotency_lookup(email: str, exchange: str, ik: str) -> d
 
 
 def _verify_strategy_idempotency_store(email: str, exchange: str, ik: str, response: dict) -> None:
-    import time
     key = _verify_strategy_idempotency_key(email, exchange, ik)
     _verify_strategy_idempotency[key] = (time.monotonic(), dict(response))
 
@@ -419,7 +417,6 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         dropped_weight_total = sum(
             w for sid, w in weights.items() if sid not in strategy_returns
         )
-        dropped_for_renormalize = [sid for sid in weights if sid not in strategy_returns]
         available_sids = set(strategy_returns.keys())
         weights = {sid: w for sid, w in weights.items() if sid in available_sids}
         total_available_w = sum(weights.values()) or 1.0
@@ -569,7 +566,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         # Portfolio-level sharpe and volatility. Track WHY the metric is None
         # so the dashboard can show the right empty-state instead of conflating
         # "insufficient history" with "flat vol" with "broken compute".
-        vol, mean_ret, sharpe, sharpe_status = _compute_sharpe_and_vol(portfolio_returns_series)
+        vol, _mean_ret, sharpe, sharpe_status = _compute_sharpe_and_vol(portfolio_returns_series)
         vol_status = "insufficient_history" if sharpe_status == "insufficient_history" else "ok"
 
         running_max = cumulative.cummax()
@@ -634,10 +631,12 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         # Partial-data telemetry. Tracks WHY a dashboard might look smaller
         # than expected so operators can tell "renormalized to subset" apart
         # from "all strategies reported in full".
+        # `dropped_for_renormalize` was previously computed here as
+        # (missing_analytics_sids ∪ missing_returns_sids); the two lists
+        # already cover every drop reason so the union is redundant.
         partial_data = bool(
             missing_analytics_sids or missing_returns_sids or missing_equity_sids
-            or dropped_for_renormalize or benchmark_error
-            or not cov_history_sufficient
+            or benchmark_error or not cov_history_sufficient
         )
         data_quality = {
             "partial_data": partial_data,
@@ -743,18 +742,23 @@ def _generate_alerts(
     alerts = []
 
     if max_drawdown is not None and max_drawdown < _DRAWDOWN_ALERT_THRESHOLD:
+        severity = (
+            AlertSeverity.HIGH.value
+            if max_drawdown < _DRAWDOWN_HIGH_SEVERITY_THRESHOLD
+            else AlertSeverity.MEDIUM.value
+        )
         alerts.append({
             "portfolio_id": portfolio_id,
-            "alert_type": "drawdown",
-            "severity": "high" if max_drawdown < _DRAWDOWN_HIGH_SEVERITY_THRESHOLD else "medium",
+            "alert_type": AlertType.DRAWDOWN.value,
+            "severity": severity,
             "message": f"Portfolio drawdown has reached {max_drawdown * 100:.1f}%.",
         })
 
     if avg_pairwise_corr is not None and avg_pairwise_corr > _CORRELATION_SPIKE_THRESHOLD:
         alerts.append({
             "portfolio_id": portfolio_id,
-            "alert_type": "correlation_spike",
-            "severity": "medium",
+            "alert_type": AlertType.CORRELATION_SPIKE.value,
+            "severity": AlertSeverity.MEDIUM.value,
             "message": (
                 f"Average pairwise correlation is {avg_pairwise_corr:.2f}. "
                 "Portfolio diversification may be insufficient."
@@ -793,8 +797,8 @@ def _generate_alerts(
             direction = "tightened" if best_recent > best_prior else "loosened"
             alerts.append({
                 "portfolio_id": portfolio_id,
-                "alert_type": "regime_shift",
-                "severity": "medium",
+                "alert_type": AlertType.REGIME_SHIFT.value,
+                "severity": AlertSeverity.MEDIUM.value,
                 "message": (
                     f"Correlation regime shift detected: pairwise correlation "
                     f"{direction} from {best_prior:.2f} to {best_recent:.2f} (delta {best_delta:.2f})."
@@ -819,8 +823,8 @@ def _generate_alerts(
             ) >= _UNDERPERFORMANCE_GAP_THRESHOLD:
                 alerts.append({
                     "portfolio_id": portfolio_id,
-                    "alert_type": "underperformance",
-                    "severity": "medium",
+                    "alert_type": AlertType.UNDERPERFORMANCE.value,
+                    "severity": AlertSeverity.MEDIUM.value,
                     "message": (
                         f"{worst.get('strategy_name', 'Unknown')} is trailing the portfolio "
                         f"baseline by {abs(trail_distance) * 100:.2f}% over the trailing window."
@@ -836,8 +840,8 @@ def _generate_alerts(
         if top.get("weight_pct", 0) >= equal_weight * _CONCENTRATION_MULTIPLIER:
             alerts.append({
                 "portfolio_id": portfolio_id,
-                "alert_type": "concentration_creep",
-                "severity": "low",
+                "alert_type": AlertType.CONCENTRATION_CREEP.value,
+                "severity": AlertSeverity.LOW.value,
                 "message": (
                     f"{top.get('strategy_name', 'Unknown')} is {top['weight_pct']:.0f}% "
                     f"of the portfolio (equal-weight baseline is {equal_weight:.0f}%)."
@@ -1004,7 +1008,11 @@ def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
         if existing.data:
             return
 
-        severity = "high" if worst["drift"] > _REBALANCE_DRIFT_HIGH_THRESHOLD else "medium"
+        severity = (
+            AlertSeverity.HIGH.value
+            if worst["drift"] > _REBALANCE_DRIFT_HIGH_THRESHOLD
+            else AlertSeverity.MEDIUM.value
+        )
         strategy_name = name_by_id.get(worst["strategy_id"], worst["strategy_id"])
         message = (
             f"{strategy_name}'s weight is {worst['actual'] * 100:.0f}% "
@@ -1450,12 +1458,9 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
     # process memory; cross-worker dedup would need a Redis surface but
     # the same-process case is the common one and gives us most of the
     # protection.
-    idempotency_key = ""
-    try:
-        idempotency_key = (request.headers.get("Idempotency-Key") or "").strip()
-    except Exception:
-        # request.headers may not be present in unit test contexts.
-        pass
+    # Starlette Request.headers is always a Headers mapping (never raises on
+    # .get()); no defensive try/except needed. Empty / missing header → skip.
+    idempotency_key = (request.headers.get("Idempotency-Key") or "").strip()
     if idempotency_key:
         cached = _verify_strategy_idempotency_lookup(req.email, req.exchange, idempotency_key)
         if cached is not None:
@@ -1540,7 +1545,7 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
 
         # Annualized sharpe + vol — extracted into helper so the three router
         # callsites + services/portfolio_optimizer don't drift apart.
-        vol, mean_ret, sharpe, _sharpe_status = _compute_sharpe_and_vol(returns)
+        _vol, _mean_ret, sharpe, _sharpe_status = _compute_sharpe_and_vol(returns)
 
         matched_strategy_id: str | None = None
         # Distinguish three outcomes the previous code collapsed:
