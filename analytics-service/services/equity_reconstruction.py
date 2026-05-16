@@ -647,8 +647,12 @@ async def _fetch_coingecko_daily_closes(
     # workers honour SIGTERM mid-throttle.
     try:
         await asyncio.sleep(COINGECKO_MIN_SLEEP_SECS)
-    except (TypeError, ValueError):  # pragma: no cover
-        pass
+    except (TypeError, ValueError) as exc:  # pragma: no cover
+        # SPEC-SFH-2 (specialist apply 2026-05-16): match the
+        # symmetric handler in ``_rate_limit_sleep`` — both narrowed
+        # swallows should log so a future reader can grep the same
+        # signal, rather than one path silently dropping.
+        logger.warning("coingecko throttle sleep skipped: %s", exc)
 
     prices = data.get("prices") or []
     out: list[tuple[str, float]] = []
@@ -1761,6 +1765,15 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
     # DO-NOTHING against leftover stale rows). The docstring on
     # ``_purge_allocator_equity_snapshots`` already promises bubble
     # semantics; this is the catch site that closes the contract.
+    # SPEC-SFH-3 (specialist apply 2026-05-16): pre-initialise to a
+    # fail-safe shape so the audit-metadata builder ~70 lines down
+    # cannot NameError if a future refactor reorders the emit path
+    # outside the try-cover. SiblingCheckResult(True, False, None)
+    # mirrors the "skip purge, no error" default — closer to the
+    # actual fail-safe semantics than (False, ...) would be.
+    sibling_check = SiblingCheckResult(
+        has_siblings=True, lookup_failed=False, error_message=None,
+    )
     try:
         purged = 0
         sibling_check = await _allocator_has_other_api_keys(
@@ -1815,10 +1828,37 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
     # silent regression. ``days_written == 0`` with rows in hand is
     # the exact pattern PR #68's audit-log story said it would expose;
     # tag the event so support can spot it.
-    if count == 0 and rows:
+    #
+    # SPEC-CR-1 (specialist apply 2026-05-16): only stamp
+    # ``reconstruct_unexpected_noop`` on the sole-key path where the
+    # purge fires and ``count == 0`` truly means the upsert produced
+    # nothing. On the multi-key path (siblings present), the purge is
+    # skipped and ON CONFLICT DO NOTHING legitimately drops rows that
+    # collide with a sibling's snapshot — that's the documented
+    # T-07-V5b aggregation invariant, not a silent regression. Keep
+    # the alarm narrow so multi-key onboarding doesn't trigger
+    # false-positive support pages.
+    # SPEC-SFH-1 (specialist apply 2026-05-16): when inverse-perp
+    # activity was the ONLY signal we saw (telemetry recorded
+    # inverse_perp_symbols AND every persisted row totalled $0), the
+    # account is rendering a flat-line $0 curve — exactly the V-shape
+    # silent-failure pattern the v0.15.3.x audit chain was retiring.
+    # Stamp a distinct ``reconstruct_partial_unsupported`` kind so
+    # the dashboard can render an "unsupported account shape" state
+    # rather than implying empty equity.
+    inverse_only_zero_curve = (
+        bool(telemetry["inverse_perp_symbols"])
+        and bool(rows)
+        and all(
+            float((r.get("value_usd") or 0.0)) == 0.0 for r in rows
+        )
+    )
+    if count == 0 and rows and not sibling_check.has_siblings:
         audit_kind = "allocator.equity.reconstruct_unexpected_noop"
     elif count == 0 and not rows:
         audit_kind = "allocator.equity.reconstruct_no_data"
+    elif inverse_only_zero_curve:
+        audit_kind = "allocator.equity.reconstruct_partial_unsupported"
     else:
         audit_kind = "allocator.equity.reconstruct_complete"
 
@@ -1888,6 +1928,13 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
         # it can't collide with a spot symbol of the same base currency.
         total = 0.0
         breakdown: dict[str, float] = {}
+        # SPEC-SFH-4 (specialist apply 2026-05-16): aggregate
+        # missing-upnl symbols across the loop and emit ONE audit
+        # event at the end (mirroring the telemetry pattern used by
+        # the reconstruct path's skipped_symbols list). Pre-fix the
+        # per-symbol emit would flood audit_events on every daily
+        # refresh for any allocator with a stuck poller.
+        perp_upnl_missing_symbols: list[str] = []
         for h in holdings:
             sym = (h.get("symbol") or "").upper()
             if not sym:
@@ -1912,11 +1959,8 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
                         "venue=%s — skipping",
                         allocator_id, sym, venue,
                     )
-                    _emit_audit(
-                        allocator_id, api_key_id,
-                        "allocator.equity.perp_upnl_missing",
-                        {"symbol": sym, "venue": venue},
-                    )
+                    if sym not in perp_upnl_missing_symbols:
+                        perp_upnl_missing_symbols.append(sym)
                     continue
                 try:
                     upnl = float(upnl_raw)
@@ -1939,6 +1983,19 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
                 v = float(h.get("value_usd") or 0.0)
                 breakdown[sym] = round(breakdown.get(sym, 0.0) + v, 2)
                 total += v
+
+        # SPEC-SFH-4: emit ONE aggregated perp_upnl_missing event at
+        # the end of the loop (cap at 50 symbols to bound metadata).
+        if perp_upnl_missing_symbols:
+            _emit_audit(
+                allocator_id, api_key_id,
+                "allocator.equity.perp_upnl_missing",
+                {
+                    "symbols": perp_upnl_missing_symbols[:50],
+                    "missing_count": len(perp_upnl_missing_symbols),
+                    "venue": venue,
+                },
+            )
 
         if not breakdown:
             logger.info(
