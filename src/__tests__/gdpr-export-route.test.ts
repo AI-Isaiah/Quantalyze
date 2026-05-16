@@ -84,6 +84,18 @@ vi.mock("@/lib/gdpr-export", () => ({
   // the upload mock observes a Uint8Array as expected.
   encodeExportBundle: (bundle: unknown) =>
     new TextEncoder().encode(JSON.stringify(bundle)),
+  // Audit 2026-05-07 red-team #7: the route wires `rowsForTable(bundle,
+  // "profiles")` into the production download path so the null-on-
+  // missing schema-drift contract becomes load-bearing. The route-
+  // level mock returns the seeded bundle's profiles rows; tests that
+  // want to exercise the manifest-drift path override per-test.
+  rowsForTable: (
+    bundle: { tables?: Array<{ table: string; rows: unknown[] }> },
+    table: string,
+  ): unknown[] | null => {
+    const entry = bundle.tables?.find((t) => t.table === table);
+    return entry ? entry.rows : null;
+  },
 }));
 
 import { NextRequest } from "next/server";
@@ -164,8 +176,21 @@ describe("POST /api/account/export — orphan cleanup on sign failure (I2)", () 
       schema_version: 1,
       user_id: "user-123",
       generated_at: "2026-04-16T00:00:00Z",
-      total_row_count: 0,
-      tables: [],
+      total_row_count: 1,
+      // Audit 2026-05-07 red-team #7: the route now wires
+      // `rowsForTable(bundle, "profiles")` as a load-bearing manifest-
+      // drift detector. Include a profiles entry in the bundle so the
+      // happy-ish path reaches the sign-failure cleanup branch.
+      tables: [
+        {
+          table: "profiles",
+          rows: [{ id: "user-123" }],
+          row_count: 1,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
       truncated_at_size_cap: false,
       parent_id_truncated_tables: [],
       partial: false,
@@ -442,7 +467,15 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
 
     // The refusal IS audited: forensic reconstruction must survive
     // response-body discard. account.export_refused is emitted with
-    // the truncation map in metadata.
+    // the truncation booleans + counts in metadata.
+    //
+    // Audit 2026-05-07 red-team #1 (HIGH conf-9): the audit metadata
+    // MUST NOT include verbatim table-name lists — those are schema
+    // reconnaissance that a subject can read out of their next
+    // successful export via audit_log_for_user. Aggregate counts
+    // give regulators the "did the controller know" signal without
+    // bundling the schema map. The full table-name lists remain on
+    // the server-side console.error.
     await Promise.resolve();
     await Promise.resolve();
     const refusedCall = logAuditRpcMock.mock.calls.find(
@@ -453,8 +486,14 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     const md = (refusedCall![1] as Record<string, unknown>)
       .p_metadata as Record<string, unknown>;
     expect(md.truncated_at_size_cap).toBe(true);
-    expect(md.row_capped_tables).toEqual(["trades"]);
-    expect(md.parent_id_truncated_tables).toEqual(["strategy_analytics"]);
+    expect(md.row_capped_table_count).toBe(1);
+    expect(md.parent_id_truncated_table_count).toBe(1);
+    expect(md.failed_table_count).toBe(0);
+    // Schema-reconnaissance fields MUST NOT appear on the audit row.
+    expect(md.row_capped_tables).toBeUndefined();
+    expect(md.parent_id_truncated_tables).toBeUndefined();
+    expect(md.failed_tables).toBeUndefined();
+    expect(md.incomplete_reasons).toBeUndefined();
 
     consoleErrorSpy.mockRestore();
   });
@@ -500,8 +539,22 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       schema_version: 1,
       user_id: "user-429",
       generated_at: "2026-04-16T00:00:00Z",
-      total_row_count: 0,
-      tables: [],
+      total_row_count: 1,
+      // Audit 2026-05-07 red-team #7: `rowsForTable(bundle, "profiles")`
+      // is wired into the production download path; include a profiles
+      // entry so the happy-ish 200 branch can proceed past the manifest-
+      // drift gate. Tests for the 429 / partial / truncated paths exit
+      // before reaching this gate.
+      tables: [
+        {
+          table: "profiles",
+          rows: [{ id: "user-429" }],
+          row_count: 1,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
       truncated_at_size_cap: false,
       parent_id_truncated_tables: [],
       partial: false,
@@ -674,8 +727,17 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       schema_version: 1,
       user_id: "user-B",
       generated_at: "2026-04-16T00:00:00Z",
-      total_row_count: 0,
-      tables: [],
+      total_row_count: 1,
+      tables: [
+        {
+          table: "profiles",
+          rows: [{ id: "user-B" }],
+          row_count: 1,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
       truncated_at_size_cap: false,
       parent_id_truncated_tables: [],
       partial: false,

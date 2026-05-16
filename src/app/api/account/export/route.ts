@@ -4,7 +4,11 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { exportLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
-import { collectUserExportBundle, encodeExportBundle } from "@/lib/gdpr-export";
+import {
+  collectUserExportBundle,
+  encodeExportBundle,
+  rowsForTable,
+} from "@/lib/gdpr-export";
 
 /**
  * POST /api/account/export
@@ -52,7 +56,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // 1/day/user bucket. The Upstash sliding window covers a rolling 24h
   // so a user who exported yesterday at 09:00 cannot export today until
   // 09:00 — matching the regulatory cadence the task spec commits to.
-  const rl = await checkLimit(exportLimiter, `export:${user.id}`);
+  const rateLimitKey = `export:${user.id}`;
+  const rl = await checkLimit(exportLimiter, rateLimitKey);
   if (!rl.success) {
     return NextResponse.json(
       { error: "Export limit reached — try again later." },
@@ -64,6 +69,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const admin = createAdminClient();
+
+  // Audit 2026-05-07 red-team #2 (HIGH conf-8): on refusal, refund the
+  // 1/day token. Pre-fix, a user whose data hit ANY truncation cap
+  // (size/row/parent-id) consumed their 1/day token, got 500, and was
+  // permanently locked out — the truncation is deterministic per data
+  // set, so the next day's retry hits the exact same refusal. A
+  // regulator-visible GDPR Art. 15 violation. Token refund preserves
+  // the rate cap (a user still cannot grind through unlimited exports)
+  // while making the refusal pathway non-lockout. The refund call is
+  // best-effort: if it fails (Upstash blip) the user retries tomorrow
+  // — same as today's worst case.
+  const refundRateLimitToken = async (reason: string): Promise<void> => {
+    if (!exportLimiter) return;
+    try {
+      await exportLimiter.resetUsedTokens(rateLimitKey);
+    } catch (err) {
+      console.error(
+        `[api/account/export] rate-limit refund failed (${reason}):`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  };
 
   // Assemble the bundle across all user-owned tables. Uses the admin
   // client because the bundle spans tables with divergent RLS shapes
@@ -125,11 +152,36 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       parent_id_truncated_tables: bundle.parent_id_truncated_tables,
       incomplete_reasons: incompleteReasons,
     });
+    // Audit 2026-05-07 red-team #2 (HIGH conf-8): refund the 1/day
+    // rate-limit token BEFORE the audit emit / response build. Refusal
+    // is deterministic on data shape — without a refund the user is
+    // permanently locked out of GDPR Art. 15 fulfilment by their own
+    // data volume. The refund happens before audit so a subsequent
+    // retry within the same lambda warm window observes the refund.
+    await refundRateLimitToken(
+      bundle.partial ? "export_partial" : "export_truncated",
+    );
+
     // Audit the refusal so forensic reconstruction of "why this user
     // got 500" survives the response-body discard. The metadata is
     // also the only durable trail of which truncations occurred — if
     // a regulator later asks "did the controller ever know about this
     // user's truncation", the audit row is the answer.
+    //
+    // Audit 2026-05-07 red-team #1 (HIGH conf-9): the previous version
+    // wrote the verbatim table-name lists (row_capped_tables,
+    // parent_id_truncated_tables, incomplete_reasons strings with
+    // comma-joined table names) into audit_log.metadata under
+    // user_id=subject. redactAuditLogForUser retains the row (subject
+    // is actor), and metadata is NOT in AUDIT_METADATA_REDACT_KEYS —
+    // so the same schema reconnaissance the body strip blocked rode
+    // back into the next successful export's bundle. We now strip the
+    // table-name detail from the audit metadata: only the truncation
+    // booleans and counts ride along. Support reproduces from
+    // request_id + server log; the booleans answer "did this user hit
+    // truncation" for regulator forensics without revealing which
+    // internal tables. The full table-name lists remain on the
+    // console.error above (server-only durable forensics).
     logAuditEvent(supabase, {
       action: "account.export_refused",
       entity_type: "user",
@@ -138,9 +190,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         request_id: requestId,
         partial: bundle.partial,
         truncated_at_size_cap: bundle.truncated_at_size_cap,
-        row_capped_tables: rowCappedTables,
-        parent_id_truncated_tables: bundle.parent_id_truncated_tables,
-        incomplete_reasons: incompleteReasons,
+        // Aggregate counts only — NOT table names. The boolean per-mode
+        // signals + counts give a regulator-visible "did the controller
+        // know" trail without bundling internal schema reconnaissance.
+        row_capped_table_count: rowCappedTables.length,
+        parent_id_truncated_table_count:
+          bundle.parent_id_truncated_tables.length,
+        failed_table_count: bundle.failed_tables.length,
       },
     });
     return NextResponse.json(
@@ -150,6 +206,36 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           : "Your data exceeds export limits and a complete bundle cannot be produced automatically. Please contact support — GDPR Art. 15 requires a complete bundle.",
         code: bundle.partial ? "export_partial" : "export_truncated",
         request_id: requestId,
+      },
+      { status: 500 },
+    );
+  }
+
+  // Audit 2026-05-07 red-team #7 (MED conf-9): wire `rowsForTable`
+  // into the production download path. The helper returns `null` (not
+  // `[]`) when a table is missing from the bundle — schema drift /
+  // manifest typo. Reading the subject's own `profiles` row through
+  // the typed helper makes the null-vs-`[]` distinction load-bearing:
+  // a future refactor that drops `profiles` from USER_EXPORT_TABLES
+  // will return null here and surface a 500 with a deterministic
+  // diagnostic, instead of silently shipping a bundle whose
+  // identifying-row is missing.
+  //
+  // We invoke the helper on `profiles` specifically because the CI
+  // coverage hook (`scripts/check-gdpr-export-coverage.ts`) pins this
+  // table as user-owned via migration 005's `profiles.id = auth.users.id`
+  // FK. A miss here means the manifest no longer matches the migration.
+  const profilesRows = rowsForTable(bundle, "profiles");
+  if (profilesRows === null) {
+    console.error(
+      "[api/account/export] manifest drift detected — profiles missing from bundle:",
+      { user_id: user.id, table_count: bundle.tables.length },
+    );
+    await refundRateLimitToken("manifest_drift");
+    return NextResponse.json(
+      {
+        error: "Export manifest drift — please contact support.",
+        code: "export_manifest_drift",
       },
       { status: 500 },
     );
@@ -254,6 +340,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       total_row_count: bundle.total_row_count,
       truncated_at_size_cap: bundle.truncated_at_size_cap,
       incomplete_reasons: incompleteReasons,
+      // Audit 2026-05-07 red-team #7: number of profiles rows observed
+      // via the typed `rowsForTable` helper. Pinned to 1 on a normally-
+      // built bundle (one subject = one profile row); a drift to 0 or
+      // null would have failed the load-bearing check above.
+      profiles_row_count: profilesRows.length,
     },
   });
 
