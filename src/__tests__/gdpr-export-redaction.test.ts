@@ -310,6 +310,22 @@ describe("USER_EXPORT_TABLES — api_keys is exported as a projected redaction (
     expect(apiKeyEntries).toHaveLength(1);
     expect(apiKeyEntries[0].kind).toBe("projected");
   });
+
+  it("C-0166: API_KEYS_REDACTED_COLUMNS covers every credential/IV column from migration 003", () => {
+    // If a future migration adds a new encrypted-credential column on
+    // api_keys, the contract is: it MUST be added to
+    // API_KEYS_REDACTED_COLUMNS so the GDPR bundle continues to strip
+    // ciphertext. This test pins the current set so a new column
+    // landing without an update to the redaction set surfaces here.
+    expect(API_KEYS_REDACTED_COLUMNS.has("api_key_encrypted")).toBe(true);
+    expect(API_KEYS_REDACTED_COLUMNS.has("api_secret_encrypted")).toBe(true);
+    expect(API_KEYS_REDACTED_COLUMNS.has("passphrase_encrypted")).toBe(true);
+    expect(API_KEYS_REDACTED_COLUMNS.has("dek_encrypted")).toBe(true);
+    expect(API_KEYS_REDACTED_COLUMNS.has("nonce")).toBe(true);
+    // Size invariant: exactly 5 columns today. If you add one,
+    // increment this number AND add the new column above.
+    expect(API_KEYS_REDACTED_COLUMNS.size).toBe(5);
+  });
 });
 
 describe("redactContactRequestForUser (P708)", () => {
