@@ -459,6 +459,55 @@ class TestAlertDedup:
 # Per-email rate limit (H-0593)
 # ---------------------------------------------------------------------------
 
+class TestIdempotencyCache:
+    """H-0592: Idempotency-Key support for verify_strategy. Same key +
+    same (email, exchange) returns the cached response without re-firing
+    the live exchange handshake.
+    """
+
+    def setup_method(self):
+        portfolio_mod._verify_strategy_idempotency.clear()
+
+    def test_lookup_miss_returns_none(self):
+        from routers.portfolio import _verify_strategy_idempotency_lookup
+        assert _verify_strategy_idempotency_lookup("a@x.com", "binance", "key1") is None
+
+    def test_store_then_lookup_hits(self):
+        from routers.portfolio import (
+            _verify_strategy_idempotency_lookup,
+            _verify_strategy_idempotency_store,
+        )
+        _verify_strategy_idempotency_store(
+            "a@x.com", "binance", "key1", {"verification_id": "v-1"},
+        )
+        cached = _verify_strategy_idempotency_lookup("a@x.com", "binance", "key1")
+        assert cached == {"verification_id": "v-1"}
+
+    def test_different_key_is_isolated(self):
+        from routers.portfolio import (
+            _verify_strategy_idempotency_lookup,
+            _verify_strategy_idempotency_store,
+        )
+        _verify_strategy_idempotency_store(
+            "a@x.com", "binance", "key1", {"verification_id": "v-1"},
+        )
+        # Different IK on the same (email, exchange) returns nothing.
+        assert _verify_strategy_idempotency_lookup("a@x.com", "binance", "key2") is None
+
+    def test_email_case_normalized(self):
+        """Idempotency-Key dedup is case-insensitive on email — the
+        rate-limit check normalizes email too, so the two must agree."""
+        from routers.portfolio import (
+            _verify_strategy_idempotency_lookup,
+            _verify_strategy_idempotency_store,
+        )
+        _verify_strategy_idempotency_store(
+            "A@X.com", "binance", "key1", {"verification_id": "v-1"},
+        )
+        cached = _verify_strategy_idempotency_lookup("a@x.com", "binance", "key1")
+        assert cached is not None
+
+
 class TestPerEmailRateLimit:
     def setup_method(self):
         # Clear the in-memory bucket between tests.

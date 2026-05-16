@@ -147,6 +147,38 @@ def _check_verify_strategy_email_rate(email: str) -> bool:
     return True
 
 
+# Audit H-0592 — in-process idempotency cache for verify_strategy. Keyed
+# by (email, exchange, idempotency_key) with a 24h TTL. Not distributed-
+# safe across workers; the IP rate limit + per-email throttle remain the
+# authoritative bound on multi-worker abuse, but same-process flaky-client
+# retries get full replay protection.
+_VERIFY_STRATEGY_IDEMPOTENCY_TTL_SEC = 24 * 3600
+_verify_strategy_idempotency: dict[str, tuple[float, dict]] = {}
+
+
+def _verify_strategy_idempotency_key(email: str, exchange: str, ik: str) -> str:
+    return f"{(email or '').strip().lower()}|{exchange}|{ik}"
+
+
+def _verify_strategy_idempotency_lookup(email: str, exchange: str, ik: str) -> dict | None:
+    import time
+    key = _verify_strategy_idempotency_key(email, exchange, ik)
+    entry = _verify_strategy_idempotency.get(key)
+    if not entry:
+        return None
+    stored_at, response = entry
+    if time.monotonic() - stored_at > _VERIFY_STRATEGY_IDEMPOTENCY_TTL_SEC:
+        _verify_strategy_idempotency.pop(key, None)
+        return None
+    return response
+
+
+def _verify_strategy_idempotency_store(email: str, exchange: str, ik: str, response: dict) -> None:
+    import time
+    key = _verify_strategy_idempotency_key(email, exchange, ik)
+    _verify_strategy_idempotency[key] = (time.monotonic(), dict(response))
+
+
 def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
     """Convert [{date, value}, ...] records to a DatetimeIndex pd.Series.
 
@@ -1406,6 +1438,23 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
             detail="Too many verification attempts for this email. Try again later.",
         )
 
+    # Audit H-0592 — Idempotency-Key support. A flaky-client retry on the
+    # same key returns the cached response (with idempotent_replay=True)
+    # instead of firing two live exchange handshakes per call. Scope: in
+    # process memory; cross-worker dedup would need a Redis surface but
+    # the same-process case is the common one and gives us most of the
+    # protection.
+    idempotency_key = ""
+    try:
+        idempotency_key = (request.headers.get("Idempotency-Key") or "").strip()
+    except Exception:
+        # request.headers may not be present in unit test contexts.
+        pass
+    if idempotency_key:
+        cached = _verify_strategy_idempotency_lookup(req.email, req.exchange, idempotency_key)
+        if cached is not None:
+            return {**cached, "idempotent_replay": True}
+
     try:
         exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
     except ValueError as exc:
@@ -1554,7 +1603,7 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
         # and persists public_token / expires_at on its side. We return
         # the computed metrics in the response so the caller can stamp
         # them onto strategy_verifications.metrics_snapshot if desired.
-        return {
+        response = {
             "ok": True,
             "status": "complete",
             "verification_id": verification_id,
@@ -1565,6 +1614,13 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
             "sharpe": sharpe,
             **{k: period_returns.get(k) for k in ("return_24h", "return_mtd", "return_ytd")},
         }
+        # Cache on Idempotency-Key for replay-protection on flaky-client
+        # retries (audit H-0592).
+        if idempotency_key:
+            _verify_strategy_idempotency_store(
+                req.email, req.exchange, idempotency_key, response,
+            )
+        return response
 
     except HTTPException:
         raise
