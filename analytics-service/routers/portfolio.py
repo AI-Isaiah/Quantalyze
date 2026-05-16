@@ -147,6 +147,56 @@ def _redact_credentials(message: str, req: "VerifyStrategyRequest") -> str:
 _compute_semaphore = asyncio.Semaphore(3)
 
 
+def _build_normalized_weights(portfolio_strategies: list[dict]) -> dict[str, float]:
+    """Build a normalized weight map from portfolio_strategies rows.
+
+    Replaces three near-identical inline copies across _compute_portfolio_analytics,
+    portfolio_optimizer, and portfolio_bridge (audit M-0624).
+    """
+    raw = {
+        row["strategy_id"]: float(row["current_weight"]) if row.get("current_weight") else 1.0
+        for row in portfolio_strategies
+    }
+    total = sum(raw.values()) or 1.0
+    return {sid: w / total for sid, w in raw.items()}
+
+
+def _series_to_curve(series: pd.Series) -> list[dict]:
+    """Serialize a cumprod Series into JSON-shaped equity-curve records.
+
+    Replaces two duplicated comprehensions in _compute_portfolio_analytics and
+    verify_strategy (audit M-0625).
+    """
+    return [
+        {"date": d.isoformat(), "value": _safe_float(float(v))}
+        for d, v in series.items()
+    ]
+
+
+def _compute_sharpe_and_vol(returns: pd.Series) -> tuple[float | None, float | None, float | None, str]:
+    """Compute annualised vol, mean_ret, sharpe + a status code.
+
+    Returns (vol, mean_ret, sharpe, sharpe_status). Status codes:
+      "ok" — sharpe is a real float.
+      "insufficient_history" — fewer than 2 samples.
+      "zero_volatility" — vol == 0.
+      "nan_mean" — mean_ret is NaN.
+      "nan" — sharpe is NaN/inf after _safe_float.
+
+    Replaces three structurally identical implementations (audit M-0626).
+    """
+    if len(returns) <= 1:
+        return None, None, None, "insufficient_history"
+    vol = returns.std() * np.sqrt(252)
+    mean_ret = returns.mean() * 252
+    if vol is None or vol == 0 or (isinstance(vol, float) and np.isnan(vol)):
+        return _safe_float(vol), _safe_float(mean_ret), None, "zero_volatility" if vol == 0 else "nan"
+    if mean_ret is None or (isinstance(mean_ret, float) and np.isnan(mean_ret)):
+        return _safe_float(vol), None, None, "nan_mean"
+    sharpe = _safe_float(mean_ret / vol)
+    return _safe_float(vol), _safe_float(mean_ret), sharpe, "ok" if sharpe is not None else "nan"
+
+
 # ---------------------------------------------------------------------------
 # Internal computation helper (also callable from the cron module)
 # ---------------------------------------------------------------------------
@@ -194,12 +244,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         strategy_ids = [row["strategy_id"] for row in portfolio_strategies]
 
         # Build weight map (default equal weight if not set)
-        raw_weights = {
-            row["strategy_id"]: float(row["current_weight"]) if row.get("current_weight") else 1.0
-            for row in portfolio_strategies
-        }
-        total_w = sum(raw_weights.values()) or 1.0
-        weights = {sid: w / total_w for sid, w in raw_weights.items()}
+        weights = _build_normalized_weights(portfolio_strategies)
 
         strategy_names = {
             row["strategy_id"]: (row.get("strategies") or {}).get("name", row["strategy_id"])
@@ -413,10 +458,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
 
         # Portfolio equity curve
         cumulative = (1 + portfolio_returns_series).cumprod()
-        portfolio_equity_curve = [
-            {"date": d.isoformat(), "value": _safe_float(float(v))}
-            for d, v in cumulative.items()
-        ]
+        portfolio_equity_curve = _series_to_curve(cumulative)
 
         # Total AUM — only meaningful when every strategy reports AUM. A
         # mix of $0 reporters and NULLs would otherwise collapse to None and
@@ -430,27 +472,8 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         # Portfolio-level sharpe and volatility. Track WHY the metric is None
         # so the dashboard can show the right empty-state instead of conflating
         # "insufficient history" with "flat vol" with "broken compute".
-        vol_status = "ok"
-        sharpe_status = "ok"
-        if len(portfolio_returns_series) <= 1:
-            vol = None
-            mean_ret = None
-            sharpe = None
-            vol_status = "insufficient_history"
-            sharpe_status = "insufficient_history"
-        else:
-            vol = portfolio_returns_series.std() * np.sqrt(252)
-            mean_ret = portfolio_returns_series.mean() * 252
-            if vol is None or vol == 0 or np.isnan(vol):
-                sharpe = None
-                sharpe_status = "zero_volatility" if vol == 0 else "nan"
-            elif mean_ret is None or np.isnan(mean_ret):
-                sharpe = None
-                sharpe_status = "nan_mean"
-            else:
-                sharpe = _safe_float(mean_ret / vol)
-                if sharpe is None:
-                    sharpe_status = "nan"
+        vol, mean_ret, sharpe, sharpe_status = _compute_sharpe_and_vol(portfolio_returns_series)
+        vol_status = "insufficient_history" if sharpe_status == "insufficient_history" else "ok"
 
         running_max = cumulative.cummax()
         drawdown = (cumulative - running_max) / running_max
@@ -932,17 +955,46 @@ async def portfolio_analytics(request: Request, req: PortfolioAnalyticsRequest):
 
         result = await _compute_portfolio_analytics(req.portfolio_id)
 
-    return {"status": "complete", "portfolio_id": req.portfolio_id, "analytics_id": result["analytics_id"]}
+    # Audit C-0216: previously this handler discarded the full update_payload
+    # spread, returning only {status, portfolio_id, analytics_id}. Callers that
+    # expected inline metrics (mirroring verify-strategy's response shape) got
+    # nothing back and had no signal to poll separately. We now surface the
+    # full sanitized payload inline so callers can render without an extra
+    # round-trip; analytics_id is preserved for cache-key purposes.
+    return {
+        "status": "complete",
+        "portfolio_id": req.portfolio_id,
+        **result,
+    }
 
 
 # ---------------------------------------------------------------------------
 # Endpoint 2: POST /api/portfolio-optimizer
 # ---------------------------------------------------------------------------
 
+_OPTIMIZER_PUBLISHED_LIMIT = 200  # max published strategies pulled per optimizer run
+
+
 @router.post("/portfolio-optimizer")
 @limiter.limit("10/hour")
 async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
-    """Find diversification candidates for a portfolio."""
+    """Find diversification candidates for a portfolio.
+
+    Audit 2026-05-07 hardening:
+      - req.weights is now Dict[str, float] with NaN/Inf/negative rejected
+        at the Pydantic layer (PortfolioOptimizerRequest._validate_weights).
+      - Phantom keys (not in the portfolio's strategy_ids) are dropped
+        with a warning so the optimizer math doesn't operate on injected
+        ghost strategies.
+      - Published-strategy pool is capped at _OPTIMIZER_PUBLISHED_LIMIT
+        to bound memory + PostgREST payload size.
+      - optimizer_suggestions is stored against the LATEST analytics row
+        only when one exists; the absence of a row is now logged so the
+        response-only fallback doesn't hide silently (M-0617).
+      - When portfolio.user_id is NULL the audit emission still happens
+        under a sentinel ('unknown-owner') so the run is never silently
+        unaudited (M-0623).
+    """
     supabase = get_supabase()
 
     # Verify portfolio exists + capture owner id for audit attribution
@@ -965,16 +1017,25 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
 
     strategy_ids = [row["strategy_id"] for row in portfolio_strategies]
 
-    raw_weights = {
-        row["strategy_id"]: float(row["current_weight"]) if row.get("current_weight") else 1.0
-        for row in portfolio_strategies
-    }
-    total_w = sum(raw_weights.values()) or 1.0
-    weights = {sid: w / total_w for sid, w in raw_weights.items()}
+    weights = _build_normalized_weights(portfolio_strategies)
 
-    # Override weights from request if provided
+    # Override weights from request if provided. Phantom keys (not in the
+    # portfolio's strategy_ids) are dropped — the pre-audit code silently
+    # added them to the weight vector, which let any service-key holder
+    # corrupt the score matrix.
     if req.weights:
-        weights.update(req.weights)
+        portfolio_sids = set(strategy_ids)
+        phantom = [k for k in req.weights if k not in portfolio_sids]
+        if phantom:
+            logger.warning(
+                "portfolio_optimizer: dropping %d phantom weight keys for %s: %s",
+                len(phantom), req.portfolio_id, phantom,
+            )
+        scoped = {k: v for k, v in req.weights.items() if k in portfolio_sids}
+        weights.update(scoped)
+        # Renormalize so injected weights can't unbalance the vector.
+        total = sum(weights.values()) or 1.0
+        weights = {sid: w / total for sid, w in weights.items()}
 
     sa_in_result = supabase.table("strategy_analytics").select(
         "strategy_id, returns_series"
@@ -991,7 +1052,9 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
 
     all_published = supabase.table("strategies").select("id, name").eq(
         "status", "published"
-    ).not_.in_("id", strategy_ids).execute()
+    ).not_.in_("id", strategy_ids).order(
+        "created_at", desc=True
+    ).limit(_OPTIMIZER_PUBLISHED_LIMIT).execute()
 
     candidate_rows = all_published.data or []
     candidate_ids = [row["id"] for row in candidate_rows]
@@ -1017,31 +1080,62 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
         "portfolio_id", req.portfolio_id
     ).eq("computation_status", "complete").order("computed_at", desc=True).limit(1).execute()
 
+    persisted = False
     if latest.data:
         # @audit-skip: internal cache write (optimizer_suggestions is
         # denormalized onto the most recent portfolio_analytics row for
         # the UI to read in one fetch). User-intent audit emitted below
         # after the compute completes.
+        #
+        # NOTE: This is an in-place UPDATE of an append-only snapshot. The
+        # ideal fix (H-0573) is to INSERT a new portfolio_analytics row
+        # carrying optimizer_suggestions, but that requires a schema-level
+        # decision (recompute the full payload? mark as derivative?) that
+        # is out of scope for the audit-2026-05-07 router pass. We keep
+        # the UPDATE here for now but explicitly log the override so the
+        # audit trail isn't silent about the mutation.
         supabase.table("portfolio_analytics").update(
             {"optimizer_suggestions": suggestions}
         ).eq("id", latest.data[0]["id"]).execute()
+        persisted = True
+    else:
+        # Surface the no-completed-analytics no-op explicitly. The previous
+        # code silently returned suggestions that vanished on page reload.
+        logger.warning(
+            "portfolio_optimizer: no completed analytics row for %s; "
+            "suggestions returned response-only (will not persist)",
+            req.portfolio_id,
+        )
 
     # Sprint 6 Task 7.1b — audit the optimizer run. entity is the
     # portfolio the optimizer ran against. user_id is the portfolio
-    # owner (resolved via the portfolios row above).
-    if portfolio_owner_id:
-        log_audit_event(
-            user_id=portfolio_owner_id,
-            action="optimizer.run",
-            entity_type="optimizer_run",
-            entity_id=req.portfolio_id,
-            metadata={"suggestion_count": len(suggestions)},
+    # owner (resolved via the portfolios row above). When user_id is
+    # NULL we still emit under a sentinel so the run isn't silently
+    # unaudited (audit-2026-05-07 M-0623).
+    audit_user_id = portfolio_owner_id or "00000000-0000-0000-0000-000000000000"
+    if not portfolio_owner_id:
+        logger.warning(
+            "portfolio_optimizer: portfolio %s has NULL user_id; "
+            "auditing under sentinel actor",
+            req.portfolio_id,
         )
+    log_audit_event(
+        user_id=audit_user_id,
+        action="optimizer.run",
+        entity_type="optimizer_run",
+        entity_id=req.portfolio_id,
+        metadata={
+            "suggestion_count": len(suggestions),
+            "owner_resolved": bool(portfolio_owner_id),
+            "persisted": persisted,
+        },
+    )
 
     return {
         "status": "complete",
         "portfolio_id": req.portfolio_id,
         "suggestions": suggestions,
+        "persisted": persisted,
     }
 
 
@@ -1087,12 +1181,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
         )
 
     # Build weights
-    raw_weights = {
-        row["strategy_id"]: float(row["current_weight"]) if row.get("current_weight") else 1.0
-        for row in portfolio_strategies
-    }
-    total_w = sum(raw_weights.values()) or 1.0
-    weights = {sid: w / total_w for sid, w in raw_weights.items()}
+    weights = _build_normalized_weights(portfolio_strategies)
 
     # Fetch portfolio strategy returns
     sa_in_result = supabase.table("strategy_analytics").select(
@@ -1108,10 +1197,14 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     if not portfolio_returns:
         raise HTTPException(status_code=400, detail="No returns data available")
 
-    # Fetch all published candidate strategies (excluding portfolio members)
+    # Fetch all published candidate strategies (excluding portfolio members).
+    # Cap at _OPTIMIZER_PUBLISHED_LIMIT to bound the JSONB payload size as the
+    # catalog grows (audit-2026-05-07 H-1072).
     all_published = supabase.table("strategies").select("id, name").eq(
         "status", "published"
-    ).not_.in_("id", strategy_ids).execute()
+    ).not_.in_("id", strategy_ids).order(
+        "created_at", desc=True
+    ).limit(_OPTIMIZER_PUBLISHED_LIMIT).execute()
 
     candidate_rows = all_published.data or []
     candidate_ids = [row["id"] for row in candidate_rows]
@@ -1288,18 +1381,14 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
 
         # Equity curve
         cumulative = (1 + returns).cumprod()
-        equity_curve = [
-            {"date": d.isoformat(), "value": _safe_float(float(v))}
-            for d, v in cumulative.items()
-        ]
+        equity_curve = _series_to_curve(cumulative)
 
         # TWR
         twr = compute_twr(cumulative, [])
 
-        # Simple sharpe
-        vol = returns.std() * np.sqrt(252) if len(returns) > 1 else None
-        mean_ret = returns.mean() * 252 if len(returns) > 1 else None
-        sharpe = _safe_float(mean_ret / vol) if vol and vol != 0 and mean_ret is not None else None
+        # Annualized sharpe + vol — extracted into helper so the three router
+        # callsites + services/portfolio_optimizer don't drift apart.
+        vol, mean_ret, sharpe, _sharpe_status = _compute_sharpe_and_vol(returns)
 
         matched_strategy_id: str | None = None
         # Distinguish three outcomes the previous code collapsed:
@@ -1372,6 +1461,7 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
             "status": "complete",
             "verification_id": verification_id,
             "matched_strategy_id": matched_strategy_id,
+            "matching_status": matching_status,
             "results": results_payload,
             "twr": twr,
             "sharpe": sharpe,
