@@ -198,6 +198,45 @@ export interface ManagerIdentity {
   linkedin: string | null;
 }
 
+/**
+ * audit-2026-05-07 M-0582: typed envelope for `strategy_analytics.metrics_json`.
+ *
+ * The column is JSONB and catches every derived metric series whose shape
+ * varies (rolling correlations, drawdown episodes, risk of ruin, trade
+ * mix). The interface enumerates the known key NAMES so a typo (e.g.
+ * `bencmark_returns`) is a compile error. Values stay `unknown` because
+ * the JSONB source can legitimately ship a malformed payload — every
+ * consumer (PerformanceReport, WorstDrawdowns, CorrelationWithBenchmark)
+ * keeps its existing `isCorrelationPointArray` / `isServerEpisode`
+ * runtime predicate; the type-level promise is "this key name is part
+ * of the contract", not "this value is well-shaped".
+ *
+ * JSDoc on each known key documents the EXPECTED shape that the
+ * runtime predicate should accept; the index signature retains
+ * forward-compat for analytics-service additions that don't yet have
+ * a UI consumer.
+ */
+export interface MetricsJson {
+  /** Expected: TimeSeriesPoint[]. Per-strategy benchmark daily returns. */
+  benchmark_returns?: unknown;
+  /** Expected: TimeSeriesPoint[]. Benchmark returns keyed for BTC overlay. */
+  btc_benchmark_returns?: unknown;
+  /** Expected: TimeSeriesPoint[]. Rolling 90d correlation series vs BTC. */
+  btc_rolling_correlation_90d?: unknown;
+  /** Expected: array of {start, end, depth, recovery}. */
+  drawdown_episodes?: unknown;
+  /** Expected: { loss_pct: number; probability: number }[]. */
+  risk_of_ruin?: unknown;
+  /** Expected: TradeMixBuckets. (Also surfaced via TradeMetrics.trade_mix.) */
+  trade_mix?: unknown;
+  /** Expected: number. Authoritative history length (days). */
+  history_days?: unknown;
+  /** Forward-compat: analytics-service can add additional fields. Reads
+   *  must validate the value's runtime shape; the type only enforces
+   *  the key NAME at the contract level. */
+  [key: string]: unknown;
+}
+
 export interface StrategyAnalytics {
   id: string;
   strategy_id: string;
@@ -216,7 +255,16 @@ export interface StrategyAnalytics {
   six_month_return: number | null;
   sparkline_returns: number[] | null;
   sparkline_drawdown: number[] | null;
-  metrics_json: Record<string, unknown> | null;
+  /**
+   * audit-2026-05-07 M-0582: typed envelope for the catch-all metrics blob.
+   * Known keys are documented; the index signature retains forward-compat
+   * (analytics writer can add fields without breaking the type). Consumers
+   * reading well-known keys (`benchmark_returns`, `btc_rolling_correlation_90d`,
+   * `drawdown_episodes`, `risk_of_ruin`, `trade_mix`) get `unknown` typed
+   * values they still need to validate — but a typo in a known key now
+   * triggers a TS error rather than `undefined` at runtime.
+   */
+  metrics_json: MetricsJson | null;
   returns_series: { date: string; value: number }[] | null;
   drawdown_series: { date: string; value: number }[] | null;
   monthly_returns: Record<string, Record<string, number>> | null;
