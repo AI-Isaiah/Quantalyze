@@ -100,10 +100,15 @@ SET lock_timeout = '5s';
 -- --------------------------------------------------------------------------
 -- STEP 1: H-0849 — bound compute_jobs.metadata size to 8 KB
 -- --------------------------------------------------------------------------
--- Defense in depth. pg_column_size() returns the on-disk footprint
--- (TOAST + compression aware), so the CHECK matches the heap cost the
--- attacker is targeting. 8 KB is comfortably above all current writers:
---   * sync/route.ts:88-95 writes { correlation_id }              ~64 B
+-- Defense in depth. octet_length(metadata::text) measures the JSONB text
+-- representation in bytes — IMMUTABLE, independent of TOAST/compression
+-- policy, and indexable. The earlier pg_column_size variant was STABLE
+-- (not IMMUTABLE) and tied to TOAST internals, which PG emits a WARNING
+-- on at CHECK creation time and which drifts across PG major versions
+-- (audit-A Q#5). Matches the 32 KB ceiling shape that
+-- log_audit_event_service already enforces via octet_length.
+-- 8 KB is comfortably above all current writers:
+--   * the sync route writes { correlation_id }                   ~64 B
 --   * mig 104 Phase 19 backbone metadata                         <512 B
 --   * mig 109 fan-in initial-status metadata                     <128 B
 -- 8 KB leaves three orders of magnitude of headroom while bounding
@@ -122,7 +127,7 @@ BEGIN
     UPDATE compute_jobs
        SET metadata = '{}'::jsonb
      WHERE metadata IS NOT NULL
-       AND pg_column_size(metadata) > 8192
+       AND octet_length(metadata::text) > 8192
     RETURNING id
   )
   SELECT count(*) INTO v_coerced FROM coerced;
@@ -137,7 +142,7 @@ ALTER TABLE compute_jobs
 
 ALTER TABLE compute_jobs
   ADD CONSTRAINT compute_jobs_metadata_size_bounded
-  CHECK (metadata IS NULL OR pg_column_size(metadata) <= 8192)
+  CHECK (metadata IS NULL OR octet_length(metadata::text) <= 8192)
   NOT VALID;
 
 ALTER TABLE compute_jobs
@@ -165,7 +170,7 @@ COMMENT ON CONSTRAINT compute_jobs_metadata_size_bounded ON compute_jobs IS
 -- with CREATE INDEX CONCURRENTLY (which must run outside a tx).
 DROP INDEX IF EXISTS compute_jobs_parent_lookup;
 
-CREATE INDEX compute_jobs_parent_lookup
+CREATE INDEX IF NOT EXISTS compute_jobs_parent_lookup
   ON compute_jobs USING GIN (parent_job_ids)
   WHERE status IN ('pending', 'running', 'done_pending_children');
 
@@ -179,32 +184,48 @@ COMMENT ON INDEX compute_jobs_parent_lookup IS
 -- STEP 3: H-0857 — bound compute_jobs.claimed_by shape
 -- --------------------------------------------------------------------------
 -- Defense in depth against a future REVOKE relaxation. The CHECK
--- permits the deployed Railway worker naming convention plus the
--- local-dev `test-*` shape. Length cap of 128 matches mig 109's
--- idempotency_key CHECK so an attacker cannot use claimed_by as a
--- megabyte heap-poison surface either.
+-- permits the deployed Railway worker naming convention, Kubernetes-
+-- style `<pod>/<container>` identifiers, and the local-dev `test-*`
+-- shape. Length cap of 128 matches mig 109's idempotency_key CHECK so
+-- an attacker cannot use claimed_by as a megabyte heap-poison surface
+-- either.
 --
--- Backfill: any existing row whose claimed_by violates the regex
--- (e.g., a manual operator UPDATE during incident response) gets the
--- value coerced to NULL so VALIDATE CONSTRAINT can pass. NULL is the
--- default-state value for unclaimed rows so the coercion is the same
--- shape as "row not claimed by anyone".
+-- audit-2026-05-07 Q#12 audit-A: live (non-terminal) rows whose
+-- claimed_by violates the new shape are NOT silently coerced — that
+-- would flag healthy workers as unclaimed and let the watchdog reclaim
+-- them mid-flight. Fail loud on any live-row violation so an operator
+-- updates the worker_id manually before re-running this migration.
+-- Terminal-state rows (where the writing worker is no longer alive)
+-- are still coerced because their claimed_by is purely historical.
 DO $$
 DECLARE
-  v_coerced INTEGER;
+  v_coerced          INTEGER;
+  v_live_violations  INTEGER;
 BEGIN
+  SELECT count(*) INTO v_live_violations
+    FROM compute_jobs
+   WHERE claimed_by IS NOT NULL
+     AND (length(claimed_by) > 128
+          OR claimed_by !~ '^[A-Za-z0-9_:./-]+$')
+     AND status IN ('pending', 'running', 'done_pending_children');
+  IF v_live_violations > 0 THEN
+    RAISE EXCEPTION 'audit-2026-05-07 H-0857: % live compute_jobs rows have claimed_by outside the new CHECK shape. Update them manually before re-running this migration so the watchdog cannot reclaim a healthy worker.',
+      v_live_violations
+      USING ERRCODE = 'check_violation';
+  END IF;
+
   WITH coerced AS (
     UPDATE compute_jobs
        SET claimed_by = NULL
      WHERE claimed_by IS NOT NULL
        AND (length(claimed_by) > 128
-            OR claimed_by !~ '^[A-Za-z0-9_:.-]+$')
+            OR claimed_by !~ '^[A-Za-z0-9_:./-]+$')
     RETURNING id
   )
   SELECT count(*) INTO v_coerced FROM coerced;
 
   IF v_coerced > 0 THEN
-    RAISE NOTICE 'audit-2026-05-07 H-0857: coerced % out-of-shape compute_jobs.claimed_by rows to NULL.', v_coerced;
+    RAISE NOTICE 'audit-2026-05-07 H-0857: coerced % out-of-shape compute_jobs.claimed_by rows (terminal-state only) to NULL.', v_coerced;
   END IF;
 END $$;
 
@@ -216,7 +237,7 @@ ALTER TABLE compute_jobs
   CHECK (
     claimed_by IS NULL
     OR (length(claimed_by) <= 128
-        AND claimed_by ~ '^[A-Za-z0-9_:.-]+$')
+        AND claimed_by ~ '^[A-Za-z0-9_:./-]+$')
   )
   NOT VALID;
 
@@ -418,6 +439,14 @@ BEGIN
   IF v_body !~* 'sync_strategy_analytics_status' THEN
     RAISE EXCEPTION 'audit-2026-05-07: mark_compute_job_done body lost mig 099 Phase-18 atomic UI bridge';
   END IF;
+
+  -- audit-2026-05-07 R#3: re-assert PUBLIC EXECUTE absence on
+  -- mark_compute_job_done via the mig 134 / C-0284 helper. The REVOKE
+  -- above strips any leak; this PERFORM aborts the migration if a
+  -- future change ever re-grants PUBLIC.
+  PERFORM public._assert_no_public_execute(
+    'public.mark_compute_job_done(uuid, uuid)'
+  );
 END $$;
 
 COMMIT;
