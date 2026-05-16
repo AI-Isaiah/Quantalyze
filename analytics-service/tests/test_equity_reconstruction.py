@@ -2116,12 +2116,18 @@ async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
 
     # Allocator has BOTH api_keys — the new one (API_KEY_ID_1) and the
     # prior one (API_KEY_ID_2). The prior key's existence is the signal
-    # that stale rows are legitimately aggregated, not orphaned.
+    # that stale rows are legitimately aggregated, not orphaned. Both
+    # must be ACTIVE + CONNECTED for the sibling-count filter to see
+    # them (H-1162 / H-1164: the filter mirrors migration 075's worker
+    # dispatch — is_active=true AND disconnected_at IS NULL AND
+    # sync_status != 'revoked').
     fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
         "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "disconnected_at": None, "sync_status": "ok",
     }
     fake_supabase.store[("api_keys", (API_KEY_ID_2,))] = {
         "id": API_KEY_ID_2, "user_id": ALLOCATOR_ID, "exchange": "okx",
+        "is_active": True, "disconnected_at": None, "sync_status": "ok",
     }
 
     ts = int(start_date.timestamp() * 1000)
@@ -2545,8 +2551,16 @@ async def test_refresh_daily_uses_unrealized_pnl_for_perp_not_notional(monkeypat
     )
     assert brk.get("USDT") == pytest.approx(195_493.36, abs=0.01)
     # The perp contribution sits under a :PERP-tagged key so it can't
-    # collide with a spot line of the same base currency.
-    assert brk.get("ETHUSDT:PERP") == pytest.approx(123.45, abs=0.01), brk
+    # collide with a spot line of the same base currency. Post-fix the
+    # refresh job emits the CANONICAL 3-part ``BASE:QUOTE:PERP`` shape
+    # (H-1157 / H-1165 / H-1169) — pre-fix it emitted ``ETHUSDT:PERP``
+    # which silently split the dashboard's grouping between reconstruct
+    # and refresh paths.
+    assert brk.get("ETH:USDT:PERP") == pytest.approx(123.45, abs=0.01), brk
+    assert "ETHUSDT:PERP" not in brk, (
+        "Legacy 2-part PERP key reappeared — refresh path must emit "
+        "the canonical 3-part shape, see breakdown_key_for_perp()."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2575,7 +2589,7 @@ def test_v0_15_4_2_defensive_resolves_base_units_when_cost_is_broken():
     treat raw contract count as base units and blow up the MTM 10-100x.
     The v0.15.4.2 table-driven fallback recovers real base units.
     """
-    from services.equity_reconstruction import _resolve_perp_amt_base
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
 
     # 21.464 ETH position on OKX ETH-USDT-SWAP (ctVal=0.1). Amount lands
     # as 214.64 contracts. When safe_trade fails to apply contractSize,
@@ -2583,9 +2597,9 @@ def test_v0_15_4_2_defensive_resolves_base_units_when_cost_is_broken():
     # v0.15.4.0 path computes amt_base = 492508.80 / 2295 = 214.64 —
     # contracts, not ETH. The v0.15.4.2 table overrides this.
     broken_cost = 214.64 * 2295.0  # ctVal NOT applied (the production bug)
-    recovered = _resolve_perp_amt_base(
+    recovered, source, _drift = _resolve_perp_amt_base(
         "ETH/USDT:USDT", amount=214.64, price=2295.0, cost=broken_cost,
-        inst_type="SWAP",
+        inst_type="SWAP", venue="okx",
     )
     assert recovered == pytest.approx(21.464, abs=0.001), (
         f"Defensive ctVal table must recover 21.464 ETH from the "
@@ -2593,6 +2607,7 @@ def test_v0_15_4_2_defensive_resolves_base_units_when_cost_is_broken():
         f"Got {recovered} — if this equals 214.64 the table didn't "
         f"fire and we're back to the contract-count inflation bug."
     )
+    assert source == _PerpAmtSource.CTVAL_TABLE, source
 
 
 def test_v0_15_4_2_defensive_preserves_proper_cost_path():
@@ -2600,17 +2615,18 @@ def test_v0_15_4_2_defensive_preserves_proper_cost_path():
     price × ctVal), cost/price is already in base units and agrees with
     the explicit table. The defensive layer must NOT corrupt this case.
     """
-    from services.equity_reconstruction import _resolve_perp_amt_base
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
 
     # cost = 214.64 × 2295 × 0.1 = 49,258.88 (ctVal applied correctly).
     proper_cost = 214.64 * 2295.0 * 0.1
-    recovered = _resolve_perp_amt_base(
+    recovered, source, _drift = _resolve_perp_amt_base(
         "ETH/USDT:USDT", amount=214.64, price=2295.0, cost=proper_cost,
-        inst_type="SWAP",
+        inst_type="SWAP", venue="okx",
     )
     assert recovered == pytest.approx(21.464, abs=0.001), (
         f"Proper-cost path must still return 21.464 ETH. Got {recovered}"
     )
+    assert source == _PerpAmtSource.COST_DIV_PRICE, source
 
 
 def test_v0_15_4_2_defensive_backward_compat_with_synthetic_fixtures():
@@ -2619,14 +2635,15 @@ def test_v0_15_4_2_defensive_backward_compat_with_synthetic_fixtures():
     fixtures are NOT in the OKX ctVal table, so the defensive layer must
     fall through to cost/price.
     """
-    from services.equity_reconstruction import _resolve_perp_amt_base
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
 
-    recovered = _resolve_perp_amt_base(
+    recovered, source, _drift = _resolve_perp_amt_base(
         "TEST/USDT:USDT", amount=10.0, price=100.0, cost=1000.0,
     )
     assert recovered == pytest.approx(10.0, abs=0.001), (
         f"Fixture compat broken. Got {recovered}"
     )
+    assert source == _PerpAmtSource.COST_DIV_PRICE, source
 
 
 # ---------------------------------------------------------------------------
@@ -2705,7 +2722,7 @@ async def test_v0_15_4_2_anchor_offsets_reconstructed_series_to_exchange_balance
             class R: data = []
             return R()
 
-    rows, _ = await _fetch_and_price_window(
+    rows, _terminus, _telemetry = await _fetch_and_price_window(
         FakeExchange(), "okx", StubSupabase(),
         date(2026, 4, 22), date(2026, 4, 24),
     )
@@ -2794,3 +2811,650 @@ async def test_v0_15_4_3_ohlcv_paginates_past_venue_page_cap():
     closes = [r[4] for r in rows]
     assert closes[0] == 100.0
     assert closes[-1] == 100.0 + 729
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 regression suite - equity_reconstruction.py
+# ---------------------------------------------------------------------------
+# Tests for the findings in FIX-BRIEF.md (C-0326..0330, H-1156..1174,
+# M-1022..1034).
+
+
+# ---- C-0327 - OKX FUTURES contract-size gate -----------------------------
+
+def test_c0327_okx_futures_inflation_gate_no_100x_on_btc_quarterly():
+    """OKX expiring FUTURES carry instType='FUTURES' (not 'SWAP'), so the
+    v0.15.4.2 defensive override at line 169 silently skipped them.
+    Post-fix the override covers both SWAP and FUTURES.
+    """
+    from services.equity_reconstruction import (
+        _resolve_perp_amt_base,
+        _PerpAmtSource,
+        OKX_FUTURES_CONTRACT_SIZE,
+    )
+
+    broken_cost = 100.0 * 60_000.0
+    recovered, source, _drift = _resolve_perp_amt_base(
+        "BTC/USDT:USDT-251226",
+        amount=100.0,
+        price=60_000.0,
+        cost=broken_cost,
+        inst_type="FUTURES",
+        venue="okx",
+    )
+    expected_base = 100.0 * OKX_FUTURES_CONTRACT_SIZE["BTC/USDT:USDT"]
+    assert recovered == pytest.approx(expected_base, abs=0.0001), recovered
+    assert source == _PerpAmtSource.CTVAL_TABLE, source
+
+
+# ---- C-0326 - Inverse perp safety ---------------------------------------
+
+def test_c0326_inverse_perp_returns_unsupported_sentinel():
+    """Inverse perps (BTC/USD:BTC) carry cost in BASE units, not quote.
+    The resolver must short-circuit with INVERSE_UNSUPPORTED rather than
+    silently corrupt position state via cost/price.
+    """
+    from services.equity_reconstruction import (
+        _resolve_perp_amt_base,
+        _is_inverse_perp,
+        _PerpAmtSource,
+    )
+
+    assert _is_inverse_perp("BTC/USD:BTC")
+    assert _is_inverse_perp("ETH/USD:ETH")
+    assert not _is_inverse_perp("BTC/USDT:USDT")
+    assert not _is_inverse_perp("BTC/USDT")
+
+    _amt, source, _drift = _resolve_perp_amt_base(
+        "BTC/USD:BTC",
+        amount=1.0, price=60_000.0, cost=1.0,
+        inst_type="SWAP", venue="okx",
+    )
+    assert source == _PerpAmtSource.INVERSE_UNSUPPORTED, source
+
+
+def test_c0326_compute_daily_equity_records_inverse_perp_skip():
+    """The replay loop must SKIP inverse-perp fills and surface them via
+    inverse_perp_symbols.
+    """
+    from services.equity_reconstruction import _compute_daily_equity
+
+    d0 = date(2026, 4, 10)
+    inverse_trade = {
+        "timestamp": int(
+            datetime(d0.year, d0.month, d0.day, tzinfo=timezone.utc).timestamp() * 1000
+        ),
+        "symbol": "BTC/USD:BTC",
+        "side": "buy",
+        "amount": 1.0,
+        "price": 60_000.0,
+        "cost": 1.0,
+        "info": {"instType": "SWAP"},
+    }
+    inverse_set: set[str] = set()
+    _rows = _compute_daily_equity(
+        trades=[inverse_trade],
+        deposits=[],
+        withdrawals=[],
+        ohlcv_by_symbol={"BTC": [(d0.isoformat(), 60_000.0)]},
+        coingecko_by_symbol={},
+        start_date=d0,
+        end_date=d0,
+        venue="okx",
+        inverse_perp_symbols=inverse_set,
+    )
+    assert "BTC/USD:BTC" in inverse_set, inverse_set
+
+
+# ---- C-0329 - Unknown OKX perp surfaces silent-inflation signal ---------
+
+def test_c0329_unknown_okx_swap_surfaces_via_unknown_perp_symbols():
+    """An OKX SWAP fill not in the ctVal table must be surfaced via
+    unknown_perp_symbols.
+    """
+    from services.equity_reconstruction import _compute_daily_equity
+
+    d0 = date(2026, 4, 10)
+    unknown_trade = {
+        "timestamp": int(
+            datetime(d0.year, d0.month, d0.day, tzinfo=timezone.utc).timestamp() * 1000
+        ),
+        "symbol": "WLD/USDT:USDT",
+        "side": "buy",
+        "amount": 50.0,
+        "price": 3.0,
+        "cost": 50.0 * 3.0,
+        "info": {"instType": "SWAP"},
+    }
+    unknown_set: set[str] = set()
+    _rows = _compute_daily_equity(
+        trades=[unknown_trade],
+        deposits=[],
+        withdrawals=[],
+        ohlcv_by_symbol={"WLD": [(d0.isoformat(), 3.0)]},
+        coingecko_by_symbol={},
+        start_date=d0,
+        end_date=d0,
+        venue="okx",
+        unknown_perp_symbols=unknown_set,
+    )
+    assert "WLD/USDT:USDT" in unknown_set, unknown_set
+
+
+# ---- C-0330 - Skipped-symbol surfacing -----------------------------------
+
+def test_c0330_skipped_symbols_are_surfaced_when_ohlcv_is_missing():
+    """Symbols with missing OHLCV must be added to skipped_symbols."""
+    from services.equity_reconstruction import _compute_daily_equity
+
+    d0 = date(2026, 4, 10)
+    trade = {
+        "timestamp": int(
+            datetime(d0.year, d0.month, d0.day, tzinfo=timezone.utc).timestamp() * 1000
+        ),
+        "symbol": "ETH/USDT",
+        "side": "buy",
+        "amount": 1.0,
+        "price": 2000.0,
+        "cost": 2000.0,
+    }
+    skipped: set[str] = set()
+    _rows = _compute_daily_equity(
+        trades=[trade],
+        deposits=[],
+        withdrawals=[],
+        ohlcv_by_symbol={},
+        coingecko_by_symbol={},
+        start_date=d0,
+        end_date=d0,
+        venue="binance",
+        skipped_symbols=skipped,
+    )
+    assert "ETH" in skipped, skipped
+
+
+# ---- M-1022 - Bybit perp must NOT use OKX ctVal table -------------------
+
+def test_m1022_bybit_perp_skips_okx_ctval_table():
+    """Bybit V5 also stamps instType='SWAP'. The override must be
+    venue-gated so non-OKX fills always use cost/price.
+    """
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
+
+    recovered, source, _drift = _resolve_perp_amt_base(
+        "ETH/USDT:USDT",
+        amount=10.0,
+        price=2000.0,
+        cost=10.0 * 2000.0,
+        inst_type="SWAP",
+        venue="bybit",
+    )
+    assert recovered == pytest.approx(10.0, abs=0.001), recovered
+    assert source == _PerpAmtSource.COST_DIV_PRICE, source
+
+
+# ---- H-1157 / H-1165 / H-1169 - Canonical PERP breakdown key shape ------
+
+def test_h1157_breakdown_key_for_perp_canonical_shape():
+    from services.equity_reconstruction import (
+        breakdown_key_for_perp,
+        split_holdings_symbol_to_base_quote,
+    )
+
+    assert breakdown_key_for_perp("ETH", "USDT") == "ETH:USDT:PERP"
+    assert breakdown_key_for_perp("btc", "usdt") == "BTC:USDT:PERP"
+
+    base, quote = split_holdings_symbol_to_base_quote("ETHUSDT")
+    assert (base, quote) == ("ETH", "USDT")
+    assert breakdown_key_for_perp(base, quote) == "ETH:USDT:PERP"
+
+    base, quote = split_holdings_symbol_to_base_quote("BTCUSDC")
+    assert (base, quote) == ("BTC", "USDC")
+
+
+# ---- H-1161 / M-1023 - Refresh-job derivative NULL-vs-zero --------------
+
+@pytest.mark.asyncio
+async def test_h1161_refresh_logs_audit_when_perp_upnl_is_none(monkeypatch):
+    """NULL upnl emits perp_upnl_missing audit so the upstream gap is
+    visible.
+    """
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    today = date(2026, 4, 23)
+
+    fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "USDT", today.isoformat()))] = {
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "venue": "okx", "symbol": "USDT", "asof": today.isoformat(),
+        "value_usd": 100_000.0, "holding_type": "spot",
+        "unrealized_pnl_usd": None,
+    }
+    fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "ETHUSDT", today.isoformat()))] = {
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "venue": "okx", "symbol": "ETHUSDT", "asof": today.isoformat(),
+        "value_usd": 50_000.0, "holding_type": "derivative",
+        "unrealized_pnl_usd": None,
+    }
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.close = AsyncMock()
+    _install_fake_preflight(monkeypatch, "okx", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    today_dt = datetime(today.year, today.month, today.day, 5, 0, tzinfo=timezone.utc)
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return today_dt if tz else today_dt.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    result = await run_refresh_allocator_equity_daily_job(
+        {"id": "refresh-null-upnl", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
+    )
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    audit_actions = [c.kwargs.get("action") for c in audit_mock.call_args_list]
+    assert "allocator.equity.perp_upnl_missing" in audit_actions, audit_actions
+
+
+@pytest.mark.asyncio
+async def test_h1161_refresh_keeps_perp_breakdown_entry_when_upnl_is_zero(monkeypatch):
+    """upnl=0.0 (fresh open at entry) must surface a 0-valued breakdown
+    key, not be silently dropped.
+    """
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_audit(monkeypatch)
+
+    today = date(2026, 4, 23)
+    fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "USDT", today.isoformat()))] = {
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "venue": "okx", "symbol": "USDT", "asof": today.isoformat(),
+        "value_usd": 100_000.0, "holding_type": "spot",
+        "unrealized_pnl_usd": None,
+    }
+    fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "ETHUSDT", today.isoformat()))] = {
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "venue": "okx", "symbol": "ETHUSDT", "asof": today.isoformat(),
+        "value_usd": 50_000.0, "holding_type": "derivative",
+        "unrealized_pnl_usd": 0.0,
+    }
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.close = AsyncMock()
+    _install_fake_preflight(monkeypatch, "okx", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    today_dt = datetime(today.year, today.month, today.day, 5, 0, tzinfo=timezone.utc)
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return today_dt if tz else today_dt.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    result = await run_refresh_allocator_equity_daily_job(
+        {"id": "refresh-zero-upnl", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
+    )
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    written = [
+        r for r in fake_supabase.rows_for("allocator_equity_snapshots")
+        if r["asof"] == today.isoformat()
+    ]
+    assert len(written) == 1
+    brk = written[0]["breakdown"]
+    assert brk.get("ETH:USDT:PERP") == 0.0, brk
+
+
+# ---- H-1162 / H-1164 - is_active sibling filter -------------------------
+
+@pytest.mark.asyncio
+async def test_h1162_sibling_with_is_active_false_does_not_block_purge(monkeypatch):
+    """Deactivated sibling (is_active=false) must NOT block the
+    sole-source purge.
+    """
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=9)
+
+    for d in range(10):
+        asof = (start_date + timedelta(days=d)).date().isoformat()
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID, "asof": asof,
+            "value_usd": -777_777.0, "breakdown": {"STALE": -777_777.0},
+            "source": "exchange_primary", "history_depth_months": 24,
+            "reconstructed_at": "2026-04-01T00:00:00+00:00",
+        }
+
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "disconnected_at": None, "sync_status": "ok",
+    }
+    fake_supabase.store[("api_keys", (API_KEY_ID_2,))] = {
+        "id": API_KEY_ID_2, "user_id": ALLOCATOR_ID, "exchange": "okx",
+        "is_active": False,
+        "disconnected_at": None, "sync_status": "ok",
+    }
+
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50_000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + d * day_ms, 50_000.0) for d in range(10)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    result = await run_reconstruct_allocator_history_job({
+        "id": "job-deactivated-sibling",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    })
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    stored = fake_supabase.rows_for("allocator_equity_snapshots")
+    stale = [r for r in stored if r.get("value_usd") == -777_777.0]
+    assert not stale, (
+        f"Got {len(stale)} stale rows: {stored!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_h1162_sibling_with_revoked_sync_status_does_not_block_purge(
+    monkeypatch,
+):
+    """Symmetric: revoked sibling must not block purge either."""
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=9)
+
+    for d in range(10):
+        asof = (start_date + timedelta(days=d)).date().isoformat()
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID, "asof": asof,
+            "value_usd": -555_555.0, "breakdown": {"STALE": -555_555.0},
+            "source": "exchange_primary", "history_depth_months": 24,
+            "reconstructed_at": "2026-04-01T00:00:00+00:00",
+        }
+
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "disconnected_at": None, "sync_status": "ok",
+    }
+    fake_supabase.store[("api_keys", (API_KEY_ID_2,))] = {
+        "id": API_KEY_ID_2, "user_id": ALLOCATOR_ID, "exchange": "okx",
+        "is_active": True, "disconnected_at": None,
+        "sync_status": "revoked",
+    }
+
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50_000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + d * day_ms, 50_000.0) for d in range(10)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    result = await run_reconstruct_allocator_history_job({
+        "id": "job-revoked-sibling",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    })
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    stored = fake_supabase.rows_for("allocator_equity_snapshots")
+    stale = [r for r in stored if r.get("value_usd") == -555_555.0]
+    assert not stale, stored
+
+
+# ---- H-1163 / C-0328 - Sibling-lookup failure surfacing ------------------
+
+@pytest.mark.asyncio
+async def test_h1163_sibling_lookup_exception_returns_fail_safe(monkeypatch):
+    """A sibling-count query exception returns SiblingCheckResult with
+    has_siblings=True and lookup_failed=True (fail-safe).
+    """
+    from services.equity_reconstruction import _allocator_has_other_api_keys
+
+    fake_supabase = FakeSupabaseClient()
+
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "disconnected_at": None, "sync_status": "ok",
+    }
+
+    class _RaisingTable:
+        def select(self, *a, **kw): return self
+        def eq(self, *a, **kw): return self
+        def neq(self, *a, **kw): return self
+        def is_(self, *a, **kw): return self
+        def execute(self):
+            raise RuntimeError("simulated transient 503 from supabase")
+
+    original_table = fake_supabase.table
+
+    def _table(name):
+        if name == "api_keys":
+            return _RaisingTable()
+        return original_table(name)
+
+    monkeypatch.setattr(fake_supabase, "table", _table)
+
+    result = await _allocator_has_other_api_keys(
+        fake_supabase, ALLOCATOR_ID, API_KEY_ID_1,
+    )
+
+    assert bool(result) is True, bool(result)
+    assert result.lookup_failed is True
+    assert result.error_message and "transient" in result.error_message
+
+
+# ---- H-1166 - Purge count semantics --------------------------------------
+
+@pytest.mark.asyncio
+async def test_h1166_purge_count_reflects_actual_deletions(monkeypatch):
+    """_purge_allocator_equity_snapshots returns the actual deletion
+    count via _result_row_count.
+    """
+    from services.equity_reconstruction import _purge_allocator_equity_snapshots
+
+    fake_supabase = FakeSupabaseClient()
+
+    for d in range(5):
+        asof = f"2026-04-{d + 1:02d}"
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID, "asof": asof, "value_usd": 1.0,
+        }
+
+    purged = await _purge_allocator_equity_snapshots(fake_supabase, ALLOCATOR_ID)
+    assert purged == 5, purged
+
+    purged_empty = await _purge_allocator_equity_snapshots(
+        fake_supabase, ALLOCATOR_ID,
+    )
+    assert purged_empty == 0
+
+
+# ---- H-1168 - Distinct audit kinds for no-op vs no-data ------------------
+
+@pytest.mark.asyncio
+async def test_h1168_reconstruct_no_data_emits_distinct_audit_kind(
+    monkeypatch,
+):
+    """Empty replay must emit reconstruct_no_data, distinct from
+    reconstruct_complete.
+    """
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "disconnected_at": None, "sync_status": "ok",
+    }
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(return_value=[])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=[])
+    mock_exchange.fetch_balance = AsyncMock(return_value={"total": {}})
+    mock_exchange.fetch_positions = AsyncMock(return_value=[])
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    result = await run_reconstruct_allocator_history_job({
+        "id": "no-data",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    })
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    actions = [c.kwargs.get("action") for c in audit_mock.call_args_list]
+    assert "allocator.equity.reconstruct_no_data" in actions, actions
+    assert "allocator.equity.reconstruct_complete" not in actions
+
+
+# ---- M-1029 - Purge failure bubbles -------------------------------------
+
+@pytest.mark.asyncio
+async def test_m1029_purge_failure_bubbles_to_outer_handler(monkeypatch):
+    """Purge crash must bubble and result in reconstruct_failed audit."""
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=9)
+
+    for d in range(10):
+        asof = (start_date + timedelta(days=d)).date().isoformat()
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID, "asof": asof,
+            "value_usd": 12345.0, "breakdown": {"USDT": 12345.0},
+        }
+
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "disconnected_at": None, "sync_status": "ok",
+    }
+
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50_000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + d * day_ms, 50_000.0) for d in range(10)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.fetch_balance = AsyncMock(return_value={"total": {}})
+    mock_exchange.fetch_positions = AsyncMock(return_value=[])
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    original_table = fake_supabase.table
+
+    def _table(name):
+        t = original_table(name)
+        if name == "allocator_equity_snapshots":
+            orig_run = t.execute
+            def _wrapped_execute():
+                if t._pending_op == "delete":
+                    raise RuntimeError("simulated delete failure")
+                return orig_run()
+            t.execute = _wrapped_execute
+        return t
+
+    monkeypatch.setattr(fake_supabase, "table", _table)
+    from services import db as db_module
+    monkeypatch.setattr(db_module, "get_supabase", lambda: fake_supabase)
+    monkeypatch.setattr(er, "get_supabase", lambda: fake_supabase, raising=False)
+
+    result = await run_reconstruct_allocator_history_job({
+        "id": "purge-fail",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    })
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.FAILED, result
+
+    actions = [c.kwargs.get("action") for c in audit_mock.call_args_list]
+    assert "allocator.equity.reconstruct_failed" in actions, actions

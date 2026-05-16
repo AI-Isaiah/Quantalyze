@@ -119,7 +119,22 @@ COINGECKO_ID_OVERRIDES: dict[str, str] = {
 # When they diverge, we trust the table.
 #
 # ctVal values cross-checked against OKX's public `/api/v5/public/
-# instruments?instType=SWAP` on 2026-04-24.
+# instruments?instType=SWAP` on 2026-04-24. Stamp the verification date
+# in a module-level constant so a future drift audit can spot the table
+# going stale (see M-1024).
+OKX_CTVAL_LAST_VERIFIED_AT: str = "2026-04-24"
+
+# Magic-number → named constant. 5% disagreement between cost/price and
+# the explicit ctVal table is the threshold for "ccxt's safe_trade
+# silently dropped contractSize." Below 5% the two paths agree closely
+# enough that the cost/price branch wins (fixture compat). Above the
+# threshold we trust the table. See M-1024 / M-1031 / M-1032.
+PERP_AMT_CTVAL_DIVERGENCE_THRESHOLD: float = 0.05
+# Soft-warn band: between 1% and the hard threshold we still pick
+# cost/price but emit an audit signal so table-drift surfaces before
+# the curve goes visibly wrong.
+PERP_AMT_CTVAL_DRIFT_WARN_THRESHOLD: float = 0.01
+
 OKX_PERP_CONTRACT_SIZE: dict[str, float] = {
     "BTC/USDT:USDT": 0.01,
     "ETH/USDT:USDT": 0.1,
@@ -138,46 +153,176 @@ OKX_PERP_CONTRACT_SIZE: dict[str, float] = {
 }
 
 
+# Per-symbol ctVal map for OKX expiring FUTURES (instType=FUTURES). OKX
+# quarterly futures use the same ctVal as their SWAP counterparts (BTC
+# 0.01, ETH 0.1, etc — verified against OKX public instruments endpoint
+# 2026-04-24). The original v0.15.4.x defensive override gated on
+# instType=='SWAP' ONLY, so FUTURES fills silently reverted to the
+# cost/price path and re-opened the v0.15.4.0 100x inflation bug for
+# any user trading dated futures. See C-0327 / H-1158.
+OKX_FUTURES_CONTRACT_SIZE: dict[str, float] = dict(OKX_PERP_CONTRACT_SIZE)
+
+# Linear-perp instTypes that participate in the defensive ctVal override.
+# Both SWAP (perpetual) and FUTURES (expiring) use the same ctVal scale
+# on OKX, and ccxt's symbol shape catches both via `:`-in-raw_symbol.
+_OKX_LINEAR_INST_TYPES: frozenset[str] = frozenset({"SWAP", "FUTURES"})
+
+
+class _PerpAmtSource:
+    """String enum for _resolve_perp_amt_base provenance.
+
+    Kept as a plain class with string class-vars so it stays cheap to
+    log/serialise into audit metadata, while giving callers a typed
+    constant to compare against (vs raw string literals). See M-1032.
+    """
+
+    COST_DIV_PRICE: str = "cost_div_price"
+    CTVAL_TABLE: str = "ctval_table"
+    FALLBACK_AMOUNT: str = "fallback_amount"
+    INVERSE_UNSUPPORTED: str = "inverse_unsupported"
+
+
+def _is_inverse_perp(raw_symbol: str) -> bool:
+    """OKX/Bybit inverse perps use BTC/USD:BTC (settle ccy == base ccy).
+
+    Linear perps settle in the quote currency (USDT), so the suffix
+    after `:` is the quote, e.g. BTC/USDT:USDT. Inverse contracts
+    settle in the base currency (the coin itself), so the suffix is
+    the base — BTC/USD:BTC, ETH/USD:ETH. See C-0326.
+    """
+    if "/" not in raw_symbol or ":" not in raw_symbol:
+        return False
+    head, settle = raw_symbol.split(":", 1)
+    base = head.split("/")[0].upper()
+    return settle.split("-")[0].upper() == base  # tolerate FUTURES suffix
+
+
+def breakdown_key_for_perp(base: str, quote: str) -> str:
+    """Single source of truth for the perp breakdown key shape.
+
+    Both production paths (reconstruct + refresh) write derivative
+    contributions into ``allocator_equity_snapshots.breakdown`` under
+    this canonical 3-part key. Pre-fix the refresh path emitted
+    ``{symbol}:PERP`` while reconstruct emitted ``{BASE}:{QUOTE}:PERP``,
+    so the same logical position appeared under TWO different keys
+    depending on which path produced the row (H-1157 / H-1165 / H-1169).
+    Centralising the format eliminates the schema fork.
+    """
+    return f"{base.upper()}:{quote.upper()}:PERP"
+
+
+def split_holdings_symbol_to_base_quote(symbol: str) -> tuple[str, str]:
+    """Best-effort split of a raw ``allocator_holdings.symbol`` value
+    (e.g. ``"ETHUSDT"``) into its base + quote components.
+
+    The refresh job receives un-normalised symbols from the positions
+    poller (allocator_positions.py stores them stripped — no ``/``).
+    For the canonical PERP breakdown key we need both pieces. We match
+    against the same stablecoin set used elsewhere, scanning longest-
+    first so ``USDC`` doesn't accidentally swallow ``USDCETH`` shape
+    inputs. Returns ``(symbol_upper, "USDT")`` as a safe fallback when
+    no known stablecoin suffix is found, matching the legacy assumption
+    that perp settle ccy defaults to USDT.
+    """
+    s = (symbol or "").upper()
+    if not s:
+        return "", "USDT"
+    # Stablecoins ordered longest-first so USDC/BUSD/etc match before USD.
+    for q in sorted(STABLECOINS, key=len, reverse=True):
+        if s.endswith(q) and len(s) > len(q):
+            return s[: -len(q)], q
+    return s, "USDT"
+
+
 def _resolve_perp_amt_base(
     raw_symbol: str, amount: float, price: float, cost: float,
     inst_type: str | None = None,
-) -> float:
+    venue: str | None = None,
+) -> tuple[float, str, float | None]:
     """Recover base-unit trade size for a linear perp.
 
-    Prefers `cost / price` when cost is trustworthy (i.e. ccxt's
-    safe_trade did apply contractSize). Falls back to the explicit
-    OKX_PERP_CONTRACT_SIZE table whenever the two disagree by more
-    than 5% — that's the signal safe_trade didn't have a market with
-    contractSize available and returned `cost = amount × price`, which
-    would silently leak contract counts into the replay state.
+    Returns ``(amt_base, source, relative_err)``. ``source`` records
+    which branch produced the value (see ``_PerpAmtSource``). ``relative_err``
+    is the cost/price-vs-ctval_table disagreement when both are known,
+    else None.
 
-    The defensive override only fires when the trade carries the real
-    OKX `info.instType = "SWAP"` stamp. Synthetic test fixtures that
-    treat amount as base units (implicit contractSize = 1) never carry
-    that stamp, so they keep the legacy behaviour and aren't bitten by
-    the symbol collision with the ctVal table.
+    Prefers ``cost / price`` when cost is trustworthy (i.e. ccxt's
+    safe_trade did apply contractSize). Falls back to the explicit
+    OKX_PERP_CONTRACT_SIZE / OKX_FUTURES_CONTRACT_SIZE table whenever
+    the two disagree by more than 5% — that's the signal safe_trade
+    didn't have a market with contractSize available and returned
+    ``cost = amount × price``, which would silently leak contract
+    counts into the replay state.
+
+    The defensive override fires for real OKX SWAP **and** FUTURES
+    fills (both stamp ``info.instType``). Earlier revisions gated on
+    SWAP only and re-opened the 100x inflation bug for any user
+    trading expiring futures — see C-0327. Synthetic test fixtures
+    without ``info.instType`` keep the legacy cost/price path
+    (contractSize=1 implicit), so they aren't bitten by the symbol
+    collision with the ctVal table.
+
+    Inverse contracts (BTC/USD:BTC) settle in the base currency, so
+    ccxt reports ``cost`` in BASE units, not quote. ``cost / price``
+    is meaningless for inverse — see C-0326. We refuse to guess and
+    raise/return a sentinel source so the caller surfaces the missing
+    coverage rather than letting a silently-wrong amt_base poison the
+    replay.
+
+    Venue gating (H-1158 / M-1022): the OKX_PERP_CONTRACT_SIZE table
+    is OKX-specific. Bybit V5 unified-margin payloads also stamp
+    instType=SWAP, so the lookup must be gated on venue=='okx' to
+    avoid applying OKX ctVal values to a Bybit trade where the
+    contract scale may differ.
 
     Backward-compatible for fixtures that pass cost = amount × price
     (contractSize = 1 implicit): cost/price == amount, inst_type is
-    None, we return amount.
+    None, we return ``(amount, COST_DIV_PRICE, None)``.
     """
     if price <= 0:
-        return amount  # caller already skips this path
+        # Caller already skips this path; return amount with no
+        # provenance signal.
+        return amount, _PerpAmtSource.FALLBACK_AMOUNT, None
+
+    # Inverse perps need a separate cost-handling rule. Return the
+    # INVERSE_UNSUPPORTED sentinel so the replay loop can audit the
+    # skip rather than silently corrupting position state with cost/price
+    # values denominated in the wrong currency.
+    if _is_inverse_perp(raw_symbol):
+        return 0.0, _PerpAmtSource.INVERSE_UNSUPPORTED, None
+
     amt_from_cost = (cost / price) if cost > 0 else amount
-    # Only apply the defensive override for REAL OKX SWAP fills. Synthetic
-    # fixtures without info.instType stay on the legacy cost/price path.
-    if not inst_type or str(inst_type).upper() != "SWAP":
-        return amt_from_cost
-    ctval = OKX_PERP_CONTRACT_SIZE.get(raw_symbol)
+
+    # Only apply the defensive override for REAL OKX SWAP/FUTURES fills.
+    # Synthetic fixtures without info.instType stay on the legacy
+    # cost/price path. Bybit fills (venue!='okx') also bypass the table
+    # even when instType reads SWAP — OKX's ctVal table doesn't generalise.
+    if not inst_type or str(inst_type).upper() not in _OKX_LINEAR_INST_TYPES:
+        return amt_from_cost, _PerpAmtSource.COST_DIV_PRICE, None
+    if venue is not None and str(venue).lower() != "okx":
+        return amt_from_cost, _PerpAmtSource.COST_DIV_PRICE, None
+
+    if str(inst_type).upper() == "FUTURES":
+        ctval = OKX_FUTURES_CONTRACT_SIZE.get(raw_symbol)
+        if ctval is None:
+            # Strip optional `-YYMMDD` suffix that ccxt appends to dated
+            # futures (BTC/USDT:USDT-251226) before lookup.
+            base_key = raw_symbol.split("-", 1)[0]
+            ctval = OKX_FUTURES_CONTRACT_SIZE.get(base_key)
+    else:
+        ctval = OKX_PERP_CONTRACT_SIZE.get(raw_symbol)
+
     if ctval is None:
-        return amt_from_cost
+        # No defensive cover — caller should audit this as an unknown
+        # perp. See C-0329.
+        return amt_from_cost, _PerpAmtSource.COST_DIV_PRICE, None
     amt_explicit = amount * ctval
     if amt_explicit <= 0:
-        return amt_from_cost
+        return amt_from_cost, _PerpAmtSource.COST_DIV_PRICE, None
     relative_err = abs(amt_from_cost - amt_explicit) / amt_explicit
-    if relative_err > 0.05:
-        return amt_explicit
-    return amt_from_cost
+    if relative_err > PERP_AMT_CTVAL_DIVERGENCE_THRESHOLD:
+        return amt_explicit, _PerpAmtSource.CTVAL_TABLE, relative_err
+    return amt_from_cost, _PerpAmtSource.COST_DIV_PRICE, relative_err
 
 
 # ---------------------------------------------------------------------------
@@ -241,14 +386,20 @@ async def _rate_limit_sleep(exchange: Any) -> None:
     receive — reach for the advertised per-call rateLimit attribute and
     sleep for that many ms. Falls through silently on AsyncMock / test
     doubles that have no rateLimit attribute so pytest stays fast.
+
+    M-1030: narrow the swallow to ``TypeError``/``ValueError`` so
+    ``asyncio.CancelledError`` (which subclasses ``BaseException`` on
+    3.8+, but inherits from ``Exception`` on older interpreters) is
+    NOT caught — workers that hit SIGTERM mid-sleep must propagate
+    the cancellation so kubectl rollouts don't stall on a stuck loop.
     """
     ms = getattr(exchange, "rateLimit", None)
     if not isinstance(ms, (int, float)) or ms <= 0:
         return
     try:
         await asyncio.sleep(float(ms) / 1000.0)
-    except Exception:  # pragma: no cover
-        pass
+    except (TypeError, ValueError) as exc:  # pragma: no cover
+        logger.warning("_rate_limit_sleep skipped: %s", exc)
 
 
 async def _fetch_trades_with_pagination(
@@ -486,9 +637,11 @@ async def _fetch_coingecko_daily_closes(
 
     # Rate-limit throttle to stay under CoinGecko's free-tier 30 RPM limit.
     # Tests monkeypatch COINGECKO_MIN_SLEEP_SECS=0 to keep pytest fast.
+    # Narrow swallow (M-1030 sibling): CancelledError must propagate so
+    # workers honour SIGTERM mid-throttle.
     try:
         await asyncio.sleep(COINGECKO_MIN_SLEEP_SECS)
-    except Exception:  # pragma: no cover
+    except (TypeError, ValueError):  # pragma: no cover
         pass
 
     prices = data.get("prices") or []
@@ -577,6 +730,11 @@ def _compute_daily_equity(
     coingecko_by_symbol: dict[str, dict[str, float]],
     start_date: date,
     end_date: date,
+    venue: str | None = None,
+    skipped_symbols: set[str] | None = None,
+    unknown_perp_symbols: set[str] | None = None,
+    inverse_perp_symbols: set[str] | None = None,
+    ctval_drift_warnings: list[dict] | None = None,
 ) -> list[dict]:
     """Replay trades + transfers forward; mark each day by close × quantity.
 
@@ -584,6 +742,13 @@ def _compute_daily_equity(
     'exchange_primary' if all symbols priced from exchange OHLCV;
     'coingecko_fallback' if ALL pricing came from CoinGecko;
     'mixed' if partial.
+
+    Optional out-parameter sets/lists (``skipped_symbols``,
+    ``unknown_perp_symbols``, ``inverse_perp_symbols``,
+    ``ctval_drift_warnings``) collect observability signals across the
+    replay so the caller can surface them in ``reconstruct_complete``
+    audit metadata — closing the silent-skip gaps C-0330, C-0329,
+    C-0326, and M-1024.
 
     Perpetual vs spot replay (M078):
         Spot trades mutate base/quote quantities the classical way — buying
@@ -733,9 +898,63 @@ def _compute_daily_equity(
                     # fall back to amount × ctVal. See _resolve_perp_amt_base
                     # for the exact rule + fixture-compat carve-out.
                     inst_type = (ev.get("info") or {}).get("instType")
-                    amt_base = _resolve_perp_amt_base(
-                        raw_symbol, amt, price, cost, inst_type=inst_type,
+                    amt_base, amt_src, drift = _resolve_perp_amt_base(
+                        raw_symbol, amt, price, cost,
+                        inst_type=inst_type, venue=venue,
                     )
+                    # Surface observability for the silent-fallback edge cases
+                    # the v0.15.4.x audit chain identified as load-bearing.
+                    if amt_src == _PerpAmtSource.INVERSE_UNSUPPORTED:
+                        # C-0326: inverse perp cost field is BASE-denominated;
+                        # cost/price returns a wrong number. Skip the fill
+                        # and let the audit surface the unsupported coverage
+                        # rather than silently corrupting position state.
+                        if inverse_perp_symbols is not None:
+                            inverse_perp_symbols.add(raw_symbol)
+                        logger.warning(
+                            "equity_reconstruction: skipping inverse perp fill "
+                            "(unsupported cost shape) venue=%s symbol=%s amount=%s",
+                            venue, raw_symbol, amt,
+                        )
+                        continue
+                    if (
+                        amt_src == _PerpAmtSource.COST_DIV_PRICE
+                        and inst_type
+                        and str(inst_type).upper() in _OKX_LINEAR_INST_TYPES
+                        and (venue is None or str(venue).lower() == "okx")
+                        and drift is None
+                    ):
+                        # C-0329: OKX SWAP/FUTURES fill that DIDN'T match
+                        # the ctVal table at all. The v0.15.4.2 narrative
+                        # explicitly flags this as the silent-inflation
+                        # path. Record it so the audit log surfaces the
+                        # coverage gap.
+                        if unknown_perp_symbols is not None:
+                            unknown_perp_symbols.add(raw_symbol)
+                        logger.warning(
+                            "equity_reconstruction: OKX %s symbol %s missing from "
+                            "OKX_PERP/FUTURES_CONTRACT_SIZE — falling back to "
+                            "cost/price, which can leak contract counts if "
+                            "ccxt failed to apply contractSize",
+                            inst_type, raw_symbol,
+                        )
+                    if (
+                        drift is not None
+                        and drift > PERP_AMT_CTVAL_DRIFT_WARN_THRESHOLD
+                        and drift <= PERP_AMT_CTVAL_DIVERGENCE_THRESHOLD
+                        and ctval_drift_warnings is not None
+                    ):
+                        # M-1024 / M-1031: cost/price and table agree
+                        # closely but not exactly. Surface the divergence
+                        # before it crosses the hard 5% threshold so a
+                        # stale ctVal entry shows up before the curve does.
+                        ctval_drift_warnings.append({
+                            "raw_symbol": raw_symbol,
+                            "venue": venue,
+                            "inst_type": inst_type,
+                            "relative_err": round(drift, 4),
+                            "amt_source": amt_src,
+                        })
                     signed = amt_base if side == "buy" else -amt_base
                     pos = perp_positions.get(raw_symbol, {"size": 0.0, "avg_entry": 0.0})
                     cur_size = pos["size"]
@@ -804,7 +1023,14 @@ def _compute_daily_equity(
             else:
                 px, src = _price_on(sym, iso)
                 if px is None:
-                    # Skip symbols with no price — keeps the chart stable
+                    # C-0330: skipping a symbol because of an OHLCV gap is
+                    # NOT the same as the symbol having no position. Surface
+                    # the skip via the caller-supplied set so the audit log
+                    # can distinguish "every symbol had a price gap" from
+                    # "truly empty replay" — without the signal a missing
+                    # OHLCV day silently mimics the v0.15.3.x V-shape bug.
+                    if skipped_symbols is not None:
+                        skipped_symbols.add(sym)
                     continue
             usd = qty * px
             breakdown[sym] = round(usd, 2)
@@ -815,9 +1041,10 @@ def _compute_daily_equity(
                 used_coingecko = True
 
         # Mark open perp positions to the day's close. Unrealised PnL rolls
-        # into total_usd and is attributed in the breakdown under a
-        # distinct key (`{BASE}:{QUOTE}:PERP`) so it doesn't collide with a
-        # spot holding of the same base currency.
+        # into total_usd and is attributed in the breakdown under the
+        # canonical ``BASE:QUOTE:PERP`` key (see ``breakdown_key_for_perp``)
+        # so it doesn't collide with a spot holding of the same base
+        # currency and matches the refresh-path key shape (H-1157 / H-1165).
         for perp_sym, pos in perp_positions.items():
             size = pos.get("size") or 0.0
             avg_entry = pos.get("avg_entry") or 0.0
@@ -830,11 +1057,14 @@ def _compute_daily_equity(
             )
             px, src = _price_on(base, iso)
             if px is None:
+                # C-0330: same symbol-skip surfacing applies to perp marks.
+                if skipped_symbols is not None:
+                    skipped_symbols.add(base)
                 continue
             unrealized = size * (px - avg_entry)
             if unrealized == 0.0:
                 continue
-            key = f"{base}:{quote_sym}:PERP"
+            key = breakdown_key_for_perp(base, quote_sym)
             breakdown[key] = round(breakdown.get(key, 0.0) + unrealized, 2)
             total += unrealized
             if src == "exchange_primary":
@@ -862,6 +1092,30 @@ def _compute_daily_equity(
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
+
+
+def _result_row_count(res: Any) -> int:
+    """Return the row count from a supabase-py upsert/delete result.
+
+    Prefers ``res.count`` when present (postgrest returns it when the
+    request asked for ``count='exact'`` or ``Prefer: count=exact``).
+    Falls back to ``len(res.data)`` for backwards compat with code
+    paths that don't request an explicit count (the supabase-py
+    upsert builder doesn't currently expose ``count=`` kwargs, and
+    delete builders only return data under
+    ``Prefer: return=representation``).
+
+    Either signal collapses to zero on a clean DO-NOTHING upsert or a
+    no-row delete, which is what the audit-log contract demands —
+    pre-fix code returned ``len(stamped)`` unconditionally and made
+    the audit log lie about ``days_written`` (PR #68 / H-1159).
+    """
+    count = getattr(res, "count", None)
+    if isinstance(count, int):
+        return max(0, count)
+    data = getattr(res, "data", None) or []
+    return len(data)
+
 
 async def persist_equity_snapshots(
     supabase: Any,
@@ -921,14 +1175,49 @@ async def persist_equity_snapshots(
     # while the dashboard showed zero change. Callers now see the real
     # count and can surface "reconstruct_complete but no rows written"
     # as a user-actionable signal.
+    #
+    # /investigate 2026-05-15 (H-1159 / M-1025): prefer `res.count` when
+    # PostgREST returns it (we'd ideally request count='exact' but
+    # supabase-py doesn't accept that on the upsert builder, so we
+    # opportunistically use `count` if present and fall back to
+    # `len(data)`). Either signal collapses to zero on a clean DO-NOTHING
+    # so the audit-log contract holds.
     res = await db_execute(_upsert)
-    return len(getattr(res, "data", None) or [])
+    return _result_row_count(res)
+
+
+class SiblingCheckResult:
+    """Tri-state result of ``_allocator_has_other_api_keys`` (M-1027).
+
+    The boolean ``has_siblings`` is what the caller's purge gate
+    actually reads, so existing call sites continue to work via
+    ``bool(result)``. ``lookup_failed`` distinguishes the fail-safe
+    'pretend has siblings' state from a confirmed empty sibling set,
+    which we surface to the audit log so a transient DB outage doesn't
+    look like a healthy multi-key allocator.
+    """
+
+    __slots__ = ("has_siblings", "lookup_failed", "error_message")
+
+    def __init__(
+        self,
+        has_siblings: bool,
+        lookup_failed: bool = False,
+        error_message: str | None = None,
+    ) -> None:
+        self.has_siblings = has_siblings
+        self.lookup_failed = lookup_failed
+        self.error_message = error_message
+
+    def __bool__(self) -> bool:
+        return self.has_siblings
 
 
 async def _allocator_has_other_api_keys(
     supabase: Any, allocator_id: str, api_key_id: str,
-) -> bool:
-    """Does this allocator own any CONNECTED api_keys OTHER than `api_key_id`?
+) -> SiblingCheckResult:
+    """Does this allocator own any CONNECTED, ACTIVE api_keys OTHER than
+    `api_key_id`?
 
     The reconstruction-upsert path uses ON CONFLICT DO NOTHING to protect
     multi-key aggregation (threat T-07-V5b) — the first key to land for a
@@ -939,24 +1228,29 @@ async def _allocator_has_other_api_keys(
     allocator's sole authoritative source, the fresh reconstruct should
     own the series outright.
 
-    Soft-disconnected keys (migration 075: disconnected_at IS NOT NULL)
-    MUST be excluded from the sibling count. Their rows persist in
-    api_keys for audit continuity, but the worker stopped syncing them
-    the moment they were disconnected, so they cannot produce new
-    snapshots. Counting them as siblings re-opens the "I uploaded a
-    fresh key but my stale V-shaped curve persists" trap that v0.15.3.3
-    was meant to close. Mirrors the worker-dispatch filter in migrations
-    075 (enqueue_poll_allocator_positions_for_all_keys, line 193-196;
-    enqueue_refresh_allocator_equity_for_all, line 244-248).
+    Soft-disconnected keys (migration 075: disconnected_at IS NOT NULL),
+    deactivated keys (is_active = false), and revoked keys
+    (sync_status = 'revoked') MUST be excluded from the sibling count.
+    Their rows persist in api_keys for audit continuity, but the worker
+    stopped syncing them, so they cannot produce new snapshots. Counting
+    them as siblings re-opens the "I uploaded a fresh key but my stale
+    V-shaped curve persists" trap that v0.15.3.3 was meant to close.
+    Mirrors the worker-dispatch filter in migration 075 byte-for-byte —
+    enqueue_poll_allocator_positions_for_all_keys (line 193-196) and
+    enqueue_refresh_allocator_equity_for_all (line 244-248) both filter
+    ``WHERE is_active = true AND sync_status IS DISTINCT FROM 'revoked'
+    AND disconnected_at IS NULL``. See H-1162 / H-1164.
 
     api_keys has FK cascade to compute_jobs (migration 066 STEP 2) — if a
     prior key was hard-deleted, its api_keys row is gone. So checking
     connected api_keys presence is a sufficient proxy for "are there
     OTHER keys whose data we must not clobber".
 
-    Returns True when at least one connected sibling exists. Defaults to
-    True on query failure (fail-safe: preserve DO NOTHING rather than
-    risk wiping legitimate multi-key data on a transient read error).
+    Returns ``SiblingCheckResult``. ``bool(result)`` is True when at
+    least one connected sibling exists OR when the lookup raised
+    (fail-safe: preserve DO NOTHING rather than risk wiping legitimate
+    multi-key data on a transient read error). ``.lookup_failed`` is
+    True in the second case so the caller can audit the latch.
     """
     def _sel():
         return (
@@ -964,6 +1258,8 @@ async def _allocator_has_other_api_keys(
             .select("id", count="exact", head=True)
             .eq("user_id", allocator_id)
             .neq("id", api_key_id)
+            .eq("is_active", True)
+            .neq("sync_status", "revoked")
             .is_("disconnected_at", "null")
             .execute()
         )
@@ -976,12 +1272,16 @@ async def _allocator_has_other_api_keys(
             "defaulting to multi-key safe (no snapshot wipe)",
             allocator_id, api_key_id, exc,
         )
-        return True
+        return SiblingCheckResult(
+            has_siblings=True,
+            lookup_failed=True,
+            error_message=str(exc)[:300],
+        )
     count = getattr(res, "count", None)
     if count is not None:
-        return int(count) > 0
+        return SiblingCheckResult(has_siblings=int(count) > 0)
     data = getattr(res, "data", None) or []
-    return len(data) > 0
+    return SiblingCheckResult(has_siblings=len(data) > 0)
 
 
 async def _purge_allocator_equity_snapshots(
@@ -993,6 +1293,15 @@ async def _purge_allocator_equity_snapshots(
     the number of rows deleted for audit-log surfacing. Failures bubble so
     the handler's outer except-block classifies + records them rather than
     silently proceeding with a polluted upsert.
+
+    /investigate 2026-05-15 (H-1166 / M-1033): supabase-py's
+    ``.delete().execute()`` defaults to ``Prefer: return=representation``
+    so ``data`` lists the deleted rows under normal operation, but the
+    list is bounded by PostgREST's response-size limits and can flip to
+    empty on older client versions. Use ``_result_row_count`` so the
+    audit log doesn't silently report ``stale_snapshots_purged=0`` when
+    a real purge ran (the exact gap PR #68 already closed for
+    ``persist_equity_snapshots``).
     """
     def _del():
         return (
@@ -1003,8 +1312,7 @@ async def _purge_allocator_equity_snapshots(
         )
 
     res = await db_execute(_del)
-    data = getattr(res, "data", None) or []
-    return len(data)
+    return _result_row_count(res)
 
 
 # ---------------------------------------------------------------------------
@@ -1086,9 +1394,23 @@ async def _fetch_and_price_window(
     supabase: Any,
     start_date: date,
     end_date: date,
-) -> tuple[list[dict], bool]:
+) -> tuple[list[dict], bool, dict]:
     """Fetch trades + transfers + OHLCV in [start_date, end_date] and build
-    the per-day equity rows. Returns (rows, hit_okx_terminus)."""
+    the per-day equity rows. Returns ``(rows, hit_okx_terminus, telemetry)``.
+
+    ``telemetry`` is a dict of observability signals collected during the
+    replay so the caller can include them in ``reconstruct_complete``
+    audit metadata. Keys (all best-effort, may be missing):
+
+    - ``skipped_symbols``: list[str] — symbols dropped from at least one
+      day because their price lookup returned None.
+    - ``unknown_perp_symbols``: list[str] — OKX SWAP/FUTURES symbols not
+      covered by the defensive ctVal table (silent-inflation risk).
+    - ``inverse_perp_symbols``: list[str] — inverse perps that landed
+      under an unsupported cost shape.
+    - ``ctval_drift_warnings``: list[dict] — soft drift signals where
+      cost/price disagrees with the table by 1-5%.
+    """
     start_ms = int(
         datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc).timestamp() * 1000
     )
@@ -1176,10 +1498,19 @@ async def _fetch_and_price_window(
                 needed = {iso: price for iso, price in closes}
         coingecko_by_symbol[sym] = needed
 
+    skipped_symbols: set[str] = set()
+    unknown_perp_symbols: set[str] = set()
+    inverse_perp_symbols: set[str] = set()
+    ctval_drift_warnings: list[dict] = []
     rows = _compute_daily_equity(
         trades, deposits, withdrawals,
         ohlcv_by_symbol, coingecko_by_symbol,
         start_date, end_date,
+        venue=venue,
+        skipped_symbols=skipped_symbols,
+        unknown_perp_symbols=unknown_perp_symbols,
+        inverse_perp_symbols=inverse_perp_symbols,
+        ctval_drift_warnings=ctval_drift_warnings,
     )
 
     # /investigate 2026-04-24 (v0.15.4.2): anchor the reconstructed series
@@ -1211,7 +1542,13 @@ async def _fetch_and_price_window(
                 )
                 r["breakdown"] = _cap_breakdown(bd)
 
-    return rows, hit_terminus
+    telemetry = {
+        "skipped_symbols": sorted(skipped_symbols),
+        "unknown_perp_symbols": sorted(unknown_perp_symbols),
+        "inverse_perp_symbols": sorted(inverse_perp_symbols),
+        "ctval_drift_warnings": ctval_drift_warnings,
+    }
+    return rows, hit_terminus, telemetry
 
 
 async def _fetch_current_equity(exchange: Any, venue: str) -> float | None:
@@ -1348,7 +1685,7 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
 
     try:
         try:
-            rows, hit_terminus = await _fetch_and_price_window(
+            rows, hit_terminus, telemetry = await _fetch_and_price_window(
                 ctx.exchange, venue, ctx.supabase, start_date, end_date,
             )
         except ccxt.RateLimitExceeded as exc:
@@ -1366,6 +1703,15 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
                 error_kind=error_kind,
             )
         except Exception as exc:  # noqa: BLE001
+            # H-1172: log the full traceback BEFORE sanitisation so the
+            # original error reaches stdout/sentry. The 500-char audit
+            # event keeps a sanitised summary for the trail; the logger
+            # call captures the unredacted root cause for ops.
+            logger.exception(
+                "reconstruct_allocator_history unhandled exception "
+                "allocator=%s key=%s venue=%s",
+                allocator_id, api_key_id, venue,
+            )
             error_kind, msg = classify_exception(exc)
             sanitized = msg[:500]
             _emit_audit(
@@ -1401,21 +1747,91 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
     # wide open). Purge-then-upsert breaks the deadlock cleanly without
     # regressing the T-07-V5b multi-key aggregation invariant — any
     # allocator with sibling keys keeps DO NOTHING semantics below.
-    purged = 0
-    if not await _allocator_has_other_api_keys(ctx.supabase, allocator_id, api_key_id):
-        purged = await _purge_allocator_equity_snapshots(ctx.supabase, allocator_id)
+    # M-1029: wrap purge + persist in an outer try so a delete failure
+    # bubbles to ``reconstruct_failed`` instead of leaving the worker
+    # with a corrupted half-state (purge crashed → fresh rows would
+    # DO-NOTHING against leftover stale rows). The docstring on
+    # ``_purge_allocator_equity_snapshots`` already promises bubble
+    # semantics; this is the catch site that closes the contract.
+    try:
+        purged = 0
+        sibling_check = await _allocator_has_other_api_keys(
+            ctx.supabase, allocator_id, api_key_id,
+        )
+        # C-0328 / M-1028: surface sibling-lookup failures into the audit
+        # trail. The boolean fail-safe (return True ⇒ skip purge) preserves
+        # data integrity but is invisible to operators — without an event
+        # the user's stale curve persists indefinitely with no signal that
+        # the recovery path latched on a DB error.
+        if sibling_check.lookup_failed:
+            _emit_audit(
+                allocator_id, api_key_id,
+                "allocator.equity.sibling_lookup_failed",
+                {
+                    "error_message": sibling_check.error_message,
+                    "venue": venue,
+                    "behavior": "fail_safe_skip_purge",
+                },
+            )
+        if not sibling_check.has_siblings:
+            purged = await _purge_allocator_equity_snapshots(
+                ctx.supabase, allocator_id,
+            )
 
-    count = await persist_equity_snapshots(ctx.supabase, rows, allocator_id, depth_months)
+        count = await persist_equity_snapshots(
+            ctx.supabase, rows, allocator_id, depth_months,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Same surfacing pattern as the fetch-window catch — log full
+        # traceback for sentry/stdout, then sanitised audit + FAILED
+        # outcome so the worker retries with backoff. H-1172.
+        logger.exception(
+            "reconstruct_allocator_history persist phase unhandled exception "
+            "allocator=%s key=%s venue=%s",
+            allocator_id, api_key_id, venue,
+        )
+        error_kind, msg = classify_exception(exc)
+        sanitized = msg[:500]
+        _emit_audit(
+            allocator_id, api_key_id,
+            "allocator.equity.reconstruct_failed",
+            {"error_kind": error_kind, "sanitized_message": sanitized},
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=sanitized,
+            error_kind=error_kind,
+        )
+
+    # H-1168: distinguish a clean DO-NOTHING idempotent re-run from a
+    # silent regression. ``days_written == 0`` with rows in hand is
+    # the exact pattern PR #68's audit-log story said it would expose;
+    # tag the event so support can spot it.
+    if count == 0 and rows:
+        audit_kind = "allocator.equity.reconstruct_unexpected_noop"
+    elif count == 0 and not rows:
+        audit_kind = "allocator.equity.reconstruct_no_data"
+    else:
+        audit_kind = "allocator.equity.reconstruct_complete"
 
     _emit_audit(
         allocator_id, api_key_id,
-        "allocator.equity.reconstruct_complete",
+        audit_kind,
         {
             "days_written": count,
             "stale_snapshots_purged": purged,
             "history_depth_months": depth_months,
             "okx_terminus_hit": hit_terminus,
             "venue": venue,
+            "sibling_check_failed": sibling_check.lookup_failed,
+            # Surface replay-time observability (C-0326/9/30, M-1024).
+            # Keep the lists bounded by audit_metadata size by capping
+            # each at 50 entries; the sets only ever grow per-symbol so
+            # 50 is sufficient even for a noisy account.
+            "skipped_symbols": telemetry["skipped_symbols"][:50],
+            "unknown_perp_symbols": telemetry["unknown_perp_symbols"][:50],
+            "inverse_perp_symbols": telemetry["inverse_perp_symbols"][:50],
+            "ctval_drift_warnings": telemetry["ctval_drift_warnings"][:50],
         },
     )
     logger.info(
@@ -1470,10 +1886,45 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
                 continue
             htype = (h.get("holding_type") or "").lower()
             if htype == "derivative":
-                upnl = float(h.get("unrealized_pnl_usd") or 0.0)
-                if upnl == 0.0:
+                # H-1161 / M-1023: distinguish "field is None" (the poll
+                # job failed to populate the row) from "MTM legitimately
+                # equals zero" (fresh open at entry, perfect hedge).
+                # Pre-fix `float(... or 0.0)` then `if upnl == 0.0:
+                # continue` collapsed both states into a silent drop —
+                # the dashboard rendered "no derivative activity" for
+                # users who legitimately held perps. Now: NULL → log +
+                # skip; 0.0 → keep the breakdown key with value 0 so
+                # the position is visible even when there's no MTM
+                # signal yet.
+                upnl_raw = h.get("unrealized_pnl_usd")
+                if upnl_raw is None:
+                    logger.info(
+                        "refresh: derivative holding missing "
+                        "unrealized_pnl_usd allocator=%s symbol=%s "
+                        "venue=%s — skipping",
+                        allocator_id, sym, venue,
+                    )
+                    _emit_audit(
+                        allocator_id, api_key_id,
+                        "allocator.equity.perp_upnl_missing",
+                        {"symbol": sym, "venue": venue},
+                    )
                     continue
-                key = f"{sym}:PERP"
+                try:
+                    upnl = float(upnl_raw)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "refresh: derivative holding has non-numeric "
+                        "unrealized_pnl_usd=%r allocator=%s symbol=%s",
+                        upnl_raw, allocator_id, sym,
+                    )
+                    continue
+                # H-1157 / H-1165 / H-1169: emit under the canonical
+                # 3-part key shape used by the reconstruct path. The
+                # refresh holdings.symbol column is stored stripped
+                # (no ``/``), so we split it back into base+quote.
+                base, quote = split_holdings_symbol_to_base_quote(sym)
+                key = breakdown_key_for_perp(base, quote)
                 breakdown[key] = round(breakdown.get(key, 0.0) + upnl, 2)
                 total += upnl
             else:
@@ -1532,6 +1983,13 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
             error_kind=error_kind,
         )
     except Exception as exc:  # noqa: BLE001
+        # H-1172: surface the full traceback to stdout/sentry before
+        # sanitising for the audit-trail summary.
+        logger.exception(
+            "refresh_allocator_equity_daily unhandled exception "
+            "allocator=%s key=%s venue=%s",
+            allocator_id, api_key_id, venue,
+        )
         error_kind, msg = classify_exception(exc)
         sanitized = msg[:500]
         _emit_audit(
