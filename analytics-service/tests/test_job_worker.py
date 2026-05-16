@@ -133,10 +133,29 @@ class TestClassifyException:
         assert "400" in msg
         assert "Insufficient trade history" in msg
 
-    def test_http_exception_404_is_permanent(self) -> None:
-        exc = HTTPException(status_code=404, detail="Strategy not found")
+    def test_http_exception_403_is_unknown(self) -> None:
+        """H-1113: 403 'Internal API not configured' is raised by
+        routers/internal.py during deploy windows when INTERNAL_API_TOKEN
+        is briefly missing — a transient infra blip. Classifying it as
+        permanent would terminate the job on the first deploy and require
+        manual re-enqueue; classifying as unknown lets the retry queue
+        self-heal once the env is restored. The DB CHECK still accepts
+        'unknown' (compute_jobs.error_kind enum)."""
+        exc = HTTPException(status_code=403, detail="Internal API not configured")
         kind, msg = classify_exception(exc)
-        assert kind == "permanent"
+        assert kind == "unknown"
+        assert "403" in msg
+        assert "Internal API not configured" in msg
+
+    def test_http_exception_404_is_unknown(self) -> None:
+        """H-1113: 404 'API key not found' is raised by routers/internal.py
+        during a key rotation race. The next sync usually finds the new
+        row; classifying as unknown lets the retry pick it up. A
+        legitimately-deleted strategy will eventually be cancelled by the
+        watchdog or by max attempts — not by a single-attempt 404."""
+        exc = HTTPException(status_code=404, detail="API key not found")
+        kind, msg = classify_exception(exc)
+        assert kind == "unknown"
         assert "404" in msg
 
     def test_http_exception_422_is_permanent(self) -> None:
@@ -172,6 +191,72 @@ class TestClassifyException:
         exc = RuntimeError(long_msg)
         _, msg = classify_exception(exc)
         assert len(msg) <= 500
+
+    def test_http_exception_dict_detail_serializes_via_json(self) -> None:
+        """H-1114 / M-0948 / M-0949 / M-0951: FastAPI types
+        HTTPException.detail as Any. Routers (e.g. routers/csv.py) raise
+        with detail=dict for structured errors. Pre-fix `str(dict)`
+        produced Python repr (single-quoted), leaking internal keys and
+        invalid for JSON consumers. Post-fix the dict is JSON-serialized
+        — round-trippable by downstream consumers."""
+        exc = HTTPException(
+            status_code=400,
+            detail={"code": "INSUFFICIENT_TRADES", "have": 12, "need": 30},
+        )
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+        assert "INSUFFICIENT_TRADES" in msg
+        # JSON output uses double quotes, not Python repr single quotes.
+        assert '"code"' in msg or "INSUFFICIENT_TRADES" in msg
+
+    def test_http_exception_rogue_detail_does_not_crash_classifier(self) -> None:
+        """H-1114: the classifier itself must never raise. A detail whose
+        __str__ raises would propagate out of classify_exception, defeat
+        the worker dispatcher's exception envelope, and reclassify what
+        should have been a permanent 4xx as a fallback 'unknown'."""
+
+        class RogueDetail:
+            def __str__(self) -> str:  # pragma: no cover - rogue path
+                raise RuntimeError("naughty __str__")
+            def __repr__(self) -> str:  # pragma: no cover - rogue path
+                raise RuntimeError("naughty __repr__")
+
+        exc = HTTPException(status_code=400, detail=RogueDetail())
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+        assert "400" in msg
+        # Must contain the fallback literal so admin UI shows SOMETHING.
+        assert "<unstringifiable detail>" in msg
+
+    def test_classifier_returns_typed_error_kind(self) -> None:
+        """H-1112 / H-1110: classify_exception is annotated
+        `tuple[ErrorKind, str]`. Verify the returned tag is one of the
+        three Literal values the DB CHECK accepts (the structural
+        contract that makes the DB guard defense-in-depth instead of the
+        only line of defense)."""
+        from services.job_worker import classify_exception
+        for exc in [
+            ccxt.NetworkError("x"),
+            ccxt.AuthenticationError("x"),
+            RuntimeError("x"),
+            HTTPException(status_code=400, detail="x"),
+        ]:
+            kind, _ = classify_exception(exc)
+            assert kind in ("transient", "permanent", "unknown")
+
+    def test_http_exception_with_ccxt_baseerror_parent_still_permanent(self) -> None:
+        """M-0950: defensive pin on branch order — HTTPException must be
+        checked BEFORE ccxt.BaseError so any future multi-inheriting class
+        gets the more specific 4xx classification, not the catch-all
+        'unknown' bucket. If a refactor flips the order this test fires."""
+
+        class HybridError(HTTPException, ccxt.BaseError):
+            def __init__(self) -> None:
+                HTTPException.__init__(self, status_code=400, detail="hybrid")
+                ccxt.BaseError.__init__(self, "hybrid")
+
+        kind, _ = classify_exception(HybridError())
+        assert kind == "permanent"
 
 
 # ---------------------------------------------------------------------------
@@ -482,8 +567,8 @@ class TestSyncTradesFeatureFlag:
         ), patch(
             "services.job_worker.fetch_raw_trades",
             mock_fetch_raw,
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
         ):
             result = await run_sync_trades_job(job)
 
@@ -537,8 +622,8 @@ class TestSyncTradesFeatureFlag:
         ), patch(
             "services.job_worker.fetch_raw_trades",
             mock_fetch_raw,
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
         ):
             result = await run_sync_trades_job(job)
 
@@ -623,8 +708,8 @@ class TestSyncTradesEnqueuesComputeAnalytics:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
         ):
             result = await run_sync_trades_job(job)
 
@@ -707,8 +792,8 @@ class TestSyncTradesEnqueuesComputeAnalytics:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
         ):
             result = await run_sync_trades_job(job)
 
@@ -803,8 +888,8 @@ class TestSyncTradesEnqueuesComputeAnalytics:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
         ):
             result = await run_sync_trades_job(job)
 
@@ -907,8 +992,8 @@ class TestSyncTradesEmptyResponsePreservesHistory:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
         ):
             result = await run_sync_trades_job(job)
 
@@ -995,8 +1080,8 @@ class TestSyncTradesEmptyResponsePreservesHistory:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
         ):
             result = await run_sync_trades_job(job)
 
@@ -1148,8 +1233,8 @@ class TestSyncTradesPhase2AmendmentDetection:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
         ):
             result = await run_sync_trades_job(job)
 
@@ -1301,8 +1386,8 @@ class TestSyncTradesPhase2AmendmentDetection:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
         ):
             result = await run_sync_trades_job(job)
 
@@ -1453,8 +1538,8 @@ class TestSyncTradesPhase2PartialBatchFailure:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
         ):
             result = await run_sync_trades_job(job)
 
