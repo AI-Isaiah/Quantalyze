@@ -69,7 +69,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final, NewType
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 # This module lives in analytics-service/scripts/. The analytics-service services
 # package is on sys.path when invoked via `python -m scripts.phase12_kill_switch`
@@ -152,6 +152,20 @@ def _parse_run_flag(value: str) -> bool:
     )
 
 
+def _env_truthy(name: str) -> bool:
+    """Return True iff the named env var is set AND parses as truthy.
+
+    Unset / empty → False (don't enable the flag).
+    Recognized truthy/falsy → bool per _parse_run_flag.
+    Garbage → SystemExit (consistent with _parse_run_flag's polarity
+    refusal — a typo in PHASE12_FORCE_CUTOVER must not silently default).
+    """
+    raw = os.getenv(name)
+    if not raw:
+        return False
+    return _parse_run_flag(raw)
+
+
 # P2024: the heavy-kind allowlist is no longer encoded in Python. Migration
 # 129's `cutover_strategy_metrics_keys_atomic` RPC defines `v_allowlist`
 # server-side and reads metrics_json under SELECT ... FOR UPDATE — the
@@ -216,14 +230,21 @@ def _parse_postgres_url(db_url: str) -> dict[str, str]:
     # (?sslmode=require). Forward it verbatim so the libpq behavior
     # matches what an operator running psql interactively would see.
     if parsed.query:
-        for kv in parsed.query.split("&"):
-            if "=" not in kv:
-                continue
-            k, v = kv.split("=", 1)
-            if k == "sslmode" and v:
-                env["PGSSLMODE"] = v
-                break
+        sslmode_values = parse_qs(parsed.query).get("sslmode")
+        if sslmode_values and sslmode_values[0]:
+            env["PGSSLMODE"] = sslmode_values[0]
     return env
+
+
+# Compiled once at import time — _redact_dsn is called on every psql
+# stderr propagation and any malformed-DSN raise; compiling at call
+# site would do unnecessary work on hot error paths.
+# Non-greedy match up to the first whitespace, quote, or end-of-string.
+# Covers: postgresql://user:pass@host:5432/db?sslmode=require
+_DSN_PATTERN = re.compile(
+    r"(?:postgresql|postgres)(?:\+psycopg)?://[^\s\"'<>]+",
+    re.IGNORECASE,
+)
 
 
 def _redact_dsn(message: str) -> str:
@@ -242,13 +263,7 @@ def _redact_dsn(message: str) -> str:
     """
     if not message:
         return message
-    # Non-greedy match up to the first whitespace, quote, or end-of-string.
-    # Covers: postgresql://user:pass@host:5432/db?sslmode=require
-    pattern = re.compile(
-        r"(?:postgresql|postgres)(?:\+psycopg)?://[^\s\"'<>]+",
-        re.IGNORECASE,
-    )
-    return pattern.sub("<postgres-dsn-redacted>", message)
+    return _DSN_PATTERN.sub("<postgres-dsn-redacted>", message)
 
 # Path to the phase 12 TODOS file — kill-switch trigger appends a log entry here.
 TODOS_PATH = (
@@ -739,11 +754,9 @@ async def main(
 
     # H-0624: confirm gate — block prod-looking hosts unless the operator
     # has set either the --confirm-prod CLI flag or the
-    # PHASE12_KILL_SWITCH_CONFIRMED env var. Read the env confirm here so
-    # phase12_deploy.py can pass it through as a single boolean.
-    env_confirmed = os.getenv("PHASE12_KILL_SWITCH_CONFIRMED")
-    env_confirm_flag = bool(env_confirmed and _parse_run_flag(env_confirmed))
-    _check_confirm_gate(cli_confirm_prod or env_confirm_flag)
+    # PHASE12_KILL_SWITCH_CONFIRMED env var. phase12_deploy.py passes the
+    # env-var path so a single CI boolean propagates through the stack.
+    _check_confirm_gate(cli_confirm_prod or _env_truthy("PHASE12_KILL_SWITCH_CONFIRMED"))
 
     # H-0614: --force / PHASE12_FORCE_CUTOVER overrides the p999 < threshold
     # short-circuit. Required for the resume case: after a partial cutover,
@@ -752,8 +765,7 @@ async def main(
     # rows by hundreds of kB, dragging the percentile down). Without
     # --force, the script would log "no cutover needed" and exit 0,
     # leaving the partial state in place forever.
-    env_force = os.getenv("PHASE12_FORCE_CUTOVER")
-    force = cli_force or bool(env_force and _parse_run_flag(env_force))
+    force = cli_force or _env_truthy("PHASE12_FORCE_CUTOVER")
 
     p999, n = await measure_p999(cli_p999=cli_p999, cli_count=cli_count)
     print(
