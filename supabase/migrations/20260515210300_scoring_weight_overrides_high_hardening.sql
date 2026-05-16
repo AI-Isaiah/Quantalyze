@@ -16,6 +16,10 @@
 --     — the engine's `overrides.get('W_PORTFOLIO_FIT', 1.0)` silently
 --     accepts the bad shape and poisons every scoring run for that
 --     allocator until manual cleanup.
+--     audit-2026-05-07 Phase C red-team #1: the canonical weight set
+--     is {W_PORTFOLIO_FIT, W_PREFERENCE_FIT, W_TRACK_RECORD, W_CAPACITY_FIT}
+--     per analytics-service/services/feedback_engine.py:60-63 (ALL_DIMENSIONS)
+--     and match_engine.py:59-62 + 773-795 (weight constants + blend).
 --   * H-0941 (data-migration c8) + H-0945 (red-team c7): migration 062
 --     DROPped enqueue_compute_job + REVOKEd from PUBLIC/anon/authenticated
 --     but never GRANTed EXECUTE TO service_role. Migration 066 extended
@@ -56,10 +60,10 @@
 -- -------------------------
 -- 1. CHECK constraint on allocator_preferences.scoring_weight_overrides
 --    enforcing: NULL, or JSONB object with all keys ∈ whitelist
---    {W_PORTFOLIO_FIT, W_PERFORMANCE, W_QUALITY, W_RISK_FIT, W_RELIABILITY,
---    W_EXCHANGE_FIT, W_LIQUIDITY_FIT} AND all values numeric within
---    [0.5, 1.5]. Matches the engine's clamp range. NOT VALID + VALIDATE
---    pattern so the migration is atomic.
+--    {W_PORTFOLIO_FIT, W_PREFERENCE_FIT, W_TRACK_RECORD, W_CAPACITY_FIT}
+--    AND all values numeric within [0.5, 1.5]. Matches the engine's
+--    ALL_DIMENSIONS and _clamp range. NOT VALID + VALIDATE pattern so
+--    the migration is atomic.
 -- 2. GRANT EXECUTE on enqueue_compute_job's current 9-param signature
 --    (the migration-066 extension) TO service_role so direct
 --    analytics-service rpc() calls do not hit insufficient_privilege if
@@ -106,6 +110,15 @@ IMMUTABLE
 PARALLEL SAFE
 SET search_path = pg_catalog
 AS $fn$
+  -- audit-2026-05-07 Phase C red-team #1 (CRITICAL): the whitelist
+  -- MUST mirror analytics-service/services/feedback_engine.py's
+  -- ALL_DIMENSIONS (lines 60-63) and match_engine.py's weight
+  -- constants (lines 59-62 + score-blend at lines 773-795). The
+  -- previous list was wrong (7 invented keys vs the engine's 4
+  -- real keys) which would have (a) silently nulled every
+  -- legitimate allocator_preferences row during backfill and
+  -- (b) raised check_violation on every feedback engine UPDATE
+  -- after apply, permanently breaking mandate adaptation.
   SELECT
     p_overrides IS NULL
     OR (
@@ -114,8 +127,8 @@ AS $fn$
         SELECT 1
           FROM jsonb_object_keys(p_overrides) AS k
          WHERE k NOT IN (
-           'W_PORTFOLIO_FIT', 'W_PERFORMANCE', 'W_QUALITY', 'W_RISK_FIT',
-           'W_RELIABILITY', 'W_EXCHANGE_FIT', 'W_LIQUIDITY_FIT'
+           'W_PORTFOLIO_FIT', 'W_PREFERENCE_FIT',
+           'W_TRACK_RECORD',  'W_CAPACITY_FIT'
          )
       )
       AND NOT EXISTS (
@@ -132,14 +145,15 @@ AS $fn$
 $fn$;
 
 COMMENT ON FUNCTION public._scoring_weight_overrides_is_valid(jsonb) IS
-  'audit-2026-05-07 H-0939. IMMUTABLE shape validator for '
-  'allocator_preferences.scoring_weight_overrides. Returns TRUE iff the '
+  'audit-2026-05-07 H-0939 + Phase C red-team #1. IMMUTABLE shape validator '
+  'for allocator_preferences.scoring_weight_overrides. Returns TRUE iff the '
   'argument is NULL or a JSONB object whose keys are all in '
-  '{W_PORTFOLIO_FIT, W_PERFORMANCE, W_QUALITY, W_RISK_FIT, W_RELIABILITY, '
-  'W_EXCHANGE_FIT, W_LIQUIDITY_FIT} and whose values are all JSON numbers '
-  'in [0.5, 1.5]. Called from both the backfill predicate and the table '
-  'CHECK constraint — coordinate any amendment with both call sites and '
-  'with match_engine.py.';
+  '{W_PORTFOLIO_FIT, W_PREFERENCE_FIT, W_TRACK_RECORD, W_CAPACITY_FIT} '
+  '(matching analytics-service/services/feedback_engine.py ALL_DIMENSIONS '
+  'and match_engine.py weight constants) and whose values are all JSON '
+  'numbers in [0.5, 1.5] (matching the engine''s _clamp range). Coordinate '
+  'any amendment with feedback_engine.py + match_engine.py + the backfill '
+  'predicate + the table CHECK constraint.';
 
 -- --------------------------------------------------------------------------
 -- STEP 1: H-0939 — bound scoring_weight_overrides shape
@@ -189,10 +203,13 @@ ALTER TABLE allocator_preferences
   VALIDATE CONSTRAINT allocator_preferences_scoring_weight_overrides_shape;
 
 COMMENT ON CONSTRAINT allocator_preferences_scoring_weight_overrides_shape ON allocator_preferences IS
-  'audit-2026-05-07 H-0939. JSONB shape gate for scoring_weight_overrides: object-typed, '
-  'keys ∈ {W_PORTFOLIO_FIT, W_PERFORMANCE, W_QUALITY, W_RISK_FIT, W_RELIABILITY, '
-  'W_EXCHANGE_FIT, W_LIQUIDITY_FIT}, values numeric ∈ [0.5, 1.5]. Mirrors match_engine.py '
-  'clamp range. Coordinate this CHECK with any future weight-slot addition.';
+  'audit-2026-05-07 H-0939 + Phase C red-team #1. JSONB shape gate for '
+  'scoring_weight_overrides: object-typed, keys ∈ {W_PORTFOLIO_FIT, '
+  'W_PREFERENCE_FIT, W_TRACK_RECORD, W_CAPACITY_FIT} (matching '
+  'feedback_engine.py:60-63 ALL_DIMENSIONS and match_engine.py:59-62 weight '
+  'constants), values numeric ∈ [0.5, 1.5] (matching match_engine.py:773-779 '
+  '_clamp range). Coordinate this CHECK with any future weight-slot addition '
+  'in feedback_engine.py.';
 
 -- --------------------------------------------------------------------------
 -- STEP 2: H-0941 + H-0945 — re-assert grants on enqueue_compute_job
