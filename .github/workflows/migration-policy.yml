@@ -1,0 +1,215 @@
+name: Migration Policy
+
+# PR-time enforcement of the backdated-migration safety policy.
+#
+# Runs only when a PR targeting `main` adds or modifies files in
+# `supabase/migrations/`. The previous incarnation of this guard lived
+# inside `supabase-migrate.yml`'s apply job (workflow_dispatch on main),
+# which was architecturally wrong: by the time apply runs, the files are
+# already merged. The guard fired too late to prevent the bad merge AND
+# fired against legitimate unapplied legacy migrations that just needed
+# to flow through `db push --include-all`.
+#
+# This workflow runs at the right time (PR review, before merge) and on
+# the right inputs (only newly-added migration files in the diff, not
+# every local file). The remote tip is queried fresh on each run via
+# `supabase db query --linked` so it reflects whatever has been applied
+# to prod up to that moment.
+#
+# Allowlist (`.github/migrate-backdated-allowlist.txt`) is the exception
+# channel: history-only restorations (already-applied SQL whose local
+# file body has just been recovered for reconciliation) are listed there
+# with a comment citing the PR + reason.
+#
+# Required GitHub repo configuration (same secrets as supabase-migrate.yml):
+#   - Secret `SUPABASE_ACCESS_TOKEN`
+#   - Secret `SUPABASE_DB_PASSWORD` (consumed by `supabase link` to write
+#     into the local supabase config file — required even though this
+#     workflow only issues read-only `db query` against schema_migrations)
+#   - Variable `SUPABASE_PROJECT_REF`
+#
+# Security note: this workflow reads SUPABASE_ACCESS_TOKEN to run a
+# read-only query against the project's schema_migrations table. No
+# `db push` or other write operation is ever invoked. The only
+# attacker-controlled inputs are `github.event.pull_request.base.sha`
+# (passed via env var, validated as a SHA-shape by git itself, never
+# interpolated directly into shell) and the names of files in
+# `supabase/migrations/` (validated against a 14-digit-prefix regex
+# before use).
+#
+# Concurrency: per-PR group so a force-push cancels the in-flight check.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+      - '.github/migrate-backdated-allowlist.txt'
+      - '.github/workflows/migration-policy.yml'
+
+concurrency:
+  group: migration-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Read-only: this workflow only checks out the tree and runs read-only
+# queries against the remote DB via SUPABASE_ACCESS_TOKEN. No GitHub
+# API writes (no comments, no statuses, no labels) — the failure mode
+# is just `exit 1`, which surfaces as a failed check.
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    # Pin to the same `Production` environment as supabase-migrate.yml
+    # so future required-reviewer protection (ADR-0009) applies
+    # uniformly. The check is read-only, but it consumes the same
+    # SUPABASE_ACCESS_TOKEN secret as the apply path — keeping the
+    # secret-consumption pattern aligned simplifies the access-control
+    # story.
+    environment: Production
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          # fetch-depth: 0 so the PR base SHA is reachable for the
+          # diff-against-base computation below. (Default depth=1 only
+          # has the PR's HEAD commit and can't resolve the base ref.)
+          fetch-depth: 0
+          # Drop persisted GITHUB_TOKEN cred — no git writes happen here,
+          # only a local diff against the already-checked-out base SHA.
+          persist-credentials: false
+      - name: Check secrets are configured
+        id: check
+        env:
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          if [ -z "$SUPABASE_PROJECT_REF" ] || [ -z "$SUPABASE_ACCESS_TOKEN" ] || [ -z "$SUPABASE_DB_PASSWORD" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Migration Policy skipped — SUPABASE_PROJECT_REF (var), SUPABASE_ACCESS_TOKEN (secret), or SUPABASE_DB_PASSWORD (secret) not configured. PR cannot be gated on backdated-migration policy until these are set."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: supabase/setup-cli@b60b5899c73b63a2d2d651b1e90db8d4c9392f51  # v1.6.0
+        if: steps.check.outputs.configured == 'true'
+        with:
+          # Pinned to match supabase-migrate.yml (plan + apply jobs) so
+          # CLI-version drift cannot silently change `db query` semantics
+          # between the policy check and the eventual apply.
+          version: 2.98.2
+      - name: Enforce backdated-migration policy
+        if: steps.check.outputs.configured == 'true'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # Algorithm:
+        #   1. Diff PR HEAD against PR base to find NEWLY ADDED migration files.
+        #      (We don't care about modifications — those are caught by
+        #      `supabase db push`'s file-hash check at apply time. We only
+        #      gate on ADDITIONS because an added file with a backdated
+        #      timestamp is the silent-history-rewrite vector.)
+        #   2. Query the remote DB's current schema_migrations max version.
+        #   3. For each newly-added file: parse its 14-digit timestamp prefix
+        #      and compare to the remote tip. If older AND not allowlisted,
+        #      that's a violation.
+        #   4. Exit 1 on any violation, exit 0 otherwise.
+        #
+        # Why diff-filter=A (additions) and not =AM (additions+modifications):
+        # modifying an already-applied migration is its own kind of bad
+        # (changes the file hash, `db push` will fail with a hash mismatch),
+        # but that's a separate failure mode from the silent-history-rewrite
+        # attack this guard is designed to stop. Mixing the two would make
+        # the failure messages confusing. Keep this guard focused.
+        run: |
+          set -euo pipefail
+
+          if [ -z "$BASE_SHA" ]; then
+            echo "::error::github.event.pull_request.base.sha is empty — this workflow only makes sense on pull_request events."
+            exit 1
+          fi
+
+          echo "PR base SHA: $BASE_SHA"
+          echo "PR head SHA: $GITHUB_SHA"
+
+          # actions/checkout with fetch-depth: 0 already fetched the full
+          # history including the base SHA, so no extra `git fetch` needed.
+          # Validate the base SHA is reachable before diffing (defensive).
+          if ! git cat-file -e "$BASE_SHA" 2>/dev/null; then
+            echo "::error::Base SHA $BASE_SHA not reachable in this checkout. fetch-depth: 0 may have failed."
+            exit 1
+          fi
+
+          # Newly added .sql files under supabase/migrations/ between base and head.
+          # No `|| true` — a git-diff failure must fail loud, not silently
+          # masquerade as "no changes" and let the PR through. `set -euo
+          # pipefail` (top of script) propagates the non-zero exit.
+          ADDED_FILES=$(git diff --name-only --diff-filter=A "$BASE_SHA"..HEAD -- 'supabase/migrations/*.sql')
+
+          if [ -z "$ADDED_FILES" ]; then
+            echo "No newly-added migration files in this PR. Migration policy OK."
+            exit 0
+          fi
+
+          echo "Newly-added migration files in this PR:"
+          echo "$ADDED_FILES" | sed 's/^/  - /'
+
+          # Link to the project (writes auth config locally) and query the
+          # remote tip. `db query --linked --agent=no --output json` returns
+          # a plain JSON array like `[{"max_version": "<ts>"}]`.
+          supabase link --project-ref "$SUPABASE_PROJECT_REF"
+          REMOTE_TIP_JSON=$(supabase db query --linked --agent=no --output json \
+            "SELECT MAX(version) AS max_version FROM supabase_migrations.schema_migrations")
+          REMOTE_TIP=$(echo "$REMOTE_TIP_JSON" | jq -r '.[0].max_version // "00000000000000"')
+          echo "Remote tip: $REMOTE_TIP"
+
+          # Read allowlist (one timestamp per line; lines starting with # or
+          # blank lines are ignored).
+          ALLOWLIST_FILE=".github/migrate-backdated-allowlist.txt"
+          ALLOWLIST=$(grep -Ev '^\s*(#|$)' "$ALLOWLIST_FILE" 2>/dev/null || true)
+
+          # For each newly-added file, parse the 14-digit timestamp prefix
+          # and compare to the remote tip. Files whose basename prefix is
+          # not 14 digits (defensive — should not happen for properly named
+          # migrations) are flagged as a separate violation class.
+          VIOLATIONS=""
+          MALFORMED=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            base=$(basename "$f")
+            ts="${base%%_*}"
+            if [[ ${#ts} -ne 14 ]] || ! [[ "$ts" =~ ^[0-9]{14}$ ]]; then
+              MALFORMED="${MALFORMED}"$'\n'"  - $base (basename prefix is not a 14-digit timestamp)"
+              continue
+            fi
+            if [[ "$ts" < "$REMOTE_TIP" ]]; then
+              if ! echo "$ALLOWLIST" | grep -qFx "$ts"; then
+                VIOLATIONS="${VIOLATIONS}"$'\n'"  - $base (timestamp $ts < remote tip $REMOTE_TIP)"
+              else
+                echo "Allowlisted backdated addition: $base"
+              fi
+            fi
+          done <<< "$ADDED_FILES"
+
+          FAIL=0
+
+          if [[ -n "$MALFORMED" ]]; then
+            echo "::error::Newly-added migration files with malformed names:${MALFORMED}"
+            echo "::error::Migration file basenames must start with a 14-digit timestamp (YYYYMMDDHHMMSS)."
+            FAIL=1
+          fi
+
+          if [[ -n "$VIOLATIONS" ]]; then
+            echo "::error::Backdated migration additions detected without allowlist entry:${VIOLATIONS}"
+            echo "::error::A backdated migration is a newly-added file whose timestamp is older than the most-recently-applied remote migration. These are blocked because they enable silent-history-rewrite attacks: --include-all would gap-fill the older timestamp slot at apply time."
+            echo "::error::If this is a legitimate history-only restoration (e.g. SQL already executed against the remote via a different path; body is idempotent), add the 14-digit timestamp to ${ALLOWLIST_FILE} with a comment citing the PR + reason."
+            FAIL=1
+          fi
+
+          if [[ $FAIL -ne 0 ]]; then
+            exit 1
+          fi
+
+          echo "Migration policy OK — all newly-added migrations are forward-only or allowlisted."

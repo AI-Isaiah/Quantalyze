@@ -445,6 +445,7 @@ describe("Critical regression guards", () => {
       ".github/workflows/nightly.yml",
       ".github/workflows/phase-19-stability.yml",
       ".github/workflows/supabase-migrate.yml",
+      ".github/workflows/migration-policy.yml",
     ];
 
     // Test helpers — collapse the repeated regex-assertion pattern below.
