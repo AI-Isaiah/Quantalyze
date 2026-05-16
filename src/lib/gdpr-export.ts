@@ -75,10 +75,12 @@ export type PublicRow<T extends PublicTable> =
  *    hit in practice. V1 also caps per-table row counts to bound
  *    memory; both caps surface to the user via per-table flags + the
  *    bundle-level `truncated_at_size_cap` + `parent_id_truncated_tables`.
- * 3. Per-table selector is either a `user_column` (direct) or a
- *    `reachable_via` descriptor (indirect — the table is scoped to a
- *    user's strategies/portfolios). Both shapes produce the same output
- *    format: `{ table_name, rows: [...], row_count, truncated_at_cap }`.
+ * 3. Per-table selector is one of three kinds: `direct` (table has
+ *    `user_column`), `indirect` (table is scoped to a user's
+ *    strategies/portfolios via `parent_table` + `parent_user_column`),
+ *    or `projected` (post-fetch redaction). All three produce the
+ *    same output format: ExportTablePayload (table, rows, row_count,
+ *    truncated_at_cap, parent_id_truncated, fetch_error).
  *
  * Why this file, not inline in the route
  * --------------------------------------
@@ -457,8 +459,12 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   { kind: "direct", table: "user_favorites", user_column: "user_id" },
   { kind: "direct", table: "user_notes", user_column: "user_id" },
   // ------------------------------------------------------------------
-  // Projected (raw source table excluded; bundle exposes a redacted
-  // projection — see kind:"projected" docstring)
+  // Projected — bundle exposes a redacted projection of the source.
+  // The bundle-facing `table` name MAY differ from `source_table`
+  // (when the projection IS a synthetic name, e.g.
+  // audit_log_for_user) or MAY match (when the table itself is just
+  // having columns stripped, e.g. api_keys -> drops ciphertext).
+  // See kind:"projected" docstring for details.
   // ------------------------------------------------------------------
   // audit_log entries can reference OTHER users in `metadata` (manager
   // display_name, partner_tag of the counter-party allocator, etc.).
@@ -722,7 +728,8 @@ export async function collectUserExportBundle(
   admin: SupabaseClient,
   userId: string,
 ): Promise<ExportBundle> {
-  // Phase 1: parallel fetch across all 31 tables (bounded concurrency).
+  // Phase 1: parallel fetch across all USER_EXPORT_TABLES entries
+  // (bounded concurrency).
   // Manifest order is preserved by storing into a positional array.
   //
   // Issue 5 (audit-2026-05-07 follow-up): pre-fix, both the
@@ -963,17 +970,13 @@ interface FetchRowsResult {
  * test fixtures) don't crash the SELECT planner.
  */
 function getOrderColumn(spec: UserExportTable): string {
-  // audit_log / contact_requests have created_at as their natural
-  // time-ordering field. For everything else `id` is a stable UUID
-  // and an effective tie-break.
-  if (spec.kind === "projected") {
-    return spec.source_table === "audit_log" ? "created_at" : "id";
-  }
-  if (spec.kind === "direct" || spec.kind === "indirect") {
-    // Use 'id' as the universal stable sort. Every user-owned table
-    // in this codebase has an 'id' UUID PK (verified against
-    // database.types.ts at audit time).
-    return spec.kind === "direct" ? "id" : "id";
+  // audit_log entries have created_at as their natural time-ordering
+  // field. For everything else `id` is a stable UUID PK and a
+  // sufficient deterministic sort key (every user-owned table in
+  // this codebase has an `id` UUID column — verified against
+  // database.types.ts at audit time).
+  if (spec.kind === "projected" && spec.source_table === "audit_log") {
+    return "created_at";
   }
   return "id";
 }
