@@ -81,9 +81,19 @@ vi.mock("@/lib/supabase/server", () => ({
     from: () => ({
       select: () => ({
         eq: () => ({
+          // audit-2026-05-07 C-0119/H-0329 — finalize-wizard now applies
+          // .eq('user_id', user.id) as belt-and-braces ownership defense
+          // on top of RLS, so the strategies lookup chain is
+          // .select().eq().eq().maybeSingle(). Other adapters still use
+          // a single .eq() chain, so we keep maybeSingle/single on the
+          // outer level too.
           eq: () => ({
             single: async () => ({
               data: { id: TEST_STRATEGY_ID, user_id: TEST_USER.id },
+              error: null,
+            }),
+            maybeSingle: async () => ({
+              data: { api_key_id: TEST_API_KEY_ID },
               error: null,
             }),
           }),
@@ -158,11 +168,15 @@ vi.mock("next/server", async () => {
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 
 // Outbound fetch mock — every flag=on case asserts on its arguments.
+// Default response is the "newly queued" envelope shape (queued=true +
+// verification_id) which matches the real Python /process-key contract
+// for the common path; WIZARD_DUPLICATE-specific tests override the
+// body to assert the queued=false branch.
 let fetchCalls: Array<{ url: string; init: RequestInit }>;
 const mockFetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
   fetchCalls.push({ url: String(url), init: init ?? {} });
   return new Response(
-    JSON.stringify({ verification_id: "v-thin-adapter", queued: false }),
+    JSON.stringify({ verification_id: "v-thin-adapter", queued: true }),
     { status: 200, headers: { "content-type": "application/json" } },
   );
 });

@@ -787,3 +787,13 @@ Four files still import `extractAnalytics`/`EMPTY_ANALYTICS` from `@/lib/queries
 
 Fix path: mechanical refactor across `src/app/portfolio-pdf/[id]/page.tsx`, `src/app/api/factsheet/[id]/tearsheet.pdf/route.ts`, `src/app/api/factsheet/[id]/pdf/route.ts`, `src/app/(dashboard)/compare/page.tsx`. Also remove the now-redundant `vi.mock` in `src/app/(dashboard)/compare/page.test.tsx:22`. Once done, the explanatory comment in `readiness.ts` can shrink further.
 
+### P2: Cross-process portfolio-recompute UNIQUE INDEX (red-team HIGH from v0.22.39.0 audit-2026-05-07 cron.py round)
+
+**Priority:** P2 — known structural limitation; v0.22.39.0 documents the gap honestly in `analytics-service/routers/cron.py` comment but does not close it.
+
+`analytics-service/routers/portfolio.py:46` defines `_compute_semaphore = asyncio.Semaphore(3)` and `_compute_portfolio_analytics` INSERTs a new `portfolio_analytics` row with `computation_status='computing'` unconditionally. The cron-sync TOCTOU guard at `analytics-service/routers/cron.py` (`_guarded_recompute`) does a SELECT for an in-flight row before the compute, but: (a) the semaphore is process-local so two Vercel function instances or worker pods can both pass through their own caps, and (b) even in the same pod the Semaphore(3) admits 3 coroutines concurrently, so two cron coroutines both SELECT-see-empty and both INSERT a `computing` row for the same portfolio.
+
+Fix path: add a Postgres migration `UNIQUE INDEX portfolio_analytics_one_computing_per_portfolio_idx ON portfolio_analytics(portfolio_id) WHERE computation_status='computing'`, then catch `UniqueViolation` in `_compute_portfolio_analytics`'s INSERT branch and map it to the same "skip — already in-flight" path the cron router uses. Alternative: `pg_try_advisory_xact_lock(hashtext(portfolio_id))` inside the compute. Either closes the gap cross-process; current state is "best-effort within-process throttle" and v0.22.39.0's comment says so honestly.
+
+Blast radius if it bites: two duplicate `portfolio_analytics` history rows for the same portfolio, two competing computes hitting Supabase, alert fan-out triggering twice. Hasn't been observed in prod, but the architectural seam is real.
+

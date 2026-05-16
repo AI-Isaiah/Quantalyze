@@ -44,8 +44,12 @@ at any moment, enforced by partial unique indexes.
 - `app.analytics_service_url` GUC set to the Railway worker URL
 - `app.analytics_service_key` GUC set to the Railway service key
 - `USE_COMPUTE_JOBS_QUEUE` env var on Vercel:
-  - `false` = /api/keys/sync uses the legacy `after()` path (rollback)
-  - `true` = /api/keys/sync enqueues into compute_jobs (shipped state)
+  - `false` = `/api/keys/sync` and `/api/strategies/finalize-wizard`
+    both use the legacy `after()` path (rollback)
+  - `true` = both endpoints enqueue `sync_trades` into compute_jobs
+    (shipped state). The wizard enqueue (v0.22.38.1, H-0330) is the
+    primary path for new strategies; `/api/keys/sync` is the manual
+    "Sync now" button on the keys page
 - `COMPUTE_QUEUE_HMAC_SECRET` env var (shared between Vercel fallback
   cron and Railway tick endpoint) for replay protection
 
@@ -210,10 +214,14 @@ The wizard `SyncPreviewStep` shows "Computing..." and never advances.
 3. If rows exist in `failed_retry` with `next_attempt_at` in the
    future → they will auto-retry. Wait.
 4. If rows exist in `failed_final` → click Retry in the admin page
-5. If no rows exist at all → the enqueue never happened. Check the
-   Vercel log for `/api/keys/sync`. Check `USE_COMPUTE_JOBS_QUEUE` env
-   var. Fall back to legacy by flipping the flag and having the user
-   resubmit
+5. If no rows exist at all → the enqueue never happened. For a wizard
+   submission, check the Vercel log for
+   `/api/strategies/finalize-wizard` (the `after()` block dispatches
+   `enqueue_compute_job` for `sync_trades`; failures Sentry-escalate
+   via `captureToSentry` with tag `route=finalize-wizard`,
+   `step=sync_trades_enqueue`). For a manual "Sync now" click, check
+   `/api/keys/sync`. Check `USE_COMPUTE_JOBS_QUEUE` env var. Fall back
+   to legacy by flipping the flag and having the user resubmit
 
 ## Rollback procedure
 
@@ -277,6 +285,10 @@ simultaneous processing of the same job id.
 - Worker: `analytics-service/routers/jobs.py`,
   `analytics-service/services/jobs.py`
 - Next.js enqueue helper: `src/lib/compute-queue.ts`
+- Next.js enqueue call sites:
+  - `src/app/api/strategies/finalize-wizard/route.ts` (`after()` block,
+    H-0330 — primary for new strategies)
+  - `src/app/api/keys/sync/route.ts` (manual "Sync now" button)
 - Admin UI: `src/app/(dashboard)/admin/compute-jobs/page.tsx`,
   `src/components/admin/ComputeJobsTable.tsx`
 - Wizard integration: `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx`
