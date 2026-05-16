@@ -13,6 +13,7 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import {
   useDashboardConfigV2,
   consumeDashboardRecoveryFlag,
+  type DashboardRecoveryReason,
 } from "./hooks/useDashboardConfig";
 import { WidgetGrid } from "./components/WidgetGrid";
 import { WidgetPicker } from "./components/WidgetPicker";
@@ -92,9 +93,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   // non-blocking dismissible banner so the user sees that their saved
   // layout was reset; without this consumer the C-0332..0335 fix was
   // logic-only and never reached the user-facing surface.
-  const [recoveryReason, setRecoveryReason] = useState<
-    "parse_failed" | "version_reset" | "legacy_in_v2_blob" | null
-  >(null);
+  // pr189-followup M12 (type-design-analyzer MED/8) — use the exported
+  // DashboardRecoveryReason union instead of duplicating the literal.
+  const [recoveryReason, setRecoveryReason] = useState<DashboardRecoveryReason | null>(null);
   useEffect(() => {
     const reason = consumeDashboardRecoveryFlag();
     // Mount-only drain of an external one-shot sessionStorage flag —
