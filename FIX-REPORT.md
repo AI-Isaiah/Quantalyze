@@ -90,3 +90,34 @@ copy, color, or layout change.
 - Mergeable status: `CONFLICTING` against `main` — expected; PR #190 (open) targets an overlapping version slot. Per task spec, this PR is NOT merged; rebase + version-slot reconciliation is a separate step for the operator.
 - Applied: 20 code fixes + 1 verified false positive = 21 of 21 in scope
 - Deferred: 5 MED/7 + 9 LOW + 1 INFO (below threshold per spec)
+
+## Rebase phase (post-#191)
+
+PR #195 was opened at v0.22.40.23. Between then and 2026-05-16 23:01, main advanced to v0.22.40.26 via PR merges #193, #194, #196, #197, #191. The PR became CONFLICTING+DIRTY on VERSION / package.json / CHANGELOG.md.
+
+### Rebase mechanics
+
+- Fetched origin/main (tip `0.22.40.26`).
+- `git rebase origin/main` — applied 6 of 8 commits cleanly; commit 7/8 (`b7d71b55` — v0.22.40.23 + CHANGELOG + FIX-REPORT) hit expected 3-way conflicts on three files only:
+  - `VERSION` — main `0.22.40.26` vs branch `0.22.40.23` → resolved to `0.22.40.27`
+  - `package.json` — `"version"` field, same pattern → resolved to `0.22.40.27`
+  - `CHANGELOG.md` — main had `[0.22.40.26]` + `[0.22.40.25]` + `[0.22.40.20]` headers; branch had `[0.22.40.23]` → re-headered the PR's narrative under new `[0.22.40.27]` slot above main's entries, preserving main's `.26 / .25 / .20 / .18 / .17` headers verbatim. PR-narrative paragraph updated to note rebase target (`.26` was the new tip) and 5-PR ancestry (#193/#194/#196/#197/#191).
+- No `src/` conflicts (as predicted in task brief — main's recent merges were CI workflow / types.ts tightening / SQL migrations, disjoint from allocator dashboard fix surface).
+- 8/8 commits rebased; `rebase --continue` ended without further intervention.
+
+### Re-bump marker
+
+The version-bump conflict resolution already brought VERSION + package.json to `0.22.40.27` inside the existing commit (`59c6b394`). Added an explicit empty marker commit `chore: re-bump version after rebase against main (v0.22.40.27)` on top (commit `a56b3dab`) so the version slot claim is grep-able and the branch log records the re-bump intent independently. Both files moved together per CLAUDE.md `feedback_version_bump_both_files` (VERSION + package.json must bump in the same commit so `critical-regressions.test.ts` stays green).
+
+### Push + CI
+
+- `git push origin fix/pr189-retro-followup-2026-05-16 --force-with-lease` (lease against `1173ab7c`, the pre-rebase tip).
+- CI auto-triggered on force-push (workflow run `25972869975`). No manual nudge required.
+- All 14 checks passed: `frontend-build`, `frontend-lint`, `frontend-policy`, `frontend-test (1/2/3)`, `frontend-typecheck`, `python`, `sql-tests`, `e2e`, `secret-scan`, `docs-link-check`, `frontend`, `Vercel`, `Vercel Preview Comments`. No regressions.
+
+### Final state
+
+- `gh pr view 195 --json mergeable,mergeStateStatus` → `{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}`
+- New version: `0.22.40.27`
+- Branch tip: `a56b3dab` (re-bump marker on top of `4d194eae`, `59c6b394`, plus the 6 fix-content commits).
+- DID NOT merge / DID NOT /land-and-deploy — handoff back to orchestrator per task spec.
