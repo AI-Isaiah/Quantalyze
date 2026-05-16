@@ -31,7 +31,9 @@ import {
   USER_EXPORT_TABLES,
   collectUserExportBundle,
   redactAuditLogForUser,
+  redactApiKeysForUser,
   redactContactRequestForUser,
+  API_KEYS_REDACTED_COLUMNS,
   REDACTED_PLACEHOLDER,
 } from "@/lib/gdpr-export";
 
@@ -228,6 +230,85 @@ describe("redactAuditLogForUser (P697/P707/P708)", () => {
     const redacted = redactAuditLogForUser(rows, userId);
     expect(redacted).toHaveLength(1);
     expect(redacted[0].metadata).toEqual(["tag-a", "tag-b", 42, null]);
+  });
+});
+
+describe("redactApiKeysForUser (C-0166)", () => {
+  const userId = "key-owner";
+  const otherUserId = "other-user";
+
+  it("retains only rows where user_id === subject (drops rows owned by others)", () => {
+    const rows = [
+      { id: "k1", user_id: userId, exchange: "binance", label: "main" },
+      { id: "k2", user_id: otherUserId, exchange: "okx", label: "other" },
+      { id: "k3", user_id: userId, exchange: "bybit", label: "secondary" },
+    ];
+    const redacted = redactApiKeysForUser(rows, userId);
+    expect(redacted.map((r) => r.id)).toEqual(["k1", "k3"]);
+  });
+
+  it("strips encrypted-credential columns (C-0166): ciphertext + iv MUST NOT appear", () => {
+    const rows = [
+      {
+        id: "k1",
+        user_id: userId,
+        exchange: "binance",
+        label: "main",
+        api_key_encrypted: "CIPHERTEXT-KEY",
+        api_secret_encrypted: "CIPHERTEXT-SECRET",
+        passphrase_encrypted: "CIPHERTEXT-PASS",
+        dek_encrypted: "CIPHERTEXT-DEK",
+        nonce: "IV-BYTES",
+        created_at: "2026-01-01T00:00:00Z",
+        last_sync_at: "2026-04-01T00:00:00Z",
+        sync_status: "ok",
+      },
+    ];
+    const redacted = redactApiKeysForUser(rows, userId);
+    expect(redacted).toHaveLength(1);
+    const r = redacted[0];
+
+    // Safe / identifying fields are preserved.
+    expect(r.id).toBe("k1");
+    expect(r.exchange).toBe("binance");
+    expect(r.label).toBe("main");
+    expect(r.created_at).toBe("2026-01-01T00:00:00Z");
+    expect(r.last_sync_at).toBe("2026-04-01T00:00:00Z");
+    expect(r.sync_status).toBe("ok");
+
+    // Ciphertext columns are stripped entirely (NOT replaced with a
+    // placeholder — the field MUST NOT be present, because a downstream
+    // JSON consumer treating the bundle as ground truth might still see
+    // the field name as evidence the column exists).
+    for (const col of API_KEYS_REDACTED_COLUMNS) {
+      expect(col in r).toBe(false);
+    }
+    // Sanity: the explicit columns the audit C-0166 named must be gone.
+    expect("api_key_encrypted" in r).toBe(false);
+    expect("api_secret_encrypted" in r).toBe(false);
+    expect("dek_encrypted" in r).toBe(false);
+    expect("passphrase_encrypted" in r).toBe(false);
+    expect("nonce" in r).toBe(false);
+  });
+
+  it("handles a row that does NOT carry the encrypted columns (no-op)", () => {
+    const rows = [{ id: "k1", user_id: userId, exchange: "binance", label: "main" }];
+    const redacted = redactApiKeysForUser(rows, userId);
+    expect(redacted).toHaveLength(1);
+    expect(redacted[0]).toEqual({
+      id: "k1",
+      user_id: userId,
+      exchange: "binance",
+      label: "main",
+    });
+  });
+});
+
+describe("USER_EXPORT_TABLES — api_keys is exported as a projected redaction (C-0166)", () => {
+  it("api_keys appears only as a projected entry (no direct .select('*'))", () => {
+    const apiKeyEntries = USER_EXPORT_TABLES.filter((t) => t.table === "api_keys");
+    expect(apiKeyEntries).toHaveLength(1);
+    expect(apiKeyEntries[0].kind).toBe("projected");
   });
 });
 

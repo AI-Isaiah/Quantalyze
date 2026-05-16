@@ -287,6 +287,66 @@ export function redactContactRequestForUser(
 }
 
 /**
+ * Columns on `api_keys` that carry the at-rest-encrypted credential
+ * blob or its envelope metadata. Even though they're ciphertext, GDPR
+ * Art. 15/20 do NOT require returning them — the user already has the
+ * plaintext key in their broker UI, and the underlying credential
+ * decrypt is gated by a service-only RPC (`decrypt_api_key`) that
+ * applies its own access policy. Including the ciphertext in the
+ * export bundle would widen the attack surface: anyone who captures
+ * the 1-hour signed URL would also capture the encrypted material,
+ * bypassing the decrypt RPC's access controls.
+ *
+ * Audit 2026-05-07 finding C-0166 (security c5):
+ *   The pre-fix manifest exported `api_keys` with `.select('*')` and
+ *   shipped every column — including `api_key_encrypted`,
+ *   `api_secret_encrypted`, `dek_encrypted`, `passphrase_encrypted`,
+ *   and the `nonce` IV. The redacted projection below strips those
+ *   columns and keeps only the safe metadata the user genuinely needs
+ *   to recognize the key (exchange, label, timestamps, status).
+ *
+ * Exported for unit-test pinning.
+ */
+export const API_KEYS_REDACTED_COLUMNS: ReadonlySet<string> = new Set<string>([
+  "api_key_encrypted",
+  "api_secret_encrypted",
+  "passphrase_encrypted",
+  "dek_encrypted",
+  "nonce",
+]);
+
+/**
+ * Projection helper — api_keys with credential ciphertext stripped.
+ *
+ * Retains EVERY row where `user_id === subject` (the user owns the
+ * key) and removes the ciphertext / IV columns enumerated in
+ * `API_KEYS_REDACTED_COLUMNS`. The remaining columns (`id`, `exchange`,
+ * `label`, `created_at`, `last_sync_at`, `sync_status`, etc.) are
+ * sufficient for the user to recognise the key and re-create it via
+ * their broker UI.
+ *
+ * Exported for unit-test pinning.
+ */
+export function redactApiKeysForUser(
+  rows: unknown[],
+  userId: string,
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    const row = r as Record<string, unknown>;
+    if (row.user_id !== userId) continue;
+    const clone: Record<string, unknown> = {};
+    for (const key of Object.keys(row)) {
+      if (API_KEYS_REDACTED_COLUMNS.has(key)) continue;
+      clone[key] = row[key];
+    }
+    out.push(clone);
+  }
+  return out;
+}
+
+/**
  * Canonical list of every table that holds user-owned data.
  *
  * CI invariant: the hook in `scripts/check-gdpr-export-coverage.ts` reads
@@ -310,7 +370,22 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   // GDPR Art. 15 requires they be part of the user's export.
   { kind: "direct", table: "allocator_holdings", user_column: "allocator_id" },
   { kind: "direct", table: "allocator_preferences", user_column: "user_id" },
-  { kind: "direct", table: "api_keys", user_column: "user_id" },
+  // api_keys is exported as a REDACTED projection: GDPR Art. 15
+  // entitles the user to know which keys exist on their account, but
+  // not to receive the encrypted credential blob (which is internal
+  // storage — the user already has the plaintext in their broker
+  // UI). Stripping the ciphertext closes the 1-hour-signed-URL
+  // exfiltration vector described in audit 2026-05-07 finding
+  // C-0166. The post-fetch projection `redactApiKeysForUser` removes
+  // `api_key_encrypted`, `api_secret_encrypted`, `passphrase_encrypted`,
+  // `dek_encrypted`, and `nonce` from every row.
+  {
+    kind: "projected",
+    table: "api_keys",
+    source_table: "api_keys",
+    user_column: "user_id",
+    project: redactApiKeysForUser,
+  },
   // contact_requests carries a cross-party `strategy_id` referring to
   // another user's strategy. The projected version retains the
   // subject's own row state and blanks the cross-party link.
