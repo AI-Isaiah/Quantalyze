@@ -106,6 +106,89 @@ export const RecomputeMatchResponseSchema = z.object({
 export const EnqueueComputeJobResponseSchema = z.string().uuid();
 export type EnqueueComputeJobResponse = z.infer<typeof EnqueueComputeJobResponseSchema>;
 
+/**
+ * --- get_user_compute_jobs RPC row (Supabase RPC, not Railway HTTP) ---
+ *
+ * Returned by `supabase.rpc('get_user_compute_jobs', { ... })`. The RPC
+ * (migration 032 STEP 16 + migration 111 user_message + audit-2026-05-07
+ * residual COALESCE filter) returns a SETOF rows shaped exactly as the
+ * `RETURNS TABLE(...)` declaration in PL/pgSQL.
+ *
+ * audit-2026-05-07 M-0782: strict-versioned schema for the RPC response
+ * so a future migration that adds, removes, or reorders a column fails
+ * loudly at parse time instead of silently changing the contract.
+ *
+ * Current consumer status (api-contract specialist 2026-05-16):
+ * This schema is parse-only via the live-DB Vitest contract test in
+ * `src/__tests__/compute-jobs-audit-2026-05-07-residual.test.ts`. NO
+ * production code path calls `supabase.rpc('get_user_compute_jobs')`
+ * today — the admin UI under `src/app/(dashboard)/admin/compute-jobs/`
+ * reads via service-role `.from('compute_jobs')`. The "fail loud on
+ * drift" guarantee is therefore conditional on CI running the live-DB
+ * suite. Wiring this RPC into a real read path (e.g. a user-facing
+ * job-status surface) would convert the schema from regression-test-
+ * only to a real boundary parser.
+ *
+ * Two notes on field semantics:
+ *
+ *  - `last_error` is hard-redacted to `null` inside the RPC body. The
+ *    field is preserved in the shape (vs. omitted entirely) so admin UI
+ *    code that reads via the service-role direct query path can share
+ *    a row type with the user-facing path. We model it as `z.null()` —
+ *    a parse against a real value would fail and flag the redaction
+ *    layer regressing, which is exactly the regression we want to
+ *    detect.
+ *
+ *  - `user_message` was added by migration 111 and is `string | null`
+ *    depending on the row's `(status, error_kind)` combination — null
+ *    for healthy / in-flight rows, populated for failures.
+ */
+export const GetUserComputeJobsRowSchema = z
+  .object({
+    id: z.string().uuid(),
+    strategy_id: z.string().uuid().nullable(),
+    portfolio_id: z.string().uuid().nullable(),
+    kind: z.string(),
+    parent_job_ids: z.array(z.string().uuid()),
+    status: z.enum([
+      "pending",
+      "running",
+      "done",
+      "done_pending_children",
+      "failed_retry",
+      "failed_final",
+    ]),
+    attempts: z.number().int().nonnegative(),
+    max_attempts: z.number().int().positive(),
+    next_attempt_at: z.string(),
+    claimed_at: z.string().nullable(),
+    claimed_by: z.string().nullable(),
+    // Hard-redacted to null inside the RPC body (mig 032 STEP 16). A
+    // parse failure here means the redaction layer regressed — exactly
+    // what we want surfaced.
+    last_error: z.null(),
+    error_kind: z.enum(["transient", "permanent", "unknown"]).nullable(),
+    idempotency_key: z.string().max(128).nullable(),
+    exchange: z.enum(["binance", "okx", "bybit"]).nullable(),
+    trade_count: z.number().int().nonnegative().nullable(),
+    created_at: z.string(),
+    updated_at: z.string(),
+    metadata: z.unknown().nullable(),
+    user_message: z.string().nullable(),
+  })
+  // Strict: a future migration that appends a column must update this
+  // schema in the same PR. Without .strict(), Zod silently strips
+  // unknown fields and contract drift goes undetected.
+  .strict();
+export type GetUserComputeJobsRow = z.infer<typeof GetUserComputeJobsRowSchema>;
+
+export const GetUserComputeJobsResponseSchema = z.array(
+  GetUserComputeJobsRowSchema,
+);
+export type GetUserComputeJobsResponse = z.infer<
+  typeof GetUserComputeJobsResponseSchema
+>;
+
 // ─────────────────────────────────────────────────────────────────────
 // Versioned object responses (Sprint 2 Task 2.9 and later)
 //

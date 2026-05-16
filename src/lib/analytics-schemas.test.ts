@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   EnqueueComputeJobResponseSchema,
   EncryptKeyResponseSchema,
+  GetUserComputeJobsRowSchema,
   RecomputeMatchResponseSchema,
   TickJobsResponseSchema,
 } from "./analytics-schemas";
@@ -187,6 +188,171 @@ describe("EncryptKeyResponseSchema (envelope-encryption contract)", () => {
       kek_version: 1,
     };
     const result = EncryptKeyResponseSchema.safeParse(legacyFlat);
+    expect(result.success).toBe(false);
+  });
+});
+
+/**
+ * pr-test-analyzer c9 (audit-2026-05-07 apply): pin
+ * `GetUserComputeJobsRowSchema` against contract drift. The schema's
+ * regression value comes from .strict() rejecting unknown fields plus
+ * tight enum constraints — without this battery a future relaxation
+ * (e.g. dropping .strict() or widening status to z.string()) ships
+ * silently. Mirrors the TickJobsResponseSchema pattern above.
+ *
+ * Field semantics under test:
+ *  - .strict() rejects unknown fields (added column = schema bump)
+ *  - last_error is z.null() (redaction-layer regression trips parse)
+ *  - status enum is fixed at 6 values (drift = parse failure)
+ *  - error_kind enum is transient/permanent/unknown (or null)
+ *  - exchange enum is binance/okx/bybit (or null)
+ *  - attempts non-negative, max_attempts positive, trade_count non-negative
+ */
+describe("GetUserComputeJobsRowSchema", () => {
+  // A canonical valid row matching the RPC's RETURNS TABLE shape (mig 032
+  // STEP 16 + mig 111 user_message + audit-2026-05-07 residual COALESCE).
+  const valid = {
+    id: "11111111-2222-4333-8444-555555555555",
+    strategy_id: "22222222-3333-4444-8555-666666666666",
+    portfolio_id: null,
+    kind: "sync_trades",
+    parent_job_ids: [],
+    status: "failed_final" as const,
+    attempts: 3,
+    max_attempts: 3,
+    next_attempt_at: "2026-05-15T12:00:00.000Z",
+    claimed_at: "2026-05-15T11:59:00.000Z",
+    claimed_by: "railway-pod-abc",
+    last_error: null,
+    error_kind: "permanent" as const,
+    idempotency_key: "strategy:22222222-3333-4444-8555-666666666666:sync_trades",
+    exchange: "binance" as const,
+    trade_count: 42,
+    created_at: "2026-05-15T11:55:00.000Z",
+    updated_at: "2026-05-15T12:00:00.000Z",
+    metadata: { source: "manual" },
+    user_message: "Tried multiple times without success. Please contact support.",
+  };
+
+  it("accepts a canonical valid RPC row", () => {
+    expect(GetUserComputeJobsRowSchema.parse(valid)).toMatchObject(valid);
+  });
+
+  it("rejects unknown extra fields (.strict() lock)", () => {
+    // The "fail loud on contract drift" guarantee. A future migration
+    // that adds a column to the RPC's RETURNS TABLE without updating
+    // this schema fails the parse here. Without .strict() Zod strips
+    // the field and the contract drift goes silently to production.
+    const result = GetUserComputeJobsRowSchema.safeParse({
+      ...valid,
+      secrets_leaked: "very bad",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects non-null last_error (redaction-layer regression)", () => {
+    // The RPC hard-codes NULL::TEXT for last_error inside its body. If
+    // a future refactor returns the raw column instead, this test
+    // catches it before the leaked-credential surface reaches the UI.
+    const result = GetUserComputeJobsRowSchema.safeParse({
+      ...valid,
+      last_error: "LEAKED_SECRET",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it.each([
+    ["frozen"],
+    ["queued"],
+    ["complete"],
+    ["DONE"], // case-sensitive
+    [""],
+  ])("rejects unknown status %p", (status) => {
+    const result = GetUserComputeJobsRowSchema.safeParse({ ...valid, status });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects attempts = -1 (CHECK constraint mirror)", () => {
+    const result = GetUserComputeJobsRowSchema.safeParse({
+      ...valid,
+      attempts: -1,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects max_attempts = 0 (CHECK constraint mirror)", () => {
+    const result = GetUserComputeJobsRowSchema.safeParse({
+      ...valid,
+      max_attempts: 0,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects trade_count = -1", () => {
+    const result = GetUserComputeJobsRowSchema.safeParse({
+      ...valid,
+      trade_count: -1,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects non-integer attempts", () => {
+    const result = GetUserComputeJobsRowSchema.safeParse({
+      ...valid,
+      attempts: 1.5,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects idempotency_key longer than 128 chars", () => {
+    const result = GetUserComputeJobsRowSchema.safeParse({
+      ...valid,
+      idempotency_key: "x".repeat(129),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects unknown exchange (enum drift)", () => {
+    const result = GetUserComputeJobsRowSchema.safeParse({
+      ...valid,
+      exchange: "kraken",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects unknown error_kind", () => {
+    // The RPC's error_kind is constrained to transient/permanent/unknown.
+    // A future write path emitting "timeout" would slip past untyped
+    // consumers; the schema flags it.
+    const result = GetUserComputeJobsRowSchema.safeParse({
+      ...valid,
+      error_kind: "timeout",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts null user_message (healthy / in-flight row)", () => {
+    const parsed = GetUserComputeJobsRowSchema.parse({
+      ...valid,
+      status: "running" as const,
+      user_message: null,
+    });
+    expect(parsed.user_message).toBeNull();
+  });
+
+  it("rejects non-array parent_job_ids", () => {
+    const result = GetUserComputeJobsRowSchema.safeParse({
+      ...valid,
+      parent_job_ids: "not-an-array",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects non-UUID id", () => {
+    const result = GetUserComputeJobsRowSchema.safeParse({
+      ...valid,
+      id: "not-a-uuid",
+    });
     expect(result.success).toBe(false);
   });
 });
