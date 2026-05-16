@@ -357,24 +357,30 @@ describe("collectUserExportBundle — audit_log replaced by audit_log_for_user (
       },
     ];
     return {
-      from: (table: string) => ({
-        select: (projection: string) => ({
-          eq: () => ({
-            limit: async () => {
-              // Projected fetcher queries the SOURCE table (audit_log)
-              // and then post-processes via redactAuditLogForUser.
-              if (table === "audit_log") {
-                return { data: auditRowsRaw, error: null };
-              }
-              if (projection === "id") {
-                return { data: [], error: null };
-              }
-              return { data: [], error: null };
-            },
+      from: (table: string) => {
+        const limit = async () => {
+          // Projected fetcher queries the SOURCE table (audit_log)
+          // and then post-processes via redactAuditLogForUser.
+          if (table === "audit_log") {
+            return { data: auditRowsRaw, error: null };
+          }
+          return { data: [], error: null };
+        };
+        const indirectLimit = async () => ({ data: [], error: null });
+        return {
+          select: () => ({
+            // H-0456 fix: chain `.order(...)` between `.eq()` and `.limit()`.
+            eq: () => ({
+              order: () => ({ limit }),
+              limit,
+            }),
+            in: () => ({
+              order: () => ({ limit: indirectLimit }),
+              limit: indirectLimit,
+            }),
           }),
-          in: () => ({ limit: async () => ({ data: [], error: null }) }),
-        }),
-      }),
+        };
+      },
     };
   }
 

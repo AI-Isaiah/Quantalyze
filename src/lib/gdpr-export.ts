@@ -44,12 +44,17 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  *    user-owned table, both this list AND the migration must land in the
  *    same PR — the CI hook exits non-zero if the list drifts from the
  *    migrations.
- * 2. 100MB cap. The route streams one JSON bundle; rows are collected in
- *    memory. If the total serialized size exceeds the cap, the route
- *    returns a `continuation_token` the client can use to resume with
- *    the next slice. V1 caps per-table row counts to bound memory; a
- *    future sprint can switch to true streamed JSON if the cap is hit
- *    in practice.
+ * 2. 100MB cap. The route assembles one JSON bundle in memory; if the
+ *    total serialized size exceeds the cap, the bundle is truncated
+ *    deterministically (per-row, sorted by stable column, oldest first)
+ *    and `truncated_at_size_cap: true` is set on the envelope. Note:
+ *    the V1 implementation does NOT mint a continuation_token — the
+ *    docstring previously claimed one but no such field exists on
+ *    `ExportBundle` (audit 2026-05-07 H-0456). A future sprint can
+ *    switch to true streamed JSON / continuation tokens if the cap is
+ *    hit in practice. V1 also caps per-table row counts to bound
+ *    memory; both caps surface to the user via per-table flags + the
+ *    bundle-level `truncated_at_size_cap` + `parent_id_truncated_tables`.
  * 3. Per-table selector is either a `user_column` (direct) or a
  *    `reachable_via` descriptor (indirect — the table is scoped to a
  *    user's strategies/portfolios). Both shapes produce the same output
@@ -93,6 +98,17 @@ export interface IndirectUserTable {
   parent_table: string;
   /** User-identifying column on the parent table. */
   parent_user_column: string;
+  /**
+   * Primary-key column on the parent table used by the two-hop
+   * select. Defaults to `"id"` at the call site if omitted, which
+   * matches every parent table in the current manifest. Audit
+   * 2026-05-07 M-0524: pre-fix, `fetchRowsForSpec` hard-coded
+   * `(r: { id: string }) => r.id` — an indirect entry whose parent
+   * used a non-`id` PK would have silently returned an empty
+   * export. Surfacing the column name in the spec turns the
+   * assumption into a contract.
+   */
+  parent_id_column?: string;
 }
 
 /**
@@ -497,8 +513,12 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
 ] as const;
 
 /**
- * Max total serialized size before the export truncates and sets the
- * continuation token. 100MB is the Task 7.3 spec cap.
+ * Max total serialized size before the export truncates and sets
+ * `truncated_at_size_cap: true` on the envelope. 100MB is the Task 7.3
+ * spec cap. The cumulative budget is envelope-aware: it counts the
+ * bundle skeleton, per-table wrappers, and per-row payload so the
+ * final UTF-8 byte-length is strictly ≤ this cap (audit 2026-05-07
+ * H-0454).
  */
 export const EXPORT_SIZE_CAP_BYTES = 100 * 1024 * 1024;
 
@@ -519,6 +539,22 @@ export const EXPORT_PER_TABLE_ROW_CAP = 50_000;
 export const EXPORT_FETCH_CONCURRENCY = 10;
 
 /**
+ * Max parent-table id rows probed for an indirect select's two-hop
+ * lookup. A `.in()` filter scales linearly with the number of ids, and
+ * PostgREST has a request-line-length ceiling that hits ~2.5k elements
+ * for UUIDs. The 2000 cap leaves headroom and handles every realistic
+ * user (a power user with thousands of strategies is uncommon enough
+ * that the explicit truncation flag — `parent_id_truncated` — is the
+ * right escape hatch).
+ *
+ * Audit 2026-05-07 H-0453: pre-fix this cap dropped the parent-id tail
+ * silently with no signal in the bundle. The new path sets the
+ * `parent_id_truncated` flag on the child-table payload when the
+ * probe hits the cap.
+ */
+export const EXPORT_PARENT_ID_CAP = 2000;
+
+/**
  * Shape of one `tables[*]` entry in the export bundle.
  *
  * Issue 5 (audit-2026-05-07 follow-up): `fetch_error` carries the failure
@@ -529,12 +565,20 @@ export const EXPORT_FETCH_CONCURRENCY = 10;
  * requires a COMPLETE export; a partial bundle marked as such would
  * still be a violation, so the chosen policy is "fail loud, ask the
  * user to retry".
+ *
+ * Audit 2026-05-07 H-0453: `parent_id_truncated` flags indirect-table
+ * fetches whose parent-id probe hit `EXPORT_PARENT_ID_CAP` (2000). A
+ * user with >2000 strategies or portfolios silently lost all child
+ * rows belonging to the dropped parents — fully invisible to the
+ * bundle pre-fix. The flag is only meaningful for `kind: "indirect"`
+ * specs (`false` for direct/projected).
  */
 export interface ExportTablePayload {
   table: string;
   rows: unknown[];
   row_count: number;
   truncated_at_cap: boolean;
+  parent_id_truncated: boolean;
   fetch_error: string | null;
 }
 
@@ -546,6 +590,18 @@ export interface ExportTablePayload {
  * actually persists a bundle with partial=true, but the helper still
  * exposes the fields so the route's gate has a single object to inspect
  * and tests can pin the exact shape.
+ *
+ * Audit 2026-05-07 H-0453: `parent_id_truncated_tables` lists every
+ * indirect-table whose parent-id probe hit `EXPORT_PARENT_ID_CAP`
+ * (2000). The route can surface this to the user (e.g., "Your export
+ * includes data scoped to your first 2000 strategies. Contact support
+ * if you have more.") instead of dropping the tail silently.
+ *
+ * Audit 2026-05-07 M-0523: `schema_version: 1` is a literal so the
+ * bundle is versionable. A future v2 reader will see schema_version=1
+ * and route to the v1 parser; the contract is encoded in the type.
+ * The current bundle is the V1 variant of the discriminated union
+ * `ExportBundleV1 | ExportBundleV2` that future migrations can extend.
  */
 export interface ExportBundle {
   schema_version: 1;
@@ -554,6 +610,7 @@ export interface ExportBundle {
   total_row_count: number;
   tables: ExportTablePayload[];
   truncated_at_size_cap: boolean;
+  parent_id_truncated_tables: string[];
   partial: boolean;
   failed_tables: string[];
 }
@@ -611,6 +668,7 @@ export async function collectUserExportBundle(
     spec: UserExportTable;
     rows: unknown[];
     error: string | null;
+    parent_id_truncated: boolean;
   }
   const fetched: Array<FetchedEntry | null> = new Array(
     USER_EXPORT_TABLES.length,
@@ -630,9 +688,19 @@ export async function collectUserExportBundle(
           console.error(
             `[gdpr-export] fetch failed for ${spec.table}: ${result.error}`,
           );
-          fetched[start + i] = { spec, rows: [], error: result.error };
+          fetched[start + i] = {
+            spec,
+            rows: [],
+            error: result.error,
+            parent_id_truncated: result.parent_id_truncated,
+          };
         } else {
-          fetched[start + i] = { spec, rows: result.rows, error: null };
+          fetched[start + i] = {
+            spec,
+            rows: result.rows,
+            error: null,
+            parent_id_truncated: result.parent_id_truncated,
+          };
         }
       } else {
         const reason =
@@ -642,26 +710,66 @@ export async function collectUserExportBundle(
         console.error(
           `[gdpr-export] batch fetch rejected for ${spec.table}: ${reason}`,
         );
-        fetched[start + i] = { spec, rows: [], error: reason };
+        fetched[start + i] = {
+          spec,
+          rows: [],
+          error: reason,
+          parent_id_truncated: false,
+        };
       }
     }
   }
 
   // Phase 2: cumulative-size budget. O(n) over the rows, NOT
   // O(log n) over the full bundle.
+  //
+  // Audit 2026-05-07 H-0454: the legacy budget only accounted for
+  // per-row payload bytes; the bundle envelope itself (schema_version,
+  // user_id, generated_at, total_row_count, tables[], etc.) plus the
+  // per-table wrapper objects (table name + flags) and the inter-row
+  // comma separators were never reserved, so the final JSON could
+  // overrun EXPORT_SIZE_CAP_BYTES by up to ~1–2MB. We now seed
+  // `bytesUsed` with a conservative envelope reservation derived from
+  // a synthetic empty bundle, plus a per-table wrapper estimate. The
+  // resulting cap is strictly conservative — final upload size is at
+  // or below `EXPORT_SIZE_CAP_BYTES`.
   const tables: ExportTablePayload[] = [];
   const failedTables: string[] = [];
+  const parentTruncatedTables: string[] = [];
   let totalRowCount = 0;
-  let bytesUsed = 0;
-  let truncatedAtSizeCap = false;
   const encoder = new TextEncoder();
+
+  // Envelope reservation: stringify a bundle skeleton with NO rows,
+  // measure its UTF-8 byte length, and seed `bytesUsed` with it. The
+  // synthetic skeleton uses placeholder values whose serialized lengths
+  // are at least as long as the real values, so the reservation is an
+  // upper bound. Per-table overhead (`{ "table": "...", "rows": [...],
+  // "row_count": N, "truncated_at_cap": false, "parent_id_truncated":
+  // false, "fetch_error": null },`) is bounded by ~140 bytes plus the
+  // table name length — we account for this by reserving a per-table
+  // line below as each table starts.
+  const envelopeSkeleton: ExportBundle = {
+    schema_version: 1,
+    user_id: userId,
+    generated_at: new Date(0).toISOString(),
+    total_row_count: 0,
+    tables: [],
+    truncated_at_size_cap: false,
+    partial: false,
+    failed_tables: [],
+  };
+  let bytesUsed = encoder.encode(JSON.stringify(envelopeSkeleton)).byteLength;
+  let truncatedAtSizeCap = false;
 
   for (const entry of fetched) {
     if (!entry) continue;
-    const { spec, rows, error: fetchError } = entry;
+    const { spec, rows, error: fetchError, parent_id_truncated } = entry;
 
     if (fetchError) {
       failedTables.push(spec.table);
+    }
+    if (parent_id_truncated) {
+      parentTruncatedTables.push(spec.table);
     }
 
     if (truncatedAtSizeCap) {
@@ -670,10 +778,37 @@ export async function collectUserExportBundle(
         rows: [],
         row_count: 0,
         truncated_at_cap: true,
+        parent_id_truncated,
         fetch_error: fetchError,
       });
       continue;
     }
+
+    // Reserve the per-table wrapper bytes BEFORE counting rows so the
+    // cumulative budget reflects the real shape of the upload.
+    const tableWrapperBytes = encoder.encode(
+      JSON.stringify({
+        table: spec.table,
+        rows: [],
+        row_count: 0,
+        truncated_at_cap: false,
+        parent_id_truncated,
+        fetch_error: fetchError,
+      }) + ",",
+    ).byteLength;
+    if (bytesUsed + tableWrapperBytes > EXPORT_SIZE_CAP_BYTES) {
+      truncatedAtSizeCap = true;
+      tables.push({
+        table: spec.table,
+        rows: [],
+        row_count: 0,
+        truncated_at_cap: true,
+        parent_id_truncated,
+        fetch_error: fetchError,
+      });
+      continue;
+    }
+    bytesUsed += tableWrapperBytes;
 
     const includedRows: unknown[] = [];
     let tableTruncated = rows.length >= EXPORT_PER_TABLE_ROW_CAP;
@@ -696,6 +831,7 @@ export async function collectUserExportBundle(
       rows: includedRows,
       row_count: includedRows.length,
       truncated_at_cap: tableTruncated,
+      parent_id_truncated,
       fetch_error: fetchError,
     });
     totalRowCount += includedRows.length;
@@ -708,6 +844,7 @@ export async function collectUserExportBundle(
     total_row_count: totalRowCount,
     tables,
     truncated_at_size_cap: truncatedAtSizeCap,
+    parent_id_truncated_tables: parentTruncatedTables,
     partial: failedTables.length > 0,
     failed_tables: failedTables,
   };
@@ -735,6 +872,40 @@ export async function collectUserExportBundle(
 interface FetchRowsResult {
   rows: unknown[];
   error: string | null;
+  /**
+   * Indirect-spec only: true when the parent-id probe hit
+   * `EXPORT_PARENT_ID_CAP` and child rows belonging to the dropped
+   * tail were not loaded. Always `false` for direct/projected specs.
+   * See audit 2026-05-07 H-0453.
+   */
+  parent_id_truncated: boolean;
+}
+
+/**
+ * The Postgres column that determines stable ORDER BY for a given
+ * spec. Audit 2026-05-07 H-0456: PostgreSQL does NOT guarantee row
+ * order without an explicit ORDER BY, so two calls to the same export
+ * can return DIFFERENT 50K subsets for a user with >50K rows. The
+ * size-cap truncation also depends on this ordering — without it the
+ * bundle is non-deterministic. We sort by `created_at` for the audit
+ * trail tables and by `id` for everything else. The first sort key is
+ * a NULLS-LAST so rows without a `created_at` (legacy seed rows in
+ * test fixtures) don't crash the SELECT planner.
+ */
+function getOrderColumn(spec: UserExportTable): string {
+  // audit_log / contact_requests have created_at as their natural
+  // time-ordering field. For everything else `id` is a stable UUID
+  // and an effective tie-break.
+  if (spec.kind === "projected") {
+    return spec.source_table === "audit_log" ? "created_at" : "id";
+  }
+  if (spec.kind === "direct" || spec.kind === "indirect") {
+    // Use 'id' as the universal stable sort. Every user-owned table
+    // in this codebase has an 'id' UUID PK (verified against
+    // database.types.ts at audit time).
+    return spec.kind === "direct" ? "id" : "id";
+  }
+  return "id";
 }
 
 async function fetchRowsForSpec(
@@ -742,11 +913,14 @@ async function fetchRowsForSpec(
   spec: UserExportTable,
   userId: string,
 ): Promise<FetchRowsResult> {
+  const orderCol = getOrderColumn(spec);
+
   if (spec.kind === "direct") {
     const { data, error } = await admin
       .from(spec.table)
       .select("*")
       .eq(spec.user_column, userId)
+      .order(orderCol, { ascending: true })
       .limit(EXPORT_PER_TABLE_ROW_CAP);
     if (error) {
       // Issue 5 fix: surface the error to the bundle instead of silently
@@ -754,9 +928,9 @@ async function fetchRowsForSpec(
       // when ANY table reports a fetch_error.
       const msg = `direct select failed for ${spec.table}: ${error.message}`;
       console.error(`[gdpr-export] ${msg}`);
-      return { rows: [], error: msg };
+      return { rows: [], error: msg, parent_id_truncated: false };
     }
-    return { rows: data ?? [], error: null };
+    return { rows: data ?? [], error: null, parent_id_truncated: false };
   }
 
   if (spec.kind === "projected") {
@@ -765,42 +939,65 @@ async function fetchRowsForSpec(
       .from(spec.source_table)
       .select("*")
       .eq(spec.user_column, userId)
+      .order(orderCol, { ascending: true })
       .limit(EXPORT_PER_TABLE_ROW_CAP);
     if (error) {
       const msg = `projected select failed for ${spec.source_table} (->${spec.table}): ${error.message}`;
       console.error(`[gdpr-export] ${msg}`);
-      return { rows: [], error: msg };
+      return { rows: [], error: msg, parent_id_truncated: false };
     }
     // Run the redaction projection. This is where cross-party PII in
     // metadata gets blanked.
-    return { rows: spec.project(data ?? [], userId), error: null };
+    return {
+      rows: spec.project(data ?? [], userId),
+      error: null,
+      parent_id_truncated: false,
+    };
   }
 
-  // Indirect: two-hop.
+  // Indirect: two-hop. Order the parent-id probe so the dropped tail
+  // is at least deterministic between requests (H-0456); same for the
+  // child select.
+  const parentIdColumn = spec.parent_id_column ?? "id";
   const { data: parentRows, error: parentErr } = await admin
     .from(spec.parent_table)
-    .select("id")
+    .select(parentIdColumn)
     .eq(spec.parent_user_column, userId)
-    .limit(2000);
+    .order(parentIdColumn, { ascending: true })
+    .limit(EXPORT_PARENT_ID_CAP);
   if (parentErr) {
     const msg = `parent select failed for ${spec.parent_table} (via ${spec.table}): ${parentErr.message}`;
     console.error(`[gdpr-export] ${msg}`);
-    return { rows: [], error: msg };
+    return { rows: [], error: msg, parent_id_truncated: false };
   }
-  const parentIds = (parentRows ?? []).map((r: { id: string }) => r.id);
+  // M-0524 fix: read parent id by the configured column name. Default
+  // 'id' covers every parent in the current manifest; an indirect
+  // entry whose parent uses a non-`id` PK can override via
+  // `parent_id_column` without falling through to a silent
+  // `{ id: undefined }` cast.
+  const parentRowsArr = (parentRows ?? []) as Array<Record<string, unknown>>;
+  const parentIds = parentRowsArr
+    .map((r) => r[parentIdColumn])
+    .filter((v): v is string => typeof v === "string");
+  const parentIdTruncated = parentRowsArr.length >= EXPORT_PARENT_ID_CAP;
   if (parentIds.length === 0) {
-    return { rows: [], error: null };
+    return { rows: [], error: null, parent_id_truncated: parentIdTruncated };
   }
 
   const { data, error } = await admin
     .from(spec.table)
     .select("*")
     .in(spec.via_column, parentIds)
+    .order("id", { ascending: true })
     .limit(EXPORT_PER_TABLE_ROW_CAP);
   if (error) {
     const msg = `indirect select failed for ${spec.table}: ${error.message}`;
     console.error(`[gdpr-export] ${msg}`);
-    return { rows: [], error: msg };
+    return { rows: [], error: msg, parent_id_truncated: parentIdTruncated };
   }
-  return { rows: data ?? [], error: null };
+  return {
+    rows: data ?? [],
+    error: null,
+    parent_id_truncated: parentIdTruncated,
+  };
 }

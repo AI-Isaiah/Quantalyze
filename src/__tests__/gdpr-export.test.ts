@@ -98,38 +98,46 @@ function makeMockClient(
   rowsByTable: Record<string, unknown[]>,
 ) {
   const visited: string[] = [];
+  // H-0456 fix: every select chain now goes through `.order(col,
+  // {ascending}).limit(n)`. The mock mirrors that chain so production
+  // code paths exercise correctly. `.order()` returns the same shape
+  // as the previous direct-`.limit()` step so the existing terminal
+  // resolver continues to work.
+  const directResolver = (table: string) => async () => ({
+    data: rowsByTable[table] ?? [],
+    error: null,
+  });
+  const parentIdResolver = (table: string) => async () => {
+    const rows = (rowsByTable[table] ?? []) as Array<{ id?: string }>;
+    return {
+      data: rows
+        .filter((r) => typeof r.id === "string")
+        .map((r) => ({ id: r.id })),
+      error: null,
+    };
+  };
   return {
     visited,
     from: (table: string) => {
       visited.push(table);
       return {
-        select: (projection: string) => ({
-          eq: () => ({
-            limit: async () => {
-              // Parent-id probe (indirect path's first hop): projection
-              // is "id". Return the id field of each seeded row.
-              if (projection === "id") {
-                const rows = (rowsByTable[table] ?? []) as Array<{
-                  id?: string;
-                }>;
-                return {
-                  data: rows
-                    .filter((r) => typeof r.id === "string")
-                    .map((r) => ({ id: r.id })),
-                  error: null,
-                };
-              }
-              // Direct fetch: full rows.
-              return { data: rowsByTable[table] ?? [], error: null };
-            },
-          }),
-          in: () => ({
-            limit: async () => ({
-              data: rowsByTable[table] ?? [],
-              error: null,
+        select: (projection: string) => {
+          // Parent-id probe (indirect path's first hop): projection
+          // is "id". Return the id field of each seeded row.
+          // Direct fetch: full rows.
+          const limitFn =
+            projection === "id" ? parentIdResolver(table) : directResolver(table);
+          return {
+            eq: () => ({
+              order: () => ({ limit: limitFn }),
+              limit: limitFn,
             }),
-          }),
-        }),
+            in: () => ({
+              order: () => ({ limit: directResolver(table) }),
+              limit: directResolver(table),
+            }),
+          };
+        },
       };
     },
   };
@@ -270,21 +278,21 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
    */
   it("collapses sequential fetches into bounded-concurrency batches", async () => {
     const FETCH_LATENCY_MS = 50;
+    // H-0456 fix: chain `.order(...)` between `.eq()` and `.limit()`.
+    const delayedLimit = async () => {
+      await new Promise((r) => setTimeout(r, FETCH_LATENCY_MS));
+      return { data: [], error: null };
+    };
     const mock = {
       from: () => ({
-        select: (projection: string) => ({
+        select: () => ({
           eq: () => ({
-            limit: async () => {
-              await new Promise((r) => setTimeout(r, FETCH_LATENCY_MS));
-              if (projection === "id") return { data: [], error: null };
-              return { data: [], error: null };
-            },
+            order: () => ({ limit: delayedLimit }),
+            limit: delayedLimit,
           }),
           in: () => ({
-            limit: async () => {
-              await new Promise((r) => setTimeout(r, FETCH_LATENCY_MS));
-              return { data: [], error: null };
-            },
+            order: () => ({ limit: delayedLimit }),
+            limit: delayedLimit,
           }),
         }),
       }),
@@ -305,22 +313,27 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
   it("uses Promise.allSettled — one rejected fetch does not abort the bundle", async () => {
     // Make one specific table reject; everything else succeeds.
     const mock = {
-      from: (table: string) => ({
-        select: (projection: string) => ({
-          eq: () => ({
-            limit: async () => {
-              if (table === "api_keys") {
-                throw new Error("simulated network failure for api_keys");
-              }
-              if (projection === "id") return { data: [], error: null };
-              return { data: [], error: null };
-            },
+      from: (table: string) => {
+        const limit = async () => {
+          if (table === "api_keys") {
+            throw new Error("simulated network failure for api_keys");
+          }
+          return { data: [], error: null };
+        };
+        const indirectLimit = async () => ({ data: [], error: null });
+        return {
+          select: () => ({
+            eq: () => ({
+              order: () => ({ limit }),
+              limit,
+            }),
+            in: () => ({
+              order: () => ({ limit: indirectLimit }),
+              limit: indirectLimit,
+            }),
           }),
-          in: () => ({
-            limit: async () => ({ data: [], error: null }),
-          }),
-        }),
-      }),
+        };
+      },
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -346,24 +359,30 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
     // error: { code, message } instead of throwing. This is the path
     // that pre-fix silently substituted [] inside fetchRowsForSpec.
     const mock = {
-      from: (table: string) => ({
-        select: (_projection: string) => ({
-          eq: () => ({
-            limit: async () => {
-              if (table === "profiles") {
-                return {
-                  data: null,
-                  error: { code: "57014", message: "statement timeout" },
-                };
-              }
-              return { data: [], error: null };
-            },
+      from: (table: string) => {
+        const limit = async () => {
+          if (table === "profiles") {
+            return {
+              data: null,
+              error: { code: "57014", message: "statement timeout" },
+            };
+          }
+          return { data: [], error: null };
+        };
+        const indirectLimit = async () => ({ data: [], error: null });
+        return {
+          select: () => ({
+            eq: () => ({
+              order: () => ({ limit }),
+              limit,
+            }),
+            in: () => ({
+              order: () => ({ limit: indirectLimit }),
+              limit: indirectLimit,
+            }),
           }),
-          in: () => ({
-            limit: async () => ({ data: [], error: null }),
-          }),
-        }),
-      }),
+        };
+      },
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -378,14 +397,17 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
   });
 
   it("Issue 5: a fully successful bundle has partial=false and failed_tables=[]", async () => {
+    const emptyLimit = async () => ({ data: [], error: null });
     const mock = {
       from: () => ({
         select: () => ({
           eq: () => ({
-            limit: async () => ({ data: [], error: null }),
+            order: () => ({ limit: emptyLimit }),
+            limit: emptyLimit,
           }),
           in: () => ({
-            limit: async () => ({ data: [], error: null }),
+            order: () => ({ limit: emptyLimit }),
+            limit: emptyLimit,
           }),
         }),
       }),
@@ -425,19 +447,27 @@ describe("collectUserExportBundle — cumulative-size budget (P450 regression)",
     const mock = makeMockClient({ allocator_preferences: rows });
 
     // Count JSON.stringify calls on objects "shaped like a full
-    // bundle" (i.e. having a `tables` array). The legacy code's
-    // binary-search re-serialized objects of this shape multiple
-    // times; the new code only stringifies leaf rows.
+    // bundle WITH DATA" (i.e. having a NON-EMPTY `tables` array). The
+    // legacy code's binary-search re-serialized objects of this shape
+    // multiple times; the new code only stringifies leaf rows.
+    //
+    // H-0454 fix (envelope reservation): the cumulative-size budget
+    // stringifies an EMPTY bundle skeleton (`tables: []`) ONCE to
+    // seed `bytesUsed`. That's an O(1) call, not a re-serialization
+    // — the count below excludes empty-tables shapes specifically so
+    // the envelope reservation does not trip the legacy-regression
+    // guard.
     const originalStringify = JSON.stringify;
-    let bundleShapeStringifyCalls = 0;
+    let bundleShapeWithDataStringifyCalls = 0;
     const spied = (value: unknown, ...rest: Parameters<typeof JSON.stringify>) => {
       if (
         value !== null &&
         typeof value === "object" &&
         "tables" in (value as Record<string, unknown>) &&
-        Array.isArray((value as { tables: unknown }).tables)
+        Array.isArray((value as { tables: unknown[] }).tables) &&
+        (value as { tables: unknown[] }).tables.length > 0
       ) {
-        bundleShapeStringifyCalls += 1;
+        bundleShapeWithDataStringifyCalls += 1;
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return originalStringify(value as any, ...(rest as any));
@@ -453,11 +483,193 @@ describe("collectUserExportBundle — cumulative-size budget (P450 regression)",
       (JSON as any).stringify = originalStringify;
     }
 
-    // The new path never stringifies a "bundle-shaped" object during
+    // The new path never stringifies a populated bundle shape during
     // collection. The legacy binary-search loop did this multiple
-    // times. Strict zero is acceptable; any drift to >0 indicates a
-    // regression into full-bundle re-serialization.
-    expect(bundleShapeStringifyCalls).toBe(0);
+    // times. Strict zero is the contract.
+    expect(bundleShapeWithDataStringifyCalls).toBe(0);
+  });
+});
+
+describe("collectUserExportBundle — H-0453 parent_id_truncated regression", () => {
+  it("sets parent_id_truncated when the parent-id probe hits EXPORT_PARENT_ID_CAP", async () => {
+    // Build a mock that returns exactly EXPORT_PARENT_ID_CAP parent rows
+    // when queried by `.select("id")`. The function should set the flag
+    // on every child table that uses that parent.
+    //
+    // Indirect manifest entries (strategies parents: strategy_analytics,
+    // trades, funding_fees, reconciliation_reports; portfolios parents:
+    // portfolio_strategies, portfolio_analytics, portfolio_alerts,
+    // allocation_events, weight_snapshots) — each child should reflect
+    // the truncation flag for its parent.
+    const parentRows = Array.from({ length: 2000 }, (_, i) => ({
+      id: `parent-${i}`,
+    }));
+    const mock = {
+      from: (table: string) => {
+        const probeLimit = async () => ({ data: parentRows, error: null });
+        const childLimit = async () => ({
+          data: [{ id: `${table}-row-1` }],
+          error: null,
+        });
+        const directLimit = async () => ({ data: [], error: null });
+        return {
+          select: (projection: string) => {
+            // Parent-id probe returns the saturated 2000 rows.
+            const limit =
+              projection === "id" ? probeLimit : directLimit;
+            return {
+              eq: () => ({
+                order: () => ({ limit }),
+                limit,
+              }),
+              in: () => ({
+                order: () => ({ limit: childLimit }),
+                limit: childLimit,
+              }),
+            };
+          },
+        };
+      },
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-cap");
+
+    // The indirect children (trades, portfolio_strategies, etc.) should
+    // all have parent_id_truncated=true.
+    const indirectChildren = bundle.tables.filter((t) =>
+      [
+        "strategy_analytics",
+        "trades",
+        "funding_fees",
+        "reconciliation_reports",
+        "portfolio_strategies",
+        "portfolio_analytics",
+        "portfolio_alerts",
+        "allocation_events",
+        "weight_snapshots",
+      ].includes(t.table),
+    );
+    expect(indirectChildren.length).toBeGreaterThan(0);
+    for (const entry of indirectChildren) {
+      expect(entry.parent_id_truncated).toBe(true);
+    }
+    // Direct entries should never carry the flag.
+    const directEntries = bundle.tables.filter(
+      (t) => !indirectChildren.find((c) => c.table === t.table),
+    );
+    for (const entry of directEntries) {
+      expect(entry.parent_id_truncated).toBe(false);
+    }
+    // Bundle-level summary lists each truncated child.
+    expect(bundle.parent_id_truncated_tables.length).toBe(
+      indirectChildren.length,
+    );
+  });
+
+  it("leaves parent_id_truncated=false when parent probe returns < cap", async () => {
+    const mock = makeMockClient({
+      strategies: [{ id: "s1" }, { id: "s2" }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-undercap");
+    for (const t of bundle.tables) {
+      expect(t.parent_id_truncated).toBe(false);
+    }
+    expect(bundle.parent_id_truncated_tables).toEqual([]);
+  });
+});
+
+describe("collectUserExportBundle — H-0454 envelope reservation regression", () => {
+  it("final upload byte length stays at or below EXPORT_SIZE_CAP_BYTES (envelope-aware)", async () => {
+    // A truncating mix: many tables of medium-size payloads. The legacy
+    // budget only counted per-row bytes — adding envelope + per-table
+    // wrappers + commas pushed actual stringified bytes ~0.5–2MB over
+    // the cap. The fixed budget seeds with the envelope, so total
+    // serialized bytes are STRICTLY ≤ EXPORT_SIZE_CAP_BYTES.
+    const ROW_SIZE = 10 * 1024 * 1024; // 10MB rows
+    const rows = Array.from({ length: 12 }, (_, i) => ({
+      id: `row-${i}`,
+      blob: "x".repeat(ROW_SIZE),
+    }));
+    const mock = makeMockClient({
+      allocator_preferences: rows,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-envelope");
+    expect(bundle.truncated_at_size_cap).toBe(true);
+    const actualBytes = new TextEncoder().encode(JSON.stringify(bundle))
+      .byteLength;
+    // Strict: the upload size MUST NOT exceed the cap. H-0454 fix.
+    expect(actualBytes).toBeLessThanOrEqual(EXPORT_SIZE_CAP_BYTES);
+  });
+});
+
+describe("collectUserExportBundle — H-0456 ORDER BY determinism regression", () => {
+  it("every select chain runs through `.order(col)` so row order is deterministic", async () => {
+    // Spy on `.order(...)` invocations across all `from(...).select(...).eq(...)`
+    // chains. Every direct, projected, and indirect (parent + child) hop
+    // MUST include an explicit ORDER BY — without it Postgres row order
+    // is implementation-defined and the size-cap truncation tail is
+    // non-deterministic between requests for the same user.
+    const orderCalls: Array<{ table: string; col: string }> = [];
+    const mock = {
+      from: (table: string) => {
+        const limit = async () => ({ data: [], error: null });
+        return {
+          select: () => ({
+            eq: () => ({
+              order: (col: string) => {
+                orderCalls.push({ table, col });
+                return { limit };
+              },
+              // Bare `.limit()` without order is the legacy path; the
+              // test mock still exposes it but production code MUST
+              // route through `.order(...).limit(...)`. A regression
+              // that drops the order step will leave `orderCalls`
+              // empty for that table.
+              limit,
+            }),
+            in: () => ({
+              order: (col: string) => {
+                orderCalls.push({ table, col });
+                return { limit };
+              },
+              limit,
+            }),
+          }),
+        };
+      },
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await collectUserExportBundle(mock as any, "u-order");
+
+    // Every direct and projected entry should appear at least once.
+    // Indirect entries appear TWICE (parent probe + child select),
+    // but a single appearance is sufficient to verify ORDER BY is in
+    // the chain.
+    const tablesOrdered = new Set(orderCalls.map((c) => c.table));
+    const directTables = USER_EXPORT_TABLES.filter(
+      (t) => t.kind === "direct",
+    ).map((t) => t.table);
+    for (const t of directTables) {
+      expect(tablesOrdered.has(t)).toBe(true);
+    }
+    // Indirect children: their `.in().order()` is exercised on the
+    // child SELECT.
+    const indirectChildren = USER_EXPORT_TABLES.filter(
+      (t) => t.kind === "indirect",
+    );
+    // The empty-parent short-circuit means child selects may not
+    // fire when parent returns []. Verify the parents themselves did
+    // get an ORDER BY hop.
+    const parents = new Set(
+      indirectChildren.map((t) => (t.kind === "indirect" ? t.parent_table : "")),
+    );
+    for (const p of parents) {
+      expect(tablesOrdered.has(p)).toBe(true);
+    }
   });
 });
 

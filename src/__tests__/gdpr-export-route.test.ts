@@ -262,8 +262,8 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
       generated_at: "2026-04-16T00:00:00Z",
       total_row_count: 3,
       tables: [
-        { table: "profiles", rows: [{ id: "user-ttl" }], row_count: 1, truncated_at_cap: false, fetch_error: null },
-        { table: "api_keys", rows: [{ id: "k1" }, { id: "k2" }], row_count: 2, truncated_at_cap: false, fetch_error: null },
+        { table: "profiles", rows: [{ id: "user-ttl" }], row_count: 1, truncated_at_cap: false, parent_id_truncated: false, fetch_error: null },
+        { table: "api_keys", rows: [{ id: "k1" }, { id: "k2" }], row_count: 2, truncated_at_cap: false, parent_id_truncated: false, fetch_error: null },
       ],
       truncated_at_size_cap: false,
       partial: false,
@@ -445,8 +445,8 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       generated_at: "2026-04-16T00:00:00Z",
       total_row_count: 0,
       tables: [
-        { table: "profiles", rows: [], row_count: 0, truncated_at_cap: false, fetch_error: null },
-        { table: "api_keys", rows: [], row_count: 0, truncated_at_cap: false, fetch_error: "direct select failed for api_keys: statement timeout" },
+        { table: "profiles", rows: [], row_count: 0, truncated_at_cap: false, parent_id_truncated: false, fetch_error: null },
+        { table: "api_keys", rows: [], row_count: 0, truncated_at_cap: false, parent_id_truncated: false, fetch_error: "direct select failed for api_keys: statement timeout" },
       ],
       truncated_at_size_cap: false,
       partial: true,
