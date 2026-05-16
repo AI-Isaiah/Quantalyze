@@ -459,24 +459,163 @@ export function parsePositionRows(rows: unknown[]): Position[] {
 }
 
 /**
+ * audit-2026-05-07 M-0909: branded MatchKey type for `funding_fees.match_key`.
+ * The dedup contract is `strategy_id:exchange:symbol:8h-bucket(timestamp)` and
+ * backs a UNIQUE constraint. Branding prevents arbitrary string concatenations
+ * from flowing into `match_key` without going through `buildFundingMatchKey`,
+ * which is the single place that knows the canonical format.
+ */
+export type FundingFeeMatchKey = string & { readonly __brand: "FundingFeeMatchKey" };
+
+/**
+ * Canonical match_key constructor. Floors the timestamp to its enclosing
+ * 8-hour funding bucket (00:00 / 08:00 / 16:00 UTC) — the same shape the
+ * Python `_build_match_key` writer emits.
+ */
+export function buildFundingMatchKey(parts: {
+  strategy_id: string;
+  exchange: SupportedExchange;
+  symbol: string;
+  /** ISO-8601 UTC timestamp; floored to the 8h bucket. */
+  timestamp: string;
+}): FundingFeeMatchKey {
+  const t = new Date(parts.timestamp).getTime();
+  const bucketMs = 8 * 60 * 60 * 1000;
+  const floored = Math.floor(t / bucketMs) * bucketMs;
+  const bucket = new Date(floored).toISOString();
+  return `${parts.strategy_id}:${parts.exchange}:${parts.symbol}:${bucket}` as FundingFeeMatchKey;
+}
+
+/**
+ * audit-2026-05-07 M-0910: per-exchange raw response shapes preserved on
+ * `funding_fees.raw_data`. Each exchange's normalizer writes one of these.
+ * The full FundingFee type is a discriminated union on `exchange` so a
+ * consumer narrowing on `fee.exchange === "binance"` gets the typed
+ * Binance row body without an `as` cast.
+ *
+ * Fields are intentionally `unknown` because the raw response carries
+ * extra fields beyond what we strictly key on; the discriminator is the
+ * SHAPE of the row, not field-level types.
+ */
+export interface BinanceFundingRaw {
+  incomeType?: unknown;
+  income?: unknown;
+  asset?: unknown;
+  time?: unknown;
+  tranId?: unknown;
+  [key: string]: unknown;
+}
+
+export interface OkxFundingRaw {
+  instId?: unknown;
+  type?: unknown;
+  pnl?: unknown;
+  ccy?: unknown;
+  ts?: unknown;
+  billId?: unknown;
+  [key: string]: unknown;
+}
+
+export interface BybitFundingRaw {
+  symbol?: unknown;
+  type?: unknown;
+  funding?: unknown;
+  currency?: unknown;
+  transactionTime?: unknown;
+  id?: unknown;
+  [key: string]: unknown;
+}
+
+/**
  * funding_fees row — one per 8-hour funding window per
  * (strategy, exchange, symbol). Signed amount: positive = received,
  * negative = paid. See migration 044.
+ *
+ * audit-2026-05-07 M-0910: discriminated union on `exchange` so
+ * `raw_data` narrows to the per-exchange raw shape automatically.
  */
-export interface FundingFee {
+interface FundingFeeBase {
   id: string;
   strategy_id: string;
-  // audit-2026-05-07 H-1117: single source of truth — alias for the
-  // canonical `SupportedExchange` tuple in utils.ts. Prevents drift when
-  // Sprint 6 adds a fourth exchange.
-  exchange: SupportedExchange;
   symbol: string;
   amount: number;
   currency: string;
   timestamp: string;
-  match_key: string;
-  raw_data: Record<string, unknown> | null;
+  // audit-2026-05-07 M-0909: branded MatchKey — only `buildFundingMatchKey`
+  // produces values that satisfy the type. Prevents typo-shaped duplicates
+  // from sailing past the UNIQUE constraint sister test that fakes a key.
+  match_key: FundingFeeMatchKey;
   created_at: string;
+}
+
+export type FundingFee =
+  | (FundingFeeBase & {
+      exchange: "binance";
+      raw_data: BinanceFundingRaw | null;
+    })
+  | (FundingFeeBase & {
+      exchange: "okx";
+      raw_data: OkxFundingRaw | null;
+    })
+  | (FundingFeeBase & {
+      exchange: "bybit";
+      raw_data: BybitFundingRaw | null;
+    });
+
+/**
+ * audit-2026-05-07 H-1116: Zod guard for FundingFee rows fetched from
+ * Supabase. Mirrors the pattern in `PositionRowSchema` — `z.coerce.number()`
+ * on NUMERIC columns (PostgREST may surface DECIMAL as string for arbitrary
+ * precision), `.datetime({ offset: true })` on TIMESTAMPTZ, `z.enum`
+ * against `SUPPORTED_EXCHANGES` so a typo in the row's exchange becomes
+ * a parse error rather than a silent fall-through. `.strict()` surfaces
+ * column drift loudly.
+ */
+const _fundingRawData = z.record(z.string(), z.unknown()).nullable();
+
+export const FundingFeeRowSchema = z
+  .object({
+    id: z.string(),
+    strategy_id: z.string(),
+    exchange: z.enum(["binance", "okx", "bybit"]),
+    symbol: z.string(),
+    amount: _coerceNumber,
+    currency: z.string(),
+    timestamp: _isoTimestamp,
+    match_key: z.string(),
+    raw_data: _fundingRawData,
+    created_at: _isoTimestamp,
+  })
+  .strict()
+  .transform((row) => row as FundingFee);
+
+/**
+ * Parse an array of unknown rows (typically `data` from a Supabase select)
+ * into a typed `FundingFee[]`. Mirrors `parsePositionRows`: rows that fail
+ * the schema are dropped with a path/code-only `console.warn` (never the
+ * row contents — PII / PnL leakage hazard via Vercel runtime logs).
+ */
+export function parseFundingFeeRows(rows: unknown[]): FundingFee[] {
+  const out: FundingFee[] = [];
+  for (const row of rows) {
+    const parsed = FundingFeeRowSchema.safeParse(row);
+    if (parsed.success) {
+      out.push(parsed.data);
+    } else {
+      const rowId = (row && typeof row === "object" && "id" in row)
+        ? (row as { id?: unknown }).id
+        : undefined;
+      const safeIssues = parsed.error.issues.map((i) => ({
+        path: i.path.join("."),
+        code: i.code,
+      }));
+      console.warn(
+        "[parseFundingFeeRows] dropping invalid funding_fee row",
+        { rowId, issues: safeIssues },
+      );
+    }
+  }
+  return out;
 }
 
 /**
