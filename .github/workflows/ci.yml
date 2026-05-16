@@ -701,6 +701,30 @@ jobs:
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+      # retro-PR179-M-cache: restore .next/cache (Next.js incremental
+      # webpack/Turbopack store) for the seed-gated rebuild. The
+      # downloaded nextjs-build artifact excludes .next/cache/** (see
+      # frontend-build upload step), and the e2e job previously had no
+      # actions/cache restore — so the rebuild's "incremental on top
+      # of the placeholder run" promise (in the comment below) was
+      # factually false. The rebuild was running cold (~47-50s observed
+      # across 4 post-merge runs vs the 30-60s stated range, at the
+      # upper bound).
+      #
+      # Restore from the SAME cache key as frontend-build:Cache .next/cache
+      # (read-only restore from the e2e side; frontend-build is the
+      # writer). Cache buckets keyed on hashFiles(...) are content-
+      # addressed, so the prefix-only restore-keys fallback handles the
+      # case where frontend-build's cache step hashed src/** to a
+      # different bucket than this e2e job sees.
+      - name: Restore .next/cache for rebuild (read-only)
+        if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: .next/cache
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-${{ hashFiles('src/**') }}
+          restore-keys: |
+            ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-
       - name: Rebuild Next.js with real test-Supabase env (C-0293(c))
         # The artifact downloaded above was built with PLACEHOLDER
         # NEXT_PUBLIC_* values so the uploaded `.next/**` artifact never
@@ -715,13 +739,20 @@ jobs:
         #
         # Cost: ~30-60s only when E2E_TEST_DB_CONFIGURED == 'true'.
         # For fork PRs and repos without the test-DB wired, this step
-        # skips entirely.
+        # skips entirely. On a warm cache (frontend-build wrote .next/cache
+        # on the same lockfile+config+src hash), the rebuild becomes
+        # genuinely incremental — the previous "incremental" comment
+        # was aspirational because .next/cache was not restored. With
+        # the restore step above the comment now matches observed
+        # behavior.
         if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
         run: |
           # Wipe the placeholder-built artifact manifests + chunks so
-          # the rebuild has nothing stale to merge against. `.next/cache`
-          # (the incremental webpack/Turbopack store) is left intact so
-          # the rebuild is incremental on top of the placeholder run.
+          # the rebuild has nothing stale to merge against. We leave
+          # .next/cache (restored above by actions/cache/restore) so
+          # the rebuild can re-use the per-module webpack cache from
+          # the placeholder run — DefinePlugin re-bakes the NEXT_PUBLIC_*
+          # literals on the second pass, the rest is incremental.
           rm -rf .next/server .next/static .next/build-manifest.json .next/prerender-manifest.json .next/required-server-files.json 2>/dev/null || true
           npm run build
         env:
