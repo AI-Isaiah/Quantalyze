@@ -696,10 +696,13 @@ export type LazyMetricsPanelId =
 /**
  * audit-2026-05-07 H-0496: encode the panel→kind mapping at the type
  * level so a docstring/SQL drift cannot survive type-check. The mapping
- * mirrors the SQL `CASE` statement in migration 087. The keys cover
- * every member of `LazyMetricsPanelId`; the union of all values is a
- * subset of `StrategyAnalyticsSeriesKind` (intentionally narrower —
- * `equity_series_1y` lives in metrics_json, not in the sibling table).
+ * mirrors the SQL `CASE` statement in
+ * `supabase/migrations/20260428120919_strategy_analytics_series.sql`.
+ * The keys cover every member of `LazyMetricsPanelId`; the union of all
+ * values equals `StrategyAnalyticsSeriesKind`. (`equity_series_1y` is
+ * intentionally NOT in `StrategyAnalyticsSeriesKind` — it lives in
+ * `metrics_json`, not the sibling table — so it correctly does not
+ * appear here.)
  *
  * Currently consumed for type-correctness ONLY (we don't widen
  * `fetchStrategyLazyMetrics`' return type because that would break
@@ -740,10 +743,39 @@ type _AssertPanelMapKindsValid =
     | never
     ? true
     : never;
+// Force evaluation of both assertions at a real assignment site. If either
+// branch resolves to `never` (map drift on keys or values), assigning `true`
+// fails type-check. A bare type alias would be lazily-evaluated and let value
+// drift slip through.
 type _PanelMapChecked = _AssertPanelMapCoversIds & _AssertPanelMapKindsValid;
-// Keep the symbol referenced so future linters that flag type-only
-// unused declarations don't remove the guard at the top.
-export type _LazyMetricsPanelMapInvariantChecked = _PanelMapChecked;
+const _panelMapInvariant: _PanelMapChecked = true;
+void _panelMapInvariant;
+
+// Runtime mirror of `LazyMetricsPanelKindMap`. Used by
+// `fetchStrategyLazyMetrics` to drop unexpected keys (typo in SQL CASE, drift
+// in the SECURITY DEFINER body) before they reach a destructuring consumer.
+// `satisfies` enforces the runtime list matches the type-level union for each
+// panel — any drift between the two surfaces as a TS error here.
+const EXPECTED_LAZY_METRICS_KINDS_BY_PANEL = {
+  overview: [],
+  equity: ["log_returns_series"],
+  drawdown: [],
+  returns_dist: ["daily_returns_grid"],
+  rolling: [
+    "rolling_sortino_3m",
+    "rolling_sortino_6m",
+    "rolling_sortino_12m",
+    "rolling_volatility_3m",
+    "rolling_volatility_6m",
+    "rolling_volatility_12m",
+    "rolling_alpha",
+    "rolling_beta",
+  ],
+  trades: [],
+  exposure: ["exposure_series", "turnover_series"],
+} as const satisfies {
+  [P in LazyMetricsPanelId]: readonly LazyMetricsPanelKindMap[P][] | readonly [];
+};
 
 /**
  * Lazy-fetch heavy series for panels 4–7 of the Single-Strategy v2 page.
@@ -807,25 +839,77 @@ export async function fetchStrategyLazyMetrics(
   // in the SECURITY DEFINER function that returns SQL NULL, an array,
   // a primitive, etc. would otherwise sail through the cast and corrupt
   // every downstream consumer that expects `data.rolling_sortino_3m` to
-  // be either undefined or an array. Reject anything that isn't a
-  // plain object (the visibility-miss + null-data path collapses to
-  // `{}`, matching the existing contract).
+  // be either undefined or an array. Reject anything that isn't a plain
+  // object — `null` and `undefined` are legitimate visibility-miss /
+  // empty-row signals; primitives / arrays are real shape regressions.
   if (
     data === null ||
     typeof data !== "object" ||
     Array.isArray(data)
   ) {
     if (data !== null && data !== undefined) {
+      const shapeType = Array.isArray(data) ? "array" : typeof data;
       console.error("fetchStrategyLazyMetrics: unexpected RPC payload shape", {
         strategyId,
         panelId,
-        type: Array.isArray(data) ? "array" : typeof data,
+        type: shapeType,
       });
+      // Mirror the H-0488 escalation for the error-channel path: a SECURITY
+      // DEFINER return-type drift is invisible to ops if it only hits
+      // console.error. Tag distinctly so alerting can split shape-mismatch
+      // from RPC-error.
+      captureToSentry(
+        new Error("fetchStrategyLazyMetrics: unexpected RPC payload shape"),
+        {
+          tags: {
+            op: "fetchStrategyLazyMetrics",
+            panel_id: panelId,
+            reason: "unexpected_payload_shape",
+          },
+          extra: { strategyId, panelId, type: shapeType },
+          level: "error",
+        },
+      );
     }
     return {} as LazyMetricsPayload;
   }
 
-  return data as LazyMetricsPayload;
+  // Drop keys outside the type-level panel→kind contract. A SQL CASE typo
+  // (`rollig_sortino_3m`) used to sail through the cast and surface as
+  // `undefined` to destructuring consumers; the runtime mirror now refuses
+  // unexpected keys at the boundary. Unexpected keys are escalated to
+  // Sentry so SQL drift surfaces operationally.
+  const expectedKinds = EXPECTED_LAZY_METRICS_KINDS_BY_PANEL[panelId];
+  const expectedKindSet = new Set<string>(expectedKinds);
+  const unexpectedKeys: string[] = [];
+  const filtered: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (expectedKindSet.has(key)) {
+      filtered[key] = value;
+    } else {
+      unexpectedKeys.push(key);
+    }
+  }
+  if (unexpectedKeys.length > 0) {
+    console.error("fetchStrategyLazyMetrics: unexpected RPC payload keys", {
+      strategyId,
+      panelId,
+      unexpected: unexpectedKeys,
+    });
+    captureToSentry(
+      new Error("fetchStrategyLazyMetrics: unexpected RPC payload keys"),
+      {
+        tags: {
+          op: "fetchStrategyLazyMetrics",
+          panel_id: panelId,
+          reason: "unexpected_payload_keys",
+        },
+        extra: { strategyId, panelId, unexpected: unexpectedKeys },
+        level: "error",
+      },
+    );
+  }
+  return filtered as LazyMetricsPayload;
 }
 
 export async function getUserPortfolios(): Promise<PortfolioWithCount[]> {
@@ -1066,7 +1150,11 @@ export const getRealPortfolio = cache(
  * `daily_returns` for the scenario math. `apiKeys` drives the
  * inline "Add Investment" / "Connected exchanges" section.
  */
-import type { BridgeOutcome } from "./bridge-outcome-schema";
+import {
+  REJECTION_REASONS,
+  type BridgeOutcome,
+  type RejectionReason,
+} from "./bridge-outcome-schema";
 
 /**
  * Phase 5 D-15 (revised) — allocator-scoped bridge_outcomes row with the
@@ -1714,18 +1802,19 @@ export const getMyAllocationDashboard = cache(
     // match_decisions, match_batches, allocator_equity_snapshots,
     // allocator_holdings via .eq('allocator_id', userId)) uses the inline
     // userId argument as its sole tenant boundary — the admin client
-    // bypasses RLS by design. Today every caller resolves userId via
-    // supabase.auth.getUser() server-side, but if a future caller ever
-    // accepts userId from a query param / header / cookie without that
-    // check, this function would happily exfiltrate that allocator's full
-    // holdings + outcomes history. Assert auth.uid()===userId here so the
-    // foot-gun fails closed instead of silent cross-tenant disclosure.
+    // bypasses RLS by design. If a future caller ever accepts userId from
+    // a query param / header / cookie without re-checking auth, this
+    // function would exfiltrate that allocator's full holdings + outcomes.
+    // Assert auth.uid()===userId so the foot-gun fails closed instead of
+    // silent cross-tenant disclosure. Live integration tests must sign in
+    // as the allocator (see src/__tests__/outcomes-join-rls.test.ts).
     //
-    // The guard is STRICT: it requires an authenticated session whose
-    // user.id matches the argument. Live integration tests that
-    // previously called this function with an admin-seeded user id and
-    // no session must sign in as that user first (see
-    // src/__tests__/outcomes-join-rls.test.ts for the existing pattern).
+    // Run SEQUENTIALLY before the parallel fan-out below. Folding this into
+    // Promise.all is tempting (~30ms saved) but executes admin-keyed reads
+    // against the attacker-supplied userId before auth resolves — leaving a
+    // side-channel via PostgREST audit logs, victim-tenant rate-limit
+    // consumption, and victim-data heap residency until GC. The return-value
+    // channel is the same; the defence-in-depth is not.
     const { data: { user: authUser } } = await supabase.auth.getUser();
     if (!authUser || authUser.id !== userId) {
       console.error(
@@ -1875,28 +1964,31 @@ export const getMyAllocationDashboard = cache(
     // tier-safe display string. The leaf type stays `{id, name}` so
     // downstream consumers don't have to learn a new contract; the
     // server-side resolver is the gate.
-    type EmbeddedStrategyRaw = {
-      id: string;
-      name: string | null;
-      codename: string | null;
-      disclosure_tier: DisclosureTier | null;
-    };
     type EmbeddedStrategy = { id: string; name: string };
     type RawRow = Record<string, unknown>;
     const normalizeEmbed = (v: unknown): EmbeddedStrategy | null => {
       if (v == null) return null;
-      const raw = (Array.isArray(v) ? v[0] : v) as
-        | EmbeddedStrategyRaw
-        | undefined
-        | null;
-      if (!raw) return null;
+      const candidate = Array.isArray(v) ? v[0] : v;
+      // Narrow from unknown via runtime check — `as EmbeddedStrategyRaw` here
+      // would launder `undefined` into the public `EmbeddedStrategy.id`
+      // (same bug class as H-0490). A column drop on the embedded join must
+      // collapse to null rather than ship a `{ id: undefined, name: ... }`.
+      if (!candidate || typeof candidate !== "object") return null;
+      const raw = candidate as Record<string, unknown>;
+      if (typeof raw.id !== "string" || raw.id.length === 0) return null;
+      const rawName = typeof raw.name === "string" ? raw.name : null;
+      const rawCodename = typeof raw.codename === "string" ? raw.codename : null;
+      const rawTier =
+        typeof raw.disclosure_tier === "string"
+          ? (raw.disclosure_tier as DisclosureTier)
+          : null;
       return {
         id: raw.id,
         name: displayStrategyName({
           id: raw.id,
-          name: raw.name ?? null,
-          codename: raw.codename ?? null,
-          disclosure_tier: raw.disclosure_tier ?? null,
+          name: rawName,
+          codename: rawCodename,
+          disclosure_tier: rawTier,
         }),
       };
     };
@@ -1904,26 +1996,68 @@ export const getMyAllocationDashboard = cache(
     // `{ ...(row as unknown as BridgeOutcome), ... }`. The previous
     // spread + force-cast hid drift: if the SELECT column list ever
     // drops a `BridgeOutcome` key (e.g. `needs_recompute`, `delta_30d`),
-    // the cast silently produces an object missing that field and
-    // downstream consumers would read `undefined` instead of failing
-    // type-check. Pull each `BridgeOutcome` key from the raw row by
-    // name so a missing column becomes a TS error.
-    const pickBridgeOutcomeFields = (row: RawRow): BridgeOutcome => ({
-      id: row.id as string,
-      kind: row.kind as BridgeOutcome["kind"],
-      percent_allocated: (row.percent_allocated as number | null) ?? null,
-      allocated_at: (row.allocated_at as string | null) ?? null,
-      rejection_reason:
-        (row.rejection_reason as BridgeOutcome["rejection_reason"]) ?? null,
-      note: (row.note as string | null) ?? null,
-      delta_30d: (row.delta_30d as number | null) ?? null,
-      delta_90d: (row.delta_90d as number | null) ?? null,
-      delta_180d: (row.delta_180d as number | null) ?? null,
-      estimated_delta_bps: (row.estimated_delta_bps as number | null) ?? null,
-      estimated_days: (row.estimated_days as number | null) ?? null,
-      needs_recompute: Boolean(row.needs_recompute),
-      created_at: row.created_at as string,
-    });
+    // the cast silently produced an object missing that field and
+    // downstream consumers read `undefined` instead of failing.
+    //
+    // Phase B follow-up: runtime guards on each field. Plain `as` casts
+    // on a `Record<string, unknown>` cannot enforce TS error on a SELECT
+    // column drop (the cast laundering accepts any value). Coerce each
+    // field via a typeof guard; required fields throw, nullable fields
+    // null-coerce. A missing column then surfaces as a thrown Error rather
+    // than `{ id: undefined, kind: undefined, ... }`.
+    const nullableNumber = (v: unknown): number | null =>
+      typeof v === "number" && Number.isFinite(v) ? v : null;
+    const nullableString = (v: unknown): string | null =>
+      typeof v === "string" ? v : null;
+    const requiredString = (row: RawRow, key: string): string => {
+      const v = row[key];
+      if (typeof v !== "string" || v.length === 0) {
+        throw new Error(
+          `getMyAllocationDashboard.bridge_outcomes: missing required ${key}`,
+        );
+      }
+      return v;
+    };
+    const KIND_VALUES: ReadonlySet<BridgeOutcome["kind"]> = new Set(
+      ["allocated", "rejected"] as const,
+    );
+    const isBridgeKind = (v: unknown): v is BridgeOutcome["kind"] =>
+      typeof v === "string" &&
+      (KIND_VALUES as ReadonlySet<string>).has(v);
+    const REJECTION_VALUES: ReadonlySet<RejectionReason> = new Set(
+      REJECTION_REASONS,
+    );
+    const isRejectionReason = (v: unknown): v is RejectionReason =>
+      typeof v === "string" &&
+      (REJECTION_VALUES as ReadonlySet<string>).has(v);
+    const pickBridgeOutcomeFields = (row: RawRow): BridgeOutcome => {
+      const rawKind = row.kind;
+      if (!isBridgeKind(rawKind)) {
+        throw new Error(
+          `getMyAllocationDashboard.bridge_outcomes: invalid kind ${String(rawKind)}`,
+        );
+      }
+      return {
+        id: requiredString(row, "id"),
+        kind: rawKind,
+        percent_allocated: nullableNumber(row.percent_allocated),
+        allocated_at: nullableString(row.allocated_at),
+        rejection_reason: isRejectionReason(row.rejection_reason)
+          ? row.rejection_reason
+          : null,
+        note: nullableString(row.note),
+        delta_30d: nullableNumber(row.delta_30d),
+        delta_90d: nullableNumber(row.delta_90d),
+        delta_180d: nullableNumber(row.delta_180d),
+        estimated_delta_bps: nullableNumber(row.estimated_delta_bps),
+        estimated_days: nullableNumber(row.estimated_days),
+        // Strict boolean compare — `Boolean("false")` is `true` and would
+        // flip the stale-data UI indicator on a column-type drift; the
+        // typeof discipline applied to every other field must apply here.
+        needs_recompute: row.needs_recompute === true,
+        created_at: requiredString(row, "created_at"),
+      };
+    };
 
     const outcomes: OutcomeRow[] = ((outcomesFullRes.data ?? []) as RawRow[]).map(
       (row) => {
@@ -2022,20 +2156,32 @@ export const getMyAllocationDashboard = cache(
     const candidateIds = Array.from(
       new Set(flaggedRowsOnly.map((f) => f.top_candidate_strategy_id!)),
     );
-    const { data: candidateStrategies } =
-      candidateIds.length > 0
-        ? await supabase
-            .from("strategies")
-            .select("id, name, codename, disclosure_tier")
-            .in("id", candidateIds)
-        : {
-            data: [] as Array<{
-              id: string;
-              name: string | null;
-              codename: string | null;
-              disclosure_tier: DisclosureTier | null;
-            }>,
-          };
+    // Phase C red-team Finding 2: this secondary SELECT was previously
+    // destructured `{ data }`-only, so a Supabase error silently produced
+    // `data === undefined → nameById empty → every flagged holding's
+    // `name` resolved to `undefined` → the `if (!name) return null` filter
+    // below stripped EVERY flagged-holding entry. Allocators would see an
+    // empty flagged-holdings panel masking real breach signals. Lift the
+    // error channel the same way `assertOk` does for the Promise.all
+    // fan-out above.
+    const candidateStrategiesRes = candidateIds.length > 0
+      ? await supabase
+          .from("strategies")
+          .select("id, name, codename, disclosure_tier")
+          .in("id", candidateIds)
+      : {
+          data: [] as Array<{
+            id: string;
+            name: string | null;
+            codename: string | null;
+            disclosure_tier: DisclosureTier | null;
+          }>,
+          error: null as null,
+        };
+    const candidateStrategies = assertOk(
+      candidateStrategiesRes,
+      "flagged_candidate_strategies",
+    );
     const nameById = new Map(
       (candidateStrategies ?? []).map((s) => [
         s.id,
