@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withRole, APP_ROLES, type AppRole } from "@/lib/auth";
-import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
+import {
+  adminActionLimiter,
+  checkLimit,
+  isRateLimitMisconfigured,
+} from "@/lib/ratelimit";
 // audit-2026-05-07 fix C-0065 (red-team conf-6): for RBAC-mutating
 // routes we use the synchronous `emit` directly (aliased here to
 // `logAuditEvent` so the audit-coverage grep gate matches) rather than
@@ -133,7 +137,40 @@ async function fetchUserRoles(
  * P462 — envelope matches POST: `{ user_id, roles: string[] }`.
  */
 export const GET = withRole<{ id: string }>("admin")(
-  async (_req: NextRequest, { params }) => {
+  async (_req: NextRequest, { user, params }) => {
+    // audit-2026-05-07 specialist-apply (code-reviewer M conf-7):
+    // POST has adminActionLimiter; GET previously had none. The same
+    // threat model applies — a compromised admin session can probe
+    // every user_id in profiles to map the full role assignment table
+    // with no audit emit (read path is deliberately not audited).
+    // Apply the same bucket with a `:get` suffix so the GET cadence
+    // doesn't interfere with legitimate POST rate-limit accounting.
+    const rl = await checkLimit(
+      adminActionLimiter,
+      `admin:${user.id}:users-roles:get`,
+    );
+    if (!rl.success) {
+      if (isRateLimitMisconfigured(rl)) {
+        return NextResponse.json(
+          {
+            error: "Rate limiter unavailable",
+            code: "ratelimit_misconfigured",
+          },
+          {
+            status: 503,
+            headers: { "Retry-After": String(rl.retryAfter) },
+          },
+        );
+      }
+      return NextResponse.json(
+        { error: "Too many requests" },
+        {
+          status: 429,
+          headers: { "Retry-After": String(rl.retryAfter) },
+        },
+      );
+    }
+
     const targetUserId = params?.id;
     if (!targetUserId) {
       return NextResponse.json(
@@ -158,15 +195,22 @@ export const GET = withRole<{ id: string }>("admin")(
         code: profileError.code,
         message: profileError.message,
       });
+      // audit-2026-05-07 specialist-apply (api-contract M conf-9):
+      // add stable `code` so the UI can disambiguate this 500 from
+      // the post-mutation read failure 500 ({roles_read_failed}).
       return NextResponse.json(
-        { error: "Failed to fetch user roles" },
+        { error: "Failed to fetch user roles", code: "profile_read_failed" },
         { status: 500 },
       );
     }
 
     if (!profile) {
+      // audit-2026-05-07 specialist-apply (api-contract M conf-8):
+      // add `code: "user_not_found"` so the UI can disambiguate this
+      // 404 from the revoke `role_not_held` 404 — same status, two
+      // semantically distinct conditions.
       return NextResponse.json(
-        { error: "User not found" },
+        { error: "User not found", code: "user_not_found" },
         { status: 404 },
       );
     }
@@ -211,6 +255,27 @@ export const POST = withRole<{ id: string }>("admin")(
       `admin:${user.id}:users-roles`,
     );
     if (!rl.success) {
+      // audit-2026-05-07 specialist-apply (silent-failure-hunter HIGH conf-9):
+      // checkLimit() returns {success:false, reason:'ratelimit_misconfigured'}
+      // when Upstash env is missing or the limiter throws (ratelimit.ts:215-240).
+      // Pre-fix the route collapsed both quota-exhaustion AND misconfiguration
+      // into 429, masking an Upstash outage as ordinary throttling. The
+      // rate-limit module exposes `isRateLimitMisconfigured(rl)` precisely
+      // so callers can translate the misconfigured variant into 503 — the
+      // contract documented in ratelimit.ts:182-195. Canary/health checks
+      // observe the configuration outage instead of seeing healthy 429s.
+      if (isRateLimitMisconfigured(rl)) {
+        return NextResponse.json(
+          {
+            error: "Rate limiter unavailable",
+            code: "ratelimit_misconfigured",
+          },
+          {
+            status: 503,
+            headers: { "Retry-After": String(rl.retryAfter) },
+          },
+        );
+      }
       return NextResponse.json(
         { error: "Too many requests" },
         {
@@ -271,6 +336,45 @@ export const POST = withRole<{ id: string }>("admin")(
 
     const admin = createAdminClient();
 
+    // audit-2026-05-07 specialist-apply (api-contract HIGH conf-9 +
+    // code-reviewer M-#4 conf-7 + security #4 conf-7): POST previously
+    // skipped the profile-existence check that GET enforces. A
+    // grant/revoke against a typo'd or deleted user id fell through to
+    // a Supabase FK violation (500 'Grant failed') OR the new no-op
+    // revoke 404 with code='role_not_held' — three different envelopes
+    // for the same missing-user condition. Mirror GET's contract:
+    // 404 with code='user_not_found' uniformly for missing users so
+    // the UI can disambiguate "user doesn't exist" from "user exists
+    // but doesn't hold role".
+    const { data: targetProfile, error: profileLookupError } = await admin
+      .from("profiles")
+      .select("id")
+      .eq("id", targetUserId)
+      .maybeSingle();
+    if (profileLookupError) {
+      console.error(
+        "[admin/users/roles] POST profile lookup failed:",
+        {
+          target_user_id: targetUserId,
+          code: profileLookupError.code,
+          message: profileLookupError.message,
+        },
+      );
+      return NextResponse.json(
+        {
+          error: "Failed to look up target user",
+          code: "profile_read_failed",
+        },
+        { status: 500 },
+      );
+    }
+    if (!targetProfile) {
+      return NextResponse.json(
+        { error: "User not found", code: "user_not_found" },
+        { status: 404 },
+      );
+    }
+
     if (action === "grant") {
       // audit-2026-05-07 fix M-0288 (silent-failure-hunter conf-8):
       // determine `was_new_grant` BEFORE upsert by reading the existing
@@ -292,12 +396,25 @@ export const POST = withRole<{ id: string }>("admin")(
           code: preExistingError.code,
           message: preExistingError.message,
         });
+        // audit-2026-05-07 specialist-apply (api-contract M conf-9):
+        // distinguish pre-read failure from upsert failure with a
+        // stable code so the UI can decide whether to retry safely.
         return NextResponse.json(
-          { error: "Grant failed" },
+          { error: "Grant failed", code: "grant_pre_read_failed" },
           { status: 500 },
         );
       }
       const wasNewGrant = preExisting == null;
+      // audit-2026-05-07 specialist-apply (silent-failure HIGH #3 +
+      // code-reviewer M #5): `wasNewGrant` is TOCTOU-racy — between
+      // this maybeSingle() and the upsert below another admin could
+      // insert the same (user_id, role) row. We accept this race
+      // explicitly and anchor it forensically via role.state_observed
+      // (C-0067) which records the post-write reality. The audit row's
+      // was_new_grant reflects what THIS handler observed, NOT a
+      // serialized snapshot. A definitive fix requires a SECURITY
+      // DEFINER RPC returning xmax=0 atomically — tracked as a
+      // follow-up in the audit-2026-05-07 long-tail backlog.
 
       // ON CONFLICT DO NOTHING via upsert — a repeat grant is a no-op,
       // not an error. We still emit the audit event so the operator
@@ -320,8 +437,11 @@ export const POST = withRole<{ id: string }>("admin")(
           code: error.code,
           message: error.message,
         });
+        // audit-2026-05-07 specialist-apply (api-contract M conf-9):
+        // distinguish upsert failure from pre-read failure with a
+        // stable code so the UI knows the mutation did NOT commit.
         return NextResponse.json(
-          { error: "Grant failed" },
+          { error: "Grant failed", code: "grant_mutation_failed" },
           { status: 500 },
         );
       }
@@ -346,12 +466,48 @@ export const POST = withRole<{ id: string }>("admin")(
       // so re-grant audit rows are distinguishable from first-time
       // grants — analogous to `was_first_run` in account.sanitize
       // (deletion-requests/approve/route.ts).
-      await logAuditEvent(supabase, {
-        action: "role.grant",
-        entity_type: "user_app_role",
-        entity_id: targetUserId,
-        metadata: { role, granted_by: user.id, was_new_grant: wasNewGrant },
-      });
+      //
+      // audit-2026-05-07 specialist-apply (code-reviewer HIGH conf-8 +
+      // security HIGH conf-8 + api-contract M conf-7): wrap the
+      // awaited emit in try/catch. emit() re-throws on permission_denied
+      // and unknown errors (audit.ts:469-519). Without try/catch a
+      // failed emit becomes an unhandled rejection, bubbles to Next's
+      // 500 response with NO stable envelope, AND the mutation has
+      // already committed. Return a stable
+      // {code:'mutation_succeeded_but_audit_failed'} 500 so the UI
+      // can prompt a refresh without re-firing the grant.
+      try {
+        await logAuditEvent(supabase, {
+          action: "role.grant",
+          entity_type: "user_app_role",
+          entity_id: targetUserId,
+          metadata: {
+            role,
+            granted_by: user.id,
+            was_new_grant: wasNewGrant,
+          },
+        });
+      } catch (auditError) {
+        console.error(
+          "[admin/users/roles] grant committed but role.grant audit emit failed:",
+          {
+            target_user_id: targetUserId,
+            role,
+            error:
+              auditError instanceof Error
+                ? auditError.message
+                : String(auditError),
+          },
+        );
+        return NextResponse.json(
+          {
+            error:
+              "Grant committed but audit emission failed. Refresh to verify state.",
+            code: "mutation_succeeded_but_audit_failed",
+          },
+          { status: 500 },
+        );
+      }
 
       // P462 (audit-2026-05-07) — unify the response envelope across GET,
       // grant, and revoke. The UI's role panel uses the same parser for
@@ -395,18 +551,57 @@ export const POST = withRole<{ id: string }>("admin")(
       // race-dependent — the post-write observation is the only signal
       // that survives the interleave. Note: this records what THIS
       // request saw; it does not serialize the underlying race.
-      const holdsRoleAfterGrant = grantResult.roles.includes(role);
-      await logAuditEvent(supabase, {
-        action: "role.state_observed",
-        entity_type: "user_app_role",
-        entity_id: targetUserId,
-        metadata: {
-          role,
-          observed_by: user.id,
-          following_action: "grant",
-          holds_role: holdsRoleAfterGrant,
-        },
-      });
+      //
+      // audit-2026-05-07 specialist-apply (silent-failure HIGH conf-8 +
+      // code-reviewer HIGH conf-8 + security LOW conf-8 +
+      // silent-failure M conf-7): role.state_observed is a FORENSIC
+      // ANCHOR, not a control-flow signal. If THIS secondary emit
+      // fails AFTER role.grant has landed AND the mutation committed,
+      // surfacing 500 would (a) make the admin retry → producing a
+      // second role.grant audit row with was_new_grant=false (the
+      // exact regression C-0067 was designed to prevent), and
+      // (b) leave audit_log + response state divergent. Mirror the
+      // primary/secondary asymmetry called out in the specialist
+      // briefs: role.grant/role.revoke is fail-loud (primary intent
+      // row); role.state_observed is fail-soft (secondary observation).
+      //
+      // api-contract M conf-8: gate state_observed on `wasNewGrant` —
+      // a no-op grant doesn't change state, so emitting state_observed
+      // unconditionally inverts the symmetry with the revoke no-op
+      // suppression path (which already skips state_observed on
+      // count=0). The role.grant row still emits unconditionally to
+      // preserve operator-intent forensic signal.
+      if (wasNewGrant) {
+        const holdsRoleAfterGrant = grantResult.roles.includes(role);
+        try {
+          await logAuditEvent(supabase, {
+            action: "role.state_observed",
+            entity_type: "user_app_role",
+            entity_id: targetUserId,
+            metadata: {
+              role,
+              observed_by: user.id,
+              following_action: "grant",
+              holds_role: holdsRoleAfterGrant,
+            },
+          });
+        } catch (auditError) {
+          console.error(
+            "[admin/users/roles] grant succeeded but role.state_observed emit failed (non-fatal):",
+            {
+              target_user_id: targetUserId,
+              role,
+              error:
+                auditError instanceof Error
+                  ? auditError.message
+                  : String(auditError),
+            },
+          );
+          // Intentionally do NOT propagate — observability metric
+          // drops, but the response stays honest. The primary
+          // role.grant row already landed above.
+        }
+      }
 
       return NextResponse.json({
         user_id: targetUserId,
@@ -428,8 +623,11 @@ export const POST = withRole<{ id: string }>("admin")(
         code: error.code,
         message: error.message,
       });
+      // audit-2026-05-07 specialist-apply (api-contract M conf-9):
+      // stable code so the UI can distinguish the various 500 classes
+      // on this route.
       return NextResponse.json(
-        { error: "Revoke failed" },
+        { error: "Revoke failed", code: "revoke_mutation_failed" },
         { status: 500 },
       );
     }
@@ -446,6 +644,43 @@ export const POST = withRole<{ id: string }>("admin")(
     // didn't change because of THIS call).
     const removedRows = count ?? 0;
     if (removedRows === 0) {
+      // audit-2026-05-07 specialist-apply (code-reviewer HIGH conf-8 +
+      // security HIGH conf-9 + silent-failure M conf-8): emit a distinct
+      // `role.revoke_noop` audit row on the no-op path. Pre-apply the
+      // route returned 404 + suppressed BOTH role.revoke and
+      // role.state_observed — eliminating the only forensic signal that
+      // a probe occurred. A compromised admin could enumerate (user, role)
+      // pairs (~20/min via the rate limiter) entirely off-the-books.
+      // The new action preserves M-0287's intent (no ghost `role.revoke`
+      // rows polluting "who-revoked-what" forensic queries) while keeping
+      // operator INTENT recorded for SOC/compliance review. Fail-soft on
+      // the emit itself: a forensic anchor failure must not change the
+      // 404 the caller sees (consistent with the state_observed pattern).
+      try {
+        await logAuditEvent(supabase, {
+          action: "role.revoke_noop",
+          entity_type: "user_app_role",
+          entity_id: targetUserId,
+          metadata: {
+            role,
+            attempted_by: user.id,
+            was_held: false,
+            removed_rows: 0,
+          },
+        });
+      } catch (auditError) {
+        console.error(
+          "[admin/users/roles] role.revoke_noop audit emit failed (non-fatal):",
+          {
+            target_user_id: targetUserId,
+            role,
+            error:
+              auditError instanceof Error
+                ? auditError.message
+                : String(auditError),
+          },
+        );
+      }
       return NextResponse.json(
         {
           error: `User does not hold role '${role}' — nothing to revoke.`,
@@ -467,12 +702,43 @@ export const POST = withRole<{ id: string }>("admin")(
     // removedRows > 0 — the early-return above guarantees that here.
     // The `removed_rows` metadata is now always > 0 (no more ghost
     // revoke rows with `removed_rows: 0` polluting the timeline).
-    await logAuditEvent(supabase, {
-      action: "role.revoke",
-      entity_type: "user_app_role",
-      entity_id: targetUserId,
-      metadata: { role, revoked_by: user.id, removed_rows: removedRows },
-    });
+    //
+    // audit-2026-05-07 specialist-apply (silent-failure HIGH conf-8 +
+    // code-reviewer HIGH conf-8 + security HIGH conf-8 + api-contract M
+    // conf-7): wrap awaited emit in try/catch + return stable
+    // mutation_succeeded_but_audit_failed envelope. Same rationale as
+    // the grant path — the DELETE already committed, surfacing a
+    // bare 500 to the caller has the UI re-firing the revoke
+    // (next call → count=0 → 404 → role.revoke_noop, audit
+    // forensics + UX diverge).
+    try {
+      await logAuditEvent(supabase, {
+        action: "role.revoke",
+        entity_type: "user_app_role",
+        entity_id: targetUserId,
+        metadata: { role, revoked_by: user.id, removed_rows: removedRows },
+      });
+    } catch (auditError) {
+      console.error(
+        "[admin/users/roles] revoke committed but role.revoke audit emit failed:",
+        {
+          target_user_id: targetUserId,
+          role,
+          error:
+            auditError instanceof Error
+              ? auditError.message
+              : String(auditError),
+        },
+      );
+      return NextResponse.json(
+        {
+          error:
+            "Revoke committed but audit emission failed. Refresh to verify state.",
+          code: "mutation_succeeded_but_audit_failed",
+        },
+        { status: 500 },
+      );
+    }
 
     // P462 (audit-2026-05-07) — same envelope as grant + GET. The
     // `removed_rows` count is dropped from the response body; it was a
@@ -507,18 +773,38 @@ export const POST = withRole<{ id: string }>("admin")(
     // audit-2026-05-07 fix C-0067 (red-team conf-7): emit
     // `role.state_observed` with the post-write boolean for the same
     // race-anchor reason as the grant path. See the grant-side comment.
+    //
+    // audit-2026-05-07 specialist-apply (silent-failure HIGH conf-8 +
+    // code-reviewer HIGH conf-8 + security LOW conf-8): role.state_observed
+    // is forensic-secondary; failure here must not turn a successful
+    // revoke into a 500. Log + Sentry, continue with the unified
+    // envelope. Same fail-soft pattern as the grant path.
     const holdsRoleAfterRevoke = revokeResult.roles.includes(role);
-    await logAuditEvent(supabase, {
-      action: "role.state_observed",
-      entity_type: "user_app_role",
-      entity_id: targetUserId,
-      metadata: {
-        role,
-        observed_by: user.id,
-        following_action: "revoke",
-        holds_role: holdsRoleAfterRevoke,
-      },
-    });
+    try {
+      await logAuditEvent(supabase, {
+        action: "role.state_observed",
+        entity_type: "user_app_role",
+        entity_id: targetUserId,
+        metadata: {
+          role,
+          observed_by: user.id,
+          following_action: "revoke",
+          holds_role: holdsRoleAfterRevoke,
+        },
+      });
+    } catch (auditError) {
+      console.error(
+        "[admin/users/roles] revoke succeeded but role.state_observed emit failed (non-fatal):",
+        {
+          target_user_id: targetUserId,
+          role,
+          error:
+            auditError instanceof Error
+              ? auditError.message
+              : String(auditError),
+        },
+      );
+    }
 
     return NextResponse.json({
       user_id: targetUserId,
