@@ -98,23 +98,59 @@ const SYNTHETIC_BASELINE_AUM = 1;
 // Public API
 // ---------------------------------------------------------------------------
 
-export interface ScenarioCommitDiff {
-  kind:
-    | "voluntary_remove"
-    | "voluntary_add"
-    | "voluntary_modify"
-    | "bridge_recommended";
-  holding_ref?: string;
-  strategy_id?: string;
-  new_weight?: number;
+/**
+ * retro audit (type-design-analyzer): ScenarioCommitDiff was a single
+ * interface with every field optional, so the downstream
+ * ScenarioCommitDrawer + RPC adapter had no compile-time guarantee that
+ * a `voluntary_remove` diff carried `holding_ref` or that a
+ * `voluntary_add` diff carried `strategy_id`. A discriminated union on
+ * `kind` lets the consumer narrow exhaustively and surfaces missing-
+ * field bugs at the type seam instead of at runtime.
+ *
+ * Field-level required-ness mirrors the existing JSDoc that ScenarioCommitDrawer
+ * already documents. Optional fields (rejection_reason, percent_allocated,
+ * note) remain optional because they are filled in by the drawer's per-row
+ * inputs AFTER the diff is constructed; the composer hands the partial diff
+ * to the drawer where the user completes it.
+ */
+interface ScenarioCommitDiffBase {
   size_at_decision_usd: number;
-  /** Required for voluntary_remove. Collected by ScenarioCommitDrawer. */
-  rejection_reason?: string;
-  /** Required for voluntary_add / bridge_recommended (0..100). Collected by ScenarioCommitDrawer. */
-  percent_allocated?: number;
   /** Optional free-text note (max 2000 chars). Per-row drawer input. */
   note?: string;
 }
+
+export interface VoluntaryRemoveDiff extends ScenarioCommitDiffBase {
+  kind: "voluntary_remove";
+  holding_ref: string;
+  /** Required for voluntary_remove. Collected by ScenarioCommitDrawer. */
+  rejection_reason?: string;
+}
+
+export interface VoluntaryAddDiff extends ScenarioCommitDiffBase {
+  kind: "voluntary_add";
+  strategy_id: string;
+  /** Required for voluntary_add (0..100). Collected by ScenarioCommitDrawer. */
+  percent_allocated?: number;
+}
+
+export interface VoluntaryModifyDiff extends ScenarioCommitDiffBase {
+  kind: "voluntary_modify";
+  holding_ref: string;
+  new_weight: number;
+}
+
+export interface BridgeRecommendedDiff extends ScenarioCommitDiffBase {
+  kind: "bridge_recommended";
+  strategy_id: string;
+  /** Required for bridge_recommended (0..100). Collected by ScenarioCommitDrawer. */
+  percent_allocated?: number;
+}
+
+export type ScenarioCommitDiff =
+  | VoluntaryRemoveDiff
+  | VoluntaryAddDiff
+  | VoluntaryModifyDiff
+  | BridgeRecommendedDiff;
 
 export interface ScenarioComposerProps {
   payload: MyAllocationDashboardPayload;
@@ -374,7 +410,16 @@ export function ScenarioComposer({
   // `Map<scopeRef, holding>` once per holdingsSummary so the lookup is
   // O(1) — same pattern as `flaggedByRef` (L863) and the
   // ScenarioCommitDrawer adapter Maps. The memo deps are unchanged.
-  const scenarioAum = useMemo(() => {
+  //
+  // retro audit (red-team L9 c7): split into TWO memos so the O(N)
+  // Map-build only re-runs when `holdingsSummary` reference identity
+  // actually changes, while the cheap sum-loop re-runs on the much more
+  // frequent toggleByScopeRef change. Pre-fix, both deps shared one
+  // memo and the parent-rerender pattern (where holdingsSummary is a
+  // new reference on every server-action settle) defeated the memo on
+  // the hot path. Two memos > one big memo when the deps have different
+  // cardinalities.
+  const holdingByRef = useMemo(() => {
     const byRef = new Map<string, (typeof holdingsSummary)[number]>();
     for (const x of holdingsSummary) {
       byRef.set(
@@ -386,15 +431,18 @@ export function ScenarioComposer({
         x,
       );
     }
+    return byRef;
+  }, [holdingsSummary]);
+  const scenarioAum = useMemo(() => {
     let sum = 0;
     for (const [scopeRef, on] of Object.entries(scenario.draft.toggleByScopeRef)) {
       if (!on) continue;
       if (!scopeRef.startsWith("holding:")) continue;
-      const h = byRef.get(scopeRef);
+      const h = holdingByRef.get(scopeRef);
       if (h) sum += h.value_usd;
     }
     return sum;
-  }, [scenario.draft.toggleByScopeRef, holdingsSummary]);
+  }, [scenario.draft.toggleByScopeRef, holdingByRef]);
 
   // Review-pass P2 fix — when the allocator has added strategies but the
   // live holdings list is empty (or all toggled off), `scenarioAum` is 0

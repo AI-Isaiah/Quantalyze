@@ -200,6 +200,22 @@ function sliceByPeriod(
   }
   return points.filter((p) => {
     const e = parseISO(p.date);
+    // retro audit (silent-failure-hunter L10 c8): parseISO falls back
+    // to `new Date(s).getTime()` which returns NaN on truly malformed
+    // inputs ('2025-XX-01', 'invalid'). NaN comparisons (e >= start,
+    // e <= end) always evaluate to false, so the bad point is silently
+    // dropped. The user sees a chart that's quietly missing data. Surface
+    // the failure via console.warn — kept inside the filter so the
+    // breadcrumb names the offending date even if multiple are bad.
+    if (!Number.isFinite(e)) {
+      if (typeof console !== "undefined") {
+        console.warn(
+          "[EquityChart] sliceByPeriod — dropping malformed date",
+          { date: p.date },
+        );
+      }
+      return false;
+    }
     return e >= startEpoch && e <= endEpoch;
   });
 }

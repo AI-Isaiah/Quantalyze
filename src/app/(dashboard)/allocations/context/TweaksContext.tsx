@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -83,36 +84,66 @@ function pickUnion<T extends string>(
   candidate: unknown,
   allowed: ReadonlySet<T>,
   fallback: T,
+  fieldName?: string,
 ): T {
-  return typeof candidate === "string" && (allowed as ReadonlySet<string>).has(candidate)
-    ? (candidate as T)
-    : fallback;
+  if (typeof candidate === "string") {
+    if ((allowed as ReadonlySet<string>).has(candidate)) {
+      return candidate as T;
+    }
+    // retro audit (silent-failure-hunter L9 c9): distinguish "never
+    // set" (skip log) from "set to invalid value" (warn). A persisted
+    // ultra-tight density (from a feature flag that shipped a 4th
+    // option and was rolled back, or hand-edited localStorage)
+    // previously snapped to the fallback with no breadcrumb — exactly
+    // the silent-drift the audit said this fix was supposed to close.
+    if (candidate.length > 0 && typeof console !== "undefined") {
+      console.warn(
+        "[TweaksContext] parseTweakState — discarding unknown value, falling back to default",
+        { field: fieldName ?? "unknown", value: candidate, fallback },
+      );
+    }
+  }
+  return fallback;
 }
 
 function parseTweakState(raw: unknown): TweakState {
   if (!raw || typeof raw !== "object") return TWEAK_DEFAULTS;
-  const r = raw as Record<string, unknown>;
+  // retro audit (red-team L12 c7): rebase the input through
+  // Object.create(null) so a hostile `__proto__` payload in
+  // localStorage cannot smuggle a value through the prototype chain
+  // when we read r.density / r.bridgeVariant / etc. Without this,
+  // a hand-edited blob like `{"__proto__":{"density":"tight"}}`
+  // could surface "tight" via prototype lookup even though the own-
+  // property is absent.
+  const r = Object.assign(
+    Object.create(null) as Record<string, unknown>,
+    raw as Record<string, unknown>,
+  );
   return {
-    density: pickUnion(r.density, DENSITY_VALUES, TWEAK_DEFAULTS.density),
+    density: pickUnion(r.density, DENSITY_VALUES, TWEAK_DEFAULTS.density, "density"),
     accentIntensity: pickUnion(
       r.accentIntensity,
       ACCENT_VALUES,
       TWEAK_DEFAULTS.accentIntensity,
+      "accentIntensity",
     ),
     displayFont: pickUnion(
       r.displayFont,
       DISPLAY_FONT_VALUES,
       TWEAK_DEFAULTS.displayFont,
+      "displayFont",
     ),
     bridgeVariant: pickUnion(
       r.bridgeVariant,
       BRIDGE_VARIANT_VALUES,
       TWEAK_DEFAULTS.bridgeVariant,
+      "bridgeVariant",
     ),
     chartStyle: pickUnion(
       r.chartStyle,
       CHART_STYLE_VALUES,
       TWEAK_DEFAULTS.chartStyle,
+      "chartStyle",
     ),
     showBench:
       typeof r.showBench === "boolean" ? r.showBench : TWEAK_DEFAULTS.showBench,
@@ -156,6 +187,16 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
   const [panelOpen, setPanelOpen] = useState(false);
   const [hydrated, setHydrated] = useState(false);
 
+  // retro audit (red-team L6 c8): the persist effect re-enters on every
+  // state change. In Safari private mode / quota-exhausted contexts the
+  // catch fires per keystroke (chip click flips state, persist effect
+  // runs, throws, warns). A user dragging the density slider could emit
+  // 3-4 warnings in <100ms; Sentry capture-console converts each to a
+  // separate event. The audit's "support paper trail" becomes a flood
+  // that buries the actual signal. Dedupe with a ref so we warn at most
+  // once per session.
+  const persistWarnedRef = useRef(false);
+
   // Hydrate post-mount to avoid SSR mismatch.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -173,7 +214,9 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
       // Safari private mode / quota errors are non-fatal for the in-memory
       // state, but they DO mean the user's preferences won't survive reload —
       // surface that to the console so a support ticket can be diagnosed.
-      if (typeof console !== "undefined") {
+      // Dedupe so a quota-exhausted browser doesn't flood console / Sentry.
+      if (!persistWarnedRef.current && typeof console !== "undefined") {
+        persistWarnedRef.current = true;
         console.warn(
           "[TweaksContext] localStorage write failed; preferences will not persist",
           err,
