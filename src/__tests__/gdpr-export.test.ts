@@ -490,6 +490,63 @@ describe("collectUserExportBundle — cumulative-size budget (P450 regression)",
   });
 });
 
+describe("collectUserExportBundle — M-0520 indirect parent error fails loud (not silent [])", () => {
+  it("an indirect parent select error sets fetch_error + bundle.partial=true (not silent [])", async () => {
+    // Strategies parent select returns an error. The indirect children
+    // (trades, strategy_analytics, funding_fees, reconciliation_reports)
+    // MUST all report fetch_error+partial — pre-M-0520, they silently
+    // reported row_count=0, truncated_at_cap=false (= GDPR compliance
+    // claim "complete export" while the data was actually missing).
+    const mock = {
+      from: (table: string) => {
+        const limit = async () => {
+          if (table === "strategies") {
+            return {
+              data: null,
+              error: { code: "57014", message: "parent timeout" },
+            };
+          }
+          return { data: [], error: null };
+        };
+        const indirectLimit = async () => ({ data: [], error: null });
+        return {
+          select: () => ({
+            eq: () => ({
+              order: () => ({ limit }),
+              limit,
+            }),
+            in: () => ({
+              order: () => ({ limit: indirectLimit }),
+              limit: indirectLimit,
+            }),
+          }),
+        };
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-parent-err");
+    expect(bundle.partial).toBe(true);
+
+    // Every indirect child of strategies should carry a fetch_error.
+    const strategyChildren = [
+      "trades",
+      "strategy_analytics",
+      "funding_fees",
+      "reconciliation_reports",
+    ];
+    for (const childName of strategyChildren) {
+      const entry = bundle.tables.find((t) => t.table === childName);
+      expect(entry).toBeDefined();
+      expect(entry!.fetch_error).toBeTruthy();
+      expect(entry!.fetch_error).toMatch(/parent select failed for strategies/);
+    }
+    // The error tables should all appear in failed_tables.
+    for (const childName of strategyChildren) {
+      expect(bundle.failed_tables).toContain(childName);
+    }
+  });
+});
+
 describe("collectUserExportBundle — H-0453 parent_id_truncated regression", () => {
   it("sets parent_id_truncated when the parent-id probe hits EXPORT_PARENT_ID_CAP", async () => {
     // Build a mock that returns exactly EXPORT_PARENT_ID_CAP parent rows
@@ -674,17 +731,21 @@ describe("collectUserExportBundle — H-0456 ORDER BY determinism regression", (
 });
 
 describe("USER_EXPORT_TABLES — shape type check (compile-time regression)", () => {
-  it("accepts DirectUserTable and IndirectUserTable shapes", () => {
+  it("accepts DirectUserTable and IndirectUserTable shapes (M-0522: table names are typed)", () => {
+    // M-0522: `table` is narrowed to `keyof Database['public']['Tables']`.
+    // Real table names (strategies, trades) compile. A typo like
+    // "stratgies" would now fail at tsc time. Use real names so the
+    // unit test stays green and serves as compile-time documentation.
     const direct: UserExportTable = {
       kind: "direct",
-      table: "test",
+      table: "user_notes",
       user_column: "user_id",
     };
     const indirect: UserExportTable = {
       kind: "indirect",
-      table: "child",
-      via_column: "parent_id",
-      parent_table: "parent",
+      table: "trades",
+      via_column: "strategy_id",
+      parent_table: "strategies",
       parent_user_column: "user_id",
     };
     expect(direct.kind).toBe("direct");

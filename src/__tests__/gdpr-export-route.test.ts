@@ -145,6 +145,7 @@ describe("POST /api/account/export — orphan cleanup on sign failure (I2)", () 
       total_row_count: 0,
       tables: [],
       truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
       partial: false,
       failed_tables: [],
     });
@@ -266,6 +267,7 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
         { table: "api_keys", rows: [{ id: "k1" }, { id: "k2" }], row_count: 2, truncated_at_cap: false, parent_id_truncated: false, fetch_error: null },
       ],
       truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
       partial: false,
       failed_tables: [],
     });
@@ -326,6 +328,63 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     expect(body.rows).toBeUndefined();
   });
 
+  it("H-0451: surfaces incomplete_reasons to the user when row/size/parent caps trigger", async () => {
+    // Build a bundle that exercises all three truncation paths.
+    collectBundleMock.mockResolvedValueOnce({
+      schema_version: 1,
+      user_id: "user-trunc",
+      generated_at: "2026-04-16T00:00:00Z",
+      total_row_count: 50000,
+      tables: [
+        {
+          table: "trades",
+          rows: [],
+          row_count: 50000,
+          truncated_at_cap: true,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+        {
+          table: "strategy_analytics",
+          rows: [],
+          row_count: 0,
+          truncated_at_cap: false,
+          parent_id_truncated: true,
+          fetch_error: null,
+        },
+      ],
+      truncated_at_size_cap: true,
+      parent_id_truncated_tables: ["strategy_analytics"],
+      partial: false,
+      failed_tables: [],
+    });
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest());
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as {
+      truncated_at_size_cap: boolean;
+      incomplete_reasons: string[];
+    };
+    expect(body.truncated_at_size_cap).toBe(true);
+    expect(Array.isArray(body.incomplete_reasons)).toBe(true);
+    // All three reason categories should appear.
+    expect(body.incomplete_reasons.some((r) => r.startsWith("size_cap_exceeded"))).toBe(
+      true,
+    );
+    expect(
+      body.incomplete_reasons.some(
+        (r) => r.startsWith("per_table_row_cap_reached") && r.includes("trades"),
+      ),
+    ).toBe(true);
+    expect(
+      body.incomplete_reasons.some(
+        (r) =>
+          r.startsWith("parent_id_cap_reached") && r.includes("strategy_analytics"),
+      ),
+    ).toBe(true);
+  });
+
   it("emits account.export audit event with storage_path + expires_at + table_count + total_row_count", async () => {
     const { POST } = await loadRoute();
     const res = await POST(makeRequest());
@@ -370,6 +429,7 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       total_row_count: 0,
       tables: [],
       truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
       partial: false,
       failed_tables: [],
     });
@@ -449,6 +509,7 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
         { table: "api_keys", rows: [], row_count: 0, truncated_at_cap: false, parent_id_truncated: false, fetch_error: "direct select failed for api_keys: statement timeout" },
       ],
       truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
       partial: true,
       failed_tables: ["api_keys"],
     });
@@ -533,6 +594,7 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       total_row_count: 0,
       tables: [],
       truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
       partial: false,
       failed_tables: [],
     });

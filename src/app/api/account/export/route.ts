@@ -121,6 +121,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // string + bytes). A future hardening pass could replace this with
   // a true streaming serializer that writes chunks directly to a
   // ReadableStream — tracked under audit P448 follow-up.
+  //
+  // Audit 2026-05-07 H-0448: peak heap is bounded by
+  // EXPORT_SIZE_CAP_BYTES (100MB) × ~3 (object + string + bytes) ≈
+  // 300MB on a 1024MB Vercel Fluid lambda. The envelope-aware budget
+  // (H-0454 fix) makes the cap strictly conservative — the upload
+  // size never exceeds 100MB, so the headroom-to-OOM is at least 3×.
+  // The true streaming refactor is queued as a separate sprint
+  // (would replace the single TextEncoder.encode with a chunked
+  // ReadableStream piped to Supabase storage); the bound + the GC
+  // reclaim pattern keep this within budget until then.
   const objectKey = `${user.id}/${crypto.randomUUID()}.json`;
   const bundleBytes = new TextEncoder().encode(JSON.stringify(bundle));
 
@@ -180,6 +190,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     Date.now() + SIGNED_URL_EXPIRY_SECONDS * 1000,
   ).toISOString();
 
+  // Audit 2026-05-07 H-0451: row-cap / size-cap / parent-id
+  // truncation MUST be surfaced to the user. GDPR Art. 12 requires
+  // the controller to communicate the response — pre-fix the row
+  // cap silently dropped rows for users with >50K trades (or >2000
+  // strategies for the parent-id cap), shipping an incomplete
+  // bundle with no signal. Aggregate per-table flags into a
+  // user-readable `incomplete_reasons` array.
+  const rowCappedTables = bundle.tables
+    .filter((t) => t.truncated_at_cap)
+    .map((t) => t.table);
+  const incompleteReasons: string[] = [];
+  if (bundle.truncated_at_size_cap) {
+    incompleteReasons.push(
+      "size_cap_exceeded:bundle exceeded 100MB cap; oldest-first packing kept the earliest rows.",
+    );
+  }
+  if (rowCappedTables.length > 0) {
+    incompleteReasons.push(
+      `per_table_row_cap_reached:${rowCappedTables.join(",")} — only the first 50000 rows are included per table.`,
+    );
+  }
+  if (bundle.parent_id_truncated_tables.length > 0) {
+    incompleteReasons.push(
+      `parent_id_cap_reached:${bundle.parent_id_truncated_tables.join(",")} — only the first 2000 parent rows are included; child rows of dropped parents are missing.`,
+    );
+  }
+
   // Audit the export. Fire-and-forget; never gates the response.
   // entity_type 'user' per the Task 7.3 extension of ADR-0023 §4 —
   // the "entity" is the account being exported.
@@ -193,6 +230,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       table_count: bundle.tables.length,
       total_row_count: bundle.total_row_count,
       truncated_at_size_cap: bundle.truncated_at_size_cap,
+      incomplete_reasons: incompleteReasons,
     },
   });
 
@@ -204,5 +242,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     table_count: bundle.tables.length,
     total_row_count: bundle.total_row_count,
     truncated_at_size_cap: bundle.truncated_at_size_cap,
+    incomplete_reasons: incompleteReasons,
   });
 }

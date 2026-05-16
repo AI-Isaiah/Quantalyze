@@ -1,5 +1,25 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/lib/database.types";
+
+/**
+ * Closed keyset of every public-schema table name. Audit 2026-05-07
+ * M-0522: pre-fix, `table: string` allowed a typo like
+ * `allocator_holdngs` to compile, with the CI hook
+ * (check-gdpr-export-coverage.ts) as the only late safety net. By
+ * narrowing the type to the Supabase-generated key union we move the
+ * invariant into `tsc` and surface typos at compile time.
+ */
+export type PublicTable = keyof Database["public"]["Tables"];
+
+/**
+ * Row shape for a public-schema table. Re-exposed so consumers of the
+ * export bundle (download scripts, regulator-facing serializers) can
+ * recover the per-row contract without re-deriving from the Supabase
+ * client. Audit 2026-05-07 M-0521.
+ */
+export type PublicRow<T extends PublicTable> =
+  Database["public"]["Tables"][T]["Row"];
 
 /**
  * GDPR Art. 15 (right of access) + Art. 20 (data portability) export
@@ -72,10 +92,14 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * Direct ownership: the table has a column that IS the user's id (an FK
  * to `profiles(id)` or `auth.users(id)`). The export route SELECTs
  * `* FROM <table> WHERE <column> = <user_id>`.
+ *
+ * Audit 2026-05-07 M-0522: `table` is narrowed to `PublicTable` so a
+ * typo in the manifest fails at compile time instead of being caught
+ * only by the runtime CI hook.
  */
 export interface DirectUserTable {
   kind: "direct";
-  table: string;
+  table: PublicTable;
   /** Column holding the user's id. Usually "user_id"; for match_batches
    * etc. it's "allocator_id". */
   user_column: string;
@@ -91,11 +115,11 @@ export interface DirectUserTable {
  */
 export interface IndirectUserTable {
   kind: "indirect";
-  table: string;
+  table: PublicTable;
   /** Foreign-key column on this table. */
   via_column: string;
   /** Parent table whose rows this table is scoped to. */
-  parent_table: string;
+  parent_table: PublicTable;
   /** User-identifying column on the parent table. */
   parent_user_column: string;
   /**
@@ -123,13 +147,18 @@ export interface IndirectUserTable {
  * projection, not the raw rows). The CI coverage hook
  * (`scripts/check-gdpr-export-coverage.ts`) understands this kind so
  * the raw source table is considered covered.
+ *
+ * Note: `table` (the bundle-facing projection name) is INTENTIONALLY
+ * a free `string` — `audit_log_for_user` is a synthetic name that
+ * does NOT exist as a public table. The narrowed `source_table` IS
+ * a `PublicTable` because the SELECT actually hits it.
  */
 export interface ProjectedUserTable {
   kind: "projected";
-  /** Bundle-facing name (e.g. "audit_log_for_user"). */
+  /** Bundle-facing name (e.g. "audit_log_for_user"). May be synthetic. */
   table: string;
   /** Underlying table name the SELECT hits. */
-  source_table: string;
+  source_table: PublicTable;
   /** Column on source_table holding the subject's user id. */
   user_column: string;
   /** Post-fetch redaction function. */
@@ -583,6 +612,36 @@ export interface ExportTablePayload {
 }
 
 /**
+ * Typed view of a per-table payload. Audit 2026-05-07 M-0521: the
+ * payload's `rows: unknown[]` loses every per-table contract for
+ * downstream consumers (download script, regulator-facing
+ * serializer). Use this helper to recover the row type at the call
+ * site:
+ *
+ *   const trades = rowsForTable(bundle, "trades");
+ *   //   trades: PublicRow<"trades">[]
+ *
+ * The lookup is by table NAME (string match) — runtime safety still
+ * depends on the export function having populated the rows from the
+ * named table; the type is a witness to the manifest contract.
+ */
+export function rowsForTable<T extends PublicTable>(
+  bundle: ExportBundle,
+  table: T,
+): Array<PublicRow<T>> {
+  const entry = bundle.tables.find((t) => t.table === table);
+  if (!entry) return [];
+  return entry.rows as Array<PublicRow<T>>;
+}
+
+/**
+ * V1 bundle shape. Audit 2026-05-07 M-0523: `schema_version` is the
+ * discriminant for a future `ExportBundleV1 | ExportBundleV2` union.
+ * Today `ExportBundle = ExportBundleV1`; when v2 ships, change the
+ * alias to a union and downstream readers will be forced (by tsc) to
+ * narrow on the version tag before reaching v2-only fields.
+ */
+/**
  * Shape of the full export bundle that lands in Supabase Storage.
  *
  * Issue 5: `partial` + `failed_tables` make any read failure observable
@@ -603,7 +662,7 @@ export interface ExportTablePayload {
  * The current bundle is the V1 variant of the discriminated union
  * `ExportBundleV1 | ExportBundleV2` that future migrations can extend.
  */
-export interface ExportBundle {
+export interface ExportBundleV1 {
   schema_version: 1;
   user_id: string;
   generated_at: string;
@@ -614,6 +673,16 @@ export interface ExportBundle {
   partial: boolean;
   failed_tables: string[];
 }
+
+/**
+ * Active bundle shape. Audit 2026-05-07 M-0523: aliased so the
+ * downstream `ExportBundle` reference remains stable while the
+ * version-narrowing happens at the V1/V2 boundary. When V2 ships,
+ * change this to `export type ExportBundle = ExportBundleV1 |
+ * ExportBundleV2;` and consumers will be forced to discriminate on
+ * `schema_version`.
+ */
+export type ExportBundle = ExportBundleV1;
 
 /**
  * Collect every row referenced by `user_id`, running one SELECT per
@@ -755,6 +824,7 @@ export async function collectUserExportBundle(
     total_row_count: 0,
     tables: [],
     truncated_at_size_cap: false,
+    parent_id_truncated_tables: [],
     partial: false,
     failed_tables: [],
   };
@@ -975,7 +1045,17 @@ async function fetchRowsForSpec(
   // entry whose parent uses a non-`id` PK can override via
   // `parent_id_column` without falling through to a silent
   // `{ id: undefined }` cast.
-  const parentRowsArr = (parentRows ?? []) as Array<Record<string, unknown>>;
+  //
+  // The double-cast (`as unknown as ...`) is necessary because the
+  // Supabase typed select can return a union including
+  // `GenericStringError`; the runtime `error` branch above already
+  // returned, so the residual type still includes the error sentinel
+  // that never satisfies the `Record<string, unknown>` index
+  // signature. The cast is type-only; the runtime shape is verified
+  // by the .filter((v): v is string) below.
+  const parentRowsArr = ((parentRows ?? []) as unknown) as Array<
+    Record<string, unknown>
+  >;
   const parentIds = parentRowsArr
     .map((r) => r[parentIdColumn])
     .filter((v): v is string => typeof v === "string");
