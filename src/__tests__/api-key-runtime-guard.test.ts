@@ -9,6 +9,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { parseApiKeyRows, ApiKeyRowSchema } from "@/lib/types";
 
+// audit-2026-05-07 type-design HIGH (red-team apply): `disconnected_at`
+// added to `ApiKeyRowSchema` and `ApiKey` to match the
+// `API_KEY_USER_COLUMNS` projection (migration 075). The test fixture
+// now includes it so the schema's `.strict()` accepts the row.
 const baseRow = {
   id: "00000000-0000-0000-0000-000000000001",
   user_id: "11111111-1111-1111-1111-111111111111",
@@ -21,6 +25,7 @@ const baseRow = {
   created_at: "2026-01-01T00:00:00Z",
   sync_error: null,
   last_429_at: null,
+  disconnected_at: null,
 };
 
 describe("ApiKeyRowSchema — M-0583 trust-boundary guard", () => {

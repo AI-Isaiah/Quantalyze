@@ -216,6 +216,20 @@ export interface ManagerIdentity {
  * forward-compat for analytics-service additions that don't yet have
  * a UI consumer.
  */
+// audit-2026-05-07 type-design HIGH (red-team apply): the prior JSDoc on
+// this interface claimed "a typo (e.g. `bencmark_returns`) is a compile
+// error". That was a LIE in practice: the `[key: string]: unknown` index
+// signature accepts every string key, so `metrics.bencmark_returns` types
+// as `unknown` instead of erroring, AND consumers like
+// `src/components/strategy/MetricPanel.tsx` cast through
+// `Record<string, number>` to access ~25-30 scalar metric keys that this
+// interface doesn't enumerate. Removing the index signature would break
+// those consumers (and the type would still under-promise without all
+// scalar keys enumerated). The honest fix is to correct the JSDoc to
+// match what the index signature actually delivers: forward-compat for
+// arbitrary keys, with NO typo protection at the type level. Consumers
+// that want typo protection should reach for the dedicated scalar
+// accessors / Zod schemas, not this catch-all envelope.
 export interface MetricsJson {
   /** Expected: TimeSeriesPoint[]. Per-strategy benchmark daily returns. */
   benchmark_returns?: unknown;
@@ -231,9 +245,18 @@ export interface MetricsJson {
   trade_mix?: unknown;
   /** Expected: number. Authoritative history length (days). */
   history_days?: unknown;
-  /** Forward-compat: analytics-service can add additional fields. Reads
-   *  must validate the value's runtime shape; the type only enforces
-   *  the key NAME at the contract level. */
+  /**
+   * Catch-all for the many scalar metrics emitted by analytics-service
+   * (var_1d_95, mtd, ytd, alpha, beta, info_ratio, omega, skewness,
+   * profit_factor, etc.). The runtime carries dozens of named scalars
+   * read via `Record<string, number>` casts in consumers like
+   * `MetricPanel.tsx`. The index signature is a deliberate trade-off:
+   * NO typo protection at the type level, but no churn in the ~30
+   * consumer sites that already cast through it.
+   *
+   * If you need typo protection for a specific scalar, add a typed
+   * accessor (or a Zod schema slice) — do NOT rely on this interface.
+   */
   [key: string]: unknown;
 }
 
@@ -257,12 +280,13 @@ export interface StrategyAnalytics {
   sparkline_drawdown: number[] | null;
   /**
    * audit-2026-05-07 M-0582: typed envelope for the catch-all metrics blob.
-   * Known keys are documented; the index signature retains forward-compat
-   * (analytics writer can add fields without breaking the type). Consumers
-   * reading well-known keys (`benchmark_returns`, `btc_rolling_correlation_90d`,
-   * `drawdown_episodes`, `risk_of_ruin`, `trade_mix`) get `unknown` typed
-   * values they still need to validate — but a typo in a known key now
-   * triggers a TS error rather than `undefined` at runtime.
+   * Known keys are documented on `MetricsJson`; the index signature retains
+   * forward-compat (analytics writer can add fields without breaking the
+   * type) — but that index signature also means typos on UNKNOWN keys are
+   * NOT a compile error. See MetricsJson's JSDoc for the trade-off.
+   * Consumers reading well-known keys (`benchmark_returns`,
+   * `btc_rolling_correlation_90d`, `drawdown_episodes`, `risk_of_ruin`,
+   * `trade_mix`) get `unknown` typed values they still need to validate.
    */
   metrics_json: MetricsJson | null;
   returns_series: { date: string; value: number }[] | null;
@@ -600,6 +624,40 @@ const _coerceNumberNullable = z.coerce.number().nullable();
 const _isoTimestamp = z.string().datetime({ offset: true });
 const _isoTimestampNullable = z.string().datetime({ offset: true }).nullable();
 
+// audit-2026-05-07 silent-failure HIGH (red-team apply): explicit
+// pre-validation that does NOT silently coerce empty strings, booleans,
+// arrays, or NaN into 0. Use for fields where 0 is a meaningful value
+// distinct from "absent" (FundingFee.amount, ApiKey.account_balance_usdt).
+const _strictNumberOrStringNumeric = z.preprocess((v) => {
+  if (typeof v === "number") return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : v;
+  }
+  return v;
+}, z.number().finite());
+
+const _strictNumberOrStringNumericNullable = z.preprocess((v) => {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number") return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : v;
+  }
+  return v;
+}, z.number().finite().nullable());
+
+// audit-2026-05-07 type-design HIGH (red-team apply): `duration_seconds` was
+// REQUIRED on the .strict() schema but ABSENT from the discovery page's
+// SELECT projection (page.tsx:44). Every row was silently dropped by
+// safeParse, so the Discovery position table rendered empty for every
+// strategy. The runtime contract is "the SELECT projection" — the schema
+// must match what is actually fetched. Marking `duration_seconds` as
+// `.optional()` aligns the guard with the live projection; the underlying
+// `Position.duration_seconds` field stays `number | null` because rows
+// produced by migrations 114+ (post-PR-#140) DO carry it once they pass
+// through a SELECT that asks for it. Optional-on-the-schema + nullable-on-
+// the-type is the truthful encoding of "may or may not be in this row".
 export const PositionRowSchema = z.object({
   id: z.string(),
   strategy_id: z.string(),
@@ -616,10 +674,17 @@ export const PositionRowSchema = z.object({
   opened_at: _isoTimestamp,
   closed_at: _isoTimestampNullable,
   duration_days: _coerceNumberNullable,
-  duration_seconds: _coerceNumberNullable,
+  duration_seconds: _coerceNumberNullable.optional(),
   roi: _coerceNumberNullable,
   funding_pnl: _coerceNumber,
-}).strict() satisfies z.ZodType<Position>;
+}).strict().transform((row): Position => ({
+  ...row,
+  // Normalize `duration_seconds: undefined` (absent from SELECT projection)
+  // to `null` so downstream consumers see a uniform `number | null` shape
+  // matching the `Position` type. This preserves the storage-boundary
+  // promise: pass through what's there, fill what's not.
+  duration_seconds: row.duration_seconds ?? null,
+}));
 
 /**
  * Parse an array of unknown rows (typically `positionsResult.data` from a
@@ -630,14 +695,35 @@ export const PositionRowSchema = z.object({
  * Returning `Position[]` (never `null`) is intentional: the page-level call
  * site is responsible for preserving the null-vs-empty distinction it cares
  * about (see `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx`).
+ *
+ * audit-2026-05-07 silent-failure HIGH (red-team apply): callers can't
+ * distinguish "no data" (zero rows in) from "all rows dropped by guard"
+ * (drift / corrupt rows in). `parsePositionRowsWithDiagnostics` exposes
+ * the same parse plus the counts so callers that care can branch on
+ * `dropped > 0`. `parsePositionRows` stays the simple-array adapter for
+ * the existing call sites; new code that needs diagnostics should reach
+ * for the diagnostics variant.
  */
-export function parsePositionRows(rows: unknown[]): Position[] {
+export interface ParseDiagnostics {
+  /** Total rows attempted (input length). */
+  total: number;
+  /** Rows that successfully passed the schema. */
+  accepted: number;
+  /** Rows that were dropped due to schema failure. */
+  dropped: number;
+}
+
+export function parsePositionRowsWithDiagnostics(
+  rows: unknown[],
+): { data: Position[]; diagnostics: ParseDiagnostics } {
   const out: Position[] = [];
+  let dropped = 0;
   for (const row of rows) {
     const parsed = PositionRowSchema.safeParse(row);
     if (parsed.success) {
       out.push(parsed.data);
     } else {
+      dropped += 1;
       // Adversarial-review hardening (PR #138 follow-up): only log paths
       // and codes — never the row contents or `received` values. Zod
       // issue `received` may include allocator-attributable strategy_id
@@ -656,7 +742,14 @@ export function parsePositionRows(rows: unknown[]): Position[] {
       );
     }
   }
-  return out;
+  return {
+    data: out,
+    diagnostics: { total: rows.length, accepted: out.length, dropped },
+  };
+}
+
+export function parsePositionRows(rows: unknown[]): Position[] {
+  return parsePositionRowsWithDiagnostics(rows).data;
 }
 
 /**
@@ -782,13 +875,31 @@ export type FundingFee =
  */
 const _fundingRawData = z.record(z.string(), z.unknown()).nullable();
 
+// audit-2026-05-07 silent-failure HIGH (red-team apply):
+//   1. `z.coerce.number()` silently turns ""/null/false into 0. For
+//      FundingFee.amount that converts "balance not yet known" into a
+//      literal $0 funding payment, which then corrupts every downstream
+//      sum (FundingFee aggregates feed the funding_pnl PnL math).
+//      Use `_strictNumberOrStringNumeric` — accepts real numbers + parseable
+//      DECIMAL-as-string, rejects coercion-of-empty.
+//   2. The original `.transform((row): FundingFee => ({...row, match_key:
+//      row.match_key as FundingFeeMatchKey} as FundingFee))` had a top-
+//      level `as FundingFee` cast. That cast bypassed the discriminated
+//      union shape — Zod returns a flat object with `raw_data:
+//      Record<string,unknown>|null`, but the discriminated `FundingFee`
+//      requires the raw_data shape to match the `exchange` discriminator
+//      branch. Casting to FundingFee defeats the whole point of the
+//      discriminated union. The honest construction is a switch on
+//      `row.exchange` so the right branch is selected at runtime; the
+//      raw_data still types as the per-exchange Record because the wire
+//      shape can carry extra fields beyond what we strictly key on.
 export const FundingFeeRowSchema = z
   .object({
     id: z.string(),
     strategy_id: z.string(),
     exchange: z.enum(["binance", "okx", "bybit"]),
     symbol: z.string(),
-    amount: _coerceNumber,
+    amount: _strictNumberOrStringNumeric,
     currency: z.string(),
     timestamp: _isoTimestamp,
     match_key: z.string(),
@@ -796,10 +907,26 @@ export const FundingFeeRowSchema = z
     created_at: _isoTimestamp,
   })
   .strict()
-  .transform((row): FundingFee => ({
-    ...row,
-    match_key: row.match_key as FundingFeeMatchKey,
-  } as FundingFee));
+  .transform((row): FundingFee => {
+    const base = {
+      id: row.id,
+      strategy_id: row.strategy_id,
+      symbol: row.symbol,
+      amount: row.amount,
+      currency: row.currency,
+      timestamp: row.timestamp,
+      match_key: row.match_key as FundingFeeMatchKey,
+      created_at: row.created_at,
+    };
+    switch (row.exchange) {
+      case "binance":
+        return { ...base, exchange: "binance", raw_data: row.raw_data as BinanceFundingRaw | null };
+      case "okx":
+        return { ...base, exchange: "okx", raw_data: row.raw_data as OkxFundingRaw | null };
+      case "bybit":
+        return { ...base, exchange: "bybit", raw_data: row.raw_data as BybitFundingRaw | null };
+    }
+  });
 
 /**
  * Parse an array of unknown rows (typically `data` from a Supabase select)
@@ -807,13 +934,21 @@ export const FundingFeeRowSchema = z
  * the schema are dropped with a path/code-only `console.warn` (never the
  * row contents — PII / PnL leakage hazard via Vercel runtime logs).
  */
-export function parseFundingFeeRows(rows: unknown[]): FundingFee[] {
+// audit-2026-05-07 silent-failure HIGH (red-team apply): see
+// `parsePositionRowsWithDiagnostics`. Same pattern — array-only adapter
+// for back-compat, diagnostics variant for callers that need to
+// distinguish "no rows" from "all rows dropped".
+export function parseFundingFeeRowsWithDiagnostics(
+  rows: unknown[],
+): { data: FundingFee[]; diagnostics: ParseDiagnostics } {
   const out: FundingFee[] = [];
+  let dropped = 0;
   for (const row of rows) {
     const parsed = FundingFeeRowSchema.safeParse(row);
     if (parsed.success) {
       out.push(parsed.data);
     } else {
+      dropped += 1;
       const rowId = (row && typeof row === "object" && "id" in row)
         ? (row as { id?: unknown }).id
         : undefined;
@@ -827,7 +962,14 @@ export function parseFundingFeeRows(rows: unknown[]): FundingFee[] {
       );
     }
   }
-  return out;
+  return {
+    data: out,
+    diagnostics: { total: rows.length, accepted: out.length, dropped },
+  };
+}
+
+export function parseFundingFeeRows(rows: unknown[]): FundingFee[] {
+  return parseFundingFeeRowsWithDiagnostics(rows).data;
 }
 
 /**
@@ -875,6 +1017,12 @@ export interface ApiKey {
   // Phase 06 / ISSUE-006 (migration 068). Stamped by the Python worker on
   // ccxt 429s; drives the `rate_limited` pill's retry-in-Ns countdown.
   last_429_at: string | null;
+  // Migration 075: soft-disconnect timestamp. NULL = connected; non-null =
+  // disconnected (workers skip on the next cron tick). Present in
+  // `API_KEY_USER_COLUMNS` projection and consumed by
+  // AllocatorExchangeManager — schema must include it to avoid silent
+  // row-drops.
+  disconnected_at: string | null;
 }
 
 /**
@@ -901,20 +1049,30 @@ export const ApiKeyRowSchema = z
     is_active: z.boolean(),
     sync_status: z.string().nullable(),
     last_sync_at: _isoTimestampNullable,
-    account_balance_usdt: _coerceNumberNullable,
+    // Explicit pre-validation — see _strictNumberOrStringNumericNullable
+    // above. Replaces the prior `_coerceNumberNullable` which silently
+    // turned ""/false/[] into 0.
+    account_balance_usdt: _strictNumberOrStringNumericNullable,
     created_at: _isoTimestamp,
     sync_error: z.string().nullable(),
     last_429_at: _isoTimestampNullable,
+    disconnected_at: _isoTimestampNullable,
   })
   .strict() satisfies z.ZodType<ApiKey>;
 
-export function parseApiKeyRows(rows: unknown[]): ApiKey[] {
+// audit-2026-05-07 silent-failure HIGH (red-team apply): see
+// `parsePositionRowsWithDiagnostics`.
+export function parseApiKeyRowsWithDiagnostics(
+  rows: unknown[],
+): { data: ApiKey[]; diagnostics: ParseDiagnostics } {
   const out: ApiKey[] = [];
+  let dropped = 0;
   for (const row of rows) {
     const parsed = ApiKeyRowSchema.safeParse(row);
     if (parsed.success) {
       out.push(parsed.data);
     } else {
+      dropped += 1;
       const rowId = (row && typeof row === "object" && "id" in row)
         ? (row as { id?: unknown }).id
         : undefined;
@@ -928,7 +1086,14 @@ export function parseApiKeyRows(rows: unknown[]): ApiKey[] {
       );
     }
   }
-  return out;
+  return {
+    data: out,
+    diagnostics: { total: rows.length, accepted: out.length, dropped },
+  };
+}
+
+export function parseApiKeyRows(rows: unknown[]): ApiKey[] {
+  return parseApiKeyRowsWithDiagnostics(rows).data;
 }
 
 export interface DiscoveryCategory {
