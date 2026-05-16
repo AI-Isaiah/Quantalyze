@@ -391,7 +391,25 @@ def measure_p999_via_sql() -> tuple[float, int]:
     # held FOR UPDATE from parking the deploy indefinitely with no
     # diagnostic. The DSN is in env=, not argv — see _parse_postgres_url
     # docstring and the H-0611 / H-0616 / C-0217 finding.
-    subprocess_env = {**os.environ, **pg_env}
+    #
+    # silent-failure-hunter HIGH conf-9 + security MED conf-7:
+    # Strip ALL PG*/PGPASSFILE/PGSERVICEFILE keys from the inherited env
+    # BEFORE overlaying pg_env. Otherwise a stale PGPASSWORD / PGUSER /
+    # PGDATABASE / PGSERVICE / PGOPTIONS in os.environ survives the merge
+    # (because _parse_postgres_url only sets keys present in the DSN) and
+    # silently takes effect — operator believes the DSN determined the
+    # connection target, but an inherited credential can authenticate as
+    # a different role, bypass the _check_confirm_gate host check, or
+    # amplify a DoS via PGOPTIONS. Additionally null out PGSERVICEFILE
+    # and PGPASSFILE so libpq's fallback-file resolution cannot redirect
+    # the probe away from the DSN-derived target.
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("PG")}
+    subprocess_env = {
+        **clean_env,
+        "PGPASSFILE": "",
+        "PGSERVICEFILE": "",
+        **pg_env,
+    }
     try:
         result = subprocess.run(
             ["psql", "-tAF,", "-c", sql],
