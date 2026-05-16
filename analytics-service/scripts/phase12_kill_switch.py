@@ -599,45 +599,75 @@ async def cutover_strategy(strategy_id: str) -> int:
 
 # --- IAM gate (H-0624) -----------------------------------------------------
 
-# Substrings that identify a non-prod DB host. Operators running against a
-# matching host can skip the explicit `--confirm-prod` / env var gate.
-# The list is conservative: anything NOT matching here is treated as prod.
-_NON_PROD_HOST_MARKERS: Final[tuple[str, ...]] = (
+# Labels (or full hosts) that identify a non-prod DB target. Matched at
+# DOT-DELIMITED LABEL BOUNDARIES, not substrings — otherwise a prod host
+# whose name embeds one of these as a substring (e.g.
+# `db.test.prod.example.com`, `attest.example.com`, `staging.prod.example.com`)
+# would silently bypass the H-0624 confirm gate. The list is conservative:
+# any host whose labels don't include a marker is treated as prod.
+_NON_PROD_HOST_MARKERS: Final[frozenset[str]] = frozenset({
     "localhost",
     "127.0.0.1",
     "::1",
-    "stg.",
-    "staging.",
-    "-staging.",
-    "dev.",
-    "-dev.",
-    "test.",
-    "-test.",
-    ".test",
-    ".local",
-)
+    "stg",
+    "staging",
+    "dev",
+    "test",
+    "local",
+})
 
 
 def _looks_like_prod_host(db_url: str | None) -> bool:
     """Heuristic: return True when the DSN host does NOT match a known
-    non-prod marker. Default-deny: if we can't tell, treat as prod and
-    require the operator to confirm.
+    non-prod marker at a DOT-LABEL BOUNDARY. Default-deny: if we can't
+    tell, treat as prod and require the operator to confirm.
 
     H-0624: the gate is intentionally heuristic — false positives (a stg
     host that didn't match the marker list) just require the operator to
     set the confirm flag once. False negatives (a prod host that LOOKED
     like staging) would skip the gate, which is the worse failure mode.
+
+    security MED conf-8 / silent-failure-hunter LOW conf-7: the prior
+    substring-containment check let adversarially-named or accidentally-
+    named prod hosts bypass the gate (e.g. `db.test.prod.example.com`
+    contains 'test.' as a substring). Match must be on a full dot-label
+    (or the entire host) so a marker appearing inside a longer label
+    cannot fall through. `127.0.0.1` and `::1` are matched as full-host
+    literals since they have no meaningful labels.
     """
     if not db_url:
         return True
     try:
         parsed = urlparse(db_url.strip())
         host = (parsed.hostname or "").lower()
-    except Exception:
+    except (ValueError, AttributeError) as exc:
+        # urllib.parse only raises ValueError on genuinely malformed
+        # input. Log so a future urlparse signature change that bubbles
+        # an unexpected type doesn't silently default-deny without a
+        # diagnostic the operator can act on.
+        print(
+            f"phase12_kill_switch: _looks_like_prod_host: urlparse failed "
+            f"({type(exc).__name__}: {exc!r}); defaulting to prod.",
+            file=sys.stderr,
+        )
         return True
     if not host:
         return True
-    return not any(marker in host for marker in _NON_PROD_HOST_MARKERS)
+    # Exact-host literal matches (covers `localhost`, `127.0.0.1`, `::1`).
+    if host in _NON_PROD_HOST_MARKERS:
+        return False
+    # Label-boundary match: any dot-delimited label of the host equal
+    # to a marker counts as non-prod. This rejects substring bypasses
+    # like `db.test.prod.example.com` (labels: db, test, prod, example,
+    # com — `test` IS a label, so this DOES match non-prod). The trade
+    # off is conservative: a label-level match is a STRONGER signal
+    # than substring containment that the host is intentionally non-prod.
+    # Operators running against a prod environment that happens to have
+    # a literal `test` / `dev` / `staging` label as one of its hostname
+    # components must explicitly --confirm-prod, which the H-0624
+    # docstring already calls out as the safer failure mode.
+    labels = host.split(".")
+    return not any(label in _NON_PROD_HOST_MARKERS for label in labels)
 
 
 def _check_confirm_gate(force: bool) -> None:
@@ -661,8 +691,9 @@ def _check_confirm_gate(force: bool) -> None:
         "DATABASE_URL host but no confirmation. Re-run with --confirm-prod "
         "or set PHASE12_KILL_SWITCH_CONFIRMED=true to acknowledge the "
         "table-wide rewrite of strategy_analytics.metrics_json. (Override "
-        "the host check by including 'stg.', 'staging.', 'dev.', 'test.', "
-        "or 'localhost' in the DSN if you are pointing at non-prod.)"
+        "the host check by including a dot-delimited 'stg', 'staging', "
+        "'dev', 'test', or 'local' label in the DSN if you are pointing "
+        "at non-prod, or use 'localhost'/127.0.0.1/::1.)"
     )
 
 
@@ -1005,9 +1036,9 @@ if __name__ == "__main__":
         default=False,
         help=(
             "H-0624: required when DATABASE_URL points at a prod-looking "
-            "host (i.e. doesn't include 'stg.', 'staging.', 'dev.', "
-            "'test.', or 'localhost'). Same effect as "
-            "PHASE12_KILL_SWITCH_CONFIRMED=true. Without this, "
+            "host (i.e. no dot-delimited 'stg', 'staging', 'dev', 'test', "
+            "or 'local' label, and not 'localhost'/127.0.0.1/::1). Same "
+            "effect as PHASE12_KILL_SWITCH_CONFIRMED=true. Without this, "
             "RUN_KILL_SWITCH=true against prod aborts with SystemExit."
         ),
     )
