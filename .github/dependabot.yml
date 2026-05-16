@@ -1,0 +1,49 @@
+# Dependabot configuration.
+#
+# retro-PR188-F9 (pr-test-analyzer #37, MEDIUM/9): with every `uses:` in
+# the workflow files pinned to a 40-char SHA (PR #179 / C-0293(b)), there
+# is no automated mechanism to surface upstream security or feature
+# bumps. SHA-pinning trades the mutable-tag attack vector for a stale-
+# version drift problem, and stale pins are silent. Dependabot generates
+# PRs in the same SHA-with-tag-comment format PR #179 established, so a
+# maintainer just reviews + merges.
+#
+# Audit reference: docs/runbooks/ci-hardening-review-cluster-gate-2026-05-16.md
+# (lines 122-125 noted pinned versions trail upstream by 1-3 majors:
+# checkout v4.3.1 vs v6.0.2, setup-node v4.4.0 vs v6.4.0,
+# upload-artifact v4.6.2 vs v7.0.1, cache v4.3.0 vs v5.0.5).
+#
+# This config does NOT enable npm/python ecosystem updates — Renovate
+# already covers those via the existing npm-audit nightly job and
+# analytics-service requirements-{dev,test}.txt. github-actions is
+# the gap.
+
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(actions)"
+      include: "scope"
+    # Group security advisories into a single PR so the reviewer pages
+    # at most once a week for action bumps.
+    groups:
+      actions-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      actions-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "ci"
+      - "dependencies"
