@@ -97,6 +97,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   >(null);
   useEffect(() => {
     const reason = consumeDashboardRecoveryFlag();
+    // Mount-only drain of an external one-shot sessionStorage flag —
+    // the synchronous setState is the intended behaviour.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (reason) setRecoveryReason(reason);
   }, []);
   const dismissRecoveryBanner = useCallback(() => setRecoveryReason(null), []);
