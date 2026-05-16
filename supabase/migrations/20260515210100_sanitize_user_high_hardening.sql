@@ -239,12 +239,19 @@ BEGIN
       OR string_data_right_truncation
       OR numeric_value_out_of_range
       OR insufficient_privilege THEN
+      -- audit-2026-05-07 Phase C red-team #3: the SFT #8 set_config
+      -- approach was dead code. is_local=true GUCs reset at the
+      -- transaction's COMMIT; PostgREST's admin.rpc() executes
+      -- sanitize_user in its OWN implicit tx, so the GUC is gone
+      -- before the route handler can read it. The fix is reverted.
+      -- The audit-emission failure surfaces only via this NOTICE on
+      -- the postgres log stream. Closing the partial-success
+      -- observability gap requires either (a) a forensic side-table
+      -- the route handler can read, or (b) changing the function's
+      -- return contract from BOOLEAN to JSONB — both invasive
+      -- changes deferred to a follow-up.
       RAISE NOTICE 'audit-2026-05-07 H-0908/H-0909: orphan-organization audit emission failed for user % (sqlstate=%, msg=%); sanitize continues',
         p_user_id, SQLSTATE, SQLERRM;
-      -- audit-2026-05-07 SFT #8 (Phase B): mark the transaction so a
-      -- caller doing post-call introspection can detect partial
-      -- success without changing the BOOLEAN return contract.
-      PERFORM set_config('quantalyze.sanitize_user.audit_emit_failed', 'true', true);
   END;
 
   -- mig 120 P914: NULL profiles.partner_tag in addition to existing columns.
@@ -356,12 +363,10 @@ BEGIN
       -- size / role-gate failures so the GDPR sanitize completes; schema-
       -- drift errors (42703 undefined_column / 42P01 undefined_table /
       -- 42883 undefined_function) propagate so they surface loudly.
+      -- See Phase C red-team #3 for why a partial-success signal to
+      -- the route handler cannot be carried by an is_local GUC.
       RAISE NOTICE 'audit-2026-05-07 H-0899/H-0905: sanitize audit emission failed for user % (sqlstate=%, msg=%); sanitize succeeded',
         p_user_id, SQLSTATE, SQLERRM;
-      -- audit-2026-05-07 SFT #8 (Phase B): mark the transaction so a
-      -- caller doing post-call introspection can detect partial
-      -- success without changing the BOOLEAN return contract.
-      PERFORM set_config('quantalyze.sanitize_user.audit_emit_failed', 'true', true);
   END;
 
   RETURN TRUE;
@@ -375,11 +380,10 @@ COMMENT ON FUNCTION public.sanitize_user(UUID) IS
   'H-0900 / H-0905 / H-0908 / H-0909 additions: pg_advisory_xact_lock serializes concurrent '
   'admin invocations; sole-admin organization detection emits orphan audit_log rows; the '
   'sanitize itself emits one audit_log row per successful run. See migrations 055, 120, plus '
-  'this migration (20260515210100). Partial-success observability (audit-2026-05-07 SFT #8): '
-  'when an audit_log emission fails-soft the function sets '
-  'quantalyze.sanitize_user.audit_emit_failed=true in the transaction-scoped GUC; the caller '
-  'can SELECT current_setting(''quantalyze.sanitize_user.audit_emit_failed'', true) '
-  'after invocation and trigger a manual audit replay if the value is ''true''.';
+  'this migration (20260515210100). Partial-success observability gap (audit-2026-05-07 Phase '
+  'C red-team #3): an audit_log emission that fails-soft surfaces only as a postgres-log '
+  'NOTICE; the route handler cannot detect it from the BOOLEAN return value. Closing this gap '
+  'requires either a forensic side-table or a richer JSONB return contract — deferred.';
 
 REVOKE ALL ON FUNCTION public.sanitize_user(UUID) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.sanitize_user(UUID) TO service_role;
@@ -389,8 +393,9 @@ GRANT EXECUTE ON FUNCTION public.sanitize_user(UUID) TO service_role;
 -- --------------------------------------------------------------------------
 DO $$
 DECLARE
-  v_body        TEXT;
-  v_legacy_idx  BOOLEAN;
+  v_body            TEXT;
+  v_body_stripped   TEXT;
+  v_legacy_idx      BOOLEAN;
 BEGIN
   -- H-0903: legacy index dropped (or kept as fallback if v2 missing)
   SELECT EXISTS(
@@ -421,18 +426,22 @@ BEGIN
   IF v_body IS NULL THEN
     RAISE EXCEPTION 'audit-2026-05-07: sanitize_user function not found';
   END IF;
-  IF v_body NOT LIKE '%pg_advisory_xact_lock%' THEN
+  -- audit-2026-05-07 Phase C red-team #7: strip SQL line-comments
+  -- from the body before regex-probing for live PERFORM calls.
+  -- pg_get_functiondef preserves `--` comments verbatim, so a
+  -- commented-out PERFORM would otherwise satisfy the regex.
+  v_body_stripped := regexp_replace(v_body, '--[^\n]*', '', 'g');
+
+  IF v_body_stripped NOT LIKE '%pg_advisory_xact_lock%' THEN
     RAISE EXCEPTION 'audit-2026-05-07 H-0900 verification failed: sanitize_user body lacks pg_advisory_xact_lock';
   END IF;
-  -- audit-2026-05-07 PTA #2 / SFT #6 (Phase B): match the LITERAL
-  -- 'gdpr.sanitize_user' only when it appears inside a PERFORM call
-  -- to log_audit_event_service. The earlier substring probe matched
-  -- the NOTICE message and comments too, so a refactor that
-  -- commented out the PERFORM would pass.
-  IF v_body !~* 'PERFORM\s+public\.log_audit_event_service[^;]*''gdpr\.sanitize_user''' THEN
+  -- audit-2026-05-07 PTA #2 / SFT #6 (Phase B) + Phase C red-team #7:
+  -- match the LITERAL 'gdpr.sanitize_user' only when it appears
+  -- inside a live (non-commented) PERFORM call to log_audit_event_service.
+  IF v_body_stripped !~* 'PERFORM\s+public\.log_audit_event_service[^;]*''gdpr\.sanitize_user''' THEN
     RAISE EXCEPTION 'audit-2026-05-07 H-0899/H-0905 verification failed: gdpr.sanitize_user audit emission not present as a live PERFORM log_audit_event_service call';
   END IF;
-  IF v_body NOT LIKE '%organization.orphaned_by_sanitize%' THEN
+  IF v_body_stripped NOT LIKE '%organization.orphaned_by_sanitize%' THEN
     RAISE EXCEPTION 'audit-2026-05-07 H-0908/H-0909 verification failed: sanitize_user body lacks sole-admin orphan detection';
   END IF;
   -- Regression gate for the Q#2 audit-A finding: the original body
@@ -444,10 +453,10 @@ BEGIN
   -- Assert the loop binds to the real column name AND to the broadened
   -- role filter so a future copy-edit cannot reintroduce the silent
   -- failure.
-  IF v_body NOT LIKE '%om1.organization_id%' THEN
+  IF v_body_stripped NOT LIKE '%om1.organization_id%' THEN
     RAISE EXCEPTION 'audit-2026-05-07 H-0908/H-0909 verification failed: sole-admin loop does not reference organization_members.organization_id (regression to org_id?)';
   END IF;
-  IF v_body NOT LIKE '%role IN (''owner'', ''admin'')%' THEN
+  IF v_body_stripped NOT LIKE '%role IN (''owner'', ''admin'')%' THEN
     RAISE EXCEPTION 'audit-2026-05-07 H-0908/H-0909 verification failed: sole-admin loop role filter must include both owner AND admin';
   END IF;
   -- Pre-flight: organization_members.organization_id column must exist.
@@ -461,14 +470,18 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'audit-2026-05-07 sanitize_user pre-flight failed: organization_members.organization_id column missing';
   END IF;
-  -- Preservation gate — mig 120 sentinel + partner_tag + auth purge
-  IF v_body NOT LIKE '%quantalyze.sanitize_in_progress%' THEN
+  -- Preservation gate — mig 120 sentinel + partner_tag + auth purge.
+  -- All probes use v_body_stripped (Phase C #7). The partner_tag
+  -- probe is whitespace-tolerant via regex so a future formatter
+  -- pass that normalizes the 3-space gap to one does not break it
+  -- (see code-reviewer Phase B + SFT #6).
+  IF v_body_stripped NOT LIKE '%quantalyze.sanitize_in_progress%' THEN
     RAISE EXCEPTION 'audit-2026-05-07: sanitize_user lost mig 120 sentinel-progress signal';
   END IF;
-  IF v_body NOT LIKE '%partner_tag   = NULL%' THEN
+  IF v_body_stripped !~* 'partner_tag\s*=\s*NULL' THEN
     RAISE EXCEPTION 'audit-2026-05-07: sanitize_user lost mig 120 partner_tag NULLing';
   END IF;
-  IF v_body NOT LIKE '%auth.refresh_tokens%' THEN
+  IF v_body_stripped NOT LIKE '%auth.refresh_tokens%' THEN
     RAISE EXCEPTION 'audit-2026-05-07: sanitize_user lost mig 120 auth purge';
   END IF;
   -- audit-2026-05-07 R#3: sanitize_user is SECURITY DEFINER + REVOKEd
