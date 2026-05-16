@@ -2909,6 +2909,218 @@ class TestFetchDailyPnlBybitFailLoud:
             "silent-failure sweep)"
         )
 
+    @pytest.mark.asyncio
+    async def test_bybit_iso_conversion_overflow_emits_warning(self, caplog):
+        """PR #181 take-2 silent-failure-hunter F13 + pr-test LOW #3:
+        the original Bybit-branch WARNING text 'Bybit closed_pnl fetch
+        / ISO-conversion failed' names TWO failure modes. The renamed
+        sibling test_bybit_closed_pnl_item_parse_failure covers the
+        per-item parse path; the RPC-failure test covers the RPC path.
+        This test exercises the TRUE ISO-conversion failure mode: a
+        createdTime that passes the isdigit() guard but overflows when
+        passed to datetime.fromtimestamp via int(ts_raw) / 1000.
+
+        Take-2 atomicity (red-team F5): in addition to emitting the
+        WARNING, the failure must NOT partially mutate daily_pnl —
+        either all entries are converted, or none are (atomic
+        contract). After F5, the Bybit ISO conversion builds a NEW
+        list before mutating daily_pnl; on mid-loop failure, the
+        partial state is discarded and daily_pnl remains uniform.
+        """
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+        # 22-digit createdTime passes `str.isdigit()` but `int(.) / 1000`
+        # overflows datetime.fromtimestamp on most platforms (year ~10^14).
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "closedPnl": "5.0",
+                            "createdTime": "9" * 22,
+                        }
+                    ]
+                }
+            }
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_daily_pnl(mock_exchange)
+
+        # F5 atomicity: on ISO failure, no Bybit rows leak into daily_pnl
+        # (build-then-extend means a mid-loop overflow discards the
+        # partial converted list).
+        assert isinstance(result, list)
+        # Operator visibility: WARNING fired for the ISO-conversion path.
+        matching = [
+            r for r in caplog.records
+            if "Bybit closed_pnl" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert matching, (
+            "Bybit ISO-conversion overflow must produce a WARNING log "
+            "with prefix 'Bybit closed_pnl' (PR #181 take-2 F13)"
+        )
+
+
+# PR #181 take-2 silent-failure-hunter F4: OKX bills aggregator pre-take2
+# had no else branch on the `ts_raw.isdigit()` guard — bills with empty
+# or non-digit ts were silently dropped. Now logs a WARNING with
+# billId + billType for cross-exchange triage consistency.
+class TestFetchDailyPnlOkxFailLoud:
+    """Take-2 regression coverage for the OKX bill-aggregator silent-drop fix."""
+
+    @pytest.mark.asyncio
+    async def test_okx_bill_dropped_on_non_digit_ts_logs_warning(self, caplog):
+        """A bill with a non-digit ts (e.g., ISO string from a schema drift)
+        must produce a WARNING naming the billId / billType so operators
+        can spot the regression instead of seeing silently truncated
+        daily_pnl.
+        """
+        import logging
+        from datetime import datetime, timezone, timedelta
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "okx"
+        # Recent bills: one valid, one with non-digit ts (mimics OKX
+        # returning an ISO string for a future schema-drift bill).
+        valid_ts = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+        recent_resp = {
+            "data": [
+                {"ts": valid_ts, "pnl": "1.0", "fee": "0", "billId": "B1", "billType": "8"},
+                {"ts": "2026-01-01T00:00:00Z", "pnl": "2.0", "fee": "0", "billId": "B2", "billType": "8"},
+                {"ts": "", "pnl": "3.0", "fee": "0", "billId": "B3", "billType": "8"},
+            ]
+        }
+        archive_resp = {"data": []}
+
+        async def mock_recent(params):
+            return recent_resp
+
+        async def mock_archive(params):
+            return archive_resp
+
+        mock_exchange.private_get_account_bills = AsyncMock(
+            side_effect=mock_recent
+        )
+        mock_exchange.private_get_account_bills_archive = AsyncMock(
+            side_effect=mock_archive
+        )
+
+        # since_ms recent (no archive needed)
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=2)).timestamp() * 1000)
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            await fetch_daily_pnl(mock_exchange, since_ms=since_ms)
+
+        dropped = [
+            r for r in caplog.records
+            if "OKX bill dropped" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        # Both bad bills (ISO + empty-string) should emit a WARNING.
+        assert len(dropped) >= 2, (
+            "PR #181 take-2 F4: each OKX bill with non-digit ts must "
+            f"emit a WARNING; observed {len(dropped)}"
+        )
+        msgs = " | ".join(r.getMessage() for r in dropped)
+        assert "B2" in msgs, "WARNING must include billId for the ISO-ts row"
+        assert "B3" in msgs, "WARNING must include billId for the empty-ts row"
+
+
+# PR #181 take-2 silent-failure-hunter F3: fetch_mark_prices pre-take2
+# silently dropped Binance/Bybit rows whose markPrice was missing or
+# malformed. Now logs a WARNING with the symbol + the unparseable
+# markPrice value. Schema drift on the ticker endpoint would corrupt
+# valuation (caller treats absent symbols as flat positions) with no
+# operator signal without this WARNING.
+class TestFetchMarkPricesFailLoud:
+    """Take-2 regression coverage for the per-row silent-drop fix."""
+
+    @pytest.mark.asyncio
+    async def test_binance_drops_unparseable_mark_price_with_warning(self, caplog):
+        import logging
+        from services.exchange import (
+            fetch_mark_prices,
+            _reset_mark_price_cache_for_tests,
+        )
+
+        _reset_mark_price_cache_for_tests()
+        mock_exchange = MagicMock()
+        mock_exchange.id = "binance"
+        # Mixed response: BTCUSDT is fine, ETHUSDT has a non-numeric markPrice.
+        mock_exchange.fapiPublic_get_premiumindex = AsyncMock(
+            return_value=[
+                {"symbol": "BTCUSDT", "markPrice": "60000.0"},
+                {"symbol": "ETHUSDT", "markPrice": "NaN-string"},
+                {"symbol": "SOLUSDT"},  # missing markPrice entirely
+            ]
+        )
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_mark_prices(
+                mock_exchange, ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+            )
+        # The good row is kept; the bad rows are dropped.
+        assert result.get("BTCUSDT") == 60000.0
+        assert "ETHUSDT" not in result
+        assert "SOLUSDT" not in result
+        # WARNINGs must name the dropped symbols.
+        drops = [
+            r for r in caplog.records
+            if "fetch_mark_prices Binance" in r.getMessage()
+            and "dropping sym=" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert len(drops) >= 2, (
+            f"PR #181 take-2 F3: expected per-symbol WARNING for each "
+            f"dropped row; observed {len(drops)}"
+        )
+        msgs = " | ".join(r.getMessage() for r in drops)
+        assert "ETHUSDT" in msgs, "WARNING must name ETHUSDT drop"
+        assert "SOLUSDT" in msgs, "WARNING must name SOLUSDT drop"
+
+    @pytest.mark.asyncio
+    async def test_bybit_drops_unparseable_mark_price_with_warning(self, caplog):
+        import logging
+        from services.exchange import (
+            fetch_mark_prices,
+            _reset_mark_price_cache_for_tests,
+        )
+
+        _reset_mark_price_cache_for_tests()
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_market_tickers = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {"symbol": "BTCUSDT", "markPrice": "60000.0"},
+                        {"symbol": "ETHUSDT", "markPrice": "NaN-string"},
+                    ]
+                }
+            }
+        )
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_mark_prices(
+                mock_exchange, ["BTCUSDT", "ETHUSDT"]
+            )
+        assert result.get("BTCUSDT") == 60000.0
+        assert "ETHUSDT" not in result
+        drops = [
+            r for r in caplog.records
+            if "fetch_mark_prices Bybit" in r.getMessage()
+            and "dropping sym=ETHUSDT" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert drops, (
+            "PR #181 take-2 F3: ETHUSDT drop must emit a Bybit-specific "
+            "WARNING naming the symbol"
+        )
+
 
 # Review-cluster gate (audit-2026-05-07): the Binance branch fix at
 # exchange.py:552-562 — pre-gate it had NO regression test. A /simplify
