@@ -128,8 +128,10 @@ by pre-existing `ModuleNotFoundError: structlog`/`pandera` (unrelated to phase12
 ## Grok adversarial pass: PASS — All critical risks (DSN leaks, prod-gate bypass, silent failures, atomic TODOS, bounded async) closed with layered defenses + 243 passing tests.
 
 ## /ship phase
-- Branch: fix/audit-2026-05-07-phase12-kill-switch-py
+- PR: https://github.com/AI-Isaiah/Quantalyze/pull/177
 - Version: 0.22.40.0 → 0.22.40.1
+- CI: green
+- Grok pass: PASS
 - Coverage: 94% on scripts/phase12_kill_switch.py (212 kill-switch tests pass)
 - Repo-wide tests: pytest 1456 passed / 52 skipped; vitest 3557 passed / 209 skipped
-- Grok 4.3 adversarial: PASS
+- Ready for /land-and-deploy
