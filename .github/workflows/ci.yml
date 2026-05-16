@@ -139,6 +139,17 @@ jobs:
     # other frontend-* jobs (above) and uploads the .next + public output
     # as an artifact so the e2e job can download instead of rebuilding —
     # eliminating the duplicate ~60-120s build that used to live in e2e.
+    #
+    # C-0293(c) artifact-leak fix: this job builds with PLACEHOLDER
+    # NEXT_PUBLIC_SUPABASE_* env values UNCONDITIONALLY (no longer the
+    # seed-aware ternary). The previous behavior baked the real
+    # TEST_SUPABASE_URL + TEST_SUPABASE_ANON_KEY into the client bundles
+    # in `.next/**` whenever vars.E2E_TEST_DB_CONFIGURED was true, then
+    # uploaded that artifact (where any third-party action in the same
+    # workflow run has `actions: read` and could grep for inlined creds).
+    # The seed-gated e2e specs now rebuild locally inside the e2e job
+    # with the real env, and that rebuilt `.next/` stays on the runner
+    # FS — it is never uploaded as an artifact.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -163,14 +174,16 @@ jobs:
           key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-${{ hashFiles('src/**') }}
           restore-keys: |
             ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-
-      # The build env mirrors the e2e job's seed-aware ternary so the
-      # uploaded .next artifact carries the right NEXT_PUBLIC_* values
-      # baked into client bundles. e2e downloads this same artifact.
+      # C-0293(c): build with PLACEHOLDERS unconditionally. The previous
+      # seed-aware ternary leaked test-DB credentials into the uploaded
+      # artifact (see the security comment on this job header above).
+      # The seed-gated e2e specs rebuild locally with the real env in
+      # the e2e job, and that rebuilt `.next/` is never uploaded.
       - run: npm run build
         env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || 'https://placeholder.supabase.co' }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_ANON_KEY || 'placeholder' }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_SERVICE_ROLE_KEY || 'placeholder_service_role' }}
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
+          SUPABASE_SERVICE_ROLE_KEY: placeholder_service_role
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
@@ -591,15 +604,15 @@ jobs:
           done
           echo "[port-cleanup] after: $(lsof -ti:3000 2>/dev/null | tr '\n' ' '),ss:$(ss -ltn 2>/dev/null | grep ':3000\b' || echo none)"
         env:
-          # Runtime env MUST match build-time env. NEXT_PUBLIC_* vars are
-          # baked into client bundles at build time; if the build saw real
-          # test-Supabase but the runtime uses placeholder, the server
-          # rejects its own signed tokens and the client bundle in the
-          # browser points at a different URL than the server's API
-          # handlers. Mirror the build-step ternary exactly.
-          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || 'https://placeholder.supabase.co' }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_ANON_KEY || 'placeholder' }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_SERVICE_ROLE_KEY || 'placeholder_service_role' }}
+          # C-0293(c): runtime env mirrors the placeholder build above.
+          # The unconditional spec set (auth, smoke, demo-public,
+          # demo-founder-view, onboarding-banner-smoke) does NOT
+          # authenticate against a real Supabase — placeholder is
+          # correct here. The seed-gated step below uses real env
+          # against a separately-rebuilt `.next/` (never uploaded).
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
+          SUPABASE_SERVICE_ROLE_KEY: placeholder_service_role
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
@@ -624,6 +637,36 @@ jobs:
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+      - name: Rebuild Next.js with real test-Supabase env (C-0293(c))
+        # The artifact downloaded above was built with PLACEHOLDER
+        # NEXT_PUBLIC_* values so the uploaded `.next/**` artifact never
+        # contains the test-Supabase URL/anon key. The seed-gated specs
+        # (onboarding-funnel, discovery, strategy-v2) need the real
+        # URL/anon key INLINED into the browser bundle (Next.js
+        # evaluates NEXT_PUBLIC_* at build time, not runtime), so we
+        # rebuild locally in this job with the real env. This rebuilt
+        # `.next/` stays on the runner FS — it is NEVER uploaded as
+        # an artifact, so the test-DB credentials never leave the
+        # ephemeral runner.
+        #
+        # Cost: ~30-60s only when E2E_TEST_DB_CONFIGURED == 'true'.
+        # For fork PRs and repos without the test-DB wired, this step
+        # skips entirely.
+        if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+        run: |
+          # Wipe the placeholder-built artifact manifests + chunks so
+          # the rebuild has nothing stale to merge against. `.next/cache`
+          # (the incremental webpack/Turbopack store) is left intact so
+          # the rebuild is incremental on top of the placeholder run.
+          rm -rf .next/server .next/static .next/build-manifest.json .next/prerender-manifest.json .next/required-server-files.json 2>/dev/null || true
+          npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+          ADMIN_EMAIL: test@example.com
+          PLATFORM_NAME: Quantalyze
+          PLATFORM_EMAIL: test@quantalyze.com
       - name: Run seed-gated specs (MA-8 / BLOCK-3 gated on vars.E2E_TEST_DB_CONFIGURED)
         if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
         run: |
