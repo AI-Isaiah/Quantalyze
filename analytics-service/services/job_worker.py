@@ -879,18 +879,45 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # strategy_analytics.data_quality_flags so the admin "Position Metrics
     # Failed" health card lights up. Best-effort — stamp failure must not
     # change the job outcome (the trades are already persisted in Phase 1).
+    #
+    # Read-modify-write: data_quality_flags is shared with analytics_runner
+    # (benchmark_unavailable / sibling_kinds_failed / position_metrics_failed
+    # etc.); an unconditional upsert with just our keys would clobber those
+    # signals. Read the current row, merge in our keys, then upsert.
     if phase2_failed:
-        flag_payload = {
-            "phase2_fill_ingestion_failed": True,
-            "phase2_error": phase2_error_message or "unknown",
-            "phase2_failed_at": datetime.now(timezone.utc).isoformat(),
-        }
+        def _load_existing_flags() -> dict:
+            res = (
+                ctx.supabase.table("strategy_analytics")
+                .select("data_quality_flags")
+                .eq("strategy_id", strategy_id)
+                .maybe_single()
+                .execute()
+            )
+            row = res.data or {}
+            return dict(row.get("data_quality_flags") or {})
+
+        try:
+            existing_flags = await db_execute(_load_existing_flags)
+        except Exception as load_exc:  # noqa: BLE001
+            # If the read fails, fall back to a fresh dict — we'd rather
+            # potentially overwrite stale flags than skip the signal entirely
+            # (analytics_runner re-emits its flags on the next computation).
+            logger.warning(
+                "sync_trades: failed to load existing data_quality_flags for "
+                "strategy %s — proceeding with new-flag-only upsert: %s",
+                strategy_id, load_exc,
+            )
+            existing_flags = {}
+
+        existing_flags["phase2_fill_ingestion_failed"] = True
+        existing_flags["phase2_error"] = phase2_error_message or "unknown"
+        existing_flags["phase2_failed_at"] = datetime.now(timezone.utc).isoformat()
 
         def _flag_phase2_failure() -> None:
             ctx.supabase.table("strategy_analytics").upsert(
                 {
                     "strategy_id": strategy_id,
-                    "data_quality_flags": flag_payload,
+                    "data_quality_flags": existing_flags,
                 },
                 on_conflict="strategy_id",
             ).execute()

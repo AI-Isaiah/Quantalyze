@@ -1573,6 +1573,146 @@ class TestSyncTradesPhase2PartialBatchFailure:
 
 
 # ---------------------------------------------------------------------------
+# H-0691 — Phase 2 failure stamps data_quality_flags
+# ---------------------------------------------------------------------------
+
+class TestSyncTradesPhase2FailureFlag:
+    """audit-2026-05-07 H-0691.
+
+    Pre-fix: `run_sync_trades_job` logged a `warning` on Phase 2 failure
+    and returned DONE — operators saw a healthy sync_trades success
+    while fills silently lagged for days. Admin's "Strategies Missing
+    Fills" health card only fires on strategies with 0 fill rows total;
+    a strategy whose fills are days behind looked healthy.
+
+    Post-fix: Phase 2 fetch or persist failure stamps
+    `strategy_analytics.data_quality_flags.phase2_fill_ingestion_failed`
+    so the admin health card surfaces the silent-lag condition. The
+    stamp is a read-modify-write so it does NOT clobber sibling flags
+    (benchmark_unavailable / sibling_kinds_failed / etc.) that
+    analytics_runner emits onto the same JSONB column.
+    """
+
+    @pytest.mark.asyncio
+    async def test_phase2_fetch_failure_stamps_data_quality_flag(self) -> None:
+        from services.job_worker import run_sync_trades_job
+
+        # Capture the data_quality_flags payload we upsert onto
+        # strategy_analytics.
+        sa_upserts: list[dict] = []
+
+        # Pretend analytics_runner already wrote `benchmark_unavailable=True`.
+        # The phase2 stamp must MERGE its keys with that pre-existing flag
+        # instead of clobbering it (admin UI relies on both signals).
+        existing_flags = {"benchmark_unavailable": True, "benchmark_note": "x"}
+
+        def _table(name: str) -> MagicMock:
+            mock_t = MagicMock()
+
+            if name == "strategy_analytics":
+                # SELECT data_quality_flags -> existing flags.
+                mock_select = MagicMock()
+                mock_eq_sel = MagicMock()
+                mock_maybe = MagicMock()
+                mock_maybe.execute.return_value = MagicMock(
+                    data={"data_quality_flags": existing_flags}
+                )
+                mock_eq_sel.maybe_single.return_value = mock_maybe
+                mock_select.eq.return_value = mock_eq_sel
+                mock_t.select.return_value = mock_select
+
+                # UPSERT capture.
+                def _upsert(payload: dict, **_kwargs):
+                    sa_upserts.append(dict(payload))
+                    stub = MagicMock()
+                    stub.execute.return_value = MagicMock(data=[])
+                    return stub
+                mock_t.upsert.side_effect = _upsert
+
+            else:
+                # api_keys.update chain
+                mock_update = MagicMock()
+                mock_eq_upd = MagicMock()
+                mock_eq_upd.execute.return_value = MagicMock(data=[])
+                mock_update.eq.return_value = mock_eq_upd
+                mock_t.update.return_value = mock_update
+                # trades.upsert (none expected when Phase 2 fetch fails)
+                mock_t.upsert.return_value = MagicMock(
+                    execute=MagicMock(return_value=MagicMock(data=[]))
+                )
+
+            return mock_t
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.supabase.table.side_effect = _table
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=1)
+            return stub
+        mock_ctx.supabase.rpc.side_effect = _rpc
+
+        mock_ctx.strategy_row = {"id": "strat-h0691", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "binance",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        job = {"id": "job-h0691", "kind": "sync_trades", "strategy_id": "strat-h0691"}
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=100.0),
+        ), patch(
+            "services.job_worker.fetch_raw_trades",
+            new=AsyncMock(side_effect=RuntimeError("exchange returned 502 BadGateway")),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
+        ):
+            result = await run_sync_trades_job(job)
+
+        # Phase 2 failure must NOT fail the job — Phase 1 succeeded.
+        assert result.outcome == DispatchOutcome.DONE
+
+        # exactly one strategy_analytics upsert (the data-quality stamp).
+        flag_upserts = [u for u in sa_upserts if "data_quality_flags" in u]
+        assert len(flag_upserts) == 1, (
+            f"Phase 2 failure must stamp exactly one data_quality_flags "
+            f"upsert; got {len(flag_upserts)} (all upserts: {sa_upserts})"
+        )
+        stamped_flags = flag_upserts[0]["data_quality_flags"]
+
+        # The new flag is present.
+        assert stamped_flags["phase2_fill_ingestion_failed"] is True
+        assert "502" in stamped_flags["phase2_error"]
+        assert "phase2_failed_at" in stamped_flags
+
+        # Pre-existing sibling flags are PRESERVED (read-modify-write).
+        # Without the read step, this upsert would clobber benchmark_unavailable
+        # to None and the admin UI would lose that signal.
+        assert stamped_flags["benchmark_unavailable"] is True, (
+            "Phase 2 stamp must merge with existing data_quality_flags, "
+            "not overwrite them. analytics_runner writes "
+            "benchmark_unavailable to the same JSONB column."
+        )
+        assert stamped_flags["benchmark_note"] == "x"
+
+
+# ---------------------------------------------------------------------------
 # G12.A.5 — RLS denies cross-allocator SELECT on is_fill=true rows
 # ---------------------------------------------------------------------------
 
