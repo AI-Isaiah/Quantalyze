@@ -97,7 +97,10 @@ class PortfolioAnalyticsResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     ok: bool = True
-    status: str  # legacy field kept for backward compat; mirrors ok
+    # Legacy compute-job phase string kept for backward compat with TS callers
+    # ("complete" on success). `ok` is the new bool discriminator and is the
+    # field new clients should branch on.
+    status: str
     portfolio_id: str
     analytics_id: str
 

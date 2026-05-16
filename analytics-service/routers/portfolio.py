@@ -1220,6 +1220,12 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
         # is out of scope for the audit-2026-05-07 router pass. We keep
         # the UPDATE here for now but explicitly log the override so the
         # audit trail isn't silent about the mutation.
+        logger.info(
+            "portfolio_optimizer: in-place suggestions override on analytics_id=%s "
+            "(portfolio=%s, suggestion_count=%d). H-0573 follow-up tracks the "
+            "append-only redesign.",
+            latest.data[0]["id"], req.portfolio_id, len(suggestions),
+        )
         supabase.table("portfolio_analytics").update(
             {"optimizer_suggestions": suggestions}
         ).eq("id", latest.data[0]["id"]).execute()
