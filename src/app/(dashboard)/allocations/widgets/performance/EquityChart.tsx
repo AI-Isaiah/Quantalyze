@@ -132,6 +132,16 @@ const DAY_MS = 86_400_000;
 
 // Exported for `EquityChartWidget` — the wrapper needs the same f7-anchored
 // first-positive date for the CustomRangePicker's `min` bound (PR4 #1).
+//
+// pr189-followup M8 (silent-failure-hunter MED/8) — hoist the malformed-
+// date breadcrumb into parseISO itself. Pre-followup, only sliceByPeriod's
+// filter callback warned; the same parseISO call is reachable from the
+// benchmark builder, overlay key-lookup, custom-range bounds, tick
+// midpoint search, tooltip date format, and the CustomRangePicker min.
+// Any of those silently dropping a date due to a malformed input would
+// stay below the engineer's radar. One module-scoped dedup Set keeps the
+// warning bounded (one warn per offending input string per session).
+const parseISOWarnedRef = new Set<string>();
 export function parseISO(s: string): number {
   // YYYY-MM-DD → epoch ms (UTC midnight). Falls back to Date constructor
   // for any non-ISO inputs so we never throw.
@@ -139,7 +149,14 @@ export function parseISO(s: string): number {
   if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
     return Date.UTC(y, m - 1, d);
   }
-  return new Date(s).getTime();
+  const t = new Date(s).getTime();
+  if (!Number.isFinite(t) && typeof console !== "undefined") {
+    if (!parseISOWarnedRef.has(s)) {
+      parseISOWarnedRef.add(s);
+      console.warn("[EquityChart] parseISO — malformed date input", { input: s });
+    }
+  }
+  return t;
 }
 
 /** Designer's f7 anchor — re-anchor at the first positive value.
@@ -195,6 +212,22 @@ function sliceByPeriod(
       if (!customRange) return points;
       startEpoch = parseISO(customRange.start);
       endEpoch = parseISO(customRange.end);
+      // pr189-followup M1 (code-reviewer MED/8) — guard the CUSTOM
+      // bounds themselves. parseISO returns NaN for truly-malformed
+      // inputs; downstream `e >= NaN` / `e <= NaN` always evaluate to
+      // false, so the chart silently empties without surfacing the
+      // bug. parseISO already emits a per-input breadcrumb (M8), so
+      // here we just fall back to ALL-period semantics to keep the
+      // chart visible.
+      if (!Number.isFinite(startEpoch) || !Number.isFinite(endEpoch)) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[EquityChart] sliceByPeriod — malformed custom range bounds; falling back to ALL period",
+            { start: customRange.start, end: customRange.end },
+          );
+        }
+        return points;
+      }
       break;
     }
   }
@@ -577,6 +610,25 @@ export function EquityChart({
     ticks.add(1);
     for (let v = 1 - stepVal; v >= yMin; v -= stepVal) ticks.add(v);
     for (let v = 1 + stepVal; v <= yMax; v += stepVal) ticks.add(v);
+    // pr189-followup H3 (silent-failure-hunter HIGH/8) — the M-1065 fix
+    // only fires the 3-tick fallback when `!satisfied`. For TRULY-flat
+    // series where one candidate clears MIN_TICKS via yPadding=0.002,
+    // the loops above can still emit 400+ ticks (stepPct=0.001%, range
+    // ~0.004 → ~401 ticks). The original silent-failure surface (DOM
+    // flood, no warning, no fallback) survives. Cap at 50 ticks; if
+    // exceeded, emit a one-shot warn and fall back to the 3-tick safe
+    // render. Belt-and-suspenders alongside the !satisfied path.
+    if (ticks.size > 50) {
+      if (typeof console !== "undefined") {
+        console.warn(
+          "[EquityChart] y-tick walker emitted >50 ticks for narrow range; capping at 3-tick fallback",
+          { tickCount: ticks.size, yMin, yMax, stepPct },
+        );
+      }
+      return Array.from(
+        new Set([yMin, 1, yMax].filter((v) => Number.isFinite(v))),
+      ).sort((a, b) => a - b);
+    }
     return Array.from(ticks).sort((a, b) => a - b);
   })();
 
@@ -1407,6 +1459,14 @@ export default function EquityChartWidget({ data }: WidgetProps) {
     const base = window[0].value;
     const last = window[window.length - 1].value;
     if (!Number.isFinite(base) || base <= 0) return null;
+    // pr189-followup M18 (red-team MED/8) — defend the OUTER summary chip
+    // against the same NaN class the M-1065 push-time filter closes on
+    // the inner chart. If a corrupt trailing point slips through (e.g.
+    // a non-finite `value` that the f7 anchor doesn't strip — anchored
+    // only checks `value > 0`, NOT `Number.isFinite(value)`), `last`
+    // can be NaN; `last / base - 1` is NaN; the chip renders 'NaN%' to
+    // the allocator. Mirror the existing base guard.
+    if (!Number.isFinite(last)) return null;
     return last / base - 1;
   }, [equityDailyPoints, period, customRange]);
 
