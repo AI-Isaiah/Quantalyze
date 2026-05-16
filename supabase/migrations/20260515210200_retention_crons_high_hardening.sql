@@ -210,10 +210,31 @@ BEGIN
   PERFORM cron.schedule(
     'retention_notification_dispatches',
     '10 3 * * *',
+    -- audit-2026-05-07 SFT #5 (Phase B): wrap the DELETE in a DO block
+    -- that also emits a NOTICE when aged queued rows accumulate above
+    -- a threshold. The H-0910 fix preserves queued rows (so an
+    -- un-consumed reminder isn't silently purged) — but absent the
+    -- Sprint-7 consumer, an upper-bound NOTICE is the only signal an
+    -- operator gets that the queue is filling up.
     $cron$
-    DELETE FROM notification_dispatches
-     WHERE created_at < now() - interval '180 days'
-       AND status <> 'queued';
+    DO $body$
+    DECLARE
+      v_queued_aged INTEGER;
+    BEGIN
+      DELETE FROM notification_dispatches
+       WHERE created_at < now() - interval '180 days'
+         AND status <> 'queued';
+
+      SELECT count(*) INTO v_queued_aged
+        FROM notification_dispatches
+       WHERE status = 'queued'
+         AND created_at < now() - interval '180 days';
+
+      IF v_queued_aged > 1000 THEN
+        RAISE NOTICE 'retention_notification_dispatches: % queued rows aged >180d — consumer drain missing or stalled. audit-2026-05-07 SFT #5.',
+          v_queued_aged;
+      END IF;
+    END $body$;
     $cron$
   );
 
