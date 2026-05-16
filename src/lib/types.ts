@@ -318,8 +318,19 @@ export interface StrategyAnalyticsSeriesRow {
  * Phase 12 / D-04: Lazy-fetch RPC return shape.
  * Maps panel_id → {kind: payload}. Empty object when strategy is not visible
  * to the caller or no kinds match the panel mapping.
+ *
+ * audit-2026-05-07 (C-0182 / C-0183 / H-0518 / H-1118): the RPC returns a
+ * PARTIAL projection of `StrategyAnalyticsSeriesKind` — each panel only
+ * emits the 0-8 kinds applicable to it. The previous shape
+ * `Record<StrategyAnalyticsSeriesKind, unknown> | Record<string, never>`
+ * was a structural lie because `Record<K,V>` in TS is TOTAL: every K must
+ * be present. The union also collapsed to `{}` because `Record<string,never>`
+ * subsumes the keyed map. Consumers reading e.g. `payload.daily_returns_grid`
+ * believed the key always existed and crashed at runtime when fetching a panel
+ * that didn't emit that kind. Switching to `Partial<...>` forces consumers
+ * to null-check before each key access, matching reality.
  */
-export type LazyMetricsPayload = Record<StrategyAnalyticsSeriesKind, unknown> | Record<string, never>;
+export type LazyMetricsPayload = Partial<Record<StrategyAnalyticsSeriesKind, unknown>>;
 
 export interface Position {
   id: string;

@@ -58,8 +58,13 @@ export async function fetchStrategyLazyMetricsClient(
       code: error.code,
       message: error.message,
     });
-    return {} as LazyMetricsPayload;
+    return {};
   }
 
+  // The RPC's `data` is typed `any` by supabase-js; the runtime shape is a
+  // partial map of `StrategyAnalyticsSeriesKind -> unknown`. The
+  // server-side `fetchStrategyLazyMetrics` performs the authoritative
+  // runtime shape + key validation (see queries.ts); this client mirror
+  // trusts the RPC for the browser case and shape-coerces via cast.
   return (data ?? {}) as LazyMetricsPayload;
 }
