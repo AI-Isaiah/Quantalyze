@@ -392,7 +392,31 @@ export function EquityChart({
   // start. Re-anchoring here makes the axis meaningful: the line always
   // departs from 0% at the left edge and ticks read as "percent change
   // since period start" — matching the tooltip arithmetic below.
-  const basePort = visible[0]?.value ?? 1;
+  //
+  // audit-2026-05-07 M-1063 c8 — `visible[0]?.value ?? 1` only catches
+  // undefined. If the first visible point's value is literally 0 (e.g. a
+  // zero-equity row that slipped past the f7 anchor because the period
+  // slice landed on a pre-anchor day), every division below produces
+  // Infinity / NaN, the y-tick walker reads NaN bounds, and the SVG path
+  // renders as a broken line off-screen with no diagnostic. Guard against
+  // non-finite and non-positive bases by reusing the existing
+  // "Equity data warming up" empty state below — this restores the
+  // visual contract (a graceful, copy-driven fallback) ONLY on broken
+  // data; the happy path is unchanged.
+  const rawBasePort = visible[0]?.value ?? 1;
+  if (!Number.isFinite(rawBasePort) || rawBasePort <= 0) {
+    return (
+      <div
+        ref={wrapRef}
+        className="flex h-[260px] w-full items-center justify-center text-sm text-text-muted"
+        role="img"
+        aria-label="Equity chart"
+      >
+        Equity data warming up
+      </div>
+    );
+  }
+  const basePort = rawBasePort;
   const visibleNormalized = visible.map((p) => p.value / basePort);
 
   // ADVERSARIAL-EQ-5 — period total return for the always-visible
@@ -477,10 +501,34 @@ export function EquityChart({
     // tickCount is monotonically decreasing in `c`. Walk ascending and
     // keep the largest candidate that still meets MIN_TICKS; bail on
     // first failure.
+    //
+    // audit-2026-05-07 M-1065 c8 — on degenerate ranges (yMin == yMax, or
+    // tickCount(candidates[0]) already < MIN_TICKS because the padded
+    // range is too small) the previous code left `stepPct` stuck at the
+    // SEED value `candidates[0] = 0.001`%. The for-v loops below then
+    // iterated ~80000+ ticks across the padded range, producing a
+    // DOM/SVG flood with no error, no log, no fallback. Track whether
+    // ANY candidate cleared MIN_TICKS; if none did, fall back to a 3-tick
+    // render (yMin, 1, yMax) so the axis stays sane on flat-line
+    // allocators and emit a one-shot console.warn so the case surfaces.
     let stepPct = candidates[0];
+    let satisfied = false;
     for (const c of candidates) {
-      if (tickCount(c) >= MIN_TICKS) stepPct = c;
-      else break;
+      if (tickCount(c) >= MIN_TICKS) {
+        stepPct = c;
+        satisfied = true;
+      } else break;
+    }
+    if (!satisfied) {
+      if (typeof console !== "undefined") {
+        console.warn(
+          "[EquityChart] y-tick walker found no candidate meeting MIN_TICKS — falling back to 3-tick render",
+          { yMin, yMax, MIN_TICKS },
+        );
+      }
+      // Fixed 3-tick render: yMin / 1.0 / yMax keeps the baseline tick
+      // and bounds visible without flooding the DOM.
+      return [yMin, 1, yMax].sort((a, b) => a - b);
     }
     const stepVal = stepPct / 100;
     const ticks = new Set<number>();

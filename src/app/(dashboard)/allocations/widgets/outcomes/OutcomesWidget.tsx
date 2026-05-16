@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Line, LineChart, ResponsiveContainer } from "recharts";
 import type { WidgetProps } from "../../lib/types";
 import type {
@@ -369,6 +369,23 @@ function ExpandedPanel({
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
+        // audit-2026-05-07 H-0162 + H-1217 c8/c9 silent-failure — before
+        // this patch the generic 'Failed to load curves' message was
+        // stored on state and then never rendered to the user (the
+        // populated-sparkline branch silently substitutes `null`). The
+        // status code from `HTTP ${res.status}`, JSON parse failures,
+        // and network errors all collapsed into the same opaque string
+        // with no diagnostic output. Surface the failure via
+        // console.error so dev-tools / Sentry's capture-console picks it
+        // up; keep the state set unchanged so the existing UI behavior
+        // (silent null sparkline) is not visually altered.
+        if (typeof console !== "undefined") {
+          console.error(
+            "[OutcomesWidget] curves fetch failed",
+            { outcome_id: outcome.id },
+            err,
+          );
+        }
         if (!cancelled) setError("Failed to load curves");
       }
     }
@@ -736,6 +753,17 @@ export default function OutcomesWidget({ data }: WidgetProps) {
   const curvesCache = useRef<Map<string, CurveData>>(new Map());
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // audit-2026-05-07 M-0188 c9 performance — the original inline
+  // `onToggle={(id) => setExpandedId(expandedId === id ? null : id)}`
+  // allocated a new function per render and closed over the current
+  // `expandedId`. Toggling row #1 re-rendered all N-1 sibling rows and
+  // re-ran their per-row memos. Hoist into a stable `useCallback` whose
+  // body uses functional `setExpandedId(prev => …)` so the handler
+  // identity is stable across renders without depending on `expandedId`.
+  const handleRowToggle = useCallback((id: string) => {
+    setExpandedId((prev) => (prev === id ? null : id));
+  }, []);
+
   const kpis = useMemo(
     () => computeOutcomeKPIs(outcomes ?? []),
     [outcomes],
@@ -902,9 +930,7 @@ export default function OutcomesWidget({ data }: WidgetProps) {
                 outcome={o}
                 colSpan={COL_SPAN}
                 isExpanded={expandedId === o.id}
-                onToggle={(id) =>
-                  setExpandedId(expandedId === id ? null : id)
-                }
+                onToggle={handleRowToggle}
                 curvesCache={curvesCache}
               />
             ))}

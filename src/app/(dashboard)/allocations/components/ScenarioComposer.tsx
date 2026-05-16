@@ -365,20 +365,32 @@ export function ScenarioComposer({
     [scenarioMetrics.equity_curve],
   );
 
+  // audit-2026-05-07 H-0105 c9 performance — the previous body called
+  // `holdingsSummary.find(x => buildHoldingRef({…}) === scopeRef)` inside
+  // the outer loop, giving O(N²) string-formatting + Array.prototype.find
+  // per render. Every toggle keystroke and every server-action parent
+  // re-render (which produces a new `holdingsSummary` array reference)
+  // busted the memo and re-ran the quadratic loop. Pre-build a
+  // `Map<scopeRef, holding>` once per holdingsSummary so the lookup is
+  // O(1) — same pattern as `flaggedByRef` (L863) and the
+  // ScenarioCommitDrawer adapter Maps. The memo deps are unchanged.
   const scenarioAum = useMemo(() => {
+    const byRef = new Map<string, (typeof holdingsSummary)[number]>();
+    for (const x of holdingsSummary) {
+      byRef.set(
+        buildHoldingRef({
+          venue: x.venue,
+          symbol: x.symbol,
+          holding_type: x.holding_type,
+        }),
+        x,
+      );
+    }
     let sum = 0;
     for (const [scopeRef, on] of Object.entries(scenario.draft.toggleByScopeRef)) {
       if (!on) continue;
-      const isHoldingRef = scopeRef.startsWith("holding:");
-      if (!isHoldingRef) continue;
-      const h = holdingsSummary.find(
-        (x) =>
-          buildHoldingRef({
-            venue: x.venue,
-            symbol: x.symbol,
-            holding_type: x.holding_type,
-          }) === scopeRef,
-      );
+      if (!scopeRef.startsWith("holding:")) continue;
+      const h = byRef.get(scopeRef);
       if (h) sum += h.value_usd;
     }
     return sum;
