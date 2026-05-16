@@ -1,6 +1,52 @@
 import { z } from "zod";
 import type { AlertSeverity, DocType, SupportedExchange } from "./utils";
 
+// ---------------------------------------------------------------------------
+// audit-2026-05-07 H-0517 — branded identifier vocabulary
+//
+// SEC-005 was the canonical class: a strategies row's `api_key_id` could
+// point at another user's key, but the TS type system would let any
+// string from any source flow into the field. The SQL trigger added in
+// migration 028 catches this at the DB boundary; branded id types make
+// the same invariant visible to the compiler — code that mixes ids of
+// different owning entities becomes a type error.
+//
+// USAGE NOTES (current rollout = type vocabulary only):
+//   - The branded aliases are EXPORTED so new code can opt into the
+//     invariant. The existing interface fields below still type these
+//     ids as `string` to keep the broader codebase compiling without a
+//     cross-cutting cast-everywhere refactor. Callers reading rows from
+//     Supabase can stamp the brand via the `cast*Id()` helpers below.
+//   - When the codebase migrates to branded ids at the DTO/cast boundary
+//     in a follow-up PR, the interface fields below will be retyped and
+//     the cascading call-site fixes happen at once.
+//   - Cross-tenant assignments (e.g. assigning an `ApiKeyId` belonging
+//     to user B into `Strategy.api_key_id` of user A) are not yet
+//     statically impossible — the SQL trigger remains the load-bearing
+//     check. The brand makes the intent EXPRESSIBLE; full enforcement is
+//     a deliberate next step.
+// ---------------------------------------------------------------------------
+export type UserId = string & { readonly __brand: "UserId" };
+export type ApiKeyId = string & { readonly __brand: "ApiKeyId" };
+export type StrategyId = string & { readonly __brand: "StrategyId" };
+export type PortfolioId = string & { readonly __brand: "PortfolioId" };
+export type TenantId = string & { readonly __brand: "TenantId" };
+
+/**
+ * Cast a raw string (e.g. fresh out of Supabase, validated by `isUuid`)
+ * to a branded id. There is no runtime check — callers are expected to
+ * have validated the string at the source. The brand is a discipline
+ * marker: it says "this string came from the row of THIS entity".
+ *
+ * Anti-pattern: passing a `UserId` into a place that wants `ApiKeyId`.
+ * The branded types make this a compile error at the point of misuse.
+ */
+export const castUserId = (s: string): UserId => s as UserId;
+export const castApiKeyId = (s: string): ApiKeyId => s as ApiKeyId;
+export const castStrategyId = (s: string): StrategyId => s as StrategyId;
+export const castPortfolioId = (s: string): PortfolioId => s as PortfolioId;
+export const castTenantId = (s: string): TenantId => s as TenantId;
+
 export type Role = "manager" | "allocator" | "both";
 
 export const ROLES: { value: Role; label: string; description: string }[] = [
