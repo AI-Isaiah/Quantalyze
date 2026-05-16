@@ -1,0 +1,3 @@
+{"id":"PTA-2","severity":"MEDIUM","confidence":7,"loc":"tests/test_portfolio_router_audit_2026_05_07.py:TestIdempotencyCache","issue":"No test for TTL expiration. After _VERIFY_STRATEGY_IDEMPOTENCY_TTL_SEC, cache should release. Missing regression."}
+{"id":"PTA-3","severity":"MEDIUM","confidence":8,"loc":"tests/test_portfolio_compute_integration.py","issue":"No test for SFH-3: analytics row survives a downstream alert-generation failure. Add test once SFH-3 fix is in."}
+{"id":"PTA-4","severity":"MEDIUM","confidence":7,"loc":"tests/test_portfolio_compute_integration.py","issue":"Missing happy-path assertion that data_quality.dropped_weight_total == 0 when all strategies present."}

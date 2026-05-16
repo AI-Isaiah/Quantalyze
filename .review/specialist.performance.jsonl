@@ -1,0 +1,2 @@
+{"id":"PERF-2","severity":"HIGH","confidence":7,"loc":"portfolio.py:_verify_strategy_email_attempts","issue":"Unbounded dict growth. Same as CR-1; need a global eviction strategy (size cap or periodic prune)."}
+{"id":"PERF-3","severity":"MEDIUM","confidence":7,"loc":"portfolio.py:_compute_portfolio_analytics","issue":"Sync Supabase.execute() inside async def blocks the event loop for the whole compute (1-3 min). Documented as deferred (H-0570/H-0576)."}
