@@ -372,10 +372,24 @@ export interface TradeMetrics {
 /**
  * Single bucket in trade_mix breakdown.
  * Each bucket counts trades partitioned by side × maker/taker.
+ *
+ * audit-2026-05-07 H-0512 / H-0513 / M-0579: \`avg_holding_period_hours\` was
+ * declared in the original S15f diff (3-field bucket) but dropped on the way
+ * to merge. The Python writer side does NOT emit it today (verified absent
+ * from the canonical golden fixture). Listed here as OPTIONAL so:
+ *   - consumers reading \`bucket.avg_holding_period_hours\` get
+ *     \`number | undefined\` (no \`as any\` cast); reads will be \`undefined\`
+ *     until/unless Python emits the field.
+ *   - the field is UNITED to Hours (audit's mixed-units risk, see
+ *     unit vocabulary above). The suffix IS the contract.
+ *   - the type-test in MetricPanel.types.test.ts continues to compile.
  */
 export interface TradeMixBucket {
   count: number;
   total_notional: number;
+  /** Average holding period for trades in this bucket, in HOURS. Optional
+   *  until the Python writer side begins emitting; consumers must null-check. */
+  avg_holding_period_hours?: number;
 }
 
 /**
