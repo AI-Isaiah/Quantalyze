@@ -879,7 +879,7 @@ BEGIN
      AND table_name = 'compute_jobs'
      AND grantee IN ('anon', 'authenticated', 'PUBLIC');
   IF v_revoked_jobs <> 0 THEN
-    RAISE EXCEPTION 'audit-2026-05-07 residual verification: compute_jobs still has %s grants to anon/authenticated/PUBLIC', v_revoked_jobs;
+    RAISE EXCEPTION 'audit-2026-05-07 residual verification: compute_jobs still has % grants to anon/authenticated/PUBLIC', v_revoked_jobs;
   END IF;
 
   -- M-0774: authenticated retains only SELECT on compute_job_kinds
@@ -890,7 +890,7 @@ BEGIN
      AND grantee = 'authenticated'
      AND privilege_type <> 'SELECT';
   IF v_revoked_kinds <> 0 THEN
-    RAISE EXCEPTION 'audit-2026-05-07 residual verification: compute_job_kinds still has non-SELECT grants to authenticated (count=%s)', v_revoked_kinds;
+    RAISE EXCEPTION 'audit-2026-05-07 residual verification: compute_job_kinds still has non-SELECT grants to authenticated (count=%)', v_revoked_kinds;
   END IF;
 
   -- M-0777: _assert_owner body has the three branches
