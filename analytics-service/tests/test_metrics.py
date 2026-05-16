@@ -1228,15 +1228,18 @@ def test_compute_all_metrics_var_1m_99_np_percentile_failure_logs_warning(
 
     def boom_on_var_1m_99_only(*args, **kwargs):
         # var_1m_99's call shape is np.percentile(monthly_rets, 1) — a
-        # 1D Series-derived array as positional arg 0, scalar 1 as
-        # positional arg 1, no axis/method kwargs. Pandas internals pass
-        # an array + axis=1 + method='linear'. Trip only on the var_1m_99
-        # shape so the pandas-internal calls are unaffected.
+        # 1D Series-derived array as positional arg 0, the SCALAR int
+        # 1 as positional arg 1, no axis/method kwargs. Pandas
+        # internals call np.percentile with an ARRAY q positional and
+        # axis=/method= kwargs. Trip only on the var_1m_99 shape
+        # (axis/method absent + arg[1] is an int-typed scalar) so the
+        # pandas-internal calls pass through to real numpy.
         if (
             len(args) == 2
-            and args[1] == 1
             and "axis" not in kwargs
             and "method" not in kwargs
+            and isinstance(args[1], int)
+            and args[1] == 1
         ):
             raise RuntimeError("simulated np.percentile failure")
         return orig_percentile(*args, **kwargs)
