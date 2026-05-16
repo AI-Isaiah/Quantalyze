@@ -233,17 +233,22 @@ describePhase10(
     );
 
     // -------------------------------------------------------------------------
-    // T_KIND_DEFAULT: column default is 'bridge_recommended'
+    // T_KIND_NO_DEFAULT: kind column has no DEFAULT (audit-2026-05-07 H-0960)
     // -------------------------------------------------------------------------
+    // Migration 20260516160600 dropped the bridge_recommended DEFAULT so every
+    // INSERT MUST specify kind explicitly. NOT NULL is preserved.
     itPhase10.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
-      "T_KIND_DEFAULT: kind column default is bridge_recommended",
+      "T_KIND_NO_DEFAULT: kind column has no DEFAULT (post-160600)",
       async () => {
-        const rows = await runIntrospectionSql<{ column_default: string }>(
+        const rows = await runIntrospectionSql<{ column_default: string | null }>(
           "SELECT column_default FROM information_schema.columns WHERE table_schema='public' AND table_name='match_decisions' AND column_name='kind'",
         );
         expectPhase10(rows.length).toBe(1);
-        // Postgres formats enum defaults as 'bridge_recommended'::match_decision_kind
-        expectPhase10(rows[0].column_default).toMatch(/bridge_recommended/);
+        // Post-160600: column_default IS NULL. mig 080 STEP 5 set
+        // DEFAULT 'bridge_recommended'; migration 160600 ALTER COLUMN
+        // ... DROP DEFAULT removes it. The NOT NULL constraint from
+        // mig 080 STEP 5 is preserved (asserted by T_KIND_NOT_NULL).
+        expectPhase10(rows[0].column_default).toBeNull();
       },
       30_000,
     );
@@ -281,17 +286,22 @@ describePhase10(
     // -------------------------------------------------------------------------
     // T_CHECKS_PRESENT: all 4 per-kind CHECKs present
     // -------------------------------------------------------------------------
+    // audit-2026-05-07 H-0956/H-0957/H-0962/H-0963: migration 20260516160400
+    // dropped bridge_recommended (OR-shape) and added _v2 (XOR-shape).
+    // Migration 20260516160500 dropped voluntary_modify and added _v2 that
+    // also requires original_strategy_id IS NULL. voluntary_add and
+    // voluntary_remove kept the original mig 080 STEP 7 names.
     itPhase10.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
-      "T_CHECKS_PRESENT: all 4 match_decisions_kind_* CHECK constraints exist",
+      "T_CHECKS_PRESENT: all 4 match_decisions_kind_* CHECK constraints exist (post-160400/160500)",
       async () => {
         const rows = await runIntrospectionSql<{ conname: string }>(
           "SELECT conname FROM pg_constraint WHERE conrelid = 'public.match_decisions'::regclass AND conname LIKE 'match_decisions_kind_%' ORDER BY conname",
         );
         const names = rows.map((r) => r.conname);
         expectPhase10(names).toEqual([
-          "match_decisions_kind_bridge_recommended",
+          "match_decisions_kind_bridge_recommended_v2",
           "match_decisions_kind_voluntary_add",
-          "match_decisions_kind_voluntary_modify",
+          "match_decisions_kind_voluntary_modify_v2",
           "match_decisions_kind_voluntary_remove",
         ]);
       },

@@ -53,6 +53,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const admin = createAdminClient();
+  // audit-2026-05-07 H-0960: kind must be set explicitly. Migration
+  // 20260516160600 drops the bridge_recommended DEFAULT on
+  // match_decisions.kind. Set kind explicitly to preserve the prior
+  // implicit DEFAULT value — same kind mig 080's DEFAULT previously
+  // back-filled for INSERTs from this route.
   const { data: inserted, error } = await admin
     .from("match_decisions")
     .insert({
@@ -62,6 +67,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       decision: body.decision,
       founder_note: body.founder_note ?? null,
       decided_by: user!.id,
+      kind: "bridge_recommended",
     })
     .select("id")
     .single();
