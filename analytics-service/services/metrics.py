@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import math
 from dataclasses import dataclass, field
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from .transforms import downsample_series, cap_data_points
 
@@ -22,6 +22,39 @@ logger = logging.getLogger("quantalyze.analytics.metrics")
 class SeriesPoint(TypedDict):
     date: str
     value: float
+
+
+# PR #181 take-2 type-design F8/F9: discriminator type for r_squared
+# computation outcome. Pre-take2 the field was typed as plain `str`,
+# which would silently accept typos like 'No Benchmark' or 'unknown'
+# at any of the three assignment sites. Narrowing to a Literal pins
+# the enum at type-check time and lets downstream consumers exhaust
+# the alternatives with mypy/pyright's narrowing.
+RSquaredStatus = Literal["no_benchmark", "ok", "error"]
+
+
+class QstatsScalarsResult(TypedDict):
+    """Return shape for `compute_qstats_scalars`.
+
+    PR #181 take-2 type-design F8/F9: pre-take2 the function returned
+    `dict[str, float | None | str]` — every consumer had to defensively
+    isinstance-narrow `str` even though only one key (`r_squared_status`)
+    carries the `str` branch. The TypedDict pins per-field types so the
+    type checker catches future drift instead of relying on a comment
+    block listing the 10 valid output keys.
+    """
+
+    recovery_factor: float | None
+    ulcer_index: float | None
+    upi: float | None
+    kelly_criterion: float | None
+    probabilistic_sharpe_ratio: float | None
+    common_sense_ratio: float | None
+    cpc_index: float | None
+    serenity_index: float | None
+    r_squared: float | None
+    r_squared_status: RSquaredStatus
+    time_in_market: float | None
 
 
 # Phase 12 / Pitfall 11: minimum acceptable return for Sortino.
@@ -560,16 +593,19 @@ def compute_all_metrics(
             metrics_json["drawdown_episodes"] = episodes
     except Exception as exc:  # noqa: BLE001
         # audit-2026-05-07 G11.E.1: replaced bare `except: pass` with structured
-        # logging + a `drawdown_episodes_error` flag so the frontend can render
-        # 'Drawdown episodes unavailable due to compute error' instead of silently
+        # logging so a regression surfaces in Railway logs instead of silently
         # falling back to lower-fidelity client-side segmentation.
+        # PR #181 take-2 type-design F10: dropped the `drawdown_episodes_error`
+        # JSONB key — no frontend or downstream Python consumer reads it
+        # (verified via repo-wide grep). The WARNING log already serves
+        # operator triage; a write-only JSONB key is dead schema and a
+        # fictional contract that misleads future maintainers.
         logger.warning(
             "drawdown_episodes computation failed (returns_len=%s): %s",
             len(returns) if returns is not None else None,
             exc,
             exc_info=True,
         )
-        metrics_json["drawdown_episodes_error"] = str(exc)[:200]
 
     # Outlier ratios
     # fail-soft: optional pair — both ratios share one try so they degrade
@@ -612,6 +648,10 @@ def compute_all_metrics(
             # of them. Log the exception with context so a regression in any of
             # those helpers surfaces in Railway logs instead of making the Risk
             # tab render "Insufficient data" forever.
+            # PR #181 take-2 type-design F10: dropped the
+            # `benchmark_metrics_error` JSONB key — no consumer reads it
+            # (verified via repo-wide grep). WARNING log is the operator
+            # signal.
             logger.warning(
                 "benchmark_metrics fan-out failed (returns_len=%s, benchmark_len=%s): %s",
                 len(returns) if returns is not None else None,
@@ -619,7 +659,6 @@ def compute_all_metrics(
                 exc,
                 exc_info=True,
             )
-            metrics_json["benchmark_metrics_error"] = str(exc)[:200]
 
         # Store benchmark cumulative returns series aligned to strategy dates
         try:
@@ -638,10 +677,13 @@ def compute_all_metrics(
         except Exception as exc:  # noqa: BLE001
             # audit-2026-05-07 G11.E.3: silently dropping benchmark_returns also
             # kills the client-side correlation fallback in
-            # CorrelationWithBenchmark.tsx. Log + emit an error flag so the
-            # frontend can surface "Benchmark data unavailable due to compute
-            # error" instead of the indistinguishable "no benchmark assigned"
-            # empty state.
+            # CorrelationWithBenchmark.tsx. Log so the regression surfaces in
+            # Railway instead of producing the indistinguishable "no benchmark
+            # assigned" empty state silently.
+            # PR #181 take-2 type-design F10: dropped the
+            # `benchmark_returns_error` JSONB key — no consumer reads it
+            # (verified via repo-wide grep). WARNING log is the operator
+            # signal.
             logger.warning(
                 "benchmark_returns serialization failed (returns_len=%s, benchmark_len=%s): %s",
                 len(returns) if returns is not None else None,
@@ -649,7 +691,6 @@ def compute_all_metrics(
                 exc,
                 exc_info=True,
             )
-            metrics_json["benchmark_returns_error"] = str(exc)[:200]
 
     # METRICS-11: 10 new qstats scalars merged into the inner metrics_json
     # JSONB sub-dict (D-01 storage split — these are scalars, they live in
@@ -804,7 +845,7 @@ def _daily_returns_grid_from_series(returns: pd.Series) -> list[SeriesPoint]:
 def compute_qstats_scalars(
     returns: pd.Series,
     benchmark: pd.Series | None,
-) -> dict[str, float | None | str]:
+) -> QstatsScalarsResult:
     """METRICS-11: Compute the 10 new qstats scalars.
 
     Audit 2026-05-07 H-0710 / H-0713 / H-0723:
@@ -839,7 +880,7 @@ def compute_qstats_scalars(
         time_in_market (fraction in [0, 1], not ceil-rounded percent),
         r_squared_status (companion: 'no_benchmark' | 'ok' | 'error').
     """
-    result: dict[str, float | None | str] = {
+    result: QstatsScalarsResult = {
         "recovery_factor": None,
         "ulcer_index": None,
         "upi": None,
