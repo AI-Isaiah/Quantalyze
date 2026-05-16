@@ -1210,13 +1210,38 @@ def test_compute_all_metrics_var_1m_99_np_percentile_failure_logs_warning(
 ):
     """var_1m_99 uses `np.percentile(monthly_rets, 1)`, not qs.stats. The
     sweep added a WARNING for that site; this test pins the contract.
+
+    PR #181 take-2 fix: pre-take2 the monkeypatch replaced np.percentile
+    globally with a boom() function. On Python 3.12 + older pandas, the
+    pandas Series.quantile internals route through np.percentile, so the
+    boom() trips _return_quantiles BEFORE the var_1m_99 try block is
+    reached. On Python 3.14 + newer pandas, Series.quantile uses a
+    different code path and the boom() only fires inside var_1m_99 as
+    intended. To make the test cross-runtime-stable, narrow the
+    boom-trigger to the EXACT call signature var_1m_99 uses:
+    `np.percentile(monthly_rets, 1)` — single positional arg pair, no
+    axis, no method kwarg.
     """
     import services.metrics as metrics_module
 
-    def boom(*args, **kwargs):
-        raise RuntimeError("simulated np.percentile failure")
+    orig_percentile = metrics_module.np.percentile
 
-    monkeypatch.setattr(metrics_module.np, "percentile", boom)
+    def boom_on_var_1m_99_only(*args, **kwargs):
+        # var_1m_99's call shape is np.percentile(monthly_rets, 1) — a
+        # 1D Series-derived array as positional arg 0, scalar 1 as
+        # positional arg 1, no axis/method kwargs. Pandas internals pass
+        # an array + axis=1 + method='linear'. Trip only on the var_1m_99
+        # shape so the pandas-internal calls are unaffected.
+        if (
+            len(args) == 2
+            and args[1] == 1
+            and "axis" not in kwargs
+            and "method" not in kwargs
+        ):
+            raise RuntimeError("simulated np.percentile failure")
+        return orig_percentile(*args, **kwargs)
+
+    monkeypatch.setattr(metrics_module.np, "percentile", boom_on_var_1m_99_only)
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
         result = compute_all_metrics(golden_returns)
     mj = result["metrics_json"]
