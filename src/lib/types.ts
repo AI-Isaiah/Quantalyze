@@ -900,12 +900,28 @@ export interface AllocationEvent {
  *
  * If you change a shape here, you MUST also update
  * `src/lib/portfolio-analytics-adapter.ts` and the analytics-service writer.
+ *
+ * audit-2026-05-07 H-1119: every metric field is `number | null` and the
+ * nullability is INDEPENDENT of `computation_status`. A computing or
+ * pending row carries the same `null` shape as a complete-but-uncomputable
+ * row (e.g. <30d history). Consumers MUST narrow on `computation_status`
+ * via `isCompletedAnalytics()` (see below) before treating a `null` value
+ * as "uncomputable" — otherwise "still warming up" renders identically
+ * to "real null", and "0.00% YTD" reads identically to "freshly warmed
+ * portfolio". A discriminated union by status is the strict design ideal;
+ * the runtime type-guard below is the surgical preliminary.
  */
+export type PortfolioAnalyticsComputationStatus =
+  | "pending"
+  | "computing"
+  | "complete"
+  | "failed";
+
 export interface PortfolioAnalytics {
   id: string;
   portfolio_id: string;
   computed_at: string;
-  computation_status: "pending" | "computing" | "complete" | "failed";
+  computation_status: PortfolioAnalyticsComputationStatus;
   computation_error: string | null;
   total_aum: number | null;
   total_return_twr: number | null;
@@ -926,6 +942,35 @@ export interface PortfolioAnalytics {
   portfolio_equity_curve: TimeSeriesPoint[] | null;
   /** Pair-keyed rolling correlation series. Key format: "<strategyA>:<strategyB>". */
   rolling_correlation: Record<string, TimeSeriesPoint[]> | null;
+}
+
+/**
+ * audit-2026-05-07 H-1119 — type-guard for the "metrics are meaningful"
+ * branch of PortfolioAnalytics. Use this to gate KPI/widget reads:
+ *
+ *   if (!isCompletedAnalytics(analytics)) return <PendingPlaceholder />;
+ *   // `analytics.return_ytd` is still `number | null` here, but the
+ *   // null now means "uncomputable" rather than "not yet warmed up".
+ *
+ * Returns false for `pending` / `computing` / `failed` so widgets can
+ * distinguish "still warming up" from "real null" — which fixes the
+ * silent rendering of a 0% return as a freshly-warmed portfolio.
+ */
+export function isCompletedAnalytics(
+  a: { computation_status: PortfolioAnalyticsComputationStatus } | null | undefined,
+): a is { computation_status: "complete" } & Record<string, unknown> {
+  return !!a && a.computation_status === "complete";
+}
+
+/**
+ * Convenience: returns true while a row is still warming up. Use for
+ * "Computing…" placeholders. Distinct from `failed` (terminal error
+ * state) and `complete` (real metrics, possibly nullable).
+ */
+export function isPendingAnalytics(
+  a: { computation_status: PortfolioAnalyticsComputationStatus } | null | undefined,
+): boolean {
+  return !!a && (a.computation_status === "pending" || a.computation_status === "computing");
 }
 
 export interface TimeSeriesPoint {
