@@ -126,6 +126,24 @@ function makeUserClient() {
 function makeAdminClient() {
   return {
     from: (table: string) => {
+      // audit-2026-05-07 specialist-apply (api-contract HIGH + code-reviewer
+      // M + security #4): the POST handler now performs a profile-existence
+      // check before mutation (mirrors the GET handler's contract). Stub
+      // out the profiles lookup so the existing happy-path mutation tests
+      // don't fall through to "Unexpected table" — the existence check
+      // returns a non-null row by default.
+      if (table === "profiles") {
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({
+                data: { id: "target-user-id" },
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }
       if (table !== "user_app_roles") {
         throw new Error(`Unexpected table in admin client: ${table}`);
       }
