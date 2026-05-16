@@ -660,8 +660,14 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         # --- Phase 2: Raw fill ingestion (gated by feature flag) ---
         # M-0673: feature flag is module-level constant. Re-reading per job
         # produced rollout-window inconsistency.
-        phase2_fetch_failed = False
-        phase2_fetch_error: str | None = None
+        #
+        # H-0691: `phase2_failed` tracks BOTH fetch failures (caught below)
+        # and persist failures (caught further down). When True, we stamp
+        # `strategy_analytics.data_quality_flags.phase2_fill_ingestion_failed`
+        # so the admin health card surfaces the silent-lag condition that
+        # used to be log-only.
+        phase2_failed = False
+        phase2_error_message: str | None = None
         if _RAW_TRADE_INGESTION_ENABLED:
             try:
                 raw_fills = await fetch_raw_trades(
@@ -691,8 +697,8 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                     strategy_id,
                     str(e),
                 )
-                phase2_fetch_failed = True
-                phase2_fetch_error = str(e)[:200]
+                phase2_failed = True
+                phase2_error_message = str(e)[:200]
     except ccxt.RateLimitExceeded:
         await _stamp_429(ctx.supabase, ctx.key_row)
         raise
@@ -826,7 +832,6 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             )
             existing_pairs = set()
 
-        phase2_persist_error: str | None = None
         try:
             for i in range(0, len(raw_fills), 100):
                 batch = raw_fills[i:i + 100]
@@ -843,15 +848,16 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             # Per-batch failure: do NOT advance the granular cursor below.
             # The next run will re-fetch the failed window and the
             # ignore_duplicates upsert keeps already-persisted batches
-            # idempotent.
+            # idempotent. H-0691: also stamp the data-quality flag so
+            # the admin health card surfaces this lag.
             logger.warning(
                 "sync_trades Phase 2: partial batch failure for strategy %s "
                 "after %d/%d fills persisted — holding fetched-cursor so "
                 "next run re-fetches lost fills. Error: %s",
                 strategy_id, phase2_persisted, len(raw_fills), exc,
             )
-            phase2_persist_error = str(exc)[:200]
-            phase2_fetch_failed = True  # so the data_quality_flag below fires
+            phase2_failed = True
+            phase2_error_message = str(exc)[:200]
 
         # G12.A.6 amendment-detection observability (best-effort).
         amended_count = len(existing_pairs)
@@ -873,10 +879,10 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # strategy_analytics.data_quality_flags so the admin "Position Metrics
     # Failed" health card lights up. Best-effort — stamp failure must not
     # change the job outcome (the trades are already persisted in Phase 1).
-    if phase2_fetch_failed:
+    if phase2_failed:
         flag_payload = {
             "phase2_fill_ingestion_failed": True,
-            "phase2_error": phase2_fetch_error or phase2_persist_error or "unknown",
+            "phase2_error": phase2_error_message or "unknown",
             "phase2_failed_at": datetime.now(timezone.utc).isoformat(),
         }
 
