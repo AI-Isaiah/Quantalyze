@@ -174,12 +174,6 @@ _CUTOVER_CONCURRENCY: Final[int] = 5
 # Railway/CI build logs, and journald/auditd). We parse it into PG*
 # libpq env vars and pass them via subprocess.run(env=...) — keeping the
 # secret out of argv entirely.
-_PG_DSN_ARGV_MARKERS: Final[tuple[str, ...]] = (
-    "postgresql://",
-    "postgres://",
-    "postgresql+psycopg",
-    "postgres+psycopg",
-)
 
 
 def _parse_postgres_url(db_url: str) -> dict[str, str]:
@@ -625,7 +619,7 @@ def _check_confirm_gate(force: bool) -> None:
 # --- Audit log write (H-0622) ----------------------------------------------
 
 
-def _atomic_append_todos(content_to_append: str, audit_line: str) -> None:
+def _atomic_append_todos(content_to_append: str) -> None:
     """Append `content_to_append` to TODOS_PATH atomically via tempfile +
     os.replace. The existing file's contents are read first; the entire
     new payload is written to a sibling .tmp file in the same directory;
@@ -675,9 +669,6 @@ def _atomic_append_todos(content_to_append: str, audit_line: str) -> None:
         except OSError:
             pass
         raise
-    # Mark the unused audit_line parameter as deliberate — kept so the
-    # signature is symmetric with the stderr-only fallback in main().
-    del audit_line
 
 
 # --- Main ------------------------------------------------------------------
@@ -875,7 +866,7 @@ async def main(
     # ironic, since production is exactly where the trigger fires.
     if TODOS_PATH.exists() or TODOS_PATH.parent.exists():
         try:
-            _atomic_append_todos(audit_line, audit_line)
+            _atomic_append_todos(audit_line)
         except OSError as exc:
             # The stderr line above is the primary durable record; an
             # OS-level failure writing the file is a SECONDARY signal

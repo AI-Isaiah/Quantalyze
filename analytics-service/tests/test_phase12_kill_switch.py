@@ -1015,7 +1015,7 @@ class TestAtomicTodosAppend:
         existing = "## Phase 12 plan\n- pre-existing line\n"
         todos.write_text(existing)
         monkeypatch.setattr(ks, "TODOS_PATH", todos)
-        ks._atomic_append_todos("\n## new entry\n", "ignored")
+        ks._atomic_append_todos("\n## new entry\n")
         result = todos.read_text()
         assert result.startswith(existing)
         assert "new entry" in result
@@ -1026,7 +1026,7 @@ class TestAtomicTodosAppend:
         todos = tmp_path / "TODOS.md"
         todos.write_text("# header\n")
         monkeypatch.setattr(ks, "TODOS_PATH", todos)
-        ks._atomic_append_todos("\nline\n", "ignored")
+        ks._atomic_append_todos("\nline\n")
         leftover = list(tmp_path.glob(".phase12_kill_switch_audit_*.tmp"))
         assert leftover == []
 
@@ -1044,7 +1044,7 @@ class TestAtomicTodosAppend:
 
         monkeypatch.setattr("scripts.phase12_kill_switch.os.replace", fail_replace)
         with pytest.raises(OSError, match="simulated permission error"):
-            ks._atomic_append_todos("\nline\n", "ignored")
+            ks._atomic_append_todos("\nline\n")
         leftover = list(tmp_path.glob(".phase12_kill_switch_audit_*.tmp"))
         assert leftover == [], f"orphan tmp files leaked: {leftover!r}"
 
@@ -1054,7 +1054,7 @@ class TestAtomicTodosAppend:
         populated yet."""
         target = tmp_path / "new_dir" / "TODOS.md"
         monkeypatch.setattr(ks, "TODOS_PATH", target)
-        ks._atomic_append_todos("\nfirst line\n", "ignored")
+        ks._atomic_append_todos("\nfirst line\n")
         assert target.exists()
         assert "first line" in target.read_text()
 
