@@ -568,9 +568,22 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 # systemic regression (Binance schema change, auth failure
                 # masquerading as futures-permission denial) instead of
                 # only seeing "BTC spot fallback fired" in the data.
+                # PR #181 take-2 security F7: ccxt's network-class exceptions
+                # for Binance signed requests embed the request URL in
+                # str(exc) — that URL ends with `&signature=<HMAC-SHA256>`.
+                # Scrub the exception message through scrub_freeform_string
+                # before logging so the HMAC signature is replaced with the
+                # REDACTED token. The exc_info=True traceback's first line
+                # also includes str(exc), so we hand the scrubbed message
+                # via the format-arg (str(exc)) AND set exc_class so
+                # operators still get the exception type for triage. The
+                # raw `exc` object is no longer interpolated.
+                from .redact import scrub_freeform_string
+                exc_class = type(exc).__name__
+                scrubbed_msg = scrub_freeform_string(str(exc))
                 logger.warning(
-                    "Binance futures-income failed (falling back to BTC spot trades): %s",
-                    exc, exc_info=True,
+                    "Binance futures-income failed (falling back to BTC spot trades), exc_class=%s, scrubbed=%s",
+                    exc_class, scrubbed_msg,
                 )
                 # Fallback: fetch spot trades for BTC only
                 trades = await exchange.fetch_my_trades("BTC/USDT", since=since_ms, limit=1000)

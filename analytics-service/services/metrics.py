@@ -11,6 +11,44 @@ from .transforms import downsample_series, cap_data_points
 logger = logging.getLogger("quantalyze.analytics.metrics")
 
 
+# PR #181 take-2 red-team F16: when a fundamental qs.stats shape regression
+# trips multiple scalars at once (e.g., a future qs upgrade returns Series
+# instead of float), all 11 inline WARNINGs at compute_all_metrics fire with
+# `exc_info=True`, each emitting a full traceback. Per-strategy that's
+# ~150-300 log lines; at fleet scale (~1000 strategies daily) that burns
+# Railway's bytes-budgeted retention in hours, evicting unrelated history.
+# Process-level dedupe: emit the full traceback (exc_info=True) on the FIRST
+# (scalar_name, exc_type) tuple seen, and a single-line WARNING without
+# traceback for all subsequent occurrences. The signal-bearing line is
+# preserved; retention impact is bounded by O(unique scalar x exc-type)
+# instead of O(call count).
+_FAIL_LOUD_TRACEBACK_EMITTED: set[tuple[str, str]] = set()
+
+
+def _should_emit_traceback(scalar_name: str, exc: BaseException) -> bool:
+    """Process-level dedupe for fail-loud tracebacks.
+
+    Returns True the first time we see a `(scalar_name, exc-type-name)` tuple
+    in this process, False thereafter. The WARNING message (with scalar_name,
+    returns_len, str(exc)) is always emitted; only the traceback attachment
+    is rate-limited.
+    """
+    key = (scalar_name, type(exc).__name__)
+    if key in _FAIL_LOUD_TRACEBACK_EMITTED:
+        return False
+    _FAIL_LOUD_TRACEBACK_EMITTED.add(key)
+    return True
+
+
+def _reset_fail_loud_traceback_dedupe_for_tests() -> None:
+    """Test-only helper — clear the per-process traceback-emitted set.
+
+    Called by test fixtures to reset state between tests so the
+    'first occurrence emits traceback' contract is reliably exercised.
+    """
+    _FAIL_LOUD_TRACEBACK_EMITTED.clear()
+
+
 # Audit 2026-05-07 H-0730: every series helper in this file returns the same
 # concrete shape {date: str, value: float} but typed it as
 # `list[dict[str, Any]]`, erasing the contract. TS consumers
@@ -127,13 +165,21 @@ def _safe_qstats_scalar(
     Failure-soft contract (H-0710 / H-0713 / H-0723): one failing scalar must
     not take down the other nine. Logs include the scalar `name` so operators
     can spot silent regressions in Railway logs without inferring from latency.
+
+    PR #181 take-2 red-team F16: traceback attachment is process-deduped via
+    `_should_emit_traceback` so a fundamental qs upgrade tripping multiple
+    scalars doesn't multiply Railway retention pressure linearly with call
+    volume. First occurrence per (scalar_name, exc-type) pair emits
+    exc_info=True; subsequent occurrences emit the WARNING text without
+    traceback. Operators still get the full first-incident traceback.
     """
     try:
         return _safe_float(fn(returns))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar %s failed (returns_len=%s): %s",
-            name, returns_len, exc, exc_info=True,
+            name, returns_len, exc,
+            exc_info=_should_emit_traceback(name, exc),
         )
         return None
 
@@ -217,7 +263,21 @@ def _safe_float(value: Any) -> float | None:
     flood Railway with normal-path noise. An operator grepping DEBUG
     output for `_safe_float` will see the coercion trail without
     background spam.
+
+    PR #181 take-2 silent-failure-hunter F18: short-circuit on None
+    BEFORE the try/except + DEBUG log. None is a legitimate normal-path
+    input from sanitize_metrics' recursive walk AND from many qs.stats
+    return values (insufficient data windows). Routing None through the
+    try/except produced a DEBUG line `_safe_float coerce failed
+    (type=NoneType)` per call — sanitize_metrics walks a full payload of
+    ~10K floats, several legitimately None, generating tens of DEBUG
+    lines per analytics run. The DEBUG noise floor defeats operators who
+    flip LOG_LEVEL=DEBUG to triage a real coercion issue (numpy.complex128,
+    Decimal, etc.) — they drown in the legitimate-None signal. Reserve
+    DEBUG for actual coercion failures.
     """
+    if value is None:
+        return None
     try:
         f = float(value)
         if math.isnan(f) or math.isinf(f):
@@ -397,7 +457,8 @@ def compute_all_metrics(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar var_1d_95 failed (returns_len=%s, nonnan_len=%s): %s",
-            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("var_1d_95", exc),
         )
     # fail-soft: optional scalar.
     try:
@@ -405,7 +466,8 @@ def compute_all_metrics(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar cvar failed (returns_len=%s, nonnan_len=%s): %s",
-            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("cvar", exc),
         )
 
     metrics_json["mtd"] = _safe_float(returns[returns.index >= pd.Timestamp(returns.index[-1].replace(day=1))].add(1).prod() - 1)
@@ -431,7 +493,8 @@ def compute_all_metrics(
         # the right call site immediately.
         logger.warning(
             "np.percentile scalar var_1m_99 failed (returns_len=%s, nonnan_len=%s, monthly_len=%s): %s",
-            returns_len_for_log, returns_nonnan_len_for_log, len(monthly_rets), exc, exc_info=True,
+            returns_len_for_log, returns_nonnan_len_for_log, len(monthly_rets), exc,
+            exc_info=_should_emit_traceback("var_1m_99", exc),
         )
     # PR #181 take-2 red-team F1: `qs.stats.gini` does not exist on the
     # pinned quantstats==0.0.81 (verified live: `hasattr(qs.stats, 'gini')
@@ -449,7 +512,8 @@ def compute_all_metrics(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar omega failed (returns_len=%s, nonnan_len=%s): %s",
-            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("omega", exc),
         )
     # fail-soft: optional scalar.
     try:
@@ -457,7 +521,8 @@ def compute_all_metrics(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar gain_pain failed (returns_len=%s, nonnan_len=%s): %s",
-            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("gain_pain", exc),
         )
     # fail-soft: optional scalar.
     try:
@@ -465,7 +530,8 @@ def compute_all_metrics(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar tail_ratio failed (returns_len=%s, nonnan_len=%s): %s",
-            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("tail_ratio", exc),
         )
 
     # Distribution metrics
@@ -477,7 +543,8 @@ def compute_all_metrics(
         # not 'qstats scalar' — Series.skew is the call, not qs.stats.
         logger.warning(
             "pandas scalar skewness failed (returns_len=%s, nonnan_len=%s): %s",
-            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("skewness", exc),
         )
     # fail-soft: optional scalar (pandas Series.kurtosis, not qs.stats).
     try:
@@ -487,7 +554,8 @@ def compute_all_metrics(
         # not 'qstats scalar' — Series.kurtosis is the call, not qs.stats.
         logger.warning(
             "pandas scalar kurtosis failed (returns_len=%s, nonnan_len=%s): %s",
-            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("kurtosis", exc),
         )
     # fail-soft: optional scalar.
     try:
@@ -495,7 +563,8 @@ def compute_all_metrics(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar smart_sharpe failed (returns_len=%s, nonnan_len=%s): %s",
-            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("smart_sharpe", exc),
         )
     # fail-soft: optional scalar.
     try:
@@ -503,7 +572,8 @@ def compute_all_metrics(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar smart_sortino failed (returns_len=%s, nonnan_len=%s): %s",
-            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("smart_sortino", exc),
         )
 
     # Win/Loss metrics
@@ -524,7 +594,8 @@ def compute_all_metrics(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar profit_factor failed (returns_len=%s, nonnan_len=%s): %s",
-            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("profit_factor", exc),
         )
 
     # Risk of Ruin (Cox-Miller approximation)
@@ -620,7 +691,8 @@ def compute_all_metrics(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "outlier ratios failed (returns_len=%s, nonnan_len=%s): %s",
-            returns_len_for_log, returns_nonnan_len_for_log, exc, exc_info=True,
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("outlier_ratios", exc),
         )
 
     # Benchmark metrics (single greeks() call for alpha + beta)

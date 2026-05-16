@@ -2979,9 +2979,30 @@ class TestFetchDailyPnlBinanceFailLoud:
             "silent-failure sweep); the prior bare-pass swallow is a "
             "regression"
         )
-        # Pin structured-logging contract.
-        assert any(r.exc_info is not None for r in matching), (
-            "Binance futures-income WARNING must use exc_info=True"
+        # PR #181 take-2 security F7: structured-logging contract changed
+        # to drop exc_info=True on this site to prevent ccxt network-class
+        # exception messages from leaking the signed URL +
+        # &signature=<HMAC> into the traceback. The new contract carries
+        # the exception class via `exc_class=` and the scrubbed message
+        # via `scrubbed=` in the WARNING template.
+        assert any(
+            "exc_class=" in r.getMessage() for r in matching
+        ), (
+            "Binance futures-income WARNING must include exc_class= label "
+            "(PR #181 take-2 HMAC-leak fix)"
+        )
+        assert any(
+            "scrubbed=" in r.getMessage() for r in matching
+        ), (
+            "Binance futures-income WARNING must include scrubbed= label "
+            "for the redacted message (PR #181 take-2 HMAC-leak fix)"
+        )
+        assert all(
+            r.exc_info is None for r in matching
+        ), (
+            "Binance futures-income WARNING must NOT use exc_info=True — "
+            "the traceback's first line includes str(exc) which carries "
+            "the signed URL + signature. Use scrubbed string instead."
         )
 
     @pytest.mark.asyncio
@@ -3028,3 +3049,59 @@ class TestFetchDailyPnlBinanceFailLoud:
             "outer fetch_daily_pnl ERROR must fire when the fallback also "
             "raises — this is the documented cascade contract"
         )
+
+    @pytest.mark.asyncio
+    async def test_binance_futures_income_warning_scrubs_hmac_signature(
+        self, caplog
+    ):
+        """PR #181 take-2 security F7: the Binance futures-income WARNING
+        previously used `exc_info=True` and interpolated the raw exception.
+        For ccxt network-class errors (RequestTimeout, ExchangeNotAvailable
+        etc.) the exception message embeds the signed request URL, which
+        ends with `&signature=<HMAC-SHA256>` for signed fapiPrivate
+        endpoints. The new contract scrubs the message via
+        `services.redact.scrub_freeform_string` so the HMAC is replaced
+        with the REDACTED token before reaching Railway/Sentry. Pre-take2
+        the HMAC plaintext landed in logs on every Binance fapi network
+        failure.
+        """
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "binance"
+        # Simulate the shape of a ccxt RequestTimeout: `details` =
+        # `id method url`, where url contains `&signature=<HMAC>`.
+        # The exception's str() will carry this verbatim.
+        fake_url = (
+            "https://fapi.binance.com/fapi/v1/income?"
+            "timestamp=1700000000000&recvWindow=5000&"
+            "signature=abcdef0123456789deadbeefcafebabe1111222233334444"
+        )
+        signed_exc_msg = f"binance GET {fake_url}"
+        mock_exchange.fapiPrivate_get_income = AsyncMock(
+            side_effect=RuntimeError(signed_exc_msg)
+        )
+        # Fallback succeeds so we only observe the inner WARNING.
+        mock_exchange.fetch_my_trades = AsyncMock(return_value=[])
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            await fetch_daily_pnl(mock_exchange)
+
+        binance_warns = [
+            r for r in caplog.records
+            if "Binance futures-income" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert binance_warns, "Binance WARNING must fire on RPC failure"
+        # The raw HMAC plaintext must NOT appear anywhere in the WARNING
+        # message text.
+        for rec in binance_warns:
+            msg = rec.getMessage()
+            assert "abcdef0123456789deadbeefcafebabe1111222233334444" not in msg, (
+                f"HMAC signature plaintext leaked into Binance WARNING: {msg!r}"
+            )
+            # exc_info must be None (we dropped it as part of the scrub fix).
+            assert rec.exc_info is None, (
+                "Binance WARNING must not carry exc_info=True (HMAC-leak fix)"
+            )

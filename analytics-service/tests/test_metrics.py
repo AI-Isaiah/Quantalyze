@@ -38,6 +38,74 @@ class TestSafeFloat:
     def test_numpy_inf(self):
         assert _safe_float(np.inf) is None
 
+    # PR #181 take-2 pr-test F17 + silent-failure-hunter F18: pin the
+    # DEBUG-vs-None contract. The sweep added DEBUG logging to _safe_float
+    # for both failure modes; pre-take2 these had no test coverage so a
+    # /simplify pass dropping the logger.debug calls would land silently.
+    # Also pin F18: None is a fast-path return BEFORE the try/except, not
+    # a "coerce failed" DEBUG line — sanitize_metrics walks ~10K values
+    # per analytics payload and several are legitimately None.
+    def test_nan_logs_debug_with_type_marker(self, caplog):
+        """NaN coercion emits DEBUG with the originating type."""
+        with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.metrics"):
+            assert _safe_float(float("nan")) is None
+        debug_records = [
+            r for r in caplog.records
+            if r.levelno == logging.DEBUG
+            and "_safe_float coerced to None" in r.getMessage()
+            and "NaN/Inf" in r.getMessage()
+        ]
+        assert debug_records, (
+            "_safe_float NaN path must emit a DEBUG record naming "
+            "'NaN/Inf' (post audit-2026-05-07 silent-failure sweep)"
+        )
+        # Negative assertion (pr-test LOW #5): DEBUG, never WARNING — the
+        # high call-frequency would flood Railway on legitimate-None paths
+        # in sanitize_metrics if this site were ever promoted to WARNING.
+        warning_records = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "_safe_float" in r.getMessage()
+        ]
+        assert not warning_records, (
+            "_safe_float NaN must NEVER emit at WARNING level — high call "
+            "frequency would flood Railway in production INFO config"
+        )
+
+    def test_string_coerce_failure_logs_debug_with_type_marker(self, caplog):
+        """Non-numeric input emits DEBUG naming the originating type."""
+        with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.metrics"):
+            assert _safe_float("not a number") is None
+        debug_records = [
+            r for r in caplog.records
+            if r.levelno == logging.DEBUG
+            and "_safe_float coerce failed" in r.getMessage()
+            and "type=str" in r.getMessage()
+        ]
+        assert debug_records, (
+            "_safe_float string-coerce path must emit a DEBUG record "
+            "naming type=str (post audit-2026-05-07 silent-failure sweep)"
+        )
+
+    def test_none_returns_none_without_debug_emission(self, caplog):
+        """PR #181 take-2 F18: None is a legitimate normal-path input from
+        sanitize_metrics + qs.stats returns; it must return None WITHOUT
+        emitting any DEBUG log (which would flood Railway in DEBUG mode).
+        """
+        with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.metrics"):
+            assert _safe_float(None) is None
+        # Critical: NO log of any level for the None input.
+        any_safe_float_log = [
+            r for r in caplog.records
+            if "_safe_float" in r.getMessage()
+        ]
+        assert not any_safe_float_log, (
+            "_safe_float(None) is a legitimate normal-path input — it "
+            "must not emit any log (DEBUG or otherwise). Pre-take2 the "
+            "TypeError branch fired DEBUG on every None, flooding the "
+            "DEBUG channel from sanitize_metrics' ~10K-value walks"
+        )
+
 
 class TestSanitizeMetrics:
     def test_replaces_nan(self):
