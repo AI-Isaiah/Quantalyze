@@ -7,17 +7,27 @@ on:
     - cron: "0 8 * * *"
   workflow_dispatch:
 
+# C-0293(a) fix: default to `contents: read`. Per-job uplifts below.
+permissions:
+  contents: read
+
 jobs:
   demo-pdf-coldstart:
     runs-on: ubuntu-latest
+    # Per-job uplift: failure path uses actions/github-script to file an
+    # auto-issue against this repo so the broken staging cold-start is
+    # surfaced to the maintainer queue. That needs `issues: write`.
+    permissions:
+      contents: read
+      issues: write
     # First-line guard on STAGING_BASE_URL: empty or single-space values
     # are treated as unset. The shell step below applies a stricter trim
     # check (belt + suspenders) since GH Actions expressions have no
     # trim function and can't catch multi-character whitespace.
     if: ${{ vars.STAGING_BASE_URL != '' && vars.STAGING_BASE_URL != ' ' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -46,14 +56,14 @@ jobs:
           npx playwright test e2e/portfolio-pdf-demo.spec.ts --grep @nightly
       - name: Upload playwright report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: nightly-pdf-report
           path: playwright-report/
           retention-days: 14
       - name: Open GitHub issue on failure
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
         env:
           RUN_ID: ${{ github.run_id }}
           REPO_NAME: ${{ github.repository }}
@@ -85,9 +95,14 @@ jobs:
     # continuous surface, and putting it on every PR's critical path
     # added 15-30s with no per-PR behavior signal.
     runs-on: ubuntu-latest
+    # Per-job uplift: failure path uses actions/github-script to file an
+    # auto-issue when a critical advisory lands. Needs `issues: write`.
+    permissions:
+      contents: read
+      issues: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -96,7 +111,7 @@ jobs:
         run: npm audit --audit-level=critical
       - name: Open GitHub issue on critical advisory
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
         env:
           RUN_ID: ${{ github.run_id }}
           REPO_NAME: ${{ github.repository }}

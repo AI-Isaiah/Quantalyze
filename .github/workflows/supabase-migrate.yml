@@ -56,13 +56,22 @@ concurrency:
   group: supabase-migrate-${{ github.ref }}
   cancel-in-progress: false
 
+# C-0293(a) fix: workflow only needs to checkout the tree and run the
+# supabase CLI against a remote DB via its access token. No GitHub API
+# writes (no issue/PR/release creation), so `contents: read` is the
+# entire surface. The actual DB-mutation power comes from the
+# SUPABASE_ACCESS_TOKEN secret + the `production` GitHub Environment's
+# required-reviewer gate — both orthogonal to GITHUB_TOKEN scope.
+permissions:
+  contents: read
+
 jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
       configured: ${{ steps.check.outputs.configured }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - name: Check secrets are configured
         id: check
         env:
@@ -76,7 +85,7 @@ jobs:
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: supabase/setup-cli@v1
+      - uses: supabase/setup-cli@b60b5899c73b63a2d2d651b1e90db8d4c9392f51  # v1.6.0
         if: steps.check.outputs.configured == 'true'
         with:
           version: latest
@@ -96,8 +105,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v4
-      - uses: supabase/setup-cli@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: supabase/setup-cli@b60b5899c73b63a2d2d651b1e90db8d4c9392f51  # v1.6.0
         with:
           version: latest
       - name: Push migrations to production
