@@ -283,6 +283,94 @@ describe("audit-2026-05-07 residual — M-0779 forensic preservation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// red-team c8 (apply pass): M-0779 concurrent mark_compute_job_failed +
+// reclaim_stuck_compute_jobs race
+// ---------------------------------------------------------------------------
+//
+// Specialists' M-0779 tests only exercise the single-caller path.
+// The forensic-preservation invariant (claimed_at/by survive on
+// failed_retry rows) must also hold under concurrent execution with
+// the watchdog. If the watchdog (which gates on status='running' but
+// nothing else) fires between mark_compute_job_failed's FOR UPDATE
+// and COMMIT, the post-failure row could end up in a hybrid state.
+//
+// Today the watchdog status='running' filter guarantees no hybrid is
+// reachable: by the time mark_compute_job_failed has the FOR UPDATE
+// row lock, the watchdog (running in a different txn) either sees
+// status='running' (acquires its own lock, blocks waiting on us) or
+// status='failed_retry' (filter excludes the row). Either way the
+// final row state is consistent. This test pins the invariant.
+
+describe("audit-2026-05-07 apply — M-0779 concurrent race", () => {
+  it.skipIf(!HAS_LIVE_DB)(
+    "concurrent mark_failed + reclaim_stuck leaves the row in a consistent state",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const userId = await createTestUser(
+        admin,
+        `residual-m0779-race-${ts}@test.sec`,
+      );
+      const strategyId = await seedStrategy(admin, userId, "m0779-race");
+      try {
+        // Seed: row running, claimed_at older than 10min so the
+        // watchdog filter sees it.
+        const stuckAt = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+        const jobId = await insertComputeJob(admin, {
+          strategy_id: strategyId,
+          kind: "sync_trades",
+          status: "running",
+          attempts: 1,
+          max_attempts: 3,
+          claimed_at: stuckAt,
+          claimed_by: "test-worker-race",
+        });
+
+        // Fire both calls concurrently. The outcome we care about is
+        // CONSISTENT STATE, not which path wins.
+        await Promise.all([
+          admin.rpc("mark_compute_job_failed", {
+            p_job_id: jobId,
+            p_error: "race-test",
+            p_error_kind: "transient",
+          } as never),
+          admin.rpc("reclaim_stuck_compute_jobs", {
+            p_older_than: "10 minutes",
+          } as never),
+        ]);
+
+        const row = await fetchJob(admin, jobId);
+        // Two valid outcomes:
+        //   A) mark_failed won the row lock: status=failed_retry,
+        //      claimed_at/by preserved (M-0779 invariant).
+        //   B) reclaim won: status=pending, claimed_at/by null.
+        // Hybrid states (e.g. status=failed_retry but claimed_at=null,
+        // or status=pending but claimed_by set) would indicate a
+        // mid-transaction race window we don't have a fence for.
+        if (row.status === "failed_retry") {
+          // M-0779 invariant under the mark_failed branch.
+          expect(row.claimed_at).not.toBeNull();
+          expect(row.claimed_by).toBe("test-worker-race");
+        } else if (row.status === "pending") {
+          // Watchdog branch — claimed_at/by cleared.
+          expect(row.claimed_at).toBeNull();
+          expect(row.claimed_by).toBeNull();
+        } else {
+          throw new Error(
+            `Inconsistent post-race state: status=${row.status} claimed_at=${row.claimed_at} claimed_by=${row.claimed_by}`,
+          );
+        }
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyId],
+        });
+      }
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
 // M-0781: reclaim_stuck_compute_jobs bounded at 500
 // ---------------------------------------------------------------------------
 
@@ -629,6 +717,48 @@ describe("audit-2026-05-07 apply — M-0774 REVOKE table grants", () => {
       }
     },
   );
+
+  // red-team c8: positive verifier — service_role must still have
+  // table-level grants the analytics worker depends on. Closes the
+  // loop on the parent migration's M-0774 verifier which only asserts
+  // the negative (anon/authenticated/PUBLIC have zero grants).
+  it.skipIf(!HAS_INTROSPECTION)(
+    "service_role retains INSERT/UPDATE/DELETE/SELECT on compute_jobs",
+    async () => {
+      const rows = await runIntrospectionSql<{ privilege_type: string }>(`
+        SELECT privilege_type
+          FROM information_schema.table_privileges
+         WHERE table_schema = 'public'
+           AND table_name = 'compute_jobs'
+           AND grantee = 'service_role'
+           AND privilege_type IN ('INSERT','UPDATE','DELETE','SELECT');
+      `);
+      const privs = new Set(rows.map((r) => r.privilege_type));
+      expect(privs.has("SELECT")).toBe(true);
+      expect(privs.has("INSERT")).toBe(true);
+      expect(privs.has("UPDATE")).toBe(true);
+      expect(privs.has("DELETE")).toBe(true);
+    },
+  );
+
+  it.skipIf(!HAS_INTROSPECTION)(
+    "service_role retains INSERT/UPDATE/DELETE/SELECT on compute_job_kinds",
+    async () => {
+      const rows = await runIntrospectionSql<{ privilege_type: string }>(`
+        SELECT privilege_type
+          FROM information_schema.table_privileges
+         WHERE table_schema = 'public'
+           AND table_name = 'compute_job_kinds'
+           AND grantee = 'service_role'
+           AND privilege_type IN ('INSERT','UPDATE','DELETE','SELECT');
+      `);
+      const privs = new Set(rows.map((r) => r.privilege_type));
+      expect(privs.has("SELECT")).toBe(true);
+      expect(privs.has("INSERT")).toBe(true);
+      expect(privs.has("UPDATE")).toBe(true);
+      expect(privs.has("DELETE")).toBe(true);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -700,6 +830,69 @@ describe("audit-2026-05-07 apply — M-0783 COALESCE filter pinned in body", () 
       // OR-form drops "COALESCE" entirely; a regression to a one-sided
       // shape would drop one of the column references.
       expect(body).toContain("COALESCE(s.user_id, p.user_id)");
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// red-team c8 (apply pass): H-0864 mark_compute_job_done uses GIN-supported
+// `@>` containment predicate, not `= ANY(array_col)`.
+// ---------------------------------------------------------------------------
+//
+// The parent migration's body had `p_job_id = ANY(c.parent_job_ids)` which
+// does NOT use the GIN index on parent_job_ids — only `@> ARRAY[...]`
+// does. The apply migration rewrites the predicate; this test pins the
+// rewrite so a regression to `= ANY` (which would be the "simpler"
+// readable form but loses index usage) fails the gate.
+
+describe("audit-2026-05-07 apply — H-0864 GIN-supported containment predicate", () => {
+  it.skipIf(!HAS_INTROSPECTION)(
+    "mark_compute_job_done body uses parent_job_ids @> ARRAY[...] (not = ANY)",
+    async () => {
+      const rows = await runIntrospectionSql<{ body: string }>(`
+        SELECT pg_get_functiondef(p.oid) AS body
+          FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'public'
+           AND p.proname = 'mark_compute_job_done';
+      `);
+      expect(rows).toHaveLength(1);
+      const body = rows[0]!.body;
+      // Positive: the GIN-supported containment predicate must be present.
+      expect(body).toContain("c.parent_job_ids @> ARRAY[p_job_id]");
+      // Negative: a regression that re-introduces `= ANY(c.parent_job_ids)`
+      // for the outer-loop predicate kills GIN index usage. The NOT EXISTS
+      // sub-query still uses `= ANY(c.parent_job_ids)` to scan parents,
+      // which is correct because that's a single-row id-equality scan, so
+      // we can't grep for the bare substring. Instead pin the rewritten
+      // OUTER predicate specifically.
+      expect(body).not.toMatch(/AND\s+p_job_id\s*=\s*ANY\(c\.parent_job_ids\)/);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// red-team c8 (apply pass): _assert_owner is VOLATILE (not STABLE).
+// ---------------------------------------------------------------------------
+//
+// The parent migration declared _assert_owner STABLE despite the body
+// RAISEing exceptions and reading request-scoped auth.uid(). VOLATILE
+// (the default) is correct for SECURITY DEFINER permission checks.
+
+describe("audit-2026-05-07 apply — _assert_owner volatility", () => {
+  it.skipIf(!HAS_INTROSPECTION)(
+    "_assert_owner is VOLATILE (provolatile='v')",
+    async () => {
+      const rows = await runIntrospectionSql<{ provolatile: string }>(`
+        SELECT provolatile
+          FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'public'
+           AND p.proname = '_assert_owner';
+      `);
+      expect(rows).toHaveLength(1);
+      // pg_proc.provolatile: 'i'=immutable, 's'=stable, 'v'=volatile
+      expect(rows[0]!.provolatile).toBe("v");
     },
   );
 });
