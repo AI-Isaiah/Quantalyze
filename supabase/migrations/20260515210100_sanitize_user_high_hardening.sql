@@ -241,6 +241,10 @@ BEGIN
       OR insufficient_privilege THEN
       RAISE NOTICE 'audit-2026-05-07 H-0908/H-0909: orphan-organization audit emission failed for user % (sqlstate=%, msg=%); sanitize continues',
         p_user_id, SQLSTATE, SQLERRM;
+      -- audit-2026-05-07 SFT #8 (Phase B): mark the transaction so a
+      -- caller doing post-call introspection can detect partial
+      -- success without changing the BOOLEAN return contract.
+      PERFORM set_config('quantalyze.sanitize_user.audit_emit_failed', 'true', true);
   END;
 
   -- mig 120 P914: NULL profiles.partner_tag in addition to existing columns.
@@ -354,6 +358,10 @@ BEGIN
       -- 42883 undefined_function) propagate so they surface loudly.
       RAISE NOTICE 'audit-2026-05-07 H-0899/H-0905: sanitize audit emission failed for user % (sqlstate=%, msg=%); sanitize succeeded',
         p_user_id, SQLSTATE, SQLERRM;
+      -- audit-2026-05-07 SFT #8 (Phase B): mark the transaction so a
+      -- caller doing post-call introspection can detect partial
+      -- success without changing the BOOLEAN return contract.
+      PERFORM set_config('quantalyze.sanitize_user.audit_emit_failed', 'true', true);
   END;
 
   RETURN TRUE;
@@ -367,7 +375,11 @@ COMMENT ON FUNCTION public.sanitize_user(UUID) IS
   'H-0900 / H-0905 / H-0908 / H-0909 additions: pg_advisory_xact_lock serializes concurrent '
   'admin invocations; sole-admin organization detection emits orphan audit_log rows; the '
   'sanitize itself emits one audit_log row per successful run. See migrations 055, 120, plus '
-  'this migration (20260515210100).';
+  'this migration (20260515210100). Partial-success observability (audit-2026-05-07 SFT #8): '
+  'when an audit_log emission fails-soft the function sets '
+  'quantalyze.sanitize_user.audit_emit_failed=true in the transaction-scoped GUC; the caller '
+  'can SELECT current_setting(''quantalyze.sanitize_user.audit_emit_failed'', true) '
+  'after invocation and trigger a manual audit replay if the value is ''true''.';
 
 REVOKE ALL ON FUNCTION public.sanitize_user(UUID) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.sanitize_user(UUID) TO service_role;
@@ -412,8 +424,13 @@ BEGIN
   IF v_body NOT LIKE '%pg_advisory_xact_lock%' THEN
     RAISE EXCEPTION 'audit-2026-05-07 H-0900 verification failed: sanitize_user body lacks pg_advisory_xact_lock';
   END IF;
-  IF v_body NOT LIKE '%gdpr.sanitize_user%' THEN
-    RAISE EXCEPTION 'audit-2026-05-07 H-0899/H-0905 verification failed: sanitize_user body lacks gdpr.sanitize_user audit emission';
+  -- audit-2026-05-07 PTA #2 / SFT #6 (Phase B): match the LITERAL
+  -- 'gdpr.sanitize_user' only when it appears inside a PERFORM call
+  -- to log_audit_event_service. The earlier substring probe matched
+  -- the NOTICE message and comments too, so a refactor that
+  -- commented out the PERFORM would pass.
+  IF v_body !~* 'PERFORM\s+public\.log_audit_event_service[^;]*''gdpr\.sanitize_user''' THEN
+    RAISE EXCEPTION 'audit-2026-05-07 H-0899/H-0905 verification failed: gdpr.sanitize_user audit emission not present as a live PERFORM log_audit_event_service call';
   END IF;
   IF v_body NOT LIKE '%organization.orphaned_by_sanitize%' THEN
     RAISE EXCEPTION 'audit-2026-05-07 H-0908/H-0909 verification failed: sanitize_user body lacks sole-admin orphan detection';
