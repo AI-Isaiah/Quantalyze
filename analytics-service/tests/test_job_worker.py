@@ -133,10 +133,29 @@ class TestClassifyException:
         assert "400" in msg
         assert "Insufficient trade history" in msg
 
-    def test_http_exception_404_is_permanent(self) -> None:
-        exc = HTTPException(status_code=404, detail="Strategy not found")
+    def test_http_exception_403_is_unknown(self) -> None:
+        """H-1113: 403 'Internal API not configured' is raised by
+        routers/internal.py during deploy windows when INTERNAL_API_TOKEN
+        is briefly missing — a transient infra blip. Classifying it as
+        permanent would terminate the job on the first deploy and require
+        manual re-enqueue; classifying as unknown lets the retry queue
+        self-heal once the env is restored. The DB CHECK still accepts
+        'unknown' (compute_jobs.error_kind enum)."""
+        exc = HTTPException(status_code=403, detail="Internal API not configured")
         kind, msg = classify_exception(exc)
-        assert kind == "permanent"
+        assert kind == "unknown"
+        assert "403" in msg
+        assert "Internal API not configured" in msg
+
+    def test_http_exception_404_is_unknown(self) -> None:
+        """H-1113: 404 'API key not found' is raised by routers/internal.py
+        during a key rotation race. The next sync usually finds the new
+        row; classifying as unknown lets the retry pick it up. A
+        legitimately-deleted strategy will eventually be cancelled by the
+        watchdog or by max attempts — not by a single-attempt 404."""
+        exc = HTTPException(status_code=404, detail="API key not found")
+        kind, msg = classify_exception(exc)
+        assert kind == "unknown"
         assert "404" in msg
 
     def test_http_exception_422_is_permanent(self) -> None:
@@ -172,6 +191,72 @@ class TestClassifyException:
         exc = RuntimeError(long_msg)
         _, msg = classify_exception(exc)
         assert len(msg) <= 500
+
+    def test_http_exception_dict_detail_serializes_via_json(self) -> None:
+        """H-1114 / M-0948 / M-0949 / M-0951: FastAPI types
+        HTTPException.detail as Any. Routers (e.g. routers/csv.py) raise
+        with detail=dict for structured errors. Pre-fix `str(dict)`
+        produced Python repr (single-quoted), leaking internal keys and
+        invalid for JSON consumers. Post-fix the dict is JSON-serialized
+        — round-trippable by downstream consumers."""
+        exc = HTTPException(
+            status_code=400,
+            detail={"code": "INSUFFICIENT_TRADES", "have": 12, "need": 30},
+        )
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+        assert "INSUFFICIENT_TRADES" in msg
+        # JSON output uses double quotes, not Python repr single quotes.
+        assert '"code"' in msg or "INSUFFICIENT_TRADES" in msg
+
+    def test_http_exception_rogue_detail_does_not_crash_classifier(self) -> None:
+        """H-1114: the classifier itself must never raise. A detail whose
+        __str__ raises would propagate out of classify_exception, defeat
+        the worker dispatcher's exception envelope, and reclassify what
+        should have been a permanent 4xx as a fallback 'unknown'."""
+
+        class RogueDetail:
+            def __str__(self) -> str:  # pragma: no cover - rogue path
+                raise RuntimeError("naughty __str__")
+            def __repr__(self) -> str:  # pragma: no cover - rogue path
+                raise RuntimeError("naughty __repr__")
+
+        exc = HTTPException(status_code=400, detail=RogueDetail())
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+        assert "400" in msg
+        # Must contain the fallback literal so admin UI shows SOMETHING.
+        assert "<unstringifiable detail>" in msg
+
+    def test_classifier_returns_typed_error_kind(self) -> None:
+        """H-1112 / H-1110: classify_exception is annotated
+        `tuple[ErrorKind, str]`. Verify the returned tag is one of the
+        three Literal values the DB CHECK accepts (the structural
+        contract that makes the DB guard defense-in-depth instead of the
+        only line of defense)."""
+        from services.job_worker import classify_exception
+        for exc in [
+            ccxt.NetworkError("x"),
+            ccxt.AuthenticationError("x"),
+            RuntimeError("x"),
+            HTTPException(status_code=400, detail="x"),
+        ]:
+            kind, _ = classify_exception(exc)
+            assert kind in ("transient", "permanent", "unknown")
+
+    def test_http_exception_with_ccxt_baseerror_parent_still_permanent(self) -> None:
+        """M-0950: defensive pin on branch order — HTTPException must be
+        checked BEFORE ccxt.BaseError so any future multi-inheriting class
+        gets the more specific 4xx classification, not the catch-all
+        'unknown' bucket. If a refactor flips the order this test fires."""
+
+        class HybridError(HTTPException, ccxt.BaseError):
+            def __init__(self) -> None:
+                HTTPException.__init__(self, status_code=400, detail="hybrid")
+                ccxt.BaseError.__init__(self, "hybrid")
+
+        kind, _ = classify_exception(HybridError())
+        assert kind == "permanent"
 
 
 # ---------------------------------------------------------------------------
@@ -482,8 +567,8 @@ class TestSyncTradesFeatureFlag:
         ), patch(
             "services.job_worker.fetch_raw_trades",
             mock_fetch_raw,
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
         ):
             result = await run_sync_trades_job(job)
 
@@ -518,6 +603,16 @@ class TestSyncTradesFeatureFlag:
         mock_update.eq.return_value = mock_eq
         mock_ctx.supabase.table.return_value.update.return_value = mock_update
 
+        # H-0691 data_quality_flags SELECT chain: return no existing flags.
+        # The phase2-success path will skip the upsert (flag_was_set=False).
+        mock_dq_select = MagicMock()
+        mock_dq_eq = MagicMock()
+        mock_dq_maybe = MagicMock()
+        mock_dq_maybe.execute.return_value = MagicMock(data=None)
+        mock_dq_eq.maybe_single.return_value = mock_dq_maybe
+        mock_dq_select.eq.return_value = mock_dq_eq
+        mock_ctx.supabase.table.return_value.select.return_value = mock_dq_select
+
         job = {"id": "job-ff-2", "kind": "sync_trades", "strategy_id": "strat-1"}
 
         mock_fetch_raw = AsyncMock(return_value=[{"fill": "data"}])
@@ -533,12 +628,12 @@ class TestSyncTradesFeatureFlag:
             new=AsyncMock(return_value=10000.0),
         ), patch(
             "services.job_worker.db_execute",
-            side_effect=lambda fn: asyncio.to_thread(fn),
+            new=AsyncMock(side_effect=lambda fn: fn()),
         ), patch(
             "services.job_worker.fetch_raw_trades",
             mock_fetch_raw,
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
         ):
             result = await run_sync_trades_job(job)
 
@@ -623,8 +718,8 @@ class TestSyncTradesEnqueuesComputeAnalytics:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
         ):
             result = await run_sync_trades_job(job)
 
@@ -707,8 +802,8 @@ class TestSyncTradesEnqueuesComputeAnalytics:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
         ):
             result = await run_sync_trades_job(job)
 
@@ -803,8 +898,8 @@ class TestSyncTradesEnqueuesComputeAnalytics:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
         ):
             result = await run_sync_trades_job(job)
 
@@ -907,8 +1002,8 @@ class TestSyncTradesEmptyResponsePreservesHistory:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
         ):
             result = await run_sync_trades_job(job)
 
@@ -995,8 +1090,8 @@ class TestSyncTradesEmptyResponsePreservesHistory:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
         ):
             result = await run_sync_trades_job(job)
 
@@ -1148,8 +1243,8 @@ class TestSyncTradesPhase2AmendmentDetection:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
         ):
             result = await run_sync_trades_job(job)
 
@@ -1301,8 +1396,8 @@ class TestSyncTradesPhase2AmendmentDetection:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
         ):
             result = await run_sync_trades_job(job)
 
@@ -1453,8 +1548,8 @@ class TestSyncTradesPhase2PartialBatchFailure:
         ), patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch.dict(
-            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
         ):
             result = await run_sync_trades_job(job)
 
@@ -1485,6 +1580,278 @@ class TestSyncTradesPhase2PartialBatchFailure:
             u for u in api_key_updates if "last_sync_at" in u
         ]
         assert len(last_sync_writes) >= 1
+
+
+# ---------------------------------------------------------------------------
+# H-0691 — Phase 2 failure stamps data_quality_flags
+# ---------------------------------------------------------------------------
+
+class TestSyncTradesPhase2FailureFlag:
+    """audit-2026-05-07 H-0691.
+
+    Pre-fix: `run_sync_trades_job` logged a `warning` on Phase 2 failure
+    and returned DONE — operators saw a healthy sync_trades success
+    while fills silently lagged for days. Admin's "Strategies Missing
+    Fills" health card only fires on strategies with 0 fill rows total;
+    a strategy whose fills are days behind looked healthy.
+
+    Post-fix: Phase 2 fetch or persist failure stamps
+    `strategy_analytics.data_quality_flags.phase2_fill_ingestion_failed`
+    so the admin health card surfaces the silent-lag condition. The
+    stamp is a read-modify-write so it does NOT clobber sibling flags
+    (benchmark_unavailable / sibling_kinds_failed / etc.) that
+    analytics_runner emits onto the same JSONB column.
+    """
+
+    @pytest.mark.asyncio
+    async def test_phase2_fetch_failure_stamps_data_quality_flag(self) -> None:
+        from services.job_worker import run_sync_trades_job
+
+        # Capture the data_quality_flags payload we upsert onto
+        # strategy_analytics.
+        sa_upserts: list[dict] = []
+
+        # Pretend analytics_runner already wrote `benchmark_unavailable=True`.
+        # The phase2 stamp must MERGE its keys with that pre-existing flag
+        # instead of clobbering it (admin UI relies on both signals).
+        existing_flags = {"benchmark_unavailable": True, "benchmark_note": "x"}
+
+        def _table(name: str) -> MagicMock:
+            mock_t = MagicMock()
+
+            if name == "strategy_analytics":
+                # SELECT data_quality_flags -> existing flags.
+                mock_select = MagicMock()
+                mock_eq_sel = MagicMock()
+                mock_maybe = MagicMock()
+                mock_maybe.execute.return_value = MagicMock(
+                    data={"data_quality_flags": existing_flags}
+                )
+                mock_eq_sel.maybe_single.return_value = mock_maybe
+                mock_select.eq.return_value = mock_eq_sel
+                mock_t.select.return_value = mock_select
+
+                # UPSERT capture.
+                def _upsert(payload: dict, **_kwargs):
+                    sa_upserts.append(dict(payload))
+                    stub = MagicMock()
+                    stub.execute.return_value = MagicMock(data=[])
+                    return stub
+                mock_t.upsert.side_effect = _upsert
+
+            else:
+                # api_keys.update chain
+                mock_update = MagicMock()
+                mock_eq_upd = MagicMock()
+                mock_eq_upd.execute.return_value = MagicMock(data=[])
+                mock_update.eq.return_value = mock_eq_upd
+                mock_t.update.return_value = mock_update
+                # trades.upsert (none expected when Phase 2 fetch fails)
+                mock_t.upsert.return_value = MagicMock(
+                    execute=MagicMock(return_value=MagicMock(data=[]))
+                )
+
+            return mock_t
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.supabase.table.side_effect = _table
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=1)
+            return stub
+        mock_ctx.supabase.rpc.side_effect = _rpc
+
+        mock_ctx.strategy_row = {"id": "strat-h0691", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "binance",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        job = {"id": "job-h0691", "kind": "sync_trades", "strategy_id": "strat-h0691"}
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=100.0),
+        ), patch(
+            "services.job_worker.fetch_raw_trades",
+            new=AsyncMock(side_effect=RuntimeError("exchange returned 502 BadGateway")),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
+        ):
+            result = await run_sync_trades_job(job)
+
+        # Phase 2 failure must NOT fail the job — Phase 1 succeeded.
+        assert result.outcome == DispatchOutcome.DONE
+
+        # exactly one strategy_analytics upsert (the data-quality stamp).
+        flag_upserts = [u for u in sa_upserts if "data_quality_flags" in u]
+        assert len(flag_upserts) == 1, (
+            f"Phase 2 failure must stamp exactly one data_quality_flags "
+            f"upsert; got {len(flag_upserts)} (all upserts: {sa_upserts})"
+        )
+        stamped_flags = flag_upserts[0]["data_quality_flags"]
+
+        # The new flag is present.
+        assert stamped_flags["phase2_fill_ingestion_failed"] is True
+        assert "502" in stamped_flags["phase2_error"]
+        assert "phase2_failed_at" in stamped_flags
+
+        # Pre-existing sibling flags are PRESERVED (read-modify-write).
+        # Without the read step, this upsert would clobber benchmark_unavailable
+        # to None and the admin UI would lose that signal.
+        assert stamped_flags["benchmark_unavailable"] is True, (
+            "Phase 2 stamp must merge with existing data_quality_flags, "
+            "not overwrite them. analytics_runner writes "
+            "benchmark_unavailable to the same JSONB column."
+        )
+        assert stamped_flags["benchmark_note"] == "x"
+
+    @pytest.mark.asyncio
+    async def test_phase2_recovery_clears_lingering_failure_flag(self) -> None:
+        """H-0691 self-healing: once Phase 2 succeeds again after a prior
+        failure, the lingering phase2_fill_ingestion_failed flag is
+        cleared. Otherwise the admin health card would show a strategy
+        as 'needs attention' forever after a single transient blip."""
+        from services.job_worker import run_sync_trades_job
+
+        sa_upserts: list[dict] = []
+        # Strategy has previous phase2 failure flag set, plus an unrelated
+        # benchmark flag. Both must survive the merge — only the phase2_*
+        # keys should be cleared.
+        existing_flags = {
+            "benchmark_unavailable": True,
+            "phase2_fill_ingestion_failed": True,
+            "phase2_error": "previous 502",
+            "phase2_failed_at": "2026-05-10T00:00:00+00:00",
+        }
+
+        def _table(name: str) -> MagicMock:
+            mock_t = MagicMock()
+            if name == "strategy_analytics":
+                mock_select = MagicMock()
+                mock_eq_sel = MagicMock()
+                mock_maybe = MagicMock()
+                mock_maybe.execute.return_value = MagicMock(
+                    data={"data_quality_flags": existing_flags}
+                )
+                mock_eq_sel.maybe_single.return_value = mock_maybe
+                mock_select.eq.return_value = mock_eq_sel
+                mock_t.select.return_value = mock_select
+
+                def _upsert(payload: dict, **_kwargs):
+                    sa_upserts.append(dict(payload))
+                    stub = MagicMock()
+                    stub.execute.return_value = MagicMock(data=[])
+                    return stub
+                mock_t.upsert.side_effect = _upsert
+            elif name == "trades":
+                # Phase 2 trades upsert (the success path).
+                mock_t.upsert.return_value = MagicMock(
+                    execute=MagicMock(return_value=MagicMock(data=[]))
+                )
+                # amendment-detection SELECT
+                mock_select = MagicMock()
+                mock_eq_sel = MagicMock()
+                mock_eq_sel2 = MagicMock()
+                mock_in = MagicMock()
+                mock_in.execute.return_value = MagicMock(data=[])
+                mock_eq_sel2.in_.return_value = mock_in
+                mock_eq_sel.eq.return_value = mock_eq_sel2
+                mock_select.eq.return_value = mock_eq_sel
+                mock_t.select.return_value = mock_select
+            else:
+                # api_keys.update chain
+                mock_update = MagicMock()
+                mock_eq_upd = MagicMock()
+                mock_eq_upd.execute.return_value = MagicMock(data=[])
+                mock_update.eq.return_value = mock_eq_upd
+                mock_t.update.return_value = mock_update
+            return mock_t
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.supabase.table.side_effect = _table
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=1)
+            return stub
+        mock_ctx.supabase.rpc.side_effect = _rpc
+
+        mock_ctx.strategy_row = {"id": "strat-recovery", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "binance",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        # Phase 2 succeeds this time — returns 2 fills.
+        raw_fills = [
+            {"exchange": "binance", "exchange_fill_id": "f1", "symbol": "BTC-USDT",
+             "side": "buy", "price": "50000", "quantity": "0.1", "is_fill": True,
+             "timestamp": "2026-05-15T12:00:00Z"},
+            {"exchange": "binance", "exchange_fill_id": "f2", "symbol": "BTC-USDT",
+             "side": "sell", "price": "50100", "quantity": "0.1", "is_fill": True,
+             "timestamp": "2026-05-15T12:01:00Z"},
+        ]
+
+        job = {"id": "job-recovery", "kind": "sync_trades", "strategy_id": "strat-recovery"}
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=100.0),
+        ), patch(
+            "services.job_worker.fetch_raw_trades",
+            new=AsyncMock(return_value=raw_fills),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
+        ):
+            result = await run_sync_trades_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+
+        flag_upserts = [u for u in sa_upserts if "data_quality_flags" in u]
+        assert len(flag_upserts) == 1, (
+            "Phase 2 recovery must perform exactly one strategy_analytics "
+            "upsert to clear the lingering flag"
+        )
+        cleared_flags = flag_upserts[0]["data_quality_flags"]
+
+        # phase2_* keys gone.
+        assert "phase2_fill_ingestion_failed" not in cleared_flags
+        assert "phase2_error" not in cleared_flags
+        assert "phase2_failed_at" not in cleared_flags
+        # Recovery marker present.
+        assert "phase2_recovered_at" in cleared_flags
+        # Sibling flag survived the clear.
+        assert cleared_flags.get("benchmark_unavailable") is True
 
 
 # ---------------------------------------------------------------------------

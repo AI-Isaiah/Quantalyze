@@ -45,7 +45,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Literal
+from typing import Final, Literal
 
 import ccxt
 from cryptography.fernet import InvalidToken
@@ -77,6 +77,43 @@ from services.positions import fetch_positions, persist_position_snapshots
 # aliases enforce the same distinction at the type layer for future code.
 Side = Literal["buy", "sell"]
 PositionDirection = Literal["long", "short"]
+
+# ---------------------------------------------------------------------------
+# Compute-queue type aliases — G21 / audit-2026-05-07
+# ---------------------------------------------------------------------------
+# These aliases mirror DB CHECK constraints in `supabase/migrations/` (see
+# 20260411144407_compute_jobs_queue.sql for status, 20260428120836 for
+# priority). Migration 089 widened the claim filter to include 'failed_retry'
+# — `CLAIMABLE_STATUSES` is the Python mirror of that SQL invariant so a
+# future status addition or filter change forces an update on both sides.
+#
+# `ErrorKind` mirrors the 3-value DB CHECK on compute_jobs.error_kind enforced
+# by `mark_compute_job_failed`. Keeping it as a Literal lets mypy/pyright
+# catch capitalization drift ('Permanent') or vocabulary drift ('retry')
+# statically rather than at the DB boundary.
+ErrorKind = Literal["transient", "permanent", "unknown"]
+JobStatus = Literal[
+    "pending",
+    "running",
+    "done",
+    "done_pending_children",
+    "failed_retry",
+    "failed_final",
+]
+Priority = Literal["low", "normal", "high"]
+
+# Subset of JobStatus values that `claim_compute_jobs` is allowed to pick up
+# (migration 089 widened the filter from {'pending'} → {'pending',
+# 'failed_retry'} when the per-row next_attempt_at backoff has elapsed).
+CLAIMABLE_STATUSES: Final[tuple[JobStatus, ...]] = ("pending", "failed_retry")
+
+# M-0673: Feature flag is read once at module import — re-reading per job
+# can produce rollout-window inconsistency (workers spawned mid-deploy with
+# different env values processing different jobs differently). Tests can
+# still flip behavior via monkeypatch on this module attribute.
+_RAW_TRADE_INGESTION_ENABLED: Final[bool] = (
+    os.environ.get("USE_RAW_TRADE_INGESTION", "false").lower() == "true"
+)
 
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
@@ -125,11 +162,15 @@ class DispatchOutcome(str, Enum):
     DEFERRED = "deferred"
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class DispatchResult:
     outcome: DispatchOutcome
     error_message: str | None = None
-    error_kind: str | None = None  # 'transient' | 'permanent' | 'unknown'
+    # G21 / H-1110: typed as ErrorKind (Literal) — the DB CHECK on
+    # compute_jobs.error_kind becomes defense-in-depth instead of the only
+    # guard. `frozen=True` blocks accidental mutation; `slots=True` keeps
+    # the dataclass compact.
+    error_kind: ErrorKind | None = None
     trade_count: int | None = None  # sync_trades success only
 
 
@@ -161,11 +202,53 @@ TIMEOUT_PER_KIND: dict[str, float] = {
 # Error classification
 # ---------------------------------------------------------------------------
 
-def classify_exception(exc: Exception) -> tuple[str, str]:
+# HTTP 4xx codes that should be retried instead of going straight to
+# failed_final. 408/429 are obvious upstream retries.
+_HTTP_TRANSIENT_4XX: frozenset[int] = frozenset({408, 429})
+
+# H-1113: 403/404 are NOT classified as permanent because internal routers
+# (routers/internal.py) raise them for transient infrastructure states —
+# 403 'Internal API not configured' during a deploy window, 404 'API key
+# not found' during a rotation race. Treating them as permanent would
+# terminate the job on the first deploy-time blip and require manual
+# operator re-enqueue. Pre-fix these were 'permanent'; now they fall
+# through to the 'unknown' branch (retried by default) so deploy-time
+# self-heals work without operator intervention.
+_HTTP_UNKNOWN_4XX: frozenset[int] = frozenset({403, 404})
+
+
+def _format_http_detail(detail: object) -> str:
+    """Coerce HTTPException.detail (typed `Any` by FastAPI) into a safe
+    bounded string for last_error storage.
+
+    H-1114 / M-0948 / M-0949 / M-0951: callers can raise
+    HTTPException(detail=dict|list|BaseModel|str). str(dict) renders
+    Python repr (single quotes, leaks internal keys); a non-stringifiable
+    detail with a raising __str__ would propagate out of classify_exception
+    itself, defeating the whole error envelope. Coerce explicitly: str
+    passes through, mappings/sequences serialize via json.dumps, and any
+    failure falls back to a fixed safe literal.
+    """
+    if isinstance(detail, str):
+        return detail[:480]
+    if detail is None:
+        return ""
+    try:
+        return json.dumps(detail, default=str)[:480]
+    except Exception:  # noqa: BLE001  - defensive against rogue __str__/__repr__
+        return "<unstringifiable detail>"
+
+
+def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     """Map an exception to (error_kind, sanitized_message).
 
     Ordered most-specific → least-specific. Truncated to 500 chars so
     admin-UI rows stay bounded. See module docstring for the full table.
+
+    H-1112 / H-1110: returns `tuple[ErrorKind, str]` so static checkers
+    catch capitalization or vocabulary drift at the callsite. The DB
+    CHECK on compute_jobs.error_kind becomes defense-in-depth instead of
+    the only guard.
     """
     # asyncio.TimeoutError is raised by asyncio.wait_for when a handler
     # exceeds its per-kind timeout. Transient — we want to retry.
@@ -181,6 +264,51 @@ def classify_exception(exc: Exception) -> tuple[str, str]:
             "permanent",
             "Credentials could not be decrypted — key may have rotated",
         )
+
+    # FastAPI HTTPException — analytics_runner raises 400 for "Insufficient
+    # trade history" and similar pre-condition failures that no amount of
+    # retry will fix (the input data is permanently absent).
+    #
+    # H-1113: HTTPException is checked BEFORE ccxt.BaseError so any future
+    # multi-inheriting exception (unlikely but possible) gets the more
+    # specific HTTP classification, not the catch-all 'unknown' bucket
+    # — see test_http_exception_with_ccxt_baseerror_parent_still_permanent.
+    #
+    # The three buckets:
+    #   408/429              → transient (upstream backpressure)
+    #   403/404              → unknown   (deploy-time infra blips that
+    #                                     routers/internal.py raises during
+    #                                     env misconfig or key-rotation races
+    #                                     — they self-heal so they should be
+    #                                     retried, not failed_final'd)
+    #   other 4xx (400/422)  → permanent (validation / pre-condition)
+    #   5xx                  → fall through to 'unknown' (retried)
+    #
+    # M-0946: structured as a match/case so the trichotomy of 4xx is
+    # explicit and exhaustive in the source rather than implicit in the
+    # ordering of two `if status in ...` blocks.
+    #
+    # H-1114 / M-0947 / M-0948 / M-0949 / M-0951: include __cause__ repr
+    # when present (preserves context across analytics_runner.py's
+    # wrap-to-HTTPException(500) boundary) and coerce non-string detail
+    # via _format_http_detail (FastAPI types HTTPException.detail as Any
+    # — str(dict) would leak Python repr and could crash on rogue
+    # __str__).
+    if isinstance(exc, HTTPException):
+        status = exc.status_code
+        detail_str = _format_http_detail(exc.detail)
+        cause = getattr(exc, "__cause__", None)
+        if cause is not None:
+            detail_str = f"{detail_str} (cause: {repr(cause)[:180]})"
+        match status:
+            case s if s in _HTTP_TRANSIENT_4XX:
+                return ("transient", f"{status}: {detail_str}"[:500])
+            case s if s in _HTTP_UNKNOWN_4XX:
+                return ("unknown", f"{status}: {detail_str}"[:500])
+            case s if 400 <= s < 500:
+                return ("permanent", f"{status}: {detail_str}"[:500])
+            case _:
+                pass  # 5xx → falls through to 'unknown' below
 
     # CCXT hierarchy checks: RequestTimeout and RateLimitExceeded both
     # inherit from NetworkError, so `isinstance(..., NetworkError)` covers
@@ -203,18 +331,6 @@ def classify_exception(exc: Exception) -> tuple[str, str]:
     # signal.
     if isinstance(exc, ccxt.BaseError):
         return ("unknown", str(exc)[:500])
-
-    # FastAPI HTTPException — analytics_runner raises 400 for "Insufficient
-    # trade history" and similar pre-condition failures that no amount of
-    # retry will fix (the input data is permanently absent). 408 (timeout)
-    # and 429 (rate limit) are the two 4xx codes that DO benefit from retry.
-    # 5xx is left unclassified (falls through to unknown → retried).
-    if isinstance(exc, HTTPException):
-        status = exc.status_code
-        if status in (408, 429):
-            return ("transient", f"{status}: {str(exc.detail)[:480]}")
-        if 400 <= status < 500:
-            return ("permanent", f"{status}: {str(exc.detail)[:480]}")
 
     # Everything else (RuntimeError, ValueError, KeyError, ...).
     return ("unknown", str(exc)[:500])
@@ -474,28 +590,55 @@ async def _allocator_key_preflight(
     )
 
 
+# M-0670: The internal wrapper exists specifically for the
+# allocator.holdings.sync_* event family — narrow `action` to a Literal so
+# static checkers (and grep) flag any drift the moment a typo enters this
+# call surface. entity_type is hard-coded to 'api_key' (the single
+# discriminator this wrapper supports).
+AllocatorHoldingsAction = Literal[
+    "allocator.holdings.sync_requested",
+    "allocator.holdings.sync_completed",
+    "allocator.holdings.sync_failed",
+]
+
+
 def _emit_audit(
     allocator_id: str,
     api_key_id: str,
-    action: str,
+    action: AllocatorHoldingsAction,
     metadata: dict | None = None,
 ) -> None:
     """f7 — Route allocator.holdings.sync_* audit events through
     services.audit.log_audit_event (NOT a local no-op).
 
-    Fire-and-forget; log_audit_event swallows all errors internally so
-    an audit drop never fails the compute path. The function is
-    re-imported locally rather than referenced at module scope so test
-    monkeypatches on services.audit.log_audit_event resolve correctly.
+    Fire-and-forget at the worker level: we wrap log_audit_event in a
+    try/except because, per the audit-2026-05-07 P907 contract,
+    services.audit.log_audit_event RE-RAISES on permission_denied
+    (SQLSTATE 42501) and on unrecognized exception classes. An audit
+    drop must never fail the compute path — at the success callsite
+    (line ~1398) it would mark a complete holdings sync as FAILED;
+    at the failure callsites (lines ~1322/~1352) it would swap the
+    original error envelope (rate_limited / revoked credential) with an
+    audit-system error in compute_jobs.last_error, hiding the real root
+    cause from on-call. The function is re-imported locally rather than
+    referenced at module scope so test monkeypatches on
+    services.audit.log_audit_event resolve correctly.
     """
     from services import audit as audit_module
-    audit_module.log_audit_event(
-        user_id=allocator_id,
-        action=action,
-        entity_type="api_key",
-        entity_id=api_key_id,
-        metadata=metadata or {},
-    )
+    try:
+        audit_module.log_audit_event(
+            user_id=allocator_id,
+            action=action,
+            entity_type="api_key",
+            entity_id=api_key_id,
+            metadata=metadata or {},
+        )
+    except Exception as audit_exc:  # noqa: BLE001
+        logger.warning(
+            "_emit_audit: audit emit %s failed for allocator=%s api_key=%s — "
+            "compute path continues, audit row dropped: %s",
+            action, allocator_id, api_key_id, audit_exc,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -530,9 +673,17 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         account_balance = await fetch_usdt_balance(ctx.exchange)
 
         # --- Phase 2: Raw fill ingestion (gated by feature flag) ---
-        # G12.A.9: `os` and `fetch_raw_trades` are now imported at module
-        # top — no inline import here.
-        if os.environ.get("USE_RAW_TRADE_INGESTION", "false").lower() == "true":
+        # M-0673: feature flag is module-level constant. Re-reading per job
+        # produced rollout-window inconsistency.
+        #
+        # H-0691: `phase2_failed` tracks BOTH fetch failures (caught below)
+        # and persist failures (caught further down). When True, we stamp
+        # `strategy_analytics.data_quality_flags.phase2_fill_ingestion_failed`
+        # so the admin health card surfaces the silent-lag condition that
+        # used to be log-only.
+        phase2_failed = False
+        phase2_error_message: str | None = None
+        if _RAW_TRADE_INGESTION_ENABLED:
             try:
                 raw_fills = await fetch_raw_trades(
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
@@ -548,11 +699,21 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 # exception specifically (informational reconciles
                 # should NOT alert on quiet accounts) — see
                 # run_reconcile_strategy_job below.
+                #
+                # H-0691: Pre-fix, a Phase 2 failure logged a warning and the
+                # job was reported as successful — fills silently lagged with
+                # no admin signal. We now (a) keep the job DONE so we don't
+                # retry the (succeeded) Phase 1, but (b) record the failure
+                # into strategy_analytics.data_quality_flags so the admin
+                # health card surfaces it. Best-effort: a stamp failure must
+                # not change the job outcome.
                 logger.warning(
                     "Raw fill ingestion failed for strategy %s (Phase 1 succeeded): %s",
                     strategy_id,
                     str(e),
                 )
+                phase2_failed = True
+                phase2_error_message = str(e)[:200]
     except ccxt.RateLimitExceeded:
         await _stamp_429(ctx.supabase, ctx.key_row)
         raise
@@ -702,13 +863,16 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             # Per-batch failure: do NOT advance the granular cursor below.
             # The next run will re-fetch the failed window and the
             # ignore_duplicates upsert keeps already-persisted batches
-            # idempotent.
+            # idempotent. H-0691: also stamp the data-quality flag so
+            # the admin health card surfaces this lag.
             logger.warning(
                 "sync_trades Phase 2: partial batch failure for strategy %s "
                 "after %d/%d fills persisted — holding fetched-cursor so "
                 "next run re-fetches lost fills. Error: %s",
                 strategy_id, phase2_persisted, len(raw_fills), exc,
             )
+            phase2_failed = True
+            phase2_error_message = str(exc)[:200]
 
         # G12.A.6 amendment-detection observability (best-effort).
         amended_count = len(existing_pairs)
@@ -725,6 +889,121 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 "(%d collided with existing exchange_fill_ids)",
                 phase2_persisted, strategy_id, amended_count,
             )
+
+    # H-0691: When Phase 2 fetch or persist fails, surface the lag into
+    # strategy_analytics.data_quality_flags so the admin "Position Metrics
+    # Failed" health card lights up. Best-effort — stamp failure must not
+    # change the job outcome (the trades are already persisted in Phase 1).
+    #
+    # Read-modify-write: data_quality_flags is shared with analytics_runner
+    # (benchmark_unavailable / sibling_kinds_failed / position_metrics_failed
+    # etc.); an unconditional upsert with just our keys would clobber those
+    # signals. Read the current row, merge in our keys, then upsert.
+    #
+    # Known TOCTOU: per-strategy compute_jobs are serialized by status
+    # (pending → running) and analytics_runner runs in a separate
+    # compute_analytics job that is sequenced AFTER sync_trades via the
+    # fan-in mechanism (migration 032 STEP 11/12). The window where
+    # analytics_runner is running concurrently with this stamp is
+    # therefore empty in practice. The stamp itself is best-effort —
+    # losing a write here on a rare race means the next analytics_runner
+    # invocation re-emits all flags it owns; we just lose the phase2
+    # signal until the next sync_trades cron tick.
+    #
+    # Self-healing on success: when Phase 2 ran without raising
+    # (phase2_failed=False), we ALSO clear the lingering phase2_* keys if
+    # present so a recovered strategy stops looking "needs attention" to
+    # the admin. We treat ANY non-failing Phase 2 run as a recovery
+    # signal — including a successful fetch that returned ZERO new fills
+    # (paused account, weekend, flat window). The earlier gate of
+    # `phase2_complete` only flipped True when at least one batch was
+    # persisted (line 775's `if raw_fills:`), so a healthy strategy with
+    # no new fills would carry a stale phase2_fill_ingestion_failed=True
+    # flag forever (HIGH code-review finding). We skip the read entirely
+    # only when Phase 2 was not run at all (_RAW_TRADE_INGESTION_ENABLED
+    # is False).
+    phase2_success = _RAW_TRADE_INGESTION_ENABLED and not phase2_failed
+    needs_flag_write = phase2_failed or phase2_success
+    if needs_flag_write:
+        def _load_existing_flags() -> dict:
+            res = (
+                ctx.supabase.table("strategy_analytics")
+                .select("data_quality_flags")
+                .eq("strategy_id", strategy_id)
+                .maybe_single()
+                .execute()
+            )
+            row = res.data or {}
+            return dict(row.get("data_quality_flags") or {})
+
+        flag_load_failed = False
+        try:
+            existing_flags = await db_execute(_load_existing_flags)
+        except Exception as load_exc:  # noqa: BLE001
+            # If the read fails, fall back to a fresh dict — we'd rather
+            # potentially overwrite stale flags than skip the signal entirely
+            # (analytics_runner re-emits its flags on the next computation).
+            logger.warning(
+                "sync_trades: failed to load existing data_quality_flags for "
+                "strategy %s — proceeding with new-flag-only upsert: %s",
+                strategy_id, load_exc,
+            )
+            existing_flags = {}
+            flag_load_failed = True
+
+        flag_was_set = existing_flags.get("phase2_fill_ingestion_failed") is True
+
+        if phase2_failed:
+            existing_flags["phase2_fill_ingestion_failed"] = True
+            existing_flags["phase2_error"] = phase2_error_message or "unknown"
+            existing_flags["phase2_failed_at"] = datetime.now(timezone.utc).isoformat()
+            write_needed = True
+        else:
+            # Phase 2 ran without raising — clear the lingering flag if present.
+            # Red-team M-conf=8: when the read itself failed we cannot tell
+            # from an empty dict whether the DB row carries a stale failure
+            # flag. Write the recovery payload defensively in that case so a
+            # recovered strategy whose read transiently blipped no longer
+            # perma-stays in "needs attention" on the admin health card.
+            # PostgREST upsert merges JSONB keys, so emitting an EXPLICIT
+            # `phase2_fill_ingestion_failed=False` is required on the
+            # load-failed path (a pop here would not actually remove the
+            # stale key from the DB row since we never read it).
+            if flag_was_set:
+                existing_flags.pop("phase2_fill_ingestion_failed", None)
+                existing_flags.pop("phase2_error", None)
+                existing_flags.pop("phase2_failed_at", None)
+                existing_flags["phase2_recovered_at"] = (
+                    datetime.now(timezone.utc).isoformat()
+                )
+                write_needed = True
+            elif flag_load_failed:
+                existing_flags["phase2_fill_ingestion_failed"] = False
+                existing_flags["phase2_recovered_at"] = (
+                    datetime.now(timezone.utc).isoformat()
+                )
+                write_needed = True
+            else:
+                write_needed = False
+
+        if write_needed:
+            def _stamp_phase2_flags() -> None:
+                ctx.supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "data_quality_flags": existing_flags,
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+
+            try:
+                await db_execute(_stamp_phase2_flags)
+            except Exception as flag_exc:  # noqa: BLE001
+                logger.warning(
+                    "sync_trades: failed to stamp data_quality_flags "
+                    "phase2_* for strategy %s: %s",
+                    strategy_id, flag_exc,
+                )
 
     # Checkpoint cursor after any successful fetch (empty or not). Survives
     # downstream analytics/reconstruction failure. Best-effort — a missed
@@ -951,6 +1230,30 @@ async def run_sync_funding_job(job: dict) -> DispatchResult:
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
     result = await upsert_funding_rows(ctx.supabase, rows)
+    upsert_errors = result.get("errors") or []
+    if upsert_errors:
+        # H-1115: upsert_funding_rows catches per-batch failures into a
+        # `errors` list and continues; the worker previously ignored the
+        # list and returned DONE with partial inserted count. A 9-of-10
+        # batch failure produced `inserted=100` with no warning and 900
+        # silently-missing rows. Now: log each entry with strategy_id (so
+        # on-call has a searchable signature) and return FAILED transient
+        # so the job retries.
+        for err in upsert_errors:
+            logger.error(
+                "sync_funding: upsert_funding_rows batch failed for "
+                "strategy %s: %s",
+                strategy_id, err,
+            )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_kind="transient",
+            error_message=(
+                f"sync_funding: {len(upsert_errors)} upsert "
+                f"batch(es) failed: {upsert_errors[:3]}"
+            ),
+        )
+
     logger.info(
         "sync_funding: upserted %d funding rows for strategy %s",
         result["inserted"], strategy_id,
@@ -1208,7 +1511,12 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
     since_ms = parse_since_ms(None, preferred=since_iso)
 
     # Step 1: fetch raw exchange fills (past 24h window).
-    from services.exchange import ColdStartSymbolDiscoveryError, fetch_raw_trades
+    # NB: `fetch_raw_trades` is imported at module scope (services.exchange);
+    # we re-import only `ColdStartSymbolDiscoveryError` here because it is a
+    # rarely-raised sentinel. Importing `fetch_raw_trades` locally would shadow
+    # the module-level binding and break test patches that target
+    # `services.job_worker.fetch_raw_trades` (PR-Y1 code-review HIGH).
+    from services.exchange import ColdStartSymbolDiscoveryError
 
     try:
         exchange_fills = await fetch_raw_trades(
@@ -1297,9 +1605,19 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
 
     # Sprint 6 Task 7.1b — audit the reconcile run. user_id is the
     # strategy owner (strategies.user_id); entity is the strategy being
-    # reconciled. Best-effort owner lookup — if the strategy was deleted
-    # between the job enqueue and now, drop the audit event rather than
-    # failing the whole reconcile path.
+    # reconciled.
+    #
+    # H-0683 / H-0685 / M-0669: db_execute does NOT catch the underlying
+    # PostgREST exception, so a transient 503 or RLS surprise on the owner
+    # SELECT would propagate, abort the reconcile epilogue, and skip the
+    # downstream _generate_alerts fan-out — the reconcile report row would
+    # exist with no alerts and no audit row. Wrap the owner lookup itself
+    # so the "best-effort" contract in the comment matches the code.
+    #
+    # When owner_id is unresolvable (deleted strategy, transient blip),
+    # emit a logger.warning with an `audit_owner_lookup_failed=true` tag
+    # so on-call has a searchable signature; the alerting fan-out below
+    # still runs so the report is not lost.
     def _load_strategy_owner() -> str | None:
         res = (
             ctx.supabase.table("strategies")
@@ -1310,17 +1628,51 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
         )
         return (res.data or {}).get("user_id") if res.data else None
 
-    owner_id = await db_execute(_load_strategy_owner)
+    owner_id: str | None = None
+    try:
+        owner_id = await db_execute(_load_strategy_owner)
+    except Exception as owner_exc:  # noqa: BLE001
+        logger.warning(
+            "reconcile_strategy: audit_owner_lookup_failed=true strategy=%s "
+            "exc=%s — audit event will be dropped, alert fan-out continues",
+            strategy_id, owner_exc,
+        )
+
     if owner_id:
-        log_audit_event(
-            user_id=owner_id,
-            action="reconcile.compare",
-            entity_type="reconcile_run",
-            entity_id=strategy_id,
-            metadata={
-                "status": report.status,
-                "discrepancy_count": report.discrepancy_count,
-            },
+        # Mirror the owner-lookup guard above: log_audit_event re-raises on
+        # permission_denied / unknown exception classes per the
+        # audit-2026-05-07 P907 contract. A bare call here would propagate
+        # past the alert fan-out below — the reconcile_reports row has
+        # already been upserted, so the report would exist with no alerts
+        # and the worker would classify the audit error as the job
+        # failure. Make the audit emit best-effort so step 5's alert
+        # generation always runs.
+        try:
+            log_audit_event(
+                user_id=owner_id,
+                action="reconcile.compare",
+                entity_type="reconcile_run",
+                entity_id=strategy_id,
+                metadata={
+                    "status": report.status,
+                    "discrepancy_count": report.discrepancy_count,
+                },
+            )
+        except Exception as audit_exc:  # noqa: BLE001
+            logger.warning(
+                "reconcile_strategy: audit emit reconcile.compare failed "
+                "strategy=%s exc=%s — alert fan-out continues",
+                strategy_id, audit_exc,
+            )
+    else:
+        # M-0669: explicit observability for the orphan-strategy /
+        # owner-lookup-failed case. The comment used to normalize the drop;
+        # the warning now makes it visible to forensic searches.
+        logger.warning(
+            "reconcile_strategy: reconcile.compare audit dropped — "
+            "strategy=%s owner_id=None (strategy deleted or owner lookup "
+            "skipped); report row already upserted, alert fan-out continues",
+            strategy_id,
         )
 
     # Step 5: fan out `sync_failure` alerts to every portfolio that holds
@@ -1715,13 +2067,23 @@ async def run_rescore_allocator_job(job: dict) -> DispatchResult:
     try:
         await _score_one_allocator(allocator_id, universe)
     except Exception as exc:  # noqa: BLE001
-        # Let the dispatcher's classify_exception bucket this; return FAILED
-        # so the job row updates rather than leaving it in 'running'.
+        # H-0682: previously hardcoded `error_kind='transient'` for every
+        # exception — meaning KeyError on bad mandate, AssertionError on
+        # renormalize, ValidationError on corrupt scoring_weight_overrides,
+        # schema-drift TypeError all retried forever. Permanent bugs
+        # repeatedly reloaded the full universe scan (~30k strategies),
+        # saturating _scoring_semaphore and DoS-ing daily cron for all
+        # allocators. Delegate to classify_exception so the standard 3-way
+        # classifier decides — ccxt/network → transient, BadRequest/auth →
+        # permanent, generic Python errors → unknown (still retried, but
+        # the admin UI flags them for human triage instead of silent
+        # infinite-loop).
         logger.exception("run_rescore_allocator_job failed for allocator=%s", allocator_id)
+        error_kind, sanitized = classify_exception(exc)
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
-            error_kind="transient",  # assume retry-safe; allocator scoring is idempotent
-            error_message=f"rescore failed: {exc}",
+            error_kind=error_kind,
+            error_message=f"rescore failed: {sanitized}",
         )
 
     return DispatchResult(outcome=DispatchOutcome.DONE)
