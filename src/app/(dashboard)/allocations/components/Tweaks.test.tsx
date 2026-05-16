@@ -238,6 +238,158 @@ describe("Tweaks — hydration", () => {
   });
 });
 
+/**
+ * Retroactive audit on PR #183 — pr-test-analyzer flagged three HIGH
+ * test gaps that left silent-revert risk:
+ *
+ *   L17 c9: parseTweakState field-by-field validation has no tests for
+ *           the invalid-value-falls-back-to-default branch. A revert to
+ *           the pre-PR `{ ...TWEAK_DEFAULTS, ...parsed }` spread would
+ *           pass every existing test even though invalid values would
+ *           silently smuggle through.
+ *   L18 c8: loadTweaks console.warn on corrupt JSON is never asserted.
+ *           A revert to bare `catch {}` would not fail any test.
+ *   L19 c8: persist effect console.warn on setItem failure (quota /
+ *           SecurityError) is never asserted. Same revert risk.
+ *
+ * These tests pin all three contracts so the audit-2026-05-07 fix
+ * survives future cleanup passes.
+ */
+describe("Tweaks — retroactive audit-2026-05-16 — parseTweakState union whitelist (pr-test L17 c9)", () => {
+  it("density:'ultra-tight' falls back to TWEAK_DEFAULTS.density='comfortable'", () => {
+    window.localStorage.setItem(
+      "allocations.tweaks",
+      JSON.stringify({
+        density: "ultra-tight",
+        accentIntensity: "muted",
+        displayFont: "serif",
+        bridgeVariant: "full",
+        chartStyle: "area",
+        showBench: true,
+        showOutcomes: true,
+      }),
+    );
+    render(<Harness />);
+    expect(document.body.getAttribute("data-density")).toBe("comfortable");
+  });
+
+  it("bridgeVariant:99 (non-string) falls back to TWEAK_DEFAULTS.bridgeVariant='full'", () => {
+    window.localStorage.setItem(
+      "allocations.tweaks",
+      JSON.stringify({
+        density: "tight",
+        accentIntensity: "muted",
+        displayFont: "serif",
+        bridgeVariant: 99,
+        chartStyle: "area",
+        showBench: true,
+        showOutcomes: true,
+      }),
+    );
+    // density:'tight' IS valid, so it hydrates; bridgeVariant 99 must
+    // fall back to 'full' (TWEAK_DEFAULTS).
+    render(<Harness />);
+    expect(document.body.getAttribute("data-density")).toBe("tight");
+    // Probe through useTweaks via context after hydration to assert
+    // bridgeVariant fell back.
+    function Probe() {
+      const { state } = useTweaks();
+      return <div data-testid="probe-bridge">{state.bridgeVariant}</div>;
+    }
+    // Re-render same Harness with a probe nested in the provider.
+    render(
+      <TweaksProvider>
+        <Probe />
+      </TweaksProvider>,
+    );
+    expect(screen.getByTestId("probe-bridge").textContent).toBe("full");
+  });
+
+  it("accentIntensity:null falls back to TWEAK_DEFAULTS.accentIntensity='muted'", () => {
+    window.localStorage.setItem(
+      "allocations.tweaks",
+      JSON.stringify({
+        density: "comfortable",
+        accentIntensity: null,
+        displayFont: "serif",
+        bridgeVariant: "full",
+        chartStyle: "area",
+        showBench: true,
+        showOutcomes: true,
+      }),
+    );
+    render(<Harness />);
+    // accentIntensity='muted' means the --color-accent override is NOT applied.
+    expect(
+      document.documentElement.style.getPropertyValue("--color-accent"),
+    ).toBe("");
+  });
+
+  it("showBench:'yes' (non-boolean) falls back to TWEAK_DEFAULTS.showBench=true", () => {
+    window.localStorage.setItem(
+      "allocations.tweaks",
+      JSON.stringify({
+        density: "comfortable",
+        accentIntensity: "muted",
+        displayFont: "serif",
+        bridgeVariant: "full",
+        chartStyle: "area",
+        showBench: "yes",
+        showOutcomes: true,
+      }),
+    );
+    function Probe() {
+      const { state } = useTweaks();
+      return <div data-testid="probe-show-bench">{String(state.showBench)}</div>;
+    }
+    render(
+      <TweaksProvider>
+        <Probe />
+      </TweaksProvider>,
+    );
+    expect(screen.getByTestId("probe-show-bench").textContent).toBe("true");
+  });
+});
+
+describe("Tweaks — retroactive audit-2026-05-16 — corrupt-JSON warn (pr-test L18 c8)", () => {
+  it("loadTweaks emits console.warn when localStorage contains malformed JSON", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    window.localStorage.setItem("allocations.tweaks", "not-json");
+    render(<Harness />);
+    expect(
+      warnSpy.mock.calls.some(
+        (c) => typeof c[0] === "string" && c[0].includes("[TweaksContext] loadTweaks failed"),
+      ),
+    ).toBe(true);
+    warnSpy.mockRestore();
+  });
+});
+
+describe("Tweaks — retroactive audit-2026-05-16 — persist setItem failure warn (pr-test L19 c8)", () => {
+  it("persist effect emits console.warn when localStorage.setItem throws", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Make the persist write throw — the hydrate read still succeeds
+    // (returns null → defaults) so the provider mounts cleanly; only
+    // the post-hydration persist effect hits the throw path.
+    localStorageMock.setItem.mockImplementationOnce(() => {
+      throw new Error("storage unavailable");
+    });
+    render(<Harness />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /toggle tweaks panel/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Tight$/i }));
+    expect(
+      warnSpy.mock.calls.some(
+        (c) =>
+          typeof c[0] === "string" &&
+          c[0].includes("[TweaksContext] localStorage write failed"),
+      ),
+    ).toBe(true);
+    warnSpy.mockRestore();
+  });
+});
+
 describe("Tweaks — context fallback outside provider", () => {
   function NakedProbe() {
     const { state } = useTweaks();

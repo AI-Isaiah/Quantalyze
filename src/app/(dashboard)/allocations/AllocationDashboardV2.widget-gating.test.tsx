@@ -97,6 +97,7 @@ vi.mock("./hooks/useDashboardConfig", () => ({
     setTimeframe: vi.fn(),
     resetToDefaults: vi.fn(),
   }),
+  consumeDashboardRecoveryFlag: () => null,
 }));
 
 // --- Import under test (after mocks) ---------------------------------------

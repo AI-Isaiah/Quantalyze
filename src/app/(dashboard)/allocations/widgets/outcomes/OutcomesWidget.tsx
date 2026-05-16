@@ -369,16 +369,15 @@ function ExpandedPanel({
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        // audit-2026-05-07 H-0162 + H-1217 c8/c9 silent-failure — before
-        // this patch the generic 'Failed to load curves' message was
-        // stored on state and then never rendered to the user (the
-        // populated-sparkline branch silently substitutes `null`). The
-        // status code from `HTTP ${res.status}`, JSON parse failures,
-        // and network errors all collapsed into the same opaque string
-        // with no diagnostic output. Surface the failure via
-        // console.error so dev-tools / Sentry's capture-console picks it
-        // up; keep the state set unchanged so the existing UI behavior
-        // (silent null sparkline) is not visually altered.
+        // retro audit (red-team L5 c9): the cancelled-guard previously
+        // only gated `setError`, NOT the console.error. A fetch that
+        // raced an unmount (collapse outcome row mid-fetch) still
+        // logged the outcome_id to console + Sentry every time the
+        // server returned non-2xx, leaking outcome UUIDs after the
+        // user moved on. Skip both side effects when the panel is
+        // already torn down — the abort already cancelled the request,
+        // there is nothing actionable left to surface.
+        if (cancelled) return;
         if (typeof console !== "undefined") {
           console.error(
             "[OutcomesWidget] curves fetch failed",
@@ -386,7 +385,7 @@ function ExpandedPanel({
             err,
           );
         }
-        if (!cancelled) setError("Failed to load curves");
+        setError("Failed to load curves");
       }
     }
     void fetchCurves();
@@ -460,7 +459,22 @@ function ExpandedPanel({
                   {d.text}
                 </div>
               )}
-              {isPending || isLoading || error ? null : (
+              {isPending || isLoading ? null : error ? (
+                // retro audit (silent-failure-hunter L8 c9): pre-fix
+                // path silently rendered `null` here when the curves
+                // fetch failed, so `setError("Failed to load curves")`
+                // was state-only and the user saw an empty sparkline
+                // area indistinguishable from "still loading". Surface
+                // the error so the user understands the chart isn't
+                // missing data — it failed to load.
+                <div
+                  role="alert"
+                  className="mt-2 text-[11px] italic"
+                  style={{ color: "var(--color-text-muted)" }}
+                >
+                  Couldn&apos;t load curve
+                </div>
+              ) : (
                 <div className="mt-2">
                   <Sparkline points={col.points} />
                 </div>

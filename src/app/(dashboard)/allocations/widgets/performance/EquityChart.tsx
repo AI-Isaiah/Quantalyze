@@ -200,6 +200,22 @@ function sliceByPeriod(
   }
   return points.filter((p) => {
     const e = parseISO(p.date);
+    // retro audit (silent-failure-hunter L10 c8): parseISO falls back
+    // to `new Date(s).getTime()` which returns NaN on truly malformed
+    // inputs ('2025-XX-01', 'invalid'). NaN comparisons (e >= start,
+    // e <= end) always evaluate to false, so the bad point is silently
+    // dropped. The user sees a chart that's quietly missing data. Surface
+    // the failure via console.warn — kept inside the filter so the
+    // breadcrumb names the offending date even if multiple are bad.
+    if (!Number.isFinite(e)) {
+      if (typeof console !== "undefined") {
+        console.warn(
+          "[EquityChart] sliceByPeriod — dropping malformed date",
+          { date: p.date },
+        );
+      }
+      return false;
+    }
     return e >= startEpoch && e <= endEpoch;
   });
 }
@@ -442,14 +458,28 @@ export function EquityChart({
       : null;
 
   // Y range over portfolio + benchmark + overlays (all period-relative
-  // and centered on 1.0). Drop nulls.
+  // and centered on 1.0). Drop nulls AND non-finite values.
+  //
+  // retro audit (red-team L4 c8): the M-1063 basePort guard catches
+  // NaN/<=0 portfolio bases, but overlay paths (overlaySeries) and the
+  // benchmark normalisation could still produce NaN when an overlay
+  // point divides 0/0 or carries a stored NaN that survived the
+  // `v != null` guard (typeof NaN === 'number'). Filter at push-time
+  // so a single corrupt overlay point can't poison yMin/yMax → NaN
+  // ticks → broken SVG path with no diagnostic.
   const allValues: number[] = [];
-  for (const v of visibleNormalized) allValues.push(v);
+  for (const v of visibleNormalized) {
+    if (Number.isFinite(v)) allValues.push(v);
+  }
   if (visibleBenchmarkNormalized) {
-    for (const v of visibleBenchmarkNormalized) if (v != null) allValues.push(v);
+    for (const v of visibleBenchmarkNormalized) {
+      if (v != null && Number.isFinite(v)) allValues.push(v);
+    }
   }
   for (const o of overlaySeries) {
-    for (const v of o.series) if (v != null) allValues.push(v);
+    for (const v of o.series) {
+      if (v != null && Number.isFinite(v)) allValues.push(v);
+    }
   }
   // Manual loop instead of Math.min(...allValues) — on the ALL period with
   // benchmark + ~20 overlay series the array grows to ~50k+ values, and
@@ -531,7 +561,16 @@ export function EquityChart({
       // case yMin / yMax round-trip to exactly 1.0 (truly-flat series
       // post-padding); the existing render code is tolerant of either
       // 1-tick or 3-tick output here.
-      return Array.from(new Set([yMin, 1, yMax])).sort((a, b) => a - b);
+      //
+      // retro audit (red-team L4 c8): even with the push-time isFinite
+      // filter above, defence-in-depth — if the filter ever lets a
+      // non-finite bound through, we DO NOT want it to reach the SVG
+      // y() coordinate function (NaN → invalid SVG text attribute,
+      // invisible labels with no signal). Filter the fallback set so
+      // a degenerate input shape can't produce a degenerate render.
+      return Array.from(
+        new Set([yMin, 1, yMax].filter((v) => Number.isFinite(v))),
+      ).sort((a, b) => a - b);
     }
     const stepVal = stepPct / 100;
     const ticks = new Set<number>();

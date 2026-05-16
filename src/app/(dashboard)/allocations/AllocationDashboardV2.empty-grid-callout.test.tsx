@@ -91,6 +91,7 @@ vi.mock("./hooks/useDashboardConfig", () => ({
     setTimeframe: vi.fn(),
     resetToDefaults: vi.fn(),
   }),
+  consumeDashboardRecoveryFlag: () => null,
 }));
 
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";

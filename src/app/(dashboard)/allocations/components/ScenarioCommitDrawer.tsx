@@ -284,18 +284,32 @@ export function ScenarioCommitDrawer({
   function buildSubmitDiffs(): ScenarioCommitDiff[] {
     return diffs.map((d, i) => {
       const r = perRow[i] ?? {};
-      const merged: ScenarioCommitDiff = { ...d };
-      if (d.kind === "voluntary_remove" && r.rejection_reason) {
-        merged.rejection_reason = r.rejection_reason;
+      const note = r.note && r.note.length > 0 ? r.note : undefined;
+      // retro audit (type-design-analyzer): branch on kind so the
+      // discriminated union narrows correctly. Pre-narrowing the assigns
+      // would have left `merged: ScenarioCommitDiff` un-narrowed and
+      // TypeScript couldn't know which optional field is valid on each
+      // shape. The kind-switch carries the narrowing through.
+      if (d.kind === "voluntary_remove") {
+        return {
+          ...d,
+          ...(r.rejection_reason
+            ? { rejection_reason: r.rejection_reason }
+            : {}),
+          ...(note !== undefined ? { note } : {}),
+        };
       }
-      if (
-        (d.kind === "voluntary_add" || d.kind === "bridge_recommended") &&
-        r.percent_allocated !== undefined
-      ) {
-        merged.percent_allocated = r.percent_allocated;
+      if (d.kind === "voluntary_add" || d.kind === "bridge_recommended") {
+        return {
+          ...d,
+          ...(r.percent_allocated !== undefined
+            ? { percent_allocated: r.percent_allocated }
+            : {}),
+          ...(note !== undefined ? { note } : {}),
+        };
       }
-      if (r.note && r.note.length > 0) merged.note = r.note;
-      return merged;
+      // voluntary_modify — only `note` is a per-row drawer input.
+      return note !== undefined ? { ...d, note } : { ...d };
     });
   }
 

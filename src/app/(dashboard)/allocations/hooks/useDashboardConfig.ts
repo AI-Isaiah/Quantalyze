@@ -80,9 +80,22 @@ function setRecoveryFlag(
   if (typeof window === "undefined") return;
   try {
     window.sessionStorage.setItem(RECOVERY_FLAG_KEY, reason);
-  } catch {
-    // best-effort: sessionStorage may itself be unavailable (private mode);
-    // the console.warn from the calling catch is the primary signal.
+  } catch (err) {
+    // retro audit (silent-failure-hunter L11 c8): `setRecoveryFlag` is
+    // called from BOTH the success-path branches in loadV2Config
+    // (version_reset / legacy_in_v2_blob) and from the catch-path
+    // (parse_failed). The "parent caller already logged" rationale only
+    // holds for the parse_failed call site; the other two are reached on
+    // the JSON.parse-succeeded code path with no enclosing catch. Always
+    // log here so an in-private-mode sessionStorage write failure has a
+    // breadcrumb regardless of which branch invoked us.
+    if (typeof console !== "undefined") {
+      console.warn(
+        "[useDashboardConfigV2] sessionStorage write failed; recovery breadcrumb lost",
+        { reason },
+        err,
+      );
+    }
   }
 }
 
@@ -345,6 +358,20 @@ function loadV2Config(): DashboardConfig {
         return defaultV2Config();
       }
       // Defensive: never let legacy-shape tiles into the V2 config.
+      //
+      // retro audit (pr-test-analyzer L23 c7): the three sub-cases below
+      // (a) !Array.isArray(parsed.tiles) — e.g. tiles:null from a
+      //     hand-edit or a future bug that nulled the field;
+      // (b) parsed.tiles.length === 0 — user removed all widgets OR a
+      //     race where the persist was truncated;
+      // (c) legacy-shape tiles in a V2 blob — covered today.
+      //
+      // Pre-fix, only (c) emitted a recovery flag. (a) and (b) silently
+      // reset to defaults — exactly the silent-failure pattern the
+      // recovery breadcrumb infrastructure was designed to close. Tag (a)
+      // as parse_failed (no user opted into tiles:null) and (b) as a
+      // legitimate "user emptied the layout" — no flag, no warn — but
+      // log the corruption case so engineering sees the truncation.
       if (
         !Array.isArray(parsed.tiles) ||
         parsed.tiles.length === 0 ||
@@ -352,7 +379,18 @@ function loadV2Config(): DashboardConfig {
       ) {
         if (Array.isArray(parsed.tiles) && parsed.tiles.some(looksLikeLegacyTile)) {
           setRecoveryFlag("legacy_in_v2_blob");
+        } else if (!Array.isArray(parsed.tiles)) {
+          if (typeof console !== "undefined") {
+            console.warn(
+              "[useDashboardConfigV2] persisted tiles is not an array; falling back to defaults",
+              { tiles: parsed.tiles },
+            );
+          }
+          setRecoveryFlag("parse_failed");
         }
+        // parsed.tiles.length === 0 falls through with no flag — that is
+        // the "user removed every widget" intentional state. Not silent
+        // because the user explicitly produced it.
         return defaultV2Config();
       }
       // Phase 09.1 Plan 05 / D-19 — normalize any persisted short keys to
@@ -418,18 +456,39 @@ export function consumeDashboardRecoveryFlag():
   try {
     const value = window.sessionStorage.getItem(RECOVERY_FLAG_KEY);
     if (!value) return null;
-    window.sessionStorage.removeItem(RECOVERY_FLAG_KEY);
+    // retro audit (silent-failure-hunter L12 c8): validate BEFORE
+    // removeItem so we know what we're discarding. The previous order
+    // (remove then validate) silently dropped a forward-compat reason
+    // code from a newer build with no console signal. Now: a known
+    // reason removes + returns the value; an unknown reason removes +
+    // warns so ops sees the forward-compat drift, and a not-yet-set
+    // flag falls out via the !value early return above.
     if (
       value === "parse_failed" ||
       value === "version_reset" ||
       value === "legacy_in_v2_blob"
     ) {
+      window.sessionStorage.removeItem(RECOVERY_FLAG_KEY);
       return value;
     }
+    if (typeof console !== "undefined") {
+      console.warn(
+        "[useDashboardConfigV2] consumeDashboardRecoveryFlag — unknown reason value, discarding",
+        { value },
+      );
+    }
+    window.sessionStorage.removeItem(RECOVERY_FLAG_KEY);
     return null;
-  } catch {
-    // best-effort: sessionStorage may be locked in private mode; absence of
-    // the flag is functionally equivalent to "no recovery happened".
+  } catch (err) {
+    // sessionStorage may be locked in private mode. Surface the failure
+    // so the "silent-corruption" path has a paper trail when a recovery
+    // toast doesn't appear despite the breadcrumb being set elsewhere.
+    if (typeof console !== "undefined") {
+      console.warn(
+        "[useDashboardConfigV2] consumeDashboardRecoveryFlag failed",
+        err,
+      );
+    }
     return null;
   }
 }
