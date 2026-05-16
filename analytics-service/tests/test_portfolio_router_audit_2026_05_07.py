@@ -542,14 +542,21 @@ class TestIdempotencyCache:
 
     def test_cache_evicts_when_over_cap(self):
         """CR-2/PERF-2: simultaneous-entry cap prevents unbounded growth.
-        Once cache hits the cap, the oldest insertion is evicted."""
-        from routers.portfolio import _verify_strategy_idempotency_store
+        Once cache hits the cap, the oldest insertion is evicted.
+
+        Always access the store via portfolio_mod (not a top-of-file
+        import binding) so we are guaranteed to mutate the same module
+        globals we then assert against. Under pytest+coverage+supabase
+        on Python 3.12 the import-binding and module-attribute can end
+        up resolving to different module objects, leaving the binding's
+        globals out of sync with portfolio_mod's.
+        """
         # Shrink the cap for the test, then restore.
         original_cap = portfolio_mod._VERIFY_STRATEGY_IDEMPOTENCY_CACHE_MAX
         portfolio_mod._VERIFY_STRATEGY_IDEMPOTENCY_CACHE_MAX = 3
         try:
             for i in range(5):
-                _verify_strategy_idempotency_store(
+                portfolio_mod._verify_strategy_idempotency_store(
                     f"u{i}@x.com", "binance", f"k{i}", "ik",
                     {"verification_id": f"v-{i}"},
                 )

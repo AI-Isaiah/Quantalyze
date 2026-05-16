@@ -177,6 +177,32 @@ def _reset_semaphore():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _pin_portfolio_module_in_sys_modules():
+    """Other tests in the suite have been observed to unload
+    `routers.portfolio` from sys.modules. When that happens, our
+    `patch("routers.portfolio.get_supabase", ...)` re-imports the
+    module — and on CI (Python 3.12 + real supabase installed),
+    re-import causes a downstream call to services.db.get_supabase()
+    which raises RuntimeError when SUPABASE_URL is unset. Pinning
+    the module here forces patch() to use the already-loaded module
+    so the mock takes effect. Mirrors the pattern in test_cron_router.py.
+
+    Save and restore the prior sys.modules state so later test files
+    that intentionally unload `routers.portfolio` (e.g. test_cron_router's
+    error-isolation tests) continue to see the unloaded state they expect.
+    """
+    prior = sys.modules.get("routers.portfolio")
+    sys.modules["routers.portfolio"] = portfolio_mod
+    try:
+        yield
+    finally:
+        if prior is None:
+            sys.modules.pop("routers.portfolio", None)
+        else:
+            sys.modules["routers.portfolio"] = prior
+
+
 # ---------------------------------------------------------------------------
 # C-0206 — Happy path
 # ---------------------------------------------------------------------------
