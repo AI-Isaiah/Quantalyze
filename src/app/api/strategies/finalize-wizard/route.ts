@@ -8,6 +8,7 @@ import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
+import { captureToSentry } from "@/lib/sentry-capture";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -101,6 +102,31 @@ function validateStringArray(value: unknown): string[] {
   return value
     .filter((v): v is string => typeof v === "string" && v.length > 0)
     .slice(0, 20);
+}
+
+/**
+ * Phase B/C simplify — defense-in-depth token scrub. Replaces any literal
+ * occurrence of the live INTERNAL_API_TOKEN inside a stringified value
+ * with `<redacted>` before it lands in logs / Sentry. Originally added
+ * for the H-0328 probe-error path; promoted to module scope so every
+ * error-logging site (after()-block side-effect rejections, Sentry
+ * `extra` payloads, etc.) gets the same coverage.
+ */
+function scrubInternalToken(value: string): string {
+  const token = process.env.INTERNAL_API_TOKEN;
+  if (!token || token.length === 0) return value;
+  return value.split(token).join("<redacted>");
+}
+
+function safeErrorString(err: unknown): string {
+  if (err instanceof Error) {
+    return `${scrubInternalToken(err.name)}: ${scrubInternalToken(err.message)}`;
+  }
+  try {
+    return scrubInternalToken(String(err));
+  } catch {
+    return "unknown";
+  }
 }
 
 /**
@@ -270,16 +296,13 @@ async function runScopeBroadeningProbe(
   try {
     livePerms = await fetchLivePermissions(apiKeyId);
   } catch (probeErr) {
-    // audit-2026-05-07 H-0328 — log only the error name + message, never
-    // the raw error object. Some fetch / undici stack traces include the
-    // outgoing request init (including X-Internal-Token: $INTERNAL_API_TOKEN)
-    // which would land in Vercel runtime logs and be readable by any team
-    // member with log access. Discard everything except the safe primitives.
-    const safeName = probeErr instanceof Error ? probeErr.name : "Error";
-    const safeMessage =
-      probeErr instanceof Error ? probeErr.message : "unknown";
+    // audit-2026-05-07 H-0328 + Phase C simplify — log only the safe
+    // primitives (name + message) scrubbed of any literal INTERNAL_API_TOKEN
+    // occurrence. Some fetch / undici / retry-wrapper stack traces embed
+    // the outgoing X-Internal-Token header in either the message or a
+    // wrapper-error name; both paths are covered by scrubInternalToken.
     console.error(
-      `[strategies/finalize-wizard] live permissions probe failed: ${safeName}: ${safeMessage}`,
+      `[strategies/finalize-wizard] live permissions probe failed: ${safeErrorString(probeErr)}`,
     );
     return {
       ok: false,
@@ -330,7 +353,6 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   const body = await req.json().catch(() => null);
 
-  // M-18: payload validation extracted so POST() reads as flow control.
   const validation = validatePayload(body as Record<string, unknown> | null);
   if (!validation.ok) return validation.response;
   const fields = validation.fields;
@@ -381,9 +403,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const apiKeyId =
     typeof strategyRow.api_key_id === "string" ? strategyRow.api_key_id : null;
 
-  // M-18: scope-broadening probe extracted. Phase 19 / Open Question 1 —
-  // RETAINED at the thin-adapter layer; runs BEFORE both legacy and unified
-  // paths so the defense covers either code path.
+  // Probe runs BEFORE both legacy and unified paths so the
+  // scope-broadening defense covers either code path (Phase 19 /
+  // Open Question 1 — RETAINED at the thin-adapter layer).
   if (apiKeyId) {
     const probe = await runScopeBroadeningProbe(apiKeyId);
     if (!probe.ok) return probe.response;
@@ -410,9 +432,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         .single();
       if (keyRowErr) {
         console.warn(
-          "[strategies/finalize-wizard] api_keys.exchange lookup failed; falling back to default source:",
-          keyRowErr.message,
+          `[strategies/finalize-wizard] api_keys.exchange lookup failed; falling back to default source: ${scrubInternalToken(keyRowErr.message)}`,
         );
+        // Mirror the H-0322 escalation pattern: console.warn on Vercel is
+        // best-effort log capture, not alertable. Without Sentry a transient
+        // PG blip silently routes a Binance/Bybit key through the OKX-specific
+        // code path with no forensic trail.
+        captureToSentry(keyRowErr, {
+          tags: {
+            surface: "finalize-wizard",
+            step: "unified-exchange-resolve",
+          },
+          extra: { strategy_id: fields.strategy_id, api_key_id: apiKeyId },
+        });
       }
       if (keyRow?.exchange) {
         resolvedSource = keyRow.exchange;
@@ -517,24 +549,15 @@ async function runLegacyFinalize(args: {
         : fields.name;
     if (keyLinkErr) {
       console.warn(
-        "[strategies/finalize-wizard] api_key_id lookup failed in after():",
-        keyLinkErr.message,
+        `[strategies/finalize-wizard] api_key_id lookup failed in after(): ${scrubInternalToken(keyLinkErr.message)}`,
       );
-      if (process.env.SENTRY_DSN) {
-        try {
-          const Sentry = await import("@sentry/nextjs");
-          Sentry.captureException(keyLinkErr, {
-            tags: {
-              surface: "finalize-wizard-after",
-              side_effect: "api_key_id_lookup",
-            },
-            extra: { strategy_id: resolvedId },
-          });
-        } catch {
-          // Sentry import failure is non-fatal — the warn line above
-          // already emitted the signal.
-        }
-      }
+      captureToSentry(keyLinkErr, {
+        tags: {
+          surface: "finalize-wizard-after",
+          side_effect: "api_key_id_lookup",
+        },
+        extra: { strategy_id: resolvedId },
+      });
     }
 
     // audit-2026-05-07 G10.E.1: name each side effect so a future grep /
@@ -550,8 +573,6 @@ async function runLegacyFinalize(args: {
     }> = [
       {
         label: "notify_founder_new_strategy",
-        // audit-2026-05-07 H-0331 — use canonicalName (DB row) instead of
-        // form input so the founder email matches the admin UI.
         run: () => notifyFounderNewStrategy(canonicalName, managerName),
       },
       // @audit-skip: denormalization timestamp. api_keys.last_sync_at
@@ -564,10 +585,9 @@ async function runLegacyFinalize(args: {
         label: "api_keys_last_sync_at_touch",
         run: async () => {
           if (!keyLink?.api_key_id) return;
-          // @audit-skip: denormalization timestamp. api_keys.last_sync_at is a
-          // sync-state hint, not a user-visible state change. The user-intent
-          // event for this flow is finalize_wizard_strategy (RPC) which
-          // promoted the draft to pending_review.
+          // @audit-skip: denormalization timestamp — see outer comment.
+          // (Pragma kept within 8 lines of the .update chain so the
+          // audit-coverage grep sees it.)
           await admin
             .from("api_keys")
             .update({ last_sync_at: new Date().toISOString() })
@@ -602,6 +622,10 @@ async function runLegacyFinalize(args: {
           if (enqueueErr) {
             // Throw so Promise.allSettled marks this side effect as
             // rejected and the Sentry capture below picks it up.
+            // Backstop: cron/reconcile-strategies re-enqueues stuck
+            // computation_status='pending' rows so worst-case latency is
+            // ~24h, not "forever". Disabling that cron removes the safety
+            // net for this throw.
             throw new Error(
               `enqueue_compute_job failed: ${enqueueErr.message}`,
             );
@@ -620,30 +644,22 @@ async function runLegacyFinalize(args: {
         // to Sentry instead of swallowing on stdout. The cosmetic
         // last_sync_at touch goes through the same channel for parity
         // (operators want a single place to read for after()-failures).
+        // Phase C simplify — scrub the rejection reason before it lands
+        // in Vercel logs. Side-effect errors (notably enqueue_compute_job
+        // wrappers) may stringify request init into .message.
         console.warn(
-          `[strategies/finalize-wizard] side effect ${label} failed (non-blocking):`,
-          r.reason,
+          `[strategies/finalize-wizard] side effect ${label} failed (non-blocking): ${safeErrorString(r.reason)}`,
         );
-        if (process.env.SENTRY_DSN) {
-          try {
-            const Sentry = await import("@sentry/nextjs");
-            Sentry.captureException(r.reason, {
-              tags: {
-                surface: "finalize-wizard-after",
-                side_effect: label,
-              },
-              extra: {
-                strategy_id: resolvedId,
-                manager_name: managerName,
-              },
-            });
-          } catch (sentryErr) {
-            console.warn(
-              "[strategies/finalize-wizard] Sentry capture failed:",
-              sentryErr,
-            );
-          }
-        }
+        captureToSentry(r.reason, {
+          tags: {
+            surface: "finalize-wizard-after",
+            side_effect: label,
+          },
+          extra: {
+            strategy_id: resolvedId,
+            manager_name: managerName,
+          },
+        });
       }
     }
   });
@@ -658,6 +674,24 @@ async function runLegacyFinalize(args: {
  * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
  * `flow_type=onboard` (finalize step). The force-refresh permissions probe
  * has already run in the caller (Open Question 1 — RETAINED at this layer).
+ *
+ * ⚠️  Phase C simplify — side-effect parity gap.
+ * The legacy `runLegacyFinalize` after() block fans out THREE side
+ * effects after the SECURITY DEFINER RPC succeeds:
+ *   - `notify_founder_new_strategy` (founder email)
+ *   - `api_keys_last_sync_at_touch`  (Sprint-2 GC heartbeat)
+ *   - `enqueue_sync_trades_job`      (Round-2 cutover analytics enqueue)
+ * The Python unified backbone (analytics-service/routers/process_key.py)
+ * only enqueues `process_key_long`. It does NOT fire the founder email,
+ * does NOT touch `api_keys.last_sync_at`, and does NOT enqueue
+ * `sync_trades`. Flipping `isUnifiedBackboneActive=true` in production
+ * silently drops all three.
+ *
+ * This is an architectural decision (do these live in the Next route or
+ * the Python worker?) and is OUT OF SCOPE for /simplify cleanup. The
+ * load-bearing comment + Sentry warning below exist so the gap surfaces
+ * on the very first unified-path request after cutover instead of
+ * silently breaking the founder-notification SLA.
  */
 async function unifiedFinalizeWizardHandler(args: {
   strategy_id: string;
@@ -703,36 +737,112 @@ async function unifiedFinalizeWizardHandler(args: {
   // missing branch, not as a silent null/false fallback.
   const upstream = result.body;
   if (isProcessKeyOnboardResponse(upstream)) {
+    if (upstream.queued) {
+      return NextResponse.json({
+        strategy_id: args.strategy_id,
+        status: "pending_review",
+        verification_id: upstream.verification_id,
+        queued: true,
+      });
+    }
+    // queued=false discriminant — duplicate / dedup-hit envelope.
     return NextResponse.json({
       strategy_id: args.strategy_id,
       status: "pending_review",
       verification_id: upstream.verification_id ?? null,
-      queued: upstream.queued ?? true,
-      ...(typeof upstream.code === "string" ? { code: upstream.code } : {}),
+      queued: false,
+      code: upstream.code,
       ...(upstream.idempotent === true ? { idempotent: true } : {}),
     });
   }
-  return NextResponse.json(upstream ?? {});
+  // Phase B simplify — H-0327 follow-up. The guard miss means the upstream
+  // /process-key returned a 2xx body whose shape doesn't match the onboard
+  // contract (rename, partial deploy, AI gateway shape drift, proxy strip).
+  // Returning `upstream ?? {}` with 200 would leave wizard chrome reading
+  // `body.strategy_id === undefined` and showing "success" with no draft to
+  // advance — the exact silent failure the guard exists to prevent. Surface
+  // via Sentry and a 502 so the contract drift is alertable.
+  console.error(
+    "[strategies/finalize-wizard] unified upstream returned unrecognized shape",
+    {
+      keys:
+        upstream && typeof upstream === "object"
+          ? Object.keys(upstream as Record<string, unknown>)
+          : null,
+    },
+  );
+  captureToSentry(new Error("process-key onboard contract violation"), {
+    tags: {
+      surface: "finalize-wizard",
+      step: "unified-response-parse",
+    },
+    extra: {
+      strategy_id: args.strategy_id,
+      upstream_keys:
+        upstream && typeof upstream === "object"
+          ? Object.keys(upstream as Record<string, unknown>)
+          : null,
+    },
+  });
+  return NextResponse.json(
+    { error: "Upstream service returned unexpected response" },
+    { status: 502 },
+  );
 }
 
 /**
  * audit-2026-05-07 H-0327 — local narrow over the /process-key response
  * shape this handler depends on. Avoids the `Record<string, unknown>`
  * cast at the call site so subsequent property accesses are typed.
+ *
+ * Phase B simplify — `queued` made required so an upstream
+ * `{queued: undefined}` cannot silently coerce into `queued: true` via a
+ * `?? true` fallback at the read site.
+ *
+ * Phase C simplify — split into a discriminated union on `queued`. The
+ * Python contract (analytics-service/routers/process_key.py) only ever
+ * returns one of two shapes:
+ *   - `{queued: true,  verification_id: string}` — newly queued.
+ *   - `{queued: false, code: string, verification_id?, idempotent?}` —
+ *     dedup hit (WIZARD_DUPLICATE).
+ * A mixed envelope (e.g., `{queued: true, code: "WIZARD_DUPLICATE"}`) is
+ * a backbone bug; the guard rejects it so the unified-response-parse
+ * 502+Sentry path fires instead of silently misrouting wizard chrome.
  */
-interface ProcessKeyOnboardResponse {
-  queued?: boolean;
-  verification_id?: string | null;
-  code?: string;
-  idempotent?: boolean;
-}
+type ProcessKeyOnboardResponse =
+  | { queued: true; verification_id: string }
+  | {
+      queued: false;
+      code: string;
+      verification_id?: string | null;
+      idempotent?: boolean;
+    };
 
 function isProcessKeyOnboardResponse(
   body: unknown,
 ): body is ProcessKeyOnboardResponse {
-  return (
-    body !== null &&
-    typeof body === "object" &&
-    "queued" in (body as Record<string, unknown>)
-  );
+  if (body === null || typeof body !== "object") return false;
+  const r = body as Record<string, unknown>;
+  if (typeof r.queued !== "boolean") return false;
+  if (r.queued) {
+    // queued=true branch: verification_id MUST be a string, and
+    // code/idempotent MUST NOT be present (mixed envelope = bug).
+    if (typeof r.verification_id !== "string") return false;
+    if ("code" in r || "idempotent" in r) return false;
+    return true;
+  }
+  // queued=false branch: code MUST be a string; verification_id and
+  // idempotent are optional but must match types if present.
+  if (typeof r.code !== "string") return false;
+  if (
+    r.verification_id !== undefined &&
+    r.verification_id !== null &&
+    typeof r.verification_id !== "string"
+  ) {
+    return false;
+  }
+  if (r.idempotent !== undefined && typeof r.idempotent !== "boolean") {
+    return false;
+  }
+  return true;
 }

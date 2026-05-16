@@ -61,18 +61,51 @@ const STATE = vi.hoisted(() => ({
   rpcResult: { data: null as unknown, error: null as unknown },
   // Admin RPC capture (after() block).
   adminRpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
+  // H-0330 — forced error returned by admin.rpc('enqueue_compute_job').
+  adminEnqueueError: null as { message: string } | null,
   // Admin client api_keys lookup (api_key_id) for the after() block.
   adminApiKeyId: null as string | null,
   // H-0331 — name on the DB row (admin strategies SELECT) used by
   // the founder-notify email instead of the form input.
   adminStrategyName: "Alpha Centauri" as string | null,
+  // H-0322 — forced error on admin strategies SELECT so the after()
+  // keyLinkErr branch is reachable from tests.
+  adminStrategiesError: null as { message: string } | null,
+  // H-0323 — exchange returned by admin api_keys SELECT (unified path).
+  adminApiKeysExchange: "okx" as string | null,
+  // H-0323 — forced error on admin api_keys.exchange SELECT (unified
+  // path) so the keyRowErr fallback branch is reachable from tests.
+  adminApiKeysSelectError: null as { message: string } | null,
   // H-0331 — capture the strategy name actually passed to
   // notifyFounderNewStrategy so tests can assert it came from the DB row.
   notifyFounderCalls: [] as Array<{ name: unknown; managerName: unknown }>,
-  // H-0330 — when true, the next/server after() mock invokes the
-  // callback synchronously so tests can assert the side-effect fan-out
-  // (enqueue_compute_job, api_keys touch, founder notify).
+  // Phase B simplify — when true, the next/server after() mock invokes
+  // the callback synchronously so tests can assert the side-effect fan-out
+  // (enqueue_compute_job, api_keys touch, founder notify). The mock also
+  // stores the underlying promise on `afterPromise` so `flushAfter()` can
+  // await it deterministically instead of guessing microtask ticks.
   runAfterCallback: false as boolean,
+  afterPromise: null as Promise<unknown> | null,
+  // Phase B simplify — captureToSentry call capture so tests can assert
+  // Sentry escalation paths (H-0322, H-0323, H-0327 fall-through, H-0330
+  // enqueue failure) without coupling to the real Sentry transport.
+  captureToSentryCalls: [] as Array<{
+    err: unknown;
+    options: {
+      tags: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }>,
+  // Phase B simplify — unified-backbone flag toggleable per test.
+  unifiedBackboneActive: false as boolean,
+  // Phase B simplify — postProcessKey upstream body (drives the H-0327
+  // guard fall-through test). null means use the legacy 200 default.
+  processKeyResult: null as null | {
+    ok: boolean;
+    body?: unknown;
+    response?: unknown;
+  },
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -112,11 +145,13 @@ vi.mock("@/lib/supabase/admin", () => ({
           select: () => ({
             eq: () => ({
               single: async () => ({
-                data: {
-                  api_key_id: STATE.adminApiKeyId,
-                  name: STATE.adminStrategyName,
-                },
-                error: null,
+                data: STATE.adminStrategiesError
+                  ? null
+                  : {
+                      api_key_id: STATE.adminApiKeyId,
+                      name: STATE.adminStrategyName,
+                    },
+                error: STATE.adminStrategiesError,
               }),
             }),
           }),
@@ -124,6 +159,18 @@ vi.mock("@/lib/supabase/admin", () => ({
       }
       if (table === "api_keys") {
         return {
+          // Unified-path exchange resolve uses select().eq().single();
+          // after() last_sync_at touch uses update().eq().
+          select: () => ({
+            eq: () => ({
+              single: async () => ({
+                data: STATE.adminApiKeysSelectError
+                  ? null
+                  : { exchange: STATE.adminApiKeysExchange },
+                error: STATE.adminApiKeysSelectError,
+              }),
+            }),
+          }),
           update: () => ({
             eq: async () => ({ data: null, error: null }),
           }),
@@ -133,9 +180,37 @@ vi.mock("@/lib/supabase/admin", () => ({
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
       STATE.adminRpcCalls.push({ name, args });
+      if (name === "enqueue_compute_job" && STATE.adminEnqueueError) {
+        return { data: null, error: STATE.adminEnqueueError };
+      }
       return { data: "fake-job-id", error: null };
     },
   }),
+}));
+
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: (
+    err: unknown,
+    options: {
+      tags: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    },
+  ) => {
+    STATE.captureToSentryCalls.push({ err, options });
+  },
+}));
+
+vi.mock("@/lib/feature-flags", () => ({
+  isUnifiedBackboneActive: async () => STATE.unifiedBackboneActive,
+}));
+
+vi.mock("@/lib/process-key-client", () => ({
+  postProcessKey: async () =>
+    STATE.processKeyResult ?? {
+      ok: true,
+      body: { queued: true, verification_id: "ver-1" },
+    },
 }));
 
 vi.mock("@/lib/email", () => ({
@@ -158,9 +233,10 @@ vi.mock("next/server", async () => {
     ...actual,
     after: (fn: () => unknown) => {
       if (STATE.runAfterCallback) {
-        // Invoke and swallow rejections so test-mode after() failures
-        // can't mask the response assertions the test is making.
-        Promise.resolve()
+        // Store the promise so flushAfter() can await it deterministically.
+        // A bare setImmediate flushed only one microtask tick, which left
+        // races against nested awaits inside the after() callback.
+        STATE.afterPromise = Promise.resolve()
           .then(fn)
           .catch(() => {});
       }
@@ -208,9 +284,17 @@ beforeEach(async () => {
   STATE.rpcResult = { data: STRATEGY_ID, error: null };
   STATE.adminApiKeyId = API_KEY_ID;
   STATE.adminStrategyName = "Alpha Centauri";
+  STATE.adminStrategiesError = null;
+  STATE.adminApiKeysExchange = "okx";
+  STATE.adminApiKeysSelectError = null;
+  STATE.adminEnqueueError = null;
   STATE.notifyFounderCalls = [];
   STATE.adminRpcCalls = [];
+  STATE.captureToSentryCalls = [];
+  STATE.unifiedBackboneActive = false;
+  STATE.processKeyResult = null;
   STATE.runAfterCallback = false;
+  STATE.afterPromise = null;
   delete process.env.USE_COMPUTE_JOBS_QUEUE;
   process.env.INTERNAL_API_TOKEN = "test-internal-token";
   process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
@@ -222,6 +306,30 @@ beforeEach(async () => {
 async function importPost() {
   const mod = await import("./route");
   return mod.POST;
+}
+
+function mockProbeReadOnly(): ReturnType<typeof vi.spyOn> {
+  return vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        read: true,
+        trade: false,
+        withdraw: false,
+        probe_error: false,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+  );
+}
+
+// next/server's after() mock stores the callback promise on
+// STATE.afterPromise; await it directly so nested `await`s inside the
+// callback (Promise.all + Promise.allSettled + chained admin RPCs) are
+// fully drained before assertions, instead of racing the scheduler.
+async function flushAfter(): Promise<void> {
+  if (STATE.afterPromise) {
+    await STATE.afterPromise;
+  }
 }
 
 describe("POST /api/strategies/finalize-wizard — scope-broadening defense", () => {
@@ -450,20 +558,6 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
  *   - With the flag ON but no api_key (CSV branch), no enqueue runs.
  */
 describe("POST /api/strategies/finalize-wizard — H-0330 enqueue_compute_job", () => {
-  function mockProbeReadOnly(): ReturnType<typeof vi.spyOn> {
-    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          read: true,
-          trade: false,
-          withdraw: false,
-          probe_error: false,
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    );
-  }
-
   it("enqueues sync_trades when USE_COMPUTE_JOBS_QUEUE=true and a key is linked", async () => {
     const fetchSpy = mockProbeReadOnly();
     process.env.USE_COMPUTE_JOBS_QUEUE = "true";
@@ -473,9 +567,7 @@ describe("POST /api/strategies/finalize-wizard — H-0330 enqueue_compute_job", 
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
 
-    // Wait for the queued microtask to flush (after callback runs via
-    // Promise.resolve().then(fn) in the mock).
-    await new Promise((r) => setImmediate(r));
+    await flushAfter();
 
     const enqueueCall = STATE.adminRpcCalls.find(
       (c) => c.name === "enqueue_compute_job",
@@ -494,7 +586,7 @@ describe("POST /api/strategies/finalize-wizard — H-0330 enqueue_compute_job", 
     const POST = await importPost();
     await POST(makeReq(VALID_BODY));
 
-    await new Promise((r) => setImmediate(r));
+    await flushAfter();
 
     const enqueueCall = STATE.adminRpcCalls.find(
       (c) => c.name === "enqueue_compute_job",
@@ -513,7 +605,7 @@ describe("POST /api/strategies/finalize-wizard — H-0330 enqueue_compute_job", 
     const POST = await importPost();
     await POST(makeReq(VALID_BODY));
 
-    await new Promise((r) => setImmediate(r));
+    await flushAfter();
 
     const enqueueCall = STATE.adminRpcCalls.find(
       (c) => c.name === "enqueue_compute_job",
@@ -530,20 +622,6 @@ describe("POST /api/strategies/finalize-wizard — H-0330 enqueue_compute_job", 
  * one source of truth.
  */
 describe("POST /api/strategies/finalize-wizard — H-0331 founder-email canonical name", () => {
-  function mockProbeReadOnly(): ReturnType<typeof vi.spyOn> {
-    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          read: true,
-          trade: false,
-          withdraw: false,
-          probe_error: false,
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    );
-  }
-
   it("uses the DB-row name when it differs from the form input", async () => {
     const fetchSpy = mockProbeReadOnly();
     STATE.adminStrategyName = "Sanitized DB Name";
@@ -551,10 +629,11 @@ describe("POST /api/strategies/finalize-wizard — H-0331 founder-email canonica
 
     const POST = await importPost();
     await POST(makeReq(VALID_BODY));
-    await new Promise((r) => setImmediate(r));
+    await flushAfter();
 
     expect(STATE.notifyFounderCalls.length).toBe(1);
     expect(STATE.notifyFounderCalls[0].name).toBe("Sanitized DB Name");
+    fetchSpy.mockRestore();
   });
 
   it("falls back to the form input when the DB-row name is missing", async () => {
@@ -564,7 +643,7 @@ describe("POST /api/strategies/finalize-wizard — H-0331 founder-email canonica
 
     const POST = await importPost();
     await POST(makeReq(VALID_BODY));
-    await new Promise((r) => setImmediate(r));
+    await flushAfter();
 
     expect(STATE.notifyFounderCalls.length).toBe(1);
     // VALID_BODY.name is set to STRATEGY_NAMES[0] in beforeEach.
@@ -617,17 +696,7 @@ describe("POST /api/strategies/finalize-wizard — H-0325 dollar-amount validati
   });
 
   it("accepts omitted aum (undefined / null)", async () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          read: true,
-          trade: false,
-          withdraw: false,
-          probe_error: false,
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    );
+    const fetchSpy = mockProbeReadOnly();
 
     const POST = await importPost();
     const bodyNoAum: Record<string, unknown> = { ...VALID_BODY };
@@ -639,20 +708,6 @@ describe("POST /api/strategies/finalize-wizard — H-0325 dollar-amount validati
 });
 
 describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping", () => {
-  function mockProbeReadOnly(): ReturnType<typeof vi.spyOn> {
-    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          read: true,
-          trade: false,
-          withdraw: false,
-          probe_error: false,
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    );
-  }
-
   it("maps P0002 (no_data_found) to 404 + sanitized 'Draft not found'", async () => {
     const fetchSpy = mockProbeReadOnly();
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -760,5 +815,346 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
 
     fetchSpy.mockRestore();
     consoleErr.mockRestore();
+  });
+});
+
+/**
+ * Phase B simplify — H-0328 probe-error log token sanitization.
+ *
+ * The probe-error catch block in route.ts:273-292 must NEVER write the raw
+ * error object to console.error: some undici/fetch error stringifications
+ * include the outgoing request init, which carries
+ * `X-Internal-Token: $INTERNAL_API_TOKEN`. Landing that in Vercel runtime
+ * logs is a P445-style secrets-in-logs vulnerability — readable by any
+ * team member with log access.
+ *
+ * This test was a gap in the original H-0328 commit. A regression that
+ * swaps `safeMessage` for `${probeErr}` would pass every other test today.
+ */
+describe("POST /api/strategies/finalize-wizard — H-0328 probe-error log sanitization", () => {
+  it("does NOT leak INTERNAL_API_TOKEN substrings into the probe-error log", async () => {
+    // Build a probe error whose message AND name embed the live token, as
+    // a stack-trace dump would in the wild.
+    const leaky = new Error(
+      "permissions probe failed: outgoing init carried X-Internal-Token: test-internal-token",
+    );
+    leaky.name = "TokenLeakingError(test-internal-token)";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(leaky);
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+
+    // Aggregate everything console.error received and assert the token
+    // substring never appears, regardless of which argument site leaks it.
+    const errArgs = consoleErr.mock.calls
+      .map((args) => args.map((a) => String(a)).join(" "))
+      .join("\n");
+    expect(errArgs).not.toContain("test-internal-token");
+    // Sanity: the safe formatter still emits something useful.
+    expect(errArgs).toMatch(/permissions probe failed/);
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase B simplify — H-0322 Sentry escalation when admin strategies
+ * SELECT (api_key_id, name) fails inside after().
+ *
+ * The keyLinkErr branch was added by H-0322 to prevent a transient PG blip
+ * from silently skipping the last_sync_at touch (Sprint-2 cleanup would
+ * then treat the key as abandoned and GC it). The original commit logged
+ * + escalated to Sentry but the escalation chain had no behavioral test.
+ */
+describe("POST /api/strategies/finalize-wizard — H-0322 Sentry escalation on keyLinkErr", () => {
+  it("captures the admin strategies error to Sentry and still fires the founder email", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleWarn = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+    STATE.adminStrategiesError = { message: "transient PG blip" };
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    const sentryCall = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.side_effect === "api_key_id_lookup",
+    );
+    expect(sentryCall).toBeDefined();
+    expect(sentryCall!.options.tags.surface).toBe("finalize-wizard-after");
+    expect(sentryCall!.options.extra?.strategy_id).toBe(STRATEGY_ID);
+
+    // The founder email is independent of keyLinkErr and must still run
+    // (resilience: a failed lookup must not silently mute the founder).
+    expect(STATE.notifyFounderCalls.length).toBe(1);
+
+    consoleWarn.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase B simplify — H-0323 / unified-path Sentry escalation when admin
+ * api_keys.exchange SELECT fails.
+ *
+ * Phase B-1 added captureToSentry to mirror the H-0322 pattern. Without
+ * Sentry, a transient PG blip silently routes a Binance/Bybit key through
+ * the OKX-specific code path with only a console.warn line — not
+ * alertable on Vercel.
+ */
+describe("POST /api/strategies/finalize-wizard — H-0323 Sentry escalation on keyRowErr", () => {
+  it("captures the api_keys.exchange error to Sentry and falls back to 'okx'", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleWarn = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+    STATE.unifiedBackboneActive = true;
+    STATE.adminApiKeysSelectError = { message: "stale snapshot" };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    // Unified path returns the postProcessKey envelope translated; the
+    // status code here just needs to not be 5xx (we're testing the
+    // exchange-resolve branch, not the unified response shape).
+    expect(res.status).toBe(200);
+
+    const sentryCall = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.step === "unified-exchange-resolve",
+    );
+    expect(sentryCall).toBeDefined();
+    expect(sentryCall!.options.tags.surface).toBe("finalize-wizard");
+    expect(sentryCall!.options.extra?.strategy_id).toBe(STRATEGY_ID);
+    expect(sentryCall!.options.extra?.api_key_id).toBe(API_KEY_ID);
+
+    consoleWarn.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase B simplify — H-0327 type-guard fall-through.
+ *
+ * When the upstream /process-key body doesn't match the onboard shape
+ * (rename, partial deploy, AI gateway shape drift, proxy strip), the
+ * route MUST surface the contract violation as a 502 + Sentry rather
+ * than passing the opaque body through with status 200 — the wizard
+ * client would otherwise read `body.strategy_id === undefined` and
+ * pretend the submission succeeded.
+ */
+describe("POST /api/strategies/finalize-wizard — H-0327 unified contract violation", () => {
+  it("returns 502 + Sentry when upstream `queued` is a string instead of boolean", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    STATE.unifiedBackboneActive = true;
+    STATE.processKeyResult = {
+      ok: true,
+      body: { queued: "yes", verification_id: "ver-1" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toMatch(/unexpected response/i);
+
+    const sentryCall = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.step === "unified-response-parse",
+    );
+    expect(sentryCall).toBeDefined();
+    expect(sentryCall!.options.extra?.strategy_id).toBe(STRATEGY_ID);
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("returns 502 when upstream body has no `queued` field at all", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    STATE.unifiedBackboneActive = true;
+    STATE.processKeyResult = {
+      ok: true,
+      body: { verification_id: "ver-1" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("returns 200 + translated envelope when upstream matches the onboard shape", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.unifiedBackboneActive = true;
+    STATE.processKeyResult = {
+      ok: true,
+      body: { queued: true, verification_id: "ver-1" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategy_id).toBe(STRATEGY_ID);
+    expect(body.status).toBe("pending_review");
+    expect(body.queued).toBe(true);
+    expect(body.verification_id).toBe("ver-1");
+
+    fetchSpy.mockRestore();
+  });
+
+  // Phase C simplify — discriminated union test: WIZARD_DUPLICATE envelope.
+  // queued=false branch must surface `code` and `idempotent` so wizard chrome
+  // routes the duplicate copy on the idempotent-resume path.
+  it("returns 200 + WIZARD_DUPLICATE envelope when upstream queued=false", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.unifiedBackboneActive = true;
+    STATE.processKeyResult = {
+      ok: true,
+      body: {
+        queued: false,
+        code: "WIZARD_DUPLICATE",
+        idempotent: true,
+        verification_id: "ver-existing",
+      },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.queued).toBe(false);
+    expect(body.code).toBe("WIZARD_DUPLICATE");
+    expect(body.idempotent).toBe(true);
+    expect(body.verification_id).toBe("ver-existing");
+    expect(body.strategy_id).toBe(STRATEGY_ID);
+
+    fetchSpy.mockRestore();
+  });
+
+  // Phase C simplify — discriminated guard: a mixed envelope
+  // (queued=true + code/idempotent set) is a backbone bug, NOT a valid
+  // shape. Wizard chrome would otherwise treat it as both "queued" AND
+  // "duplicate" and double-process. Reject with 502 + Sentry.
+  it("rejects mixed envelope (queued=true with code field) with 502", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    STATE.unifiedBackboneActive = true;
+    STATE.processKeyResult = {
+      ok: true,
+      body: {
+        queued: true,
+        verification_id: "ver-1",
+        code: "WIZARD_DUPLICATE",
+      },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+
+    const sentryCall = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.step === "unified-response-parse",
+    );
+    expect(sentryCall).toBeDefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  // Phase C simplify — queued=true without verification_id is also a
+  // contract violation (Python always returns it on the queued branch).
+  it("rejects queued=true with missing verification_id with 502", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    STATE.unifiedBackboneActive = true;
+    STATE.processKeyResult = {
+      ok: true,
+      body: { queued: true },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  // Phase C simplify — queued=false without code is also a contract
+  // violation (Python always returns `code: "WIZARD_DUPLICATE"` on the
+  // dedup-hit branch).
+  it("rejects queued=false with missing code with 502", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    STATE.unifiedBackboneActive = true;
+    STATE.processKeyResult = {
+      ok: true,
+      body: { queued: false, verification_id: "ver-1" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase B simplify — H-0330 enqueue_compute_job failure → Sentry path.
+ *
+ * The "enqueues on success" path is covered above. This block exercises
+ * the rejection chain: enqueue_compute_job returns an error → run()
+ * throws → Promise.allSettled marks the side effect rejected → the loop
+ * escalates to Sentry. Without this test, dropping the throw would land
+ * strategies in compute_status='pending' forever (with only the 24h
+ * reconcile-strategies cron as a backstop).
+ */
+describe("POST /api/strategies/finalize-wizard — H-0330 enqueue failure escalation", () => {
+  it("escalates enqueue_compute_job failures to Sentry without breaking 200", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleWarn = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    STATE.adminEnqueueError = { message: "duplicate key value" };
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    const sentryCall = STATE.captureToSentryCalls.find(
+      (c) =>
+        c.options.tags.side_effect === "enqueue_sync_trades_job" &&
+        c.options.tags.surface === "finalize-wizard-after",
+    );
+    expect(sentryCall).toBeDefined();
+
+    // Founder email must still fire — side effects are independent.
+    expect(STATE.notifyFounderCalls.length).toBe(1);
+
+    consoleWarn.mockRestore();
+    fetchSpy.mockRestore();
   });
 });

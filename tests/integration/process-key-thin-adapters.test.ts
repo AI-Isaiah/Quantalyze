@@ -168,11 +168,15 @@ vi.mock("next/server", async () => {
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 
 // Outbound fetch mock — every flag=on case asserts on its arguments.
+// Default response is the "newly queued" envelope shape (queued=true +
+// verification_id) which matches the real Python /process-key contract
+// for the common path; WIZARD_DUPLICATE-specific tests override the
+// body to assert the queued=false branch.
 let fetchCalls: Array<{ url: string; init: RequestInit }>;
 const mockFetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
   fetchCalls.push({ url: String(url), init: init ?? {} });
   return new Response(
-    JSON.stringify({ verification_id: "v-thin-adapter", queued: false }),
+    JSON.stringify({ verification_id: "v-thin-adapter", queued: true }),
     { status: 200, headers: { "content-type": "application/json" } },
   );
 });
