@@ -58,8 +58,35 @@ export async function fetchStrategyLazyMetricsClient(
       code: error.code,
       message: error.message,
     });
-    return {} as LazyMetricsPayload;
+    return {};
   }
 
-  return (data ?? {}) as LazyMetricsPayload;
+  // audit-2026-05-07 silent-failure HIGH (red-team apply): the prior
+  // bare `as LazyMetricsPayload` cast bypassed the server-side runtime
+  // guards in `fetchStrategyLazyMetrics` (queries.ts:836-912). A
+  // SECURITY DEFINER RPC drift that returned a SQL NULL, an array, or a
+  // primitive would sail through the client mirror untouched and corrupt
+  // every downstream destructuring consumer. Mirror the server guard:
+  // reject anything that isn't a plain object; treat null/undefined as
+  // legitimate empty.
+  if (data === null || data === undefined) {
+    return {};
+  }
+  if (typeof data !== "object" || Array.isArray(data)) {
+    const shapeType = Array.isArray(data) ? "array" : typeof data;
+    console.error("fetchStrategyLazyMetricsClient: unexpected RPC payload shape", {
+      strategyId,
+      panelId,
+      type: shapeType,
+    });
+    return {};
+  }
+  // The RPC's `data` is typed `any` by supabase-js; after the guard
+  // above we know it's a plain object. The server-side
+  // `fetchStrategyLazyMetrics` performs the authoritative
+  // key-name validation (whitelist of `StrategyAnalyticsSeriesKind`).
+  // The client mirror does the SHAPE check; consumers still narrow
+  // values via the per-key runtime predicates documented on
+  // `LazyMetricsPayload`.
+  return data as LazyMetricsPayload;
 }

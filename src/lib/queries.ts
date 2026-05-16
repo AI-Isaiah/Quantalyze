@@ -830,7 +830,7 @@ export async function fetchStrategyLazyMetrics(
       extra: { strategyId, panelId, message: error.message },
       level: "error",
     });
-    return {} as LazyMetricsPayload;
+    return {};
   }
 
   // audit-2026-05-07 H-0489/H-0494: runtime shape check before the
@@ -871,7 +871,7 @@ export async function fetchStrategyLazyMetrics(
         },
       );
     }
-    return {} as LazyMetricsPayload;
+    return {};
   }
 
   // Drop keys outside the type-level panel→kind contract. A SQL CASE typo

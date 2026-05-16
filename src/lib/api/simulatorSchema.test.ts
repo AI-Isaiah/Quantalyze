@@ -121,4 +121,52 @@ describe("SimulatorResponseSchema", () => {
     });
     expect(result.success).toBe(true);
   });
+
+  // audit-2026-05-07 M-0912: partial_history must equal overlap_days < 126.
+  it("rejects partial_history=false when overlap_days < threshold", () => {
+    const result = SimulatorResponseSchema.safeParse({
+      ...validResponse,
+      overlap_days: 50,
+      partial_history: false,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects partial_history=true when overlap_days >= threshold", () => {
+    const result = SimulatorResponseSchema.safeParse({
+      ...validResponse,
+      overlap_days: 200,
+      partial_history: true,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts partial_history=true with overlap_days < threshold", () => {
+    const result = SimulatorResponseSchema.safeParse({
+      ...validResponse,
+      overlap_days: 50,
+      partial_history: true,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  // audit-2026-05-07 H-1120: discriminated union — proposed/deltas/curves
+  // are NOT required on non-ok status.
+  it("accepts insufficient_data without proposed/deltas/curves", () => {
+    const result = SimulatorResponseSchema.safeParse({
+      candidate_id: "c1",
+      candidate_name: "Strategy",
+      portfolio_id: "p1",
+      status: "insufficient_data",
+      overlap_days: 5,
+      partial_history: true,
+      current: {
+        sharpe: null,
+        max_drawdown: null,
+        avg_correlation: null,
+        concentration: null,
+      },
+    });
+    expect(result.success).toBe(true);
+  });
 });

@@ -232,12 +232,18 @@ export type TickJobsResponse = z.infer<typeof TickJobsResponseSchema>;
 // the BridgeCandidate shape in types.ts. Parse failures throw.
 // ─────────────────────────────────────────────────────────────────────
 
-const BridgeFitLabelSchema = z.enum([
+// audit-2026-05-07 M-0908: single source of truth for the bridge fit
+// label set. The TS literal union previously declared in types.ts is
+// derived from this schema via z.infer so adding a tier (e.g. 'Excellent
+// fit') only requires updating one list — and Record<BridgeFitLabel,…>
+// lookups in ReplacementCard stay exhaustive at compile time.
+export const BridgeFitLabelSchema = z.enum([
   "Strong fit",
   "Good fit",
   "Moderate fit",
   "Weak fit",
 ]);
+export type BridgeFitLabel = z.infer<typeof BridgeFitLabelSchema>;
 
 const BridgeCandidateSchema = z.object({
   strategy_id: z.string(),
