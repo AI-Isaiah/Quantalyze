@@ -110,6 +110,10 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
   it.skipIf(!HAS_LIVE_DB)(
     "rejects INSERT with BOTH original_strategy_id AND original_holding_ref set (SQLSTATE 23514)",
     async () => {
+      // audit-2026-05-07 H-0960: kind must be set explicitly (mig 20260516160600
+      // dropped the DEFAULT). audit-2026-05-07 H-0956: the v2 XOR constraint
+      // (mig 20260516160400) requires EXACTLY ONE of original_* set — both-set
+      // is forbidden.
       const { error } = await admin.from("match_decisions").insert({
         allocator_id: allocatorId,
         strategy_id: STRATEGY_XOR_A,
@@ -117,14 +121,16 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
         decided_by: allocatorId,
         original_strategy_id: STRATEGY_XOR_A,
         original_holding_ref: "holding:binance:BTC:spot",
+        kind: "bridge_recommended",
       });
 
       expect(error).not.toBeNull();
-      // SQLSTATE 23514 = check_violation; Supabase surfaces as code '23514'
-      // or the constraint name appears in the message
+      // SQLSTATE 23514 = check_violation; the new constraint name is
+      // match_decisions_kind_bridge_recommended_v2 (mig 160400). The substring
+      // 'match_decisions_kind_bridge_recommended' matches both old and v2.
       expect(
         error?.code === "23514" ||
-          error?.message?.includes("match_decisions_original_xor"),
+          error?.message?.includes("match_decisions_kind_bridge_recommended"),
       ).toBe(true);
     },
     30_000,
@@ -133,7 +139,8 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
   it.skipIf(!HAS_LIVE_DB)(
     "rejects INSERT with NEITHER original_strategy_id NOR original_holding_ref set (SQLSTATE 23514)",
     async () => {
-      // Both NULL → XOR evaluates: FALSE <> FALSE = FALSE → check fails
+      // audit-2026-05-07 H-0960: kind explicit. Both originals NULL violates
+      // the bridge_recommended _v2 XOR (requires EXACTLY ONE of original_*).
       const { error } = await admin.from("match_decisions").insert({
         allocator_id: allocatorId,
         strategy_id: STRATEGY_XOR_A,
@@ -141,12 +148,13 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
         decided_by: allocatorId,
         original_strategy_id: null,
         original_holding_ref: null,
+        kind: "bridge_recommended",
       });
 
       expect(error).not.toBeNull();
       expect(
         error?.code === "23514" ||
-          error?.message?.includes("match_decisions_original_xor"),
+          error?.message?.includes("match_decisions_kind_bridge_recommended"),
       ).toBe(true);
     },
     30_000,
@@ -155,6 +163,8 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
   it.skipIf(!HAS_LIVE_DB)(
     "accepts INSERT with ONLY original_strategy_id set (legacy path)",
     async () => {
+      // audit-2026-05-07 H-0960: kind explicit. Exactly one of original_*
+      // set satisfies the bridge_recommended _v2 XOR.
       const { data, error } = await admin
         .from("match_decisions")
         .insert({
@@ -164,6 +174,7 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
           decided_by: allocatorId,
           original_strategy_id: STRATEGY_XOR_A,
           original_holding_ref: null,
+          kind: "bridge_recommended",
         })
         .select("id")
         .single();
@@ -178,6 +189,8 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
   it.skipIf(!HAS_LIVE_DB)(
     "accepts INSERT with ONLY original_holding_ref = 'holding:binance:BTC:spot' set (Phase 09 path)",
     async () => {
+      // audit-2026-05-07 H-0960: kind explicit. Exactly one of original_*
+      // set satisfies the bridge_recommended _v2 XOR.
       const { data, error } = await admin
         .from("match_decisions")
         .insert({
@@ -187,6 +200,7 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
           decided_by: allocatorId,
           original_strategy_id: null,
           original_holding_ref: "holding:binance:BTC:spot",
+          kind: "bridge_recommended",
         })
         .select("id")
         .single();
@@ -233,7 +247,10 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
     "bridge_outcomes widened UNIQUE: two different holdings (same allocator+strategy) BOTH succeed",
     async () => {
       // Create two holding-sourced match_decisions sharing the same strategy_id
-      // but with DIFFERENT original_holding_ref values
+      // but with DIFFERENT original_holding_ref values.
+      // audit-2026-05-07 H-0960: kind set explicitly (mig 20260516160600
+      // dropped the DEFAULT). bridge_recommended shape: strategy_id NOT NULL
+      // + exactly one of original_* NOT NULL (original_holding_ref here).
       const { data: mdA, error: errA } = await admin
         .from("match_decisions")
         .insert({
@@ -243,6 +260,7 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
           decided_by: allocatorId,
           original_strategy_id: null,
           original_holding_ref: "holding:binance:BTC:spot",
+          kind: "bridge_recommended",
         })
         .select("id")
         .single();
@@ -258,6 +276,7 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
           decided_by: allocatorId,
           original_strategy_id: null,
           original_holding_ref: "holding:binance:ETH:spot",
+          kind: "bridge_recommended",
         })
         .select("id")
         .single();
@@ -308,7 +327,8 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
   it.skipIf(!HAS_LIVE_DB)(
     "bridge_outcomes widened UNIQUE: same (allocator+strategy+holding_ref) second INSERT fails with 23505",
     async () => {
-      // Create one holding-sourced match_decision for holding:okx:SOL:spot
+      // Create one holding-sourced match_decision for holding:okx:SOL:spot.
+      // audit-2026-05-07 H-0960: kind set explicitly (bridge_recommended).
       const { data: md1, error: errMd1 } = await admin
         .from("match_decisions")
         .insert({
@@ -318,6 +338,7 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
           decided_by: allocatorId,
           original_strategy_id: null,
           original_holding_ref: "holding:okx:SOL:spot",
+          kind: "bridge_recommended",
         })
         .select("id")
         .single();
@@ -371,7 +392,10 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
   it.skipIf(!HAS_LIVE_DB)(
     "bridge_outcomes widened UNIQUE: strategy-sourced rows preserve (allocator+strategy) 1-per-pair guarantee via COALESCE('')",
     async () => {
-      // Two strategy-sourced match_decisions with same (allocator, strategy)
+      // Two strategy-sourced match_decisions with same (allocator, strategy).
+      // audit-2026-05-07 H-0960: kind set explicitly (bridge_recommended:
+      // strategy_id NOT NULL + exactly one of original_* NOT NULL, here
+      // original_strategy_id).
       const { data: mdS1 } = await admin
         .from("match_decisions")
         .insert({
@@ -381,6 +405,7 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
           decided_by: allocatorId,
           original_strategy_id: STRATEGY_XOR_B,
           original_holding_ref: null,
+          kind: "bridge_recommended",
         })
         .select("id")
         .single();
@@ -404,7 +429,8 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
       expect(boS1?.original_holding_ref).toBeNull();
       if (boS1?.id) createdBridgeOutcomeIds.push(boS1.id as string);
 
-      // Second strategy-sourced match_decision for same (allocator, strategy)
+      // Second strategy-sourced match_decision for same (allocator, strategy).
+      // audit-2026-05-07 H-0960: kind set explicitly (bridge_recommended).
       const { data: mdS2 } = await admin
         .from("match_decisions")
         .insert({
@@ -414,6 +440,7 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
           decided_by: allocatorId,
           original_strategy_id: STRATEGY_XOR_B,
           original_holding_ref: null,
+          kind: "bridge_recommended",
         })
         .select("id")
         .single();

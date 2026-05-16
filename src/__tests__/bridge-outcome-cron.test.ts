@@ -136,6 +136,11 @@ describe("bridge-outcome-cron (live-DB)", () => {
         strategy_id: stratId,
         decision: "sent_as_intro",
         decided_by: allocatorId,
+        // audit-2026-05-07 H-0960 (mig 20260516160600 drops the kind DEFAULT):
+        // kind must be set explicitly. Strategy-sourced + original_strategy_id
+        // NOT NULL + original_holding_ref NULL is the bridge_recommended XOR
+        // shape per mig 20260516160400 v2 CHECK.
+        kind: "bridge_recommended",
         // Migration 072 XOR CHECK requires exactly one of original_strategy_id
         // or original_holding_ref to be set. Strategy-sourced rows use original_strategy_id.
         original_strategy_id: stratId,

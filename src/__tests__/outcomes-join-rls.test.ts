@@ -167,6 +167,9 @@ describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", (
 
       // Seed 1 match_decisions row per allocator (sent_as_intro with the new
       // original_strategy_id column).
+      // audit-2026-05-07 H-0960: kind set explicitly (mig 20260516160600
+      // dropped the DEFAULT). bridge_recommended shape: strategy_id NOT NULL
+      // + exactly one of original_* NOT NULL (original_strategy_id here).
       for (const allocId of [alloc1, alloc2]) {
         const { data: decision, error: decisionErr } = await admin
           .from("match_decisions")
@@ -175,6 +178,7 @@ describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", (
             strategy_id: S_REPL_ID,
             original_strategy_id: S_ORIG_ID,
             decision: "sent_as_intro",
+            kind: "bridge_recommended",
           })
           .select("id")
           .single();

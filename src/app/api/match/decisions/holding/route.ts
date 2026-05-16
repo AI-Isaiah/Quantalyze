@@ -110,6 +110,13 @@ export const POST = withAuth(
     // ownership + strategy gates above use the authed client so RLS still enforces
     // the trust boundary before the elevated insert runs.
     const admin = createAdminClient();
+    // audit-2026-05-07 H-0960: kind must be set explicitly. Migration
+    // 20260516160600 drops the bridge_recommended DEFAULT on
+    // match_decisions.kind — the column is NOT NULL since mig 080 STEP 5,
+    // so INSERTs that omit kind now raise 23502. This path inserts a
+    // bridge_recommended row (strategy_id NOT NULL + original_holding_ref
+    // NOT NULL, the legacy "found a holding match" shape) — same kind
+    // mig 080's DEFAULT previously back-filled.
     const { data: inserted, error: insertErr } = await admin
       .from("match_decisions")
       .insert({
@@ -120,6 +127,7 @@ export const POST = withAuth(
         original_holding_ref: holding_ref,
         decision: "sent_as_intro",
         decided_by: user.id,
+        kind: "bridge_recommended",
       })
       .select("id")
       .single();

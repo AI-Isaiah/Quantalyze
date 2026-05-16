@@ -232,6 +232,9 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
       expect(snapErr).toBeNull();
 
       // Arrange: insert holding-sourced match_decision
+      // audit-2026-05-07 H-0960 (mig 20260516160600 drops the kind DEFAULT):
+      // kind must be set explicitly. strategy_id NOT NULL + original_holding_ref
+      // NOT NULL + original_strategy_id NULL is bridge_recommended XOR shape.
       const { data: md, error: mdErr } = await admin
         .from("match_decisions")
         .insert({
@@ -239,6 +242,7 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
           strategy_id: STRATEGY_HOLDING_TEST,
           decision: "thumbs_up",
           decided_by: allocatorId,
+          kind: "bridge_recommended",
           original_strategy_id: null,
           original_holding_ref: "holding:binance:BTC:spot",
         })
@@ -323,6 +327,7 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
       expect(snapErr).toBeNull();
 
       // Holding-sourced match_decision for ETH (different holding_ref from Test 1's BTC)
+      // audit-2026-05-07 H-0960: kind must be set explicitly post-160600.
       const { data: md2, error: mdErr2 } = await admin
         .from("match_decisions")
         .insert({
@@ -330,6 +335,7 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
           strategy_id: STRATEGY_HOLDING_TEST,
           decision: "thumbs_down",
           decided_by: allocatorId,
+          kind: "bridge_recommended",
           original_strategy_id: null,
           original_holding_ref: "holding:binance:ETH:spot",
         })
@@ -379,6 +385,9 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
     "strategy-sourced outcome still populates deltas (regression check on existing 060 path — post-f3 LEFT JOIN retains strategy-sourced processing)",
     async () => {
       // Insert strategy-sourced match_decision (original_strategy_id set)
+      // audit-2026-05-07 H-0960: kind must be set explicitly post-160600.
+      // strategy-sourced shape (original_strategy_id NOT NULL + original_holding_ref
+      // NULL) is bridge_recommended XOR shape per mig 20260516160400.
       const { data: md3, error: mdErr3 } = await admin
         .from("match_decisions")
         .insert({
@@ -386,6 +395,7 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
           strategy_id: STRATEGY_LEGACY_NULL,
           decision: "sent_as_intro",
           decided_by: allocatorId,
+          kind: "bridge_recommended",
           original_strategy_id: STRATEGY_LEGACY_NULL,
           original_holding_ref: null,
         })
