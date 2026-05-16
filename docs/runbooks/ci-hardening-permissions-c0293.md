@@ -69,7 +69,7 @@ Workflow default: `permissions: contents: read`
 
 | Job | Permissions | Justification |
 |-----|-------------|---------------|
-| `plan` | (inherits default) | Runs `supabase migration list` against remote project. Auth via SUPABASE_ACCESS_TOKEN, not GITHUB_TOKEN. |
+| `plan` | (inherits default) | Runs `supabase migration list` against remote project. Auth via SUPABASE_ACCESS_TOKEN, not GITHUB_TOKEN. Also gated by `environment: production` (required-reviewer approval) since `retro-PR179-M-env-gate` — `supabase link --project-ref` consumes SUPABASE_DB_PASSWORD and writes it into a local supabase config file, so the plan phase has the same prod-credential exposure surface as apply. |
 | `apply` | (inherits default) | Runs `supabase db push`. Auth via SUPABASE_ACCESS_TOKEN. Mutation power is gated by the `production` GitHub Environment's required-reviewer rule, orthogonal to GITHUB_TOKEN. |
 
 ### `phase-19-stability.yml`
