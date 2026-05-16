@@ -531,3 +531,72 @@ class TestPortfolioOptimizerRequestValidator:
 # (No direct unit because the logic lives inside _compute_portfolio_analytics
 # and depends on the supabase mock surface. Covered indirectly by the
 # end-to-end integration test plan documented in the audit-fix report.)
+
+
+# ---------------------------------------------------------------------------
+# ComputationStatus / AlertType / AlertSeverity enums (M-0620)
+# ---------------------------------------------------------------------------
+
+class TestStatusEnums:
+    def test_computation_status_values_match_db_check(self):
+        """Migration 010 line 30-31 declares CHECK constraint values.
+        The enum here must match exactly so we don't drift between
+        Python and DB.
+        """
+        from routers.portfolio import ComputationStatus
+        assert ComputationStatus.PENDING.value == "pending"
+        assert ComputationStatus.COMPUTING.value == "computing"
+        assert ComputationStatus.COMPLETE.value == "complete"
+        assert ComputationStatus.FAILED.value == "failed"
+
+    def test_alert_type_values(self):
+        from routers.portfolio import AlertType
+        # All Sprint 4 + Sprint 5 alert types.
+        assert AlertType.DRAWDOWN.value == "drawdown"
+        assert AlertType.CORRELATION_SPIKE.value == "correlation_spike"
+        assert AlertType.REGIME_SHIFT.value == "regime_shift"
+        assert AlertType.UNDERPERFORMANCE.value == "underperformance"
+        assert AlertType.CONCENTRATION_CREEP.value == "concentration_creep"
+        assert AlertType.REBALANCE_DRIFT.value == "rebalance_drift"
+
+    def test_alert_severity_values(self):
+        from routers.portfolio import AlertSeverity
+        assert AlertSeverity.HIGH.value == "high"
+        assert AlertSeverity.MEDIUM.value == "medium"
+        assert AlertSeverity.LOW.value == "low"
+
+
+# ---------------------------------------------------------------------------
+# _to_utc_iso datetime coercion helper (M-0621)
+# ---------------------------------------------------------------------------
+
+class TestToUtcIso:
+    def test_aware_datetime_passes_through(self):
+        from datetime import datetime, timezone
+        from routers.portfolio import _to_utc_iso
+        d = datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc)
+        s = _to_utc_iso(d)
+        assert s.startswith("2026-05-15T12:00:00")
+        assert "+00:00" in s
+
+    def test_naive_datetime_assumed_utc(self):
+        from datetime import datetime
+        from routers.portfolio import _to_utc_iso
+        # Naive datetime — coerced to UTC.
+        d = datetime(2026, 5, 15, 12, 0)
+        s = _to_utc_iso(d)
+        assert "+00:00" in s
+
+    def test_pd_timestamp_naive_assumed_utc(self):
+        import pandas as pd
+        from routers.portfolio import _to_utc_iso
+        t = pd.Timestamp("2026-05-15 12:00:00")
+        s = _to_utc_iso(t)
+        # pd.Timestamp.isoformat after tz_localize(UTC) produces
+        # something like "2026-05-15T12:00:00+00:00".
+        assert "+00:00" in s
+
+    def test_invalid_type_raises(self):
+        from routers.portfolio import _to_utc_iso
+        with pytest.raises(TypeError):
+            _to_utc_iso("not-a-datetime")  # type: ignore[arg-type]

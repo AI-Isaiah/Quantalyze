@@ -1,4 +1,5 @@
 import asyncio
+import enum
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -8,6 +9,58 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+
+
+# Audit M-0620 — canonical enums for the literal strings the DB CHECK
+# constraints enforce. The literals used to be hard-coded across the
+# router; a typo like 'completed' instead of 'complete' would only
+# surface at INSERT-time at the end of a 1-3 minute pipeline. These
+# enums give the type system a chance to flag drift at edit time.
+
+class ComputationStatus(str, enum.Enum):
+    PENDING = "pending"
+    COMPUTING = "computing"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class AlertType(str, enum.Enum):
+    DRAWDOWN = "drawdown"
+    CORRELATION_SPIKE = "correlation_spike"
+    REGIME_SHIFT = "regime_shift"
+    UNDERPERFORMANCE = "underperformance"
+    CONCENTRATION_CREEP = "concentration_creep"
+    REBALANCE_DRIFT = "rebalance_drift"
+
+
+class AlertSeverity(str, enum.Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+def _to_utc_iso(value: datetime | pd.Timestamp) -> str:
+    """Coerce a datetime or pd.Timestamp into a tz-aware UTC ISO string.
+
+    Audit M-0621 — without a single coercion point, callers sprinkled
+    `datetime.now(timezone.utc).isoformat()` and `pd.Timestamp.isoformat()`
+    inconsistently. A naive pd.Timestamp .isoformat() produced a tz-naive
+    string that Postgres TIMESTAMPTZ silently assumed UTC for; mixing the
+    two surfaces was a wall-clock-shift hazard.
+    """
+    if isinstance(value, pd.Timestamp):
+        if value.tzinfo is None:
+            value = value.tz_localize(timezone.utc)
+        else:
+            value = value.tz_convert(timezone.utc)
+        return value.isoformat()
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        return value.isoformat()
+    raise TypeError(f"_to_utc_iso: unsupported value type {type(value).__name__}")
 
 from models.schemas import BridgeRequest, PortfolioAnalyticsRequest, PortfolioOptimizerRequest, VerifyStrategyRequest
 from services.audit import log_audit_event
@@ -216,7 +269,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
     # "compute my portfolio analytics" intent doesn't map 1:1 to this
     # row (the row is internal bookkeeping).
     insert_result = supabase.table("portfolio_analytics").insert(
-        {"portfolio_id": portfolio_id, "computation_status": "computing"}
+        {"portfolio_id": portfolio_id, "computation_status": ComputationStatus.COMPUTING.value}
     ).execute()
 
     if not insert_result.data:
@@ -228,7 +281,10 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         # @audit-skip: compute-job failure state.
         # error_msg is bounded to ~500 chars to keep the column readable.
         supabase.table("portfolio_analytics").update(
-            {"computation_status": "failed", "computation_error": error_msg[:500]}
+            {
+                "computation_status": ComputationStatus.FAILED.value,
+                "computation_error": error_msg[:500],
+            }
         ).eq("id", analytics_id).execute()
 
     try:
@@ -518,7 +574,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             prev_analytics = supabase.table("portfolio_analytics").select(
                 "optimizer_suggestions"
             ).eq("portfolio_id", portfolio_id).eq(
-                "computation_status", "complete"
+                "computation_status", ComputationStatus.COMPLETE.value
             ).order("computed_at", desc=True).limit(1).execute()
             if prev_analytics.data and prev_analytics.data[0].get("optimizer_suggestions"):
                 analytics_payload["optimizer_suggestions"] = prev_analytics.data[0]["optimizer_suggestions"]
@@ -559,7 +615,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
 
         # Persist results
         update_payload = sanitize_metrics({
-            "computation_status": "complete",
+            "computation_status": ComputationStatus.COMPLETE.value,
             "computation_error": None,
             "total_aum": total_aum,
             "total_return_twr": portfolio_twr,
@@ -898,11 +954,11 @@ def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
         ).eq(
             "strategy_id", worst["strategy_id"]
         ).eq(
-            "alert_type", "rebalance_drift"
+            "alert_type", AlertType.REBALANCE_DRIFT.value
         ).is_(
             "acknowledged_at", "null"
         ).gte(
-            "triggered_at", week_start.isoformat()
+            "triggered_at", _to_utc_iso(week_start)
         ).limit(1).execute()
         if existing.data:
             return
@@ -918,7 +974,7 @@ def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
             supabase.table("portfolio_alerts").insert({
                 "portfolio_id": portfolio_id,
                 "strategy_id": worst["strategy_id"],
-                "alert_type": "rebalance_drift",
+                "alert_type": AlertType.REBALANCE_DRIFT.value,
                 "severity": severity,
                 "message": message,
                 "metadata": {
@@ -973,7 +1029,7 @@ async def portfolio_analytics(request: Request, req: PortfolioAnalyticsRequest):
     async with _compute_semaphore:
         in_flight = supabase.table("portfolio_analytics").select("id").eq(
             "portfolio_id", req.portfolio_id
-        ).eq("computation_status", "computing").limit(1).execute()
+        ).eq("computation_status", ComputationStatus.COMPUTING.value).limit(1).execute()
 
         if in_flight.data:
             raise HTTPException(
@@ -1106,7 +1162,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
 
     latest = supabase.table("portfolio_analytics").select("id").eq(
         "portfolio_id", req.portfolio_id
-    ).eq("computation_status", "complete").order("computed_at", desc=True).limit(1).execute()
+    ).eq("computation_status", ComputationStatus.COMPLETE.value).order("computed_at", desc=True).limit(1).execute()
 
     persisted = False
     if latest.data:

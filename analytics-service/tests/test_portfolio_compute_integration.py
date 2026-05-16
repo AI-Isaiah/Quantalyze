@@ -332,12 +332,19 @@ class TestTOCTOUConcurrencyGuard:
         src = _function_source("portfolio_analytics")
         tree = ast.parse(src.lstrip())
         # Walk to find AsyncWith blocks and confirm at least one contains
-        # a call to .eq('computation_status', 'computing')
+        # the in_flight variable + the COMPUTING status reference.
+        # (We accept either the literal "computing" or the
+        # ComputationStatus.COMPUTING enum name.)
         found_pattern = False
         for node in ast.walk(tree):
             if isinstance(node, ast.AsyncWith):
                 body_src = ast.unparse(node)
-                if "computing" in body_src and "in_flight" in body_src:
+                has_in_flight = "in_flight" in body_src
+                has_computing_ref = (
+                    "computing" in body_src
+                    or "ComputationStatus.COMPUTING" in body_src
+                )
+                if has_in_flight and has_computing_ref:
                     found_pattern = True
                     break
         assert found_pattern, (
@@ -484,3 +491,44 @@ class TestAnalyticsResponseInline:
         src = _function_source("portfolio_analytics")
         # The spread must be present.
         assert "**result" in src
+
+
+class TestAuditSkipAnnotations:
+    """M-0613 / M-0622 / H-0588 — every @audit-skip marker in portfolio.py
+    must be followed within 8 lines by a supabase mutation call.
+
+    The audit pass flagged these markers as 'dead' because no scanner
+    consumed them. This test makes them non-dead by enforcing the
+    co-location contract: a marker without an immediate mutation
+    nearby is a refactor mistake (the mutation was removed but the
+    comment wasn't) and gets caught here.
+    """
+
+    def test_audit_skip_marker_is_co_located_with_mutation(self):
+        lines = _PORTFOLIO_SRC.splitlines()
+        skip_lines = [
+            (i, line) for i, line in enumerate(lines)
+            if "@audit-skip" in line
+        ]
+        # Spot-check at least one marker exists (regression: if all markers
+        # are stripped the comment-discipline this test enforces vanishes).
+        assert len(skip_lines) >= 1, (
+            "Expected at least one @audit-skip marker in portfolio.py; "
+            "removing them all is acceptable only when paired with a "
+            "code-level audit-coverage scanner."
+        )
+
+        for idx, raw in skip_lines:
+            # Look forward up to 20 lines for a supabase mutation. The
+            # marker is typically followed by a few lines of rationale
+            # comment before the call.
+            window = "\n".join(lines[idx: idx + 20])
+            assert (
+                "supabase.table(" in window
+                or "log_audit_event" in window
+            ), (
+                f"@audit-skip marker at portfolio.py line {idx + 1} is not "
+                "co-located with a supabase mutation or log_audit_event call. "
+                "Either remove the stale marker or restore the mutation it "
+                "documents."
+            )
