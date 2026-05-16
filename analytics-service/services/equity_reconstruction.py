@@ -1846,11 +1846,16 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
     # Stamp a distinct ``reconstruct_partial_unsupported`` kind so
     # the dashboard can render an "unsupported account shape" state
     # rather than implying empty equity.
+    # RT-1 (inline red-team 2026-05-16): round to 2dp before equality
+    # so positions that cancel to 1e-9 (float noise from realised PnL
+    # close-outs) still classify as a zero-curve. Otherwise a single
+    # 1e-12 residual flips the audit kind back to ``reconstruct_complete``
+    # and silently loses the partial-unsupported signal.
     inverse_only_zero_curve = (
         bool(telemetry["inverse_perp_symbols"])
         and bool(rows)
         and all(
-            float((r.get("value_usd") or 0.0)) == 0.0 for r in rows
+            round(float((r.get("value_usd") or 0.0)), 2) == 0.0 for r in rows
         )
     )
     if count == 0 and rows and not sibling_check.has_siblings:
@@ -1935,6 +1940,10 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
         # per-symbol emit would flood audit_events on every daily
         # refresh for any allocator with a stuck poller.
         perp_upnl_missing_symbols: list[str] = []
+        # RT-2: track the true count separately from the bounded list
+        # so an unusually noisy account (>50 stuck symbols) still
+        # surfaces the magnitude in the audit metadata.
+        perp_upnl_missing_total = 0
         for h in holdings:
             sym = (h.get("symbol") or "").upper()
             if not sym:
@@ -1959,7 +1968,16 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
                         "venue=%s — skipping",
                         allocator_id, sym, venue,
                     )
-                    if sym not in perp_upnl_missing_symbols:
+                    # RT-2 (inline red-team 2026-05-16): bound the
+                    # in-loop dedupe list at 50 to keep the O(N) `in`
+                    # check cheap and the metadata payload predictable.
+                    # missing_count tracks the true total via the
+                    # separate counter so magnitude survives the cap.
+                    perp_upnl_missing_total += 1
+                    if (
+                        sym not in perp_upnl_missing_symbols
+                        and len(perp_upnl_missing_symbols) < 50
+                    ):
                         perp_upnl_missing_symbols.append(sym)
                     continue
                 try:
@@ -1985,14 +2003,15 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
                 total += v
 
         # SPEC-SFH-4: emit ONE aggregated perp_upnl_missing event at
-        # the end of the loop (cap at 50 symbols to bound metadata).
+        # the end of the loop (symbols cap at 50, missing_count is
+        # the true total via the separate RT-2 counter).
         if perp_upnl_missing_symbols:
             _emit_audit(
                 allocator_id, api_key_id,
                 "allocator.equity.perp_upnl_missing",
                 {
-                    "symbols": perp_upnl_missing_symbols[:50],
-                    "missing_count": len(perp_upnl_missing_symbols),
+                    "symbols": perp_upnl_missing_symbols,
+                    "missing_count": perp_upnl_missing_total,
                     "venue": venue,
                 },
             )
