@@ -611,19 +611,34 @@ def _emit_audit(
     """f7 — Route allocator.holdings.sync_* audit events through
     services.audit.log_audit_event (NOT a local no-op).
 
-    Fire-and-forget; log_audit_event swallows all errors internally so
-    an audit drop never fails the compute path. The function is
-    re-imported locally rather than referenced at module scope so test
-    monkeypatches on services.audit.log_audit_event resolve correctly.
+    Fire-and-forget at the worker level: we wrap log_audit_event in a
+    try/except because, per the audit-2026-05-07 P907 contract,
+    services.audit.log_audit_event RE-RAISES on permission_denied
+    (SQLSTATE 42501) and on unrecognized exception classes. An audit
+    drop must never fail the compute path — at the success callsite
+    (line ~1398) it would mark a complete holdings sync as FAILED;
+    at the failure callsites (lines ~1322/~1352) it would swap the
+    original error envelope (rate_limited / revoked credential) with an
+    audit-system error in compute_jobs.last_error, hiding the real root
+    cause from on-call. The function is re-imported locally rather than
+    referenced at module scope so test monkeypatches on
+    services.audit.log_audit_event resolve correctly.
     """
     from services import audit as audit_module
-    audit_module.log_audit_event(
-        user_id=allocator_id,
-        action=action,
-        entity_type="api_key",
-        entity_id=api_key_id,
-        metadata=metadata or {},
-    )
+    try:
+        audit_module.log_audit_event(
+            user_id=allocator_id,
+            action=action,
+            entity_type="api_key",
+            entity_id=api_key_id,
+            metadata=metadata or {},
+        )
+    except Exception as audit_exc:  # noqa: BLE001
+        logger.warning(
+            "_emit_audit: audit emit %s failed for allocator=%s api_key=%s — "
+            "compute path continues, audit row dropped: %s",
+            action, allocator_id, api_key_id, audit_exc,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -895,13 +910,20 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # invocation re-emits all flags it owns; we just lose the phase2
     # signal until the next sync_trades cron tick.
     #
-    # Self-healing on success: when phase2_complete=True (the Phase 2
-    # batch loop committed every batch), we ALSO clear the lingering
-    # phase2_* keys if present so a recovered strategy stops looking
-    # "needs attention" to the admin. We skip the read entirely when
-    # phase2_failed=False AND phase2_complete=False (Phase 2 wasn't run,
-    # nothing to do).
-    needs_flag_write = phase2_failed or phase2_complete
+    # Self-healing on success: when Phase 2 ran without raising
+    # (phase2_failed=False), we ALSO clear the lingering phase2_* keys if
+    # present so a recovered strategy stops looking "needs attention" to
+    # the admin. We treat ANY non-failing Phase 2 run as a recovery
+    # signal — including a successful fetch that returned ZERO new fills
+    # (paused account, weekend, flat window). The earlier gate of
+    # `phase2_complete` only flipped True when at least one batch was
+    # persisted (line 775's `if raw_fills:`), so a healthy strategy with
+    # no new fills would carry a stale phase2_fill_ingestion_failed=True
+    # flag forever (HIGH code-review finding). We skip the read entirely
+    # only when Phase 2 was not run at all (_RAW_TRADE_INGESTION_ENABLED
+    # is False).
+    phase2_success = _RAW_TRADE_INGESTION_ENABLED and not phase2_failed
+    needs_flag_write = phase2_failed or phase2_success
     if needs_flag_write:
         def _load_existing_flags() -> dict:
             res = (
@@ -1472,7 +1494,12 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
     since_ms = parse_since_ms(None, preferred=since_iso)
 
     # Step 1: fetch raw exchange fills (past 24h window).
-    from services.exchange import ColdStartSymbolDiscoveryError, fetch_raw_trades
+    # NB: `fetch_raw_trades` is imported at module scope (services.exchange);
+    # we re-import only `ColdStartSymbolDiscoveryError` here because it is a
+    # rarely-raised sentinel. Importing `fetch_raw_trades` locally would shadow
+    # the module-level binding and break test patches that target
+    # `services.job_worker.fetch_raw_trades` (PR-Y1 code-review HIGH).
+    from services.exchange import ColdStartSymbolDiscoveryError
 
     try:
         exchange_fills = await fetch_raw_trades(
@@ -1595,16 +1622,31 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
         )
 
     if owner_id:
-        log_audit_event(
-            user_id=owner_id,
-            action="reconcile.compare",
-            entity_type="reconcile_run",
-            entity_id=strategy_id,
-            metadata={
-                "status": report.status,
-                "discrepancy_count": report.discrepancy_count,
-            },
-        )
+        # Mirror the owner-lookup guard above: log_audit_event re-raises on
+        # permission_denied / unknown exception classes per the
+        # audit-2026-05-07 P907 contract. A bare call here would propagate
+        # past the alert fan-out below — the reconcile_reports row has
+        # already been upserted, so the report would exist with no alerts
+        # and the worker would classify the audit error as the job
+        # failure. Make the audit emit best-effort so step 5's alert
+        # generation always runs.
+        try:
+            log_audit_event(
+                user_id=owner_id,
+                action="reconcile.compare",
+                entity_type="reconcile_run",
+                entity_id=strategy_id,
+                metadata={
+                    "status": report.status,
+                    "discrepancy_count": report.discrepancy_count,
+                },
+            )
+        except Exception as audit_exc:  # noqa: BLE001
+            logger.warning(
+                "reconcile_strategy: audit emit reconcile.compare failed "
+                "strategy=%s exc=%s — alert fan-out continues",
+                strategy_id, audit_exc,
+            )
     else:
         # M-0669: explicit observability for the orphan-strategy /
         # owner-lookup-failed case. The comment used to normalize the drop;
