@@ -323,11 +323,12 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
 def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     """Load per-allocator data: preferences, portfolio, thumbs-down history.
 
-    Phase 09 / D-16: merges both portfolio_strategies (legacy) and
-    allocator_holdings (real holdings as pseudo-strategies) into the combined
-    context dicts. Weights are renormalized across the combined set so they sum
-    to 1.0. This function remains a synchronous `def` — it is called via
-    asyncio.to_thread at line ~268 (finding f1 mandate: MUST NOT be async def).
+    Merges legacy ``portfolio_strategies`` and ``allocator_holdings``
+    (real holdings as pseudo-strategies) into the combined context;
+    weights are renormalized across the combined set to sum to 1.0.
+    Stays synchronous (called via ``asyncio.to_thread`` from
+    ``_score_one_allocator``) — making it ``async def`` would break the
+    thread-pool pattern.
     """
     supabase = get_supabase()
 
@@ -937,7 +938,7 @@ async def eval_metrics(
             compute_hit_rate_metrics, lookback_days, partner_tag
         )
     except PaginatedSelectTruncated as err:
-        # _paginated_select hit its hard cap — without this we'd silently
+        # paginated_select hit its hard cap — without this we'd silently
         # aggregate over a partial window. 503 (data scale exceeded) is a
         # cleaner monitoring signal than a generic 500.
         logger.exception("match_engine eval truncated at hard cap: %s", err)

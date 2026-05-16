@@ -7,6 +7,29 @@ import ccxt.async_support as ccxt_async
 from services.exchange import create_exchange, validate_key_permissions
 
 
+def _attach_paginated_chain(builder: MagicMock, rows: list[dict]) -> None:
+    """Mount a chainable ``.order().range().execute()`` on ``builder`` so it
+    behaves like a PostgREST builder that's been drained by
+    ``paginated_select`` — the first ``.range()`` returns ``rows``,
+    subsequent calls return an empty list (short-page natural stop).
+    """
+    state = {"called": False}
+
+    def _range(start, end):
+        sliced = MagicMock()
+        if not state["called"]:
+            state["called"] = True
+            sliced.execute.return_value = MagicMock(data=rows)
+        else:
+            sliced.execute.return_value = MagicMock(data=[])
+        return sliced
+
+    order = MagicMock()
+    order.range.side_effect = _range
+    order.order.return_value = order
+    builder.order.return_value = order
+
+
 class TestCreateExchange:
     def test_supported_exchanges(self):
         for name in ["binance", "okx", "bybit"]:
@@ -404,12 +427,13 @@ class TestFetchRawTrades:
             mock_eq1 = MagicMock()
             mock_eq2 = MagicMock()
             if name == "trades":
-                mock_eq2.execute.return_value = MagicMock(data=[
-                    {"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}
-                ])
+                _attach_paginated_chain(
+                    mock_eq2,
+                    [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}],
+                )
                 mock_eq1.eq.return_value = mock_eq2
             else:
-                mock_eq1.execute.return_value = MagicMock(data=[])
+                _attach_paginated_chain(mock_eq1, [])
             mock_sel.eq.return_value = mock_eq1
             mock_t.select.return_value = mock_sel
             return mock_t
@@ -531,12 +555,13 @@ class TestFetchRawTrades:
             mock_eq1 = MagicMock()
             mock_eq2 = MagicMock()
             if name == "trades":
-                mock_eq2.execute.return_value = MagicMock(data=[
-                    {"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}
-                ])
+                _attach_paginated_chain(
+                    mock_eq2,
+                    [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}],
+                )
                 mock_eq1.eq.return_value = mock_eq2
             else:
-                mock_eq1.execute.return_value = MagicMock(data=[])
+                _attach_paginated_chain(mock_eq1, [])
             mock_sel.eq.return_value = mock_eq1
             mock_t.select.return_value = mock_sel
             return mock_t
@@ -634,8 +659,8 @@ class TestG12BColdStart:
             mock_sel = MagicMock()
             mock_eq1 = MagicMock()
             mock_eq2 = MagicMock()
-            mock_eq2.execute.return_value = MagicMock(data=[])
-            mock_eq1.execute.return_value = MagicMock(data=[])
+            _attach_paginated_chain(mock_eq2, [])
+            _attach_paginated_chain(mock_eq1, [])
             mock_eq1.eq.return_value = mock_eq2
             mock_sel.eq.return_value = mock_eq1
             mock_t.select.return_value = mock_sel
@@ -678,8 +703,8 @@ class TestG12BColdStart:
             mock_sel = MagicMock()
             mock_eq1 = MagicMock()
             mock_eq2 = MagicMock()
-            mock_eq2.execute.return_value = MagicMock(data=[])
-            mock_eq1.execute.return_value = MagicMock(data=[])
+            _attach_paginated_chain(mock_eq2, [])
+            _attach_paginated_chain(mock_eq1, [])
             mock_eq1.eq.return_value = mock_eq2
             mock_sel.eq.return_value = mock_eq1
             mock_t.select.return_value = mock_sel
@@ -723,14 +748,17 @@ class TestG12BBinanceConcurrency:
             mock_eq1 = MagicMock()
             mock_eq2 = MagicMock()
             if name == "trades":
-                mock_eq2.execute.return_value = MagicMock(data=[
-                    {"symbol": "BTCUSDT"},
-                    {"symbol": "ETHUSDT"},
-                    {"symbol": "SOLUSDT"},
-                ])
+                _attach_paginated_chain(
+                    mock_eq2,
+                    [
+                        {"symbol": "BTCUSDT"},
+                        {"symbol": "ETHUSDT"},
+                        {"symbol": "SOLUSDT"},
+                    ],
+                )
                 mock_eq1.eq.return_value = mock_eq2
             else:
-                mock_eq1.execute.return_value = MagicMock(data=[])
+                _attach_paginated_chain(mock_eq1, [])
             mock_sel.eq.return_value = mock_eq1
             mock_t.select.return_value = mock_sel
             return mock_t
@@ -800,13 +828,13 @@ class TestG12BBinanceConcurrency:
             mock_eq1 = MagicMock()
             mock_eq2 = MagicMock()
             if name == "trades":
-                mock_eq2.execute.return_value = MagicMock(data=[
-                    {"symbol": "BTCUSDT"},
-                    {"symbol": "ETHUSDT"},
-                ])
+                _attach_paginated_chain(
+                    mock_eq2,
+                    [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}],
+                )
                 mock_eq1.eq.return_value = mock_eq2
             else:
-                mock_eq1.execute.return_value = MagicMock(data=[])
+                _attach_paginated_chain(mock_eq1, [])
             mock_sel.eq.return_value = mock_eq1
             mock_t.select.return_value = mock_sel
             return mock_t
@@ -865,13 +893,13 @@ class TestG12BBinanceConcurrency:
             mock_eq1 = MagicMock()
             mock_eq2 = MagicMock()
             if name == "trades":
-                mock_eq2.execute.return_value = MagicMock(data=[
-                    {"symbol": "BTCUSDT"},
-                    {"symbol": "ETHUSDT"},
-                ])
+                _attach_paginated_chain(
+                    mock_eq2,
+                    [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}],
+                )
                 mock_eq1.eq.return_value = mock_eq2
             else:
-                mock_eq1.execute.return_value = MagicMock(data=[])
+                _attach_paginated_chain(mock_eq1, [])
             mock_sel.eq.return_value = mock_eq1
             mock_t.select.return_value = mock_sel
             return mock_t
@@ -898,6 +926,254 @@ class TestG12BBinanceConcurrency:
                 await fetch_raw_trades(
                     mock_exchange, "strat-1", mock_supabase
                 )
+
+    @pytest.mark.asyncio
+    async def test_binance_per_symbol_total_failure_raises_typed(self) -> None:
+        """When EVERY per-symbol fetch fails, the function previously
+        returned an empty fills list — same false-success outcome that
+        ColdStartSymbolDiscoveryError eliminates. Post-fix, total
+        per-symbol failure must raise BinancePerSymbolFetchError so the
+        worker marks the job failed_retry."""
+        import asyncio
+        from services.exchange import (
+            BinancePerSymbolFetchError,
+            fetch_raw_trades,
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+
+        async def _always_fail(symbol, since=None, limit=None):
+            raise RuntimeError(f"simulated 500 for {symbol}")
+
+        mock_exchange.fetch_my_trades = _always_fail
+
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            if name == "trades":
+                _attach_paginated_chain(
+                    mock_eq2,
+                    [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}],
+                )
+                mock_eq1.eq.return_value = mock_eq2
+            else:
+                _attach_paginated_chain(mock_eq1, [])
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            with pytest.raises(BinancePerSymbolFetchError) as exc_info:
+                await fetch_raw_trades(
+                    mock_exchange, "strat-1", mock_supabase
+                )
+        # Both failed symbols must be reported.
+        assert sorted(exc_info.value.failed_symbols) == ["BTCUSDT", "ETHUSDT"]
+        assert isinstance(exc_info.value.first_error, RuntimeError)
+
+    @pytest.mark.asyncio
+    async def test_binance_per_symbol_partial_failure_does_not_raise(
+        self,
+    ) -> None:
+        """The partial-success contract must survive: when SOME (not
+        all) symbols fail, fills from the successful symbols are
+        returned and a per-symbol-failure summary is logged. A
+        regression that promoted partial failure to a raise would
+        break the existing test_binance_per_symbol_partial_failure
+        contract; this test pins both directions explicitly."""
+        import asyncio
+        import logging
+        from services.exchange import fetch_raw_trades
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+
+        async def _fetch_my_trades(symbol, since=None, limit=None):
+            if "ETH" in symbol:
+                raise RuntimeError("simulated 500")
+            return [
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "buy",
+                    "price": 60000.0,
+                    "amount": 0.1,
+                    "datetime": "2024-01-01T00:00:00Z",
+                    "order": "ord-1",
+                    "id": "fill-1",
+                    "fee": {"cost": 0.6, "currency": "USDT"},
+                    "takerOrMaker": "taker",
+                    "info": {},
+                },
+            ]
+
+        mock_exchange.fetch_my_trades = _fetch_my_trades
+
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            if name == "trades":
+                _attach_paginated_chain(
+                    mock_eq2,
+                    [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}],
+                )
+                mock_eq1.eq.return_value = mock_eq2
+            else:
+                _attach_paginated_chain(mock_eq1, [])
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            with patch.object(
+                logging.getLogger("quantalyze.analytics"),
+                "warning",
+            ) as mock_warn:
+                result = await fetch_raw_trades(
+                    mock_exchange, "strat-1", mock_supabase
+                )
+
+        # Partial success — BTCUSDT's fill landed.
+        assert len(result) == 1
+        # Per-symbol failure logged AND summary logged. Use call.args to
+        # inspect the separate args (str(call) shows the format string,
+        # not the rendered message).
+        per_symbol_logged = any(
+            "Binance fetch_my_trades failed for" in str(c.args[0])
+            and "ETHUSDT" in c.args
+            for c in mock_warn.call_args_list
+        )
+        summary_logged = any(
+            "symbols failed" in str(c.args[0]) and c.args[1:] == (1, 2)
+            for c in mock_warn.call_args_list
+        )
+        assert per_symbol_logged
+        assert summary_logged, (
+            "partial failure must log a count summary so bad-symbol rate is visible"
+        )
+
+    @pytest.mark.asyncio
+    async def test_binance_semaphore_does_not_serialize_per_symbol_pages(
+        self,
+    ) -> None:
+        """Phase A moved ``async with sem:`` from outside the per-page
+        loop to inside the network call. A regression that re-wraps
+        the entire 20-page loop would still let ``asyncio.gather``
+        fire 5 tasks concurrently but would force each symbol to hold
+        a slot for all 20 RTTs — the test below proves page-1 of
+        symbol B can complete BEFORE page-2 of symbol A by
+        instrumenting the call ordering."""
+        import asyncio
+        from services.exchange import fetch_raw_trades
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+
+        # Two symbols, each needing 2 pages. Tracks call ORDER per symbol.
+        page_counts: dict[str, int] = {}
+        call_log: list[str] = []
+        page_2_started = asyncio.Event()
+
+        async def _fetch_my_trades(symbol, since=None, limit=None):
+            page_counts[symbol] = page_counts.get(symbol, 0) + 1
+            page = page_counts[symbol]
+            call_log.append(f"{symbol}-p{page}")
+            # Page 1 of symbol A waits for page 1 of symbol B to start
+            # before returning, proving they ran concurrently. Page-2
+            # tracking signals interleaving: symbol B's page 2 should
+            # be able to fire before symbol A's page 2 if the
+            # semaphore is per-call (Phase A) rather than per-loop.
+            if page == 1:
+                # Return a full page so a second page is needed.
+                if symbol == "BTCUSDT":
+                    # A short delay so B can interleave.
+                    await asyncio.sleep(0.01)
+                page_2_started.set()
+                return [
+                    {
+                        "symbol": "BTC/USDT:USDT",
+                        "side": "buy",
+                        "price": 60000.0,
+                        "amount": 0.1,
+                        "datetime": "2024-01-01T00:00:00Z",
+                        "order": f"ord-{symbol}-{i}",
+                        "id": f"fill-{symbol}-{i}",
+                        "fee": {"cost": 0.6, "currency": "USDT"},
+                        "takerOrMaker": "taker",
+                        "timestamp": 1700000000000 + i,
+                        "info": {},
+                    }
+                    for i in range(1000)  # full page → triggers page 2
+                ]
+            return []  # short page → end loop
+
+        mock_exchange.fetch_my_trades = _fetch_my_trades
+
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            if name == "trades":
+                _attach_paginated_chain(
+                    mock_eq2,
+                    [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}],
+                )
+                mock_eq1.eq.return_value = mock_eq2
+            else:
+                _attach_paginated_chain(mock_eq1, [])
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            await fetch_raw_trades(
+                mock_exchange, "strat-1", mock_supabase
+            )
+
+        # Both symbols ran 2 pages each.
+        assert page_counts == {"BTCUSDT": 2, "ETHUSDT": 2}
+        # Concurrency proof: ETHUSDT-p1 must appear in call_log
+        # BEFORE BTCUSDT-p2 (i.e., page-1 fan-out completes for both
+        # symbols before BTCUSDT advances to page-2). With per-loop
+        # semaphore + sem=2+ that's preserved; with per-loop semaphore
+        # + sem=1 it would serialize — but per-call semaphore (current
+        # behavior) guarantees this regardless of sem size. We test
+        # the strong invariant.
+        eth_p1_idx = call_log.index("ETHUSDT-p1")
+        btc_p2_idx = call_log.index("BTCUSDT-p2")
+        assert eth_p1_idx < btc_p2_idx, (
+            f"ETHUSDT-p1 must complete before BTCUSDT-p2 (per-call semaphore). "
+            f"call_log={call_log}"
+        )
 
 
 class TestG12BFillRowFactory:
@@ -1921,12 +2197,10 @@ class TestG12BBinancePaginationLoop:
             mock_eq1 = MagicMock()
             mock_eq2 = MagicMock()
             if name == "trades":
-                mock_eq2.execute.return_value = MagicMock(data=[
-                    {"symbol": "BTCUSDT"}
-                ])
+                _attach_paginated_chain(mock_eq2, [{"symbol": "BTCUSDT"}])
                 mock_eq1.eq.return_value = mock_eq2
             else:
-                mock_eq1.execute.return_value = MagicMock(data=[])
+                _attach_paginated_chain(mock_eq1, [])
             mock_sel.eq.return_value = mock_eq1
             mock_t.select.return_value = mock_sel
             return mock_t
@@ -2000,12 +2274,10 @@ class TestG12BBinancePaginationLoop:
             mock_eq1 = MagicMock()
             mock_eq2 = MagicMock()
             if name == "trades":
-                mock_eq2.execute.return_value = MagicMock(data=[
-                    {"symbol": "BTCUSDT"}
-                ])
+                _attach_paginated_chain(mock_eq2, [{"symbol": "BTCUSDT"}])
                 mock_eq1.eq.return_value = mock_eq2
             else:
-                mock_eq1.execute.return_value = MagicMock(data=[])
+                _attach_paginated_chain(mock_eq1, [])
             mock_sel.eq.return_value = mock_eq1
             mock_t.select.return_value = mock_sel
             return mock_t
@@ -2097,6 +2369,75 @@ class TestG12BOkxCursorAndBegin:
             "OKX must paginate with ``after`` to walk into older history; "
             "``before`` walks toward newer records and oscillates."
         )
+
+    @pytest.mark.asyncio
+    async def test_okx_pagination_walks_after_cursor_across_multiple_pages(
+        self,
+    ) -> None:
+        """Multi-page walk: a regression that picked ``data[0]`` (NEWEST,
+        DESC-sorted) instead of ``data[-1]`` (OLDEST) would have passed
+        the single-page after-cursor test as long as `data[0]` happened
+        to differ from `data[-1]`. This 3-page test pins the cursor
+        source: every subsequent page's ``after`` must equal the OLDEST
+        ``tradeId`` from the prior page (last entry of DESC-sorted data),
+        NOT the newest."""
+        from services.exchange import fetch_raw_trades
+
+        captured_params: list[dict] = []
+
+        # Three full pages of 100 fills each (DESC by ts in real OKX),
+        # then a short page of 5 (natural stop).
+        def _build_page(start_idx: int, count: int) -> list[dict]:
+            return [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "side": "buy",
+                    "fillPx": "60000",
+                    "fillSz": "0.1",
+                    "fee": "-0.6",
+                    "feeCcy": "USDT",
+                    # DESC ts within page (newest first); page boundaries
+                    # also descend.
+                    "ts": str(1700000000000 - (start_idx + i)),
+                    "ordId": f"ord-{start_idx + i}",
+                    "tradeId": f"trade-{start_idx + i}",
+                    "execType": "T",
+                }
+                for i in range(count)
+            ]
+
+        pages = [
+            _build_page(0, 100),    # page 1: trade-0 (newest) ... trade-99 (oldest)
+            _build_page(100, 100),  # page 2: trade-100 ... trade-199
+            _build_page(200, 100),  # page 3: trade-200 ... trade-299
+            _build_page(300, 5),    # page 4: short page → natural stop
+        ]
+        call_idx = {"n": 0}
+
+        async def _fills_history(params):
+            captured_params.append(dict(params))
+            i = call_idx["n"]
+            call_idx["n"] += 1
+            return {"data": pages[i] if i < len(pages) else []}
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = _fills_history
+
+        mock_supabase = MagicMock()
+        await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+
+        assert len(captured_params) == 4
+        # Page 1: no cursor.
+        assert "after" not in captured_params[0]
+        # Pages 2-4: cursor MUST be the OLDEST tradeId of the prior page
+        # (last entry, DESC-sorted), NOT the newest (first entry).
+        assert captured_params[1]["after"] == "trade-99", (
+            "page 2 cursor must be data[-1] (oldest); a regression that "
+            "picked data[0] (newest) would oscillate"
+        )
+        assert captured_params[2]["after"] == "trade-199"
+        assert captured_params[3]["after"] == "trade-299"
 
     @pytest.mark.asyncio
     async def test_okx_begin_sent_on_every_page(self) -> None:
@@ -2239,6 +2580,137 @@ class TestG12BCcxtTimestampNormalization:
         assert out is None
         assert mock_err.call_count == 1
         assert "unparseable timestamp" in str(mock_err.call_args_list[0])
+
+    def test_normalize_fill_drops_bool_timestamp(self) -> None:
+        """Python's ``True`` is an ``int`` subclass (``True == 1``).
+        Without an explicit bool guard ``coerce_to_aware_utc(True, ...)``
+        produces ``float(True)/1000 = 0.001`` → 1970-01-01T00:00:00.001
+        phantom row, same FIFO-corruption shape as ``timestamp=0``."""
+        import logging
+        from services.exchange import _normalize_fill
+
+        with patch.object(
+            logging.getLogger("quantalyze.analytics"),
+            "error",
+        ) as mock_err:
+            out = _normalize_fill(
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "buy",
+                    "price": 60000.0,
+                    "amount": 0.1,
+                    "datetime": "",
+                    "timestamp": True,  # bool, int subclass
+                    "order": "ord-1",
+                    "id": "fill-bool",
+                    "fee": {"cost": 0.6, "currency": "USDT"},
+                    "takerOrMaker": "taker",
+                    "info": {},
+                },
+                "binance",
+            )
+        assert out is None, "bool timestamp must be treated as missing"
+        assert mock_err.call_count == 1
+
+    def test_normalize_fill_drops_zero_epoch_timestamp(self) -> None:
+        """Numeric ``timestamp=0`` is the same FIFO-poisoning shape as the
+        H-0673 bug: ``coerce_to_aware_utc(0)`` would produce a
+        1970-01-01 phantom row that becomes the "earliest fill" for the
+        symbol. Post-fix, epoch-zero is treated as missing — the fill is
+        dropped just like an absent timestamp."""
+        import logging
+        from services.exchange import _normalize_fill
+
+        with patch.object(
+            logging.getLogger("quantalyze.analytics"),
+            "error",
+        ) as mock_err:
+            out = _normalize_fill(
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "buy",
+                    "price": 60000.0,
+                    "amount": 0.1,
+                    "datetime": "",
+                    "timestamp": 0,  # epoch sentinel
+                    "order": "ord-1",
+                    "id": "fill-zero",
+                    "fee": {"cost": 0.6, "currency": "USDT"},
+                    "takerOrMaker": "taker",
+                    "info": {},
+                },
+                "binance",
+            )
+        assert out is None, "epoch-zero timestamp must be treated as missing"
+        assert mock_err.call_count == 1
+
+    def test_normalize_fill_drops_missing_price_or_amount(self) -> None:
+        """Pre-Phase B `_normalize_fill` silently substituted ``0`` for
+        missing/non-numeric ``price`` or ``amount`` — same silent-failure
+        shape as the H-0673 timestamp bug. Post-fix, both are required
+        and the fill is dropped if either is missing."""
+        import logging
+        from services.exchange import _normalize_fill
+
+        for missing in ("price", "amount"):
+            base = {
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "price": 60000.0,
+                "amount": 0.1,
+                "datetime": "2024-01-01T00:00:00Z",
+                "order": "ord-1",
+                "id": f"fill-missing-{missing}",
+                "fee": {"cost": 0.6, "currency": "USDT"},
+                "takerOrMaker": "taker",
+                "info": {},
+            }
+            base.pop(missing)
+            with patch.object(
+                logging.getLogger("quantalyze.analytics"),
+                "error",
+            ) as mock_err:
+                out = _normalize_fill(base, "binance")
+            assert out is None, (
+                f"fill missing {missing} must be dropped, not silently zeroed"
+            )
+            assert mock_err.call_count == 1
+            assert "missing/non-numeric" in str(mock_err.call_args_list[0])
+
+    def test_normalize_fill_logs_warning_on_primary_field_parse_failure(
+        self,
+    ) -> None:
+        """When ``timestamp`` is present but unparseable AND ``datetime``
+        is healthy, the fill should still land — but a WARNING must fire
+        so primary-field producer drift is visible (a silent fallback
+        masks an upstream poisoning bug)."""
+        import logging
+        from services.exchange import _normalize_fill
+
+        with patch.object(
+            logging.getLogger("quantalyze.analytics"),
+            "warning",
+        ) as mock_warn:
+            out = _normalize_fill(
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "buy",
+                    "price": 60000.0,
+                    "amount": 0.1,
+                    "datetime": "2024-01-01T00:00:00Z",
+                    "timestamp": "not-a-number",  # garbage primary field
+                    "order": "ord-1",
+                    "id": "fill-fallback",
+                    "fee": {"cost": 0.6, "currency": "USDT"},
+                    "takerOrMaker": "taker",
+                    "info": {},
+                },
+                "binance",
+            )
+        assert out is not None, "fallback to datetime should succeed"
+        assert mock_warn.call_count >= 1, (
+            "primary-field parse failure must log a warning, not fall through silently"
+        )
 
 
 # ─── audit-2026-05-07 H-0663 — OKX funding-row contract ────

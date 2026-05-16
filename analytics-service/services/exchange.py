@@ -4,6 +4,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Literal, TypedDict
 
+from services.ingestion._timestamps import coerce_to_aware_utc
+from services.metrics import _safe_float
+
 logger = logging.getLogger("quantalyze.analytics")
 
 
@@ -22,32 +25,42 @@ OVERLAP_WINDOW_MS = 3_600_000
 
 
 class ColdStartSymbolDiscoveryError(Exception):
-    """Audit-2026-05-07 G12.B.1 — raised when Binance cold-start symbol
-    discovery (fetch_positions fallback) fails or yields no symbols.
-
-    Pre-fix, this branch silently returned an empty fills list and the
-    caller treated the sync_trades job as success (allocator's Trade
-    Volume tab stayed empty even with 90 days of trades on the account).
-    Raising a typed exception lets the caller mark the job for retry
-    instead of cementing a false-success state.
+    """Raised when Binance cold-start symbol discovery (fetch_positions
+    fallback) fails or yields no symbols. Lets the caller mark the
+    sync_trades job for retry instead of cementing a false-success state
+    (allocator's Trade Volume tab stays empty even with 90 days of
+    trades on the account) — see G12.B.1.
     """
 
 
+class BinancePerSymbolFetchError(Exception):
+    """Raised when the Binance per-symbol fan-out fetch fails for ALL
+    symbols. Preserves partial-success when only some symbols failed
+    (existing test contract), but a 100% failure rate is the same false-
+    success shape that ColdStartSymbolDiscoveryError eliminates — every
+    fill is dropped silently and the sync looks empty. Carries
+    ``failed_symbols`` and the first underlying error for triage.
+    """
+
+    def __init__(self, failed_symbols: list[str], first_error: BaseException) -> None:
+        self.failed_symbols = failed_symbols
+        self.first_error = first_error
+        super().__init__(
+            f"Binance per-symbol fetch failed for ALL {len(failed_symbols)} "
+            f"symbols (e.g. {failed_symbols[0] if failed_symbols else '<none>'}); "
+            f"first error: {first_error!r}"
+        )
+
+
 class FillRow(TypedDict):
-    """Audit-2026-05-07 G12.B.4 — shared shape for a single normalized
-    fill row written into the ``trades`` table.
+    """Shared shape for a normalized fill row written into ``trades``.
+    All three branches (OKX, Bybit, CCXT ``_normalize_fill``) build this
+    via ``_make_fill_dict``.
 
-    Three branches build this dict today (OKX direct API, Bybit direct
-    API, CCXT ``_normalize_fill``). Without a shared TypedDict, drift is
-    inevitable — e.g. only OKX preserves ``posSide`` so only OKX-traded
-    shorts are classified correctly downstream. ``_make_fill_dict`` is
-    the single factory all three branches go through.
-
-    Note: ``position_direction`` (long/short discriminator) is co-located
-    inside ``raw_data['position_direction']`` rather than as a top-level
-    column today — the ``trades`` table does not yet have that column,
-    so adding it to the persist shape would break the upsert. A future
-    migration can promote it.
+    ``position_direction`` (long/short discriminator) is co-located
+    inside ``raw_data['position_direction']`` until a ``trades`` column
+    migration promotes it — adding it as a top-level key here would
+    break the upsert against today's schema.
     """
     exchange: str
     symbol: str
@@ -631,30 +644,34 @@ async def _fetch_raw_trades_binance(
     since_ms: int | None,
 ) -> list[dict[str, Any]]:
     """Binance: per-symbol iteration using fetch_my_trades."""
-    from services.db import db_execute
+    from services.db import db_execute, paginated_select
 
-    # Get symbol list: DISTINCT symbols from trades + position_snapshots
+    # DISTINCT symbols across trades + position_snapshots. Paginated
+    # because PostgREST caps responses at 1000 rows by default — without
+    # this, a strategy with >1000 fill or snapshot rows silently drops
+    # symbols from discovery and per-symbol pagination then skips real
+    # history (defeating the H-0662 fix below).
     def _get_symbols():
-        trade_syms = (
+        trade_rows = paginated_select(
             supabase.table("trades")
             .select("symbol")
             .eq("strategy_id", strategy_id)
-            .eq("is_fill", True)
-            .execute()
+            .eq("is_fill", True),
+            order_by=(("id", False),),
+            truncation_hint=f"trades.symbol strategy_id={strategy_id}",
         )
-        pos_syms = (
+        pos_rows = paginated_select(
             supabase.table("position_snapshots")
             .select("symbol")
-            .eq("strategy_id", strategy_id)
-            .execute()
+            .eq("strategy_id", strategy_id),
+            order_by=(("id", False),),
+            truncation_hint=f"position_snapshots.symbol strategy_id={strategy_id}",
         )
-        symbols = set()
-        for row in trade_syms.data or []:
-            if row.get("symbol"):
-                symbols.add(row["symbol"])
-        for row in pos_syms.data or []:
-            if row.get("symbol"):
-                symbols.add(row["symbol"])
+        symbols: set[str] = set()
+        for row in (*trade_rows, *pos_rows):
+            sym = row.get("symbol")
+            if sym:
+                symbols.add(sym)
         return list(symbols)
 
     symbols = await db_execute(_get_symbols)
@@ -698,71 +715,67 @@ async def _fetch_raw_trades_binance(
                 "requires manual seed"
             )
 
-    # Audit-2026-05-07 G12.B.3 — fan-out per-symbol fetch with bounded
-    # concurrency (Semaphore=5) instead of a sequential for-loop. CCXT's
-    # per-instance rate limiter is shared across coroutines and still
-    # throttles correctly; the semaphore caps in-flight requests so we
-    # don't trip 429s. ~5x speedup vs. the sequential path that motivated
-    # the 5→15 minute TIMEOUT_PER_KIND['sync_trades'] bump.
+    # Bounded-concurrency fan-out (Semaphore=5). CCXT's per-instance
+    # rate limiter is shared across coroutines and throttles correctly;
+    # the semaphore caps in-flight requests so we don't trip 429s.
     sem = asyncio.Semaphore(5)
+
+    # Build {normalized_symbol: ccxt_symbol} once. Per-symbol scans of
+    # exchange.markets (~1500 entries on Binance) inside _fetch_one were
+    # O(N_symbols × M_markets) per sync.
+    ccxt_symbol_by_normalized: dict[str, str] = {}
+    if hasattr(exchange, "markets") and exchange.markets:
+        for mkt_symbol in exchange.markets:
+            normalized = (
+                mkt_symbol.replace("/", "")
+                .replace(":USDT", "")
+                .replace(":USD", "")
+            )
+            ccxt_symbol_by_normalized[normalized] = mkt_symbol
 
     async def _fetch_one(symbol: str):
         # Normalize symbol for CCXT: BTCUSDT -> BTC/USDT:USDT
         ccxt_symbol = symbol
         if "/" not in ccxt_symbol:
-            if hasattr(exchange, "markets") and exchange.markets:
-                for mkt_symbol, _mkt in exchange.markets.items():
-                    normalized = (
-                        mkt_symbol.replace("/", "")
-                        .replace(":USDT", "")
-                        .replace(":USD", "")
-                    )
-                    if normalized == symbol:
-                        ccxt_symbol = mkt_symbol
-                        break
+            ccxt_symbol = ccxt_symbol_by_normalized.get(symbol, symbol)
 
-        # Audit-2026-05-07 H-0662 — Binance caps fetch_my_trades at 1000
-        # rows per call. Pre-fix this was a single call with limit=1000
-        # and no pagination loop; a high-frequency strategy with >1000
-        # fills since last_sync (or a 90-day cold-start backfill) had
-        # its trade history silently truncated. Now we paginate by
-        # advancing ``since`` past the last fill's timestamp until a
-        # short page is returned or we hit the per-symbol page cap
-        # (20 pages × 1000 = 20K fills). Mirrors the OKX/Bybit page-cap
-        # contract elsewhere in this file.
+        # H-0662: Binance caps fetch_my_trades at 1000 rows per call.
+        # Paginate by advancing ``since`` past the last fill's timestamp
+        # until a short page returns or we hit the cap (20 × 1000 =
+        # 20K fills/symbol). Mirrors the OKX/Bybit page-cap contract.
         BINANCE_PAGE_CAP = 20
         all_trades: list[dict] = []
         current_since = since_ms
-        async with sem:
-            for _page in range(BINANCE_PAGE_CAP):
+        for _page in range(BINANCE_PAGE_CAP):
+            # Hold the semaphore only across the network call so one
+            # heavy symbol can't monopolize a slot for 20 sequential RTTs
+            # while sibling symbols block.
+            async with sem:
                 batch = await exchange.fetch_my_trades(
                     ccxt_symbol, since=current_since, limit=1000
                 )
-                if not batch:
-                    break
-                all_trades.extend(batch)
-                if len(batch) < 1000:
-                    break
-                last_ts = batch[-1].get("timestamp")
-                if not isinstance(last_ts, (int, float)):
-                    # CCXT unified shape uses int millis; if the venue
-                    # drops the field we can't safely advance the cursor
-                    # without risking an infinite loop. Stop here.
-                    logger.warning(
-                        "Binance fetch_my_trades %s: missing 'timestamp' "
-                        "on last fill, stopping pagination at %d fills",
-                        symbol, len(all_trades),
-                    )
-                    break
-                current_since = int(last_ts) + 1
-            else:
-                # Loop ran the full BINANCE_PAGE_CAP without natural
-                # break; possible truncation past the cap.
+            if not batch:
+                break
+            all_trades.extend(batch)
+            if len(batch) < 1000:
+                break
+            last_ts = batch[-1].get("timestamp")
+            if not isinstance(last_ts, (int, float)):
+                # No cursor → can't safely advance without risking an
+                # infinite loop. Stop here.
                 logger.warning(
-                    "Binance fetch_my_trades %s: hit %d-page cap; "
-                    "possible truncation past %d fills",
-                    symbol, BINANCE_PAGE_CAP, len(all_trades),
+                    "Binance fetch_my_trades %s: missing 'timestamp' "
+                    "on last fill, stopping pagination at %d fills",
+                    symbol, len(all_trades),
                 )
+                break
+            current_since = int(last_ts) + 1
+        else:
+            logger.warning(
+                "Binance fetch_my_trades %s: hit %d-page cap; "
+                "possible truncation past %d fills",
+                symbol, BINANCE_PAGE_CAP, len(all_trades),
+            )
         return symbol, all_trades
 
     tasks = [_fetch_one(s) for s in symbols]
@@ -784,25 +797,39 @@ async def _fetch_raw_trades_binance(
         )
 
     fills: list[dict[str, Any]] = []
+    failed_symbols: list[str] = []
+    first_error: BaseException | None = None
     for idx, item in enumerate(results):
         if isinstance(item, BaseException):
-            # Match prior log shape so existing log-archaeology queries
-            # (correlation_id grep on "Binance fetch_my_trades failed for")
-            # continue to fire.
+            # Per-symbol "Binance fetch_my_trades failed for" log shape is
+            # load-bearing for existing correlation_id log queries.
             symbol = symbols[idx] if idx < len(symbols) else "<unknown>"
+            failed_symbols.append(symbol)
+            if first_error is None:
+                first_error = item
             logger.warning(
                 "Binance fetch_my_trades failed for %s: %s", symbol, str(item)
             )
             continue
         _symbol, trades = item
         for t in trades:
-            # Audit-2026-05-07 H-0673 — _normalize_fill returns None
-            # for fills with no parseable timestamp; drop those rather
-            # than persisting an empty-string `timestamp` that breaks
-            # downstream date math.
             normalized = _normalize_fill(t, exchange.id)
             if normalized is not None:
                 fills.append(normalized)
+
+    if failed_symbols:
+        # Partial-failure summary so the bad-symbol rate is visible in logs
+        # even when some symbols succeeded.
+        logger.warning(
+            "Binance per-symbol fetch: %d/%d symbols failed",
+            len(failed_symbols), len(symbols),
+        )
+        # Total failure with no successful symbols mirrors the
+        # ColdStartSymbolDiscoveryError contract — every fill is silently
+        # dropped, so the sync looks empty. Raise so the worker marks the
+        # job failed_retry instead of cementing zero-fills success.
+        if len(failed_symbols) == len(symbols) and first_error is not None:
+            raise BinancePerSymbolFetchError(failed_symbols, first_error)
 
     return fills
 
@@ -820,20 +847,14 @@ async def _fetch_raw_trades_okx(
     PAGE_CAP = 100
     for page in range(PAGE_CAP):
         params: dict[str, str] = {"instType": "SWAP", "limit": "100"}
-        # Audit-2026-05-07 H-0665 — OKX fills-history returns DESC-sorted
-        # data and uses ``after=<billId>`` to fetch records OLDER than the
-        # cursor (``before`` fetches NEWER). Pre-fix this used ``before``
-        # with ``data[-1].tradeId`` (the oldest row on the page), which
-        # asked for records NEWER than the oldest — oscillating until the
-        # 100-page cap silently truncated. ``after`` is the correct
-        # direction for paginating into older history.
+        # OKX fills-history returns DESC-sorted data; ``after=<billId>``
+        # fetches records OLDER than the cursor (``before`` fetches NEWER).
+        # Using ``before`` here would oscillate until the page cap (H-0665).
         if cursor:
             params["after"] = cursor
-        # Audit-2026-05-07 H-0666 — ``begin`` was only sent on page 1; on
-        # subsequent pages OKX could fall back to its default window
-        # (often 7 days) and silently truncate a 90-day backfill. Always
-        # send ``begin`` when we have a since_ms so the time bound is
-        # enforced for every page.
+        # ``begin`` must be sent on every page — without it OKX falls back
+        # to its default window (often 7 days) on pages 2+ and silently
+        # truncates a 90-day backfill (H-0666).
         if since_ms:
             params["begin"] = str(since_ms)
 
@@ -851,18 +872,17 @@ async def _fetch_raw_trades_okx(
                         int(ts_raw) / 1000, tz=timezone.utc
                     )
                 else:
-                    # Audit-2026-05-07 C-0226 / H-0667 — pre-fix, an OKX fill
-                    # with a missing/non-digit ``ts`` silently substituted
-                    # ``datetime.now()``. That phantom wall-clock timestamp
-                    # then became the most-recent fill for the symbol in
-                    # FIFO reconstruction, corrupting position open/close
-                    # ordering, ROI, duration, and daily volume attribution
-                    # — all with no log, flag, or skip telemetry. Now we
-                    # drop the fill entirely and surface it as an error so
-                    # operators can spot a malformed exchange response.
+                    # Drop fills with unparseable ``ts`` rather than
+                    # substituting wall-clock time — phantom timestamps
+                    # corrupt FIFO position reconstruction silently
+                    # (C-0226 / H-0667). Log the parse target + fill_id
+                    # only (never the raw fill body) so attacker- or
+                    # PII-bearing fields can't reach log aggregation.
                     logger.error(
-                        "OKX fill dropped: unparseable ts=%r in fill=%r",
-                        ts_raw, fill,
+                        "OKX fill dropped: unparseable ts=%r (instId=%s, tradeId=%s)",
+                        ts_raw,
+                        fill.get("instId"),
+                        fill.get("tradeId"),
                     )
                     continue
 
@@ -870,15 +890,8 @@ async def _fetch_raw_trades_okx(
                 side = fill.get("side", "").lower()
                 price = float(fill.get("fillPx", 0))
                 amount = float(fill.get("fillSz", 0))
-                # Audit-2026-05-07 H-0671 — pre-fix this was abs(...).
-                # OKX maker fills carry NEGATIVE fees (rebates); abs()
-                # silently flipped the sign so a $-0.40 rebate became
-                # +$0.40 and position_reconstruction subtracted an
-                # inflated total from realized_pnl, under-reporting P&L
-                # for maker-heavy strategies. Persist the signed fee so
-                # rebates remain negative and ``total_fees += fee`` at
-                # services/position_reconstruction.py:536 reduces to a
-                # smaller subtraction.
+                # Preserve signed fee so maker rebates (negative) reduce
+                # ``total_fees`` instead of inflating it via abs() (H-0671).
                 fee = float(fill.get("fee", 0))
                 fee_currency = fill.get("feeCcy", "USDT")
                 is_maker = fill.get("execType", "") == "M"
@@ -963,15 +976,9 @@ async def _fetch_raw_trades_okx(
             prev_cursor = new_cursor
             cursor = new_cursor
         except Exception as e:
-            # Audit-2026-05-07 C-0227 — pre-fix, an exception on page N
-            # logged a warning and broke out of the loop, returning the
-            # fills already collected from pages 1..N-1. The caller saw
-            # a short list and treated the sync as success — silently
-            # truncating multi-page fill history with no data_quality
-            # flag. Now we re-raise so ``fetch_raw_trades``'s outer
-            # handler surfaces the failure to the caller, which will
-            # mark the sync_trades job failed_retry (cursor pagination
-            # is resumable on the next attempt).
+            # Re-raise per-page failures so the sync_trades job is marked
+            # failed_retry and resumes via cursor on the next attempt
+            # instead of silently truncating mid-pagination (C-0227).
             logger.error(
                 "OKX fills fetch failed page %d (re-raising to fail the sync): %s",
                 page, str(e),
@@ -979,9 +986,6 @@ async def _fetch_raw_trades_okx(
             raise
 
     if not natural_break:
-        # Audit-2026-05-07 G12.B.6 — exhausted the 100-page cap without a
-        # natural break. Surface as a warning so possible truncation is
-        # visible in operator logs.
         logger.warning(
             "Pagination hit %d-page cap for okx; possible truncation",
             PAGE_CAP,
@@ -1021,13 +1025,14 @@ async def _fetch_raw_trades_bybit(
                         int(ts_raw) / 1000, tz=timezone.utc
                     )
                 else:
-                    # Audit-2026-05-07 C-0226 / H-0667 — same fix as the
-                    # OKX branch: drop fills with unparseable ``execTime``
-                    # rather than fabricating ``datetime.now()`` and
-                    # silently corrupting FIFO ordering downstream.
+                    # Drop fills with unparseable ``execTime`` (C-0226 /
+                    # H-0667) — same rationale as the OKX branch. Log
+                    # whitelisted fields only.
                     logger.error(
-                        "Bybit fill dropped: unparseable execTime=%r in fill=%r",
-                        ts_raw, fill,
+                        "Bybit fill dropped: unparseable execTime=%r (symbol=%s, execId=%s)",
+                        ts_raw,
+                        fill.get("symbol"),
+                        fill.get("execId"),
                     )
                     continue
 
@@ -1035,9 +1040,8 @@ async def _fetch_raw_trades_bybit(
                 side = fill.get("side", "").lower()
                 price = float(fill.get("execPrice", 0))
                 amount = float(fill.get("execQty", 0))
-                # Audit-2026-05-07 H-0671 — see OKX branch above. Bybit
-                # maker rebates also come through with negative
-                # ``execFee``; preserve the sign instead of abs().
+                # Preserve signed fee so maker rebates remain negative
+                # (H-0671) — same rationale as the OKX branch.
                 fee = float(fill.get("execFee", 0))
                 fee_currency = fill.get("feeCurrency", "USDT")
                 # Audit-2026-05-07 G12.B.9 — Bybit V5 sometimes returns
@@ -1089,10 +1093,8 @@ async def _fetch_raw_trades_bybit(
                 break
             cursor = next_cursor
         except Exception as e:
-            # Audit-2026-05-07 C-0227 — same fix as the OKX branch:
-            # re-raise per-page failures so the sync_trades job is
-            # marked failed_retry and resumes via cursor next attempt
-            # instead of silently truncating mid-pagination.
+            # Re-raise per-page failures (C-0227) — same rationale as the
+            # OKX branch.
             logger.error(
                 "Bybit execution list failed page %d (re-raising to fail the sync): %s",
                 page, str(e),
@@ -1100,8 +1102,6 @@ async def _fetch_raw_trades_bybit(
             raise
 
     if not natural_break:
-        # Audit-2026-05-07 G12.B.6 — exhausted the 100-page cap without a
-        # natural break.
         logger.warning(
             "Pagination hit %d-page cap for bybit; possible truncation",
             PAGE_CAP,
@@ -1110,64 +1110,71 @@ async def _fetch_raw_trades_bybit(
     return fills
 
 
-def _normalize_fill(trade: dict, exchange_id: str) -> FillRow:
+def _normalize_fill(trade: dict, exchange_id: str) -> FillRow | None:
     """Normalize a CCXT unified trade to our fill dict shape.
 
-    Audit-2026-05-07 G12.B.4/G12.B.7 — delegates the dict construction
-    to ``_make_fill_dict`` so the OKX, Bybit, and CCXT branches all
-    share a single 16-key contract.
-
-    Returns ``None`` for fills with no usable timestamp (see H-0673);
-    callers must filter ``None`` out before passing to the persist
-    layer.
+    Delegates to ``_make_fill_dict`` so OKX, Bybit, and CCXT branches
+    share a single 16-key contract. Returns ``None`` for fills missing
+    or carrying unparseable price/quantity/timestamp; callers MUST
+    filter ``None`` before persisting (H-0673; silent-failure parity
+    with the OKX/Bybit branches).
     """
     fee_info = trade.get("fee") or {}
-    # Audit-2026-05-07 H-0671 — see OKX/Bybit branches: drop abs() so
-    # maker rebates (negative fee.cost in CCXT's unified shape) remain
-    # signed all the way to position_reconstruction's
-    # ``realized_pnl = ... - total_fees`` formula.
-    fee_cost = float(fee_info.get("cost", 0) or 0)
+    # Maker rebates arrive as negative fee.cost in CCXT's unified shape;
+    # preserve the sign so position_reconstruction's
+    # ``realized_pnl -= total_fees`` subtracts a smaller total instead of
+    # an inflated one (H-0671).
+    fee_cost = _safe_float(fee_info.get("cost"))
+    if fee_cost is None:
+        fee_cost = 0.0  # CCXT omits fee on some venues; treat as 0 fee.
     fee_currency = fee_info.get("currency", "USDT") or "USDT"
-    price = float(trade.get("price", 0))
-    amount = float(trade.get("amount", 0))
 
-    # Audit-2026-05-07 H-0673 — pre-fix this passed
-    # ``trade.get("datetime", "")`` straight through, producing rows with
-    # empty-string timestamps. Downstream ``datetime.fromisoformat("")``
-    # then raised ValueError that position_reconstruction silently
-    # swallowed (cascading into duration_days=None) and the React
-    # ``new Date(t.opened_at)`` rendered "Invalid Date". Normalize the
-    # CCXT input to a uniform UTC ISO-8601 string, preferring the
-    # numeric ``timestamp`` (millis) when available; if neither field
-    # produces a parseable value, return None so the caller can drop
-    # the fill instead of persisting a phantom row.
-    raw_datetime = trade.get("datetime") or ""
-    raw_ts = trade.get("timestamp")
+    # Drop fill on missing/non-numeric price or quantity. Pre-Phase B
+    # this branch silently substituted 0, mirroring the H-0673 timestamp
+    # bug — a phantom $0 row inflated total_fills, dragged volume %s
+    # toward "no signal", and let maker rebates land on a 0-priced fill.
+    price = _safe_float(trade.get("price"))
+    amount = _safe_float(trade.get("amount"))
+    if price is None or amount is None:
+        logger.error(
+            "CCXT fill dropped: missing/non-numeric price=%r or amount=%r "
+            "(exchange=%s, fill_id=%r)",
+            trade.get("price"), trade.get("amount"),
+            exchange_id, trade.get("id"),
+        )
+        return None
+
+    # Prefer numeric ``timestamp`` (CCXT unified ms); fall back to
+    # ``datetime`` (ISO with Z). Empty-string, None, 0 (epoch), and bool
+    # are skipped — a 1970 phantom row corrupts FIFO ordering identically
+    # to the H-0673 bug, and ``True`` (bool, int subclass) would coerce
+    # to epoch+1ms. ``not raw`` covers all four falsy shapes in one check.
+    # On per-iteration parse failure, log at WARN so primary-field
+    # producer drift is visible even when the fallback succeeds.
     timestamp_iso: str | None = None
-    if isinstance(raw_ts, (int, float)):
+    for field, raw in (
+        ("timestamp", trade.get("timestamp")),
+        ("datetime", trade.get("datetime")),
+    ):
+        if not raw or isinstance(raw, bool):
+            continue
         try:
-            timestamp_iso = datetime.fromtimestamp(
-                int(raw_ts) / 1000, tz=timezone.utc
-            ).isoformat()
-        except (ValueError, OSError, OverflowError):
-            timestamp_iso = None
-    if timestamp_iso is None and raw_datetime:
-        try:
-            parsed = datetime.fromisoformat(
-                raw_datetime.replace("Z", "+00:00")
+            timestamp_iso = coerce_to_aware_utc(raw, "ccxt").isoformat()
+            break
+        except (TypeError, ValueError, OSError, OverflowError) as exc:
+            logger.warning(
+                "CCXT fill: %s parse failed (%s=%r): %s; trying fallback",
+                field, field, raw, exc,
             )
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            timestamp_iso = parsed.isoformat()
-        except (TypeError, ValueError):
-            timestamp_iso = None
+            continue
     if timestamp_iso is None:
         logger.error(
-            "CCXT fill dropped: unparseable timestamp (datetime=%r, "
-            "timestamp=%r) in fill=%r",
-            raw_datetime, raw_ts, trade,
+            "CCXT fill dropped: unparseable timestamp "
+            "(exchange=%s, fill_id=%r, datetime=%r, timestamp=%r)",
+            exchange_id, trade.get("id"),
+            trade.get("datetime"), trade.get("timestamp"),
         )
-        return None  # type: ignore[return-value]
+        return None
 
     return _make_fill_dict(
         exchange=exchange_id,

@@ -53,12 +53,46 @@ def test_empty_metrics_shape():
     result = _empty_metrics(28)
     assert result["window_days"] == 28
     assert result["intros_shipped"] == 0
+    assert result["skipped"] == 0
+    assert result["skipped_rate"] == 0.0
     assert result["hits_top_3"] == 0
     assert result["hits_top_10"] == 0
     assert result["hit_rate_top_3"] == 0.0
     assert result["hit_rate_top_10"] == 0.0
     assert result["weekly"] == []
     assert result["missed"] == []
+
+
+def test_compute_hit_rate_surfaces_skipped_count():
+    """The denominator (`total = intros - skipped`) used to be the only
+    place skipped intros appeared, so a run where 80% of intros raised
+    looked identical to a healthy 20-intro run. Post-fix, ``skipped``
+    and ``skipped_rate`` are first-class telemetry on the response."""
+    intros = [
+        _make_intro("a1", "s1", "2026-04-07T10:00:00Z"),
+        {"allocator_id": "a2", "strategy_id": "s2"},  # missing created_at
+        _make_intro("a3", "s3", "2026-04-07T10:00:00Z"),
+        {},  # totally malformed
+    ]
+    batches = [
+        _batch("b-a1", "a1", "2026-04-06T00:00:00Z"),
+        _batch("b-a3", "a3", "2026-04-06T00:00:00Z"),
+    ]
+    candidates = [
+        _candidate("b-a1", "s1", 1),
+        _candidate("b-a3", "s3", 1),
+    ]
+    sb = _make_batched_supabase_mock(
+        intros=intros, batches=batches, candidates=candidates
+    )
+    with patch("services.db.get_supabase", return_value=sb):
+        result = compute_hit_rate_metrics(lookback_days=28)
+
+    assert result["intros_shipped"] == 2
+    assert result["skipped"] == 2, (
+        "skipped count must be returned so bad-row rate is observable"
+    )
+    assert result["skipped_rate"] == pytest.approx(0.5)
 
 
 # ─── Helpers for compute_hit_rate_metrics tests ────────────────────────
@@ -317,7 +351,9 @@ def test_compute_hit_rate_skips_malformed_intro_rows():
 
 def test_compute_hit_rate_returns_empty_when_all_rows_malformed():
     """If every row is malformed we should return empty metrics instead of
-    crashing with a ZeroDivisionError on the hit_rate numerator."""
+    crashing with a ZeroDivisionError on the hit_rate numerator. The
+    skipped count must still surface so a 100%-malformed run is
+    distinguishable from a 0-intros run."""
     intros = [
         {"allocator_id": "a1"},  # missing strategy_id + created_at
         {"strategy_id": "s1"},  # missing allocator_id + created_at
@@ -326,7 +362,10 @@ def test_compute_hit_rate_returns_empty_when_all_rows_malformed():
     with patch("services.db.get_supabase", return_value=sb):
         result = compute_hit_rate_metrics(lookback_days=28)
 
-    assert result == _empty_metrics(28)
+    expected = _empty_metrics(28)
+    expected["skipped"] = 2
+    expected["skipped_rate"] = 1.0
+    assert result == expected
 
 
 def test_compute_hit_rate_batched_picks_most_recent_batch_before_intro():
@@ -624,7 +663,7 @@ def test_paginated_select_raises_on_hard_cap():
     """audit-2026-05-07 #52 regression — pre-fix the helper logged a
     warning and silently sliced. We now raise PaginatedSelectTruncated so
     callers cannot accidentally aggregate over a partial window."""
-    from services.match_eval import _paginated_select, PaginatedSelectTruncated
+    from services.db import paginated_select, PaginatedSelectTruncated
 
     full_page_data = [{"id": f"row-{i}"} for i in range(2)]
 
@@ -641,9 +680,9 @@ def test_paginated_select_raises_on_hard_cap():
 
     with pytest.raises(PaginatedSelectTruncated) as exc_info:
         # Use tiny page_size and hard_cap_pages so the test runs fast
-        _paginated_select(
+        paginated_select(
             builder,
-            order_by="id",
+            order_by=(("id", False),),
             page_size=2,
             hard_cap_pages=3,
             truncation_hint="test_hint",
@@ -660,7 +699,7 @@ def test_paginated_select_accepts_composite_order_by():
     (e.g. (allocator_id ASC, computed_at DESC) -> idx_match_batches_allocator_recent).
     Lock that the helper applies each .order() in sequence with the right
     desc flag."""
-    from services.match_eval import _paginated_select
+    from services.db import paginated_select
 
     recorded: list[tuple[str, bool]] = []
     builder = MagicMock()
@@ -678,7 +717,7 @@ def test_paginated_select_accepts_composite_order_by():
 
     builder.range.side_effect = _range_returns_short_page
 
-    rows = _paginated_select(
+    rows = paginated_select(
         builder,
         order_by=(("allocator_id", False), ("computed_at", True)),
         page_size=10,
@@ -697,7 +736,7 @@ def test_paginated_select_no_false_positive_at_exact_boundary():
     The peek-one-extra-page step distinguishes "exactly all rows" (peek
     returns empty → return) from "real overflow" (peek returns more → raise).
     """
-    from services.match_eval import _paginated_select
+    from services.db import paginated_select
 
     page_size = 2
     hard_cap_pages = 3
@@ -726,9 +765,9 @@ def test_paginated_select_no_false_positive_at_exact_boundary():
 
     builder.range.side_effect = _range_side_effect
 
-    rows = _paginated_select(
+    rows = paginated_select(
         builder,
-        order_by="id",
+        order_by=(("id", False),),
         page_size=page_size,
         hard_cap_pages=hard_cap_pages,
         truncation_hint="boundary_test",

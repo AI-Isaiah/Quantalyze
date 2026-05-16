@@ -18,16 +18,11 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from services.db import PaginatedSelectTruncated, _paginated_select
+from services.db import PaginatedSelectTruncated, paginated_select
 
 logger = logging.getLogger(__name__)
 
-# Re-exported so existing callers / tests can keep importing from this module.
-__all__ = [
-    "PaginatedSelectTruncated",
-    "_paginated_select",
-    "compute_hit_rate_metrics",
-]
+__all__ = ["compute_hit_rate_metrics"]
 
 
 def compute_hit_rate_metrics(
@@ -116,7 +111,12 @@ def compute_hit_rate_metrics(
         valid_intros.append(intro)
 
     if not valid_intros:
-        return _empty_metrics(lookback_days)
+        # Preserve the skipped count so a "100% malformed" run is
+        # distinguishable from a "zero intros shipped" run.
+        empty = _empty_metrics(lookback_days)
+        empty["skipped"] = skipped
+        empty["skipped_rate"] = skipped / len(intros) if intros else 0.0
+        return empty
 
     allocator_ids = sorted({i["allocator_id"] for i in valid_intros})
 
@@ -139,7 +139,7 @@ def compute_hit_rate_metrics(
     # could land in any UUID bucket, so a row-index-based pagination would skip
     # or duplicate them. The composite ordering is stable because writers
     # never mutate `(allocator_id, computed_at)` post-insert.
-    for row in _paginated_select(
+    for row in paginated_select(
         supabase.table("match_batches")
         .select("id, allocator_id, computed_at")
         .in_("allocator_id", allocator_ids),
@@ -232,7 +232,7 @@ def compute_hit_rate_metrics(
         # Python and the planner falls back to a sort. In-memory `continue`
         # still defends against any post-write race that surfaces an excluded
         # row through a stale snapshot.
-        for row in _paginated_select(
+        for row in paginated_select(
             supabase.table("match_candidates")
             .select("batch_id, strategy_id, rank, exclusion_reason")
             .in_("batch_id", sorted(needed_batch_ids))
@@ -305,9 +305,13 @@ def compute_hit_rate_metrics(
             skipped += 1
             continue
 
-    total = len(intros) - skipped
+    intros_seen = len(intros)
+    total = intros_seen - skipped
     if total <= 0:
-        return _empty_metrics(lookback_days)
+        empty = _empty_metrics(lookback_days)
+        empty["skipped"] = skipped
+        empty["skipped_rate"] = skipped / intros_seen if intros_seen else 0.0
+        return empty
 
     weekly = sorted(
         [
@@ -324,9 +328,15 @@ def compute_hit_rate_metrics(
         key=lambda w: w["week_start"],
     )
 
+    # ``skipped`` is load-bearing telemetry: a run where 80% of intros
+    # raise during processing currently shrinks the denominator silently
+    # and looks identical to a healthy 20-intro run. Surface it so
+    # operators can spot the bad-row rate.
     return {
         "window_days": lookback_days,
         "intros_shipped": total,
+        "skipped": skipped,
+        "skipped_rate": skipped / intros_seen if intros_seen else 0.0,
         "hits_top_3": hits_top_3,
         "hits_top_10": hits_top_10,
         "hit_rate_top_3": hits_top_3 / total,
@@ -385,6 +395,8 @@ def _empty_metrics(lookback_days: int) -> dict[str, Any]:
     return {
         "window_days": lookback_days,
         "intros_shipped": 0,
+        "skipped": 0,
+        "skipped_rate": 0.0,
         "hits_top_3": 0,
         "hits_top_10": 0,
         "hit_rate_top_3": 0.0,
