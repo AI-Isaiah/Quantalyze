@@ -1117,7 +1117,9 @@ def _result_row_count(res: Any) -> int:
     the audit log lie about ``days_written`` (PR #68 / H-1159).
     """
     count = getattr(res, "count", None)
-    if isinstance(count, int):
+    # ``isinstance(False, int)`` is True in Python; explicitly exclude
+    # bool so a stray False from a mock doesn't masquerade as count=0.
+    if isinstance(count, int) and not isinstance(count, bool):
         return max(0, count)
     data = getattr(res, "data", None) or []
     return len(data)
