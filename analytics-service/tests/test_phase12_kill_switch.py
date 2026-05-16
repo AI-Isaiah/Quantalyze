@@ -1414,3 +1414,296 @@ class TestTypingHygiene:
         # mypy --strict pass.
         assert ks.Bytes(0) == 0
         assert ks.Bytes(123) == 123
+
+
+# --- pr-test-analyzer gaps (specialist round) ------------------------------
+
+
+class TestEnvTruthy:
+    """pr-test-analyzer MED conf-9: _env_truthy is a load-bearing helper
+    with no direct unit test. Pin all three branches (unset/recognized/
+    garbage) so a refactor that drops e.g. the "" → False short-circuit
+    would fail loud here."""
+
+    def test_unset_returns_false(self, monkeypatch) -> None:
+        monkeypatch.delenv("PHASE12_PRT_TEST_ENVTRUTHY", raising=False)
+        assert ks._env_truthy("PHASE12_PRT_TEST_ENVTRUTHY") is False
+
+    def test_empty_string_returns_false(self, monkeypatch) -> None:
+        monkeypatch.setenv("PHASE12_PRT_TEST_ENVTRUTHY", "")
+        assert ks._env_truthy("PHASE12_PRT_TEST_ENVTRUTHY") is False
+
+    @pytest.mark.parametrize("value", ["true", "TRUE", "yes", "1", "on"])
+    def test_truthy_returns_true(self, monkeypatch, value: str) -> None:
+        monkeypatch.setenv("PHASE12_PRT_TEST_ENVTRUTHY", value)
+        assert ks._env_truthy("PHASE12_PRT_TEST_ENVTRUTHY") is True
+
+    @pytest.mark.parametrize("value", ["false", "no", "0", "off"])
+    def test_falsy_returns_false(self, monkeypatch, value: str) -> None:
+        monkeypatch.setenv("PHASE12_PRT_TEST_ENVTRUTHY", value)
+        assert ks._env_truthy("PHASE12_PRT_TEST_ENVTRUTHY") is False
+
+    @pytest.mark.parametrize("value", ["maybe", "ture", "2", "y"])
+    def test_garbage_raises_systemexit(self, monkeypatch, value: str) -> None:
+        monkeypatch.setenv("PHASE12_PRT_TEST_ENVTRUTHY", value)
+        with pytest.raises(SystemExit):
+            ks._env_truthy("PHASE12_PRT_TEST_ENVTRUTHY")
+
+
+class TestConfirmGateOrdering:
+    """pr-test-analyzer MED conf-9: pin that _check_confirm_gate runs
+    BEFORE measure_p999, so a misconfigured prod-pointed run aborts
+    before any DB call. A future refactor that swapped the two lines
+    would pass test_prod_host_without_confirm_aborts (because
+    cli_p999=900_000.0/cli_count=3 short-circuits measure_p999); this
+    test fails loud by setting cli_p999=None/cli_count=None and
+    asserting the probe is never invoked."""
+
+    @pytest.mark.asyncio
+    async def test_confirm_gate_aborts_before_probe(self, monkeypatch) -> None:
+        monkeypatch.delenv("PHASE12_KILL_SWITCH_CONFIRMED", raising=False)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        monkeypatch.setenv(
+            "DATABASE_URL", "postgresql://u:p@db.production.example.com/d"
+        )
+        probe_called = {"n": 0}
+
+        def _fail_if_probed() -> tuple[float, int]:
+            probe_called["n"] += 1
+            raise AssertionError(
+                "measure_p999_via_sql was called before the confirm gate "
+                "aborted — gate ordering regressed"
+            )
+
+        monkeypatch.setattr(ks, "measure_p999_via_sql", _fail_if_probed)
+        with pytest.raises(SystemExit):
+            await ks.main(cli_p999=None, cli_count=None)
+        assert probe_called["n"] == 0
+
+
+class TestForceDoesNotBypassConfirmProd:
+    """pr-test-analyzer MED conf-7: --force / PHASE12_FORCE_CUTOVER must
+    NOT bypass --confirm-prod. The confirm gate runs at line 804 before
+    `force` is even resolved at line 813; a refactor that fused the two
+    flags would silently let --force skip the H-0624 gate in the resume
+    case (the EXACT scenario where the operator is most likely to skip
+    confirmation)."""
+
+    @pytest.mark.asyncio
+    async def test_cli_force_does_not_bypass_confirm_prod(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("PHASE12_KILL_SWITCH_CONFIRMED", raising=False)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        monkeypatch.setenv(
+            "DATABASE_URL", "postgresql://u:p@db.production.example.com/d"
+        )
+        with pytest.raises(SystemExit, match="confirm-prod|CONFIRMED"):
+            await ks.main(
+                cli_p999=100_000.0,
+                cli_count=10,
+                cli_force=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_env_force_does_not_bypass_confirm_prod(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("PHASE12_KILL_SWITCH_CONFIRMED", raising=False)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        monkeypatch.setenv("PHASE12_FORCE_CUTOVER", "true")
+        monkeypatch.setenv(
+            "DATABASE_URL", "postgresql://u:p@db.production.example.com/d"
+        )
+        with pytest.raises(SystemExit, match="confirm-prod|CONFIRMED"):
+            await ks.main(cli_p999=100_000.0, cli_count=10)
+
+
+class TestSubprocessEnvPreservesParentEnv:
+    """pr-test-analyzer MED conf-8: subprocess_env merges os.environ AND
+    pg_env. PATH/LANG/LD_LIBRARY_PATH propagation is load-bearing for
+    psql discovery in CI. A refactor that switched to `env=pg_env` (PG*
+    only) would silently break psql startup. Pin that non-PG* parent
+    env keys survive the merge."""
+
+    def test_path_survives_subprocess_env_merge(self, monkeypatch) -> None:
+        secret_dsn = "postgresql://alice:hunter2@db.example.com/quantalyze"
+        monkeypatch.setenv("DATABASE_URL", secret_dsn)
+        monkeypatch.setenv("PATH", "/test/bin:/usr/bin")
+        monkeypatch.setenv("LANG", "C.UTF-8")
+        captured: dict[str, object] = {}
+
+        def capture(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            captured["env"] = kwargs.get("env")
+            return MagicMock(
+                returncode=0,
+                stdout="relation_visible,t\nrow_security_active,f\np999,1\ncount,1\ntotal_rows,1\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr(
+            "scripts.phase12_kill_switch.subprocess.run", capture
+        )
+        ks.measure_p999_via_sql()
+        env = captured["env"]
+        assert isinstance(env, dict)
+        # Non-PG* parent env survives the merge — psql needs PATH for
+        # binary discovery and LANG for locale.
+        assert env.get("PATH") == "/test/bin:/usr/bin"
+        assert env.get("LANG") == "C.UTF-8"
+
+    def test_pg_star_keys_stripped_from_parent_env(self, monkeypatch) -> None:
+        """silent-failure-hunter HIGH conf-9: stale PG* keys in os.environ
+        MUST NOT survive the merge — only DSN-derived pg_env should
+        determine the libpq connection target."""
+        secret_dsn = "postgresql://alice:hunter2@db.example.com/quantalyze"
+        monkeypatch.setenv("DATABASE_URL", secret_dsn)
+        # Plant stale PG* keys in the parent env — a refactor that
+        # didn't strip them would silently let these override pg_env's
+        # subset (or supplement it for keys the DSN doesn't set).
+        monkeypatch.setenv("PGPASSWORD", "stale-leaked-password")
+        monkeypatch.setenv("PGUSER", "stale-leaked-user")
+        monkeypatch.setenv("PGSERVICE", "stale-service")
+        monkeypatch.setenv("PGOPTIONS", "-c statement_timeout=0")
+        monkeypatch.setenv("PGPASSFILE", "/etc/leaked.passfile")
+        captured: dict[str, object] = {}
+
+        def capture(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            captured["env"] = kwargs.get("env")
+            return MagicMock(
+                returncode=0,
+                stdout="relation_visible,t\nrow_security_active,f\np999,1\ncount,1\ntotal_rows,1\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr(
+            "scripts.phase12_kill_switch.subprocess.run", capture
+        )
+        ks.measure_p999_via_sql()
+        env = captured["env"]
+        assert isinstance(env, dict)
+        # PG* keys not present in the DSN must NOT survive.
+        assert env.get("PGSERVICE") is None or env.get("PGSERVICE") == ""
+        assert env.get("PGOPTIONS") is None or env.get("PGOPTIONS") == ""
+        # PGPASSFILE / PGSERVICEFILE explicitly nulled to defeat libpq
+        # fallback resolution (security MED conf-7).
+        assert env.get("PGPASSFILE") == ""
+        assert env.get("PGSERVICEFILE") == ""
+        # DSN-derived credentials must be the EFFECTIVE credentials.
+        assert env.get("PGPASSWORD") == "hunter2"
+        assert env.get("PGUSER") == "alice"
+
+
+class TestRunCutoversEmptyList:
+    """pr-test-analyzer MED conf-8: _run_cutovers_bounded MUST handle an
+    empty strategy_ids list (the legitimate "zero published strategies"
+    audit-log case). A refactor that did `if not strategy_ids: raise`
+    or removed the gather would regress this branch."""
+
+    @pytest.mark.asyncio
+    async def test_run_cutovers_bounded_with_empty_list(self) -> None:
+        total, fails = await ks._run_cutovers_bounded([], concurrency=5)
+        assert total == 0
+        assert fails == []
+
+
+class TestAuditLogOSErrorContinue:
+    """pr-test-analyzer MED conf-9: main() must catch OSError from
+    _atomic_append_todos and CONTINUE (the cutover succeeded against the
+    DB; an audit-log write failure must not abort the deploy). A refactor
+    that re-raised would silently regress and fail the deploy on a
+    read-only filesystem."""
+
+    @pytest.mark.asyncio
+    async def test_main_continues_when_atomic_append_raises_oserror(
+        self, monkeypatch, tmp_path, capsys
+    ) -> None:
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        monkeypatch.setenv("PHASE12_KILL_SWITCH_CONFIRMED", "true")
+        monkeypatch.setenv(
+            "DATABASE_URL", "postgresql://u:p@db.production.example.com/d"
+        )
+
+        # Repoint TODOS_PATH at a real-but-fresh tmp path. The parent
+        # dir already exists, so main() will take the
+        # `_atomic_append_todos` branch (where we then inject the
+        # OSError) rather than the "path missing" branch.
+        fake_todos = tmp_path / "TODOS.md"
+        monkeypatch.setattr(ks, "TODOS_PATH", fake_todos)
+
+        # No strategies to cut over (empty PostgREST result), so the
+        # cutover loop is a no-op and we go straight to the audit-log
+        # write.
+        fake_supabase = MagicMock()
+        fake_response = MagicMock()
+        fake_response.data = []
+        fake_supabase.table.return_value.select.return_value.execute.return_value = (
+            fake_response
+        )
+        monkeypatch.setattr(ks, "get_supabase", lambda: fake_supabase)
+
+        async def fake_db_execute(fn):  # type: ignore[no-untyped-def]
+            return fn()
+
+        monkeypatch.setattr(ks, "db_execute", fake_db_execute)
+
+        def raise_oserror(_audit: str) -> None:
+            raise OSError(13, "Permission denied")
+
+        monkeypatch.setattr(ks, "_atomic_append_todos", raise_oserror)
+
+        rc = await ks.main(
+            cli_p999=900_000.0, cli_count=0, cli_confirm_prod=True
+        )
+        # cutover succeeded (0 strategies, 0 failures) → exit 0; audit
+        # log failure logged a WARNING but did NOT propagate.
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "AUDIT" in err
+        assert "WARNING" in err
+        assert "audit log write" in err.lower()
+
+
+class TestNoopMarkerAbsenceOnPartialFailure:
+    """pr-test-analyzer LOW conf-7: noop_marker appears ONLY when
+    total_moved==0 AND failures==[]. A refactor that simplified the
+    condition to just `total_moved == 0` would mark partial failures
+    as no-ops, confusing post-incident triage. Pin the absence."""
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_does_not_get_noop_marker(
+        self, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        monkeypatch.setenv("PHASE12_KILL_SWITCH_CONFIRMED", "true")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost/d")
+
+        sid = "00000000-0000-0000-0000-000000000001"
+        fake_supabase = MagicMock()
+        fake_response = MagicMock()
+        fake_response.data = [{"strategy_id": sid}]
+        fake_supabase.table.return_value.select.return_value.execute.return_value = (
+            fake_response
+        )
+        monkeypatch.setattr(ks, "get_supabase", lambda: fake_supabase)
+
+        async def fake_db_execute(fn):  # type: ignore[no-untyped-def]
+            return fn()
+
+        monkeypatch.setattr(ks, "db_execute", fake_db_execute)
+
+        # Force the single strategy to FAIL — total_moved=0 but
+        # failures is non-empty, so noop_marker must be absent.
+        async def fail_cutover(_sid: str) -> int:
+            raise RuntimeError("simulated partial failure")
+
+        monkeypatch.setattr(ks, "cutover_strategy", fail_cutover)
+        # Avoid the real atomic-append touching the test tree.
+        monkeypatch.setattr(ks, "_atomic_append_todos", lambda _line: None)
+
+        rc = await ks.main(cli_p999=900_000.0, cli_count=1)
+        assert rc == 1
+        err = capsys.readouterr().err
+        # Partial failure must NOT be marked no-op (the marker would
+        # silently merge two distinct failure modes in audit triage).
+        assert "(no-op" not in err
