@@ -1,15 +1,28 @@
 name: Supabase Migrate
 
-# Applies Supabase migrations to production on merge to main.
+# Applies Supabase migrations to production on workflow_dispatch.
 #
 # Flow:
-#   1. `plan` job runs on every trigger and prints `supabase migration list`
-#      so the remote-vs-local diff is visible in the run log BEFORE the
-#      apply step can start.
-#   2. `apply` job is gated on the `production` GitHub environment —
-#      required-reviewer approval must be granted in the GitHub UI before
-#      it runs. Once approved, `supabase db push` applies only the
-#      migrations not yet present in the remote migration history.
+#   1. `plan` job prints `supabase db push --include-all --dry-run` so the
+#      EXACT command + flags the apply step will run are visible in the run
+#      log first (the dry-run output IS what the operator approves).
+#   2. `apply` job runs the same command without --dry-run on the
+#      `Production` GitHub Environment. Before the push, a mechanical
+#      "Backdated-migration safety guard" step rejects any local migration
+#      whose timestamp is older than the most-recently-applied remote
+#      migration unless it is on `.github/migrate-backdated-allowlist.txt`.
+#
+# Safety story (BUILD stage — required-reviewer gates NOT yet configured):
+#   - workflow_dispatch-only (no auto-trigger on push)
+#   - Backdated-migration safety guard mechanically blocks unallowlisted
+#     timestamp gap-fills before they can apply
+#   - Two-step plan-then-apply: the plan step uses --dry-run with the same
+#     --include-all flag, so what the operator eyeballs IS what runs
+#   - At scale (>=10 active clients), add required-reviewer protection to
+#     the `Production` GitHub Environment per ADR-0009 (TODO). The
+#     `environment: Production` lines below already pin the job to that
+#     environment, so future protection-rule changes apply without further
+#     workflow edits.
 #
 # Required GitHub repo configuration (one-time setup):
 #   - Secret `SUPABASE_ACCESS_TOKEN`: a personal access token with
@@ -18,8 +31,9 @@ name: Supabase Migrate
 #   - Secret `SUPABASE_DB_PASSWORD`: the database password for the target
 #     project (Supabase dashboard -> Project -> Settings -> Database).
 #   - Variable `SUPABASE_PROJECT_REF`: the project ref (e.g. `khslejtfbuezsmvmtsdn`).
-#   - Environment `production` (Settings -> Environments -> New environment)
-#     with required reviewers configured — this is the approval gate.
+#   - Environment `Production` (Settings -> Environments). At BUILD stage
+#     no protection rules are configured; reviewers should be added
+#     per ADR-0009 when client count justifies the operational overhead.
 #
 # Security note: this workflow consumes only repository secrets and
 # variables. No untrusted github.event.* fields (PR titles, commit
@@ -60,8 +74,10 @@ concurrency:
 # supabase CLI against a remote DB via its access token. No GitHub API
 # writes (no issue/PR/release creation), so `contents: read` is the
 # entire surface. The actual DB-mutation power comes from the
-# SUPABASE_ACCESS_TOKEN secret + the `production` GitHub Environment's
-# required-reviewer gate — both orthogonal to GITHUB_TOKEN scope.
+# SUPABASE_ACCESS_TOKEN secret + the workflow_dispatch-only trigger +
+# the Backdated-migration safety guard step in the apply job — all
+# orthogonal to GITHUB_TOKEN scope. (Required-reviewer protection on
+# the `Production` environment is a TODO per ADR-0009.)
 permissions:
   contents: read
 
@@ -69,18 +85,14 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     # retro-PR179-M-env-gate: the plan job consumes SUPABASE_DB_PASSWORD
-    # at L80 + L96 to run `supabase link --project-ref` (which writes
-    # the password into a local supabase config file). The apply job
-    # already gates on `environment: production` (required-reviewer
-    # approval before SUPABASE_DB_PASSWORD is consumed); the plan job
-    # was previously ungated, so a compromised supabase/setup-cli SHA
-    # could exfiltrate the password WITHOUT the same approval.
-    #
-    # Symmetric gate: plan now also requires `environment: production`
-    # approval. The cost is one extra UI click per dispatch; the gain
-    # is that prod-credential exposure now ALWAYS routes through a
-    # required-reviewer surface, matching the apply job's contract.
-    environment: production
+    # to run `supabase link --project-ref` (which writes the password
+    # into a local supabase config file). Both jobs are pinned to the
+    # `Production` GitHub Environment so any future protection-rule
+    # additions (required reviewers per ADR-0009) take effect uniformly
+    # across plan + apply without further workflow edits. At BUILD
+    # stage `Production` has no protection rules — the safety story
+    # is workflow_dispatch-only + the backdated-migration guard.
+    environment: Production
     outputs:
       configured: ${{ steps.check.outputs.configured }}
     steps:
@@ -122,7 +134,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.configured == 'true'
     runs-on: ubuntu-latest
-    environment: production
+    environment: Production
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
@@ -141,8 +153,16 @@ jobs:
         # --include-all is required to apply migrations that gap-fill earlier timestamp slots
         # (e.g. when a history-only restoration like PR #176 lands before subsequent additions).
         # Without it, db push refuses with "Found local migration ... that is below remote tip".
-        # Safety preserved by: workflow_dispatch-only + production environment gate + required
-        # reviewer + two-step plan-then-apply (operator eyeballs plan output before approving apply).
+        #
+        # Safety story (BUILD stage — required reviewers NOT yet configured):
+        #   - workflow_dispatch-only (no auto-trigger on push)
+        #   - The "Backdated-migration safety guard" step above mechanically rejects any
+        #     local migration whose timestamp is older than the most-recently-applied
+        #     remote migration unless on .github/migrate-backdated-allowlist.txt
+        #   - Two-step plan-then-apply with `--dry-run` on plan so the operator sees the
+        #     EXACT command output before approving apply
+        #   - At scale (>=10 active clients), add required-reviewer protection to the
+        #     `Production` environment per ADR-0009 (TODO).
         run: |
           supabase link --project-ref "$SUPABASE_PROJECT_REF"
           supabase db push --include-all
