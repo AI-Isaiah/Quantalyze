@@ -658,7 +658,11 @@ export interface OptimizerSuggestionRow {
   score: number;
 }
 
-export type BridgeFitLabel = "Strong fit" | "Good fit" | "Moderate fit" | "Weak fit";
+// audit-2026-05-07 M-0908: re-export the inferred Zod type so the
+// schema (analytics-schemas.ts) is the single source of truth. Existing
+// consumers that `import { BridgeFitLabel } from "./types"` keep working.
+import type { BridgeFitLabel } from "./analytics-schemas";
+export type { BridgeFitLabel };
 
 export interface BridgeCandidate {
   strategy_id: string;
