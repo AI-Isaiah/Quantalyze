@@ -55,10 +55,17 @@ Findings cluster around 6 user-facing failure modes. Multiple specialists flagge
 
 ### Defer (out of scope)
 
-- HIGH type-design-analyzer: WidgetProps.data:any narrowing — touches ~30 widget files, separate PR per runner
+- HIGH type-design-analyzer: WidgetProps.data:any narrowing — touches ~30 widget files, separate PR per runner instructions
 - MED red-team L7: cross-hook localStorage origin sharing (architectural — needs design discussion)
+- Visual-fidelity violation (red-team L11 conf-8): M-1063 EquityChart fallback DOES change visual surface on broken data (new empty-state DOM where SVG used to render). This was acknowledged in the original PR #183 commit message ("a graceful, copy-driven fallback on broken data") but the "zero JSX changes" headline claim was not technically accurate. NOT reverting M-1063 because the post-fix behaviour is correct; documenting here so the audit trail is intact. The minor banner addition for the recovery flag in this PR is the second visual change (also justified — the recovery flag's stated purpose was a user-facing notice).
 
 ### Skip (below threshold or unrelated)
 
 - All LOW findings
 - All findings without retroactive:true,pr:183 marker (these are equity_reconstruction.py from a later audit, unrelated to PR #183 scope)
+
+## Apply summary
+
+7 commits queued. Findings closed: 18 (8 HIGH conf>=7, 10 MED conf>=8).
+Findings deferred: 2 (1 HIGH WidgetProps.data:any → separate PR, 1 MED cross-hook localStorage → architectural).
+Visual changes: 2 acknowledged (M-1063 already merged, new recovery banner in commit 1).
