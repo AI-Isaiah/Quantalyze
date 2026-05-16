@@ -771,6 +771,14 @@ export type FundingFee =
  * against `SUPPORTED_EXCHANGES` so a typo in the row's exchange becomes
  * a parse error rather than a silent fall-through. `.strict()` surfaces
  * column drift loudly.
+ *
+ * The schema is a flat object (single enum on `exchange`); the typed
+ * discriminated union shape lives on `FundingFee` and the parser
+ * `.transform()`s the validated row up to it. Modelling Zod as a
+ * discriminated union of three near-identical branches doesn't buy
+ * additional safety here because the raw_data per-exchange shapes are
+ * all `Record<string, unknown> | null` at the wire level — the
+ * discriminator value is the only thing the runtime can verify.
  */
 const _fundingRawData = z.record(z.string(), z.unknown()).nullable();
 
@@ -788,7 +796,10 @@ export const FundingFeeRowSchema = z
     created_at: _isoTimestamp,
   })
   .strict()
-  .transform((row) => row as FundingFee);
+  .transform((row): FundingFee => ({
+    ...row,
+    match_key: row.match_key as FundingFeeMatchKey,
+  } as FundingFee));
 
 /**
  * Parse an array of unknown rows (typically `data` from a Supabase select)
