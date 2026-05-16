@@ -529,16 +529,49 @@ describe("Critical regression guards", () => {
     // uploaded artifact. A regression that re-introduces the ternary
     // (or any non-placeholder value) re-opens the exfil pivot.
     describe("frontend-build env: placeholder NEXT_PUBLIC_* values only", () => {
-      it("ci.yml frontend-build env block uses placeholder NEXT_PUBLIC_* values and does not reference secrets.TEST_SUPABASE_URL", () => {
+      it("ci.yml frontend-build env block uses placeholder NEXT_PUBLIC_* values and does not reference secrets.TEST_SUPABASE_*", () => {
         const src = readText(".github/workflows/ci.yml");
         // Find the frontend-build job's `npm run build` step env block.
         // The placeholder MUST appear directly in the env literal, not
         // via a secret/var expression.
-        const envBlock = findOrFail(
-          src,
-          /frontend-build:[\s\S]*?-\s*run:\s*npm run build[\s\S]*?env:\s*\n([\s\S]*?)(?=\n\s{0,6}-\s|\n[a-z])/,
+        //
+        // retro-PR188-F5 (red-team #36): the previous regex boundary
+        // `(?=\n\s{0,6}-\s|\n[a-z])` over-captured past the env block into
+        // following YAML comments. A benign doc comment mentioning
+        // `secrets.TEST_SUPABASE_URL` would have triggered a false-positive.
+        // Tighter approach — walk lines from the `env:` line forward,
+        // collecting only indented KEY: VALUE lines (no comments, no shell
+        // continuation lines), and stop at the first non-indented line or
+        // dash-prefixed step. That mirrors the real YAML semantics.
+        const buildStepRe =
+          /frontend-build:[\s\S]*?-\s*run:\s*npm run build[\s\S]*?env:\s*\n/;
+        const m = src.match(buildStepRe);
+        expect(
+          m,
           "ci.yml: could not locate frontend-build npm run build env block",
-        );
+        ).not.toBeNull();
+        const envStart = m!.index! + m![0].length;
+        const tail = src.slice(envStart).split("\n");
+        const envLines: string[] = [];
+        // Indented YAML key lines look like `          KEY: VALUE` —
+        // require at least one leading space (the env block is a YAML map
+        // nested under `env:`). Stop at first non-indented line, dash-step,
+        // or comment.
+        for (const line of tail) {
+          if (line.trim() === "") break;
+          // Step boundary: a line starting with `<spaces>-` is the next step.
+          if (/^\s+-\s/.test(line)) break;
+          // Stop at any non-indented line (e.g. next job).
+          if (/^\S/.test(line)) break;
+          // Skip pure comment lines but DO NOT include them in the block.
+          if (/^\s+#/.test(line)) continue;
+          envLines.push(line);
+        }
+        const envBlock = envLines.join("\n");
+        expect(
+          envBlock.length,
+          "ci.yml: frontend-build env block walked empty — env block format drifted",
+        ).toBeGreaterThan(0);
         expectMatch(
           envBlock,
           /NEXT_PUBLIC_SUPABASE_URL:\s*https:\/\/placeholder\.supabase\.co/,
@@ -549,13 +582,17 @@ describe("Critical regression guards", () => {
           /NEXT_PUBLIC_SUPABASE_ANON_KEY:\s*placeholder\b/,
           "frontend-build env NEXT_PUBLIC_SUPABASE_ANON_KEY is not the literal placeholder — C-0293(c) regression",
         );
-        // Defensive: secrets.TEST_SUPABASE_URL must NOT appear in the
-        // frontend-build env block (it belongs only in the rebuild
-        // step further down in the e2e job).
+        // retro-PR188-F1 (red-team #34): defensive — NO test-Supabase
+        // secret may appear in the frontend-build env block. The prior
+        // check only banned TEST_SUPABASE_URL; ANON_KEY + SERVICE_ROLE_KEY
+        // are equally load-bearing leak vectors (the URL+anon pair is
+        // enough to auth against the test project; SERVICE_ROLE_KEY bypasses
+        // RLS entirely). Broaden to a prefix match so any current or future
+        // TEST_SUPABASE_* secret addition is caught.
         expectNoMatch(
           envBlock,
-          /secrets\.TEST_SUPABASE_URL/,
-          "frontend-build env references secrets.TEST_SUPABASE_URL — C-0293(c) seed-aware ternary regression",
+          /secrets\.TEST_SUPABASE_/,
+          "frontend-build env references a secrets.TEST_SUPABASE_* — C-0293(c) seed-aware ternary regression (URL/ANON_KEY/SERVICE_ROLE_KEY all banned)",
         );
       });
 
