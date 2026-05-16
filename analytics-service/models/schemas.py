@@ -1,6 +1,6 @@
 import math
 from pydantic import BaseModel, ConfigDict, field_validator
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 
 class ComputeRequest(BaseModel):
@@ -122,7 +122,15 @@ class VerifyStrategyResponse(BaseModel):
     status: str
     verification_id: str
     matched_strategy_id: Optional[str] = None
-    matching_status: Optional[str] = None
+    # The four known outcomes after the audit-2026-05-07 H-0582 split.
+    # Declared as Literal so the OpenAPI schema documents the enum and
+    # typed-SDK consumers can switch on it (review API-3).
+    matching_status: Optional[
+        Literal["matched", "no_match", "matching_unavailable"]
+    ] = None
+    # Set to True only when the response was served from the H-0592
+    # idempotency cache on an Idempotency-Key retry (review API-5).
+    idempotent_replay: Optional[bool] = None
 
 
 class PortfolioBridgeResponse(BaseModel):

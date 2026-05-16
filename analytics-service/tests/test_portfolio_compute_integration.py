@@ -533,6 +533,66 @@ class TestResponseEnvelopeContract:
         assert "response_model=VerifyStrategyResponse" in _PORTFOLIO_SRC
 
 
+# ---------------------------------------------------------------------------
+# SFH-3 — Alert-generation failure does not demote COMPLETE analytics row
+# ---------------------------------------------------------------------------
+
+
+class TestAlertFailureKeepsAnalyticsComplete:
+    """Review SFH-3: _generate_alerts is called AFTER the analytics row is
+    UPDATEd to 'complete'. If alert generation raises (e.g., transient
+    Supabase failure on the dedup probe), the outer except in
+    _compute_portfolio_analytics used to run _fail(), demoting a fully-
+    computed COMPLETE row to FAILED.
+
+    After the fix, _generate_alerts is wrapped in its own try/except so
+    a downstream alert failure cannot corrupt the analytics row state.
+    """
+
+    @pytest.mark.asyncio
+    async def test_alert_exception_does_not_mark_row_failed(self, monkeypatch):
+        ret1 = _returns_records(seed=1)
+        ret2 = _returns_records(seed=2)
+        ps = [
+            {"strategy_id": "s1", "current_weight": 0.5, "strategies": {"id": "s1", "name": "Alpha"}},
+            {"strategy_id": "s2", "current_weight": 0.5, "strategies": {"id": "s2", "name": "Beta"}},
+        ]
+        sa_rows = [
+            {"strategy_id": "s1", "returns_series": ret1, "equity_curve": _equity_records(ret1), "total_aum": 100.0},
+            {"strategy_id": "s2", "returns_series": ret2, "equity_curve": _equity_records(ret2), "total_aum": 50.0},
+        ]
+        sb, tables = _make_supabase_for_compute(
+            portfolio_strategies=ps,
+            analytics_rows=sa_rows,
+        )
+
+        async def _fake_benchmark(symbol):
+            return None, True
+
+        # Inject a poisoned _generate_alerts that raises.
+        def _explode(*_a, **_kw):
+            raise RuntimeError("simulated dedup probe failure")
+
+        monkeypatch.setattr("routers.portfolio._generate_alerts", _explode)
+        with patch("routers.portfolio.get_supabase", return_value=sb), \
+             patch("routers.portfolio.get_benchmark_returns", side_effect=_fake_benchmark):
+            result = await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+
+        # Compute returned successfully — exception was contained.
+        assert result["analytics_id"] == "analytics-1"
+        # The only update made to portfolio_analytics was to COMPLETE; no
+        # subsequent _fail() should have run.
+        update_calls = tables["portfolio_analytics"].update.call_args_list
+        # First (and only) update is the COMPLETE write.
+        assert len(update_calls) == 1, (
+            "Expected exactly one UPDATE on portfolio_analytics (the COMPLETE "
+            "transition). A second UPDATE would mean the row was demoted "
+            "back to FAILED by the outer except."
+        )
+        first_update_payload = update_calls[0][0][0]
+        assert first_update_payload["computation_status"] == "complete"
+
+
 class TestAuditSkipAnnotations:
     """M-0613 / M-0622 / H-0588 — every @audit-skip marker in portfolio.py
     must be followed within 8 lines by a supabase mutation call.

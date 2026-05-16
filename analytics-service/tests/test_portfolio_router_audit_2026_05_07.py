@@ -460,17 +460,25 @@ class TestAlertDedup:
 # ---------------------------------------------------------------------------
 
 class TestIdempotencyCache:
-    """H-0592: Idempotency-Key support for verify_strategy. Same key +
-    same (email, exchange) returns the cached response without re-firing
-    the live exchange handshake.
+    """H-0592: Idempotency-Key support for verify_strategy. Same
+    (email, exchange, api_key, idempotency_key) returns the cached
+    response without re-firing the live exchange handshake. The
+    api_key is part of the cache key (review SEC-2) so two callers
+    sharing an email but using different api_keys can't read each
+    other's cached response.
     """
+
+    _API_KEY = "test-api-key-1"
+    _OTHER_API_KEY = "different-api-key-2"
 
     def setup_method(self):
         portfolio_mod._verify_strategy_idempotency.clear()
 
     def test_lookup_miss_returns_none(self):
         from routers.portfolio import _verify_strategy_idempotency_lookup
-        assert _verify_strategy_idempotency_lookup("a@x.com", "binance", "key1") is None
+        assert _verify_strategy_idempotency_lookup(
+            "a@x.com", "binance", self._API_KEY, "key1",
+        ) is None
 
     def test_store_then_lookup_hits(self):
         from routers.portfolio import (
@@ -478,9 +486,12 @@ class TestIdempotencyCache:
             _verify_strategy_idempotency_store,
         )
         _verify_strategy_idempotency_store(
-            "a@x.com", "binance", "key1", {"verification_id": "v-1"},
+            "a@x.com", "binance", self._API_KEY, "key1",
+            {"verification_id": "v-1"},
         )
-        cached = _verify_strategy_idempotency_lookup("a@x.com", "binance", "key1")
+        cached = _verify_strategy_idempotency_lookup(
+            "a@x.com", "binance", self._API_KEY, "key1",
+        )
         assert cached == {"verification_id": "v-1"}
 
     def test_different_key_is_isolated(self):
@@ -489,10 +500,13 @@ class TestIdempotencyCache:
             _verify_strategy_idempotency_store,
         )
         _verify_strategy_idempotency_store(
-            "a@x.com", "binance", "key1", {"verification_id": "v-1"},
+            "a@x.com", "binance", self._API_KEY, "key1",
+            {"verification_id": "v-1"},
         )
-        # Different IK on the same (email, exchange) returns nothing.
-        assert _verify_strategy_idempotency_lookup("a@x.com", "binance", "key2") is None
+        # Different IK on the same (email, exchange, api_key) returns nothing.
+        assert _verify_strategy_idempotency_lookup(
+            "a@x.com", "binance", self._API_KEY, "key2",
+        ) is None
 
     def test_email_case_normalized(self):
         """Idempotency-Key dedup is case-insensitive on email — the
@@ -502,10 +516,47 @@ class TestIdempotencyCache:
             _verify_strategy_idempotency_store,
         )
         _verify_strategy_idempotency_store(
-            "A@X.com", "binance", "key1", {"verification_id": "v-1"},
+            "A@X.com", "binance", self._API_KEY, "key1",
+            {"verification_id": "v-1"},
         )
-        cached = _verify_strategy_idempotency_lookup("a@x.com", "binance", "key1")
+        cached = _verify_strategy_idempotency_lookup(
+            "a@x.com", "binance", self._API_KEY, "key1",
+        )
         assert cached is not None
+
+    def test_different_api_key_isolated(self):
+        """SEC-2: same (email, exchange, IK) but different api_key must
+        NOT return the cached response. A flaky-client retry that swaps
+        credentials should not leak the previous response."""
+        from routers.portfolio import (
+            _verify_strategy_idempotency_lookup,
+            _verify_strategy_idempotency_store,
+        )
+        _verify_strategy_idempotency_store(
+            "a@x.com", "binance", self._API_KEY, "key1",
+            {"verification_id": "v-1"},
+        )
+        assert _verify_strategy_idempotency_lookup(
+            "a@x.com", "binance", self._OTHER_API_KEY, "key1",
+        ) is None
+
+    def test_cache_evicts_when_over_cap(self):
+        """CR-2/PERF-2: simultaneous-entry cap prevents unbounded growth.
+        Once cache hits the cap, the oldest insertion is evicted."""
+        from routers.portfolio import _verify_strategy_idempotency_store
+        # Shrink the cap for the test, then restore.
+        original_cap = portfolio_mod._VERIFY_STRATEGY_IDEMPOTENCY_CACHE_MAX
+        portfolio_mod._VERIFY_STRATEGY_IDEMPOTENCY_CACHE_MAX = 3
+        try:
+            for i in range(5):
+                _verify_strategy_idempotency_store(
+                    f"u{i}@x.com", "binance", f"k{i}", "ik",
+                    {"verification_id": f"v-{i}"},
+                )
+            # Cap=3 means after storing 5, only 3 remain.
+            assert len(portfolio_mod._verify_strategy_idempotency) == 3
+        finally:
+            portfolio_mod._VERIFY_STRATEGY_IDEMPOTENCY_CACHE_MAX = original_cap
 
 
 class TestPerEmailRateLimit:
@@ -533,6 +584,18 @@ class TestPerEmailRateLimit:
             _check_verify_strategy_email_rate("c@example.com")
         # Different email should still be allowed.
         assert _check_verify_strategy_email_rate("d@example.com") is True
+
+    def test_cache_evicts_when_over_cap(self):
+        """CR-1/PERF-2: simultaneous-email cap prevents unbounded growth.
+        Once cache hits the cap, the oldest-touched email is evicted."""
+        original_cap = portfolio_mod._VERIFY_STRATEGY_EMAIL_CACHE_MAX
+        portfolio_mod._VERIFY_STRATEGY_EMAIL_CACHE_MAX = 3
+        try:
+            for i in range(5):
+                _check_verify_strategy_email_rate(f"u{i}@example.com")
+            assert len(portfolio_mod._verify_strategy_email_attempts) == 3
+        finally:
+            portfolio_mod._VERIFY_STRATEGY_EMAIL_CACHE_MAX = original_cap
 
 
 # ---------------------------------------------------------------------------

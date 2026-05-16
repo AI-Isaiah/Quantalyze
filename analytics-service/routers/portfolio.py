@@ -1,5 +1,6 @@
 import asyncio
 import enum
+import hashlib
 import logging
 import time
 import uuid
@@ -122,6 +123,11 @@ limiter = Limiter(key_func=get_remote_address)
 # IP-based limiter is still authoritative for the global ceiling.
 _VERIFY_STRATEGY_EMAIL_RATE_LIMIT = 5          # max per window
 _VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC = 3600  # 1 hour
+# Bound on distinct emails tracked simultaneously. Without a cap an attacker
+# submitting unique addresses could leak unbounded memory (review CR-1/PERF-2).
+# When the cap is hit we evict the oldest-touched email (LRU-ish: dict insertion
+# order is the activity order since we re-insert on every check).
+_VERIFY_STRATEGY_EMAIL_CACHE_MAX = 10_000
 _verify_strategy_email_attempts: dict[str, list[float]] = {}
 
 
@@ -129,8 +135,9 @@ def _check_verify_strategy_email_rate(email: str) -> bool:
     """Return True if the email is under the per-email rate budget.
 
     Side-effect: prunes expired timestamps and records the current attempt
-    when the check passes. Returning False means the caller should reject
-    with HTTP 429 even though the IP-based limiter let the request through.
+    when the check passes (failed attempts count too — abuse-prevention).
+    Returning False means the caller should reject with HTTP 429 even
+    though the IP-based limiter let the request through.
     """
     if not email:
         return True
@@ -143,25 +150,53 @@ def _check_verify_strategy_email_rate(email: str) -> bool:
         _verify_strategy_email_attempts[email] = bucket
         return False
     bucket.append(now)
+    # Re-insert (move to dict-end) to preserve insertion-order LRU semantics.
+    _verify_strategy_email_attempts.pop(email, None)
     _verify_strategy_email_attempts[email] = bucket
+    # Evict oldest entries when over cap.
+    while len(_verify_strategy_email_attempts) > _VERIFY_STRATEGY_EMAIL_CACHE_MAX:
+        oldest = next(iter(_verify_strategy_email_attempts))
+        _verify_strategy_email_attempts.pop(oldest, None)
     return True
 
 
 # Audit H-0592 — in-process idempotency cache for verify_strategy. Keyed
-# by (email, exchange, idempotency_key) with a 24h TTL. Not distributed-
-# safe across workers; the IP rate limit + per-email throttle remain the
-# authoritative bound on multi-worker abuse, but same-process flaky-client
-# retries get full replay protection.
+# by (email, exchange, api_key fingerprint, idempotency_key) with a 24h TTL.
+# api_key is hashed into the key (review SEC-2) so two callers sharing an
+# email but using different keys can't read each other's cached response.
+# Not distributed-safe across workers; the IP rate limit + per-email
+# throttle remain the authoritative bound on multi-worker abuse, but
+# same-process flaky-client retries get full replay protection.
 _VERIFY_STRATEGY_IDEMPOTENCY_TTL_SEC = 24 * 3600
+# Bound on simultaneously-cached idempotency responses. Reviewed under CR-2 /
+# PERF-2 — without a cap the dict grows unbounded. Eviction follows the same
+# insertion-order LRU pattern as the email cache.
+_VERIFY_STRATEGY_IDEMPOTENCY_CACHE_MAX = 10_000
 _verify_strategy_idempotency: dict[str, tuple[float, dict]] = {}
 
 
-def _verify_strategy_idempotency_key(email: str, exchange: str, ik: str) -> str:
-    return f"{(email or '').strip().lower()}|{exchange}|{ik}"
+def _api_key_fingerprint(api_key: str | None) -> str:
+    """Return a short hex digest of api_key for inclusion in the
+    idempotency-cache key (review SEC-2). 12 hex chars (48 bits) is plenty
+    of collision resistance for an in-process cache while staying short.
+    """
+    raw = (api_key or "").encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:12]
 
 
-def _verify_strategy_idempotency_lookup(email: str, exchange: str, ik: str) -> dict | None:
-    key = _verify_strategy_idempotency_key(email, exchange, ik)
+def _verify_strategy_idempotency_key(
+    email: str, exchange: str, api_key: str | None, ik: str,
+) -> str:
+    return (
+        f"{(email or '').strip().lower()}|{exchange}|"
+        f"{_api_key_fingerprint(api_key)}|{ik}"
+    )
+
+
+def _verify_strategy_idempotency_lookup(
+    email: str, exchange: str, api_key: str | None, ik: str,
+) -> dict | None:
+    key = _verify_strategy_idempotency_key(email, exchange, api_key, ik)
     entry = _verify_strategy_idempotency.get(key)
     if not entry:
         return None
@@ -172,9 +207,16 @@ def _verify_strategy_idempotency_lookup(email: str, exchange: str, ik: str) -> d
     return response
 
 
-def _verify_strategy_idempotency_store(email: str, exchange: str, ik: str, response: dict) -> None:
-    key = _verify_strategy_idempotency_key(email, exchange, ik)
+def _verify_strategy_idempotency_store(
+    email: str, exchange: str, api_key: str | None, ik: str, response: dict,
+) -> None:
+    key = _verify_strategy_idempotency_key(email, exchange, api_key, ik)
+    # Re-insert to preserve insertion-order LRU semantics.
+    _verify_strategy_idempotency.pop(key, None)
     _verify_strategy_idempotency[key] = (time.monotonic(), dict(response))
+    while len(_verify_strategy_idempotency) > _VERIFY_STRATEGY_IDEMPOTENCY_CACHE_MAX:
+        oldest = next(iter(_verify_strategy_idempotency))
+        _verify_strategy_idempotency.pop(oldest, None)
 
 
 def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
@@ -268,12 +310,16 @@ def _series_to_curve(series: pd.Series) -> list[dict]:
 def _compute_sharpe_and_vol(returns: pd.Series) -> tuple[float | None, float | None, float | None, str]:
     """Compute annualised vol, mean_ret, sharpe + a status code.
 
-    Returns (vol, mean_ret, sharpe, sharpe_status). Status codes:
-      "ok" — sharpe is a real float.
+    Returns (vol, mean_ret, sharpe, sharpe_status). Status codes are
+    deliberately mutually exclusive so the data_quality channel can
+    distinguish each empty-state reason (review CR-3):
+
+      "ok"                   — sharpe is a real float.
       "insufficient_history" — fewer than 2 samples.
-      "zero_volatility" — vol == 0.
-      "nan_mean" — mean_ret is NaN.
-      "nan" — sharpe is NaN/inf after _safe_float.
+      "zero_volatility"      — vol == 0 (flat returns).
+      "nan_vol"              — vol is NaN (typically all-NaN returns).
+      "nan_mean"             — vol is finite but mean_ret is NaN.
+      "nan_sharpe"           — mean_ret/vol arithmetic produced NaN/inf.
 
     Replaces three structurally identical implementations (audit M-0626).
     """
@@ -282,11 +328,15 @@ def _compute_sharpe_and_vol(returns: pd.Series) -> tuple[float | None, float | N
     vol = returns.std() * np.sqrt(252)
     mean_ret = returns.mean() * 252
     if vol is None or vol == 0 or (isinstance(vol, float) and np.isnan(vol)):
-        return _safe_float(vol), _safe_float(mean_ret), None, "zero_volatility" if vol == 0 else "nan"
+        if vol == 0:
+            status = "zero_volatility"
+        else:
+            status = "nan_vol"
+        return _safe_float(vol), _safe_float(mean_ret), None, status
     if mean_ret is None or (isinstance(mean_ret, float) and np.isnan(mean_ret)):
         return _safe_float(vol), None, None, "nan_mean"
     sharpe = _safe_float(mean_ret / vol)
-    return _safe_float(vol), _safe_float(mean_ret), sharpe, "ok" if sharpe is not None else "nan"
+    return _safe_float(vol), _safe_float(mean_ret), sharpe, "ok" if sharpe is not None else "nan_sharpe"
 
 
 # ---------------------------------------------------------------------------
@@ -680,16 +730,27 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             "id", analytics_id
         ).execute()
 
-        # Generate alerts
-        _generate_alerts(
-            supabase,
-            portfolio_id,
-            max_drawdown,
-            avg_pairwise_corr,
-            rolling_corr=rolling_corr,
-            attribution=attribution,
-            risk_decomp=risk_decomp,
-        )
+        # Generate alerts. Wrapped in its own try so an alert-side failure
+        # (review SFH-3) cannot demote a successfully-COMPLETE analytics
+        # row back to FAILED: by the time we get here the row is persisted
+        # as COMPLETE above, and the user-visible analytics are correct.
+        # Alerts are best-effort secondary signals.
+        try:
+            _generate_alerts(
+                supabase,
+                portfolio_id,
+                max_drawdown,
+                avg_pairwise_corr,
+                rolling_corr=rolling_corr,
+                attribution=attribution,
+                risk_decomp=risk_decomp,
+            )
+        except Exception as alert_exc:
+            logger.exception(
+                "Alert generation failed for portfolio %s (analytics row "
+                "remains COMPLETE): %s",
+                portfolio_id, alert_exc,
+            )
 
         return {"analytics_id": analytics_id, **update_payload}
 
@@ -706,7 +767,17 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         # can identify the root cause from the row alone, without having
         # to cross-reference Sentry by timestamp. Project memory KPI-17
         # saga (PRs #95-#100) flagged this exact debug-the-DB-row need.
-        _fail(f"{type(exc).__name__}: {str(exc)[:400]}")
+        # _fail() itself can raise if Supabase is down — catch and log
+        # (review CR-7) so the original computation exception isn't
+        # masked by a subsequent infra error.
+        try:
+            _fail(f"{type(exc).__name__}: {str(exc)[:400]}")
+        except Exception as fail_exc:
+            logger.exception(
+                "Failed to mark portfolio %s analytics row FAILED (row may "
+                "be stuck in 'computing'; cron reaper will recover): %s",
+                portfolio_id, fail_exc,
+            )
         raise HTTPException(status_code=500, detail="Portfolio analytics computation failed")
 
 
@@ -1462,7 +1533,9 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
     # .get()); no defensive try/except needed. Empty / missing header → skip.
     idempotency_key = (request.headers.get("Idempotency-Key") or "").strip()
     if idempotency_key:
-        cached = _verify_strategy_idempotency_lookup(req.email, req.exchange, idempotency_key)
+        cached = _verify_strategy_idempotency_lookup(
+            req.email, req.exchange, req.api_key, idempotency_key,
+        )
         if cached is not None:
             return {**cached, "idempotent_replay": True}
 
@@ -1629,7 +1702,7 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
         # retries (audit H-0592).
         if idempotency_key:
             _verify_strategy_idempotency_store(
-                req.email, req.exchange, idempotency_key, response,
+                req.email, req.exchange, req.api_key, idempotency_key, response,
             )
         return response
 
