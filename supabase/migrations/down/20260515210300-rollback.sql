@@ -2,7 +2,10 @@
 -- audit-2026-05-07 H-0939 / H-0941 / H-0942 / H-0944 / H-0945.
 --
 -- Restores the pre-forward state:
---   * Drops the allocator_preferences_scoring_weight_overrides_shape CHECK.
+--   * Drops the allocator_preferences_scoring_weight_overrides_shape CHECK
+--     and the _scoring_weight_overrides_is_valid helper it depends on
+--     (order: CHECK first, then helper, otherwise the DROP FUNCTION trips
+--     dependent_objects_still_exist).
 --   * Restores the migration-066 enqueue_compute_job body (no allocator-
 --     branch ownership gate). The explicit service_role GRANT is NOT
 --     revoked — restoring a known-buggy "no GRANT" state is not a
@@ -13,6 +16,8 @@ SET lock_timeout = '5s';
 
 ALTER TABLE allocator_preferences
   DROP CONSTRAINT IF EXISTS allocator_preferences_scoring_weight_overrides_shape;
+
+DROP FUNCTION IF EXISTS public._scoring_weight_overrides_is_valid(jsonb);
 
 CREATE OR REPLACE FUNCTION public.enqueue_compute_job(
   p_strategy_id     UUID,

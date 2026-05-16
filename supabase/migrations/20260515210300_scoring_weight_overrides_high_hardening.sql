@@ -5,8 +5,9 @@
 -- Why this migration exists
 -- -------------------------
 -- The audit-2026-05-07 H-pass on supabase/migrations/062_scoring_weight_overrides.sql
--- identified three SQL-actionable HIGH defects beyond what migrations
--- 066 / 118 / 134 closed in the prior remediation rounds:
+-- identified three clusters of SQL-actionable HIGH defects (five
+-- individual H-IDs) beyond what migrations 066 / 118 / 134 closed in
+-- the prior remediation rounds:
 --
 --   * H-0939 (type-design-analyzer c9): allocator_preferences.scoring_weight_overrides
 --     is JSONB with no DB-level shape contract. A buggy admin tool, a
@@ -88,17 +89,70 @@ BEGIN;
 SET lock_timeout = '5s';
 
 -- --------------------------------------------------------------------------
+-- STEP 0: H-0939 helper — shape validation function
+-- --------------------------------------------------------------------------
+-- PostgreSQL forbids subqueries inside CHECK expressions (raises
+-- 0A000 cannot_use_subquery_in_check), so the NOT EXISTS predicates
+-- that police the JSONB shape must live inside an IMMUTABLE function
+-- the CHECK can call. Extracting the helper also collapses the
+-- backfill predicate and the CHECK predicate to a single source of
+-- truth — the H-0939 fixup commit demonstrated the cost of the
+-- predicate-duplication (audit-A reuse #2 / efficiency #4).
+CREATE OR REPLACE FUNCTION public._scoring_weight_overrides_is_valid(
+  p_overrides jsonb
+) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog
+AS $fn$
+  SELECT
+    p_overrides IS NULL
+    OR (
+      jsonb_typeof(p_overrides) = 'object'
+      AND NOT EXISTS (
+        SELECT 1
+          FROM jsonb_object_keys(p_overrides) AS k
+         WHERE k NOT IN (
+           'W_PORTFOLIO_FIT', 'W_PERFORMANCE', 'W_QUALITY', 'W_RISK_FIT',
+           'W_RELIABILITY', 'W_EXCHANGE_FIT', 'W_LIQUIDITY_FIT'
+         )
+      )
+      AND NOT EXISTS (
+        SELECT 1
+          FROM jsonb_each(p_overrides) AS kv(key, value)
+         WHERE jsonb_typeof(kv.value) <> 'number'
+            OR CASE
+                 WHEN jsonb_typeof(kv.value) = 'number'
+                 THEN (kv.value::text)::numeric NOT BETWEEN 0.5 AND 1.5
+                 ELSE false
+               END
+      )
+    );
+$fn$;
+
+COMMENT ON FUNCTION public._scoring_weight_overrides_is_valid(jsonb) IS
+  'audit-2026-05-07 H-0939. IMMUTABLE shape validator for '
+  'allocator_preferences.scoring_weight_overrides. Returns TRUE iff the '
+  'argument is NULL or a JSONB object whose keys are all in '
+  '{W_PORTFOLIO_FIT, W_PERFORMANCE, W_QUALITY, W_RISK_FIT, W_RELIABILITY, '
+  'W_EXCHANGE_FIT, W_LIQUIDITY_FIT} and whose values are all JSON numbers '
+  'in [0.5, 1.5]. Called from both the backfill predicate and the table '
+  'CHECK constraint — coordinate any amendment with both call sites and '
+  'with match_engine.py.';
+
+-- --------------------------------------------------------------------------
 -- STEP 1: H-0939 — bound scoring_weight_overrides shape
 -- --------------------------------------------------------------------------
--- The CHECK enforces three invariants:
+-- The CHECK enforces three invariants via _scoring_weight_overrides_is_valid:
 --   (a) JSONB type is 'object' (rejects arrays, scalars, NULL is OK).
 --   (b) Every top-level key is in the whitelist of known weight slots.
 --   (c) Every top-level value is a JSON number in [0.5, 1.5].
 --
 -- Weight whitelist mirrors the match_engine.py constants. If a future
--- weight is added, this CHECK must be amended in lockstep — surface
--- the dependency in the function comment + this migration's header so
--- a missed update is caught by the runtime CHECK error rather than
+-- weight is added, the helper above + this migration's header must be
+-- amended in lockstep — surface the dependency in the function comment
+-- so a missed update is caught by the runtime CHECK error rather than
 -- silently mis-scoring.
 --
 -- Backfill: any existing row that violates the new CHECK gets its
@@ -113,27 +167,7 @@ BEGIN
     UPDATE allocator_preferences
        SET scoring_weight_overrides = NULL
      WHERE scoring_weight_overrides IS NOT NULL
-       AND NOT (
-         jsonb_typeof(scoring_weight_overrides) = 'object'
-         AND NOT EXISTS (
-           SELECT 1
-             FROM jsonb_object_keys(scoring_weight_overrides) AS k
-            WHERE k NOT IN (
-              'W_PORTFOLIO_FIT', 'W_PERFORMANCE', 'W_QUALITY', 'W_RISK_FIT',
-              'W_RELIABILITY', 'W_EXCHANGE_FIT', 'W_LIQUIDITY_FIT'
-            )
-         )
-         AND NOT EXISTS (
-           SELECT 1
-             FROM jsonb_each(scoring_weight_overrides) AS kv(key, value)
-            WHERE jsonb_typeof(kv.value) <> 'number'
-               OR CASE
-                    WHEN jsonb_typeof(kv.value) = 'number'
-                    THEN (kv.value::text)::numeric NOT BETWEEN 0.5 AND 1.5
-                    ELSE false
-                  END
-         )
-       )
+       AND NOT public._scoring_weight_overrides_is_valid(scoring_weight_overrides)
     RETURNING user_id
   )
   SELECT count(*) INTO v_coerced FROM coerced;
@@ -148,30 +182,7 @@ ALTER TABLE allocator_preferences
 
 ALTER TABLE allocator_preferences
   ADD CONSTRAINT allocator_preferences_scoring_weight_overrides_shape
-  CHECK (
-    scoring_weight_overrides IS NULL
-    OR (
-      jsonb_typeof(scoring_weight_overrides) = 'object'
-      AND NOT EXISTS (
-        SELECT 1
-          FROM jsonb_object_keys(scoring_weight_overrides) AS k
-         WHERE k NOT IN (
-           'W_PORTFOLIO_FIT', 'W_PERFORMANCE', 'W_QUALITY', 'W_RISK_FIT',
-           'W_RELIABILITY', 'W_EXCHANGE_FIT', 'W_LIQUIDITY_FIT'
-         )
-      )
-      AND NOT EXISTS (
-        SELECT 1
-          FROM jsonb_each(scoring_weight_overrides) AS kv(key, value)
-         WHERE jsonb_typeof(kv.value) <> 'number'
-            OR CASE
-                 WHEN jsonb_typeof(kv.value) = 'number'
-                 THEN (kv.value::text)::numeric NOT BETWEEN 0.5 AND 1.5
-                 ELSE false
-               END
-      )
-    )
-  )
+  CHECK (public._scoring_weight_overrides_is_valid(scoring_weight_overrides))
   NOT VALID;
 
 ALTER TABLE allocator_preferences
@@ -241,7 +252,8 @@ SECURITY DEFINER
 SET search_path = public, pg_catalog
 AS $$
 DECLARE
-  v_role TEXT;
+  v_role        TEXT;
+  v_caller_uid  UUID;
 BEGIN
   -- Strategy-scoped (pre-062 + post-062 callers).
   IF p_strategy_id IS NOT NULL AND p_allocator_id IS NULL AND p_api_key_id IS NULL THEN
@@ -260,16 +272,26 @@ BEGIN
     -- raise insufficient_privilege so a future SECURITY DEFINER
     -- caller that forgets to bind p_allocator_id = auth.uid() cannot
     -- forge a cross-allocator rescore enqueue.
+    --
+    -- Capture auth.role() AND auth.uid() once. The EXCEPTION trap is
+    -- narrowed to the SQLSTATEs that actually fire when the auth
+    -- schema is missing or unreadable (e.g., direct postgres role
+    -- during migration apply); any other failure must propagate so
+    -- schema-drift bugs surface loudly instead of silently downgrading
+    -- to v_role=NULL/v_caller_uid=NULL and dying at the gate below.
     BEGIN
       v_role := auth.role();
-    EXCEPTION WHEN OTHERS THEN
-      v_role := NULL;
+      v_caller_uid := auth.uid();
+    EXCEPTION
+      WHEN undefined_function OR undefined_table OR insufficient_privilege THEN
+        v_role := NULL;
+        v_caller_uid := NULL;
     END;
 
     IF v_role IS DISTINCT FROM 'service_role' THEN
-      IF auth.uid() IS NULL OR auth.uid() IS DISTINCT FROM p_allocator_id THEN
+      IF v_caller_uid IS NULL OR v_caller_uid IS DISTINCT FROM p_allocator_id THEN
         RAISE EXCEPTION 'enqueue_compute_job: allocator-scoped enqueue requires p_allocator_id = auth.uid() (got p_allocator_id=%, auth.uid()=%). audit-2026-05-07 H-0942.',
-          p_allocator_id, auth.uid()
+          p_allocator_id, v_caller_uid
           USING ERRCODE = 'insufficient_privilege';
       END IF;
     END IF;
@@ -332,7 +354,10 @@ BEGIN
     RAISE EXCEPTION 'audit-2026-05-07 H-0939 verification failed: shape CHECK missing or not VALIDATED';
   END IF;
 
-  -- H-0941 / H-0945: service_role can EXECUTE the 9-param signature
+  -- H-0941 / H-0945: service_role can EXECUTE the 9-param signature.
+  -- has_function_privilege(role_name, fn, 'EXECUTE') is reliable for
+  -- named roles. The PUBLIC pseudo-grantee is unreliable (cf. C-0284 /
+  -- mig 134) — for PUBLIC absence use _assert_no_public_execute below.
   SELECT has_function_privilege(
     'service_role',
     'public.enqueue_compute_job(uuid, text, text, uuid[], text, jsonb, uuid, uuid, timestamptz)',
@@ -341,6 +366,15 @@ BEGIN
   IF v_service_can IS NOT TRUE THEN
     RAISE EXCEPTION 'audit-2026-05-07 H-0941/H-0945 verification failed: service_role lacks EXECUTE on enqueue_compute_job(9-param)';
   END IF;
+
+  -- audit-2026-05-07 H-0941 / H-0945 / C-0284: assert PUBLIC absence on the
+  -- 9-param signature via the mig 134 helper (aclexplode grantee=0 probe).
+  -- Mirrors the C-0284 acceptance shape; the STEP 3 REVOKE above strips any
+  -- leak, this PERFORM raises insufficient_privilege if a future migration
+  -- ever re-grants PUBLIC EXECUTE.
+  PERFORM public._assert_no_public_execute(
+    'public.enqueue_compute_job(uuid, text, text, uuid[], text, jsonb, uuid, uuid, timestamptz)'
+  );
 
   -- H-0942 / H-0944: allocator-branch ownership gate in body
   SELECT pg_get_functiondef(p.oid) INTO v_body
