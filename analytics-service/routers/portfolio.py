@@ -748,22 +748,50 @@ def _generate_alerts(
             })
 
     if alerts:
-        # Insert each alert individually, skipping if an unacknowledged alert
-        # of the same type already exists. PostgREST's upsert cannot reference
-        # the partial unique index (WHERE acknowledged_at IS NULL), so we do a
-        # select-then-insert per type. The partial unique index in migration 042
-        # serves as a DB-level safety net for any race conditions.
+        # Audit H-1073: batch the dedup SELECT into one query so we do
+        # at most 1 SELECT + N INSERTs per portfolio compute instead of
+        # N SELECT + N INSERT. PostgREST upsert can't reference the
+        # PARTIAL unique index (WHERE acknowledged_at IS NULL), so true
+        # ON CONFLICT DO NOTHING isn't reachable from supabase-py; the
+        # partial unique index from migration 042 still acts as the
+        # DB-level race guard.
+        alert_types_to_check = list({a["alert_type"] for a in alerts})
+        try:
+            existing_resp = supabase.table("portfolio_alerts").select(
+                "alert_type"
+            ).eq(
+                "portfolio_id", portfolio_id
+            ).in_(
+                "alert_type", alert_types_to_check
+            ).is_(
+                "acknowledged_at", "null"
+            ).execute()
+            existing_types = {row["alert_type"] for row in (existing_resp.data or [])}
+        except Exception as exc:
+            # If the dedup probe fails we must not silently skip alerts —
+            # fall back to per-alert select-then-insert to preserve the
+            # delivery contract.
+            logger.warning(
+                "portfolio_alerts batch dedup probe failed for %s: %s; "
+                "falling back to per-alert select",
+                portfolio_id, exc,
+            )
+            existing_types = None
+
         for alert in alerts:
             try:
-                existing = supabase.table("portfolio_alerts").select("id").eq(
-                    "portfolio_id", alert["portfolio_id"]
-                ).eq(
-                    "alert_type", alert["alert_type"]
-                ).is_(
-                    "acknowledged_at", "null"
-                ).limit(1).execute()
-                if existing.data:
-                    continue  # Already have an unacknowledged alert of this type
+                if existing_types is None:
+                    existing = supabase.table("portfolio_alerts").select("id").eq(
+                        "portfolio_id", alert["portfolio_id"]
+                    ).eq(
+                        "alert_type", alert["alert_type"]
+                    ).is_(
+                        "acknowledged_at", "null"
+                    ).limit(1).execute()
+                    if existing.data:
+                        continue
+                elif alert["alert_type"] in existing_types:
+                    continue  # already have an unacked alert of this type
                 supabase.table("portfolio_alerts").insert(alert).execute()
             except Exception as exc:
                 logger.warning(

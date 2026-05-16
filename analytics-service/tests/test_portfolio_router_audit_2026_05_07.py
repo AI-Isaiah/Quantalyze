@@ -427,9 +427,23 @@ class TestSprint4AlertRules:
 
 class TestAlertDedup:
     def test_skips_insert_when_unacked_alert_exists(self):
-        """H-1070: existing unacked alert of same type → skip insert."""
+        """H-1070: existing unacked alert of same type → skip insert.
+
+        After audit H-1073 the dedup path was batched into a single SELECT
+        over alert_type IN (...) for the whole call. The test must mock
+        the new chain (.eq.in_.is_.execute) AND the per-alert fallback
+        (.eq.eq.is_.limit.execute) because the per-alert path is taken
+        only when the batch probe fails.
+        """
         sb = MagicMock()
-        # Select returns an existing unacked alert.
+        # Batch probe returns ALL alert_types as existing → skip all inserts.
+        sb.table.return_value.select.return_value.eq.return_value.in_.return_value.is_.return_value.execute.return_value = MagicMock(
+            data=[
+                {"alert_type": "drawdown"},
+                {"alert_type": "correlation_spike"},
+            ]
+        )
+        # The per-alert fallback chain (only used if batch probe raises).
         sb.table.return_value.select.return_value.eq.return_value.eq.return_value.is_.return_value.limit.return_value.execute.return_value = MagicMock(
             data=[{"id": "existing-1"}]
         )
@@ -437,7 +451,7 @@ class TestAlertDedup:
             data=[{"id": "new-1"}]
         )
         _generate_alerts(sb, "portfolio-1", max_drawdown=-0.25, avg_pairwise_corr=0.85)
-        # No insert call (dedup hit)
+        # No insert call (dedup hit on both alerts)
         sb.table.return_value.insert.assert_not_called()
 
 

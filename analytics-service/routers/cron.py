@@ -515,6 +515,34 @@ async def cron_sync():
                 len(portfolio_ids),
             )
 
+        # C-0213: reset stalled portfolio_analytics rows older than threshold before recomputing
+        # audit-2026-05-07 C-0213 — reap any orphan computation_status='computing'
+        # rows before the per-portfolio in-flight check below. If a previous
+        # tick / pod was SIGKILL'd between the INSERT and the final UPDATE,
+        # the row sits in 'computing' forever and `_guarded_recompute` would
+        # otherwise classify the portfolio as `in_flight` indefinitely. The
+        # reaper RPC was added in migration
+        # 20260516122247_portfolio_analytics_stuck_row_reaper.sql.
+        try:
+            reaped = supabase.rpc(
+                "reset_stalled_portfolio_analytics",
+                {"p_stale_threshold": "30 minutes"},
+            ).execute()
+            if reaped.data:
+                logger.info(
+                    "cron_recompute: reaped %s stale portfolio_analytics rows",
+                    reaped.data,
+                )
+        except Exception:
+            # Non-fatal — the in-flight check will still classify the orphan
+            # row as `in_flight` (not `ok`), but the user-facing 409 from
+            # `POST /api/portfolio-analytics` won't auto-clear this tick.
+            # Fail-loud via logger.exception so the traceback reaches Sentry
+            # instead of being swallowed.
+            logger.exception(
+                "cron_recompute: stale-row reaper RPC failed",
+            )
+
         # Best-effort within-process throttle via the shared
         # `_compute_semaphore` (process-local, so it does NOT prevent
         # double-compute across Vercel function instances or worker
