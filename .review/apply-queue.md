@@ -1,56 +1,64 @@
-# PR #179 Retroactive Apply Queue
+# PR #183 Retroactive Apply Queue — chore/allocator-dashboard-retroactive-audit-2026-05-16
 
-Consolidated findings post-dedup, filtered to threshold:
-- CRITICAL: ALL
-- HIGH: conf >= 7
-- MED: conf >= 8
-- LOW: skip (except where dual-confirmed by red-team list in prompt)
+Date: 2026-05-16
+Branch: chore/allocator-dashboard-retroactive-audit-2026-05-16
+Base: a24a2b4a (PR #183, allocator dashboard safety)
+Threshold: HIGH >=7, MED >=8, LOW skipped.
 
-Findings by source:
-- `.review/specialist.security.jsonl` (7 records, 1 blank)
-- `.review/specialist.code-reviewer.jsonl` (0 records)
-- `.review/specialist.pr-test-analyzer.jsonl` (21 records)
-- `.review/specialist.performance.jsonl` (9 records)
-- `.review/red-team.jsonl` (10 records)
+## Dedup pass
 
-Out-of-scope (analytics-service / equity_reconstruction): all pr-test-analyzer items #1-#14 and red-team items #1-#2 cover analytics-service code, not CI hardening. They are tracked in a separate worktree.
+Findings cluster around 6 user-facing failure modes. Multiple specialists flagged each from different angles — combined here so each fix closes 1+ findings.
 
-## Apply queue (CI hardening only)
+### Apply (atomic commits)
 
-| # | Source | Sev | Conf | Title | Commit |
-|---|--------|-----|------|-------|--------|
-| 1 | security #1 / red-team #3 (2-way confirmed) | HIGH | 9 | playwright-report trace.zip leaks NEXT_PUBLIC creds | 1 |
-| 2 | security #2 | MED | 8 | nightly-pdf-report leaks DEMO_PDF_SECRET | 1 |
-| 3 | pr-test-analyzer #15 | HIGH | 9 | No CI gate enforces SHA-pin policy | 2 |
-| 4 | pr-test-analyzer #16 | HIGH | 9 | No CI gate enforces NEXT_PUBLIC-not-in-artifact | 2 |
-| 5 | pr-test-analyzer #17 | HIGH | 8 | Seed-gated rebuild has no contract test | 2 |
-| 6 | pr-test-analyzer #20 / #21 | MED | 8 | No vitest regression for placeholder-env contract / hidden-files invariant | 2 (same describe) |
-| 7 | red-team #4 | MED | 8 | persist-credentials default exposes GITHUB_TOKEN | 3 |
-| 8 | red-team #8 | LOW | 8 | supabase-migrate plan job missing production env-gate (per prompt) | 4 |
-| 9 | performance #5 | MED | 9 | Rebuild step comment lie + no actual cache restore | 5 |
+**Commit 1 — wire consumeDashboardRecoveryFlag**
+- HIGH conf-9 silent-failure-hunter L7: recovery flag exported but never imported in production code
+- HIGH conf-9 red-team L3: V2 layoutVersion-mismatch reset destroys user layout (cluster fix: once recovery flag has consumer, layout-reset is visible to user)
+- MED conf-8 silent-failure-hunter L11: setRecoveryFlag empty catch (add console.warn)
+- MED conf-8 silent-failure-hunter L12: consumeDashboardRecoveryFlag drops unknown flag silently (reorder removeItem after validation)
+- Visual: minimal banner above existing strip — justified because the original PR's "recovery flag" infrastructure had no consumer
 
-## Skip list (rationale)
+**Commit 2 — OutcomesWidget error state visible + post-unmount guard**
+- HIGH conf-9 silent-failure-hunter L8: setError populated but never rendered
+- MED conf-9 red-team L5: console.error fires post-unmount (move cancelled-guard above the log)
+- Visual: error text in the empty sparkline area when error is non-null — justified because pre-PR-#183 sparkline silently disappeared on failure
 
-- security #3 (.next/cache stale-cred residue, MED conf-7): conf-7 below MED threshold of 8.
-- security #4-#7 (LOW): below threshold.
-- pr-test-analyzer #1-#14 (equity_reconstruction): out of scope, separate worktree.
-- pr-test-analyzer #18 (Dependabot, MED conf-9): not in instructed apply queue.
-- pr-test-analyzer #19 (runbook drift, MED conf-8): doc-only, not in instructed apply queue.
-- performance #1-#4 (analytics-service): out of scope.
-- performance #6 (LOW conf-8): below threshold.
-- performance #7-#9 (info): not actionable.
-- red-team #1-#2 (analytics-service): out of scope.
-- red-team #5 (SHA force-push detection, MED conf-8): nightly cron addition not in instructed apply queue.
-- red-team #6 (gitleaks PR-comment chain, MED conf-7): conf-7 below MED threshold.
-- red-team #7 (rebuild rm -rf list, MED conf-7): conf-7 below MED threshold.
-- red-team #9 (workflow OIDC scope, LOW conf-8): below threshold.
-- red-team #10 (artifact retention, MED conf-7): conf-7 below MED threshold; also addressed by commit 1.
+**Commit 3 — M-1065 NaN guard + simplify unreachable fallback**
+- HIGH conf-9 red-team L4: M-1065 fallback emits NaN array on NaN overlay series (filter Number.isFinite at push-time + filter fallback tick set)
+- HIGH conf-8 code-reviewer (not in current jsonl but matches red-team finding): unreachable fallback explicit precondition guard
+- Per Rule 2 (Simplicity First): keep the fallback but ensure inputs are sane; do NOT delete since red-team #4 proved NaN can reach yMin/yMax
 
-## Commits planned
+**Commit 4 — widgetViewsFiredRef reset on toggle + portfolio switch**
+- HIGH conf-8 red-team L8: widgetViewsFiredRef persists across showOutcomes toggles
+- MED conf-7 red-team L10: unknownLoggedRef persists across portfolio switches (paired)
 
-1. `fix(ci): close playwright-report trace.zip exfil (closes retro-PR179-H1)`
-2. `test(ci): add CRITICAL-C0293 invariants to critical-regressions.test.ts (closes retro-PR179-H2/H3/H4)`
-3. `fix(ci): persist-credentials=false on all actions/checkout invocations (closes retro-PR179-M-persist-chain)`
-4. `fix(ci): supabase-migrate plan job missing production env-gate (closes retro-PR179-M-env-gate)`
-5. `chore(ci): rebuild step comment honesty + cache restore (closes retro-PR179-M-cache)`
-6. `docs(ci): retroactive specialist findings consolidated`
+**Commit 5 — regression tests for H-1197/H-1199/TweaksContext fields (HIGH cluster)**
+- HIGH conf-9 pr-test-analyzer L15: H-1197 IntersectionObserver deps regression
+- HIGH conf-8 pr-test-analyzer L16: H-1199 unknown-widget console.warn dedupe
+- HIGH conf-9 pr-test-analyzer L17: TweaksContext parseTweakState union whitelist
+- HIGH conf-8 pr-test-analyzer L18: TweaksContext loadTweaks console.warn assertion
+- HIGH conf-8 pr-test-analyzer L19: TweaksContext persist console.warn assertion
+- MED conf-8 pr-test-analyzer L20: composite-gate-invariant duplicates source-of-truth (export STRATEGY_COMPOSITE_WIDGETS once)
+
+**Commit 6 — ScenarioCommitDiff discriminated union + MED conf-8 fixes**
+- HIGH conf-7 type-design-analyzer (not in current jsonl but cited in runner): ScenarioCommitDiff.kind discriminated union
+- MED conf-9 silent-failure-hunter L9: TweaksContext silently coerces unknown union values (add console.warn in pickUnion)
+- MED conf-8 silent-failure-hunter L10: EquityChart parseISO NaN drops silently (add isFinite check in filter)
+- MED conf-7 red-team L9: ScenarioComposer Map-build memo (split into two memos)
+- MED conf-7 red-team L12: parseTweakState prototype-poisoning cast (Object.create(null))
+- MED conf-8 red-team L6: TweaksContext persist quota-warn flood (persistWarnedRef dedupe)
+- MED conf-7 pr-test-analyzer L23: loadV2Config tiles:null silent-reset (recovery flag + console.warn)
+
+**Commit 7 — docs note**
+- DOCS: M-1063 visual-fidelity violation acknowledgement (DOCUMENT only)
+- DOCS: WidgetProps.data:any deferred to separate PR (per runner instructions)
+
+### Defer (out of scope)
+
+- HIGH type-design-analyzer: WidgetProps.data:any narrowing — touches ~30 widget files, separate PR per runner
+- MED red-team L7: cross-hook localStorage origin sharing (architectural — needs design discussion)
+
+### Skip (below threshold or unrelated)
+
+- All LOW findings
+- All findings without retroactive:true,pr:183 marker (these are equity_reconstruction.py from a later audit, unrelated to PR #183 scope)

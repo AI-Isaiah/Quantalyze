@@ -10,7 +10,10 @@ import {
 } from "react";
 import Link from "next/link";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
-import { useDashboardConfigV2 } from "./hooks/useDashboardConfig";
+import {
+  useDashboardConfigV2,
+  consumeDashboardRecoveryFlag,
+} from "./hooks/useDashboardConfig";
 import { WidgetGrid } from "./components/WidgetGrid";
 import { WidgetPicker } from "./components/WidgetPicker";
 import { WIDGET_COMPONENTS } from "./widgets";
@@ -80,6 +83,23 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerTriggerRef = useRef<HTMLButtonElement>(null);
   const dashboardContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // retro audit (silent-failure-hunter L7 c9 / red-team L3 c9) —
+  // useDashboardConfigV2's `loadV2Config` writes a sessionStorage
+  // breadcrumb when a parse_failed / version_reset / legacy_in_v2_blob
+  // recovery happened, but PR #183 shipped the breadcrumb infrastructure
+  // without a consumer. Drain the flag once per mount and surface a
+  // non-blocking dismissible banner so the user sees that their saved
+  // layout was reset; without this consumer the C-0332..0335 fix was
+  // logic-only and never reached the user-facing surface.
+  const [recoveryReason, setRecoveryReason] = useState<
+    "parse_failed" | "version_reset" | "legacy_in_v2_blob" | null
+  >(null);
+  useEffect(() => {
+    const reason = consumeDashboardRecoveryFlag();
+    if (reason) setRecoveryReason(reason);
+  }, []);
+  const dismissRecoveryBanner = useCallback(() => setRecoveryReason(null), []);
 
   // PR3 — listen for the AllocationsTabs "Widget" chip's custom event so
   // clicking it opens the picker without prop-drilling state up two levels.
@@ -312,6 +332,33 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         flaggedCount={flaggedHoldings.length}
         className="mt-3 px-1"
       />
+      {recoveryReason != null && (
+        <div
+          role="status"
+          data-testid="dashboard-recovery-banner"
+          data-recovery-reason={recoveryReason}
+          className="mt-3 flex items-start justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-4 py-2 text-sm text-text-primary"
+        >
+          <div className="flex items-start gap-2">
+            <span aria-hidden className="font-semibold">Heads up:</span>
+            <span>
+              {recoveryReason === "parse_failed"
+                ? "We couldn't read your saved dashboard layout and reset it to defaults."
+                : recoveryReason === "version_reset"
+                  ? "Your saved dashboard layout was from an older version and has been reset to the latest defaults."
+                  : "Your saved dashboard layout used a legacy format and has been migrated to the new defaults."}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={dismissRecoveryBanner}
+            aria-label="Dismiss layout reset notice"
+            className="shrink-0 rounded-md px-2 py-0.5 text-xs font-medium text-text-muted transition-colors hover:bg-warning/20 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       <div
         ref={dashboardContainerRef}
         className="relative"
