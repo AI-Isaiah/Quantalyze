@@ -824,53 +824,45 @@ GRANT EXECUTE ON FUNCTION get_user_compute_jobs TO authenticated;
 -- ====================================================================
 DO $$
 DECLARE
-  v_body              TEXT;
-  v_forced_jobs       BOOLEAN;
-  v_forced_kinds      BOOLEAN;
-  v_revoked_jobs      INTEGER;
-  v_revoked_kinds     INTEGER;
+  v_body          TEXT;
+  v_constraint    TEXT;
+  v_table         TEXT;
+  v_forced        BOOLEAN;
+  v_revoked_jobs  INTEGER;
+  v_revoked_kinds INTEGER;
+  v_expected_constraints CONSTANT TEXT[] := ARRAY[
+    'compute_jobs_attempts_non_negative',
+    'compute_jobs_max_attempts_positive',
+    'compute_jobs_trade_count_non_negative'
+  ];
+  v_forced_tables CONSTANT TEXT[] := ARRAY[
+    'compute_jobs',
+    'compute_job_kinds'
+  ];
 BEGIN
-  -- M-0772: all three CHECK constraints present and validated
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-     WHERE conname = 'compute_jobs_attempts_non_negative'
-       AND conrelid = 'public.compute_jobs'::regclass
-       AND convalidated
-  ) THEN
-    RAISE EXCEPTION 'audit-2026-05-07 residual verification: compute_jobs_attempts_non_negative missing or NOT VALID';
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-     WHERE conname = 'compute_jobs_max_attempts_positive'
-       AND conrelid = 'public.compute_jobs'::regclass
-       AND convalidated
-  ) THEN
-    RAISE EXCEPTION 'audit-2026-05-07 residual verification: compute_jobs_max_attempts_positive missing or NOT VALID';
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-     WHERE conname = 'compute_jobs_trade_count_non_negative'
-       AND conrelid = 'public.compute_jobs'::regclass
-       AND convalidated
-  ) THEN
-    RAISE EXCEPTION 'audit-2026-05-07 residual verification: compute_jobs_trade_count_non_negative missing or NOT VALID';
-  END IF;
+  -- M-0772: every expected CHECK constraint exists AND is VALIDATED.
+  -- Array-driven so adding a future constraint is one line, not a new block.
+  FOREACH v_constraint IN ARRAY v_expected_constraints LOOP
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+       WHERE conname = v_constraint
+         AND conrelid = 'public.compute_jobs'::regclass
+         AND convalidated
+    ) THEN
+      RAISE EXCEPTION 'audit-2026-05-07 residual verification: % missing or NOT VALID', v_constraint;
+    END IF;
+  END LOOP;
 
-  -- M-0773: FORCE RLS on both tables
-  SELECT relforcerowsecurity INTO v_forced_jobs
-    FROM pg_class
-    WHERE relname = 'compute_jobs'
-      AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public');
-  IF NOT COALESCE(v_forced_jobs, FALSE) THEN
-    RAISE EXCEPTION 'audit-2026-05-07 residual verification: compute_jobs not FORCE ROW LEVEL SECURITY';
-  END IF;
-  SELECT relforcerowsecurity INTO v_forced_kinds
-    FROM pg_class
-    WHERE relname = 'compute_job_kinds'
-      AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public');
-  IF NOT COALESCE(v_forced_kinds, FALSE) THEN
-    RAISE EXCEPTION 'audit-2026-05-07 residual verification: compute_job_kinds not FORCE ROW LEVEL SECURITY';
-  END IF;
+  -- M-0773: FORCE RLS on every expected table.
+  FOREACH v_table IN ARRAY v_forced_tables LOOP
+    SELECT relforcerowsecurity INTO v_forced
+      FROM pg_class
+      WHERE relname = v_table
+        AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public');
+    IF NOT COALESCE(v_forced, FALSE) THEN
+      RAISE EXCEPTION 'audit-2026-05-07 residual verification: % not FORCE ROW LEVEL SECURITY', v_table;
+    END IF;
+  END LOOP;
 
   -- M-0774: anon/authenticated have NO grants on compute_jobs
   SELECT count(*) INTO v_revoked_jobs
