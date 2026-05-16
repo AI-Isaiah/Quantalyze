@@ -27,6 +27,12 @@ on:
     - cron: "0 * * * *"  # hourly
   workflow_dispatch:
 
+# C-0293(a) fix: hourly cron only checks out the tree and runs a bash
+# script against the test Supabase project. No GitHub API writes, so
+# `contents: read` is the entire surface.
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest

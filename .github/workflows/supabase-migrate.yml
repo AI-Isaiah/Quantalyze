@@ -56,6 +56,15 @@ concurrency:
   group: supabase-migrate-${{ github.ref }}
   cancel-in-progress: false
 
+# C-0293(a) fix: workflow only needs to checkout the tree and run the
+# supabase CLI against a remote DB via its access token. No GitHub API
+# writes (no issue/PR/release creation), so `contents: read` is the
+# entire surface. The actual DB-mutation power comes from the
+# SUPABASE_ACCESS_TOKEN secret + the `production` GitHub Environment's
+# required-reviewer gate — both orthogonal to GITHUB_TOKEN scope.
+permissions:
+  contents: read
+
 jobs:
   plan:
     runs-on: ubuntu-latest

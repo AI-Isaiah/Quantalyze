@@ -17,6 +17,18 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+# C-0293(a) fix: minimal default GITHUB_TOKEN scope. Without this block,
+# GITHUB_TOKEN inherits the repo default (which is `contents: write` plus
+# write on issues/packages/PRs/statuses), so a compromised third-party
+# action would have a write-all credential to pivot from. We default to
+# `contents: read` (enough for actions/checkout to fetch the tree) and
+# uplift specific jobs that genuinely need more (secret-scan grants
+# pull-requests: write so gitleaks can post finding comments). The
+# release/migration paths live in other workflows that gate on the
+# `production` GitHub environment + manual approval.
+permissions:
+  contents: read
+
 jobs:
   # CI speedup PR-B (v0.22.1.2+): the prior monolithic `frontend` job ran
   # typecheck → lint → test → policy-checks → audit → build serially
@@ -370,6 +382,14 @@ jobs:
     # lives in .gitleaks.toml (extends the default ruleset with a
     # narrow allowlist for known test fixtures).
     runs-on: ubuntu-latest
+    # C-0293(a) per-job uplift: gitleaks-action posts finding summaries
+    # as PR comments when a leak is detected (so the author sees the
+    # diagnostic without digging into the workflow log). That requires
+    # `pull-requests: write`. `contents: read` is inherited from the
+    # workflow-level default for checkout. No other scope needed.
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:

@@ -7,9 +7,19 @@ on:
     - cron: "0 8 * * *"
   workflow_dispatch:
 
+# C-0293(a) fix: default to `contents: read`. Per-job uplifts below.
+permissions:
+  contents: read
+
 jobs:
   demo-pdf-coldstart:
     runs-on: ubuntu-latest
+    # Per-job uplift: failure path uses actions/github-script to file an
+    # auto-issue against this repo so the broken staging cold-start is
+    # surfaced to the maintainer queue. That needs `issues: write`.
+    permissions:
+      contents: read
+      issues: write
     # First-line guard on STAGING_BASE_URL: empty or single-space values
     # are treated as unset. The shell step below applies a stricter trim
     # check (belt + suspenders) since GH Actions expressions have no
@@ -85,6 +95,11 @@ jobs:
     # continuous surface, and putting it on every PR's critical path
     # added 15-30s with no per-PR behavior signal.
     runs-on: ubuntu-latest
+    # Per-job uplift: failure path uses actions/github-script to file an
+    # auto-issue when a critical advisory lands. Needs `issues: write`.
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
