@@ -214,3 +214,5 @@ Counts (apply pass):
 | #12 | 12 | MED 8 chain | fetch_error + parent_id_truncated double-signal | CLOSED |
 | #13 | 14 | MED 8 chain | concurrent same-user exports + module WeakMap | CLOSED (regr.) |
 | (skip) | 13 | MED 8 challenge | challenge: happy-path metadata assertion | SKIPPED per spec |
+
+## Grok adversarial pass: PASS — Grok 4.3 reviewed route.ts diff + library invariants (privacy / concurrency / fail-loud / JSON correctness); no blocking findings. Verdict ratified that account.export_refused recon leak is closed, ROW_JSON_CACHE concurrency is isolated via per-call deep-freeze, all four truncation modes refund-before-audit and return 500 export_truncated, and encodeExportBundle/safeStringify round-trip is sound.
