@@ -233,6 +233,31 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     }
   }, [portfolio?.id]);
 
+  // pr189-followup M6 (silent-failure-hunter MED/8) — the previous two
+  // reset effects covered the showOutcomes toggle and portfolio.id
+  // switch but missed the empty→populated transition. The IntersectionObserver
+  // effect below re-runs on [holdingsEmpty, hasSyncing] (H-1197 fix) and
+  // re-observes tiles that mount after the EmptyState short-circuit
+  // releases, but the dedup Set is per-component-instance and still holds
+  // any ids from before the transition. After delete-key-and-reconnect
+  // within the same session, the first widget_viewed for each tile is
+  // suppressed. Clear the dedup when the observer re-attaches so each
+  // populated mount gets a fresh slate. Uses the same null-baseline
+  // ref pattern as the adjacent effects so the first observation
+  // doesn't trigger a no-op reset.
+  const lastHoldingsGateRef = useRef<string | null>(null);
+  useEffect(() => {
+    const next = `${holdingsEmpty ? "1" : "0"}:${hasSyncing ? "1" : "0"}`;
+    if (lastHoldingsGateRef.current === null) {
+      lastHoldingsGateRef.current = next;
+      return;
+    }
+    if (lastHoldingsGateRef.current !== next) {
+      lastHoldingsGateRef.current = next;
+      widgetViewsFiredRef.current = new Set();
+    }
+  }, [holdingsEmpty, hasSyncing]);
+
   useEffect(() => {
     if (typeof IntersectionObserver === "undefined") return;
     const root = dashboardContainerRef.current;

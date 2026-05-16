@@ -176,6 +176,26 @@ export type ScenarioCommitDiff =
   | VoluntaryModifyDiff
   | BridgeRecommendedDiff;
 
+/**
+ * pr189-followup H6 (type-design-analyzer HIGH/8) — narrower union for the
+ * composer→drawer hand-off. `handleCommit` only constructs the two kinds
+ * below today (voluntary_remove + voluntary_add); the wider four-arm
+ * `ScenarioCommitDiff` is the WIRE contract for the server, not the
+ * producer contract for the composer.
+ *
+ * Exporting both makes the producer/consumer seam explicit: a future
+ * producer that wants to construct `voluntary_modify` or `bridge_recommended`
+ * (currently unreachable from this composer) must consciously widen the
+ * return type, surfacing the missing percent_allocated / holding_ref
+ * normalisation contract at the type level.
+ *
+ * The drawer still consumes the full `ScenarioCommitDiff[]` because it
+ * has to render and submit any kind (including future kinds wired by
+ * other producers). The seam is producer-side narrowness, not consumer-
+ * side narrowness.
+ */
+export type ComposerProducedDiff = VoluntaryRemoveDiff | VoluntaryAddDiff;
+
 export interface ScenarioComposerProps {
   payload: MyAllocationDashboardPayload;
   allocatorId: string;
@@ -554,7 +574,12 @@ export function ScenarioComposer({
   // wiring with the real ScenarioCommitDrawer.
   // -------------------------------------------------------------------------
   function handleCommit() {
-    const diffs: ScenarioCommitDiff[] = [];
+    // pr189-followup H6 — narrow to ComposerProducedDiff at the producer
+    // seam. Today only voluntary_remove + voluntary_add are constructed
+    // here; if a future change attempts voluntary_modify / bridge_recommended
+    // construction in this function, the type will reject it and surface
+    // the missing-kind contract at the seam.
+    const diffs: ComposerProducedDiff[] = [];
     for (const [scopeRef, on] of Object.entries(scenario.draft.toggleByScopeRef)) {
       if (on) continue;
       if (!scopeRef.startsWith("holding:")) continue;

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor } from "@testing-library/react";
+import { fireEvent, render, waitFor } from "@testing-library/react";
 
 /**
  * Retroactive audit on PR #183 — pr-test-analyzer found that THREE
@@ -51,6 +51,15 @@ const tilesHolder = vi.hoisted(() => ({
   tiles: [] as Array<{ k: string; w: 1 | 2 | 3 | 4 }>,
 }));
 
+// pr189-followup H7 (red-team HIGH/8) — per-test override hook for the
+// recovery flag so we can mount the dashboard with each of the three
+// reason branches and assert the banner renders. Pre-followup, the
+// mock was a fixed `() => null` and no test exercised the banner —
+// a silent revert of the banner JSX would have passed every assertion.
+const recoveryFlagHolder = vi.hoisted(() => ({
+  reason: null as "parse_failed" | "version_reset" | "legacy_in_v2_blob" | null,
+}));
+
 vi.mock("./hooks/useDashboardConfig", () => ({
   useDashboardConfigV2: () => ({
     config: {
@@ -65,13 +74,15 @@ vi.mock("./hooks/useDashboardConfig", () => ({
     setTimeframe: vi.fn(),
     resetToDefaults: vi.fn(),
   }),
-  consumeDashboardRecoveryFlag: () => null,
+  consumeDashboardRecoveryFlag: () => recoveryFlagHolder.reason,
 }));
 
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
+import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
 beforeEach(() => {
   tilesHolder.tiles = [];
+  recoveryFlagHolder.reason = null;
   global.fetch = vi.fn(() =>
     Promise.resolve({ ok: true, json: () => Promise.resolve({}) }),
   ) as unknown as typeof fetch;
@@ -85,6 +96,17 @@ beforeEach(() => {
   }
 });
 
+// pr189-followup M15 (type-design-analyzer MED/8) — type the fixture
+// against MyAllocationDashboardPayload via `satisfies Partial<...>` so
+// fields present in the fixture are constrained by the production prop
+// type (closing the drift surface). Missing required fields are
+// tolerated because the dashboard only reads a 6-field subset at the
+// top level (portfolio/strategies/holdingsSummary/hasSyncing/analytics/
+// flaggedHoldings) and the rest reach widgets via `data` which the
+// dashboard already passes as `any` for unrelated reasons (WidgetProps
+// deferred — see lib/types.ts JSDoc). A future tightening of
+// WidgetProps.data will surface the missing fixture fields with no
+// `as any` casts hiding the gap.
 const BASE_PAYLOAD = {
   portfolio: null,
   analytics: null,
@@ -100,6 +122,7 @@ const BASE_PAYLOAD = {
       value_usd: 90000,
       venue: "Binance",
       holding_type: "spot" as const,
+      api_key_id: "test-key-id",
     },
   ],
   snapshotCount: 30,
@@ -111,7 +134,15 @@ const BASE_PAYLOAD = {
   activeVenues: [],
   flaggedHoldings: [],
   matchDecisionsByHoldingRef: {},
-  strategies: [] as unknown[],
+  strategies: [],
+} satisfies Partial<MyAllocationDashboardPayload>;
+
+// pr189-followup M15 — empty-holdings variant for tests that exercise
+// the EmptyState short-circuit (e.g. the recovery-banner-in-empty-state
+// test below).
+const EMPTY_HOLDINGS_PAYLOAD = {
+  ...BASE_PAYLOAD,
+  holdingsSummary: [],
 };
 
 describe("AllocationDashboardV2 — retroactive audit-2026-05-16 — H-1199 unknown-widget console.warn (pr-test L16 c8)", () => {
@@ -122,8 +153,7 @@ describe("AllocationDashboardV2 — retroactive audit-2026-05-16 — H-1199 unkn
     ];
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { rerender, container } = render(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      <AllocationDashboardV2 {...(BASE_PAYLOAD as any)} />,
+      <AllocationDashboardV2 {...BASE_PAYLOAD as unknown as MyAllocationDashboardPayload} />,
     );
     await waitFor(() => {
       expect(
@@ -133,8 +163,7 @@ describe("AllocationDashboardV2 — retroactive audit-2026-05-16 — H-1199 unkn
     // Re-render 3x — dedup contract: still 1 warn total for the same id.
     for (let i = 0; i < 3; i++) {
       rerender(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        <AllocationDashboardV2 {...(BASE_PAYLOAD as any)} />,
+        <AllocationDashboardV2 {...BASE_PAYLOAD as unknown as MyAllocationDashboardPayload} />,
       );
     }
     const strandedWarns = warnSpy.mock.calls.filter((c) => {
@@ -144,8 +173,7 @@ describe("AllocationDashboardV2 — retroactive audit-2026-05-16 — H-1199 unkn
         msg.includes("[AllocationDashboardV2] unknown widget id in persisted layout") &&
         typeof payload === "object" &&
         payload !== null &&
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (payload as any).widget_id === "stranded-unknown-widget"
+        (payload as { widget_id?: string }).widget_id === "stranded-unknown-widget"
       );
     });
     expect(strandedWarns).toHaveLength(1);
@@ -158,8 +186,7 @@ describe("AllocationDashboardV2 — retroactive audit-2026-05-16 — H-1199 unkn
       { k: "another-stranded-id", w: 2 },
     ];
     const { container, getByText } = render(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      <AllocationDashboardV2 {...(BASE_PAYLOAD as any)} />,
+      <AllocationDashboardV2 {...BASE_PAYLOAD as unknown as MyAllocationDashboardPayload} />,
     );
     await waitFor(() => {
       expect(
@@ -265,5 +292,193 @@ describe("AllocationDashboardV2 — retroactive audit-2026-05-16 — STRATEGY_CO
       expect(src).toContain(`"${id}"`);
     }
     expect(expected).toHaveLength(18);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pr189-followup H7 (red-team HIGH/8) — dashboard recovery banner coverage.
+// Pre-followup, the retro-audit test file mocked consumeDashboardRecoveryFlag
+// as `() => null` for every test, so a silent revert of the recovery-banner
+// JSX in AllocationDashboardV2.tsx would have passed every assertion.
+//
+// These cases drive each reason branch through the per-test override hook
+// and assert the banner DOM renders with the right copy + the right
+// data-recovery-reason attribute, plus a dismiss-button case to pin the
+// onClick → setRecoveryReason(null) wiring.
+// ---------------------------------------------------------------------------
+
+describe("AllocationDashboardV2 — retroactive audit-2026-05-16 — recovery banner (red-team H7)", () => {
+  const REASON_COPY = {
+    parse_failed:
+      /We couldn't read your saved dashboard layout and reset it to defaults/,
+    version_reset:
+      /Your saved dashboard layout was from an older version and has been reset to the latest defaults/,
+    legacy_in_v2_blob:
+      /Your saved dashboard layout used a legacy format and has been migrated to the new defaults/,
+  } as const;
+
+  for (const reason of [
+    "parse_failed",
+    "version_reset",
+    "legacy_in_v2_blob",
+  ] as const) {
+    it(`renders banner for ${reason} (populated path)`, async () => {
+      tilesHolder.tiles = [{ k: KPI_STRIP_ID, w: 2 }];
+      recoveryFlagHolder.reason = reason;
+      const { container, getByText } = render(
+        <AllocationDashboardV2 {...BASE_PAYLOAD as unknown as MyAllocationDashboardPayload} />,
+      );
+      await waitFor(() => {
+        const banner = container.querySelector(
+          '[data-testid="dashboard-recovery-banner"]',
+        );
+        expect(banner).not.toBeNull();
+        expect(banner?.getAttribute("data-recovery-reason")).toBe(reason);
+      });
+      expect(getByText(REASON_COPY[reason])).not.toBeNull();
+    });
+
+    it(`renders banner for ${reason} in EmptyState branch (H1 — banner survives the short-circuit)`, async () => {
+      // H1 + H7 — the empty-holdings branch returns early. Pre-followup,
+      // the banner was rendered AFTER that early return, so empty-holdings
+      // allocators got their flag drained without ever seeing the banner.
+      tilesHolder.tiles = [];
+      recoveryFlagHolder.reason = reason;
+      const { container } = render(
+        <AllocationDashboardV2 {...EMPTY_HOLDINGS_PAYLOAD as unknown as MyAllocationDashboardPayload} />,
+      );
+      await waitFor(() => {
+        const banner = container.querySelector(
+          '[data-testid="dashboard-recovery-banner"]',
+        );
+        expect(banner).not.toBeNull();
+        expect(banner?.getAttribute("data-recovery-reason")).toBe(reason);
+      });
+    });
+  }
+
+  it("dismiss button removes the banner", async () => {
+    tilesHolder.tiles = [{ k: KPI_STRIP_ID, w: 2 }];
+    recoveryFlagHolder.reason = "parse_failed";
+    const { container, getByLabelText } = render(
+      <AllocationDashboardV2 {...BASE_PAYLOAD as unknown as MyAllocationDashboardPayload} />,
+    );
+    await waitFor(() => {
+      expect(
+        container.querySelector('[data-testid="dashboard-recovery-banner"]'),
+      ).not.toBeNull();
+    });
+    const dismiss = getByLabelText(/Dismiss layout reset notice/i);
+    fireEvent.click(dismiss);
+    await waitFor(() => {
+      expect(
+        container.querySelector('[data-testid="dashboard-recovery-banner"]'),
+      ).toBeNull();
+    });
+  });
+
+  it("no banner when consumeDashboardRecoveryFlag returns null (control)", async () => {
+    tilesHolder.tiles = [{ k: KPI_STRIP_ID, w: 2 }];
+    recoveryFlagHolder.reason = null;
+    const { container } = render(
+      <AllocationDashboardV2 {...BASE_PAYLOAD as unknown as MyAllocationDashboardPayload} />,
+    );
+    await waitFor(() => {
+      expect(
+        container.querySelector(`[data-widget-id="${KPI_STRIP_ID}"]`),
+      ).not.toBeNull();
+    });
+    expect(
+      container.querySelector('[data-testid="dashboard-recovery-banner"]'),
+    ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pr189-followup M3 (code-reviewer MED/8) — behavior-test companion to the
+// existing structural H-1197 deps test. The structural grep would silently
+// pass if the widget_viewed effect were refactored into a custom hook
+// (the literal would move out of AllocationDashboardV2.tsx); this behavior
+// test mounts the dashboard with empty holdings (triggering the EmptyState
+// short-circuit), then re-mounts with populated holdings (releasing the
+// short-circuit), and asserts that the IntersectionObserver-driven
+// widget_viewed events fire for tiles that become visible after the
+// transition.
+// ---------------------------------------------------------------------------
+
+describe("AllocationDashboardV2 — retroactive audit-2026-05-16 — H-1197 widget_viewed behavior (code-reviewer M3)", () => {
+  it("widget_viewed observer re-attaches when transitioning from EmptyState to populated", async () => {
+    // Custom IntersectionObserver that synchronously calls back on observe()
+    // so the test doesn't have to wait for the browser's intersection loop.
+    type Cb = (entries: IntersectionObserverEntry[]) => void;
+    const observed: HTMLElement[] = [];
+    let lastCb: Cb | null = null;
+    class TestIO {
+      constructor(cb: Cb) {
+        lastCb = cb;
+      }
+      observe(target: HTMLElement) {
+        observed.push(target);
+        if (lastCb)
+          lastCb([
+            {
+              isIntersecting: true,
+              target,
+              boundingClientRect: {} as DOMRectReadOnly,
+              intersectionRatio: 1,
+              intersectionRect: {} as DOMRectReadOnly,
+              rootBounds: null,
+              time: 0,
+            } as unknown as IntersectionObserverEntry,
+          ]);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    (globalThis as unknown as { IntersectionObserver: typeof TestIO }).IntersectionObserver =
+      TestIO;
+
+    const { trackUsageEventClient } = await import(
+      "@/lib/analytics/usage-events-client"
+    );
+    const trackMock = trackUsageEventClient as unknown as ReturnType<typeof vi.fn>;
+    trackMock.mockClear();
+
+    tilesHolder.tiles = [{ k: KPI_STRIP_ID, w: 2 }];
+
+    // First render: empty holdings → EmptyState short-circuit, no widget
+    // observer wiring should fire widget_viewed because the ref div
+    // hasn't mounted.
+    const { rerender, container } = render(
+      <AllocationDashboardV2 {...EMPTY_HOLDINGS_PAYLOAD as unknown as MyAllocationDashboardPayload} />,
+    );
+    expect(
+      container.querySelector(`[data-widget-id="${KPI_STRIP_ID}"]`),
+    ).toBeNull();
+    expect(
+      trackMock.mock.calls.filter((c) => c[0] === "widget_viewed"),
+    ).toHaveLength(0);
+
+    // Second render: populated holdings → dashboard mounts the ref div,
+    // observer effect re-runs on the dep change [holdingsEmpty, hasSyncing],
+    // synchronous TestIO fires widget_viewed for the visible KPI tile.
+    rerender(
+      <AllocationDashboardV2 {...BASE_PAYLOAD as unknown as MyAllocationDashboardPayload} />,
+    );
+    await waitFor(() => {
+      expect(
+        container.querySelector(`[data-widget-id="${KPI_STRIP_ID}"]`),
+      ).not.toBeNull();
+    });
+    await waitFor(() => {
+      const widgetViewedCalls = trackMock.mock.calls.filter(
+        (c) => c[0] === "widget_viewed",
+      );
+      expect(widgetViewedCalls.length).toBeGreaterThanOrEqual(1);
+      const ids = widgetViewedCalls.map(
+        (c) => (c[1] as { widget_id?: string }).widget_id,
+      );
+      expect(ids).toContain(KPI_STRIP_ID);
+    });
   });
 });

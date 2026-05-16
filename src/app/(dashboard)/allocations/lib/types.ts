@@ -76,6 +76,25 @@ export interface WidgetMeta {
 }
 
 export interface WidgetProps {
+  /**
+   * pr189-followup M14 (type-design-analyzer MED/8): widen-but-typed —
+   * intentionally `any` because callers in this dashboard register
+   * heterogeneous widgets (ConcentrationRisk, NotesWidget, RegimeDetector,
+   * etc.) and each destructures a different payload shape. Tightening
+   * requires either:
+   *   (a) a per-widget-id payload union indexed at the WIDGET_COMPONENTS
+   *       registry (`data: WidgetDataByKind[K]`), OR
+   *   (b) a per-widget props refactor so each widget exports its own
+   *       Props type and the registry passes the right shape.
+   *
+   * Deferred from PR #189 (commit b77fde81) — the deferral was honest at
+   * the PM level but invisible at source-level. This JSDoc makes the
+   * choice discoverable to the next reader of types.ts so they don't
+   * (1) rip out the eslint-disable and break the registry, or
+   * (2) extend `any` to neighbouring fields. See follow-up
+   * `.review/follow-up-pr-findings.md` (M14) and the apply-queue at
+   * `.review/apply-queue-2026-05-16-take2.md`.
+   */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   data: any;
   timeframe: string;
