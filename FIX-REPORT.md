@@ -1,70 +1,84 @@
-# PR #181 Take-2 Apply Pass FIX-REPORT (2026-05-16)
+# PR #189 Retroactive Fix-Content Follow-up — FIX REPORT (2026-05-16)
 
-Branch: `chore/silent-failure-sweep-analytics-2026-05-16`
-Worktree: `/Users/helios-mammut/claude-projects/quantalyze-worktrees/silent-failure-sweep`
-Threshold applied: CRITICAL=all, HIGH conf>=7, MED conf>=8, LOW=skip.
-Scope: `analytics-service/services/{metrics,exchange}.py` + accompanying tests only.
+Branch: `fix/pr189-retro-followup-2026-05-16`
+Base: `origin/main` (`609b625b`)
+Version: bumped to `v0.22.40.23` (VERSION + package.json).
 
-## Specialist apply matrix
+Source threshold findings (from `.review/specialist-fix-content.*.jsonl` +
+`red-team-fix-content.jsonl` on the `allocator-dashboard-retroactive`
+worktree): CRITICAL + HIGH≥7 + MED≥8 + LOW≥9.
 
-7 proper specialists wrote findings under `.review/`:
+## Applied: 21 in scope (20 code fixes + 1 verified false positive)
 
-| File | Findings | Actionable (passed threshold) |
-|---|---|---|
-| `.review/specialist.code-reviewer.jsonl` | 7 | 1 MED conf-8 (subsumed by F18) |
-| `.review/specialist.silent-failure-hunter.jsonl` | 13 | 3 HIGH + 5 MED conf>=8 |
-| `.review/specialist.type-design-analyzer.jsonl` | 10 | 4 MED conf-8 |
-| `.review/specialist.pr-test-analyzer.jsonl` | 7 | 2 MED actionable + complementary tests |
-| `.review/specialist.security.jsonl` | 8 | 1 MED conf-8 (F7) |
-| `.review/specialist.performance.jsonl` | 7 | 0 (all LOW conf-7) |
-| `.review/red-team.jsonl` | 12 | 4 HIGH + 6 MED actionable |
+### HIGH (7 of 8 applied — 1 false positive)
 
-## Apply queue and status
+| ID | Severity / conf | File | Status |
+|---|---|---|---|
+| H1 | HIGH / 9 | `AllocationDashboardV2.tsx` | Recovery banner hoisted above EmptyState early-return + rendered in both branches |
+| H2 | HIGH / 9 | `OutcomesWidget.tsx` | Curve-fetch error hoisted to panel level; rendered regardless of per-window pending state |
+| H3 | HIGH / 8 | `EquityChart.tsx` | y-tick walker safety cap at 50 ticks with one-shot warn + 3-tick fallback |
+| H4 | HIGH / 8 | `useDashboardConfig.ts` | Preserve user's empty-tiles layout instead of silently replacing with DEFAULT_LAYOUT |
+| H5 | HIGH / 9 | `ScenarioComposer.tsx` | Client `ScenarioCommitDiff` aligned to Zod wire contract (holding_ref required on BridgeRecommendedDiff, percent_allocated added to VoluntaryModifyDiff, effective_date added to all members, rejection_reason narrowed to RejectionReason enum, note narrowed to string\|null\|undefined) |
+| H6 | HIGH / 8 | `ScenarioComposer.tsx` | Export narrower `ComposerProducedDiff` (voluntary_remove + voluntary_add) for the composer→drawer seam; handleCommit retypes locally |
+| H7 | HIGH / 8 | `AllocationDashboardV2.retro-audit.test.tsx` | Per-test override hook for consumeDashboardRecoveryFlag + 7 new tests covering banner copy / EmptyState branch / dismiss / null control |
+| H8 | HIGH / 8 | `AllocationDashboardV2.tsx` | **False positive** — `warning` IS a registered Tailwind `@theme inline` token in `src/app/globals.css`; existing files (`src/app/security/page.tsx`, `WithdrawalWarningStrip.tsx`, `WizardIpAllowlistHint.tsx`) use `border-warning` + `bg-warning/N` successfully; verified by grep. No code change required. |
 
-| ID | Severity | Conf | Specialist(s) | Status | Commit |
-|---|---|---|---|---|---|
-| F1 | HIGH | 9 | silent-failure-hunter + code-reviewer + red-team | CLOSED — removed qs.stats.gini dead call (gini absent from qs 0.0.81) | 1 |
-| F2 | HIGH | 9 | red-team-new | CLOSED — var_1d_95 kwarg fixed from `cutoff=0.05` to `confidence=0.95` | 1 |
-| F3 | HIGH | 8 | silent-failure-hunter | CLOSED — fetch_mark_prices Binance/Bybit per-row drops now log WARNING with sym + unparseable value | 1 + tests in 4 |
-| F4 | HIGH | 8 | silent-failure-hunter | CLOSED — OKX bills aggregator non-digit ts now logs WARNING with billId/billType (mirrors Binance/Bybit severity, not the asymmetric ERROR) | 1 + tests in 4 |
-| F5 | HIGH | 8 | red-team-chain | CLOSED — Bybit ISO-conversion now atomic (build-then-extend); mid-loop failure discards partial state so daily_pnl stays uniform | 1 + tests in 4 |
-| F6 | HIGH | 8 | red-team-new | CLOSED — returns_nonnan_len_for_log threaded through all 11 inline WARNINGs alongside raw returns_len_for_log | 1 |
-| F7 | MED | 8 | security | CLOSED — Binance WARNING now scrubs str(exc) via services.redact.scrub_freeform_string (Pass 1 catches `signature=<HMAC>`); exc_info=True dropped on that site (HMAC plaintext was in traceback first line). Bybit V5 path left exc_info=True (V5 signs via header, not URL — per security finding LOW conf-6) | 3 + test |
-| F8 | MED | 8 | type-design | CLOSED — `RSquaredStatus = Literal['no_benchmark', 'ok', 'error']` added; assigned at all 3 sites | 2 |
-| F9 | MED | 8 | type-design | CLOSED — compute_qstats_scalars return type narrowed from `dict[str, float \| None \| str]` to `QstatsScalarsResult` TypedDict | 2 |
-| F10 | MED | 8 | type-design | CLOSED — removed 3 fictional `*_error` JSONB keys (drawdown_episodes_error, benchmark_metrics_error, benchmark_returns_error) — repo-wide grep confirmed zero consumers | 2 |
-| F11 | MED | 8 | type-design | PARTIAL (F10 removes inconsistent `*_error: str` shape; full discriminator-pattern migration of 11 inline scalars deferred — too invasive for this PR) | 2 |
-| F12 | MED | 9 | silent-failure-hunter | CLOSED — test_bybit_api_timeout docstring rewritten to describe post-sweep contract (WARNING is the load-bearing signal; observable result unchanged) | 4 |
-| F13 | MED | 7 | silent-failure-hunter | CLOSED — added test_bybit_iso_conversion_overflow_emits_warning exercising true ISO-conversion path via 22-digit createdTime overflow; also pins F5 atomicity contract | 4 |
-| F14 | MED | 8 | silent-failure-hunter | PARTIAL (F4 covered the OKX bills aggregator silent-drop; OKX paginator break with no partial=true signal documented out-of-scope) | docs |
-| F15 | MED | 8 | red-team-new | DEFERRED — Sentry breadcrumb scrubber gap is in sentry_init.py (outside this PR's scope). F7's drop of exc_info=True on the Binance signed-URL site removes the largest exposure surface. F16's traceback rate-limit caps fleet-wide breadcrumb volume. Full Sentry-side fix tracked separately. | n/a |
-| F16 | MED | 8 | red-team-new | CLOSED — module-level `_FAIL_LOUD_TRACEBACK_EMITTED` + `_should_emit_traceback(scalar, exc)` helper. First (scalar_name, exc-type) occurrence per process emits full traceback; subsequent occurrences emit single-line WARNING. Threaded through all 11 inline WARNING sites + _safe_qstats_scalar helper. Autouse conftest fixture resets the set per-test. | 3 |
-| F17 | MED | 8 | pr-test | CLOSED — 3 caplog tests added to TestSafeFloat pinning DEBUG-vs-WARNING contract for NaN + string + None paths | 3 |
-| F18 | MED | 8 | silent-failure-hunter | CLOSED — `if value is None: return None` fast-path added before try/except in _safe_float. sanitize_metrics' recursive walk now skips legitimate-None paths without emitting DEBUG. | 3 |
+### MEDIUM ≥8 (13 in scope)
 
-## Deferred / out-of-scope (tracked for follow-up)
+| ID | Severity / conf | File | Status |
+|---|---|---|---|
+| M1 | MED / 8 | `EquityChart.tsx` | Guard CUSTOM range startEpoch/endEpoch against NaN, fall back to ALL-period with breadcrumb |
+| M2 | MED / 8 | `OutcomesWidget.tsx` | Reset `error` to null at the start of each effect run |
+| M3 | MED / 8 | `AllocationDashboardV2.retro-audit.test.tsx` | New behavior test mounts empty→populated transition and asserts widget_viewed fires via mocked synchronous IntersectionObserver |
+| M6 | MED / 8 | `AllocationDashboardV2.tsx` | Third widgetViewsFiredRef reset effect keyed on `[holdingsEmpty, hasSyncing]` so empty→populated transitions get a fresh dedup |
+| M7 | MED / 9 | `ScenarioCommitDrawer.tsx` | buildSubmitDiffs replaced with exhaustive switch + assertNever default |
+| M8 | MED / 8 | `EquityChart.tsx` | Malformed-date breadcrumb hoisted into parseISO itself with module-scoped dedup Set |
+| M11 | MED / 8 | `ScenarioCommitDrawer.tsx` | Validate `recorded` is a finite number BEFORE lifting JSON into state; emit malformed-response failure otherwise |
+| M12 | MED / 8 | `useDashboardConfig.ts` + `AllocationDashboardV2.tsx` | Export `DashboardRecoveryReason` named type, replace 3 hand-typed literal unions |
+| M13 | MED / 8 | `ScenarioCommitDrawer.tsx` | PerRowState.rejection_reason narrowed from `string?` to `RejectionReason` enum |
+| M14 | MED / 8 | `lib/types.ts` | WidgetProps.data:any JSDoc explaining the deferral rationale, blocking constraint, and pointer to follow-ups |
+| M15 | MED / 8 | `AllocationDashboardV2.retro-audit.test.tsx` | BASE_PAYLOAD now `satisfies Partial<MyAllocationDashboardPayload>`; api_key_id added to holdingsSummary; all 4 `as any` render-site casts replaced with `as unknown as MyAllocationDashboardPayload` |
+| M17 | MED / 8 | `OutcomesWidget.tsx` | Subsumed by H2 — error rendered ONCE at panel level (not 3× per column) |
+| M18 | MED / 8 | `EquityChart.tsx` | EquityChartWidget.periodReturn guards `last` against NaN (chip can never render "NaN%") |
 
-- **F14 OKX paginator partial-truncation** (silent-failure-hunter MED #4): the `break` in the paginator at exchange.py:432-434, 467-469 returns truncated data without any `partial=true` signal. The PR description scoped this out as pre-existing. Recommended follow-up: thread a `(daily_pnl, partial: bool)` tuple through fetch_daily_pnl OR raise a typed `OkxBillsPartialFetchError`.
-- **F15 Sentry breadcrumb scrubber** (red-team-new MED #6): sentry_init.py's `_redact_before_send` walks exception locals but not breadcrumb-level stacktrace frames. Out of scope (sentry_init.py is not in this PR's file set). F7+F16 reduce the practical exposure surface; full fix is a separate PR.
-- **F11 full discriminator-pattern migration** (type-design): F10 + F8 + F9 cover the highest-confidence pieces. Migrating all 11 inline scalars to a `result/status` discriminator pair is invasive (touches 11 try blocks + every consumer) — defer.
-- **Various LOW-severity findings** (code-reviewer #2 helper-extension, #5 per-scalar comment cleanup, #6 outlier-mean fragility, type-design #1/#2/#3/#8/#9/#10, perf all 7, security 4 LOWs): below threshold, not applied. See `.review/specialist.*.jsonl` for full text.
+### DEFERRED (below threshold)
 
-## Test summary
+Per spec, only CRITICAL + HIGH≥7 + MED≥8 + LOW≥9 are in scope. Findings
+explicitly listed in `.review/follow-up-pr-findings.md` as DEFERRED:
 
-- analytics-service tests: **211 passing** (test_metrics + test_exchange + test_exchange_harness), up from 174 pre-take2. Net new tests:
-  - test_compute_all_metrics_does_not_call_qstats_gini (replaces sweep WARNING-pin test; F1)
-  - test_compute_all_metrics_var_1d_95_uses_correct_kwarg (positive coverage; F2)
-  - test_nan_logs_debug_with_type_marker, test_string_coerce_failure_logs_debug_with_type_marker, test_none_returns_none_without_debug_emission (F17/F18)
-  - test_binance_futures_income_warning_scrubs_hmac_signature (F7)
-  - test_bybit_iso_conversion_overflow_emits_warning (F13)
-  - TestFetchMarkPricesFailLoud (Binance + Bybit, F3)
-  - TestFetchDailyPnlOkxFailLoud (F4)
-- Ruff: 2 pre-existing E402 warnings (unused import in `_fetch_raw_trades_binance`, late `import time` in fetch_mark_prices module). Not introduced by this PR; not in scope.
+- M4 (perf MED/7 — console.warn flood in sliceByPeriod filter)
+- M5 (perf MED/7 — two adjacent useEffect for prev-value tracking)
+- M9 (silent-failure MED/7 — aria-hidden on stale dimmer)
+- M10 (silent-failure MED/7 — module-level fallback for locked-storage setRecoveryFlag failure)
+- M16 (type-design MED/7 — split SubmitState.failure invariant)
+- All 9 LOW findings (none reach LOW≥9 threshold)
+- 1 INFO finding (positive defense-in-depth, no action)
 
-## Commits (this take-2 apply pass)
+## Visual contract preservation
 
-1. `fix(audit-2026-05-07): silent-failure-sweep — apply HIGH findings (gini + var_1d_95 + fetch_mark_prices + OKX bills + Bybit cascade + returns_len)` (5bd3bead)
-2. `fix(audit-2026-05-07): silent-failure-sweep — apply MED type-design (Literal r_squared_status + TypedDict + remove fictional *_error keys)` (aca34c42)
-3. `fix(audit-2026-05-07): silent-failure-sweep — apply MED security/perf (HMAC strip + log rate-limit + None fast-path)` (16983968)
-4. `fix(audit-2026-05-07): silent-failure-sweep — apply MED test gaps (docstring rewrite + ISO-conversion regression + mark_prices + OKX bills)` (c0c2eb0e)
-5. (this) `docs(audit-2026-05-07): silent-failure-sweep — proper-specialist apply pass FIX-REPORT`
+Per CLAUDE.md `feedback_dashboard_parity_visual_fidelity`: only
+logic/data/wiring changes; no Tailwind translation or new visual surfaces
+introduced beyond the H2 hoist (which REPLACES three identical per-column
+alerts with one panel-level alert — net visual REDUCTION, not addition).
+
+The H1 recovery banner was already present in PR #189; H1 only changes
+its rendering position so it survives the EmptyState short-circuit. No
+copy, color, or layout change.
+
+## Test verification
+
+- TypeScript: `npm run typecheck` → PASS, 0 errors
+- Vitest (full suite): 3689 passed, 228 skipped, 0 failed
+- Vitest (allocations dir, 68 files, 780 tests): all pass
+- Vitest (retro-audit only): 13/13 pass (6 pre-existing + 7 new H7/M3)
+- ESLint: 0 errors (23 pre-existing warnings unchanged)
+
+## Commits (atomic, one per fix bundle)
+
+1. `fix(allocator-retro): render recovery banner before EmptyState short-circuit` (H1)
+2. `fix(allocator-retro): hoist OutcomesWidget curve-error to panel level + reset on refetch` (H2, M2, M17)
+3. `fix(allocator-retro): EquityChart NaN guards + tick-count cap + parseISO breadcrumb` (H3, M1, M8, M18)
+4. `fix(allocator-retro): preserve empty-tiles layout + export DashboardRecoveryReason` (H4, M12)
+5. `fix(allocator-retro): ScenarioCommitDiff Zod alignment + exhaustive switch + RejectionReason narrowing + SubmitResponse validation` (H5, M7, M11, M13)
+6. `fix(allocator-retro): split composer/drawer seam + recovery banner regression tests + behavior H-1197 test + WidgetProps.data JSDoc + widget views reset` (H6, H7, M3, M6, M14, M15)
+7. (final) `chore: v0.22.40.23 + FIX-REPORT for PR #189 retro follow-up`
