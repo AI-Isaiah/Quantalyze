@@ -1,101 +1,42 @@
-# PR #182 specialist-review apply queue (take 2) — 2026-05-16
+# PR #181 Take-2 Apply Queue (2026-05-16)
 
-Worktree: `quantalyze-worktrees/sql-migrations-safety`
-Branch: `chore/sql-migrations-safety-2026-05-16`
+Threshold: CRITICAL=all, HIGH conf≥7, MED conf≥8, LOW=skip.
+In-scope files: `analytics-service/services/{metrics,exchange}.py` + their tests.
 
-## Specialist counts (raw)
-- code-reviewer: 10 (2 HIGH conf-9/8 + 8 MED conf-8)
-- security: 5 (1 CRITICAL conf-9, 1 MED conf-7, 2 LOW conf-5/6, 1 INFO conf-6)
-- data-migration: 8 (1 CRITICAL conf-9, 1 HIGH conf-8, 2 MED conf-7/8, 3 LOW conf-6/7/8)
-- pr-test-analyzer: 12 (6 HIGH conf-8/9/10, 5 MED conf-6/7/8, 1 LOW conf-4)
-- performance: 6 (1 HIGH conf-8, 2 MED conf-7/8, 3 LOW conf-6/7)
-- red-team: 11 (3 HIGH conf-8/8/9, 5 MED conf-7/7/8/8/8, 2 LOW conf-7/7, 1 challenge MED conf-8)
+## Apply queue (deduplicated)
 
-## Dedup: CRITICAL
-**APPLY-CRITICAL-1 — service_role REVOKE / trigger interaction**
-- code-reviewer HIGH conf-9 (mig 160700 L104-L150)
-- security MED conf-7 elevated by exposure
-- data-migration CRITICAL conf-9 (mig 160700 L104-L149)
-- pr-test-analyzer HIGH conf-9 (mig 160700 L41-L150 — zero behavioral test coverage for reject path; will fire on direct service_role INSERT)
-**Three specialists confirm = 1 CRITICAL finding.** Service_role direct INSERTs into match_decisions for bridge_recommended/voluntary_add will fail with 42501.
-Fix: ADD migration `20260516170000_match_decisions_visibility_check_secdef_fix.sql` — GRANT EXECUTE on `_assert_strategy_visible_to_allocator(uuid,uuid)` to `service_role, authenticated` (Option B — matches 160100 sanitize_user GRANT pattern, less privilege risk than SECDEF on trigger).
+| ID | Severity | Confidence | Specialist(s) | File | Line | Title | Fix sketch |
+|---|---|---|---|---|---|---|---|
+| F1 | HIGH | 9 | silent-failure-hunter + code-reviewer + red-team-chain | metrics.py | L391 | qs.stats.gini AttributeError permanent noise | Remove the call entirely (qs 0.0.81 has no gini); document drop in docstring |
+| F2 | HIGH | 9 | red-team-new + red-team-chain | metrics.py | L349 | var_1d_95 TypeError (kwarg `cutoff` should be `confidence`) | Change `cutoff=0.05` → `confidence=0.95` |
+| F3 | HIGH | 8 | silent-failure-hunter | exchange.py | L1422-L1430 (Binance), L1443-L1451 (Bybit) | fetch_mark_prices silent per-row drops | Add WARNING with sym + row.get('markPrice') in except clause |
+| F4 | HIGH | 8 | silent-failure-hunter | exchange.py | L497-L503 | OKX bills aggregator silent non-digit ts | Add else branch logging WARNING (not ERROR; mirror Binance/Bybit symmetry) |
+| F5 | HIGH | 8 | red-team-chain | exchange.py | L609-L613 | Bybit ISO-conversion mid-loop returns mixed timestamps -> transforms cascade | Make ISO conversion atomic — build new list, only assign on full success |
+| F6 | HIGH | 8 | red-team-new | metrics.py | L346 | returns_len_for_log doesn't reflect post-NaN length used by qs | Compute nonnan_len; pass both into WARNINGs |
+| F7 | MED | 8 | security | exchange.py | L559-L562 | Binance signed-URL HMAC leak in WARNING | Use scrub_freeform_string(str(exc)) and log type(exc).__name__ first |
+| F8 | MED | 8 | type-design | metrics.py | L791,L826 | r_squared_status as plain str — needs Literal | Import Literal; define RSquaredStatus = Literal[...] |
+| F9 | MED | 8 | type-design | metrics.py | L788-L876 | compute_qstats_scalars return type loose | Replace return type with TypedDict QstatsScalarsResult |
+| F10 | MED | 8 | type-design | metrics.py | L556,L606,L636 | `*_error` keys never consumed | Remove the 3 `*_error` writes (logs already serve operator triage) |
+| F11 | MED | 8 | type-design | metrics.py | many | Three incompatible failure-mode encodings | Unify by removing the `*_error` blobs (F10 handles); status discriminator remains for r_squared |
+| F12 | MED | 9 | silent-failure-hunter | test_exchange_harness.py L639 | docstring `Bybit timeout silently caught` | Rewrite to describe post-sweep contract |
+| F13 | MED | 7 | silent-failure-hunter (CHALLENGE LOW->MED apply-list says MED-conf-8 in step 2) | test_exchange.py | L2860 | Bybit ISO-conversion regression test gap | Add test exercising true ISO-conversion failure path (datetime.fromtimestamp raises) |
+| F14 | MED | 8 | silent-failure-hunter | exchange.py | L405-L491 vs others | OKX branch severity asymmetry (ERROR vs WARNING) | F4 covers the OKX bills aggregator. OKX paginator break (separate site) is documented out-of-scope; flag in FIX-REPORT |
+| F15 | MED | 8 | red-team-new | sentry_init.py | L228-L251 | Sentry breadcrumb scrubber doesn't walk stacktrace frames | OUT OF SCOPE (sentry_init.py not in scope). Defense: drop exc_info=True from the 2 exchange WARNINGs (Binance/Bybit) — DEFERRED to keep operator tracebacks; document |
+| F16 | MED | 8 | red-team-new | metrics.py | L347-L458 | 11 separate exc_info tracebacks per call = retention blowout | Add simple module-level rate-limit on duplicate-message WARNINGs |
+| F17 | MED | 8 | pr-test | test_metrics.py | L13-L40 | _safe_float DEBUG paths not pinned by caplog test | Add 2 caplog tests verifying DEBUG fires + level==DEBUG (negative WARNING assertion) |
+| F18 | MED | 8 | silent-failure-hunter | metrics.py | L188-L202 | _safe_float(None) emits DEBUG on every legitimate None | Add `if value is None: return None` as first line |
 
-**APPLY-CRITICAL-2 — reset_stalled_portfolio_analytics PUBLIC EXECUTE**
-- security CRITICAL conf-9 (mig 20260516122247 L25-L57 — already merged via PR #184)
-Fix: ADD migration `20260516170100_reset_stalled_portfolio_analytics_revoke_public.sql` — REVOKE EXECUTE FROM PUBLIC, anon, authenticated; GRANT TO service_role; add `_assert_no_public_execute` self-verifier.
+## Notable findings DEFERRED
 
-## Dedup: HIGH conf ≥7
-**APPLY-HIGH-1 — NOT VALID v2 CHECKs lack VALIDATE follow-up**
-- data-migration HIGH conf-8 (mig 160400 L88-L102 + 160500)
-Fix: ADD migration `20260516170200_match_decisions_constraint_validate.sql` — VALIDATE both constraints (wrapped in DO/EXCEPTION to surface violator count cleanly).
+- type-design F11 unified-encoding sweep: too invasive; partial coverage via F10 + F8 keeps PR scope.
+- Sentry breadcrumb scrubber (F15) and log rate-limiter (F16): F16 implementable inline in metrics.py via a small dedupe filter. F15 requires sentry_init.py edits which are out of scope.
+- OKX paginator partial-truncation (silent-failure-hunter MED #4): out of scope per PR description; document in FIX-REPORT.
+- code-reviewer MED `_safe_float` DEBUG flood: addressed via F18 (skip None) so the dominant noise source for sanitize_metrics path goes away.
 
-**APPLY-HIGH-2 — DELETE on notification_dispatches seq-scans**
-- red-team HIGH conf-9 (mig 160100 L158)
-Fix: ADD migration `20260516170300_notification_dispatches_recipient_email_idx.sql` using CREATE INDEX CONCURRENTLY (no BEGIN/COMMIT wrapper).
+## Application order (atomic commits)
 
-**APPLY-HIGH-3 — CREATE INDEX on portfolio_analytics without CONCURRENTLY**
-- performance HIGH conf-8 (mig 20260516122247 already merged via PR #184)
-Fix: ADD migration `20260516170400_portfolio_analytics_computing_idx_concurrently.sql` — DROP existing blocking index + CREATE INDEX CONCURRENTLY (no BEGIN/COMMIT wrapper).
-
-**APPLY-HIGH-4 — 23502 regression timebomb in bridge-outcome-cron tests**
-- pr-test-analyzer HIGH conf-10 (mig 160600 L60-L61 vs bridge-outcome-cron.test.ts L134, bridge-outcome-cron-holding.test.ts L237/L326/L382)
-Fix: EDIT 4 test sites in `src/__tests__/bridge-outcome-cron*.test.ts` to include `kind: 'bridge_recommended'` field.
-
-**APPLY-HIGH-5 — sanitize_user verification regex brittleness**
-- red-team HIGH conf-8 (mig 160100 L256-L275)
-Fix: NEW migration `20260516170500_sanitize_user_verification_robustness.sql` that re-installs sanitize_user verification with schema-prefix-tolerant regexes. (CANNOT edit 160100 itself per hard rule.)
-
-**APPLY-HIGH-6 — Vercel rollback re-opens 23502 surface**
-- red-team HIGH conf-8 (mig 160600 L60-L62)
-Fix: DOCUMENT in `docs/runbooks/sql-migrations-coverage-2026-05-16.md`. Operational, not code.
-
-## Dedup: MED conf ≥8
-**APPLY-MED-1 — _validate_scenario_diff numeric cast 22P02 leak**
-- code-reviewer MED conf-8 (mig 160800 L103/L118/L144)
-- red-team MED conf-8 (same finding)
-Fix: NEW migration `20260516170600_validate_scenario_diff_numeric_cast_hardening.sql` CREATE OR REPLACE FUNCTION with BEGIN/EXCEPTION guarded numeric casts.
-
-**APPLY-MED-2 — SET search_path on non-SECDEF helpers**
-- code-reviewer MED conf-8 (mig 160700 L114-L134 _match_decisions_visibility_check)
-- security INFO conf-6 (same + 160200 + 160800)
-Fix: Part of `20260516170000` — re-create trigger fn with SET search_path. Also part of `20260516170600` for _validate_scenario_diff.
-
-**APPLY-MED-3 — orphan-org bypass / privacy backdoor**
-- data-migration MED conf-7
-- security MED conf-7
-- red-team MED conf-7
-Fix: Tighten orphan-org branch. Part of `20260516170000` — re-create helper with stricter orphan handling: return FALSE for orphan-org by default (fail closed).
-
-**APPLY-MED-4 — Stale test_sanitize_user_hardening.sql Test 3 inverted polarity**
-- pr-test-analyzer MED conf-7 (supabase/tests/test_sanitize_user_hardening.sql L194-L196)
-Fix: EDIT `supabase/tests/test_sanitize_user_hardening.sql` Test 3 to assert PRESENCE not absence (+ add M-0796 PRESENT assertion).
-
-**APPLY-MED-5 — Sequential ALTER TABLE lock-acquisition race**
-- red-team MED conf-8 (160400/500/600 each takes EXCLUSIVE; lock_timeout=5s)
-DEFER: bumping lock_timeout or merging into one tx are both invasive. The retry semantics with lock_timeout=5s are operationally acceptable. Document in runbook.
-
-**APPLY-MED-6 — _validate_scenario_diff dead code (not wired)**
-- pr-test-analyzer HIGH conf-9 (zero coverage AND not invoked)
-DEFER for wiring (out of scope), but APPLY-MED-1 fix here improves the contract correctness if/when wired. Tests at supabase/tests level: defer.
-
-## NOT applied (LOWER conf or settled overrides)
-- search_path TO '' override: NOT APPLIED (settled per user override; codebase convention is `public, pg_catalog`).
-- match_decisions visibility GUC escape hatch (red-team MED conf-8): DEFER — not exercised by any current code path; over-engineering.
-- frozen_post_sanitize column (red-team MED conf-7): DEFER — new column on organizations needs separate PR scope.
-- Supabase preview-branch order (red-team challenge MED conf-8): DOCUMENT only; per main+preview separation no concurrent apply.
-- 23514 admin route remap to 409 (red-team MED conf-7): DEFER — not in SQL migrations scope; new PR for routes.
-- COUNT(*) → EXISTS optimization (performance LOW conf-6): DEFER per LOW conf.
-- 160300 STEP 3 block-comment hole (code-reviewer + red-team LOW conf-7): DEFER per LOW conf.
-- 160300 STEP 1 bootstrap (data-migration LOW conf-7): DEFER per LOW conf.
-- 160100 second-sanitize PII gap (data-migration LOW conf-6): DEFER per LOW conf.
-- SET LOCAL lock_timeout (data-migration LOW conf-8): DEFER — Supabase migration-runner-per-file isolates session.
-- 161000 - 122247 lock_timeout (performance MED conf-7): DEFER — index migration goes CONCURRENTLY (no tx wrapper). 121000 data_quality column add lock_timeout: DEFER (idempotent metadata-only).
-- _assert_retention_columns service_role GRANT (performance LOW conf-6): DEFER (canary cron not yet built).
-
-## Commit plan
-1. `chore(audit-2026-05-07): SQL migrations — apply CRITICAL service_role REVOKE fix (new migration 20260516170000)` — closes APPLY-CRITICAL-1 + APPLY-MED-2 (search_path on trigger fn) + APPLY-MED-3 (orphan-org tightening)
-2. `chore(audit-2026-05-07): SQL migrations — apply CRITICAL reset_stalled_portfolio_analytics REVOKE (new migration 20260516170100)` — APPLY-CRITICAL-2
-3. `chore(audit-2026-05-07): SQL migrations — apply HIGH (CONCURRENTLY index, VALIDATE CONSTRAINT, notification_dispatches idx)` — APPLY-HIGH-1 + APPLY-HIGH-2 + APPLY-HIGH-3
-4. `chore(audit-2026-05-07): SQL migrations — apply HIGH test fixes (bridge-outcome-cron 23502 timebomb + kind defaults + sanitize_user verification regex)` — APPLY-HIGH-4 + APPLY-HIGH-5 + APPLY-MED-4
-5. `chore(audit-2026-05-07): SQL migrations — apply MED specialist findings (numeric cast hardening, runbook doc)` — APPLY-MED-1 + APPLY-HIGH-6 docs
-6. `docs(audit-2026-05-07): SQL migrations — proper-specialist apply pass FIX-REPORT`
+1. F1, F2, F3, F4, F5, F6 — HIGH cluster.
+2. F8, F9, F10 (F11 subset) — MED type-design cluster.
+3. F7, F16, F18 — MED security/perf/noise cluster.
+4. F12, F13, F17 — MED test cluster.
+5. Docs commit: FIX-REPORT.md.
