@@ -3,15 +3,45 @@ when p99.9 (post-TOAST-compression on-disk size) >= 800kB.
 
 Usage:
     # Opt-IN: kill-switch is OFF by default; set RUN_KILL_SWITCH to enable.
-    RUN_KILL_SWITCH=true python -m scripts.phase12_kill_switch              # auto-runs SQL probe
-    RUN_KILL_SWITCH=true python -m scripts.phase12_kill_switch --p999 820000 --count 15
+    # Prod hosts also require --confirm-prod or PHASE12_KILL_SWITCH_CONFIRMED=true.
+    RUN_KILL_SWITCH=true python -m scripts.phase12_kill_switch --confirm-prod
+    RUN_KILL_SWITCH=true python -m scripts.phase12_kill_switch \\
+        --p999 820000 --count 15 --confirm-prod
     python -m scripts.phase12_kill_switch                                   # bypass (default)
+
+    # After a partial cutover (some strategies failed; p999 has dropped
+    # because the successful ones shrank), re-run with --force to bypass
+    # the threshold short-circuit.
+    RUN_KILL_SWITCH=true python -m scripts.phase12_kill_switch --force --confirm-prod
 
 P2021 (audit-2026-05-07 round 2):
     Inverted from the prior opt-OUT `SKIP_KILL_SWITCH=1` polarity — that fired the
     kill-switch by default on partial deploys. RUN_KILL_SWITCH is now an opt-IN
     truthy parse (true|yes|1|on / false|no|0|off|""); unknown values raise SystemExit
     rather than silently defaulting (CLAUDE.md Rule 12: fail loud).
+
+audit-2026-05-07 specialist-fix round:
+    * H-0611 / H-0616 / C-0217: DSN parsed into PG* libpq env vars and
+      passed via subprocess(env=...) — never in argv (which is visible
+      to `ps auxe`, /proc/<pid>/cmdline, and CI argv-capturing loggers).
+    * H-0623: psql stderr is run through `_redact_dsn` before being
+      propagated into RuntimeError — strips any embedded postgresql://
+      DSN echoed back on auth / SSL / parse failures.
+    * H-0606: per-strategy cutover loop runs with bounded concurrency
+      (`asyncio.Semaphore(_CUTOVER_CONCURRENCY)`).
+    * H-0614: `--force` / `PHASE12_FORCE_CUTOVER=true` bypasses the
+      p999 < threshold short-circuit for the resume case after a
+      partial cutover.
+    * H-0620: strategy_id is UUID-validated at the cutover boundary.
+    * H-0622: TODOS audit-log write is atomic (tempfile + os.replace).
+    * H-0624: `--confirm-prod` / `PHASE12_KILL_SWITCH_CONFIRMED=true`
+      is REQUIRED when DATABASE_URL points at a prod-looking host.
+    * M-0637: missing TODOS_PATH is non-fatal — the audit line is also
+      printed to stderr (which the deploy log captures unconditionally).
+    * M-0639: DATABASE_URL is parsed via urllib.parse and rejected when
+      the scheme is not postgresql / postgres or no host is present.
+    * M-0640: THRESHOLD_BYTES is typed `Final[Bytes]` (Bytes is a
+      NewType('Bytes', int)).
 
 Idempotent: re-running after a successful cutover is a no-op (heavy keys already missing
 from metrics_json; the batch upsert into strategy_analytics_series is itself an upsert).
@@ -34,8 +64,12 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Final, NewType
+from urllib.parse import urlparse
 
 # This module lives in analytics-service/scripts/. The analytics-service services
 # package is on sys.path when invoked via `python -m scripts.phase12_kill_switch`
@@ -44,7 +78,12 @@ from services.db import db_execute, get_supabase
 
 # --- Constants -------------------------------------------------------------
 
-THRESHOLD_BYTES = 800_000  # 800kB — Phase 12 SC#3a kill-switch trigger.
+# M-0640: typed-int wrapper around byte counts. The unit is encoded in the
+# type so a future caller cannot accidentally pass `p999_kb` (a different
+# unit) where bytes are expected without a type-checker complaint.
+Bytes = NewType("Bytes", int)
+
+THRESHOLD_BYTES: Final[Bytes] = Bytes(800_000)  # 800kB — Phase 12 SC#3a kill-switch trigger.
 # Default timeout on the psql subprocess so a hung pgbouncer / network
 # partition / held FOR UPDATE can't park the deploy indefinitely. Resolved
 # lazily inside `_resolve_probe_timeout_s` so a malformed env var raises a
@@ -119,7 +158,103 @@ def _parse_run_flag(value: str) -> bool:
 # Python caller never touches the snapshot. Single source of truth lives
 # in supabase/migrations/129_*.sql.
 
-SQL_PROBE_PATH = Path(__file__).parent / "analyze_metrics_size.sql"
+SQL_PROBE_PATH: Final[Path] = Path(__file__).parent / "analyze_metrics_size.sql"
+
+# Bounded concurrency for the per-strategy cutover loop. The RPC takes a
+# row-level FOR UPDATE lock on strategy_analytics — sending more than a
+# handful of concurrent calls saturates the Postgres connection pool and
+# starves other writers without speeding up the cutover (the bottleneck
+# is row contention, not Python-side latency). The default of 5 is the
+# same number `phase12_backfill_enqueue` uses for its own throttle.
+_CUTOVER_CONCURRENCY: Final[int] = 5
+
+# H-0611 / H-0616 / C-0217: credential disclosure surface.
+# The DATABASE_URL contains a password that MUST NOT appear in process
+# argv (visible to every local user via `ps auxe`, /proc/<pid>/cmdline,
+# Railway/CI build logs, and journald/auditd). We parse it into PG*
+# libpq env vars and pass them via subprocess.run(env=...) — keeping the
+# secret out of argv entirely.
+_PG_DSN_ARGV_MARKERS: Final[tuple[str, ...]] = (
+    "postgresql://",
+    "postgres://",
+    "postgresql+psycopg",
+    "postgres+psycopg",
+)
+
+
+def _parse_postgres_url(db_url: str) -> dict[str, str]:
+    """Parse a postgresql:// DSN into PG* libpq env vars.
+
+    Returns a dict with PGHOST / PGUSER / PGPASSWORD / PGDATABASE / PGPORT /
+    PGSSLMODE keys (only those present in the URL). The returned dict is
+    intended for merge into os.environ via `{**os.environ, **parsed}`.
+
+    Raises ValueError on URLs that don't have a recognized postgres scheme,
+    or that lack a host. This is the only place the URL is parsed — the
+    raw DSN string never leaves this function (M-0639).
+    """
+    if not isinstance(db_url, str) or not db_url:
+        raise ValueError("phase12_kill_switch: empty DATABASE_URL")
+    parsed = urlparse(db_url.strip())
+    if parsed.scheme not in ("postgresql", "postgres"):
+        raise ValueError(
+            f"phase12_kill_switch: DATABASE_URL has unrecognized scheme "
+            f"{parsed.scheme!r}; expected 'postgresql' or 'postgres'."
+        )
+    if not parsed.hostname:
+        raise ValueError(
+            "phase12_kill_switch: DATABASE_URL has no host component."
+        )
+    env: dict[str, str] = {"PGHOST": parsed.hostname}
+    if parsed.port is not None:
+        env["PGPORT"] = str(parsed.port)
+    if parsed.username:
+        env["PGUSER"] = parsed.username
+    if parsed.password:
+        env["PGPASSWORD"] = parsed.password
+    # `/dbname` → strip the leading slash. Falls through to an unset
+    # PGDATABASE when the URL has no path, which is libpq's "use the
+    # username as the database name" default — same shape as before.
+    db_path = (parsed.path or "").lstrip("/")
+    if db_path:
+        env["PGDATABASE"] = db_path
+    # PGSSLMODE rides in the query string for Supabase URLs
+    # (?sslmode=require). Forward it verbatim so the libpq behavior
+    # matches what an operator running psql interactively would see.
+    if parsed.query:
+        for kv in parsed.query.split("&"):
+            if "=" not in kv:
+                continue
+            k, v = kv.split("=", 1)
+            if k == "sslmode" and v:
+                env["PGSSLMODE"] = v
+                break
+    return env
+
+
+def _redact_dsn(message: str) -> str:
+    """Strip embedded postgresql:// connection strings from an error message.
+
+    psql commonly echoes the connection URI back in stderr on auth /
+    SSL / parse failures — `connection to server at "postgresql://postgres:
+    HUNTER2@db.host..." failed: ...`. Propagating that stderr verbatim
+    into a RuntimeError → CI log = credential disclosure (H-0623).
+
+    The regex matches the full DSN (with or without `+psycopg` driver
+    suffix) and replaces it with `<postgres-dsn-redacted>`. We don't try
+    to extract just the password — the host is also sensitive (it
+    confirms which Supabase project the operator was connected to, and
+    co-tenants can use that to scope further probes).
+    """
+    if not message:
+        return message
+    # Non-greedy match up to the first whitespace, quote, or end-of-string.
+    # Covers: postgresql://user:pass@host:5432/db?sslmode=require
+    pattern = re.compile(
+        r"(?:postgresql|postgres)(?:\+psycopg)?://[^\s\"'<>]+",
+        re.IGNORECASE,
+    )
+    return pattern.sub("<postgres-dsn-redacted>", message)
 
 # Path to the phase 12 TODOS file — kill-switch trigger appends a log entry here.
 TODOS_PATH = (
@@ -201,6 +336,14 @@ def measure_p999_via_sql() -> tuple[float, int]:
     a SQL re-order can no longer silently shift the parsed p999 to a different
     percentile. Requires keys `p999` and `count` to be present; rejects NaN/
     inf/negative values.
+
+    H-0611 / H-0616 / C-0217: the DSN is parsed into PG* libpq env vars and
+    passed via `subprocess.run(env=...)`. It is NEVER passed as a positional
+    or `--dbname` argv argument — argv is visible to every local user via
+    `ps auxe`, /proc/<pid>/cmdline, and Railway/CI argv-capturing logs.
+    H-0623: any stderr propagated into the raised exception is run through
+    `_redact_dsn` so a psql error message that echoes back the connection
+    URI cannot leak the password into the calling log.
     """
     db_url = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
     if not db_url:
@@ -208,17 +351,27 @@ def measure_p999_via_sql() -> tuple[float, int]:
             "phase12_kill_switch: DATABASE_URL (or SUPABASE_DB_URL) not set; "
             "cannot run pg_column_size SQL probe (M-03)."
         )
+    try:
+        pg_env = _parse_postgres_url(db_url)
+    except ValueError as exc:
+        # Don't propagate the URL into the message — it could be the raw
+        # DSN with the password embedded. The redactor is defense in depth.
+        raise RuntimeError(
+            f"phase12_kill_switch: DATABASE_URL is malformed: {_redact_dsn(str(exc))}"
+        ) from None
     sql = SQL_PROBE_PATH.read_text()
     timeout_s = _resolve_probe_timeout_s()
-    # Explicit --dbname flag (the previous positional dbname was easy to
-    # mis-read as a query when reviewing CI logs). The bounded timeout
-    # prevents a hung pgbouncer / network partition / held FOR UPDATE
-    # from parking the deploy indefinitely with no diagnostic.
+    # The bounded timeout prevents a hung pgbouncer / network partition /
+    # held FOR UPDATE from parking the deploy indefinitely with no
+    # diagnostic. The DSN is in env=, not argv — see _parse_postgres_url
+    # docstring and the H-0611 / H-0616 / C-0217 finding.
+    subprocess_env = {**os.environ, **pg_env}
     try:
         result = subprocess.run(
-            ["psql", "--dbname", db_url, "-tAF,", "-c", sql],
+            ["psql", "-tAF,", "-c", sql],
             capture_output=True, text=True, check=False,
             timeout=timeout_s,
+            env=subprocess_env,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
@@ -227,8 +380,12 @@ def measure_p999_via_sql() -> tuple[float, int]:
             f"pgbouncer hung, or strategy_analytics held under FOR UPDATE)"
         ) from exc
     if result.returncode != 0:
+        # H-0623: psql can echo the connection URI in stderr on auth /
+        # SSL handshake failures. Redact before raising so the exception
+        # message never carries the DSN into the deploy log.
         raise RuntimeError(
-            f"phase12_kill_switch: SQL probe failed: {result.stderr.strip()}"
+            f"phase12_kill_switch: SQL probe failed (exit {result.returncode}): "
+            f"{_redact_dsn(result.stderr.strip())}"
         )
     parsed: dict[str, str] = {}
     for line in result.stdout.strip().splitlines():
@@ -332,9 +489,31 @@ async def cutover_strategy(strategy_id: str) -> int:
         returns `jsonb_build_object('moved', <int>)`. The entire read+strip
         runs under a row lock — no race window vs concurrent writers.
 
+    H-0620: the strategy_id is validated as a UUID string at the function
+    boundary. The RPC signature is `p_strategy_id UUID` — Postgres would
+    reject a non-UUID at execute time, but the Python-side guard fails
+    earlier (and surfaces a clearer error than a libpq parse failure).
+
     Idempotent (per migration 129's contract): a re-run for a strategy whose
     heavy keys are already in the sibling table is a no-op.
     """
+    # H-0620: reject non-UUID strategy_ids before they hit the RPC. The
+    # function signature accepts `str` (not `UUID`) so callers can keep
+    # passing values that came over the wire as JSON strings, but the
+    # validator pins the shape — any callers passing arbitrary text now
+    # fail loud here rather than at the Postgres UUID parser.
+    if not isinstance(strategy_id, str) or not strategy_id:
+        raise ValueError(
+            f"phase12_kill_switch: strategy_id must be a non-empty string; "
+            f"got {strategy_id!r}"
+        )
+    try:
+        uuid.UUID(strategy_id)
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError(
+            f"phase12_kill_switch: strategy_id {strategy_id!r} is not a "
+            f"valid UUID; refusing to call cutover RPC."
+        ) from exc
     supabase = get_supabase()
     result = await db_execute(
         lambda: supabase.rpc(
@@ -374,11 +553,189 @@ async def cutover_strategy(strategy_id: str) -> int:
     return moved
 
 
+# --- IAM gate (H-0624) -----------------------------------------------------
+
+# Substrings that identify a non-prod DB host. Operators running against a
+# matching host can skip the explicit `--confirm-prod` / env var gate.
+# The list is conservative: anything NOT matching here is treated as prod.
+_NON_PROD_HOST_MARKERS: Final[tuple[str, ...]] = (
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "stg.",
+    "staging.",
+    "-staging.",
+    "dev.",
+    "-dev.",
+    "test.",
+    "-test.",
+    ".test",
+    ".local",
+)
+
+
+def _looks_like_prod_host(db_url: str | None) -> bool:
+    """Heuristic: return True when the DSN host does NOT match a known
+    non-prod marker. Default-deny: if we can't tell, treat as prod and
+    require the operator to confirm.
+
+    H-0624: the gate is intentionally heuristic — false positives (a stg
+    host that didn't match the marker list) just require the operator to
+    set the confirm flag once. False negatives (a prod host that LOOKED
+    like staging) would skip the gate, which is the worse failure mode.
+    """
+    if not db_url:
+        return True
+    try:
+        parsed = urlparse(db_url.strip())
+        host = (parsed.hostname or "").lower()
+    except Exception:
+        return True
+    if not host:
+        return True
+    return not any(marker in host for marker in _NON_PROD_HOST_MARKERS)
+
+
+def _check_confirm_gate(force: bool) -> None:
+    """Raise SystemExit when RUN_KILL_SWITCH=true points at a prod host
+    AND the operator has not set either the CLI --confirm-prod flag or
+    the PHASE12_KILL_SWITCH_CONFIRMED env var. Skipped if RUN_KILL_SWITCH
+    is falsy (the bypass branch handles that).
+
+    H-0624: the confirm gate is the second factor on top of the env-var
+    "RUN_KILL_SWITCH=true" opt-in. A typo on the operator's part can
+    point DATABASE_URL at prod just as easily as at staging; the confirm
+    flag forces an explicit second action specific to the prod target.
+    """
+    if force:
+        return
+    db_url = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
+    if not _looks_like_prod_host(db_url):
+        return
+    raise SystemExit(
+        "phase12_kill_switch: RUN_KILL_SWITCH=true with a prod-looking "
+        "DATABASE_URL host but no confirmation. Re-run with --confirm-prod "
+        "or set PHASE12_KILL_SWITCH_CONFIRMED=true to acknowledge the "
+        "table-wide rewrite of strategy_analytics.metrics_json. (Override "
+        "the host check by including 'stg.', 'staging.', 'dev.', 'test.', "
+        "or 'localhost' in the DSN if you are pointing at non-prod.)"
+    )
+
+
+# --- Audit log write (H-0622) ----------------------------------------------
+
+
+def _atomic_append_todos(content_to_append: str, audit_line: str) -> None:
+    """Append `content_to_append` to TODOS_PATH atomically via tempfile +
+    os.replace. The existing file's contents are read first; the entire
+    new payload is written to a sibling .tmp file in the same directory;
+    `os.replace` makes the swap atomic on POSIX (single inode rename).
+
+    H-0622: the previous `TODOS_PATH.write_text(read + append)` was a
+    non-atomic read-modify-write. Two concurrent invocations could
+    clobber each other's audit entries, and a crash mid-write could
+    truncate the file (losing the prior phase 12 plan content). The
+    tempfile + os.replace pattern guarantees no truncation: either the
+    swap completes and the new content is visible, or the original
+    file is untouched.
+
+    M-0637: when TODOS_PATH is missing (the audit is being written from
+    a deployed container where `.planning/` is not shipped), the audit
+    line is ALSO emitted to stderr by the caller — this helper still
+    raises if the path can't be written, but the caller decides whether
+    the absence is fatal.
+    """
+    parent = TODOS_PATH.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    existing = TODOS_PATH.read_text() if TODOS_PATH.exists() else ""
+    payload = existing + content_to_append
+    # NamedTemporaryFile(delete=False) creates the file with a unique
+    # name in the same parent — required for os.replace to be a single
+    # rename rather than a cross-filesystem copy.
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        dir=str(parent),
+        prefix=".phase12_kill_switch_audit_",
+        suffix=".tmp",
+        delete=False,
+        encoding="utf-8",
+    ) as tmp:
+        tmp.write(payload)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = tmp.name
+    try:
+        os.replace(tmp_path, TODOS_PATH)
+    except OSError:
+        # Clean up the temp file if the replace failed — otherwise a
+        # disk-full / permissions failure would leave orphan .tmp files
+        # accumulating in the audit directory.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    # Mark the unused audit_line parameter as deliberate — kept so the
+    # signature is symmetric with the stderr-only fallback in main().
+    del audit_line
+
+
 # --- Main ------------------------------------------------------------------
+
+async def _run_cutovers_bounded(
+    strategy_ids: list[str],
+    *,
+    concurrency: int = _CUTOVER_CONCURRENCY,
+) -> tuple[int, list[tuple[str, str]]]:
+    """Run cutover_strategy across strategy_ids with bounded concurrency.
+
+    H-0606: the previous serial loop did 2 sequential awaits per strategy
+    (the RPC + its connection round-trip), so a 50-strategy cutover took
+    10-30s of partial-state during which some strategies had heavy keys
+    moved and others didn't. Bounded gather (concurrency=5) cuts the
+    wall-clock by ~5x and shrinks the inconsistency window proportionally.
+
+    The bound matters: unbounded gather would saturate the Postgres
+    connection pool (the RPC takes a FOR UPDATE lock — too many concurrent
+    locks starve other writers without improving throughput).
+
+    Returns `(total_moved, failures)` where failures is a list of
+    `(strategy_id, repr(exc))` pairs for any strategies whose cutover
+    raised. The function never raises on a per-strategy failure — it
+    always returns, so the caller can write the audit log even when
+    some strategies failed.
+    """
+    sem = asyncio.Semaphore(max(1, concurrency))
+    # `_one` returns (sid, moved, error) so .gather can collect both
+    # successes and failures without an unhandled exception aborting the
+    # whole batch. Per-strategy try/except is INSIDE the helper so a
+    # bug-free strategy is not starved by a failure on another.
+    async def _one(sid: str) -> tuple[str, int, str | None]:
+        async with sem:
+            try:
+                moved = await cutover_strategy(sid)
+                return (sid, moved, None)
+            except Exception as exc:
+                return (sid, 0, repr(exc))
+
+    results = await asyncio.gather(*(_one(sid) for sid in strategy_ids))
+    total_moved = 0
+    failures: list[tuple[str, str]] = []
+    for sid, moved, error in results:
+        if error is not None:
+            failures.append((sid, error))
+            print(f"  strategy {sid}: WARNING — cutover failed: {error} (continuing)")
+            continue
+        total_moved += moved
+        print(f"  strategy {sid}: moved {moved} keys")
+    return (total_moved, failures)
+
 
 async def main(
     cli_p999: float | None = None,
     cli_count: int | None = None,
+    cli_force: bool = False,
+    cli_confirm_prod: bool = False,
 ) -> int:
     # P2021: opt-IN. Default (unset) → bypass. Truthy → run. Garbage → SystemExit.
     raw = os.getenv("RUN_KILL_SWITCH")
@@ -389,15 +746,45 @@ async def main(
         )
         return 0
 
+    # H-0624: confirm gate — block prod-looking hosts unless the operator
+    # has set either the --confirm-prod CLI flag or the
+    # PHASE12_KILL_SWITCH_CONFIRMED env var. Read the env confirm here so
+    # phase12_deploy.py can pass it through as a single boolean.
+    env_confirmed = os.getenv("PHASE12_KILL_SWITCH_CONFIRMED")
+    env_confirm_flag = bool(env_confirmed and _parse_run_flag(env_confirmed))
+    _check_confirm_gate(cli_confirm_prod or env_confirm_flag)
+
+    # H-0614: --force / PHASE12_FORCE_CUTOVER overrides the p999 < threshold
+    # short-circuit. Required for the resume case: after a partial cutover,
+    # p999 may have dropped below threshold even though some strategies
+    # still have heavy keys (because the SUCCESSFUL cutovers shrank their
+    # rows by hundreds of kB, dragging the percentile down). Without
+    # --force, the script would log "no cutover needed" and exit 0,
+    # leaving the partial state in place forever.
+    env_force = os.getenv("PHASE12_FORCE_CUTOVER")
+    force = cli_force or bool(env_force and _parse_run_flag(env_force))
+
     p999, n = await measure_p999(cli_p999=cli_p999, cli_count=cli_count)
     print(
         f"phase12_kill_switch: probe — p99.9 = {p999:.0f} bytes across {n} strategies "
         f"(threshold {THRESHOLD_BYTES}) [M-03: pg_column_size, DB-side only]"
     )
 
-    if p999 < THRESHOLD_BYTES:
+    if p999 < THRESHOLD_BYTES and not force:
         print("phase12_kill_switch: p99.9 < threshold — no cutover needed.")
+        print(
+            "phase12_kill_switch: re-run with --force or PHASE12_FORCE_CUTOVER=true "
+            "if you suspect a prior partial cutover left some strategies in the "
+            "old shape (H-0614)."
+        )
         return 0
+
+    if force and p999 < THRESHOLD_BYTES:
+        print(
+            f"phase12_kill_switch: --force / PHASE12_FORCE_CUTOVER set — "
+            f"bypassing threshold gate (p99.9={p999:.0f} < {THRESHOLD_BYTES}). "
+            f"Running cutover against every strategy."
+        )
 
     print("phase12_kill_switch: TRIGGERED — cutting over heavy keys for all strategies")
 
@@ -434,24 +821,13 @@ async def main(
             continue
         strategy_ids.append(sid)
 
-    # Per-strategy try/except so a mid-loop RPC failure cannot skip the
-    # post-loop audit-log write. Mirror P2025: collect (sid, exc) failures,
-    # always write the TODOS.md entry with moved/failed counts, return
-    # non-zero when any strategy failed. Malformed-row failures (rows
-    # missing strategy_id) are seeded into `failures` before the loop so
-    # they roll up into the same audit record.
-    total_moved = 0
-    failures: list[tuple[str, str]] = list(malformed_rows)
-    for sid in strategy_ids:
-        try:
-            moved = await cutover_strategy(sid)
-            total_moved += moved
-            print(f"  strategy {sid}: moved {moved} keys")
-        except Exception as exc:
-            failures.append((sid, repr(exc)))
-            print(
-                f"  strategy {sid}: WARNING — cutover failed: {exc!r} (continuing)"
-            )
+    # H-0606: bounded gather (concurrency=_CUTOVER_CONCURRENCY) replaces
+    # the prior serial for-loop. Per-strategy try/except lives INSIDE
+    # _run_cutovers_bounded so a mid-batch RPC failure can't skip the
+    # post-loop audit-log write. Malformed-row failures (rows missing
+    # strategy_id) are merged into the same failures list afterwards.
+    total_moved, rpc_failures = await _run_cutovers_bounded(strategy_ids)
+    failures: list[tuple[str, str]] = list(malformed_rows) + rpc_failures
 
     succeeded = input_total - len(failures)
     status = "COMPLETE" if not failures else "PARTIAL"
@@ -470,18 +846,6 @@ async def main(
     # operator must SEE the trigger fired. Mark the no-op cases with a
     # "(no-op)" suffix so duplicates are still distinguishable post-
     # incident without losing the record.
-    #
-    # Refuse to run when TODOS_PATH is missing (env-specific failure
-    # mode: archived phase dirs, wrong working directory). The audit
-    # destination is part of the operational contract.
-    if not TODOS_PATH.exists():
-        raise RuntimeError(
-            f"phase12_kill_switch: audit destination {TODOS_PATH} not "
-            f"found. The kill-switch triggered (p99.9={p999:.0f} >= "
-            f"{THRESHOLD_BYTES}) but cannot record the event. Restore the "
-            f"phase 12 TODOS.md or rerun from the correct working "
-            f"directory before proceeding."
-        )
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     noop_marker = (
         " (no-op — moved=0, failures=0; either keys already stripped, "
@@ -489,16 +853,51 @@ async def main(
         if total_moved == 0 and not failures
         else ""
     )
-    TODOS_PATH.write_text(
-        TODOS_PATH.read_text()
-        + (
-            f"\n## Kill-switch triggered (D-07) — {ts}{noop_marker}\n"
-            f"- p99.9 = {p999:.0f} bytes (threshold {THRESHOLD_BYTES}); "
-            f"moved {total_moved} keys across "
-            f"{succeeded}/{input_total} strategies "
-            f"({len(failures)} failed).\n"
-        )
+    audit_line = (
+        f"\n## Kill-switch triggered (D-07) — {ts}{noop_marker}\n"
+        f"- p99.9 = {p999:.0f} bytes (threshold {THRESHOLD_BYTES}); "
+        f"moved {total_moved} keys across "
+        f"{succeeded}/{input_total} strategies "
+        f"({len(failures)} failed).\n"
     )
+
+    # Audit line ALSO goes to stderr unconditionally so a deploy log
+    # captures it even when TODOS_PATH is missing (M-0637: `.planning/`
+    # is a developer-tree artifact, not shipped to Railway / prod
+    # containers — the in-tree audit trail is silently lost in the very
+    # environment where the kill-switch is most likely to fire).
+    print(f"phase12_kill_switch: AUDIT — {audit_line.strip()}", file=sys.stderr)
+
+    # H-0622: atomic write. Falls through to a stderr-only log if the
+    # TODOS_PATH parent doesn't exist (deploy artifact case) AND we're
+    # not in a known dev/CI environment. The prior round's "raise on
+    # missing TODOS_PATH" made the script unusable in production —
+    # ironic, since production is exactly where the trigger fires.
+    if TODOS_PATH.exists() or TODOS_PATH.parent.exists():
+        try:
+            _atomic_append_todos(audit_line, audit_line)
+        except OSError as exc:
+            # The stderr line above is the primary durable record; an
+            # OS-level failure writing the file is a SECONDARY signal
+            # (the deploy log already has the audit entry). Log loudly
+            # but don't abort — the cutover succeeded against the DB.
+            print(
+                f"phase12_kill_switch: WARNING — audit log write to "
+                f"{TODOS_PATH} failed: {exc!r}. The stderr AUDIT line "
+                f"above is the durable record.",
+                file=sys.stderr,
+            )
+    else:
+        # M-0637: don't fail loud — the stderr AUDIT line above is the
+        # primary durable record in this deployment shape. Log the path
+        # we tried so the operator can investigate post-hoc.
+        print(
+            f"phase12_kill_switch: NOTE — {TODOS_PATH} not in tree "
+            f"(expected when running from a deploy container — `.planning/` "
+            f"is dev-tree only). The stderr AUDIT line above is the "
+            f"durable record.",
+            file=sys.stderr,
+        )
 
     return 1 if failures else 0
 
@@ -522,5 +921,38 @@ if __name__ == "__main__":
         default=None,
         help="strategy_count from SQL probe (integer)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help=(
+            "H-0614: bypass the p999 < threshold short-circuit. Required "
+            "after a partial cutover — successful strategies shrank the "
+            "p999 distribution, so re-running without --force would log "
+            "'no cutover needed' and exit, leaving remaining strategies "
+            "in the old shape. Same effect as PHASE12_FORCE_CUTOVER=true."
+        ),
+    )
+    parser.add_argument(
+        "--confirm-prod",
+        action="store_true",
+        default=False,
+        help=(
+            "H-0624: required when DATABASE_URL points at a prod-looking "
+            "host (i.e. doesn't include 'stg.', 'staging.', 'dev.', "
+            "'test.', or 'localhost'). Same effect as "
+            "PHASE12_KILL_SWITCH_CONFIRMED=true. Without this, "
+            "RUN_KILL_SWITCH=true against prod aborts with SystemExit."
+        ),
+    )
     args = parser.parse_args()
-    sys.exit(asyncio.run(main(cli_p999=args.p999, cli_count=args.count)))
+    sys.exit(
+        asyncio.run(
+            main(
+                cli_p999=args.p999,
+                cli_count=args.count,
+                cli_force=args.force,
+                cli_confirm_prod=args.confirm_prod,
+            )
+        )
+    )

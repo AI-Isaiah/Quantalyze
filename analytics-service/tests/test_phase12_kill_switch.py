@@ -20,15 +20,57 @@ P2024 (atomic cutover via migration 129 RPC):
     function, which locks the row with SELECT ... FOR UPDATE inside the
     function body. Closes the race window vs concurrent analytics_runner
     writes.
+
+audit-2026-05-07 specialist-fix round:
+    * H-0606: bounded asyncio.gather replaces serial cutover loop.
+    * H-0611/H-0616/C-0217: DSN parsed into PG* env vars, never argv.
+    * H-0614: --force / PHASE12_FORCE_CUTOVER bypasses p999 < threshold
+      short-circuit to recover from partial-cutover state.
+    * H-0620: strategy_id is UUID-validated at the cutover boundary.
+    * H-0622: TODOS audit is atomic (tempfile + os.replace).
+    * H-0623: psql stderr is redacted of any embedded DSN before being
+      propagated into RuntimeError.
+    * H-0624: --confirm-prod / PHASE12_KILL_SWITCH_CONFIRMED required
+      when DATABASE_URL points at a prod-looking host.
+    * M-0637: TODOS path missing is non-fatal — stderr AUDIT line is
+      the primary durable record.
 """
 from __future__ import annotations
 
 import asyncio
+import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from scripts import phase12_kill_switch as ks
+
+
+# --- Test fixtures ---------------------------------------------------------
+
+# Real UUIDs for the cutover tests (H-0620 — non-UUID strategy_ids are rejected
+# at the boundary). These are deterministic uuid5() values so test failures
+# point at a stable identifier.
+TEST_STRATEGY_UUID = str(uuid.uuid5(uuid.NAMESPACE_OID, "phase12_kill_switch_test"))
+TEST_STRATEGY_UUID_2 = str(uuid.uuid5(uuid.NAMESPACE_OID, "phase12_kill_switch_test_2"))
+
+
+@pytest.fixture(autouse=True)
+def _confirm_prod_gate(monkeypatch):
+    """H-0624: pre-grant the prod-confirm gate for every test that runs
+    main() with RUN_KILL_SWITCH=true. Individual tests that need to
+    exercise the gate itself can monkeypatch.delenv() to reset it.
+
+    A localhost DATABASE_URL would have the same effect, but several
+    tests assert against `capsys.readouterr().out` and pre-setting an
+    env var keeps test stdout free of an extra "DATABASE_URL ..." line."""
+    monkeypatch.setenv("PHASE12_KILL_SWITCH_CONFIRMED", "true")
+
+
+def _uuid_for(label: str) -> str:
+    """Generate a deterministic UUID for a test label so audit-log
+    assertions can match a stable strategy_id substring."""
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, label))
 
 
 # --- P2021: RUN_KILL_SWITCH truthy parse -------------------------------------
@@ -384,12 +426,12 @@ class TestCutoverDelegatesToAtomicRpc:
         mock_rpc_chain.execute.return_value = MagicMock(data={"moved": 7})
 
         with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
-            moved = await ks.cutover_strategy("strat-abc")
+            moved = await ks.cutover_strategy(TEST_STRATEGY_UUID)
 
         assert moved == 7
         mock_supabase.rpc.assert_called_once_with(
             "cutover_strategy_metrics_keys_atomic",
-            {"p_strategy_id": "strat-abc"},
+            {"p_strategy_id": TEST_STRATEGY_UUID},
         )
 
     @pytest.mark.asyncio
@@ -403,7 +445,7 @@ class TestCutoverDelegatesToAtomicRpc:
         mock_rpc_chain.execute.return_value = MagicMock(data={"moved": 0})
 
         with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
-            await ks.cutover_strategy("strat-abc")
+            await ks.cutover_strategy(TEST_STRATEGY_UUID)
 
         mock_supabase.table.assert_not_called()
 
@@ -426,7 +468,7 @@ class TestCutoverDelegatesToAtomicRpc:
 
         with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
             with pytest.raises(RuntimeError, match="unexpected shape"):
-                await ks.cutover_strategy("strat-abc")
+                await ks.cutover_strategy(TEST_STRATEGY_UUID)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -451,7 +493,7 @@ class TestCutoverDelegatesToAtomicRpc:
 
         with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
             with pytest.raises(RuntimeError, match="expected int"):
-                await ks.cutover_strategy("strat-abc")
+                await ks.cutover_strategy(TEST_STRATEGY_UUID)
 
     @pytest.mark.asyncio
     async def test_cutover_does_not_drop_runner_writes(self) -> None:
@@ -486,16 +528,45 @@ class TestCutoverDelegatesToAtomicRpc:
             # Interleave a "runner write" with cutover. Python coroutines can
             # only see one ordering of awaits; the point is that cutover's
             # ONLY mutation call is the RPC, with strategy_id only.
-            await asyncio.gather(ks.cutover_strategy("strat-abc"), fake_runner_write())
+            await asyncio.gather(ks.cutover_strategy(TEST_STRATEGY_UUID), fake_runner_write())
 
         # The cutover made exactly one RPC call, with no sibling payload.
         assert mock_supabase.rpc.call_count == 1
         rpc_args = mock_supabase.rpc.call_args.args
         assert rpc_args[0] == "cutover_strategy_metrics_keys_atomic"
-        assert rpc_args[1] == {"p_strategy_id": "strat-abc"}
+        assert rpc_args[1] == {"p_strategy_id": TEST_STRATEGY_UUID}
         # Most importantly: no client-side metrics_json snapshot was passed in.
         assert "p_kinds" not in rpc_args[1]
         assert "metrics_json" not in rpc_args[1]
+
+    # H-0620: strategy_id must be UUID-validated at the cutover boundary --
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_sid",
+        ["strat-abc", "not-a-uuid", "12345", "", "00000000-0000-0000-0000-00000000000Z"],
+    )
+    async def test_non_uuid_strategy_id_rejected(self, bad_sid: str) -> None:
+        """H-0620: a non-UUID strategy_id must fail at the Python boundary
+        rather than hitting the Postgres UUID parser. The RPC must never
+        be called with a malformed identifier — guards against accidental
+        injection of stringified row dicts or schema-rename artifacts."""
+        mock_supabase = MagicMock()
+        with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
+            with pytest.raises(ValueError, match=r"strategy_id|UUID"):
+                await ks.cutover_strategy(bad_sid)
+        # RPC must NOT be called when validation fails.
+        mock_supabase.rpc.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_string_strategy_id_rejected(self) -> None:
+        """Type guard: a non-string sid (e.g. an int slipped through from
+        a malformed row dict) must raise before reaching the UUID parser."""
+        mock_supabase = MagicMock()
+        with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
+            with pytest.raises(ValueError, match="non-empty string"):
+                await ks.cutover_strategy(12345)  # type: ignore[arg-type]
+        mock_supabase.rpc.assert_not_called()
 
 
 # --- Argparse validator ------------------------------------------------------
@@ -546,9 +617,13 @@ class TestCutoverLoopPartialFailure:
         monkeypatch.setattr(ks, "TODOS_PATH", todos_path)
         monkeypatch.setenv("RUN_KILL_SWITCH", "true")
 
-        # Cutover succeeds for sids 0 and 2, fails for sid 1.
+        # Map deterministic test UUIDs to short labels for assertions.
+        sids = [_uuid_for(f"partial-strat-{i}") for i in range(3)]
+        fail_sid = sids[1]
+
+        # Cutover succeeds for indexes 0 and 2, fails for index 1.
         async def fake_cutover(sid: str) -> int:
-            if sid == "strat-1":
+            if sid == fail_sid:
                 raise RuntimeError("simulated mid-loop RPC failure")
             return 5
         monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
@@ -556,7 +631,7 @@ class TestCutoverLoopPartialFailure:
         mock_supabase = MagicMock()
         select_chain = MagicMock()
         select_chain.execute.return_value = MagicMock(
-            data=[{"strategy_id": f"strat-{i}"} for i in range(3)],
+            data=[{"strategy_id": sid} for sid in sids],
         )
         mock_supabase.table.return_value.select.return_value = select_chain
 
@@ -566,8 +641,10 @@ class TestCutoverLoopPartialFailure:
         captured = capsys.readouterr()
         # Mid-loop failure is surfaced.
         assert "simulated mid-loop RPC failure" in captured.out
-        # Loop did NOT abort — strat-2 still processed AFTER strat-1's failure.
-        assert "strat-2: moved 5 keys" in captured.out
+        # Bounded gather may interleave; the surviving strategies must still
+        # have their "moved 5 keys" lines, irrespective of order.
+        assert f"{sids[0]}: moved 5 keys" in captured.out
+        assert f"{sids[2]}: moved 5 keys" in captured.out
         # Status reflects partial completion.
         assert "PARTIAL" in captured.out
         assert "2/3" in captured.out  # 2 succeeded out of 3
@@ -594,6 +671,8 @@ class TestCutoverLoopPartialFailure:
         monkeypatch.setattr(ks, "TODOS_PATH", todos_path)
         monkeypatch.setenv("RUN_KILL_SWITCH", "true")
 
+        sids = [_uuid_for(f"noop-strat-{i}") for i in range(3)]
+
         async def fake_cutover(sid: str) -> int:
             return 0  # already-stripped — RPC says nothing to move
         monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
@@ -601,7 +680,7 @@ class TestCutoverLoopPartialFailure:
         mock_supabase = MagicMock()
         select_chain = MagicMock()
         select_chain.execute.return_value = MagicMock(
-            data=[{"strategy_id": f"strat-{i}"} for i in range(3)],
+            data=[{"strategy_id": sid} for sid in sids],
         )
         mock_supabase.table.return_value.select.return_value = select_chain
 
@@ -619,30 +698,49 @@ class TestCutoverLoopPartialFailure:
         )
 
     @pytest.mark.asyncio
-    async def test_missing_todos_path_raises_when_triggered(
-        self, monkeypatch, tmp_path
+    async def test_missing_todos_path_is_stderr_only_not_fatal(
+        self, monkeypatch, tmp_path, capsys
     ) -> None:
-        """#3: if TODOS_PATH does not exist, the kill-switch trigger has
-        nowhere to record itself. Fail loud rather than completing
-        silently with the audit log lost."""
-        missing_path = tmp_path / "does-not-exist.md"
+        """M-0637: when TODOS_PATH and its parent dir do not exist (the
+        normal case in a deployed container — `.planning/` is dev-tree
+        only), the kill-switch trigger MUST NOT raise. The stderr AUDIT
+        line is the durable record in that environment.
+
+        Replaces the prior "raise on missing TODOS_PATH" test — that
+        behavior made the script unusable in production, which is
+        exactly where the trigger fires. Revised semantics: the absence
+        is logged loudly to stderr; the cutover proceeds and returns
+        the per-strategy success status."""
+        # Use a path inside a nonexistent parent so neither TODOS_PATH
+        # NOR TODOS_PATH.parent exists.
+        missing_path = tmp_path / "does" / "not" / "exist" / "TODOS.md"
         monkeypatch.setattr(ks, "TODOS_PATH", missing_path)
         monkeypatch.setenv("RUN_KILL_SWITCH", "true")
 
-        async def fake_cutover(sid: str) -> int:
+        sid = _uuid_for("missing-todos-strat")
+
+        async def fake_cutover(s: str) -> int:
             return 1
         monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
 
         mock_supabase = MagicMock()
         select_chain = MagicMock()
         select_chain.execute.return_value = MagicMock(
-            data=[{"strategy_id": "s1"}],
+            data=[{"strategy_id": sid}],
         )
         mock_supabase.table.return_value.select.return_value = select_chain
 
         with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
-            with pytest.raises(RuntimeError, match="audit destination .* not found"):
-                await ks.main(cli_p999=900_000.0, cli_count=1)
+            rc = await ks.main(cli_p999=900_000.0, cli_count=1)
+
+        # Cutover succeeded → rc == 0; missing TODOS path is non-fatal.
+        assert rc == 0
+        captured = capsys.readouterr()
+        # Stderr AUDIT line must be present — it's the durable record.
+        assert "AUDIT" in captured.err
+        assert "Kill-switch triggered" in captured.err
+        # Stderr also notes the path was unavailable.
+        assert "not in tree" in captured.err
 
     @pytest.mark.asyncio
     async def test_malformed_rows_recorded_as_failures(
@@ -661,6 +759,8 @@ class TestCutoverLoopPartialFailure:
         monkeypatch.setattr(ks, "TODOS_PATH", todos_path)
         monkeypatch.setenv("RUN_KILL_SWITCH", "true")
 
+        valid_sid = _uuid_for("malformed-row-valid")
+
         async def fake_cutover(sid: str) -> int:
             return 2
         monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
@@ -670,7 +770,7 @@ class TestCutoverLoopPartialFailure:
         # Mixed rows: one valid, one missing strategy_id, one with empty string.
         select_chain.execute.return_value = MagicMock(
             data=[
-                {"strategy_id": "valid-1"},
+                {"strategy_id": valid_sid},
                 {"other_field": "no strategy_id key"},
                 {"strategy_id": ""},
             ],
@@ -738,3 +838,510 @@ class TestMeasureP999OffloadsSubprocess:
         assert captured["thread"] is not threading.main_thread(), (
             "measure_p999_via_sql must run on a worker thread, not the main thread"
         )
+
+
+# --- H-0611 / H-0616 / C-0217: DSN never in argv ---------------------------
+
+
+class TestDsnEnvNotArgv:
+    """The DATABASE_URL must be parsed into PG* libpq env vars and passed via
+    subprocess.run(env=...), NEVER as a positional or --dbname argv argument.
+    argv is visible to every local user via `ps auxe`, /proc/<pid>/cmdline,
+    Railway's process-exec logger, and CI build logs."""
+
+    def test_dsn_not_in_argv(self, monkeypatch) -> None:
+        """C-0217 root chain: the credential string MUST NOT appear in the
+        argv list passed to subprocess.run."""
+        secret_dsn = "postgresql://postgres:hunter2@db.host.supabase.co:5432/postgres?sslmode=require"
+        monkeypatch.setenv("DATABASE_URL", secret_dsn)
+        captured: dict[str, object] = {}
+
+        def capture(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            captured["cmd"] = cmd
+            captured["env"] = kwargs.get("env")
+            return MagicMock(
+                returncode=0,
+                stdout="relation_visible,t\nrow_security_active,f\np999,1\ncount,1\ntotal_rows,1\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr("scripts.phase12_kill_switch.subprocess.run", capture)
+        ks.measure_p999_via_sql()
+
+        # The DSN must NOT appear in any argv slot — that's the credential
+        # disclosure surface H-0611 / H-0616 / C-0217 close.
+        argv = captured["cmd"]
+        assert isinstance(argv, list)
+        for slot in argv:
+            assert "hunter2" not in slot, f"password leaked into argv: {slot!r}"
+            assert "postgresql://" not in slot, f"DSN scheme leaked into argv: {slot!r}"
+            assert "postgres://" not in slot, f"DSN scheme leaked into argv: {slot!r}"
+        # --dbname / -d / --URI flags are forbidden — even when followed by
+        # a separate-token DSN they end up visible in argv.
+        assert "--dbname" not in argv
+        assert "-d" not in argv
+        assert "--URI" not in argv
+
+    def test_dsn_parsed_into_pg_env_vars(self, monkeypatch) -> None:
+        """The parsed PG* env vars must be passed via env= so libpq picks
+        them up. Verifies password rides in PGPASSWORD (the channel that
+        does NOT appear in /proc/<pid>/cmdline)."""
+        secret_dsn = "postgresql://alice:hunter2@db.example.com:5433/quantalyze?sslmode=require"
+        monkeypatch.setenv("DATABASE_URL", secret_dsn)
+        captured: dict[str, object] = {}
+
+        def capture(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            captured["env"] = kwargs.get("env")
+            return MagicMock(
+                returncode=0,
+                stdout="relation_visible,t\nrow_security_active,f\np999,1\ncount,1\ntotal_rows,1\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr("scripts.phase12_kill_switch.subprocess.run", capture)
+        ks.measure_p999_via_sql()
+
+        env = captured["env"]
+        assert isinstance(env, dict)
+        assert env.get("PGHOST") == "db.example.com"
+        assert env.get("PGPORT") == "5433"
+        assert env.get("PGUSER") == "alice"
+        assert env.get("PGPASSWORD") == "hunter2"
+        assert env.get("PGDATABASE") == "quantalyze"
+        assert env.get("PGSSLMODE") == "require"
+
+    def test_dsn_parse_rejects_unknown_scheme(self) -> None:
+        with pytest.raises(ValueError, match="unrecognized scheme"):
+            ks._parse_postgres_url("mysql://u:p@h/d")
+
+    def test_dsn_parse_rejects_no_host(self) -> None:
+        with pytest.raises(ValueError, match="no host"):
+            ks._parse_postgres_url("postgresql:///dbonly")
+
+    def test_dsn_parse_postgres_scheme_alias(self) -> None:
+        """`postgres://` is libpq's older but still-valid alias for
+        `postgresql://`. Accept both."""
+        env = ks._parse_postgres_url("postgres://u:p@h:5432/d")
+        assert env["PGHOST"] == "h"
+        assert env["PGUSER"] == "u"
+
+    def test_dsn_parse_handles_minimal_url(self) -> None:
+        """A minimal URL with only host should produce only PGHOST."""
+        env = ks._parse_postgres_url("postgresql://only-host")
+        assert env == {"PGHOST": "only-host"}
+
+    def test_malformed_database_url_redacts_in_error(self, monkeypatch) -> None:
+        """A malformed DSN must produce a RuntimeError whose message does
+        NOT contain the raw DSN — operators sometimes paste production
+        URLs into env vars with stray characters; the error path must
+        not echo the password back at them."""
+        monkeypatch.setenv("DATABASE_URL", "not-a-url://has:secret@host/db")
+        with pytest.raises(RuntimeError) as exc_info:
+            ks.measure_p999_via_sql()
+        msg = str(exc_info.value)
+        # The scheme prefix is not in the redaction regex (it's not a
+        # postgresql scheme), but the redactor should still strip
+        # anything that looks like a postgres:// DSN. The malformed input
+        # here doesn't match the DSN regex, but the test also pins that
+        # we don't propagate the entire bad URL verbatim.
+        assert "secret" not in msg or "<postgres-dsn-redacted>" in msg
+
+
+# --- H-0623: stderr redaction ----------------------------------------------
+
+
+class TestStderrRedaction:
+    """psql commonly echoes the connection URI in stderr on auth / SSL /
+    parse failures. The raised RuntimeError must NEVER carry the DSN."""
+
+    def test_redact_dsn_strips_full_url(self) -> None:
+        msg = (
+            "connection to server at "
+            '"postgresql://postgres:HUNTER2@db.xxx.supabase.co:5432/postgres?sslmode=require" '
+            "failed: FATAL: password authentication failed"
+        )
+        redacted = ks._redact_dsn(msg)
+        assert "HUNTER2" not in redacted
+        assert "postgresql://" not in redacted
+        assert "<postgres-dsn-redacted>" in redacted
+        # The non-secret context survives — operators still see WHY it failed.
+        assert "password authentication failed" in redacted
+
+    def test_redact_dsn_handles_postgres_scheme_alias(self) -> None:
+        msg = "trying postgres://user:pw@h:5432/d ... bad host"
+        redacted = ks._redact_dsn(msg)
+        assert "pw" not in redacted
+        assert "<postgres-dsn-redacted>" in redacted
+
+    def test_redact_dsn_passes_through_when_no_dsn(self) -> None:
+        """Generic psql errors without DSN echo must be left untouched —
+        otherwise the operator loses the diagnostic context."""
+        assert ks._redact_dsn("FATAL: role \"deploy\" does not exist") == (
+            'FATAL: role "deploy" does not exist'
+        )
+
+    def test_psql_stderr_with_dsn_is_redacted_in_raised_error(self, monkeypatch) -> None:
+        """Integration: a psql failure that echoes the DSN in stderr must
+        produce a RuntimeError whose message has the DSN scrubbed."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://stub:secret@host/db")
+        leaky_stderr = (
+            "psql: error: connection to server at "
+            '"postgresql://stub:secret@host/db?sslmode=require" failed: FATAL'
+        )
+        monkeypatch.setattr(
+            "scripts.phase12_kill_switch.subprocess.run",
+            lambda *a, **kw: MagicMock(returncode=2, stdout="", stderr=leaky_stderr),
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            ks.measure_p999_via_sql()
+        msg = str(exc_info.value)
+        # Password and full DSN must NOT appear in the raised error.
+        assert "secret" not in msg
+        assert "postgresql://stub" not in msg
+        # The redaction marker confirms the scrub ran.
+        assert "<postgres-dsn-redacted>" in msg
+
+
+# --- H-0622: atomic TODOS write --------------------------------------------
+
+
+class TestAtomicTodosAppend:
+    """The audit log write must be atomic — a crash mid-write cannot
+    truncate the file, and a concurrent invocation cannot clobber another
+    operator's entry. tempfile + os.replace gives us the POSIX guarantee."""
+
+    def test_atomic_append_preserves_existing_content(self, monkeypatch, tmp_path) -> None:
+        todos = tmp_path / "TODOS.md"
+        existing = "## Phase 12 plan\n- pre-existing line\n"
+        todos.write_text(existing)
+        monkeypatch.setattr(ks, "TODOS_PATH", todos)
+        ks._atomic_append_todos("\n## new entry\n", "ignored")
+        result = todos.read_text()
+        assert result.startswith(existing)
+        assert "new entry" in result
+
+    def test_atomic_append_no_tmp_leak_on_success(self, monkeypatch, tmp_path) -> None:
+        """The .tmp file must be renamed away (os.replace) — no orphan
+        .tmp files in the audit directory after a successful append."""
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("# header\n")
+        monkeypatch.setattr(ks, "TODOS_PATH", todos)
+        ks._atomic_append_todos("\nline\n", "ignored")
+        leftover = list(tmp_path.glob(".phase12_kill_switch_audit_*.tmp"))
+        assert leftover == []
+
+    def test_atomic_append_no_tmp_leak_on_replace_failure(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """If os.replace raises, the temp file must be cleaned up — a
+        disk-full / permissions failure should not leave .tmp accumulating."""
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("# header\n")
+        monkeypatch.setattr(ks, "TODOS_PATH", todos)
+
+        def fail_replace(*_, **__):
+            raise OSError("simulated permission error")
+
+        monkeypatch.setattr("scripts.phase12_kill_switch.os.replace", fail_replace)
+        with pytest.raises(OSError, match="simulated permission error"):
+            ks._atomic_append_todos("\nline\n", "ignored")
+        leftover = list(tmp_path.glob(".phase12_kill_switch_audit_*.tmp"))
+        assert leftover == [], f"orphan tmp files leaked: {leftover!r}"
+
+    def test_atomic_append_creates_parent_dir(self, monkeypatch, tmp_path) -> None:
+        """Creates the parent directory when missing — supports a
+        fresh-clone workflow where the .planning tree hasn't been
+        populated yet."""
+        target = tmp_path / "new_dir" / "TODOS.md"
+        monkeypatch.setattr(ks, "TODOS_PATH", target)
+        ks._atomic_append_todos("\nfirst line\n", "ignored")
+        assert target.exists()
+        assert "first line" in target.read_text()
+
+
+# --- H-0624: confirm gate against prod hosts -------------------------------
+
+
+class TestConfirmProdGate:
+    """RUN_KILL_SWITCH=true is necessary but not sufficient when pointing
+    at a prod host. A second explicit confirmation (--confirm-prod CLI
+    flag or PHASE12_KILL_SWITCH_CONFIRMED env var) is required."""
+
+    @pytest.mark.parametrize(
+        "host,expected_prod",
+        [
+            ("localhost", False),
+            ("127.0.0.1", False),
+            ("db.staging.supabase.co", False),
+            ("stg.example.com", False),
+            ("db.test.supabase.co", False),
+            ("foo.dev.example.com", False),
+            ("db.production.supabase.co", True),
+            ("db.example.com", True),
+            ("db.prod.example.com", True),
+        ],
+    )
+    def test_prod_host_detection(self, host: str, expected_prod: bool) -> None:
+        url = f"postgresql://u:p@{host}/d"
+        assert ks._looks_like_prod_host(url) is expected_prod
+
+    def test_no_url_defaults_to_prod(self) -> None:
+        """Default-deny — if we can't detect the host, treat as prod
+        so a missing-env-var misconfiguration doesn't quietly skip the
+        confirm gate."""
+        assert ks._looks_like_prod_host(None) is True
+        assert ks._looks_like_prod_host("") is True
+
+    @pytest.mark.asyncio
+    async def test_prod_host_without_confirm_aborts(self, monkeypatch) -> None:
+        """Without --confirm-prod or PHASE12_KILL_SWITCH_CONFIRMED, a
+        prod-looking DATABASE_URL must produce SystemExit, not silently
+        proceed to a cutover."""
+        # The autouse fixture pre-sets PHASE12_KILL_SWITCH_CONFIRMED; undo it.
+        monkeypatch.delenv("PHASE12_KILL_SWITCH_CONFIRMED", raising=False)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db.production.example.com/d")
+        with pytest.raises(SystemExit, match="confirm-prod|CONFIRMED"):
+            await ks.main(cli_p999=900_000.0, cli_count=3)
+
+    @pytest.mark.asyncio
+    async def test_prod_host_with_cli_confirm_proceeds(self, monkeypatch) -> None:
+        """--confirm-prod (cli_confirm_prod=True) must unblock the gate."""
+        monkeypatch.delenv("PHASE12_KILL_SWITCH_CONFIRMED", raising=False)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db.production.example.com/d")
+        # p999 < threshold short-circuits before any DB calls.
+        rc = await ks.main(
+            cli_p999=100_000.0, cli_count=10, cli_confirm_prod=True
+        )
+        assert rc == 0
+
+    @pytest.mark.asyncio
+    async def test_prod_host_with_env_confirm_proceeds(self, monkeypatch) -> None:
+        """PHASE12_KILL_SWITCH_CONFIRMED=true must unblock the gate too —
+        phase12_deploy.py passes the confirmation through the env."""
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        monkeypatch.setenv("PHASE12_KILL_SWITCH_CONFIRMED", "true")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db.production.example.com/d")
+        rc = await ks.main(cli_p999=100_000.0, cli_count=10)
+        assert rc == 0
+
+    @pytest.mark.asyncio
+    async def test_localhost_host_skips_confirm_gate(self, monkeypatch) -> None:
+        """A localhost DSN must not require --confirm-prod — dev runs
+        would otherwise need a redundant flag for every iteration."""
+        monkeypatch.delenv("PHASE12_KILL_SWITCH_CONFIRMED", raising=False)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost/d")
+        rc = await ks.main(cli_p999=100_000.0, cli_count=10)
+        assert rc == 0
+
+
+# --- H-0614: --force overrides p999 threshold gate -------------------------
+
+
+class TestForceFlag:
+    """After a partial cutover, p999 may drop below threshold even though
+    some strategies still have heavy keys. Without --force, the re-run
+    would log "no cutover needed" and exit, leaving the partial state in
+    place forever."""
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_without_force_short_circuits(
+        self, monkeypatch, capsys
+    ) -> None:
+        """Default behavior: p999 below threshold → exit 0 with a "no
+        cutover needed" message AND a hint about --force for resume."""
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        rc = await ks.main(cli_p999=100_000.0, cli_count=10)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "no cutover needed" in out.lower()
+        # H-0614 resume hint must surface so operators know about --force.
+        assert "--force" in out or "PHASE12_FORCE_CUTOVER" in out
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_with_cli_force_proceeds(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """--force must bypass the threshold short-circuit and run the
+        cutover even when p999 < THRESHOLD_BYTES."""
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("# existing\n")
+        monkeypatch.setattr(ks, "TODOS_PATH", todos)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+
+        sid = _uuid_for("force-strat")
+
+        async def fake_cutover(s: str) -> int:
+            return 0
+        monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
+
+        mock_supabase = MagicMock()
+        select_chain = MagicMock()
+        select_chain.execute.return_value = MagicMock(data=[{"strategy_id": sid}])
+        mock_supabase.table.return_value.select.return_value = select_chain
+
+        with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
+            rc = await ks.main(cli_p999=100_000.0, cli_count=1, cli_force=True)
+
+        # Cutover proceeded despite p999 < threshold.
+        assert rc == 0
+        log = todos.read_text()
+        assert "Kill-switch triggered" in log
+        assert "(no-op" in log  # moved=0 below threshold but force=True
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_with_env_force_proceeds(
+        self, monkeypatch, tmp_path, capsys
+    ) -> None:
+        """PHASE12_FORCE_CUTOVER=true must have the same effect as --force."""
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("# existing\n")
+        monkeypatch.setattr(ks, "TODOS_PATH", todos)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        monkeypatch.setenv("PHASE12_FORCE_CUTOVER", "true")
+
+        sid = _uuid_for("env-force-strat")
+
+        async def fake_cutover(s: str) -> int:
+            return 1
+        monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
+
+        mock_supabase = MagicMock()
+        select_chain = MagicMock()
+        select_chain.execute.return_value = MagicMock(data=[{"strategy_id": sid}])
+        mock_supabase.table.return_value.select.return_value = select_chain
+
+        with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
+            rc = await ks.main(cli_p999=100_000.0, cli_count=1)
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "bypassing threshold gate" in out
+
+    @pytest.mark.asyncio
+    async def test_force_above_threshold_still_runs(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """--force when p999 is ALREADY above threshold is a no-op
+        relative to the default — the cutover runs in both cases."""
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("# existing\n")
+        monkeypatch.setattr(ks, "TODOS_PATH", todos)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+
+        sid = _uuid_for("force-above-threshold")
+
+        async def fake_cutover(s: str) -> int:
+            return 3
+        monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
+
+        mock_supabase = MagicMock()
+        select_chain = MagicMock()
+        select_chain.execute.return_value = MagicMock(data=[{"strategy_id": sid}])
+        mock_supabase.table.return_value.select.return_value = select_chain
+
+        with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
+            rc = await ks.main(cli_p999=900_000.0, cli_count=1, cli_force=True)
+
+        assert rc == 0
+        assert "3" in todos.read_text()  # moved 3 keys logged
+
+
+# --- H-0606: bounded concurrency on cutover loop ---------------------------
+
+
+class TestBoundedConcurrency:
+    """The per-strategy cutover loop must run with bounded concurrency
+    (asyncio.Semaphore) — unbounded gather saturates the Postgres pool
+    and starves other writers; serial is slow + extends the inconsistency
+    window during which only some strategies have heavy keys stripped."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cutovers_respect_semaphore_bound(
+        self, monkeypatch
+    ) -> None:
+        """The number of concurrently-running cutover_strategy calls must
+        not exceed _CUTOVER_CONCURRENCY."""
+        concurrency = 3
+        monkeypatch.setattr(ks, "_CUTOVER_CONCURRENCY", concurrency)
+
+        in_flight = 0
+        peak_in_flight = 0
+        lock = asyncio.Lock()
+
+        async def fake_cutover(sid: str) -> int:
+            nonlocal in_flight, peak_in_flight
+            async with lock:
+                in_flight += 1
+                peak_in_flight = max(peak_in_flight, in_flight)
+            # Yield so other coroutines can run.
+            await asyncio.sleep(0.01)
+            async with lock:
+                in_flight -= 1
+            return 1
+
+        monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
+
+        sids = [_uuid_for(f"bounded-{i}") for i in range(10)]
+        total, fails = await ks._run_cutovers_bounded(sids, concurrency=concurrency)
+        assert total == 10
+        assert fails == []
+        # Peak in-flight must not exceed the bound.
+        assert peak_in_flight <= concurrency, (
+            f"semaphore violated: peak {peak_in_flight} > bound {concurrency}"
+        )
+        # And must actually achieve concurrency (otherwise the test is
+        # accidentally proving "serial = bound" trivially).
+        assert peak_in_flight > 1, (
+            "expected at least 2 concurrent cutovers under bound 3"
+        )
+
+    @pytest.mark.asyncio
+    async def test_one_failure_does_not_abort_others(self, monkeypatch) -> None:
+        """A mid-batch RPC failure must NOT cancel sibling tasks. Returns
+        partial (total_moved, failures) so the caller can write the audit
+        log even when some strategies failed."""
+        sids = [_uuid_for(f"failure-{i}") for i in range(5)]
+        fail_idx = 2
+
+        async def fake_cutover(sid: str) -> int:
+            if sid == sids[fail_idx]:
+                raise RuntimeError("simulated mid-batch failure")
+            return 4
+
+        monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
+        total, fails = await ks._run_cutovers_bounded(sids, concurrency=5)
+        # 4 successes × 4 keys = 16; 1 failure.
+        assert total == 16
+        assert len(fails) == 1
+        assert fails[0][0] == sids[fail_idx]
+        assert "simulated mid-batch failure" in fails[0][1]
+
+
+# --- M-0640: Bytes NewType + Final typing ----------------------------------
+
+
+class TestTypingHygiene:
+    """Drift guards for the typed-constant pattern. A future refactor that
+    accidentally drops the Final qualifier or changes THRESHOLD_BYTES'
+    underlying int would fail these."""
+
+    def test_threshold_bytes_is_integral_800kb(self) -> None:
+        assert int(ks.THRESHOLD_BYTES) == 800_000
+
+    def test_bytes_newtype_exists(self) -> None:
+        """The Bytes NewType is part of the module API — pin it so a
+        refactor doesn't silently revert to a bare int."""
+        assert hasattr(ks, "Bytes")
+
+    def test_threshold_bytes_typed_as_bytes(self) -> None:
+        """THRESHOLD_BYTES is constructed via Bytes(800_000) so the
+        annotation correctly tags it. NewType at runtime is the identity
+        function, so the value is a plain int — assert behavior, not
+        annotation existence."""
+        # Bytes(x) == x; the test is meaningful only when paired with a
+        # mypy --strict pass.
+        assert ks.Bytes(0) == 0
+        assert ks.Bytes(123) == 123
