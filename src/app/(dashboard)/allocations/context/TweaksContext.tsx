@@ -52,14 +52,90 @@ export const TWEAK_DEFAULTS: TweakState = {
 
 const STORAGE_KEY = "allocations.tweaks";
 
+// Field-by-field guards keep persisted blobs from smuggling values outside
+// the declared unions through the JSON.parse cast. Mirrors the schema-less
+// parse anti-pattern flagged on useDashboardConfig.loadV2Config — the load
+// path is the single seam where runtime data crosses into typed state.
+const DENSITY_VALUES: ReadonlySet<TweakState["density"]> = new Set([
+  "tight",
+  "comfortable",
+  "loose",
+]);
+const ACCENT_VALUES: ReadonlySet<TweakState["accentIntensity"]> = new Set([
+  "muted",
+  "full",
+]);
+const DISPLAY_FONT_VALUES: ReadonlySet<TweakState["displayFont"]> = new Set([
+  "serif",
+  "sans",
+]);
+const BRIDGE_VARIANT_VALUES: ReadonlySet<TweakState["bridgeVariant"]> = new Set([
+  "subtle",
+  "card",
+  "full",
+]);
+const CHART_STYLE_VALUES: ReadonlySet<TweakState["chartStyle"]> = new Set([
+  "line",
+  "area",
+]);
+
+function pickUnion<T extends string>(
+  candidate: unknown,
+  allowed: ReadonlySet<T>,
+  fallback: T,
+): T {
+  return typeof candidate === "string" && (allowed as ReadonlySet<string>).has(candidate)
+    ? (candidate as T)
+    : fallback;
+}
+
+function parseTweakState(raw: unknown): TweakState {
+  if (!raw || typeof raw !== "object") return TWEAK_DEFAULTS;
+  const r = raw as Record<string, unknown>;
+  return {
+    density: pickUnion(r.density, DENSITY_VALUES, TWEAK_DEFAULTS.density),
+    accentIntensity: pickUnion(
+      r.accentIntensity,
+      ACCENT_VALUES,
+      TWEAK_DEFAULTS.accentIntensity,
+    ),
+    displayFont: pickUnion(
+      r.displayFont,
+      DISPLAY_FONT_VALUES,
+      TWEAK_DEFAULTS.displayFont,
+    ),
+    bridgeVariant: pickUnion(
+      r.bridgeVariant,
+      BRIDGE_VARIANT_VALUES,
+      TWEAK_DEFAULTS.bridgeVariant,
+    ),
+    chartStyle: pickUnion(
+      r.chartStyle,
+      CHART_STYLE_VALUES,
+      TWEAK_DEFAULTS.chartStyle,
+    ),
+    showBench:
+      typeof r.showBench === "boolean" ? r.showBench : TWEAK_DEFAULTS.showBench,
+    showOutcomes:
+      typeof r.showOutcomes === "boolean"
+        ? r.showOutcomes
+        : TWEAK_DEFAULTS.showOutcomes,
+  };
+}
+
 function loadTweaks(): TweakState {
   if (typeof window === "undefined") return TWEAK_DEFAULTS;
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return TWEAK_DEFAULTS;
-    const parsed = JSON.parse(raw) as Partial<TweakState>;
-    return { ...TWEAK_DEFAULTS, ...parsed };
-  } catch {
+    return parseTweakState(JSON.parse(raw));
+  } catch (err) {
+    // Surfacing the failure (corrupt JSON, Safari SecurityError, quota exceeded
+    // on a stale browser, etc.) gives ops a console signal — the prior bare
+    // catch coerced every failure mode into 'defaults' indistinguishably.
+    if (typeof console !== "undefined") {
+      console.warn("[TweaksContext] loadTweaks failed; falling back to defaults", err);
+    }
     return TWEAK_DEFAULTS;
   }
 }
@@ -93,8 +169,16 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
     if (!hydrated) return;
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch {
-      // Safari private mode / quota — non-fatal.
+    } catch (err) {
+      // Safari private mode / quota errors are non-fatal for the in-memory
+      // state, but they DO mean the user's preferences won't survive reload —
+      // surface that to the console so a support ticket can be diagnosed.
+      if (typeof console !== "undefined") {
+        console.warn(
+          "[TweaksContext] localStorage write failed; preferences will not persist",
+          err,
+        );
+      }
     }
   }, [state, hydrated]);
 
