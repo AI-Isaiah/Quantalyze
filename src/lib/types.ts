@@ -472,12 +472,48 @@ export type StrategyAnalyticsSeriesKind =
   | "rolling_alpha" | "rolling_beta"
   | "exposure_series" | "turnover_series" | "log_returns_series";
 
-export interface StrategyAnalyticsSeriesRow {
-  strategy_id: string;
-  kind: StrategyAnalyticsSeriesKind;
-  payload: Record<string, unknown>;
-  computed_at: string;
-}
+/**
+ * audit-2026-05-07 M-0581: discriminated payload shape per kind.
+ *
+ * Each `kind` has a known payload shape:
+ *   - `daily_returns_grid` → `Record<string, Record<string, number>>` (year → month → return)
+ *   - rolling_* (sortino/volatility 3m/6m/12m, alpha, beta) → `TimeSeriesPoint[]`
+ *   - `exposure_series` / `turnover_series` / `log_returns_series` → `TimeSeriesPoint[]`
+ *
+ * Discriminating on `kind` makes the payload narrowing automatic — a
+ * consumer reading `row.payload` for a `rolling_sortino_3m` row gets
+ * `TimeSeriesPoint[]` without an `as` cast. Previously the payload was
+ * `Record<string, unknown>` and every reader hand-rolled a predicate.
+ */
+type RollingKind =
+  | "rolling_sortino_3m"
+  | "rolling_sortino_6m"
+  | "rolling_sortino_12m"
+  | "rolling_volatility_3m"
+  | "rolling_volatility_6m"
+  | "rolling_volatility_12m"
+  | "rolling_alpha"
+  | "rolling_beta";
+
+type SeriesKindWithPointArrayPayload =
+  | RollingKind
+  | "exposure_series"
+  | "turnover_series"
+  | "log_returns_series";
+
+export type StrategyAnalyticsSeriesRow =
+  | {
+      strategy_id: string;
+      kind: SeriesKindWithPointArrayPayload;
+      payload: TimeSeriesPoint[];
+      computed_at: string;
+    }
+  | {
+      strategy_id: string;
+      kind: "daily_returns_grid";
+      payload: Record<string, Record<string, number>>;
+      computed_at: string;
+    };
 
 /**
  * Phase 12 / D-04: Lazy-fetch RPC return shape.
