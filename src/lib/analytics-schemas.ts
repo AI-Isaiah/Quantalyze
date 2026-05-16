@@ -116,11 +116,18 @@ export type EnqueueComputeJobResponse = z.infer<typeof EnqueueComputeJobResponse
  *
  * audit-2026-05-07 M-0782: strict-versioned schema for the RPC response
  * so a future migration that adds, removes, or reorders a column fails
- * loudly at parse time instead of silently changing the contract. The
- * Vitest contract test `compute-jobs-audit-2026-05-07-g10b.test.ts` (or
- * its peer in this audit cycle) is the regression seatbelt — parsing
- * any RPC response through this schema in a live-DB test catches drift
- * before merge.
+ * loudly at parse time instead of silently changing the contract.
+ *
+ * Current consumer status (api-contract specialist 2026-05-16):
+ * This schema is parse-only via the live-DB Vitest contract test in
+ * `src/__tests__/compute-jobs-audit-2026-05-07-residual.test.ts`. NO
+ * production code path calls `supabase.rpc('get_user_compute_jobs')`
+ * today — the admin UI under `src/app/(dashboard)/admin/compute-jobs/`
+ * reads via service-role `.from('compute_jobs')`. The "fail loud on
+ * drift" guarantee is therefore conditional on CI running the live-DB
+ * suite. Wiring this RPC into a real read path (e.g. a user-facing
+ * job-status surface) would convert the schema from regression-test-
+ * only to a real boundary parser.
  *
  * Two notes on field semantics:
  *
