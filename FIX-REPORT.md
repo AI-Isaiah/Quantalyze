@@ -104,3 +104,110 @@ Branch: `fix/audit-2026-05-07-job-worker-py`
 - `analytics-service/tests/test_job_worker.py` (modified, +3 test classes)
 - `analytics-service/tests/test_job_worker_sync_funding.py` (NEW)
 - `analytics-service/tests/test_job_worker_reconcile_audit.py` (NEW)
+
+## Apply pass — round 2 specialist + red-team
+
+**Status**: COMPLETE
+**Branch state**: 2 new commits on top of round-1 final.
+
+| Stage | Commit     | Title |
+| ----- | ---------- | ----- |
+| 1     | e79d76f3   | specialist apply (round 2) — 4 HIGH-conf findings |
+| 3     | 8d5cf8c0   | red-team apply — phase2 load-failed self-heal |
+
+### Stage 1 — specialist apply (round 2)
+
+Applied 4 HIGH-severity findings from `.review/specialist.*.jsonl`:
+
+1. **code-reviewer #1 (H conf=9)** — `run_reconcile_strategy_job`
+   had a local `from services.exchange import ColdStartSymbolDiscoveryError,
+   fetch_raw_trades` that shadowed the module-level `fetch_raw_trades`.
+   The 3 new reconcile-audit tests patched `services.job_worker.
+   fetch_raw_trades`, but the patch was ineffective and the real
+   `fetch_raw_trades` ran against a MagicMock exchange — tests passed
+   only because the assertion path didn't depend on what
+   `exchange_fills` contained for the clean-status case. **Fix**:
+   removed the redundant local `fetch_raw_trades` import (kept
+   ColdStartSymbolDiscoveryError as a rarely-used sentinel). The
+   patches now actually exercise the code.
+
+2. **code-reviewer #2 (H conf=9)** — `phase2_fill_ingestion_failed`
+   never self-healed on a successful run that returned ZERO new fills
+   (paused account / weekend / flat). `phase2_complete=True` only got
+   set inside `if raw_fills:`, so the previous gate
+   `needs_flag_write = phase2_failed or phase2_complete` perma-skipped
+   the clear branch. The admin "Position Metrics Failed" health card
+   kept showing the strategy as needing attention indefinitely after
+   any transient blip. **Fix**: introduced `phase2_success =
+   _RAW_TRADE_INGESTION_ENABLED and not phase2_failed` and gated on
+   `phase2_failed or phase2_success`. Adds one extra SELECT per
+   successful run when the feature flag is on (deferred performance
+   concern, see red-team JSONL).
+
+3. **silent-failure-hunter #1 (H conf=9)** — `_emit_audit`'s
+   docstring promised silent audit drops, but the
+   audit-2026-05-07 P907 commit changed `services.audit.log_audit_event`
+   to RE-RAISE on permission_denied (SQLSTATE 42501) and on
+   unrecognized exception classes. At the success callsite
+   (~line 1416) an audit re-raise marked a complete allocator
+   holdings sync as FAILED; at the failure callsites (~lines 1340 /
+   ~1370) it swapped the original error envelope (rate_limited /
+   revoked credential) with the audit error in
+   compute_jobs.last_error, hiding the real root cause from on-call.
+   **Fix**: wrapped the inner `audit_module.log_audit_event` call in
+   `try/except Exception: logger.warning(...)` so the docstring
+   contract actually holds.
+
+4. **silent-failure-hunter #2 (H conf=9)** — `reconcile_strategy`'s
+   `log_audit_event` for the `reconcile.compare` event was unwrapped,
+   so the same audit-re-raise class would propagate past the alert
+   fan-out (the reconcile_reports row was already upserted; the
+   worker would classify the audit error as the job failure and
+   skip step-5 alert generation). **Fix**: wrapped the call in
+   try/except + WARNING to match the owner-lookup guard above it;
+   alert fan-out now always runs.
+
+### Stage 2 — red-team review
+
+Performed a fresh-context red-team pass over the Stage-1 diff +
+5 specialist JSONLs + post-apply state. Output:
+`.review/red-team.jsonl` (2 findings: 1 MED-conf=8 applied,
+1 LOW-conf=7 deferred).
+
+### Stage 3 — red-team apply
+
+Applied the MED-conf=8 red-team finding:
+
+- **red-team #1**: After Stage-1 expansion of `phase2_success`
+  semantics, the self-healing branch still silently failed when the
+  existing-flags SELECT errored. The fallback `existing_flags = {}`
+  made `flag_was_set` always False, so the recovery payload never
+  fired — the same silent-lag class of failure one level deeper.
+  **Fix**: track `flag_load_failed=True` in the except branch and
+  gate the recovery write on `flag_was_set or flag_load_failed`.
+  On the load-failed path emit an EXPLICIT
+  `phase2_fill_ingestion_failed=False` (rather than `pop`) because
+  the upsert merges keys — a pop on a row we never read leaves the
+  stale DB key in place.
+
+### Stage 4 — pytest
+
+**Targeted suite**:
+`tests/test_job_worker.py + tests/test_job_worker_sync_funding.py +
+tests/test_job_worker_reconcile_audit.py` → **57 pass, 1 pre-existing
+skip**.
+
+**Full analytics-service sweep**: **1370 pass, 2 fail, 52 skipped**.
+The 2 failures are pre-existing (verified by checking out HEAD~2's
+`job_worker.py` and re-running):
+`tests/test_repro_key_flow.py::test_happy_path_replays_balance_fetch[bybit/okx]`
+make a real-network call to bybit/okx and fail on
+`AuthenticationError: API key is invalid` — infrastructure/fixture
+issue, NOT a regression from this PR. (Earlier round-1 sweep already
+noted these as out-of-PR-scope.)
+
+### Files changed (round 2)
+
+- `analytics-service/services/job_worker.py` (modified)
+- `.review/specialist.*.jsonl` (5 — input artifacts, untracked)
+- `.review/red-team.jsonl` (NEW — untracked)
