@@ -239,12 +239,14 @@ def _resolve_perp_amt_base(
     inst_type: str | None = None,
     venue: str | None = None,
 ) -> tuple[float, str, float | None]:
-    """Recover base-unit trade size for a linear perp.
+    """Recover base-unit trade size for a perpetual or expiring future.
 
     Returns ``(amt_base, source, relative_err)``. ``source`` records
-    which branch produced the value (see ``_PerpAmtSource``). ``relative_err``
-    is the cost/price-vs-ctval_table disagreement when both are known,
-    else None.
+    which branch produced the value (see ``_PerpAmtSource``).
+    ``relative_err`` is the cost/price-vs-ctval_table disagreement when
+    both are known, else None. Inverse contracts short-circuit with
+    source=``INVERSE_UNSUPPORTED`` and ``amt_base=0`` so the caller can
+    audit-and-skip rather than corrupting state with a wrong amt.
 
     Prefers ``cost / price`` when cost is trustworthy (i.e. ccxt's
     safe_trade did apply contractSize). Falls back to the explicit
