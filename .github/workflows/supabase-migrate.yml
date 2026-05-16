@@ -138,6 +138,11 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
           SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        # --include-all is required to apply migrations that gap-fill earlier timestamp slots
+        # (e.g. when a history-only restoration like PR #176 lands before subsequent additions).
+        # Without it, db push refuses with "Found local migration ... that is below remote tip".
+        # Safety preserved by: workflow_dispatch-only + production environment gate + required
+        # reviewer + two-step plan-then-apply (operator eyeballs plan output before approving apply).
         run: |
           supabase link --project-ref "$SUPABASE_PROJECT_REF"
-          supabase db push
+          supabase db push --include-all
