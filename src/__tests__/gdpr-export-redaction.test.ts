@@ -420,3 +420,131 @@ describe("collectUserExportBundle — audit_log replaced by audit_log_for_user (
     expect(onlyRow.metadata.email).toBe(REDACTED_PLACEHOLDER);
   });
 });
+
+/**
+ * Audit 2026-05-07 (specialist apply, pr-test HIGH conf-9 + security
+ * MED conf-8): the api_keys ciphertext-stripping projection is unit-
+ * tested in isolation, but pre-apply there was no integration test
+ * that drove `collectUserExportBundle` against a mock returning
+ * ciphertext-bearing api_keys rows and asserted the bundle's
+ * api_keys table has every credential column stripped. A future
+ * refactor that switched api_keys back to `kind: "direct"` (or
+ * dropped the projection from the projected branch) would leave the
+ * unit test green while shipping ciphertext in the signed URL.
+ *
+ * Additionally, the security MED conf-8 finding extended the
+ * AUDIT_METADATA_REDACT_KEYS set with the admin-actor UUID keys.
+ * The integration test pins that the new keys are redacted in the
+ * bundle's audit_log_for_user projection.
+ */
+describe("collectUserExportBundle — api_keys ciphertext stripped end-to-end (specialist apply)", () => {
+  it("drops every API_KEYS_REDACTED_COLUMNS column from the bundle's api_keys table", async () => {
+    const apiKeyRows = [
+      {
+        id: "k1",
+        user_id: "subject",
+        exchange: "binance",
+        label: "main",
+        api_key_encrypted: "CT-KEY",
+        api_secret_encrypted: "CT-SEC",
+        passphrase_encrypted: "CT-PASS",
+        dek_encrypted: "CT-DEK",
+        nonce: "IV",
+        created_at: "2026-05-01T00:00:00Z",
+      },
+    ];
+    const limit = async () => ({ data: apiKeyRows, error: null });
+    const emptyLimit = async () => ({ data: [], error: null });
+    const mock = {
+      from: (table: string) => ({
+        select: () => ({
+          eq: () => ({
+            order: () => ({
+              limit: table === "api_keys" ? limit : emptyLimit,
+            }),
+            limit: table === "api_keys" ? limit : emptyLimit,
+          }),
+          in: () => ({
+            order: () => ({ limit: emptyLimit }),
+            limit: emptyLimit,
+          }),
+        }),
+      }),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "subject");
+    const tbl = bundle.tables.find((t) => t.table === "api_keys");
+    expect(tbl).toBeDefined();
+    expect(tbl!.row_count).toBe(1);
+    const row = tbl!.rows[0] as Record<string, unknown>;
+    // Every column in the contract MUST be absent (not present with
+    // a sentinel — the field name itself reveals a column exists).
+    for (const col of API_KEYS_REDACTED_COLUMNS) {
+      expect(col in row).toBe(false);
+    }
+    // Safe metadata MUST round-trip.
+    expect(row.exchange).toBe("binance");
+    expect(row.label).toBe("main");
+    expect(row.id).toBe("k1");
+  });
+});
+
+describe("redactAuditLogForUser — admin-actor UUID redaction (specialist apply, security MED conf-8)", () => {
+  const userId = "subject";
+  it("redacts granted_by/revoked_by/approved_by/rejected_by/edited_by/admin_user_id in metadata", () => {
+    const rows = [
+      {
+        id: "a1",
+        user_id: "admin-actor-A",
+        action: "role.grant",
+        entity_id: userId,
+        entity_type: "user",
+        metadata: {
+          role: "allocator",
+          granted_by: "admin-actor-A",
+        },
+      },
+      {
+        id: "a2",
+        user_id: "admin-actor-B",
+        action: "deletion.request.approve",
+        entity_id: userId,
+        entity_type: "user",
+        metadata: {
+          target_user_id: userId,
+          approved_by: "admin-actor-B",
+        },
+      },
+      {
+        id: "a3",
+        user_id: "admin-actor-C",
+        action: "match.preference.edit",
+        entity_id: userId,
+        entity_type: "user",
+        metadata: {
+          edited_by: "admin-actor-C",
+          admin_user_id: "admin-actor-C",
+        },
+      },
+    ];
+    const out = redactAuditLogForUser(rows, userId);
+    expect(out).toHaveLength(3);
+    // The cross-party UUID keys are redacted in every row.
+    for (const row of out) {
+      const md = row.metadata as Record<string, unknown>;
+      for (const k of [
+        "granted_by",
+        "approved_by",
+        "edited_by",
+        "admin_user_id",
+        "target_user_id",
+      ]) {
+        if (k in md) {
+          expect(md[k]).toBe(REDACTED_PLACEHOLDER);
+        }
+      }
+    }
+    // The safe own-state field (role) survives.
+    expect((out[0].metadata as Record<string, unknown>).role).toBe("allocator");
+  });
+});

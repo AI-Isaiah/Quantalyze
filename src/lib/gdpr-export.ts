@@ -202,6 +202,27 @@ const AUDIT_METADATA_REDACT_KEYS = new Set<string>([
   "target_user_id",
   "actor_email",
   "actor_display_name",
+  // Audit 2026-05-07 (specialist apply, security MED conf-8):
+  // admin/actor UUID keys emitted by every admin-side audit producer
+  // when the subject is the entity/target (role.grant, role.revoke,
+  // deletion.request.approve/reject, admin/match preferences edit,
+  // debug-key-flow). Pre-apply these admin UUIDs survived the
+  // projection and the subject could resolve which admin acted on
+  // their account. Cross-party UUIDs (the admin's auth.users id)
+  // are NOT entitled to be in the subject's bundle.
+  "granted_by",
+  "revoked_by",
+  "approved_by",
+  "rejected_by",
+  "edited_by",
+  "admin_user_id",
+  "processed_by",
+  "decided_by",
+  "invited_by",
+  "uploaded_by",
+  "reviewer_id",
+  "created_by",
+  "updated_by",
 ]);
 
 /**
@@ -635,26 +656,115 @@ export interface ExportTablePayload {
 const ROW_JSON_CACHE: WeakMap<ExportTablePayload, readonly string[]> = new WeakMap();
 
 /**
- * Typed view of a per-table payload. Audit 2026-05-07 M-0521: the
- * payload's `rows: unknown[]` loses every per-table contract for
- * downstream consumers (download script, regulator-facing
- * serializer). Use this helper to recover the row type at the call
- * site:
+ * Tables whose bundle rows are the raw Supabase row shape (no
+ * projection). `rowsForTable` returns `PublicRow<T>` for these.
+ *
+ * Audit 2026-05-07 (specialist apply, type-design HIGH conf-9 +
+ * code-reviewer MED conf-9): pre-apply, `rowsForTable<T>` accepted
+ * any `PublicTable` and returned `Array<PublicRow<T>>` — but for
+ * `api_keys` the row is a stripped projection (ciphertext columns
+ * removed) and for `contact_requests` the row has a string-sentinel
+ * `strategy_id` instead of a UUID. The type lied. We narrow the
+ * helper's generic to the unprojected manifest entries and expose
+ * a separate `projectedRowsForTable` helper for the redacted shapes
+ * (returning the correct `Omit<PublicRow<...>, ...>` shape).
+ */
+export type UnprojectedBundleTable = Extract<
+  (typeof USER_EXPORT_TABLES)[number],
+  { kind: "direct" | "indirect" }
+>["table"];
+
+/**
+ * Projected bundle table names. Includes both synthetic projections
+ * (`audit_log_for_user` — source is `audit_log`) and column-strip
+ * projections (`api_keys`, `contact_requests` — source matches the
+ * table name).
+ */
+export type ProjectedBundleTable =
+  | "api_keys"
+  | "contact_requests"
+  | "audit_log_for_user";
+
+/**
+ * Row shape returned by `rowsForTable` for each projected table.
+ * Encodes the contract that the column-strip projection
+ * `redactApiKeysForUser` removes the ciphertext columns, that
+ * `redactContactRequestForUser` blanks `strategy_id` to a sentinel
+ * string, and that `audit_log_for_user` carries the audit_log row
+ * shape with redacted metadata.
+ */
+export type ProjectedRow<T extends ProjectedBundleTable> = T extends "api_keys"
+  ? Omit<
+      PublicRow<"api_keys">,
+      | "api_key_encrypted"
+      | "api_secret_encrypted"
+      | "passphrase_encrypted"
+      | "dek_encrypted"
+      | "nonce"
+    >
+  : T extends "contact_requests"
+  ? Omit<PublicRow<"contact_requests">, "strategy_id"> & {
+      strategy_id: string | null;
+    }
+  : T extends "audit_log_for_user"
+  ? PublicRow<"audit_log"> & { metadata: unknown }
+  : never;
+
+/**
+ * Typed view of a per-table payload — non-projected tables only.
+ * Audit 2026-05-07 M-0521 + specialist apply (type-design HIGH
+ * conf-9): the payload's `rows: unknown[]` loses every per-table
+ * contract for downstream consumers. Use this helper to recover the
+ * row type at the call site for the 17 direct/indirect manifest
+ * entries:
  *
  *   const trades = rowsForTable(bundle, "trades");
  *   //   trades: PublicRow<"trades">[]
  *
+ * For the three projected tables (api_keys, contact_requests,
+ * audit_log_for_user) use `projectedRowsForTable` instead — those
+ * rows have a stripped / blanked shape that does NOT match
+ * `PublicRow<T>`.
+ *
  * The lookup is by table NAME (string match) — runtime safety still
  * depends on the export function having populated the rows from the
  * named table; the type is a witness to the manifest contract.
+ *
+ * Audit 2026-05-07 (specialist apply, silent-failure MED conf-9):
+ * returns `null` (not `[]`) when the table is missing from the
+ * bundle. A missing entry indicates schema drift or a manifest typo,
+ * NOT genuine emptiness — surfacing it as `null` forces the caller
+ * to disambiguate. The CI hook (check-gdpr-export-coverage.ts)
+ * verifies manifest completeness at build time, so a runtime miss
+ * is a bug, not user error.
  */
-export function rowsForTable<T extends PublicTable>(
+export function rowsForTable<T extends UnprojectedBundleTable>(
   bundle: ExportBundle,
   table: T,
-): Array<PublicRow<T>> {
+): Array<PublicRow<T>> | null {
   const entry = bundle.tables.find((t) => t.table === table);
-  if (!entry) return [];
+  if (!entry) return null;
   return entry.rows as Array<PublicRow<T>>;
+}
+
+/**
+ * Typed view for projected-table payloads. Returns the projection's
+ * actual row shape (stripped columns / sentinel strings) rather than
+ * the raw `PublicRow<source_table>`.
+ *
+ *   const apiKeys = projectedRowsForTable(bundle, "api_keys");
+ *   //   apiKeys: ProjectedRow<"api_keys">[] | null
+ *   //          = Omit<PublicRow<"api_keys">, "api_key_encrypted" | ...>[]
+ *
+ * Returns `null` for a missing entry (see `rowsForTable` rationale).
+ */
+export function projectedRowsForTable<T extends ProjectedBundleTable>(
+  bundle: ExportBundle,
+  table: T,
+): Array<ProjectedRow<T>> | null {
+  const entry = bundle.tables.find((t) => t.table === table);
+  if (!entry) return null;
+  return entry.rows as Array<ProjectedRow<T>>;
 }
 
 /**

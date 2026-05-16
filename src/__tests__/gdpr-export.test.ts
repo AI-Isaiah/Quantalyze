@@ -730,6 +730,52 @@ describe("collectUserExportBundle — H-0456 ORDER BY determinism regression", (
   });
 });
 
+describe("collectUserExportBundle — H-0456 getOrderColumn per-table column (specialist apply, pr-test HIGH conf-9)", () => {
+  it("audit_log projection sorts by created_at; every other table by id", async () => {
+    // Spy on `.order(col, ...)` invocations and capture the column
+    // passed for each table. The audit_log projected source MUST sort
+    // by `created_at` (so size-cap truncation is chronological);
+    // every other table MUST sort by `id` (UUID PK).
+    const orderCalls: Array<{ table: string; col: string }> = [];
+    const mock = {
+      from: (table: string) => {
+        const limit = async () => ({ data: [], error: null });
+        return {
+          select: () => ({
+            eq: () => ({
+              order: (col: string) => {
+                orderCalls.push({ table, col });
+                return { limit };
+              },
+              limit,
+            }),
+            in: () => ({
+              order: (col: string) => {
+                orderCalls.push({ table, col });
+                return { limit };
+              },
+              limit,
+            }),
+          }),
+        };
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await collectUserExportBundle(mock as any, "u-h0456");
+
+    // audit_log (the projected source for audit_log_for_user) sorts
+    // by created_at — chronological packing of the size-cap tail.
+    const auditCalls = orderCalls.filter((c) => c.table === "audit_log");
+    expect(auditCalls.length).toBeGreaterThanOrEqual(1);
+    for (const c of auditCalls) expect(c.col).toBe("created_at");
+
+    // Every non-audit_log .order() call uses 'id'.
+    const nonAudit = orderCalls.filter((c) => c.table !== "audit_log");
+    expect(nonAudit.length).toBeGreaterThan(0);
+    for (const c of nonAudit) expect(c.col).toBe("id");
+  });
+});
+
 describe("USER_EXPORT_TABLES — shape type check (compile-time regression)", () => {
   it("accepts DirectUserTable and IndirectUserTable shapes (M-0522: table names are typed)", () => {
     // M-0522: `table` is narrowed to `keyof Database['public']['Tables']`.
