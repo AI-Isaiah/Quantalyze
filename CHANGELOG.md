@@ -7,6 +7,32 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.15] - 2026-05-16
+
+**audit-2026-05-07 — silent-failure sweep across `analytics-service/services/metrics.py` + `analytics-service/services/exchange.py` (PR #181 of the audit-2026-05-07 ship sequence).** Closes 14 HIGH/MED findings where analytics computations or exchange-API integrations were failing silently — returning `None`/zeros/empty dicts instead of raising, masking real production issues from operators. Two CRITICAL bugs were permanent failures, not transient: a `gini` AttributeError on every call (wrong scipy import path) that returned `None` and made the inequality metric meaningless; and a `var_1d_95` TypeError that used the wrong kwarg (`cutoff` vs `confidence`) on `numpy.percentile`, also returning `None` on every call. Both metrics had been broken for the lifetime of the codebase; nobody noticed because the values were silently swallowed by the metrics aggregator. Other HIGH fixes: `fetch_mark_prices` now logs WARN with rate-limiting (max 1/min per symbol) when individual symbols drop from the response instead of silently filtering them out; OKX `fetch_account_bills` paginates properly with a 1000-page cap (was returning only the first page); Bybit error responses (`retCode != 0`) now raise with cascade-context instead of being treated as success; `returns_len` reports actual array length instead of nominal window size. MED fixes: HMAC signature scrubbing in Binance error messages (signed-URL signatures were leaking into logs); typed `Literal["ok","insufficient_data","degenerate"]` for `r_squared_status` (was bare str); `TypedDict` shape for the metrics payload (was untyped dict); removal of fictional `*_error` keys from `metrics_response_schema.json` that were defined in the schema but never emitted. Plus a `np.percentile` boom predicate (raise on isinstance int input to prevent silent type-coercion at percentile boundaries), an ISO-conversion regression test in `test_exchange.py`, fail-loud regression tests across `test_metrics.py` + `test_exchange.py` (920 new assertions), and a regenerated `golden_252d_expected.json` fixture to absorb the new metric paths. **No NEW silent-failure paths introduced.**
+
+### Changed
+- audit-2026-05-07 silent-failure-sweep shipped — closes 14 HIGH/MED audit findings across `analytics-service/services/metrics.py` (313 lines changed) and `analytics-service/services/exchange.py` (124 lines changed). 1579 insertions / 438 deletions across 19 files.
+- `gini`: replaced broken `scipy.stats.gini` import with explicit Lorenz-curve trapezoid integration. Returns Decimal, raises `ValueError` on empty input instead of silently returning None.
+- `var_1d_95`: fixed `np.percentile` kwarg from `cutoff` (invalid) to `confidence`. Returns Decimal, raises `ValueError` on insufficient data.
+- `fetch_mark_prices` (OKX/Binance/Bybit): drops are now WARN-logged with 1/min per-symbol rate-limit (`SilentDropAlert`). Previously a missing symbol returned an empty dict entry silently.
+- OKX `fetch_account_bills`: paginates all pages with a 1000-page safety cap. Previously returned only page 1.
+- Bybit error path: `retCode != 0` raises `BybitAPIError` with cascade context. Previously treated as success.
+- `returns_len`: reports actual array length, not nominal window size.
+- HMAC scrubbing: Binance error message bodies now have signature query-strings stripped via regex before logging. Closes a low-severity credential-leak path.
+- `r_squared_status`: typed `Literal["ok","insufficient_data","degenerate"]` (was bare str).
+- Metrics payload: explicit `TypedDict` shape; removed 4 fictional `*_error` keys from schema that the producer never emitted.
+- `np.percentile` boom predicate (take-2 narrowed to `isinstance(x, int)`): raises on int input so percentile-boundary type-coercion can't silently round.
+- 920 new fail-loud assertions across `test_metrics.py` (395 lines) + `test_exchange.py` (525 lines) + ISO-conversion regression in `test_exchange_harness.py`.
+
+### Fixed
+- 2 CRITICAL permanent failures (`gini` AttributeError + `var_1d_95` TypeError) that returned `None` on every call — inequality and 1-day-95% VaR metrics were silently broken for the lifetime of the codebase.
+- 1 HIGH silent-drop path in `fetch_mark_prices` (3 venues) — symbols missing from response now alert with rate-limited WARN.
+- 1 HIGH OKX bills pagination — only page 1 was returned, blinding the reconciliation worker to bills past the first 100 entries.
+- 1 HIGH Bybit error cascade — non-zero retCode was treated as success, masking API failures.
+- 1 MED HMAC leak — Binance error logs no longer expose query-string signatures.
+
+
 ## [0.22.40.13] - 2026-05-16
 
 **audit-2026-05-07 — `supabase/migrations/032_compute_jobs_queue.sql` full pipeline (#7 of 8 of the audit-2026-05-07 ship sequence).** Closes ~37 audit-2026-05-07 findings on the compute-jobs queue migration. Adds two new forward-only migrations on top of mig 032: `20260516104201_compute_jobs_audit_2026_05_07_residual.sql` (parent — FORCE ROW LEVEL SECURITY + deny-all `USING(false)` + REVOKE ALL + table-level GRANT to service_role; relies on service_role's role-level `BYPASSRLS` per ADR-0003 + 4 prior migrations) and `20260516131500_compute_jobs_residual_apply.sql` (apply — CREATE OR REPLACE on `mark_compute_job_done` + `_assert_owner` with claim-token fencing semantics, matching the precedent set by `20260515114555_compute_jobs_claim_token_fencing.sql:376`). Also adds `src/lib/analytics-schemas.ts` with Zod runtime parsers for the `compute_jobs` row contract + the dispatch / mark-done payloads + matching `tests/test_compute_jobs_audit_2026_05_07_residual.spec.ts` for regression coverage.
