@@ -13,7 +13,7 @@ import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategyDetail, getPercentiles } from "@/lib/queries";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { createClient } from "@/lib/supabase/server";
-import { parsePositionRows } from "@/lib/types";
+import { parsePositionRowsWithDiagnostics } from "@/lib/types";
 import { notFound, redirect } from "next/navigation";
 
 export default async function StrategyDetailPage({
@@ -142,11 +142,28 @@ export default async function StrategyDetailPage({
           before casting to Position[]. Preserves the null-vs-empty signal
           the consumers branch on by mapping a missing `data` to null.
           G12.G.5 (audit 2026-05-07): forward `positionsError` so a fetch
-          failure renders a banner instead of the silent empty state. */}
+          failure renders a banner instead of the silent empty state.
+          audit-2026-05-07 RT-0002 (red-team apply): consume diagnostics
+          from parsePositionRowsWithDiagnostics so 'all rows dropped by
+          schema' (shape drift) surfaces a server-log event rather than
+          rendering an indistinguishable empty positions table. */}
       <PerformanceReport
         analytics={analytics}
         percentiles={percentiles}
-        positions={positionsResult?.data ? parsePositionRows(positionsResult.data) : null}
+        positions={(() => {
+          if (!positionsResult?.data) return null;
+          const { data, diagnostics } = parsePositionRowsWithDiagnostics(
+            positionsResult.data,
+          );
+          if (diagnostics.dropped > 0) {
+            console.error("[discovery] parsePositionRows dropped rows", {
+              strategyId,
+              slug,
+              ...diagnostics,
+            });
+          }
+          return data;
+        })()}
         positionsError={positionsError != null}
       />
       <Disclaimer variant="strategy" />

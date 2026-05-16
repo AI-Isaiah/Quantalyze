@@ -686,6 +686,19 @@ export const PositionRowSchema = z.object({
   duration_seconds: row.duration_seconds ?? null,
 }));
 
+// audit-2026-05-07 RT-0001 (red-team apply): restore the type-level
+// guarantee that PositionRowSchema's OUTPUT shape matches the `Position`
+// interface. The transform's return-type annotation guarantees the
+// schema's output, but doesn't guarantee that EVERY field of Position is
+// covered. This assignment is a compile-time check: if `Position` grows
+// a new field, the inferred output of `PositionRowSchema` won't satisfy
+// `z.ZodType<Position, ...>`-output and TS will error here.
+// (Cannot use `satisfies z.ZodType<Position>` directly on the schema
+// because `.transform()`'s input-side widens to `unknown` for the
+// generic check.)
+const _positionRowSchemaOutputCheck: Position = {} as z.infer<typeof PositionRowSchema>;
+void _positionRowSchemaOutputCheck;
+
 /**
  * Parse an array of unknown rows (typically `positionsResult.data` from a
  * Supabase select) into a typed `Position[]`. Rows that fail the schema are
@@ -907,6 +920,12 @@ export const FundingFeeRowSchema = z
     created_at: _isoTimestamp,
   })
   .strict()
+  // audit-2026-05-07 RT-0003 (red-team apply): the transform's return-type
+  // annotation is retained as `FundingFee` to ASSERT the output (so a
+  // typo in a branch would TS-error here rather than at the call site).
+  // The switch is exhaustive over the `exchange` enum; TS verifies
+  // exhaustiveness because every enum value has a `case` arm with a
+  // `return` and no `default` is needed.
   .transform((row): FundingFee => {
     const base = {
       id: row.id,

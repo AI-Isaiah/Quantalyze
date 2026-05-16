@@ -77,4 +77,52 @@ describe("ApiKeyRowSchema — M-0583 trust-boundary guard", () => {
     const serialized = JSON.stringify(warnSpy.mock.calls);
     expect(serialized).not.toContain("SECRET-LABEL-CONTENTS");
   });
+
+  // audit-2026-05-07 RT-0005 (red-team apply): pin behaviour of the
+  // newly-required `disconnected_at` field on ApiKeyRowSchema. Without
+  // these tests, a future refactor that drops the field from .strict()
+  // wouldn't be caught.
+  it("preserves disconnected_at (null) in the parsed output", () => {
+    const out = parseApiKeyRows([baseRow]);
+    expect(out).toHaveLength(1);
+    expect(out[0].disconnected_at).toBeNull();
+  });
+
+  it("preserves disconnected_at (timestamp) in the parsed output", () => {
+    const ts = "2026-04-22T09:00:00Z";
+    const out = parseApiKeyRows([{ ...baseRow, disconnected_at: ts }]);
+    expect(out).toHaveLength(1);
+    expect(out[0].disconnected_at).toBe(ts);
+  });
+
+  it("rejects rows missing disconnected_at (strict schema)", () => {
+    const { disconnected_at: _omit, ...rowWithoutDisconnected } = baseRow;
+    const out = parseApiKeyRows([rowWithoutDisconnected]);
+    expect(out).toHaveLength(0);
+  });
+
+  // audit-2026-05-07 RT silent-failure HIGH regression: account_balance_usdt
+  // must NOT silently coerce empty string / false / null to 0. These tests
+  // pin the new explicit pre-validator behaviour.
+  it("rejects empty-string account_balance_usdt (no silent coerce-to-zero)", () => {
+    const out = parseApiKeyRows([{ ...baseRow, account_balance_usdt: "" }]);
+    expect(out).toHaveLength(0);
+  });
+
+  it("rejects boolean account_balance_usdt (no silent coerce-to-zero)", () => {
+    const out = parseApiKeyRows([{ ...baseRow, account_balance_usdt: false }]);
+    expect(out).toHaveLength(0);
+  });
+
+  it("accepts null account_balance_usdt (legitimate absence)", () => {
+    const out = parseApiKeyRows([{ ...baseRow, account_balance_usdt: null }]);
+    expect(out).toHaveLength(1);
+    expect(out[0].account_balance_usdt).toBeNull();
+  });
+
+  it("accepts real zero account_balance_usdt (distinct from coercion)", () => {
+    const out = parseApiKeyRows([{ ...baseRow, account_balance_usdt: 0 }]);
+    expect(out).toHaveLength(1);
+    expect(out[0].account_balance_usdt).toBe(0);
+  });
 });
