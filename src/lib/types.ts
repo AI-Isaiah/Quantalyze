@@ -47,6 +47,63 @@ export const castStrategyId = (s: string): StrategyId => s as StrategyId;
 export const castPortfolioId = (s: string): PortfolioId => s as PortfolioId;
 export const castTenantId = (s: string): TenantId => s as TenantId;
 
+// ---------------------------------------------------------------------------
+// audit-2026-05-07 H-0514 / H-0515 / H-0516 / M-0580 / M-0584 — unit vocabulary
+//
+// The v0.17.1 KPI-17 saga (PRs #95-100) was caused by this exact drift:
+// Python returned percent-scaled, TS multiplied by 100 again, allocators
+// saw 5500%. The root cause was that every numeric metric — fraction
+// (0.05), percent (5.0), unitless ratio (0.5), score (5), days, hours,
+// seconds, USD — flowed through the same bare `number` type.
+//
+// File-wide UNIT CONTRACT (binding for new code, normative for review):
+//   - Every field whose name ends in `_pct` is a FRACTION in [0,1] (0.05 = 5%).
+//   - Every field whose name ends in `_days`, `_seconds`, `_hours`,
+//     `_minutes` is the named unit. No conversion at field level.
+//   - Every field whose name ends in `_usd` or `_usdt` is a money quantity
+//     in the named denomination (USD ≠ USDT for the purposes of math).
+//   - `risk_reward_ratio` / `profit_factor*` / `payoff_ratio` are
+//     UNITLESS RATIOS (0.5 means 0.5×, not 50%).
+//   - `sqn` is a SCORE (System Quality Number, 0-7 typical range).
+//   - `expectancy` is a FRACTION (per-trade expected return as a fraction
+//     of risked capital).
+//
+// Branded aliases are exported so new code can express intent at types.
+// Existing interface fields remain `number` for the same reason as the
+// branded ids above — full migration is a deliberate cross-cutting PR,
+// not a sneak-in. New writers should reach for the branded alias when
+// adding fields.
+//
+// PRECISION FOOTNOTE (H-0515): USD-denominated NUMERIC columns lose
+// precision through JSON.parse → IEEE-754 for values > 2^53 (~$9
+// quadrillion). For realistic hedge-fund AUMs (< $10B) the float
+// representation is exact at cent boundaries. Branded `Usd` / `Usdt`
+// stays a `number` to match the wire shape; future Decimal migration
+// would change the brand's underlying type, not the field name.
+// ---------------------------------------------------------------------------
+export type Fraction = number & { readonly __unit: "Fraction" };
+export type Ratio = number & { readonly __unit: "Ratio" };
+export type Score = number & { readonly __unit: "Score" };
+export type Days = number & { readonly __unit: "Days" };
+export type Hours = number & { readonly __unit: "Hours" };
+export type Seconds = number & { readonly __unit: "Seconds" };
+export type Usd = number & { readonly __unit: "Usd" };
+export type Usdt = number & { readonly __unit: "Usdt" };
+
+/**
+ * Unit-stamping helpers. As with `castUserId`, these are vocabulary
+ * markers — no runtime check, no conversion. The whole point is to
+ * make the unit visible in code review and type errors.
+ */
+export const asFraction = (n: number): Fraction => n as Fraction;
+export const asRatio = (n: number): Ratio => n as Ratio;
+export const asScore = (n: number): Score => n as Score;
+export const asDays = (n: number): Days => n as Days;
+export const asHours = (n: number): Hours => n as Hours;
+export const asSeconds = (n: number): Seconds => n as Seconds;
+export const asUsd = (n: number): Usd => n as Usd;
+export const asUsdt = (n: number): Usdt => n as Usdt;
+
 export type Role = "manager" | "allocator" | "both";
 
 export const ROLES: { value: Role; label: string; description: string }[] = [
