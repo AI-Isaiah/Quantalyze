@@ -6,6 +6,7 @@ import type {
   SimulatorDeltas,
   TimeSeriesPoint,
 } from "@/lib/types";
+import type { SimulatorResponseOk } from "@/lib/api/simulatorSchema";
 
 interface PortfolioImpactPanelProps {
   portfolioId: string;
@@ -291,7 +292,7 @@ function NonOkState({ data }: { data: SimulatorCandidate }) {
   );
 }
 
-function SuccessBody({ data }: { data: SimulatorCandidate }) {
+function SuccessBody({ data }: { data: SimulatorResponseOk }) {
   return (
     <div className="space-y-5">
       {data.partial_history && (

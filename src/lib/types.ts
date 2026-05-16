@@ -1074,21 +1074,21 @@ export interface SimulatorMetricsSnapshot {
 /**
  * Full simulator response for a single candidate against a portfolio.
  * Returned by POST /api/simulator.
+ *
+ * audit-2026-05-07 H-1120 / H-1121 / M-0911: the canonical shape is the
+ * inferred type from `SimulatorResponseSchema` in `./api/simulatorSchema.ts`
+ * — Zod is the single source of truth so the type cannot drift out of
+ * lock-step with the runtime validator. The shape is a discriminated
+ * union on `status`: `proposed` / `deltas` / `equity_curve_*` only
+ * appear on the `ok` branch so illegal states cease to be representable
+ * at the type level.
+ *
+ * Consumers narrow with `if (candidate.status === "ok") {…}` to access
+ * the rich-result fields; the non-ok branches expose only `current`,
+ * `overlap_days`, `partial_history`, and the id columns.
  */
-export interface SimulatorCandidate {
-  candidate_id: string;
-  candidate_name: string;
-  portfolio_id: string;
-  status: SimulatorStatus;
-  overlap_days: number;
-  /** True when overlap_days < ~6mo of business days; UI shows a warning. */
-  partial_history: boolean;
-  deltas: SimulatorDeltas;
-  current: SimulatorMetricsSnapshot;
-  proposed: SimulatorMetricsSnapshot;
-  equity_curve_current: TimeSeriesPoint[];
-  equity_curve_proposed: TimeSeriesPoint[];
-}
+import type { SimulatorResponse } from "./api/simulatorSchema";
+export type SimulatorCandidate = SimulatorResponse;
 
 export interface PortfolioStrategy {
   portfolio_id: string;

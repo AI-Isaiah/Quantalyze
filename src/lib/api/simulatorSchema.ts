@@ -4,6 +4,14 @@
  * The Next.js route proxies Python `/api/simulator` and parses the response
  * through `SimulatorResponseSchema` — parse failures throw so shape drift
  * surfaces loudly. See `SimulatorDeltas` in ../types.ts for the sign convention.
+ *
+ * audit-2026-05-07 H-1120 / H-1121 / M-0911 / M-0912: this schema is now the
+ * single source of truth for the simulator response. `types.ts` re-exports
+ * `SimulatorCandidate = z.infer<typeof SimulatorResponseSchema>` so the
+ * hand-written interface no longer drifts out of lock-step. The response is
+ * a discriminated union on `status` so `equity_curve_*` and `proposed`/`deltas`
+ * are TYPED ONLY on the `ok` branch — illegal states (proposed metrics on an
+ * `already_in_portfolio` row) cease to be representable.
  */
 
 import { z } from "zod";
@@ -42,23 +50,73 @@ const EquityCurvePointSchema = z.object({
   value: z.number(),
 });
 
-export const SimulatorResponseSchema = z
+// audit-2026-05-07 M-0912: partial_history is derivable from
+// overlap_days < PARTIAL_HISTORY_THRESHOLD (126 trading days, mirrors
+// `simulator_scoring.py:438`). Keep both fields for wire compatibility
+// AND refine to refuse contradictory rows (e.g. partial_history=false
+// with overlap_days=5).
+export const PARTIAL_HISTORY_THRESHOLD = 126;
+
+const SimulatorCommonShape = {
+  candidate_id: z.string(),
+  candidate_name: z.string(),
+  portfolio_id: z.string(),
+  overlap_days: z.number().int().nonnegative(),
+  partial_history: z.boolean(),
+  current: SimulatorMetricsSchema,
+} as const;
+
+const SimulatorOkBranch = z
   .object({
-    candidate_id: z.string(),
-    candidate_name: z.string(),
-    portfolio_id: z.string(),
-    status: SimulatorStatusSchema,
-    overlap_days: z.number().int().nonnegative(),
-    partial_history: z.boolean(),
-    deltas: SimulatorDeltasSchema,
-    current: SimulatorMetricsSchema,
+    status: z.literal("ok"),
+    ...SimulatorCommonShape,
     proposed: SimulatorMetricsSchema,
+    deltas: SimulatorDeltasSchema,
     equity_curve_current: z.array(EquityCurvePointSchema),
     equity_curve_proposed: z.array(EquityCurvePointSchema),
   })
-  // Passthrough rather than strict so future-safe additions (e.g. a
-  // confidence interval band on the proposed curve) don't break parsing.
-  // Upgrade to .strict() once the contract is frozen.
   .passthrough();
 
+const SimulatorInsufficientDataBranch = z
+  .object({
+    status: z.literal("insufficient_data"),
+    ...SimulatorCommonShape,
+  })
+  .passthrough();
+
+const SimulatorAlreadyInPortfolioBranch = z
+  .object({
+    status: z.literal("already_in_portfolio"),
+    ...SimulatorCommonShape,
+  })
+  .passthrough();
+
+const SimulatorEmptyPortfolioBranch = z
+  .object({
+    status: z.literal("empty_portfolio"),
+    ...SimulatorCommonShape,
+  })
+  .passthrough();
+
+export const SimulatorResponseSchema = z
+  .discriminatedUnion("status", [
+    SimulatorOkBranch,
+    SimulatorInsufficientDataBranch,
+    SimulatorAlreadyInPortfolioBranch,
+    SimulatorEmptyPortfolioBranch,
+  ])
+  .refine(
+    (d) => d.partial_history === (d.overlap_days < PARTIAL_HISTORY_THRESHOLD),
+    {
+      message:
+        "partial_history inconsistent with overlap_days (must equal overlap_days < PARTIAL_HISTORY_THRESHOLD)",
+    },
+  );
+
 export type SimulatorResponse = z.infer<typeof SimulatorResponseSchema>;
+
+/** The `status === "ok"` branch — the only shape where rich result
+ *  fields (deltas, proposed metrics, equity curves) are guaranteed
+ *  present. Narrow via `if (response.status === "ok")` before passing
+ *  to components that read those fields. */
+export type SimulatorResponseOk = Extract<SimulatorResponse, { status: "ok" }>;
