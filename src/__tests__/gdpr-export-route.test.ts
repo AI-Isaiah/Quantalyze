@@ -21,6 +21,7 @@ const {
   getUserMock,
   assertSameOriginMock,
   checkLimitMock,
+  resetUsedTokensMock,
   uploadMock,
   createSignedUrlMock,
   removeMock,
@@ -30,6 +31,7 @@ const {
   getUserMock: vi.fn(),
   assertSameOriginMock: vi.fn<(r: unknown) => Response | null>(() => null),
   checkLimitMock: vi.fn(),
+  resetUsedTokensMock: vi.fn(),
   uploadMock: vi.fn(),
   createSignedUrlMock: vi.fn(),
   removeMock: vi.fn(),
@@ -71,7 +73,13 @@ vi.mock("@/lib/csrf", () => ({
 }));
 
 vi.mock("@/lib/ratelimit", () => ({
-  exportLimiter: {}, // placeholder — checkLimit is the actual gate
+  // Audit 2026-05-07 red-team #2 (HIGH conf-8): the route refunds the
+  // 1/day token on every refusal path via
+  // `exportLimiter.resetUsedTokens(key)`. The mock exposes that method
+  // so the refund spec is testable.
+  exportLimiter: {
+    resetUsedTokens: (key: string) => resetUsedTokensMock(key),
+  },
   checkLimit: (limiter: unknown, key: string) => checkLimitMock(limiter, key),
 }));
 
@@ -172,6 +180,7 @@ describe("POST /api/account/export — orphan cleanup on sign failure (I2)", () 
       data: { user: { id: "user-123", email: "u@test.com" } },
     });
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    resetUsedTokensMock.mockResolvedValue(undefined);
     collectBundleMock.mockResolvedValue({
       schema_version: 1,
       user_id: "user-123",
@@ -304,6 +313,7 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
       data: { user: { id: "user-ttl", email: "ttl@test.com" } },
     });
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    resetUsedTokensMock.mockResolvedValue(undefined);
     collectBundleMock.mockResolvedValue({
       schema_version: 1,
       user_id: "user-ttl",
@@ -495,6 +505,14 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     expect(md.failed_tables).toBeUndefined();
     expect(md.incomplete_reasons).toBeUndefined();
 
+    // Audit 2026-05-07 red-team #2 (HIGH conf-8): refund the 1/day
+    // rate-limit token on refusal. Pre-fix the truncation was
+    // deterministic and the consumed token locked the user out
+    // permanently. The refund call MUST fire with the user's
+    // identifier — verifies the spec's "refund on refusal" invariant.
+    expect(resetUsedTokensMock).toHaveBeenCalledTimes(1);
+    expect(resetUsedTokensMock.mock.calls[0][0]).toBe("export:user-ttl");
+
     consoleErrorSpy.mockRestore();
   });
 
@@ -523,6 +541,60 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     expect(metadata.table_count).toBe(2);
     expect(metadata.total_row_count).toBe(3);
     expect(metadata.truncated_at_size_cap).toBe(false);
+    // Audit 2026-05-07 red-team #7: the wired-up rowsForTable("profiles")
+    // helper's output surfaces into the audit metadata as
+    // `profiles_row_count`. A future drift that drops profiles from
+    // the manifest would have either short-circuited above (manifest
+    // drift gate) or left this field at 0 — both observable.
+    expect(metadata.profiles_row_count).toBe(1);
+
+    // Audit 2026-05-07 red-team #2: token refund MUST NOT fire on
+    // the happy path. The 1/day cap remains in effect when the
+    // bundle ships normally.
+    expect(resetUsedTokensMock).not.toHaveBeenCalled();
+  });
+
+  // Audit 2026-05-07 red-team #7 (MED conf-9): the route invokes
+  // rowsForTable(bundle, "profiles") as a load-bearing manifest-drift
+  // detector. A bundle without profiles must surface
+  // export_manifest_drift + refund the rate-limit token.
+  it("red-team #7: refuses with export_manifest_drift when bundle lacks profiles", async () => {
+    collectBundleMock.mockResolvedValueOnce({
+      schema_version: 1,
+      user_id: "user-ttl",
+      generated_at: "2026-04-16T00:00:00Z",
+      total_row_count: 0,
+      // No profiles entry — schema drift.
+      tables: [
+        {
+          table: "user_notes",
+          rows: [],
+          row_count: 0,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
+      truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
+      partial: false,
+      failed_tables: [],
+    });
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest());
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { code?: string; error?: string };
+    expect(body.code).toBe("export_manifest_drift");
+    // Token refund fires so the user isn't locked out by a deploy bug.
+    expect(resetUsedTokensMock).toHaveBeenCalledTimes(1);
+    expect(resetUsedTokensMock.mock.calls[0][0]).toBe("export:user-ttl");
+    // No upload / signed URL on the drift path.
+    expect(uploadMock).not.toHaveBeenCalled();
+    expect(createSignedUrlMock).not.toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
   });
 });
 
@@ -535,6 +607,7 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
     });
     // Default: NOT rate-limited; each test overrides for the 429 case.
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    resetUsedTokensMock.mockResolvedValue(undefined);
     collectBundleMock.mockResolvedValue({
       schema_version: 1,
       user_id: "user-429",
@@ -672,6 +745,12 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
     expect(uploadMock).not.toHaveBeenCalled();
     expect(createSignedUrlMock).not.toHaveBeenCalled();
 
+    // Audit 2026-05-07 red-team #2: token refund MUST fire on the
+    // export_partial path too — a transient-looking refusal still
+    // locks the user out for 24h without the refund.
+    expect(resetUsedTokensMock).toHaveBeenCalledTimes(1);
+    expect(resetUsedTokensMock.mock.calls[0][0]).toBe("export:user-429");
+
     // The happy-path account.export audit MUST NOT fire (the export
     // never produced a signed URL). A NEW account.export_refused audit
     // DOES fire so forensic reconstruction survives the response-body
@@ -688,6 +767,19 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
         c[0] === "log_audit_event" && c[1]?.p_action === "account.export_refused",
     );
     expect(refusedCall).toBeDefined();
+
+    // Audit 2026-05-07 red-team #1 (HIGH conf-9): the refused-export
+    // audit metadata MUST NOT contain table-name lists (schema
+    // reconnaissance), only the per-mode booleans and aggregate
+    // counts. Pin this on the partial path AND the truncated path —
+    // both feed audit_log via the same logAuditEvent call.
+    const refusedMd = (refusedCall![1] as Record<string, unknown>)
+      .p_metadata as Record<string, unknown>;
+    expect(refusedMd.failed_table_count).toBe(1);
+    expect(refusedMd.failed_tables).toBeUndefined();
+    expect(refusedMd.row_capped_tables).toBeUndefined();
+    expect(refusedMd.parent_id_truncated_tables).toBeUndefined();
+    expect(refusedMd.incomplete_reasons).toBeUndefined();
 
     // Server-side log MUST carry the failed_tables (forensics) AND the
     // request_id (correlation key the user quoted to support).

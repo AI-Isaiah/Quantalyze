@@ -28,8 +28,13 @@ vi.mock("server-only", () => ({}));
 import {
   USER_EXPORT_TABLES,
   collectUserExportBundle,
+  encodeExportBundle,
+  rowsForTable,
+  projectedRowsForTable,
   EXPORT_PER_TABLE_ROW_CAP,
   EXPORT_SIZE_CAP_BYTES,
+  EXPORT_PARENT_ID_IN_CHUNK,
+  type ExportBundle,
   type UserExportTable,
 } from "@/lib/gdpr-export";
 import {
@@ -796,6 +801,725 @@ describe("USER_EXPORT_TABLES — shape type check (compile-time regression)", ()
     };
     expect(direct.kind).toBe("direct");
     expect(indirect.kind).toBe("indirect");
+  });
+});
+
+/**
+ * Audit 2026-05-07 red-team #4 (HIGH conf-8): direct unit tests of
+ * `encodeExportBundle` byte output. Pre-fix the function had no
+ * round-trip test — the route test mocked it out entirely with a
+ * tautological `TextEncoder().encode(JSON.stringify(bundle))` stub.
+ * Any of (a) wrong field order, (b) missing comma between rows,
+ * (c) undefined-field corruption (red-team #8), or (d) divergence
+ * between cached and fallback paths could ship malformed JSON to
+ * storage with no test failure.
+ *
+ * These tests assert the hand-rolled streaming serializer is
+ * load-bearing-correct.
+ */
+describe("encodeExportBundle — direct unit tests (red-team #4)", () => {
+  function makeMinimalBundle(): ExportBundle {
+    return {
+      schema_version: 1,
+      user_id: "user-encode-1",
+      generated_at: "2026-04-16T00:00:00.000Z",
+      total_row_count: 2,
+      tables: [
+        {
+          table: "profiles",
+          rows: [{ id: "user-encode-1", display_name: "Alice" }],
+          row_count: 1,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+        {
+          table: "api_keys",
+          rows: [{ id: "k1", exchange: "binance", label: "main" }],
+          row_count: 1,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
+      truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
+      partial: false,
+      failed_tables: [],
+    };
+  }
+
+  it("produces JSON that JSON.parse round-trips structurally (fallback path)", () => {
+    // Hand-constructed bundle does NOT populate the WeakMap row cache,
+    // exercising the fallback `JSON.stringify(t.rows[r])` branch.
+    const b = makeMinimalBundle();
+    const bytes = encodeExportBundle(b);
+    const text = new TextDecoder().decode(bytes);
+    const parsed = JSON.parse(text);
+    // Structural equivalence to JSON.stringify(b) — drops undefined
+    // values (which encodeExportBundle now coerces to JSON null via
+    // safeStringify, but the bundle as constructed has no undefined).
+    expect(parsed).toEqual(JSON.parse(JSON.stringify(b)));
+  });
+
+  it("matches JSON.stringify(bundle) byte-for-byte on a representative bundle", () => {
+    const b = makeMinimalBundle();
+    const ours = new TextDecoder().decode(encodeExportBundle(b));
+    const ref = JSON.stringify(b);
+    expect(ours).toBe(ref);
+  });
+
+  it("emits no inter-row commas on a single-row table; emits one comma per gap on multi-row", () => {
+    const b: ExportBundle = {
+      ...makeMinimalBundle(),
+      tables: [
+        {
+          table: "user_notes",
+          rows: [{ id: "n1" }, { id: "n2" }, { id: "n3" }],
+          row_count: 3,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
+      total_row_count: 3,
+    };
+    const text = new TextDecoder().decode(encodeExportBundle(b));
+    const parsed = JSON.parse(text);
+    expect(parsed.tables[0].rows).toEqual([
+      { id: "n1" },
+      { id: "n2" },
+      { id: "n3" },
+    ]);
+    // Count commas in the rows array (the body between `"rows":[` and
+    // `]`). With three single-key rows we expect exactly 2 inter-row
+    // commas plus the commas inside the {...} objects.
+    const rowsBody = text.match(/"rows":\[([^\]]+)\]/);
+    expect(rowsBody).toBeTruthy();
+    const innerCommas = (rowsBody![1].match(/\},\{/g) ?? []).length;
+    expect(innerCommas).toBe(2);
+  });
+
+  it("handles an empty rows array (no inter-row commas at all)", () => {
+    const b: ExportBundle = {
+      ...makeMinimalBundle(),
+      tables: [
+        {
+          table: "user_notes",
+          rows: [],
+          row_count: 0,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
+      total_row_count: 0,
+    };
+    const text = new TextDecoder().decode(encodeExportBundle(b));
+    expect(JSON.parse(text)).toEqual(JSON.parse(JSON.stringify(b)));
+    expect(text).toContain('"rows":[]');
+  });
+
+  it("red-team #8: undefined envelope/wrapper fields are coerced to JSON null (not the literal 'undefined')", () => {
+    // Hand-construct a bundle with an undefined field via a manual
+    // type override. JSON.stringify(undefined) returns the JS value
+    // undefined; concatenated into a template literal it becomes
+    // the unquoted 4 characters 'undefined' which JSON.parse rejects.
+    // safeStringify coerces this to "null".
+    const b = {
+      ...makeMinimalBundle(),
+      tables: [
+        {
+          table: "user_notes",
+          rows: [{ id: "n1" }],
+          row_count: 1,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          // fetch_error is normally string | null; an undefined here
+          // would have shipped the literal 'undefined' pre-fix.
+          fetch_error: undefined as unknown as string | null,
+        },
+      ],
+    };
+    const text = new TextDecoder().decode(
+      encodeExportBundle(b as ExportBundle),
+    );
+    // Wire encoding parses cleanly — no 'undefined' literal slipped
+    // through.
+    expect(() => JSON.parse(text)).not.toThrow();
+    const parsed = JSON.parse(text);
+    expect(parsed.tables[0].fetch_error).toBeNull();
+    expect(text).not.toMatch(/:undefined[,}]/);
+  });
+
+  it("red-team #8: a sparse-array row slot coerces to JSON null in the fallback path", () => {
+    // The fallback (no WeakMap cache) path iterates t.rows[r] directly.
+    // A sparse-array slot returns undefined; safeStringify on that
+    // returns "null" — wire encoding parses cleanly.
+    const sparse: unknown[] = [{ id: "r1" }];
+    // Sparse hole at index 1.
+    (sparse as unknown[]).length = 2;
+    const b: ExportBundle = {
+      ...makeMinimalBundle(),
+      tables: [
+        {
+          table: "user_notes",
+          rows: sparse,
+          row_count: sparse.length,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
+    };
+    const text = new TextDecoder().decode(encodeExportBundle(b));
+    expect(() => JSON.parse(text)).not.toThrow();
+    const parsed = JSON.parse(text);
+    expect(parsed.tables[0].rows[0]).toEqual({ id: "r1" });
+    expect(parsed.tables[0].rows[1]).toBeNull();
+  });
+
+  it("WeakMap cached path and fallback path produce identical bytes for the same bundle", async () => {
+    // Drive collectUserExportBundle so the WeakMap is populated for
+    // one bundle; then construct a structurally identical bundle by
+    // hand (no cache) and assert bytes match.
+    const rows = [{ id: "row-a", label: "x" }, { id: "row-b", label: "y" }];
+    const emptyLimit = async () => ({ data: [], error: null });
+    const userNotesLimit = async () => ({ data: rows, error: null });
+    const mock = {
+      from: (table: string) => ({
+        select: () => ({
+          eq: () => ({
+            order: () => ({
+              limit: table === "user_notes" ? userNotesLimit : emptyLimit,
+            }),
+            limit: table === "user_notes" ? userNotesLimit : emptyLimit,
+          }),
+          in: () => ({
+            order: () => ({ limit: emptyLimit }),
+            limit: emptyLimit,
+          }),
+        }),
+      }),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cachedBundle = await collectUserExportBundle(mock as any, "u-cache");
+    const cachedBytes = encodeExportBundle(cachedBundle);
+    const cachedText = new TextDecoder().decode(cachedBytes);
+    // Sanity: cached path produces parseable JSON that round-trips.
+    expect(JSON.parse(cachedText)).toEqual(
+      JSON.parse(JSON.stringify(cachedBundle)),
+    );
+
+    // Hand-construct an equivalent bundle (no WeakMap entry — fallback
+    // path will fire) and verify the bytes match.
+    const handBundle: ExportBundle = JSON.parse(JSON.stringify(cachedBundle));
+    const handBytes = encodeExportBundle(handBundle);
+    const handText = new TextDecoder().decode(handBytes);
+    expect(handText).toBe(cachedText);
+  });
+
+  it("red-team #5: a post-collect mutation of cached rows throws (strict-mode freeze)", async () => {
+    // collectUserExportBundle freezes each cached row + the includedRows
+    // array. A post-collect mutation must throw, surfacing the cache-
+    // staleness invariant violation BEFORE encodeExportBundle ships
+    // pre-mutation bytes.
+    const rows = [{ id: "row-mut", field: "before" }];
+    const limit = async () => ({ data: rows, error: null });
+    const emptyLimit = async () => ({ data: [], error: null });
+    const mock = {
+      from: (table: string) => ({
+        select: () => ({
+          eq: () => ({
+            order: () => ({
+              limit: table === "user_notes" ? limit : emptyLimit,
+            }),
+            limit: table === "user_notes" ? limit : emptyLimit,
+          }),
+          in: () => ({
+            order: () => ({ limit: emptyLimit }),
+            limit: emptyLimit,
+          }),
+        }),
+      }),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-freeze");
+    const notes = bundle.tables.find((t) => t.table === "user_notes");
+    expect(notes).toBeDefined();
+    expect(notes!.rows.length).toBe(1);
+    const row = notes!.rows[0] as Record<string, unknown>;
+    // Mutation MUST throw in strict mode (which all ES modules use).
+    expect(() => {
+      row.field = "mutated";
+    }).toThrow();
+    // Length-mutation on the rows array MUST also throw.
+    expect(() => {
+      (notes!.rows as unknown[]).push({ id: "row-injected" });
+    }).toThrow();
+  });
+});
+
+/**
+ * Audit 2026-05-07 red-team #6 (HIGH conf-7): top-level
+ * `row.user_id` on entity / metadata-target retained rows is the
+ * ACTOR's id (typically an admin) — a cross-party identifier.
+ * Pin redactAuditLogForUser scrubs it.
+ */
+describe("redactAuditLogForUser — top-level user_id scrubbed on entity/meta-target retention (red-team #6)", () => {
+  it("blanks row.user_id when subject is retained ONLY because they're the entity (admin grant)", async () => {
+    const { redactAuditLogForUser, REDACTED_PLACEHOLDER } = await import(
+      "@/lib/gdpr-export"
+    );
+    const out = redactAuditLogForUser(
+      [
+        // Admin-actor grants role to subject. user_id is the admin.
+        {
+          id: "g1",
+          user_id: "admin-uuid-A",
+          action: "role.grant",
+          entity_type: "user",
+          entity_id: "subject-id",
+          metadata: { role: "allocator" },
+        },
+      ],
+      "subject-id",
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].user_id).toBe(REDACTED_PLACEHOLDER);
+    // The audit info the subject IS entitled to: action, the role.
+    expect(out[0].action).toBe("role.grant");
+    expect((out[0].metadata as Record<string, unknown>).role).toBe("allocator");
+  });
+
+  it("blanks row.user_id when subject is retained ONLY because metadata.target_user_id matches (admin sanitize)", async () => {
+    const { redactAuditLogForUser, REDACTED_PLACEHOLDER } = await import(
+      "@/lib/gdpr-export"
+    );
+    const out = redactAuditLogForUser(
+      [
+        {
+          id: "s1",
+          user_id: "admin-uuid-B",
+          action: "account.sanitize",
+          entity_type: "system",
+          entity_id: null,
+          metadata: { target_user_id: "subject-id", reason: "user_request" },
+        },
+      ],
+      "subject-id",
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].user_id).toBe(REDACTED_PLACEHOLDER);
+  });
+
+  it("KEEPS row.user_id when subject is the actor (they're entitled to know they acted)", async () => {
+    const { redactAuditLogForUser } = await import("@/lib/gdpr-export");
+    const out = redactAuditLogForUser(
+      [
+        {
+          id: "a1",
+          user_id: "subject-id",
+          action: "api_key.create",
+          metadata: { exchange: "binance" },
+        },
+      ],
+      "subject-id",
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].user_id).toBe("subject-id");
+  });
+
+  it("blanks row.user_id on admin.kill_switch when subject is entity but not actor", async () => {
+    const { redactAuditLogForUser, REDACTED_PLACEHOLDER } = await import(
+      "@/lib/gdpr-export"
+    );
+    const out = redactAuditLogForUser(
+      [
+        {
+          id: "ks1",
+          user_id: "admin-uuid-C",
+          action: "admin.kill_switch",
+          entity_type: "user",
+          entity_id: "subject-id",
+          metadata: { reason: "compliance_hold" },
+        },
+      ],
+      "subject-id",
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].user_id).toBe(REDACTED_PLACEHOLDER);
+  });
+});
+
+/**
+ * Audit 2026-05-07 red-team #3 (HIGH conf-8): null parent ids are
+ * legitimate dropped rows, not a fatal type mismatch. The bundle
+ * should still build with only the affected child rows missing.
+ */
+describe("collectUserExportBundle — indirect null parent IDs are tolerated (red-team #3)", () => {
+  it("a parent row with id=null does NOT trigger fetch_error on its child tables", async () => {
+    // Strategies parent returns one row with id=null among real rows.
+    // Pre-fix this triggered fail-loud and refused the export.
+    const parentRowsWithNull = [
+      { id: "s-1" },
+      { id: null },
+      { id: "s-2" },
+    ];
+    const childRows = [{ id: "t-1", strategy_id: "s-1" }];
+    const mock = {
+      from: (table: string) => {
+        const probeLimit = async () => ({
+          data: parentRowsWithNull,
+          error: null,
+        });
+        const childLimit = async () => ({ data: childRows, error: null });
+        const emptyLimit = async () => ({ data: [], error: null });
+        return {
+          select: (projection: string) => {
+            const limit =
+              projection === "id" && table === "strategies"
+                ? probeLimit
+                : emptyLimit;
+            return {
+              eq: () => ({
+                order: () => ({ limit }),
+                limit,
+              }),
+              in: () => ({
+                order: () => ({
+                  limit: table === "trades" ? childLimit : emptyLimit,
+                }),
+                limit: table === "trades" ? childLimit : emptyLimit,
+              }),
+            };
+          },
+        };
+      },
+    };
+    // Silence the expected console.warn — the null drop is logged
+    // but does NOT fail the bundle.
+    const consoleWarnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-null-parent");
+    consoleWarnSpy.mockRestore();
+
+    // The bundle is NOT marked partial; trades row was fetched OK.
+    expect(bundle.partial).toBe(false);
+    expect(bundle.failed_tables).toEqual([]);
+    const tradesEntry = bundle.tables.find((t) => t.table === "trades");
+    expect(tradesEntry).toBeDefined();
+    expect(tradesEntry!.fetch_error).toBeNull();
+    expect(tradesEntry!.row_count).toBe(1);
+  });
+
+  it("a non-null, non-string parent id STILL triggers fetch_error (bigint/composite case)", async () => {
+    const parentRows = [{ id: 42 as unknown as string }];
+    const mock = {
+      from: (table: string) => {
+        const probeLimit = async () => ({ data: parentRows, error: null });
+        const emptyLimit = async () => ({ data: [], error: null });
+        return {
+          select: (projection: string) => {
+            const limit =
+              projection === "id" && table === "strategies"
+                ? probeLimit
+                : emptyLimit;
+            return {
+              eq: () => ({
+                order: () => ({ limit }),
+                limit,
+              }),
+              in: () => ({
+                order: () => ({ limit: emptyLimit }),
+                limit: emptyLimit,
+              }),
+            };
+          },
+        };
+      },
+    };
+    const consoleErrSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-bigint");
+    consoleErrSpy.mockRestore();
+    const tradesEntry = bundle.tables.find((t) => t.table === "trades");
+    expect(tradesEntry!.fetch_error).toBeTruthy();
+    expect(tradesEntry!.fetch_error).toMatch(/type mismatch/);
+    expect(bundle.partial).toBe(true);
+  });
+});
+
+/**
+ * Audit 2026-05-07 red-team #12 (MED conf-8 chain): when fetch_error
+ * fires on an indirect child fetch, parent_id_truncated MUST be
+ * cleared so forensic readers see ONE cause per failed table.
+ */
+describe("collectUserExportBundle — fetch_error suppresses parent_id_truncated (red-team #12)", () => {
+  it("indirect child SELECT error clears parent_id_truncated on the failed payload", async () => {
+    // Parent probe returns >= cap rows (truncated=true). The child
+    // fetch then errors.
+    const saturatedParents = Array.from({ length: 2000 }, (_, i) => ({
+      id: `p-${i}`,
+    }));
+    const mock = {
+      from: (table: string) => {
+        const probeLimit = async () => ({
+          data: saturatedParents,
+          error: null,
+        });
+        const childErr = async () => ({
+          data: null,
+          error: { code: "57014", message: "child timeout" },
+        });
+        const emptyLimit = async () => ({ data: [], error: null });
+        return {
+          select: (projection: string) => {
+            const limit =
+              projection === "id" && table === "strategies"
+                ? probeLimit
+                : emptyLimit;
+            return {
+              eq: () => ({
+                order: () => ({ limit }),
+                limit,
+              }),
+              in: () => ({
+                order: () => ({
+                  limit: table === "trades" ? childErr : emptyLimit,
+                }),
+                limit: table === "trades" ? childErr : emptyLimit,
+              }),
+            };
+          },
+        };
+      },
+    };
+    const consoleErrSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-err-trunc");
+    consoleErrSpy.mockRestore();
+    const tradesEntry = bundle.tables.find((t) => t.table === "trades");
+    expect(tradesEntry).toBeDefined();
+    expect(tradesEntry!.fetch_error).toBeTruthy();
+    // The double-signal is the bug: pre-fix this was TRUE; fix asserts
+    // FALSE because the parent-id cap is meaningless when the child
+    // never fetched any of those ids.
+    expect(tradesEntry!.parent_id_truncated).toBe(false);
+    expect(bundle.partial).toBe(true);
+    expect(bundle.failed_tables).toContain("trades");
+    // The bundle-level parent_id_truncated_tables list MUST NOT
+    // include the errored-and-cleared table.
+    expect(bundle.parent_id_truncated_tables).not.toContain("trades");
+  });
+});
+
+/**
+ * Audit 2026-05-07 red-team #10 (MED conf-8): the indirect child
+ * SELECT chunks .in() at EXPORT_PARENT_ID_IN_CHUNK so the URL stays
+ * under common edge-proxy limits.
+ */
+describe("collectUserExportBundle — chunked indirect IN under proxy limits (red-team #10)", () => {
+  it("EXPORT_PARENT_ID_IN_CHUNK is <= 500 (keeps URL under ~18KB for UUID args)", () => {
+    expect(EXPORT_PARENT_ID_IN_CHUNK).toBeLessThanOrEqual(500);
+    expect(EXPORT_PARENT_ID_IN_CHUNK).toBeGreaterThanOrEqual(100);
+  });
+
+  it("fans out across multiple .in() SELECTs for > 1000 parent IDs", async () => {
+    // Capture every `.in(col, ids)` call across the indirect child
+    // SELECTs. With 1200 parent ids and chunk=500, the child SELECT
+    // for `trades` should fire 3 times (500 + 500 + 200).
+    const parentRows = Array.from({ length: 1200 }, (_, i) => ({
+      id: `s-${i}`,
+    }));
+    const childRows = [{ id: "t-1", strategy_id: "s-0" }];
+    const inCalls: number[] = [];
+    const mock = {
+      from: (table: string) => {
+        const probeLimit = async () => ({ data: parentRows, error: null });
+        const childLimit = async () => ({ data: childRows, error: null });
+        const emptyLimit = async () => ({ data: [], error: null });
+        return {
+          select: (projection: string) => {
+            const limit =
+              projection === "id" && table === "strategies"
+                ? probeLimit
+                : emptyLimit;
+            return {
+              eq: () => ({
+                order: () => ({ limit }),
+                limit,
+              }),
+              in: (_col: string, ids: unknown[]) => {
+                if (table === "trades") {
+                  inCalls.push(ids.length);
+                }
+                return {
+                  order: () => ({
+                    limit: table === "trades" ? childLimit : emptyLimit,
+                  }),
+                  limit: table === "trades" ? childLimit : emptyLimit,
+                };
+              },
+            };
+          },
+        };
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await collectUserExportBundle(mock as any, "u-chunked");
+
+    // Verify chunking happened
+    expect(inCalls.length).toBeGreaterThan(1);
+    // Every chunk must be <= EXPORT_PARENT_ID_IN_CHUNK (500)
+    for (const n of inCalls) {
+      expect(n).toBeLessThanOrEqual(EXPORT_PARENT_ID_IN_CHUNK);
+    }
+    // Total ids processed must reflect every parent (1200)
+    const total = inCalls.reduce((s, n) => s + n, 0);
+    expect(total).toBe(1200);
+  });
+});
+
+/**
+ * Audit 2026-05-07 red-team #7 (MED conf-9): rowsForTable wired
+ * into production path. The helper's null-on-missing contract is
+ * load-bearing — schema drift surfaces at the call site.
+ */
+describe("rowsForTable + projectedRowsForTable — wired into production (red-team #7)", () => {
+  it("rowsForTable returns null (not []) when the table is missing from the bundle", () => {
+    const bundle: ExportBundle = {
+      schema_version: 1,
+      user_id: "u",
+      generated_at: "2026-04-16T00:00:00.000Z",
+      total_row_count: 0,
+      tables: [],
+      truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
+      partial: false,
+      failed_tables: [],
+    };
+    // user_notes is in the manifest but not in this synthetic bundle:
+    // helper returns null to surface the schema drift.
+    expect(rowsForTable(bundle, "user_notes")).toBeNull();
+    expect(rowsForTable(bundle, "profiles")).toBeNull();
+  });
+
+  it("rowsForTable returns the typed array when the table is present", async () => {
+    const mock = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            order: () => ({
+              limit: async () => ({ data: [{ id: "u" }], error: null }),
+            }),
+            limit: async () => ({ data: [{ id: "u" }], error: null }),
+          }),
+          in: () => ({
+            order: () => ({
+              limit: async () => ({ data: [], error: null }),
+            }),
+            limit: async () => ({ data: [], error: null }),
+          }),
+        }),
+      }),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-wired");
+    const profiles = rowsForTable(bundle, "profiles");
+    expect(profiles).not.toBeNull();
+    expect(Array.isArray(profiles)).toBe(true);
+    expect(profiles!.length).toBe(1);
+  });
+
+  it("projectedRowsForTable returns null for a missing projected entry (schema drift)", () => {
+    const bundle: ExportBundle = {
+      schema_version: 1,
+      user_id: "u",
+      generated_at: "2026-04-16T00:00:00.000Z",
+      total_row_count: 0,
+      tables: [],
+      truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
+      partial: false,
+      failed_tables: [],
+    };
+    expect(projectedRowsForTable(bundle, "api_keys")).toBeNull();
+    expect(projectedRowsForTable(bundle, "audit_log_for_user")).toBeNull();
+  });
+});
+
+/**
+ * Audit 2026-05-07 red-team #13 (MED conf-8): the module-level
+ * ROW_JSON_CACHE WeakMap is keyed by ExportTablePayload object
+ * identity. Two concurrent calls to collectUserExportBundle produce
+ * two separate object identities, so cross-call aliasing is
+ * impossible by construction. Pin this invariant.
+ */
+describe("collectUserExportBundle — concurrent same-user exports observe independent cached rows (red-team #13)", () => {
+  it("two concurrent calls produce bundles whose ExportTablePayload identities are disjoint", async () => {
+    const rowsA = [{ id: "row-A", tag: "alpha" }];
+    const rowsB = [{ id: "row-B", tag: "beta" }];
+    let callIdx = 0;
+    const mock = {
+      from: (_table: string) => ({
+        select: () => ({
+          eq: () => ({
+            order: () => ({
+              limit: async () => {
+                callIdx += 1;
+                // Alternate rows between calls to mimic two concurrent
+                // exports each returning their own row set.
+                return {
+                  data: callIdx % 2 === 1 ? rowsA : rowsB,
+                  error: null,
+                };
+              },
+            }),
+            limit: async () => ({
+              data: callIdx % 2 === 1 ? rowsA : rowsB,
+              error: null,
+            }),
+          }),
+          in: () => ({
+            order: () => ({ limit: async () => ({ data: [], error: null }) }),
+            limit: async () => ({ data: [], error: null }),
+          }),
+        }),
+      }),
+    };
+
+    const [bundleA, bundleB] = await Promise.all([
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      collectUserExportBundle(mock as any, "u-concurrent-1"),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      collectUserExportBundle(mock as any, "u-concurrent-2"),
+    ]);
+
+    // The two bundles produce distinct ExportTablePayload object
+    // identities. Because the WeakMap is keyed by object identity,
+    // each bundle's cache entries are independent.
+    const profilesA = bundleA.tables.find((t) => t.table === "profiles");
+    const profilesB = bundleB.tables.find((t) => t.table === "profiles");
+    expect(profilesA).toBeDefined();
+    expect(profilesB).toBeDefined();
+    expect(profilesA).not.toBe(profilesB);
+
+    // Encoding each bundle through encodeExportBundle MUST produce
+    // bytes derived from its own cached row content — no cross-bundle
+    // aliasing. Decode each, parse, and confirm the per-bundle row
+    // content rides into the correct encoding.
+    const textA = new TextDecoder().decode(encodeExportBundle(bundleA));
+    const textB = new TextDecoder().decode(encodeExportBundle(bundleB));
+    expect(textA).not.toBe(textB);
+    expect(JSON.parse(textA)).toEqual(JSON.parse(JSON.stringify(bundleA)));
+    expect(JSON.parse(textB)).toEqual(JSON.parse(JSON.stringify(bundleB)));
   });
 });
 

@@ -544,6 +544,14 @@ describe("redactAuditLogForUser — admin-actor UUID redaction (specialist apply
         }
       }
     }
+    // Audit 2026-05-07 red-team #6 (HIGH conf-7): the top-level
+    // `row.user_id` IS the admin's UUID on every row in this test
+    // (subject is retained via entity_id, not as actor). It MUST
+    // also be redacted — pre-fix the metadata-only redaction left
+    // the admin's auth.users id in plain sight.
+    for (const row of out) {
+      expect(row.user_id).toBe(REDACTED_PLACEHOLDER);
+    }
     // The safe own-state field (role) survives.
     expect((out[0].metadata as Record<string, unknown>).role).toBe("allocator");
   });
