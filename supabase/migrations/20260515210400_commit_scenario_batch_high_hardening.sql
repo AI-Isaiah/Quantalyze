@@ -545,9 +545,10 @@ COMMENT ON FUNCTION public.commit_scenario_batch IS
 -- --------------------------------------------------------------------------
 DO $$
 DECLARE
-  v_body   TEXT;
-  v_exists BOOLEAN;
-  v_count  INTEGER;
+  v_body            TEXT;
+  v_body_stripped   TEXT;
+  v_exists          BOOLEAN;
+  v_count           INTEGER;
 BEGIN
   -- H-0984: covering index present
   SELECT EXISTS(
@@ -579,25 +580,33 @@ BEGIN
   IF v_body IS NULL THEN
     RAISE EXCEPTION 'audit-2026-05-07: commit_scenario_batch not installed';
   END IF;
-  IF v_body NOT LIKE '%50-diff per-batch cap%' THEN
+  -- audit-2026-05-07 Phase C red-team #7: strip SQL line-comments
+  -- from the body before regex-probing for live PERFORM calls.
+  -- pg_get_functiondef preserves `--` comments verbatim, so a
+  -- commented-out PERFORM would otherwise satisfy the regex.
+  v_body_stripped := regexp_replace(v_body, '--[^\n]*', '', 'g');
+
+  IF v_body_stripped NOT LIKE '%50-diff per-batch cap%' THEN
     RAISE EXCEPTION 'audit-2026-05-07 H-0976/H-0977 verification failed: 50-diff cap missing from body';
   END IF;
-  -- audit-2026-05-07 PTA #1 / SFT #6 (Phase B): match the LITERAL
-  -- 'scenario.commit' string only when it appears inside a PERFORM
-  -- call to log_audit_event_service. The earlier substring probe
-  -- matched both the live PERFORM and the comment block above it,
-  -- so a refactor that commented out the PERFORM would pass.
-  IF v_body !~* 'PERFORM\s+public\.log_audit_event_service[^;]*''scenario\.commit''' THEN
+  -- audit-2026-05-07 PTA #1 / SFT #6 (Phase B) + Phase C red-team #7:
+  -- match the LITERAL 'scenario.commit' only when it appears inside a
+  -- live (non-commented) PERFORM call to log_audit_event_service.
+  IF v_body_stripped !~* 'PERFORM\s+public\.log_audit_event_service[^;]*''scenario\.commit''' THEN
     RAISE EXCEPTION 'audit-2026-05-07 H-0974 verification failed: scenario.commit audit emission not present as a live PERFORM log_audit_event_service call';
   END IF;
-  -- Preservation gates — mig 128 / mig 131
-  IF v_body NOT LIKE '%value_usd > 0%' THEN
+  -- Preservation gates — mig 128 / mig 131.
+  -- Positive probes use v_body_stripped (Phase C #7) so a commented-
+  -- out preservation clause does not satisfy the check. The negative
+  -- probe for `new_weight` keeps v_body so a comment that even
+  -- mentions the legacy field also aborts (max-conservative).
+  IF v_body_stripped NOT LIKE '%value_usd > 0%' THEN
     RAISE EXCEPTION 'audit-2026-05-07: commit_scenario_batch lost mig 128 P1957 value_usd guard';
   END IF;
   IF v_body LIKE '%new_weight%' THEN
     RAISE EXCEPTION 'audit-2026-05-07: commit_scenario_batch resurrected mig 128 P1956 legacy new_weight fallback';
   END IF;
-  IF v_body NOT LIKE '%scenario_commit_idempotency%' THEN
+  IF v_body_stripped NOT LIKE '%scenario_commit_idempotency%' THEN
     RAISE EXCEPTION 'audit-2026-05-07: commit_scenario_batch lost mig 131 idempotency reservation';
   END IF;
   -- audit-2026-05-07 R#3: re-assert PUBLIC EXECUTE absence on the 4-arg

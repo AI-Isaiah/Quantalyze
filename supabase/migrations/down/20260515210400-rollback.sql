@@ -18,8 +18,12 @@ SET lock_timeout = '5s';
 
 DROP INDEX IF EXISTS public.allocator_holdings_ownership_probe_idx;
 
-DROP FUNCTION IF EXISTS public.commit_scenario_batch(uuid, jsonb, text, text);
-
+-- audit-2026-05-07 Phase C red-team #11: the DROP FUNCTION was a
+-- symmetric leftover from the forward migration's pre-Phase-B
+-- shape. CREATE OR REPLACE preserves ACLs and dependent objects
+-- atomically; an explicit DROP-then-CREATE opens a small window
+-- where in-flight supabase.rpc('commit_scenario_batch', ...) calls
+-- return "function not found".
 CREATE OR REPLACE FUNCTION public.commit_scenario_batch(
   p_allocator_id uuid,
   p_diffs jsonb,
