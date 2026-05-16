@@ -114,26 +114,28 @@ SET lock_timeout = '5s';
 -- 8 KB leaves three orders of magnitude of headroom while bounding
 -- the abuse surface at one page's worth of TOAST.
 --
--- Backfill: any existing row that already exceeds 8 KB gets its
--- metadata coerced to '{}'::jsonb so VALIDATE CONSTRAINT can succeed.
--- A NOTICE is emitted per coerced row for the runbook audit trail.
--- Expected count in production: zero (the writers cited above all stay
--- well below the cap).
+-- Backfill: expected count in production is zero (the writers cited
+-- above all stay well below the cap). audit-2026-05-07 SFT #2 (Phase
+-- B): the migration FAILS LOUD on any oversized row rather than
+-- silently coercing metadata → '{}'. Silent coercion would destroy
+-- the very payload the audit wanted preserved for root-cause
+-- analysis (compromised writer, runaway backfill, etc). If the count
+-- is non-zero the operator must inspect, archive, and manually
+-- coerce the rows before re-running this migration.
 DO $$
 DECLARE
-  v_coerced INTEGER;
+  v_oversized INTEGER;
 BEGIN
-  WITH coerced AS (
-    UPDATE compute_jobs
-       SET metadata = '{}'::jsonb
-     WHERE metadata IS NOT NULL
-       AND octet_length(metadata::text) > 8192
-    RETURNING id
-  )
-  SELECT count(*) INTO v_coerced FROM coerced;
+  SELECT count(*) INTO v_oversized
+    FROM compute_jobs
+   WHERE metadata IS NOT NULL
+     AND octet_length(metadata::text) > 8192;
 
-  IF v_coerced > 0 THEN
-    RAISE NOTICE 'audit-2026-05-07 H-0849: coerced % oversized compute_jobs.metadata rows to ''{}''. Investigate the writer.', v_coerced;
+  IF v_oversized > 0 THEN
+    RAISE EXCEPTION
+      'audit-2026-05-07 H-0849: % compute_jobs rows carry metadata over the 8 KB cap. Inspect with: SELECT id, claimed_by, status, octet_length(metadata::text) FROM compute_jobs WHERE octet_length(metadata::text) > 8192 ORDER BY octet_length(metadata::text) DESC. Archive the offending payloads to forensic storage, manually coerce / DELETE the rows, then re-run this migration.',
+      v_oversized
+      USING ERRCODE = 'check_violation';
   END IF;
 END $$;
 
@@ -199,7 +201,8 @@ COMMENT ON INDEX compute_jobs_parent_lookup IS
 -- are still coerced because their claimed_by is purely historical.
 DO $$
 DECLARE
-  v_coerced          INTEGER;
+  v_record           RECORD;
+  v_coerced          INTEGER := 0;
   v_live_violations  INTEGER;
 BEGIN
   SELECT count(*) INTO v_live_violations
@@ -214,18 +217,27 @@ BEGIN
       USING ERRCODE = 'check_violation';
   END IF;
 
-  WITH coerced AS (
-    UPDATE compute_jobs
-       SET claimed_by = NULL
+  -- audit-2026-05-07 SFT #1 (Phase B): emit a per-row NOTICE with the
+  -- original claimed_by before nulling it so the migration apply log
+  -- carries the forensic trail (which worker / pod / id pattern was
+  -- non-conforming). The aggregate-count NOTICE alone left no
+  -- artifact for incident retrospectives.
+  FOR v_record IN
+    SELECT id, claimed_by, status
+      FROM compute_jobs
      WHERE claimed_by IS NOT NULL
        AND (length(claimed_by) > 128
             OR claimed_by !~ '^[A-Za-z0-9_:./-]+$')
-    RETURNING id
-  )
-  SELECT count(*) INTO v_coerced FROM coerced;
+       AND status NOT IN ('pending', 'running', 'done_pending_children')
+  LOOP
+    UPDATE compute_jobs SET claimed_by = NULL WHERE id = v_record.id;
+    RAISE NOTICE 'audit-2026-05-07 H-0857: coerced compute_jobs.id=% claimed_by_before=% status=% (terminal-state).',
+      v_record.id, v_record.claimed_by, v_record.status;
+    v_coerced := v_coerced + 1;
+  END LOOP;
 
   IF v_coerced > 0 THEN
-    RAISE NOTICE 'audit-2026-05-07 H-0857: coerced % out-of-shape compute_jobs.claimed_by rows (terminal-state only) to NULL.', v_coerced;
+    RAISE NOTICE 'audit-2026-05-07 H-0857: total % terminal-state compute_jobs.claimed_by rows coerced to NULL.', v_coerced;
   END IF;
 END $$;
 
