@@ -40,6 +40,146 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     expect(result.stdout).toContain("manifest covers all");
   }, 30_000);
 
+  it("H-0455/H-0457: exits 1 when a manifest entry has no matching sanitize_user policy", () => {
+    // Add a brand-new manifest entry whose name does NOT appear in
+    // the sanitize_user matrix or DELETE/UPDATE body — and is NOT in
+    // SANITIZE_PARITY_ALLOWLIST. The parity check should fail loud.
+    const scratch = mkdtempSync(join(tmpdir(), "gdpr-parity-test-"));
+    mkdirSync(join(scratch, "scripts"), { recursive: true });
+    mkdirSync(join(scratch, "src", "lib"), { recursive: true });
+    mkdirSync(join(scratch, "supabase"), { recursive: true });
+
+    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-gdpr-export-coverage.ts"));
+    cpSync(
+      join(REPO_ROOT, MIGRATIONS_REL),
+      join(scratch, MIGRATIONS_REL),
+      { recursive: true },
+    );
+
+    const originalManifest = readFileSync(MANIFEST_ABS, "utf8");
+    // Inject a synthetic manifest entry whose table name is "xxx_orphan_table".
+    // The sanitize_user matrix has no row for it AND the regex won't
+    // find a DELETE FROM xxx_orphan_table or UPDATE xxx_orphan_table.
+    // The migration-coverage check should NOT fail (there's no migration
+    // declaring xxx_orphan_table either), but the parity check MUST fail.
+    const mutated = originalManifest.replace(
+      /\{\s*kind:\s*"direct",\s*table:\s*"user_notes",\s*user_column:\s*"user_id"\s*\},?/,
+      `{ kind: "direct", table: "user_notes", user_column: "user_id" },
+  { kind: "direct", table: "xxx_orphan_table", user_column: "user_id" },`,
+    );
+    expect(mutated).not.toBe(originalManifest);
+    writeFileSync(join(scratch, MANIFEST_REL), mutated);
+
+    const result = spawnSync("npx", ["tsx", "scripts/check-gdpr-export-coverage.ts"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("H-0455/H-0457");
+    expect(result.stderr).toContain("xxx_orphan_table");
+  }, 30_000);
+
+  it("red-team #9: exits 1 when a projected entry's source_table is no longer in the sanitize matrix", () => {
+    // Audit 2026-05-07 red-team #9 (MED conf-8): the pre-fix parity
+    // check happily skipped allowlisted projection names without
+    // validating that their underlying source_table is still covered.
+    // The new sub-check walks every projected entry where bundle-name
+    // != source_table and asserts BOTH names are covered. A source-
+    // table rename (audit_log → audit_events) without an allowlist
+    // update would dangle the projection's provenance.
+    //
+    // Simulate this by injecting a synthetic projected entry whose
+    // source_table doesn't exist anywhere — no matrix coverage, no
+    // migration declaration, not in allowlist. The new check should
+    // fail loud with a message naming the source_table.
+    const scratch = mkdtempSync(join(tmpdir(), "gdpr-rt9-test-"));
+    mkdirSync(join(scratch, "scripts"), { recursive: true });
+    mkdirSync(join(scratch, "src", "lib"), { recursive: true });
+    mkdirSync(join(scratch, "supabase"), { recursive: true });
+
+    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-gdpr-export-coverage.ts"));
+    cpSync(
+      join(REPO_ROOT, MIGRATIONS_REL),
+      join(scratch, MIGRATIONS_REL),
+      { recursive: true },
+    );
+
+    const originalManifest = readFileSync(MANIFEST_ABS, "utf8");
+    // Inject a synthetic projected entry that names a non-existent
+    // source_table. The bundle name is also synthetic (so it's not in
+    // any sanitize matrix), but the bundle-name failure mode is
+    // already exercised by the H-0455/H-0457 test above — the unique
+    // payload here is the SOURCE_TABLE failure.
+    const mutated = originalManifest.replace(
+      /\{\s*kind:\s*"direct",\s*table:\s*"user_notes",\s*user_column:\s*"user_id"\s*\},?/,
+      `{ kind: "direct", table: "user_notes", user_column: "user_id" },
+  {
+    kind: "projected",
+    table: "xxx_synthetic_projection",
+    source_table: "xxx_renamed_source",
+    user_column: "user_id",
+    project: redactAuditLogForUser,
+  },`,
+    );
+    expect(mutated).not.toBe(originalManifest);
+    writeFileSync(join(scratch, MANIFEST_REL), mutated);
+
+    const result = spawnSync(
+      "npx",
+      ["tsx", "scripts/check-gdpr-export-coverage.ts"],
+      { encoding: "utf8", cwd: scratch },
+    );
+    expect(result.status).toBe(1);
+    // Either the H-0455/H-0457 check OR the red-team #9 sub-check
+    // surfaces this. The injected entry's source_table is missing
+    // from every matrix; both checks ought to point at it.
+    expect(result.stderr).toMatch(/xxx_renamed_source|xxx_synthetic_projection/);
+  }, 30_000);
+
+  it("red-team #9: exits 1 when SANITIZE_PARITY_ALLOWLIST has a stale entry", () => {
+    // The allowlist documents WHY a manifest entry is intentionally
+    // out of the sanitize matrix. If a future PR removes the manifest
+    // entry but forgets the allowlist, the allowlist becomes a
+    // dangling provenance comment. The new check surfaces this by
+    // comparing every allowlist key against the manifest's
+    // table/source_table/parent_table union and failing loud on any
+    // miss.
+    const scratch = mkdtempSync(join(tmpdir(), "gdpr-rt9-stale-"));
+    mkdirSync(join(scratch, "scripts"), { recursive: true });
+    mkdirSync(join(scratch, "src", "lib"), { recursive: true });
+    mkdirSync(join(scratch, "supabase"), { recursive: true });
+
+    const originalHook = readFileSync(HOOK_SCRIPT, "utf8");
+    // Add a stale allowlist entry pointing at a non-existent table.
+    // The manifest is untouched, so the new check fails with a
+    // "stale allowlist entry" message.
+    const mutatedHook = originalHook.replace(
+      /const SANITIZE_PARITY_ALLOWLIST:[^=]*=\s*\{/,
+      (m) =>
+        `${m}\n  xxx_stale_dangling_entry: { reason: "test-injection", addedIn: "test" },`,
+    );
+    expect(mutatedHook).not.toBe(originalHook);
+    writeFileSync(
+      join(scratch, "scripts", "check-gdpr-export-coverage.ts"),
+      mutatedHook,
+    );
+    cpSync(
+      join(REPO_ROOT, MIGRATIONS_REL),
+      join(scratch, MIGRATIONS_REL),
+      { recursive: true },
+    );
+    cpSync(MANIFEST_ABS, join(scratch, MANIFEST_REL));
+
+    const result = spawnSync(
+      "npx",
+      ["tsx", "scripts/check-gdpr-export-coverage.ts"],
+      { encoding: "utf8", cwd: scratch },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("stale entry");
+    expect(result.stderr).toContain("xxx_stale_dangling_entry");
+  }, 30_000);
+
   it("exits 1 with a specific error when a user-owned table is missing", () => {
     // Copy the script + manifest + migrations into a scratch dir so we
     // can mutate the manifest without polluting the working tree.

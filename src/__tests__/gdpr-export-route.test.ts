@@ -21,6 +21,7 @@ const {
   getUserMock,
   assertSameOriginMock,
   checkLimitMock,
+  resetUsedTokensMock,
   uploadMock,
   createSignedUrlMock,
   removeMock,
@@ -30,6 +31,7 @@ const {
   getUserMock: vi.fn(),
   assertSameOriginMock: vi.fn<(r: unknown) => Response | null>(() => null),
   checkLimitMock: vi.fn(),
+  resetUsedTokensMock: vi.fn(),
   uploadMock: vi.fn(),
   createSignedUrlMock: vi.fn(),
   removeMock: vi.fn(),
@@ -71,13 +73,37 @@ vi.mock("@/lib/csrf", () => ({
 }));
 
 vi.mock("@/lib/ratelimit", () => ({
-  exportLimiter: {}, // placeholder — checkLimit is the actual gate
+  // Audit 2026-05-07 red-team #2 (HIGH conf-8): the route refunds the
+  // 1/day token on every refusal path via
+  // `exportLimiter.resetUsedTokens(key)`. The mock exposes that method
+  // so the refund spec is testable.
+  exportLimiter: {
+    resetUsedTokens: (key: string) => resetUsedTokensMock(key),
+  },
   checkLimit: (limiter: unknown, key: string) => checkLimitMock(limiter, key),
 }));
 
 vi.mock("@/lib/gdpr-export", () => ({
   collectUserExportBundle: (admin: unknown, userId: string) =>
     collectBundleMock(admin, userId),
+  // The route now uses encodeExportBundle (specialist apply, performance
+  // HIGH conf-9: single-pass row encode). For the route tests we don't
+  // care about the byte-precise output — return a minimal Uint8Array so
+  // the upload mock observes a Uint8Array as expected.
+  encodeExportBundle: (bundle: unknown) =>
+    new TextEncoder().encode(JSON.stringify(bundle)),
+  // Audit 2026-05-07 red-team #7: the route wires `rowsForTable(bundle,
+  // "profiles")` into the production download path so the null-on-
+  // missing schema-drift contract becomes load-bearing. The route-
+  // level mock returns the seeded bundle's profiles rows; tests that
+  // want to exercise the manifest-drift path override per-test.
+  rowsForTable: (
+    bundle: { tables?: Array<{ table: string; rows: unknown[] }> },
+    table: string,
+  ): unknown[] | null => {
+    const entry = bundle.tables?.find((t) => t.table === table);
+    return entry ? entry.rows : null;
+  },
 }));
 
 import { NextRequest } from "next/server";
@@ -99,34 +125,50 @@ async function loadRoute() {
 }
 
 /**
- * P448 (audit 2026-05-12 Lane E) - peak memory invariant.
+ * P448 (audit 2026-05-12 Lane E) + specialist apply 2026-05-07
+ * performance HIGH conf-9 — peak memory invariant.
  *
  * The legacy upload path held `bundleJson` and `bundleBytes` in
  * scope simultaneously, peaking memory at ~3x the payload size
- * (object + JSON string + bytes). The fix drops the named
- * intermediate so the JSON string is unreachable as soon as the
- * encode call returns, letting GC reclaim it before the upload
- * round-trip.
+ * (object + JSON string + bytes). P448's fused expression cut the
+ * named intermediate. The specialist apply went further: replaced
+ * `new TextEncoder().encode(JSON.stringify(bundle))` with
+ * `encodeExportBundle(bundle)`, which stitches the upload from the
+ * cached per-row JSON strings stored on each
+ * `ExportTablePayload.__cached_rows_json`. The intermediate string
+ * is NEVER materialized, dropping peak heap from ~300MB to ~200MB
+ * on the 100MB bundle path.
  *
- * Source-grep assertion: the variable name `bundleJson` must not
- * appear in the route. A drift back to a separate `const
- * bundleJson = ...` line would fail this test.
+ * Source-grep assertions:
+ *   - `bundleJson` named intermediate MUST NOT reappear.
+ *   - The route MUST call `encodeExportBundle(bundle)` (not the
+ *     legacy `TextEncoder().encode(JSON.stringify(bundle))`).
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-describe("POST /api/account/export - peak-memory invariant (P448)", () => {
-  it("does not retain a named bundleJson intermediate (fused stringify/encode)", () => {
+describe("POST /api/account/export - peak-memory invariant (P448 + specialist apply)", () => {
+  it("uses encodeExportBundle (no double JSON.stringify of rows)", () => {
     const src = readFileSync(
       join(process.cwd(), "src", "app", "api", "account", "export", "route.ts"),
       "utf8",
     );
-    // Pattern: `const bundleJson` or `let bundleJson` at the top of a
-    // line. The fused expression `new TextEncoder().encode(JSON.stringify(bundle))`
-    // is the post-fix shape.
+    // Legacy named intermediate must not reappear.
     expect(src).not.toMatch(/\b(?:const|let|var)\s+bundleJson\b/);
-    // Sanity check: the fused expression IS present.
-    expect(src).toMatch(/TextEncoder\(\)\.encode\(\s*JSON\.stringify\(\s*bundle\s*\)\s*\)/);
+    // Specialist apply: encodeExportBundle is the single-pass shape.
+    expect(src).toMatch(/\bencodeExportBundle\(\s*bundle\s*\)/);
+    // The fused TextEncoder/JSON.stringify(bundle) call must NOT be
+    // present as the bundleBytes assignment — its replacement
+    // (encodeExportBundle) avoids the re-serialization of every row.
+    // Strip line comments so the regex doesn't match the explanatory
+    // docstring next to the new call.
+    const codeOnly = src
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
+    expect(codeOnly).not.toMatch(
+      /TextEncoder\(\)\.encode\(\s*JSON\.stringify\(\s*bundle\s*\)\s*\)/,
+    );
   });
 });
 
@@ -138,13 +180,28 @@ describe("POST /api/account/export — orphan cleanup on sign failure (I2)", () 
       data: { user: { id: "user-123", email: "u@test.com" } },
     });
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    resetUsedTokensMock.mockResolvedValue(undefined);
     collectBundleMock.mockResolvedValue({
       schema_version: 1,
       user_id: "user-123",
       generated_at: "2026-04-16T00:00:00Z",
-      total_row_count: 0,
-      tables: [],
+      total_row_count: 1,
+      // Audit 2026-05-07 red-team #7: the route now wires
+      // `rowsForTable(bundle, "profiles")` as a load-bearing manifest-
+      // drift detector. Include a profiles entry in the bundle so the
+      // happy-ish path reaches the sign-failure cleanup branch.
+      tables: [
+        {
+          table: "profiles",
+          rows: [{ id: "user-123" }],
+          row_count: 1,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
       truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
       partial: false,
       failed_tables: [],
     });
@@ -256,16 +313,18 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
       data: { user: { id: "user-ttl", email: "ttl@test.com" } },
     });
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    resetUsedTokensMock.mockResolvedValue(undefined);
     collectBundleMock.mockResolvedValue({
       schema_version: 1,
       user_id: "user-ttl",
       generated_at: "2026-04-16T00:00:00Z",
       total_row_count: 3,
       tables: [
-        { table: "profiles", rows: [{ id: "user-ttl" }], row_count: 1, truncated_at_cap: false, fetch_error: null },
-        { table: "api_keys", rows: [{ id: "k1" }, { id: "k2" }], row_count: 2, truncated_at_cap: false, fetch_error: null },
+        { table: "profiles", rows: [{ id: "user-ttl" }], row_count: 1, truncated_at_cap: false, parent_id_truncated: false, fetch_error: null },
+        { table: "api_keys", rows: [{ id: "k1" }, { id: "k2" }], row_count: 2, truncated_at_cap: false, parent_id_truncated: false, fetch_error: null },
       ],
       truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
       partial: false,
       failed_tables: [],
     });
@@ -326,6 +385,137 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     expect(body.rows).toBeUndefined();
   });
 
+  it("specialist apply: refuses to mint URL on ANY truncation (size cap / row cap / parent-id cap)", async () => {
+    // Build a bundle that exercises all three truncation paths. Pre-
+    // apply, the route returned 200 OK with advisory `incomplete_reasons`.
+    // Per the specialist finding (silent-failure HIGH conf-9), that mixes
+    // two policies on identical "incomplete export" modes — fetch errors
+    // got a 500 refusal but truncation got a 200 with text the client
+    // could trivially ignore. The apply extends the gate so all four
+    // modes return the same refusal shape.
+    collectBundleMock.mockResolvedValueOnce({
+      schema_version: 1,
+      user_id: "user-trunc",
+      generated_at: "2026-04-16T00:00:00Z",
+      total_row_count: 50000,
+      tables: [
+        {
+          table: "trades",
+          rows: [],
+          row_count: 50000,
+          truncated_at_cap: true,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+        {
+          table: "strategy_analytics",
+          rows: [],
+          row_count: 0,
+          truncated_at_cap: false,
+          parent_id_truncated: true,
+          fetch_error: null,
+        },
+      ],
+      truncated_at_size_cap: true,
+      parent_id_truncated_tables: ["strategy_analytics"],
+      partial: false,
+      failed_tables: [],
+    });
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest());
+    expect(res.status).toBe(500);
+
+    const body = (await res.json()) as {
+      error?: string;
+      code?: string;
+      request_id?: string;
+      truncated_at_size_cap?: unknown;
+      incomplete_reasons?: unknown;
+    };
+    // Stable code so clients can branch on the kind of refusal.
+    expect(body.code).toBe("export_truncated");
+    expect(typeof body.request_id).toBe("string");
+    expect(body.request_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    // The truncation detail is server-log-only — clients see a stable
+    // error + a request_id to quote to support.
+    expect(body.truncated_at_size_cap).toBeUndefined();
+    expect(body.incomplete_reasons).toBeUndefined();
+
+    // The storage round-trip MUST NOT have fired — the gate runs before
+    // upload, so the 100MB upload cost is also saved.
+    expect(uploadMock).not.toHaveBeenCalled();
+    expect(createSignedUrlMock).not.toHaveBeenCalled();
+
+    // Server-side log carries the truncation map for forensics.
+    const logCall = consoleErrorSpy.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].includes("[api/account/export]"),
+    );
+    expect(logCall).toBeDefined();
+    const ctx = logCall![1] as Record<string, unknown>;
+    expect(ctx.truncated_at_size_cap).toBe(true);
+    expect(ctx.row_capped_tables).toEqual(["trades"]);
+    expect(ctx.parent_id_truncated_tables).toEqual(["strategy_analytics"]);
+    const reasons = ctx.incomplete_reasons as string[];
+    expect(reasons.some((r) => r.startsWith("size_cap_exceeded"))).toBe(true);
+    expect(
+      reasons.some(
+        (r) => r.startsWith("per_table_row_cap_reached") && r.includes("trades"),
+      ),
+    ).toBe(true);
+    expect(
+      reasons.some(
+        (r) =>
+          r.startsWith("parent_id_cap_reached") &&
+          r.includes("strategy_analytics"),
+      ),
+    ).toBe(true);
+
+    // The refusal IS audited: forensic reconstruction must survive
+    // response-body discard. account.export_refused is emitted with
+    // the truncation booleans + counts in metadata.
+    //
+    // Audit 2026-05-07 red-team #1 (HIGH conf-9): the audit metadata
+    // MUST NOT include verbatim table-name lists — those are schema
+    // reconnaissance that a subject can read out of their next
+    // successful export via audit_log_for_user. Aggregate counts
+    // give regulators the "did the controller know" signal without
+    // bundling the schema map. The full table-name lists remain on
+    // the server-side console.error.
+    await Promise.resolve();
+    await Promise.resolve();
+    const refusedCall = logAuditRpcMock.mock.calls.find(
+      (c) =>
+        c[0] === "log_audit_event" && c[1]?.p_action === "account.export_refused",
+    );
+    expect(refusedCall).toBeDefined();
+    const md = (refusedCall![1] as Record<string, unknown>)
+      .p_metadata as Record<string, unknown>;
+    expect(md.truncated_at_size_cap).toBe(true);
+    expect(md.row_capped_table_count).toBe(1);
+    expect(md.parent_id_truncated_table_count).toBe(1);
+    expect(md.failed_table_count).toBe(0);
+    // Schema-reconnaissance fields MUST NOT appear on the audit row.
+    expect(md.row_capped_tables).toBeUndefined();
+    expect(md.parent_id_truncated_tables).toBeUndefined();
+    expect(md.failed_tables).toBeUndefined();
+    expect(md.incomplete_reasons).toBeUndefined();
+
+    // Audit 2026-05-07 red-team #2 (HIGH conf-8): refund the 1/day
+    // rate-limit token on refusal. Pre-fix the truncation was
+    // deterministic and the consumed token locked the user out
+    // permanently. The refund call MUST fire with the user's
+    // identifier — verifies the spec's "refund on refusal" invariant.
+    expect(resetUsedTokensMock).toHaveBeenCalledTimes(1);
+    expect(resetUsedTokensMock.mock.calls[0][0]).toBe("export:user-ttl");
+
+    consoleErrorSpy.mockRestore();
+  });
+
   it("emits account.export audit event with storage_path + expires_at + table_count + total_row_count", async () => {
     const { POST } = await loadRoute();
     const res = await POST(makeRequest());
@@ -351,6 +541,60 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     expect(metadata.table_count).toBe(2);
     expect(metadata.total_row_count).toBe(3);
     expect(metadata.truncated_at_size_cap).toBe(false);
+    // Audit 2026-05-07 red-team #7: the wired-up rowsForTable("profiles")
+    // helper's output surfaces into the audit metadata as
+    // `profiles_row_count`. A future drift that drops profiles from
+    // the manifest would have either short-circuited above (manifest
+    // drift gate) or left this field at 0 — both observable.
+    expect(metadata.profiles_row_count).toBe(1);
+
+    // Audit 2026-05-07 red-team #2: token refund MUST NOT fire on
+    // the happy path. The 1/day cap remains in effect when the
+    // bundle ships normally.
+    expect(resetUsedTokensMock).not.toHaveBeenCalled();
+  });
+
+  // Audit 2026-05-07 red-team #7 (MED conf-9): the route invokes
+  // rowsForTable(bundle, "profiles") as a load-bearing manifest-drift
+  // detector. A bundle without profiles must surface
+  // export_manifest_drift + refund the rate-limit token.
+  it("red-team #7: refuses with export_manifest_drift when bundle lacks profiles", async () => {
+    collectBundleMock.mockResolvedValueOnce({
+      schema_version: 1,
+      user_id: "user-ttl",
+      generated_at: "2026-04-16T00:00:00Z",
+      total_row_count: 0,
+      // No profiles entry — schema drift.
+      tables: [
+        {
+          table: "user_notes",
+          rows: [],
+          row_count: 0,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
+      truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
+      partial: false,
+      failed_tables: [],
+    });
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest());
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { code?: string; error?: string };
+    expect(body.code).toBe("export_manifest_drift");
+    // Token refund fires so the user isn't locked out by a deploy bug.
+    expect(resetUsedTokensMock).toHaveBeenCalledTimes(1);
+    expect(resetUsedTokensMock.mock.calls[0][0]).toBe("export:user-ttl");
+    // No upload / signed URL on the drift path.
+    expect(uploadMock).not.toHaveBeenCalled();
+    expect(createSignedUrlMock).not.toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
   });
 });
 
@@ -363,13 +607,29 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
     });
     // Default: NOT rate-limited; each test overrides for the 429 case.
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    resetUsedTokensMock.mockResolvedValue(undefined);
     collectBundleMock.mockResolvedValue({
       schema_version: 1,
       user_id: "user-429",
       generated_at: "2026-04-16T00:00:00Z",
-      total_row_count: 0,
-      tables: [],
+      total_row_count: 1,
+      // Audit 2026-05-07 red-team #7: `rowsForTable(bundle, "profiles")`
+      // is wired into the production download path; include a profiles
+      // entry so the happy-ish 200 branch can proceed past the manifest-
+      // drift gate. Tests for the 429 / partial / truncated paths exit
+      // before reaching this gate.
+      tables: [
+        {
+          table: "profiles",
+          rows: [{ id: "user-429" }],
+          row_count: 1,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
       truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
       partial: false,
       failed_tables: [],
     });
@@ -445,10 +705,11 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       generated_at: "2026-04-16T00:00:00Z",
       total_row_count: 0,
       tables: [
-        { table: "profiles", rows: [], row_count: 0, truncated_at_cap: false, fetch_error: null },
-        { table: "api_keys", rows: [], row_count: 0, truncated_at_cap: false, fetch_error: "direct select failed for api_keys: statement timeout" },
+        { table: "profiles", rows: [], row_count: 0, truncated_at_cap: false, parent_id_truncated: false, fetch_error: null },
+        { table: "api_keys", rows: [], row_count: 0, truncated_at_cap: false, parent_id_truncated: false, fetch_error: "direct select failed for api_keys: statement timeout" },
       ],
       truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
       partial: true,
       failed_tables: ["api_keys"],
     });
@@ -484,13 +745,41 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
     expect(uploadMock).not.toHaveBeenCalled();
     expect(createSignedUrlMock).not.toHaveBeenCalled();
 
-    // No audit emission for the partial-refuse path.
+    // Audit 2026-05-07 red-team #2: token refund MUST fire on the
+    // export_partial path too — a transient-looking refusal still
+    // locks the user out for 24h without the refund.
+    expect(resetUsedTokensMock).toHaveBeenCalledTimes(1);
+    expect(resetUsedTokensMock.mock.calls[0][0]).toBe("export:user-429");
+
+    // The happy-path account.export audit MUST NOT fire (the export
+    // never produced a signed URL). A NEW account.export_refused audit
+    // DOES fire so forensic reconstruction survives the response-body
+    // discard (specialist apply, low-conf-7 silent-failure: audit-log
+    // fire-and-forget on the refusal path now has a durable trail).
     await Promise.resolve();
     await Promise.resolve();
     const exportCall = logAuditRpcMock.mock.calls.find(
       (c) => c[0] === "log_audit_event" && c[1]?.p_action === "account.export",
     );
     expect(exportCall).toBeUndefined();
+    const refusedCall = logAuditRpcMock.mock.calls.find(
+      (c) =>
+        c[0] === "log_audit_event" && c[1]?.p_action === "account.export_refused",
+    );
+    expect(refusedCall).toBeDefined();
+
+    // Audit 2026-05-07 red-team #1 (HIGH conf-9): the refused-export
+    // audit metadata MUST NOT contain table-name lists (schema
+    // reconnaissance), only the per-mode booleans and aggregate
+    // counts. Pin this on the partial path AND the truncated path —
+    // both feed audit_log via the same logAuditEvent call.
+    const refusedMd = (refusedCall![1] as Record<string, unknown>)
+      .p_metadata as Record<string, unknown>;
+    expect(refusedMd.failed_table_count).toBe(1);
+    expect(refusedMd.failed_tables).toBeUndefined();
+    expect(refusedMd.row_capped_tables).toBeUndefined();
+    expect(refusedMd.parent_id_truncated_tables).toBeUndefined();
+    expect(refusedMd.incomplete_reasons).toBeUndefined();
 
     // Server-side log MUST carry the failed_tables (forensics) AND the
     // request_id (correlation key the user quoted to support).
@@ -530,9 +819,19 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       schema_version: 1,
       user_id: "user-B",
       generated_at: "2026-04-16T00:00:00Z",
-      total_row_count: 0,
-      tables: [],
+      total_row_count: 1,
+      tables: [
+        {
+          table: "profiles",
+          rows: [{ id: "user-B" }],
+          row_count: 1,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
       truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
       partial: false,
       failed_tables: [],
     });

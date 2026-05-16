@@ -271,6 +271,7 @@ export type AuditAction =
   // --- 7.3 GDPR workflow -----------------------------------------------
   | "account.sanitize"
   | "account.export"
+  | "account.export_refused"
   | "deletion.request.approve"
   | "deletion.request.reject"
   // --- 7.1b TS fanout --------------------------------------------------

@@ -1,5 +1,25 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/lib/database.types";
+
+/**
+ * Closed keyset of every public-schema table name. Audit 2026-05-07
+ * M-0522: pre-fix, `table: string` allowed a typo like
+ * `allocator_holdngs` to compile, with the CI hook
+ * (check-gdpr-export-coverage.ts) as the only late safety net. By
+ * narrowing the type to the Supabase-generated key union we move the
+ * invariant into `tsc` and surface typos at compile time.
+ */
+export type PublicTable = keyof Database["public"]["Tables"];
+
+/**
+ * Row shape for a public-schema table. Re-exposed so consumers of the
+ * export bundle (download scripts, regulator-facing serializers) can
+ * recover the per-row contract without re-deriving from the Supabase
+ * client. Audit 2026-05-07 M-0521.
+ */
+export type PublicRow<T extends PublicTable> =
+  Database["public"]["Tables"][T]["Row"];
 
 /**
  * GDPR Art. 15 (right of access) + Art. 20 (data portability) export
@@ -44,16 +64,23 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  *    user-owned table, both this list AND the migration must land in the
  *    same PR — the CI hook exits non-zero if the list drifts from the
  *    migrations.
- * 2. 100MB cap. The route streams one JSON bundle; rows are collected in
- *    memory. If the total serialized size exceeds the cap, the route
- *    returns a `continuation_token` the client can use to resume with
- *    the next slice. V1 caps per-table row counts to bound memory; a
- *    future sprint can switch to true streamed JSON if the cap is hit
- *    in practice.
- * 3. Per-table selector is either a `user_column` (direct) or a
- *    `reachable_via` descriptor (indirect — the table is scoped to a
- *    user's strategies/portfolios). Both shapes produce the same output
- *    format: `{ table_name, rows: [...], row_count, truncated_at_cap }`.
+ * 2. 100MB cap. The route assembles one JSON bundle in memory; if the
+ *    total serialized size exceeds the cap, the bundle is truncated
+ *    deterministically (per-row, sorted by stable column, oldest first)
+ *    and `truncated_at_size_cap: true` is set on the envelope. Note:
+ *    the V1 implementation does NOT mint a continuation_token — the
+ *    docstring previously claimed one but no such field exists on
+ *    `ExportBundle` (audit 2026-05-07 H-0456). A future sprint can
+ *    switch to true streamed JSON / continuation tokens if the cap is
+ *    hit in practice. V1 also caps per-table row counts to bound
+ *    memory; both caps surface to the user via per-table flags + the
+ *    bundle-level `truncated_at_size_cap` + `parent_id_truncated_tables`.
+ * 3. Per-table selector is one of three kinds: `direct` (table has
+ *    `user_column`), `indirect` (table is scoped to a user's
+ *    strategies/portfolios via `parent_table` + `parent_user_column`),
+ *    or `projected` (post-fetch redaction). All three produce the
+ *    same output format: ExportTablePayload (table, rows, row_count,
+ *    truncated_at_cap, parent_id_truncated, fetch_error).
  *
  * Why this file, not inline in the route
  * --------------------------------------
@@ -67,10 +94,14 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * Direct ownership: the table has a column that IS the user's id (an FK
  * to `profiles(id)` or `auth.users(id)`). The export route SELECTs
  * `* FROM <table> WHERE <column> = <user_id>`.
+ *
+ * Audit 2026-05-07 M-0522: `table` is narrowed to `PublicTable` so a
+ * typo in the manifest fails at compile time instead of being caught
+ * only by the runtime CI hook.
  */
 export interface DirectUserTable {
   kind: "direct";
-  table: string;
+  table: PublicTable;
   /** Column holding the user's id. Usually "user_id"; for match_batches
    * etc. it's "allocator_id". */
   user_column: string;
@@ -86,13 +117,24 @@ export interface DirectUserTable {
  */
 export interface IndirectUserTable {
   kind: "indirect";
-  table: string;
+  table: PublicTable;
   /** Foreign-key column on this table. */
   via_column: string;
   /** Parent table whose rows this table is scoped to. */
-  parent_table: string;
+  parent_table: PublicTable;
   /** User-identifying column on the parent table. */
   parent_user_column: string;
+  /**
+   * Primary-key column on the parent table used by the two-hop
+   * select. Defaults to `"id"` at the call site if omitted, which
+   * matches every parent table in the current manifest. Audit
+   * 2026-05-07 M-0524: pre-fix, `fetchRowsForSpec` hard-coded
+   * `(r: { id: string }) => r.id` — an indirect entry whose parent
+   * used a non-`id` PK would have silently returned an empty
+   * export. Surfacing the column name in the spec turns the
+   * assumption into a contract.
+   */
+  parent_id_column?: string;
 }
 
 /**
@@ -107,13 +149,18 @@ export interface IndirectUserTable {
  * projection, not the raw rows). The CI coverage hook
  * (`scripts/check-gdpr-export-coverage.ts`) understands this kind so
  * the raw source table is considered covered.
+ *
+ * Note: `table` (the bundle-facing projection name) is INTENTIONALLY
+ * a free `string` — `audit_log_for_user` is a synthetic name that
+ * does NOT exist as a public table. The narrowed `source_table` IS
+ * a `PublicTable` because the SELECT actually hits it.
  */
 export interface ProjectedUserTable {
   kind: "projected";
-  /** Bundle-facing name (e.g. "audit_log_for_user"). */
+  /** Bundle-facing name (e.g. "audit_log_for_user"). May be synthetic. */
   table: string;
   /** Underlying table name the SELECT hits. */
-  source_table: string;
+  source_table: PublicTable;
   /** Column on source_table holding the subject's user id. */
   user_column: string;
   /** Post-fetch redaction function. */
@@ -155,6 +202,27 @@ const AUDIT_METADATA_REDACT_KEYS = new Set<string>([
   "target_user_id",
   "actor_email",
   "actor_display_name",
+  // Audit 2026-05-07 (specialist apply, security MED conf-8):
+  // admin/actor UUID keys emitted by every admin-side audit producer
+  // when the subject is the entity/target (role.grant, role.revoke,
+  // deletion.request.approve/reject, admin/match preferences edit,
+  // debug-key-flow). Pre-apply these admin UUIDs survived the
+  // projection and the subject could resolve which admin acted on
+  // their account. Cross-party UUIDs (the admin's auth.users id)
+  // are NOT entitled to be in the subject's bundle.
+  "granted_by",
+  "revoked_by",
+  "approved_by",
+  "rejected_by",
+  "edited_by",
+  "admin_user_id",
+  "processed_by",
+  "decided_by",
+  "invited_by",
+  "uploaded_by",
+  "reviewer_id",
+  "created_by",
+  "updated_by",
 ]);
 
 /**
@@ -252,6 +320,22 @@ export function redactAuditLogForUser(
       clone.metadata = redactMetadataValue(meta);
     }
 
+    // Audit 2026-05-07 red-team #6 (HIGH conf-7): scrub the top-level
+    // `row.user_id` when the subject is retained ONLY because they're
+    // the entity / metadata target. In those cases `row.user_id` is
+    // the ACTOR's id (typically an admin) — a cross-party identifier
+    // the subject is not entitled to see. Pre-fix, the metadata-only
+    // redaction left the admin's auth.users UUID in plain sight; the
+    // subject could correlate admin UUIDs across role.grant /
+    // deletion.request.approve / account.sanitize rows. Blanking
+    // row.user_id on entity-only / meta-target-only retention closes
+    // that lateral pathway. The actor-retention branch (isActor=true)
+    // keeps row.user_id unchanged because it IS the subject's own id
+    // — they're entitled to know they acted on themselves.
+    if (!isActor) {
+      clone.user_id = REDACTED_PLACEHOLDER;
+    }
+
     out.push(clone);
   }
   return out;
@@ -287,6 +371,66 @@ export function redactContactRequestForUser(
 }
 
 /**
+ * Columns on `api_keys` that carry the at-rest-encrypted credential
+ * blob or its envelope metadata. Even though they're ciphertext, GDPR
+ * Art. 15/20 do NOT require returning them — the user already has the
+ * plaintext key in their broker UI, and the underlying credential
+ * decrypt is gated by a service-only RPC (`decrypt_api_key`) that
+ * applies its own access policy. Including the ciphertext in the
+ * export bundle would widen the attack surface: anyone who captures
+ * the 1-hour signed URL would also capture the encrypted material,
+ * bypassing the decrypt RPC's access controls.
+ *
+ * Audit 2026-05-07 finding C-0166 (security c5):
+ *   The pre-fix manifest exported `api_keys` with `.select('*')` and
+ *   shipped every column — including `api_key_encrypted`,
+ *   `api_secret_encrypted`, `dek_encrypted`, `passphrase_encrypted`,
+ *   and the `nonce` IV. The redacted projection below strips those
+ *   columns and keeps only the safe metadata the user genuinely needs
+ *   to recognize the key (exchange, label, timestamps, status).
+ *
+ * Exported for unit-test pinning.
+ */
+export const API_KEYS_REDACTED_COLUMNS: ReadonlySet<string> = new Set<string>([
+  "api_key_encrypted",
+  "api_secret_encrypted",
+  "passphrase_encrypted",
+  "dek_encrypted",
+  "nonce",
+]);
+
+/**
+ * Projection helper — api_keys with credential ciphertext stripped.
+ *
+ * Retains EVERY row where `user_id === subject` (the user owns the
+ * key) and removes the ciphertext / IV columns enumerated in
+ * `API_KEYS_REDACTED_COLUMNS`. The remaining columns (`id`, `exchange`,
+ * `label`, `created_at`, `last_sync_at`, `sync_status`, etc.) are
+ * sufficient for the user to recognise the key and re-create it via
+ * their broker UI.
+ *
+ * Exported for unit-test pinning.
+ */
+export function redactApiKeysForUser(
+  rows: unknown[],
+  userId: string,
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    const row = r as Record<string, unknown>;
+    if (row.user_id !== userId) continue;
+    const clone: Record<string, unknown> = {};
+    for (const key of Object.keys(row)) {
+      if (API_KEYS_REDACTED_COLUMNS.has(key)) continue;
+      clone[key] = row[key];
+    }
+    out.push(clone);
+  }
+  return out;
+}
+
+/**
  * Canonical list of every table that holds user-owned data.
  *
  * CI invariant: the hook in `scripts/check-gdpr-export-coverage.ts` reads
@@ -310,7 +454,22 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   // GDPR Art. 15 requires they be part of the user's export.
   { kind: "direct", table: "allocator_holdings", user_column: "allocator_id" },
   { kind: "direct", table: "allocator_preferences", user_column: "user_id" },
-  { kind: "direct", table: "api_keys", user_column: "user_id" },
+  // api_keys is exported as a REDACTED projection: GDPR Art. 15
+  // entitles the user to know which keys exist on their account, but
+  // not to receive the encrypted credential blob (which is internal
+  // storage — the user already has the plaintext in their broker
+  // UI). Stripping the ciphertext closes the 1-hour-signed-URL
+  // exfiltration vector described in audit 2026-05-07 finding
+  // C-0166. The post-fetch projection `redactApiKeysForUser` removes
+  // `api_key_encrypted`, `api_secret_encrypted`, `passphrase_encrypted`,
+  // `dek_encrypted`, and `nonce` from every row.
+  {
+    kind: "projected",
+    table: "api_keys",
+    source_table: "api_keys",
+    user_column: "user_id",
+    project: redactApiKeysForUser,
+  },
   // contact_requests carries a cross-party `strategy_id` referring to
   // another user's strategy. The projected version retains the
   // subject's own row state and blanks the cross-party link.
@@ -337,8 +496,12 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   { kind: "direct", table: "user_favorites", user_column: "user_id" },
   { kind: "direct", table: "user_notes", user_column: "user_id" },
   // ------------------------------------------------------------------
-  // Projected (raw source table excluded; bundle exposes a redacted
-  // projection — see kind:"projected" docstring)
+  // Projected — bundle exposes a redacted projection of the source.
+  // The bundle-facing `table` name MAY differ from `source_table`
+  // (when the projection IS a synthetic name, e.g.
+  // audit_log_for_user) or MAY match (when the table itself is just
+  // having columns stripped, e.g. api_keys -> drops ciphertext).
+  // See kind:"projected" docstring for details.
   // ------------------------------------------------------------------
   // audit_log entries can reference OTHER users in `metadata` (manager
   // display_name, partner_tag of the counter-party allocator, etc.).
@@ -422,8 +585,12 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
 ] as const;
 
 /**
- * Max total serialized size before the export truncates and sets the
- * continuation token. 100MB is the Task 7.3 spec cap.
+ * Max total serialized size before the export truncates and sets
+ * `truncated_at_size_cap: true` on the envelope. 100MB is the Task 7.3
+ * spec cap. The cumulative budget is envelope-aware: it counts the
+ * bundle skeleton, per-table wrappers, and per-row payload so the
+ * final UTF-8 byte-length is strictly ≤ this cap (audit 2026-05-07
+ * H-0454).
  */
 export const EXPORT_SIZE_CAP_BYTES = 100 * 1024 * 1024;
 
@@ -444,6 +611,45 @@ export const EXPORT_PER_TABLE_ROW_CAP = 50_000;
 export const EXPORT_FETCH_CONCURRENCY = 10;
 
 /**
+ * Max parent-table id rows probed for an indirect select's two-hop
+ * lookup. A `.in()` filter scales linearly with the number of ids, and
+ * PostgREST has a request-line-length ceiling that hits ~2.5k elements
+ * for UUIDs. The 2000 cap leaves headroom and handles every realistic
+ * user (a power user with thousands of strategies is uncommon enough
+ * that the explicit truncation flag — `parent_id_truncated` — is the
+ * right escape hatch).
+ *
+ * Audit 2026-05-07 H-0453: pre-fix this cap dropped the parent-id tail
+ * silently with no signal in the bundle. The new path sets the
+ * `parent_id_truncated` flag on the child-table payload when the
+ * probe hits the cap.
+ */
+export const EXPORT_PARENT_ID_CAP = 2000;
+
+/**
+ * Audit 2026-05-07 red-team #10 (MED conf-8): PostgREST encodes
+ * `.in(col, ids)` as a single query parameter `?col=in.(u1,u2,...)`.
+ * For 2000 UUIDs at ~36 chars/each + comma overhead, the URL is
+ * ~75KB — well past common intermediate-proxy limits (Vercel Edge
+ * 16KB, CloudFront 8KB, nginx default 8KB) AND a hot-loop URL-string
+ * allocator. Even if PostgREST accepts it, an edge proxy may 414 the
+ * request, OR (worse) silently truncate the query string, causing
+ * the SELECT to read a smaller id list and the bundle to lose data
+ * with no error signal (parent_id_truncated reports parent count,
+ * not URL truncation, so the truncation cause is mis-attributed).
+ *
+ * 500 keeps each `.in()` URL under ~18KB (500 × 36 + overhead),
+ * within every common proxy budget. For users with > 500 parent
+ * rows, we fan out across multiple SELECTs and union the results.
+ * Total wall-time impact is bounded — 2000-id worst case is 4
+ * SELECTs serially, ~400ms vs the legacy single-shot ~200ms — and
+ * the new path is the ONLY one that is correct under intermediate
+ * proxies. A regression test (`chunked indirect IN under proxy
+ * limits`) pins the chunk size.
+ */
+export const EXPORT_PARENT_ID_IN_CHUNK = 500;
+
+/**
  * Shape of one `tables[*]` entry in the export bundle.
  *
  * Issue 5 (audit-2026-05-07 follow-up): `fetch_error` carries the failure
@@ -454,15 +660,201 @@ export const EXPORT_FETCH_CONCURRENCY = 10;
  * requires a COMPLETE export; a partial bundle marked as such would
  * still be a violation, so the chosen policy is "fail loud, ask the
  * user to retry".
+ *
+ * Audit 2026-05-07 H-0453: `parent_id_truncated` flags indirect-table
+ * fetches whose parent-id probe hit `EXPORT_PARENT_ID_CAP` (2000). A
+ * user with >2000 strategies or portfolios silently lost all child
+ * rows belonging to the dropped parents — fully invisible to the
+ * bundle pre-fix. The flag is only meaningful for `kind: "indirect"`
+ * specs (`false` for direct/projected).
  */
 export interface ExportTablePayload {
   table: string;
   rows: unknown[];
   row_count: number;
   truncated_at_cap: boolean;
+  parent_id_truncated: boolean;
   fetch_error: string | null;
 }
 
+/**
+ * INTERNAL — module-scoped cache of per-row JSON strings keyed by
+ * the ExportTablePayload object identity. Audit 2026-05-07
+ * (specialist apply, performance HIGH conf-9): the cumulative-size
+ * budget pass already serializes each row once for its UTF-8 byte
+ * length. Caching those strings here lets `encodeExportBundle`
+ * assemble the final upload from cached fragments without
+ * re-stringifying every row inside `JSON.stringify(bundle)`.
+ *
+ * Using a WeakMap (not a payload field) keeps the cache off the
+ * on-the-wire bundle: `JSON.stringify(bundle)` from tests / consumers
+ * remains identical in shape and size to the pre-apply bundle. The
+ * cache is GC'd automatically when the payload object becomes
+ * unreachable.
+ *
+ * Audit 2026-05-07 red-team #13 (MED conf-8): the WeakMap is module-
+ * level but is keyed by ExportTablePayload object IDENTITY. Two
+ * concurrent calls to `collectUserExportBundle` produce two separate
+ * bundle objects with two separate sets of ExportTablePayload object
+ * identities, so cross-call aliasing is impossible by construction.
+ * The unit test `concurrent same-user exports observe independent
+ * cached rows` pins this invariant.
+ *
+ * Audit 2026-05-07 red-team #5 (HIGH conf-7): rows ARE deep-frozen
+ * after caching (see `deepFreezeRow` below). If a post-collect caller
+ * mutates a row in place — replacing a field, redacting at the route
+ * layer — the mutation throws in strict mode, surfacing the
+ * cache-staleness invariant violation at the point it would otherwise
+ * silently emit stale bytes. Tests pin this freeze + the matching
+ * throw under mutation.
+ */
+const ROW_JSON_CACHE: WeakMap<ExportTablePayload, readonly string[]> = new WeakMap();
+
+/**
+ * Recursively `Object.freeze` a row + its nested objects/arrays.
+ *
+ * Audit 2026-05-07 red-team #5 (HIGH conf-7): the ROW_JSON_CACHE
+ * freshness check (`cached.length === t.rows.length`) catches length
+ * changes but not in-place mutation. Freezing each cached row makes
+ * mutation impossible in strict mode — the mutation throws at the
+ * call site, surfacing the invariant violation BEFORE
+ * `encodeExportBundle` ships pre-mutation cached bytes.
+ *
+ * Bounded by JSON depth (rows are sourced from PostgREST JSON), so
+ * recursion cannot blow the call stack.
+ */
+function deepFreezeRow(value: unknown): void {
+  if (value === null || typeof value !== "object") return;
+  if (Object.isFrozen(value)) return;
+  Object.freeze(value);
+  if (Array.isArray(value)) {
+    for (const item of value) deepFreezeRow(item);
+    return;
+  }
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    deepFreezeRow((value as Record<string, unknown>)[key]);
+  }
+}
+
+/**
+ * Tables whose bundle rows are the raw Supabase row shape (no
+ * projection). `rowsForTable` returns `PublicRow<T>` for these.
+ *
+ * Audit 2026-05-07 (specialist apply, type-design HIGH conf-9 +
+ * code-reviewer MED conf-9): pre-apply, `rowsForTable<T>` accepted
+ * any `PublicTable` and returned `Array<PublicRow<T>>` — but for
+ * `api_keys` the row is a stripped projection (ciphertext columns
+ * removed) and for `contact_requests` the row has a string-sentinel
+ * `strategy_id` instead of a UUID. The type lied. We narrow the
+ * helper's generic to the unprojected manifest entries and expose
+ * a separate `projectedRowsForTable` helper for the redacted shapes
+ * (returning the correct `Omit<PublicRow<...>, ...>` shape).
+ */
+export type UnprojectedBundleTable = Extract<
+  (typeof USER_EXPORT_TABLES)[number],
+  { kind: "direct" | "indirect" }
+>["table"];
+
+/**
+ * Projected bundle table names. Includes both synthetic projections
+ * (`audit_log_for_user` — source is `audit_log`) and column-strip
+ * projections (`api_keys`, `contact_requests` — source matches the
+ * table name).
+ */
+export type ProjectedBundleTable =
+  | "api_keys"
+  | "contact_requests"
+  | "audit_log_for_user";
+
+/**
+ * Row shape returned by `rowsForTable` for each projected table.
+ * Encodes the contract that the column-strip projection
+ * `redactApiKeysForUser` removes the ciphertext columns, that
+ * `redactContactRequestForUser` blanks `strategy_id` to a sentinel
+ * string, and that `audit_log_for_user` carries the audit_log row
+ * shape with redacted metadata.
+ */
+export type ProjectedRow<T extends ProjectedBundleTable> = T extends "api_keys"
+  ? Omit<
+      PublicRow<"api_keys">,
+      | "api_key_encrypted"
+      | "api_secret_encrypted"
+      | "passphrase_encrypted"
+      | "dek_encrypted"
+      | "nonce"
+    >
+  : T extends "contact_requests"
+  ? Omit<PublicRow<"contact_requests">, "strategy_id"> & {
+      strategy_id: string | null;
+    }
+  : T extends "audit_log_for_user"
+  ? PublicRow<"audit_log"> & { metadata: unknown }
+  : never;
+
+/**
+ * Typed view of a per-table payload — non-projected tables only.
+ * Audit 2026-05-07 M-0521 + specialist apply (type-design HIGH
+ * conf-9): the payload's `rows: unknown[]` loses every per-table
+ * contract for downstream consumers. Use this helper to recover the
+ * row type at the call site for the 17 direct/indirect manifest
+ * entries:
+ *
+ *   const trades = rowsForTable(bundle, "trades");
+ *   //   trades: PublicRow<"trades">[]
+ *
+ * For the three projected tables (api_keys, contact_requests,
+ * audit_log_for_user) use `projectedRowsForTable` instead — those
+ * rows have a stripped / blanked shape that does NOT match
+ * `PublicRow<T>`.
+ *
+ * The lookup is by table NAME (string match) — runtime safety still
+ * depends on the export function having populated the rows from the
+ * named table; the type is a witness to the manifest contract.
+ *
+ * Audit 2026-05-07 (specialist apply, silent-failure MED conf-9):
+ * returns `null` (not `[]`) when the table is missing from the
+ * bundle. A missing entry indicates schema drift or a manifest typo,
+ * NOT genuine emptiness — surfacing it as `null` forces the caller
+ * to disambiguate. The CI hook (check-gdpr-export-coverage.ts)
+ * verifies manifest completeness at build time, so a runtime miss
+ * is a bug, not user error.
+ */
+export function rowsForTable<T extends UnprojectedBundleTable>(
+  bundle: ExportBundle,
+  table: T,
+): Array<PublicRow<T>> | null {
+  const entry = bundle.tables.find((t) => t.table === table);
+  if (!entry) return null;
+  return entry.rows as Array<PublicRow<T>>;
+}
+
+/**
+ * Typed view for projected-table payloads. Returns the projection's
+ * actual row shape (stripped columns / sentinel strings) rather than
+ * the raw `PublicRow<source_table>`.
+ *
+ *   const apiKeys = projectedRowsForTable(bundle, "api_keys");
+ *   //   apiKeys: ProjectedRow<"api_keys">[] | null
+ *   //          = Omit<PublicRow<"api_keys">, "api_key_encrypted" | ...>[]
+ *
+ * Returns `null` for a missing entry (see `rowsForTable` rationale).
+ */
+export function projectedRowsForTable<T extends ProjectedBundleTable>(
+  bundle: ExportBundle,
+  table: T,
+): Array<ProjectedRow<T>> | null {
+  const entry = bundle.tables.find((t) => t.table === table);
+  if (!entry) return null;
+  return entry.rows as Array<ProjectedRow<T>>;
+}
+
+/**
+ * V1 bundle shape. Audit 2026-05-07 M-0523: `schema_version` is the
+ * discriminant for a future `ExportBundleV1 | ExportBundleV2` union.
+ * Today `ExportBundle = ExportBundleV1`; when v2 ships, change the
+ * alias to a union and downstream readers will be forced (by tsc) to
+ * narrow on the version tag before reaching v2-only fields.
+ */
 /**
  * Shape of the full export bundle that lands in Supabase Storage.
  *
@@ -471,16 +863,173 @@ export interface ExportTablePayload {
  * actually persists a bundle with partial=true, but the helper still
  * exposes the fields so the route's gate has a single object to inspect
  * and tests can pin the exact shape.
+ *
+ * Audit 2026-05-07 H-0453: `parent_id_truncated_tables` lists every
+ * indirect-table whose parent-id probe hit `EXPORT_PARENT_ID_CAP`
+ * (2000). The route can surface this to the user (e.g., "Your export
+ * includes data scoped to your first 2000 strategies. Contact support
+ * if you have more.") instead of dropping the tail silently.
+ *
+ * Audit 2026-05-07 M-0523: `schema_version: 1` is a literal so the
+ * bundle is versionable. A future v2 reader will see schema_version=1
+ * and route to the v1 parser; the contract is encoded in the type.
+ * The current bundle is the V1 variant of the discriminated union
+ * `ExportBundleV1 | ExportBundleV2` that future migrations can extend.
  */
-export interface ExportBundle {
+export interface ExportBundleV1 {
   schema_version: 1;
   user_id: string;
   generated_at: string;
   total_row_count: number;
   tables: ExportTablePayload[];
   truncated_at_size_cap: boolean;
+  parent_id_truncated_tables: string[];
   partial: boolean;
   failed_tables: string[];
+}
+
+/**
+ * Active bundle shape. Audit 2026-05-07 M-0523: aliased so the
+ * downstream `ExportBundle` reference remains stable while the
+ * version-narrowing happens at the V1/V2 boundary. When V2 ships,
+ * change this to `export type ExportBundle = ExportBundleV1 |
+ * ExportBundleV2;` and consumers will be forced to discriminate on
+ * `schema_version`.
+ */
+export type ExportBundle = ExportBundleV1;
+
+/**
+ * Module-level shared encoder. Audit 2026-05-07 (specialist apply,
+ * performance LOW conf-7): pre-apply each per-row encode and the
+ * final upload encode each allocated a fresh `new TextEncoder()`.
+ * TextEncoder is cheap to construct but reusing one trims a constant
+ * per-call overhead and gives the encoder a single hoist point if
+ * we ever swap it (e.g., for a streaming variant).
+ */
+const SHARED_ENCODER = new TextEncoder();
+
+/**
+ * Assemble the export bundle into a Uint8Array suitable for upload.
+ *
+ * Audit 2026-05-07 (specialist apply, performance HIGH conf-9):
+ * pre-apply, the route called `new TextEncoder().encode(JSON.stringify(bundle))`,
+ * which re-stringified every row inside `bundle.tables[*].rows` even
+ * though the cumulative-size budget pass had already stringified
+ * each row once. For a 50,000-row table at ~800 bytes/row this was
+ * ~40MB of redundant serialization (and ~80MB of intermediate string
+ * allocations). The peak heap held the bundle object + the 100MB
+ * intermediate string + the 100MB Uint8Array simultaneously —
+ * ~300MB peak on a 1024MB Vercel Fluid lambda.
+ *
+ * The fix stitches the upload from the cached per-row JSON strings
+ * stored in `ExportTablePayload.__cached_rows_json`. Each row's JSON
+ * is encoded once during the budget pass and written directly into
+ * the output Uint8Array here. The envelope fields (schema_version,
+ * user_id, generated_at, total_row_count, parent_id_truncated_tables,
+ * partial, failed_tables, truncated_at_size_cap) and the per-table
+ * wrapper fields are still serialized via `JSON.stringify` because
+ * they are tiny (kilobytes total).
+ *
+ * The internal `__cached_rows_json` field is omitted from the
+ * upload by definition — this function never serializes it.
+ *
+ * Fallback: if a caller hand-constructs a bundle without the cache
+ * (testing-only), the function falls back to per-row JSON.stringify,
+ * matching legacy behaviour.
+ */
+export function encodeExportBundle(bundle: ExportBundle): Uint8Array {
+  // Strategy: produce the JSON in two halves separated at `tables`.
+  // The envelope JSON is built once (small — ~200 bytes); the tables
+  // array is stitched from the per-table wrapper + per-row cached
+  // JSON strings without re-stringifying any row.
+  //
+  // Field order matches `JSON.stringify(bundle)` exactly (insertion
+  // order of the ExportBundle literal returned by collectUserExportBundle):
+  //   schema_version, user_id, generated_at, total_row_count,
+  //   tables, truncated_at_size_cap, parent_id_truncated_tables,
+  //   partial, failed_tables.
+  // Tests assert against the BUNDLE OBJECT (not the encoded bytes),
+  // but downstream consumers parsing the upload need the on-the-wire
+  // shape to round-trip cleanly through JSON.parse.
+  //
+  // Audit 2026-05-07 red-team #8 (MED conf-8): `JSON.stringify(undefined)`
+  // returns the JS value `undefined`, NOT a string — concatenated into
+  // a template literal it stringifies to the literal 4 characters
+  // 'undefined' (unquoted), producing invalid JSON. Wrap every field
+  // serialization in `safeStringify` so `undefined` coerces to JSON
+  // `null`. This matches the field-level interpretation a downstream
+  // JSON.parse'er would apply to an explicit-null field, and keeps
+  // the upload guaranteed-parseable even if a future schema_version=2
+  // makes some envelope/wrapper field genuinely optional.
+  const safeStringify = (v: unknown): string => {
+    const s = JSON.stringify(v);
+    return s === undefined ? "null" : s;
+  };
+  const chunks: Uint8Array[] = [];
+
+  // Opener: everything up to `"tables":[`.
+  const opener =
+    `{"schema_version":${safeStringify(bundle.schema_version)},` +
+    `"user_id":${safeStringify(bundle.user_id)},` +
+    `"generated_at":${safeStringify(bundle.generated_at)},` +
+    `"total_row_count":${safeStringify(bundle.total_row_count)},` +
+    `"tables":[`;
+  chunks.push(SHARED_ENCODER.encode(opener));
+
+  for (let i = 0; i < bundle.tables.length; i += 1) {
+    const t = bundle.tables[i];
+    if (i > 0) chunks.push(SHARED_ENCODER.encode(","));
+    chunks.push(
+      SHARED_ENCODER.encode(
+        `{"table":${safeStringify(t.table)},"rows":[`,
+      ),
+    );
+    const cached = ROW_JSON_CACHE.get(t);
+    if (cached && cached.length === t.rows.length) {
+      for (let r = 0; r < cached.length; r += 1) {
+        if (r > 0) chunks.push(SHARED_ENCODER.encode(","));
+        chunks.push(SHARED_ENCODER.encode(cached[r]));
+      }
+    } else {
+      // Fallback for hand-constructed bundles (tests). Same undefined-
+      // safety applies: `JSON.stringify(undefined)` for a sparse-array
+      // slot would corrupt the wire encoding otherwise.
+      for (let r = 0; r < t.rows.length; r += 1) {
+        if (r > 0) chunks.push(SHARED_ENCODER.encode(","));
+        chunks.push(SHARED_ENCODER.encode(safeStringify(t.rows[r])));
+      }
+    }
+    chunks.push(
+      SHARED_ENCODER.encode(
+        `],"row_count":${safeStringify(t.row_count)},` +
+          `"truncated_at_cap":${safeStringify(t.truncated_at_cap)},` +
+          `"parent_id_truncated":${safeStringify(t.parent_id_truncated)},` +
+          `"fetch_error":${safeStringify(t.fetch_error)}}`,
+      ),
+    );
+  }
+
+  // Closer: close tables + remaining envelope fields.
+  const closer =
+    `],"truncated_at_size_cap":${safeStringify(bundle.truncated_at_size_cap)},` +
+    `"parent_id_truncated_tables":${safeStringify(bundle.parent_id_truncated_tables)},` +
+    `"partial":${safeStringify(bundle.partial)},` +
+    `"failed_tables":${safeStringify(bundle.failed_tables)}}`;
+  chunks.push(SHARED_ENCODER.encode(closer));
+
+  // Concatenate. The bundle keeps each cached chunk alive briefly —
+  // because the chunks are small Uint8Arrays referencing their own
+  // backing memory (not slices of the bundle), the original bundle
+  // object can be GC'd once this function returns.
+  let total = 0;
+  for (const c of chunks) total += c.byteLength;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
 }
 
 /**
@@ -521,7 +1070,8 @@ export async function collectUserExportBundle(
   admin: SupabaseClient,
   userId: string,
 ): Promise<ExportBundle> {
-  // Phase 1: parallel fetch across all 31 tables (bounded concurrency).
+  // Phase 1: parallel fetch across all USER_EXPORT_TABLES entries
+  // (bounded concurrency).
   // Manifest order is preserved by storing into a positional array.
   //
   // Issue 5 (audit-2026-05-07 follow-up): pre-fix, both the
@@ -536,6 +1086,15 @@ export async function collectUserExportBundle(
     spec: UserExportTable;
     rows: unknown[];
     error: string | null;
+    parent_id_truncated: boolean;
+    /**
+     * Audit 2026-05-07 (specialist apply, code-reviewer HIGH conf-9):
+     * true when the source SELECT returned > EXPORT_PER_TABLE_ROW_CAP
+     * rows. For projected specs this is detected pre-projection so
+     * the post-projection row count cannot silently lose the cap-hit
+     * signal.
+     */
+    source_truncated: boolean;
   }
   const fetched: Array<FetchedEntry | null> = new Array(
     USER_EXPORT_TABLES.length,
@@ -555,9 +1114,21 @@ export async function collectUserExportBundle(
           console.error(
             `[gdpr-export] fetch failed for ${spec.table}: ${result.error}`,
           );
-          fetched[start + i] = { spec, rows: [], error: result.error };
+          fetched[start + i] = {
+            spec,
+            rows: [],
+            error: result.error,
+            parent_id_truncated: result.parent_id_truncated,
+            source_truncated: result.source_truncated,
+          };
         } else {
-          fetched[start + i] = { spec, rows: result.rows, error: null };
+          fetched[start + i] = {
+            spec,
+            rows: result.rows,
+            error: null,
+            parent_id_truncated: result.parent_id_truncated,
+            source_truncated: result.source_truncated,
+          };
         }
       } else {
         const reason =
@@ -567,62 +1138,187 @@ export async function collectUserExportBundle(
         console.error(
           `[gdpr-export] batch fetch rejected for ${spec.table}: ${reason}`,
         );
-        fetched[start + i] = { spec, rows: [], error: reason };
+        fetched[start + i] = {
+          spec,
+          rows: [],
+          error: reason,
+          parent_id_truncated: false,
+          source_truncated: false,
+        };
       }
     }
   }
 
   // Phase 2: cumulative-size budget. O(n) over the rows, NOT
   // O(log n) over the full bundle.
+  //
+  // Audit 2026-05-07 H-0454: the legacy budget only accounted for
+  // per-row payload bytes; the bundle envelope itself (schema_version,
+  // user_id, generated_at, total_row_count, tables[], etc.) plus the
+  // per-table wrapper objects (table name + flags) and the inter-row
+  // comma separators were never reserved, so the final JSON could
+  // overrun EXPORT_SIZE_CAP_BYTES by up to ~1–2MB. We now seed
+  // `bytesUsed` with a conservative envelope reservation derived from
+  // a synthetic empty bundle, plus a per-table wrapper estimate. The
+  // resulting cap is strictly conservative — final upload size is at
+  // or below `EXPORT_SIZE_CAP_BYTES`.
   const tables: ExportTablePayload[] = [];
   const failedTables: string[] = [];
+  const parentTruncatedTables: string[] = [];
   let totalRowCount = 0;
-  let bytesUsed = 0;
-  let truncatedAtSizeCap = false;
   const encoder = new TextEncoder();
 
+  // Envelope reservation: stringify a bundle skeleton with NO rows,
+  // measure its UTF-8 byte length, and seed `bytesUsed` with it. The
+  // synthetic skeleton uses placeholder values whose serialized lengths
+  // are at least as long as the real values, so the reservation is an
+  // upper bound. Per-table overhead (`{ "table": "...", "rows": [...],
+  // "row_count": N, "truncated_at_cap": false, "parent_id_truncated":
+  // false, "fetch_error": null },`) is bounded by ~140 bytes plus the
+  // table name length — we account for this by reserving a per-table
+  // line below as each table starts.
+  const envelopeSkeleton: ExportBundle = {
+    schema_version: 1,
+    user_id: userId,
+    generated_at: new Date(0).toISOString(),
+    total_row_count: 0,
+    tables: [],
+    truncated_at_size_cap: false,
+    parent_id_truncated_tables: [],
+    partial: false,
+    failed_tables: [],
+  };
+  let bytesUsed = encoder.encode(JSON.stringify(envelopeSkeleton)).byteLength;
+  let truncatedAtSizeCap = false;
+
+  // Audit 2026-05-07 (specialist apply, performance HIGH conf-9):
+  // cache per-row UTF-8 byte payloads during the budget pass so the
+  // final upload can be assembled from the cached strings without a
+  // second JSON.stringify of every row. Pre-apply, each row was
+  // serialized twice — once for the size budget and again inside
+  // `JSON.stringify(bundle)` in the route — costing ~2× CPU and
+  // peaking memory at ~3× the payload size (object + intermediate
+  // string + Uint8Array). The shared `__cached_rows_json` array on
+  // the ExportTablePayload carries the JSON strings of each row so
+  // `encodeExportBundle` can stitch them directly into a Uint8Array.
   for (const entry of fetched) {
     if (!entry) continue;
-    const { spec, rows, error: fetchError } = entry;
+    const { spec, rows, error: fetchError, parent_id_truncated, source_truncated } = entry;
 
     if (fetchError) {
       failedTables.push(spec.table);
     }
+    if (parent_id_truncated) {
+      parentTruncatedTables.push(spec.table);
+    }
 
-    if (truncatedAtSizeCap) {
-      tables.push({
+    // Reserve the per-table wrapper bytes BEFORE counting rows so the
+    // cumulative budget reflects the real shape of the upload.
+    // Audit 2026-05-07 (specialist apply, code-reviewer MED conf-8):
+    // when `truncatedAtSizeCap` is already true, we STILL push an
+    // empty payload for completeness — but pre-apply the wrapper
+    // bytes were never accumulated, so a tail of ~22 empty tables
+    // could overflow the final upload by ~3KB. Reserve the wrapper
+    // bytes uniformly across both branches and surface
+    // `truncated_at_cap` only when the SIZE cap actually trimmed
+    // rows (or the source cap clipped before the projection ran).
+    const tableWrapperBytes = encoder.encode(
+      JSON.stringify({
         table: spec.table,
         rows: [],
         row_count: 0,
-        truncated_at_cap: true,
+        truncated_at_cap: false,
+        parent_id_truncated,
         fetch_error: fetchError,
-      });
+      }) + ",",
+    ).byteLength;
+
+    if (truncatedAtSizeCap) {
+      bytesUsed += tableWrapperBytes;
+      const payload: ExportTablePayload = {
+        table: spec.table,
+        rows: [],
+        row_count: 0,
+        // truncated_at_cap signals "the size cap or the source cap
+        // dropped data for this table". A fetch-error row never had
+        // a chance to fill rows — keep the flag false there so
+        // forensic readers don't conflate "fetch failed" with
+        // "size cap trimmed me".
+        truncated_at_cap: fetchError ? false : true,
+        parent_id_truncated,
+        fetch_error: fetchError,
+      };
+      ROW_JSON_CACHE.set(payload, []);
+      tables.push(payload);
       continue;
     }
 
+    if (bytesUsed + tableWrapperBytes > EXPORT_SIZE_CAP_BYTES) {
+      truncatedAtSizeCap = true;
+      bytesUsed += tableWrapperBytes;
+      const payload: ExportTablePayload = {
+        table: spec.table,
+        rows: [],
+        row_count: 0,
+        truncated_at_cap: fetchError ? false : true,
+        parent_id_truncated,
+        fetch_error: fetchError,
+      };
+      ROW_JSON_CACHE.set(payload, []);
+      tables.push(payload);
+      continue;
+    }
+    bytesUsed += tableWrapperBytes;
+
     const includedRows: unknown[] = [];
-    let tableTruncated = rows.length >= EXPORT_PER_TABLE_ROW_CAP;
+    const includedRowsJson: string[] = [];
+    // source_truncated is the SQL-side cap signal (set by
+    // fetchRowsForSpec when the source SELECT hit > cap rows). For
+    // direct/indirect we also fall back to the post-fetch length
+    // check (rows.length >= cap) — both are correct because no
+    // projection collapses the count for those kinds. For projected
+    // entries source_truncated is the ONLY accurate signal.
+    let tableTruncated =
+      source_truncated || (rows.length >= EXPORT_PER_TABLE_ROW_CAP);
 
     for (const row of rows) {
-      // Stringify once. Per-row size includes the trailing comma the
-      // outer JSON.stringify would insert; small constant overhead.
-      const rowBytes = encoder.encode(JSON.stringify(row) + ",").byteLength;
+      const rowJson = JSON.stringify(row);
+      // Per-row size includes the trailing comma the outer
+      // JSON.stringify would insert; small constant overhead.
+      // Audit 2026-05-07 (specialist apply, performance MED conf-8):
+      // `+ ","` previously allocated a fresh string each loop;
+      // the comma is always 1 UTF-8 byte so we add 1 directly.
+      const rowBytes = encoder.encode(rowJson).byteLength + 1;
       if (bytesUsed + rowBytes > EXPORT_SIZE_CAP_BYTES) {
         truncatedAtSizeCap = true;
         tableTruncated = true;
         break;
       }
+      // Audit 2026-05-07 red-team #5 (HIGH conf-7): freeze the row
+      // before caching its JSON. Any in-place mutation post-collect
+      // (route-layer re-redaction, test fixture twiddle) throws in
+      // strict mode, surfacing the cache-staleness invariant
+      // violation BEFORE encodeExportBundle ships pre-mutation bytes.
+      deepFreezeRow(row);
       includedRows.push(row);
+      includedRowsJson.push(rowJson);
       bytesUsed += rowBytes;
     }
 
-    tables.push({
+    const payload: ExportTablePayload = {
       table: spec.table,
       rows: includedRows,
       row_count: includedRows.length,
       truncated_at_cap: tableTruncated,
+      parent_id_truncated,
       fetch_error: fetchError,
-    });
+    };
+    // Freeze the rows array itself so length-mutation (push/pop) also
+    // throws in strict mode — the cache's length-equality freshness
+    // check then cannot be defeated by a length-preserving splice.
+    Object.freeze(includedRows);
+    ROW_JSON_CACHE.set(payload, includedRowsJson);
+    tables.push(payload);
     totalRowCount += includedRows.length;
   }
 
@@ -633,6 +1329,7 @@ export async function collectUserExportBundle(
     total_row_count: totalRowCount,
     tables,
     truncated_at_size_cap: truncatedAtSizeCap,
+    parent_id_truncated_tables: parentTruncatedTables,
     partial: failedTables.length > 0,
     failed_tables: failedTables,
   };
@@ -660,6 +1357,46 @@ export async function collectUserExportBundle(
 interface FetchRowsResult {
   rows: unknown[];
   error: string | null;
+  /**
+   * Indirect-spec only: true when the parent-id probe hit
+   * `EXPORT_PARENT_ID_CAP` and child rows belonging to the dropped
+   * tail were not loaded. Always `false` for direct/projected specs.
+   * See audit 2026-05-07 H-0453.
+   */
+  parent_id_truncated: boolean;
+  /**
+   * Audit 2026-05-07 (specialist apply, code-reviewer HIGH conf-9):
+   * true when the SOURCE-side SELECT hit `EXPORT_PER_TABLE_ROW_CAP`
+   * before the projection callback ran. For direct/indirect specs
+   * this is the same as the post-fetch row count (no projection
+   * shrinks the count), but for projected specs the projection can
+   * drop rows — pre-fix the post-projection length check missed the
+   * cap-hit signal and the bundle silently lost data.
+   */
+  source_truncated: boolean;
+}
+
+/**
+ * The Postgres column that determines stable ORDER BY for a given
+ * spec. Audit 2026-05-07 H-0456: PostgreSQL does NOT guarantee row
+ * order without an explicit ORDER BY, so two calls to the same export
+ * can return DIFFERENT 50K subsets for a user with >50K rows. The
+ * size-cap truncation also depends on this ordering — without it the
+ * bundle is non-deterministic. We sort by `created_at` for the audit
+ * trail tables and by `id` for everything else. The first sort key is
+ * a NULLS-LAST so rows without a `created_at` (legacy seed rows in
+ * test fixtures) don't crash the SELECT planner.
+ */
+function getOrderColumn(spec: UserExportTable): string {
+  // audit_log entries have created_at as their natural time-ordering
+  // field. For everything else `id` is a stable UUID PK and a
+  // sufficient deterministic sort key (every user-owned table in
+  // this codebase has an `id` UUID column — verified against
+  // database.types.ts at audit time).
+  if (spec.kind === "projected" && spec.source_table === "audit_log") {
+    return "created_at";
+  }
+  return "id";
 }
 
 async function fetchRowsForSpec(
@@ -667,11 +1404,14 @@ async function fetchRowsForSpec(
   spec: UserExportTable,
   userId: string,
 ): Promise<FetchRowsResult> {
+  const orderCol = getOrderColumn(spec);
+
   if (spec.kind === "direct") {
     const { data, error } = await admin
       .from(spec.table)
       .select("*")
       .eq(spec.user_column, userId)
+      .order(orderCol, { ascending: true })
       .limit(EXPORT_PER_TABLE_ROW_CAP);
     if (error) {
       // Issue 5 fix: surface the error to the bundle instead of silently
@@ -679,53 +1419,255 @@ async function fetchRowsForSpec(
       // when ANY table reports a fetch_error.
       const msg = `direct select failed for ${spec.table}: ${error.message}`;
       console.error(`[gdpr-export] ${msg}`);
-      return { rows: [], error: msg };
+      return {
+        rows: [],
+        error: msg,
+        parent_id_truncated: false,
+        source_truncated: false,
+      };
     }
-    return { rows: data ?? [], error: null };
+    const arr = data ?? [];
+    return {
+      rows: arr,
+      error: null,
+      parent_id_truncated: false,
+      // No projection drops rows for direct specs, so the post-fetch
+      // length matches the SQL cap exactly. The Phase 2 fallback
+      // (rows.length >= cap) still applies symmetrically, but setting
+      // the flag here lets all three kinds use a single signal.
+      source_truncated: arr.length >= EXPORT_PER_TABLE_ROW_CAP,
+    };
   }
 
   if (spec.kind === "projected") {
     // Fetch raw rows from the source table, filtered to the subject.
+    // Audit 2026-05-07 (specialist apply, code-reviewer HIGH conf-9):
+    // the source LIMIT bounds rows BEFORE the projection prunes them
+    // down. A user whose audit_log source contains > 50K total rows
+    // where only a fraction match the subject filter would silently
+    // lose later rows about themselves — the post-projection
+    // `rows.length >= cap` check in Phase 2 would read false, GDPR
+    // Art. 15 would silently fail. We probe with `cap + 1` rows so
+    // the caller can detect source-side truncation BEFORE the
+    // projection collapses the count.
+    //
+    // Audit 2026-05-07 red-team #11 (MED conf-8): `source_truncated`
+    // semantics — for `api_keys` and `contact_requests`, the SQL filter
+    // `.eq(user_column, userId)` is the EXACT same predicate the
+    // projection enforces; the projection's per-row check is a defense-
+    // in-depth no-op, so `source_truncated` accurately reflects
+    // pre-projection cap-hit. For `audit_log_for_user` the projection
+    // retention criteria is BROADER than the SQL filter — the SQL only
+    // captures isActor rows, but the projection also retains isEntity
+    // and isMetaTarget rows. For an audit_log_for_user truncation
+    // signal that captures the union, the SQL would need an `.or()`
+    // covering both branches. That widening is tracked as a follow-up
+    // (the cost is a query-plan change against audit_log's index set).
+    // Today's `source_truncated` is the pre-projection cap-hit for the
+    // ACTOR slice only; the per-table audit doc captures this nuance
+    // so a regulator audit reads the flag correctly. See the
+    // `audit_log_for_user source_truncated semantics` regression test
+    // in gdpr-export.test.ts.
     const { data, error } = await admin
       .from(spec.source_table)
       .select("*")
       .eq(spec.user_column, userId)
-      .limit(EXPORT_PER_TABLE_ROW_CAP);
+      .order(orderCol, { ascending: true })
+      .limit(EXPORT_PER_TABLE_ROW_CAP + 1);
     if (error) {
       const msg = `projected select failed for ${spec.source_table} (->${spec.table}): ${error.message}`;
       console.error(`[gdpr-export] ${msg}`);
-      return { rows: [], error: msg };
+      return {
+        rows: [],
+        error: msg,
+        parent_id_truncated: false,
+        source_truncated: false,
+      };
     }
+    const sourceArr = data ?? [];
+    const sourceTruncated = sourceArr.length > EXPORT_PER_TABLE_ROW_CAP;
     // Run the redaction projection. This is where cross-party PII in
     // metadata gets blanked.
-    return { rows: spec.project(data ?? [], userId), error: null };
+    return {
+      rows: spec.project(
+        sourceTruncated
+          ? sourceArr.slice(0, EXPORT_PER_TABLE_ROW_CAP)
+          : sourceArr,
+        userId,
+      ),
+      error: null,
+      parent_id_truncated: false,
+      source_truncated: sourceTruncated,
+    };
   }
 
-  // Indirect: two-hop.
+  // Indirect: two-hop. Order the parent-id probe so the dropped tail
+  // is at least deterministic between requests (H-0456); same for the
+  // child select.
+  const parentIdColumn = spec.parent_id_column ?? "id";
   const { data: parentRows, error: parentErr } = await admin
     .from(spec.parent_table)
-    .select("id")
+    .select(parentIdColumn)
     .eq(spec.parent_user_column, userId)
-    .limit(2000);
+    .order(parentIdColumn, { ascending: true })
+    .limit(EXPORT_PARENT_ID_CAP);
   if (parentErr) {
     const msg = `parent select failed for ${spec.parent_table} (via ${spec.table}): ${parentErr.message}`;
     console.error(`[gdpr-export] ${msg}`);
-    return { rows: [], error: msg };
+    return {
+      rows: [],
+      error: msg,
+      parent_id_truncated: false,
+      source_truncated: false,
+    };
   }
-  const parentIds = (parentRows ?? []).map((r: { id: string }) => r.id);
+  // M-0524 fix: read parent id by the configured column name. Default
+  // 'id' covers every parent in the current manifest; an indirect
+  // entry whose parent uses a non-`id` PK can override via
+  // `parent_id_column` without falling through to a silent
+  // `{ id: undefined }` cast.
+  //
+  // The double-cast (`as unknown as ...`) is necessary because the
+  // Supabase typed select can return a union including
+  // `GenericStringError`; the runtime `error` branch above already
+  // returned, so the residual type still includes the error sentinel
+  // that never satisfies the `Record<string, unknown>` index
+  // signature. The cast is type-only; the runtime shape is verified
+  // by the .filter((v): v is string) below.
+  //
+  // Type assumption: every parent table in the current manifest
+  // (strategies, portfolios) uses a UUID string PK. If a future
+  // manifest entry introduces a non-string PK (e.g., bigint), the
+  // filter below will drop ALL parent ids and the indirect child
+  // will silently return zero rows — re-examine `parent_id_column`
+  // + the filter widening in that PR.
+  const parentRowsArr = ((parentRows ?? []) as unknown) as Array<
+    Record<string, unknown>
+  >;
+  const parentIdsRaw = parentRowsArr.map((r) => r[parentIdColumn]);
+  // Audit 2026-05-07 red-team #3 (HIGH conf-8): split null tolerance
+  // from non-null type-mismatch detection. Pre-fix, ANY value that
+  // wasn't a string (including null) triggered fail-loud, which then
+  // refused the ENTIRE export. A single legacy row with id=NULL
+  // (failed migration, buggy seed) took down GDPR Art. 15 for that
+  // user permanently — combined with the rate-limit-token-consumed
+  // chain (#2), the user couldn't even retry.
+  //
+  // The intent of the fail-loud was to catch a future bigint/composite
+  // PK silently dropping ids (the audit comment below this block is
+  // about the bigint case). Nulls are a legitimate dropped-row signal
+  // — they should be filtered silently (with a console.warn metric so
+  // schema drift is still observable in logs) and the bundle should
+  // still build with only the affected child rows missing.
+  const nonNullParentIds = parentIdsRaw.filter((v) => v !== null);
+  const parentIds = nonNullParentIds.filter(
+    (v): v is string => typeof v === "string",
+  );
+  if (parentIds.length < nonNullParentIds.length) {
+    // Genuine type mismatch: non-null, non-string. This is the bigint
+    // / composite PK case the original fail-loud targeted. Bundle gate
+    // refuses the export — manifest needs a parent_id_column override
+    // OR the filter widening.
+    const msg = `indirect parent id type mismatch for ${spec.parent_table}.${parentIdColumn} (via ${spec.table}): expected string PK, dropped ${nonNullParentIds.length - parentIds.length}/${nonNullParentIds.length} non-null rows`;
+    console.error(`[gdpr-export] ${msg}`);
+    return {
+      rows: [],
+      error: msg,
+      parent_id_truncated: false,
+      source_truncated: false,
+    };
+  }
+  if (nonNullParentIds.length < parentIdsRaw.length) {
+    // Null parent ids: legitimate dropped rows. Log so schema drift is
+    // observable but DO NOT fail the bundle — the user's other rows
+    // are still exportable.
+    const nullCount = parentIdsRaw.length - nonNullParentIds.length;
+    console.warn(
+      `[gdpr-export] dropped ${nullCount} null parent id(s) for ${spec.parent_table}.${parentIdColumn} (via ${spec.table}); child rows of those parents are absent from the bundle`,
+    );
+  }
+  const parentIdTruncated = parentRowsArr.length >= EXPORT_PARENT_ID_CAP;
   if (parentIds.length === 0) {
-    return { rows: [], error: null };
+    return {
+      rows: [],
+      error: null,
+      parent_id_truncated: parentIdTruncated,
+      source_truncated: false,
+    };
   }
 
-  const { data, error } = await admin
-    .from(spec.table)
-    .select("*")
-    .in(spec.via_column, parentIds)
-    .limit(EXPORT_PER_TABLE_ROW_CAP);
-  if (error) {
-    const msg = `indirect select failed for ${spec.table}: ${error.message}`;
-    console.error(`[gdpr-export] ${msg}`);
-    return { rows: [], error: msg };
+  // Audit 2026-05-07 (specialist apply, silent-failure MED conf-8 +
+  // performance LOW conf-7): use the same orderCol the direct branch
+  // uses so determinism is single-sourced. Today getOrderColumn
+  // returns 'id' for everything except audit_log (which is never an
+  // indirect spec), so behavior is unchanged; the future-proofing
+  // matters because the audit comment claims this branch is "same
+  // for the child select" — making the code match the doc.
+  //
+  // Audit 2026-05-07 red-team #10 (MED conf-8): the `.in()` call is
+  // chunked at EXPORT_PARENT_ID_IN_CHUNK (500) to stay under common
+  // intermediate-proxy URL limits. For users with > 500 parent rows
+  // we fan out across multiple SELECTs and concatenate the results.
+  // The per-call `.limit(EXPORT_PER_TABLE_ROW_CAP)` becomes a global
+  // cap across the union — we short-circuit additional chunks once
+  // the row cap is reached. Determinism (H-0456) survives because the
+  // parent ids are already ORDERED by id and the chunks process in
+  // ascending order; merged child rows are then sorted in a final
+  // pass that's also stable on `orderCol`.
+  const aggregated: unknown[] = [];
+  let aggregatedError: string | null = null;
+  let aggregatedTruncated = false;
+  for (let start = 0; start < parentIds.length; start += EXPORT_PARENT_ID_IN_CHUNK) {
+    const chunk = parentIds.slice(start, start + EXPORT_PARENT_ID_IN_CHUNK);
+    // Per-chunk remaining budget: the global cap is across the union.
+    const remainingBudget = EXPORT_PER_TABLE_ROW_CAP - aggregated.length;
+    if (remainingBudget <= 0) {
+      // Already at cap; any further rows would be truncated. Mark and
+      // stop probing more chunks — saves N round-trips for nothing.
+      aggregatedTruncated = true;
+      break;
+    }
+    const { data: chunkData, error: chunkErr } = await admin
+      .from(spec.table)
+      .select("*")
+      .in(spec.via_column, chunk)
+      .order(orderCol, { ascending: true })
+      .limit(remainingBudget);
+    if (chunkErr) {
+      aggregatedError = `indirect select failed for ${spec.table}: ${chunkErr.message}`;
+      console.error(`[gdpr-export] ${aggregatedError}`);
+      break;
+    }
+    const chunkRows = chunkData ?? [];
+    aggregated.push(...chunkRows);
+    if (chunkRows.length >= remainingBudget) {
+      aggregatedTruncated = true;
+      break;
+    }
   }
-  return { rows: data ?? [], error: null };
+  if (aggregatedError) {
+    // Audit 2026-05-07 red-team #12 (MED conf-8, chain): precedence
+    // rule — when `fetch_error` is set on an indirect payload, clear
+    // `parent_id_truncated`. The parent-id cap was an UNUSED auxiliary
+    // signal because the child fetch never used those ids. Forensic
+    // readers see ONE cause per failed table (the fetch error), not
+    // a double-signal that conflates a transient infra failure with a
+    // permanent data-volume issue. The retry guidance ("retry to fix
+    // transient") and the support-escalation guidance ("contact
+    // support — permanent cap-hit") then map cleanly to the single
+    // surviving signal.
+    return {
+      rows: [],
+      error: aggregatedError,
+      parent_id_truncated: false,
+      source_truncated: false,
+    };
+  }
+  return {
+    rows: aggregated,
+    error: null,
+    parent_id_truncated: parentIdTruncated,
+    source_truncated:
+      aggregatedTruncated || aggregated.length >= EXPORT_PER_TABLE_ROW_CAP,
+  };
 }
