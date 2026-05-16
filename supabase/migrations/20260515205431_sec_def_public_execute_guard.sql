@@ -103,10 +103,17 @@ COMMENT ON FUNCTION public._assert_no_public_execute(TEXT) IS
   'Migration 134 / audit-2026-05-07 C-0284. Asserts a function has NO PUBLIC '
   'EXECUTE grant by inspecting pg_proc.proacl via aclexplode(grantee=0). '
   'Correct replacement for has_function_privilege(''public'', ...) which is '
-  'brittle across PG versions. Migration-utility only — REVOKE-d from anon/'
-  'authenticated below so it cannot be invoked from the API layer.';
+  'brittle across PG versions. Migration-utility ONLY — REVOKE-d from '
+  'PUBLIC/anon/authenticated/service_role below so neither the API layer nor '
+  'a compromised service-role token can invoke it. Migrations run as postgres '
+  '(superuser) and bypass the REVOKE.';
 
-REVOKE ALL ON FUNCTION public._assert_no_public_execute(TEXT) FROM PUBLIC, anon, authenticated;
+-- audit-2026-05-07 CR #4 (Phase B): service_role is REVOKEd alongside anon /
+-- authenticated. The comment promises "migration-utility only" and the only
+-- legitimate callers (the audit-slice forward migrations) execute as postgres,
+-- which bypasses any per-role REVOKE. A compromised service-role token has no
+-- legitimate need for this helper.
+REVOKE ALL ON FUNCTION public._assert_no_public_execute(TEXT) FROM PUBLIC, anon, authenticated, service_role;
 
 -- --------------------------------------------------------------------------
 -- STEP 2: defensive REVOKE on the audit-slice SECURITY DEFINER functions.
