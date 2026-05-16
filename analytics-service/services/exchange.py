@@ -501,6 +501,18 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     dt = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc)
                     day_key = dt.strftime("%Y-%m-%d")
                     daily_totals[day_key] += pnl_val
+                else:
+                    # PR #181 take-2 silent-failure-hunter HIGH F4: pre-take2,
+                    # this guard had no else branch — bills with empty or
+                    # non-digit ts were silently dropped. A schema drift
+                    # (OKX returning ISO strings, leading whitespace, exponent
+                    # notation) would lose every bill from a page with no
+                    # operator signal. Mirror the Binance/Bybit fetch_daily_pnl
+                    # WARNING severity for cross-exchange triage consistency.
+                    logger.warning(
+                        "OKX bill dropped: unparseable ts=%r (billId=%s, billType=%s)",
+                        ts_raw, bill.get("billId"), bill.get("billType"),
+                    )
 
             logger.info(
                 "OKX: %d bills aggregated to %d daily PnL entries",
@@ -549,7 +561,30 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         from datetime import datetime, timezone
                         ts = int(entry["timestamp"]) / 1000
                         entry["timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                # fail-soft fallback: keep the spot-trades fallback so the
+                # parent sync never aborts on Binance futures-income drift,
+                # but log the underlying error so operators can spot a
+                # systemic regression (Binance schema change, auth failure
+                # masquerading as futures-permission denial) instead of
+                # only seeing "BTC spot fallback fired" in the data.
+                # PR #181 take-2 security F7: ccxt's network-class exceptions
+                # for Binance signed requests embed the request URL in
+                # str(exc) — that URL ends with `&signature=<HMAC-SHA256>`.
+                # Scrub the exception message through scrub_freeform_string
+                # before logging so the HMAC signature is replaced with the
+                # REDACTED token. The exc_info=True traceback's first line
+                # also includes str(exc), so we hand the scrubbed message
+                # via the format-arg (str(exc)) AND set exc_class so
+                # operators still get the exception type for triage. The
+                # raw `exc` object is no longer interpolated.
+                from .redact import scrub_freeform_string
+                exc_class = type(exc).__name__
+                scrubbed_msg = scrub_freeform_string(str(exc))
+                logger.warning(
+                    "Binance futures-income failed (falling back to BTC spot trades), exc_class=%s, scrubbed=%s",
+                    exc_class, scrubbed_msg,
+                )
                 # Fallback: fetch spot trades for BTC only
                 trades = await exchange.fetch_my_trades("BTC/USDT", since=since_ms, limit=1000)
                 for t in trades:
@@ -563,13 +598,40 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     })
 
         elif exchange.id == "bybit":
-            # Bybit: fetch closed PnL
+            # Bybit: fetch closed PnL.
+            # audit-2026-05-07 silent-failure sweep: the previous bare
+            # `except: pass` here wrapped BOTH the Bybit RPC and the
+            # timestamp ISO-conversion loop. Two distinct failure modes
+            # collapsed into one silent surface:
+            #   (a) RPC raised — bybit daily_pnl silently missing,
+            #       caller could not distinguish "no closed positions" from
+            #       "Bybit blip / auth failure / network".
+            #   (b) ISO conversion raised on a malformed createdTime —
+            #       timestamps stayed as digit-strings or empty, and the
+            #       downstream `datetime.fromisoformat` consumer raised
+            #       another layer up with NO context about why.
+            # Both are now logged at WARNING. We deliberately keep the
+            # call best-effort (no re-raise) because fetch_daily_pnl is
+            # a fire-and-forget enrichment path — its failure must not
+            # abort the parent sync. But the silent surface is gone.
+            # fail-soft: best-effort enrichment, but log the failure mode.
             try:
                 params = {"category": "linear", "limit": 200}
                 result = await exchange.private_get_v5_position_closed_pnl(params)
                 items = result.get("result", {}).get("list", [])
-                for item in items:
-                    daily_pnl.append({
+                # PR #181 take-2 red-team HIGH F5: build the Bybit-branch rows
+                # locally first, run the ISO conversion as a pure build of a
+                # NEW list, and only mutate `daily_pnl` on full success. The
+                # prior in-place mutation could partially convert entries —
+                # if entry N succeeded but entry N+1 raised, daily_pnl held a
+                # mix of ISO strings and digit-string timestamps. Downstream
+                # `transforms.trades_to_daily_returns_with_status` then ran
+                # `pd.to_datetime(df['timestamp'])` on the mixed column and
+                # raised a cryptic format-mismatch error with NO link back to
+                # the Bybit WARNING. Atomic conversion preserves uniform
+                # timestamp format and keeps the failure mode localized.
+                bybit_rows = [
+                    {
                         "exchange": "bybit",
                         "symbol": item.get("symbol", "PORTFOLIO"),
                         "side": "buy" if float(item.get("closedPnl", 0)) >= 0 else "sell",
@@ -579,14 +641,30 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         "fee_currency": "USDT",
                         "timestamp": item.get("createdTime", ""),
                         "order_type": "daily_pnl",
-                    })
-                for entry in daily_pnl:
-                    if entry["timestamp"] and str(entry["timestamp"]).isdigit():
-                        from datetime import datetime, timezone
-                        ts = int(entry["timestamp"]) / 1000
-                        entry["timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-            except Exception:
-                pass
+                    }
+                    for item in items
+                ]
+                # Build converted-timestamp variant in a fresh list. On full
+                # success, we extend daily_pnl with the converted rows. On
+                # mid-loop failure, the except clause runs without mutating
+                # daily_pnl (preserving caller-visible uniformity).
+                from datetime import datetime, timezone
+                converted_rows: list[dict[str, Any]] = []
+                for entry in bybit_rows:
+                    new_entry = dict(entry)
+                    ts_raw = entry["timestamp"]
+                    if ts_raw and str(ts_raw).isdigit():
+                        ts = int(ts_raw) / 1000
+                        new_entry["timestamp"] = datetime.fromtimestamp(
+                            ts, tz=timezone.utc
+                        ).isoformat()
+                    converted_rows.append(new_entry)
+                daily_pnl.extend(converted_rows)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Bybit closed_pnl fetch / ISO-conversion failed: %s",
+                    exc, exc_info=True,
+                )
 
     except Exception as e:
         logger.error("fetch_daily_pnl failed: %s", str(e))
@@ -1392,7 +1470,18 @@ async def fetch_mark_prices(
                 if sym in wanted:
                     try:
                         price = float(row["markPrice"])
-                    except (KeyError, TypeError, ValueError):
+                    except (KeyError, TypeError, ValueError) as exc:
+                        # PR #181 take-2 silent-failure-hunter HIGH F3:
+                        # the prior bare `continue` silently dropped any
+                        # row whose markPrice was missing or malformed.
+                        # Caller (per docstring above) treats absent
+                        # symbols as flat positions in equity-curve
+                        # recompute — schema drift would silently corrupt
+                        # valuation. Mirror the OKX per-symbol WARNING.
+                        logger.warning(
+                            "fetch_mark_prices Binance: dropping sym=%s unparseable markPrice=%r: %s",
+                            sym, row.get("markPrice"), exc,
+                        )
                         continue
                     result[sym] = price
                     _MARK_PRICE_CACHE[sym] = (
@@ -1413,7 +1502,14 @@ async def fetch_mark_prices(
                 if sym in wanted:
                     try:
                         price = float(row["markPrice"])
-                    except (KeyError, TypeError, ValueError):
+                    except (KeyError, TypeError, ValueError) as exc:
+                        # PR #181 take-2 silent-failure-hunter HIGH F3:
+                        # same silent-drop pattern as Binance — log the
+                        # symbol that was dropped so schema drift surfaces.
+                        logger.warning(
+                            "fetch_mark_prices Bybit: dropping sym=%s unparseable markPrice=%r: %s",
+                            sym, row.get("markPrice"), exc,
+                        )
                         continue
                     result[sym] = price
                     _MARK_PRICE_CACHE[sym] = (

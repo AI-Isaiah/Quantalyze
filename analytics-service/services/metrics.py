@@ -4,11 +4,49 @@ import pandas as pd
 import numpy as np
 import math
 from dataclasses import dataclass, field
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from .transforms import downsample_series, cap_data_points
 
 logger = logging.getLogger("quantalyze.analytics.metrics")
+
+
+# PR #181 take-2 red-team F16: when a fundamental qs.stats shape regression
+# trips multiple scalars at once (e.g., a future qs upgrade returns Series
+# instead of float), all 11 inline WARNINGs at compute_all_metrics fire with
+# `exc_info=True`, each emitting a full traceback. Per-strategy that's
+# ~150-300 log lines; at fleet scale (~1000 strategies daily) that burns
+# Railway's bytes-budgeted retention in hours, evicting unrelated history.
+# Process-level dedupe: emit the full traceback (exc_info=True) on the FIRST
+# (scalar_name, exc_type) tuple seen, and a single-line WARNING without
+# traceback for all subsequent occurrences. The signal-bearing line is
+# preserved; retention impact is bounded by O(unique scalar x exc-type)
+# instead of O(call count).
+_FAIL_LOUD_TRACEBACK_EMITTED: set[tuple[str, str]] = set()
+
+
+def _should_emit_traceback(scalar_name: str, exc: BaseException) -> bool:
+    """Process-level dedupe for fail-loud tracebacks.
+
+    Returns True the first time we see a `(scalar_name, exc-type-name)` tuple
+    in this process, False thereafter. The WARNING message (with scalar_name,
+    returns_len, str(exc)) is always emitted; only the traceback attachment
+    is rate-limited.
+    """
+    key = (scalar_name, type(exc).__name__)
+    if key in _FAIL_LOUD_TRACEBACK_EMITTED:
+        return False
+    _FAIL_LOUD_TRACEBACK_EMITTED.add(key)
+    return True
+
+
+def _reset_fail_loud_traceback_dedupe_for_tests() -> None:
+    """Test-only helper — clear the per-process traceback-emitted set.
+
+    Called by test fixtures to reset state between tests so the
+    'first occurrence emits traceback' contract is reliably exercised.
+    """
+    _FAIL_LOUD_TRACEBACK_EMITTED.clear()
 
 
 # Audit 2026-05-07 H-0730: every series helper in this file returns the same
@@ -22,6 +60,39 @@ logger = logging.getLogger("quantalyze.analytics.metrics")
 class SeriesPoint(TypedDict):
     date: str
     value: float
+
+
+# PR #181 take-2 type-design F8/F9: discriminator type for r_squared
+# computation outcome. Pre-take2 the field was typed as plain `str`,
+# which would silently accept typos like 'No Benchmark' or 'unknown'
+# at any of the three assignment sites. Narrowing to a Literal pins
+# the enum at type-check time and lets downstream consumers exhaust
+# the alternatives with mypy/pyright's narrowing.
+RSquaredStatus = Literal["no_benchmark", "ok", "error"]
+
+
+class QstatsScalarsResult(TypedDict):
+    """Return shape for `compute_qstats_scalars`.
+
+    PR #181 take-2 type-design F8/F9: pre-take2 the function returned
+    `dict[str, float | None | str]` — every consumer had to defensively
+    isinstance-narrow `str` even though only one key (`r_squared_status`)
+    carries the `str` branch. The TypedDict pins per-field types so the
+    type checker catches future drift instead of relying on a comment
+    block listing the 10 valid output keys.
+    """
+
+    recovery_factor: float | None
+    ulcer_index: float | None
+    upi: float | None
+    kelly_criterion: float | None
+    probabilistic_sharpe_ratio: float | None
+    common_sense_ratio: float | None
+    cpc_index: float | None
+    serenity_index: float | None
+    r_squared: float | None
+    r_squared_status: RSquaredStatus
+    time_in_market: float | None
 
 
 # Phase 12 / Pitfall 11: minimum acceptable return for Sortino.
@@ -94,13 +165,21 @@ def _safe_qstats_scalar(
     Failure-soft contract (H-0710 / H-0713 / H-0723): one failing scalar must
     not take down the other nine. Logs include the scalar `name` so operators
     can spot silent regressions in Railway logs without inferring from latency.
+
+    PR #181 take-2 red-team F16: traceback attachment is process-deduped via
+    `_should_emit_traceback` so a fundamental qs upgrade tripping multiple
+    scalars doesn't multiply Railway retention pressure linearly with call
+    volume. First occurrence per (scalar_name, exc-type) pair emits
+    exc_info=True; subsequent occurrences emit the WARNING text without
+    traceback. Operators still get the full first-incident traceback.
     """
     try:
         return _safe_float(fn(returns))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar %s failed (returns_len=%s): %s",
-            name, returns_len, exc, exc_info=True,
+            name, returns_len, exc,
+            exc_info=_should_emit_traceback(name, exc),
         )
         return None
 
@@ -170,13 +249,49 @@ class MetricsResult:
 
 
 def _safe_float(value: Any) -> float | None:
-    """Convert to float, returning None for NaN/Inf values."""
+    """Convert to float, returning None for NaN/Inf values.
+
+    review-cluster gate (audit-2026-05-07): emit DEBUG when coercion fails or
+    produces NaN/Inf. This helper is called by every qs.stats wrapper in
+    compute_all_metrics — if qs.stats returns a numpy.complex128, NaN, or
+    a type that fails float() coercion (Decimal, an array-of-1, etc.), the
+    scalar silently becomes None and the outer try/except never fires.
+    Pre-gate, this was a doubly-silent failure mode the sweep's WARNINGs
+    did NOT cover. DEBUG (not WARNING) because this helper is also called
+    from sanitize_metrics for legitimate None paths and from many code
+    sites where missing values are normal; promoting to WARNING would
+    flood Railway with normal-path noise. An operator grepping DEBUG
+    output for `_safe_float` will see the coercion trail without
+    background spam.
+
+    PR #181 take-2 silent-failure-hunter F18: short-circuit on None
+    BEFORE the try/except + DEBUG log. None is a legitimate normal-path
+    input from sanitize_metrics' recursive walk AND from many qs.stats
+    return values (insufficient data windows). Routing None through the
+    try/except produced a DEBUG line `_safe_float coerce failed
+    (type=NoneType)` per call — sanitize_metrics walks a full payload of
+    ~10K floats, several legitimately None, generating tens of DEBUG
+    lines per analytics run. The DEBUG noise floor defeats operators who
+    flip LOG_LEVEL=DEBUG to triage a real coercion issue (numpy.complex128,
+    Decimal, etc.) — they drown in the legitimate-None signal. Reserve
+    DEBUG for actual coercion failures.
+    """
+    if value is None:
+        return None
     try:
         f = float(value)
         if math.isnan(f) or math.isinf(f):
+            logger.debug(
+                "_safe_float coerced to None (NaN/Inf detected, type=%s)",
+                type(value).__name__,
+            )
             return None
         return f
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        logger.debug(
+            "_safe_float coerce failed (type=%s): %s",
+            type(value).__name__, exc,
+        )
         return None
 
 
@@ -310,14 +425,50 @@ def compute_all_metrics(
 
     # Extended metrics
     metrics_json: dict[str, Any] = {}
+    # audit-2026-05-07 silent-failure sweep: each scalar try below previously
+    # swallowed exceptions with bare `except: pass`. That collapsed three
+    # operationally distinct states ("scalar computed", "scalar absent because
+    # insufficient data", "qs raised — operator should know") into the single
+    # "field missing" surface, with no Railway log to triage. Mirror the
+    # H-0710 / H-0713 / H-0723 pattern already used by `_safe_qstats_scalar`
+    # (above) and the post-G11.E.1 sites for drawdown/benchmark fan-outs:
+    # log with scalar name + returns_len context so operators can spot
+    # silent regressions instead of inferring from latency. Math is still
+    # failure-soft (single qs failure must not take down compute_all_metrics);
+    # only the observability changes.
+    # PR #181 take-2 red-team F6: surface BOTH the raw input length and the
+    # post-NaN-drop length qs.stats actually consumes. quantstats internally
+    # filters NaN via `_utils._prepare_returns` before computing scalars; the
+    # raw `len(returns)` value in WARNING templates misdirects operators who
+    # try to reproduce the failure manually with the same length.
+    returns_len_for_log = len(returns)
+    returns_nonnan_len_for_log = int(returns.notna().sum())
+    # fail-soft: optional scalar — single qs failure must not abort compute.
+    # PR #181 take-2 red-team F2: prior call passed `cutoff=0.05`; the
+    # pinned quantstats==0.0.81 signature uses `confidence=0.95` (NOT
+    # `cutoff`). Pre-take2 every analytics run raised TypeError here and
+    # var_1d_95 was missing from every factsheet; the sweep WARNINGs then
+    # made the permanent failure a Railway noise floor that erodes the
+    # signal value of the new fail-loud emissions.
     try:
-        metrics_json["var_1d_95"] = _safe_float(qs.stats.value_at_risk(returns, cutoff=0.05))
-    except Exception:
-        pass
+        metrics_json["var_1d_95"] = _safe_float(
+            qs.stats.value_at_risk(returns, confidence=0.95)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar var_1d_95 failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("var_1d_95", exc),
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["cvar"] = _safe_float(qs.stats.cvar(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar cvar failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("cvar", exc),
+        )
 
     metrics_json["mtd"] = _safe_float(returns[returns.index >= pd.Timestamp(returns.index[-1].replace(day=1))].add(1).prod() - 1)
     metrics_json["ytd"] = _safe_float(returns[returns.index >= pd.Timestamp(f"{returns.index[-1].year}-01-01")].add(1).prod() - 1)
@@ -330,45 +481,100 @@ def compute_all_metrics(
         metrics_json["worst_month"] = _safe_float(monthly_rets.min())
 
     # Additional risk metrics
+    # fail-soft: optional scalar — monthly_rets percentile may raise on empty.
     try:
         if len(monthly_rets) > 0:
             metrics_json["var_1m_99"] = _safe_float(np.percentile(monthly_rets, 1))
-    except Exception:
-        pass
-    try:
-        metrics_json["gini"] = _safe_float(qs.stats.gini(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # review-cluster gate (audit-2026-05-07): log prefix is 'np.percentile'
+        # not 'qstats scalar' — the underlying call is numpy, not qs.stats.
+        # An operator grepping for the qs.stats source would dead-end on a
+        # 'qstats scalar var_1m_99' line; accurate attribution lets them find
+        # the right call site immediately.
+        logger.warning(
+            "np.percentile scalar var_1m_99 failed (returns_len=%s, nonnan_len=%s, monthly_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, len(monthly_rets), exc,
+            exc_info=_should_emit_traceback("var_1m_99", exc),
+        )
+    # PR #181 take-2 red-team F1: `qs.stats.gini` does not exist on the
+    # pinned quantstats==0.0.81 (verified live: `hasattr(qs.stats, 'gini')
+    # == False`). The sweep's WARNING wrapped this site but left the dead
+    # call in place, producing one permanent Railway WARNING per analytics
+    # run that operators cannot resolve. The gini metric has been missing
+    # from every factsheet since the call was introduced; pre-sweep
+    # bare-pass swallowed the AttributeError. Removing the dead call drops
+    # the noise floor; if/when gini is needed it should be re-introduced
+    # as either (a) a manual numpy/pandas implementation, or (b) after a
+    # quantstats version bump that re-exposes the attribute.
+    # fail-soft: optional scalar.
     try:
         metrics_json["omega"] = _safe_float(qs.stats.omega(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar omega failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("omega", exc),
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["gain_pain"] = _safe_float(qs.stats.gain_to_pain_ratio(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar gain_pain failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("gain_pain", exc),
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["tail_ratio"] = _safe_float(qs.stats.tail_ratio(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar tail_ratio failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("tail_ratio", exc),
+        )
 
     # Distribution metrics
+    # fail-soft: optional scalar (pandas Series.skew, not qs.stats).
     try:
         metrics_json["skewness"] = _safe_float(returns.skew())
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # review-cluster gate (audit-2026-05-07): log prefix is 'pandas'
+        # not 'qstats scalar' — Series.skew is the call, not qs.stats.
+        logger.warning(
+            "pandas scalar skewness failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("skewness", exc),
+        )
+    # fail-soft: optional scalar (pandas Series.kurtosis, not qs.stats).
     try:
         metrics_json["kurtosis"] = _safe_float(returns.kurtosis())
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # review-cluster gate (audit-2026-05-07): log prefix is 'pandas'
+        # not 'qstats scalar' — Series.kurtosis is the call, not qs.stats.
+        logger.warning(
+            "pandas scalar kurtosis failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("kurtosis", exc),
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["smart_sharpe"] = _safe_float(qs.stats.smart_sharpe(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar smart_sharpe failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("smart_sharpe", exc),
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["smart_sortino"] = _safe_float(qs.stats.smart_sortino(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar smart_sortino failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("smart_sortino", exc),
+        )
 
     # Win/Loss metrics
     wins = returns[returns > 0]
@@ -382,10 +588,15 @@ def compute_all_metrics(
         avg_loss_abs = abs(float(losses.mean()))
         if avg_loss_abs > 0:
             metrics_json["payoff_ratio"] = _safe_float(wins.mean() / avg_loss_abs)
+    # fail-soft: optional scalar.
     try:
         metrics_json["profit_factor"] = _safe_float(qs.stats.profit_factor(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar profit_factor failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("profit_factor", exc),
+        )
 
     # Risk of Ruin (Cox-Miller approximation)
     if len(wins) > 0 and len(losses) > 0:
@@ -453,18 +664,23 @@ def compute_all_metrics(
             metrics_json["drawdown_episodes"] = episodes
     except Exception as exc:  # noqa: BLE001
         # audit-2026-05-07 G11.E.1: replaced bare `except: pass` with structured
-        # logging + a `drawdown_episodes_error` flag so the frontend can render
-        # 'Drawdown episodes unavailable due to compute error' instead of silently
+        # logging so a regression surfaces in Railway logs instead of silently
         # falling back to lower-fidelity client-side segmentation.
+        # PR #181 take-2 type-design F10: dropped the `drawdown_episodes_error`
+        # JSONB key — no frontend or downstream Python consumer reads it
+        # (verified via repo-wide grep). The WARNING log already serves
+        # operator triage; a write-only JSONB key is dead schema and a
+        # fictional contract that misleads future maintainers.
         logger.warning(
             "drawdown_episodes computation failed (returns_len=%s): %s",
             len(returns) if returns is not None else None,
             exc,
             exc_info=True,
         )
-        metrics_json["drawdown_episodes_error"] = str(exc)[:200]
 
     # Outlier ratios
+    # fail-soft: optional pair — both ratios share one try so they degrade
+    # together (consistent UI state).
     try:
         mean_ret = float(returns.mean())
         std_ret = float(returns.std())
@@ -472,8 +688,12 @@ def compute_all_metrics(
             outlier_threshold = 2 * std_ret
             metrics_json["outlier_win_ratio"] = _safe_float((returns > mean_ret + outlier_threshold).mean())
             metrics_json["outlier_loss_ratio"] = _safe_float((returns < mean_ret - outlier_threshold).mean())
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "outlier ratios failed (returns_len=%s, nonnan_len=%s): %s",
+            returns_len_for_log, returns_nonnan_len_for_log, exc,
+            exc_info=_should_emit_traceback("outlier_ratios", exc),
+        )
 
     # Benchmark metrics (single greeks() call for alpha + beta)
     if benchmark_returns is not None and len(benchmark_returns) > 0:
@@ -500,6 +720,10 @@ def compute_all_metrics(
             # of them. Log the exception with context so a regression in any of
             # those helpers surfaces in Railway logs instead of making the Risk
             # tab render "Insufficient data" forever.
+            # PR #181 take-2 type-design F10: dropped the
+            # `benchmark_metrics_error` JSONB key — no consumer reads it
+            # (verified via repo-wide grep). WARNING log is the operator
+            # signal.
             logger.warning(
                 "benchmark_metrics fan-out failed (returns_len=%s, benchmark_len=%s): %s",
                 len(returns) if returns is not None else None,
@@ -507,7 +731,6 @@ def compute_all_metrics(
                 exc,
                 exc_info=True,
             )
-            metrics_json["benchmark_metrics_error"] = str(exc)[:200]
 
         # Store benchmark cumulative returns series aligned to strategy dates
         try:
@@ -526,10 +749,13 @@ def compute_all_metrics(
         except Exception as exc:  # noqa: BLE001
             # audit-2026-05-07 G11.E.3: silently dropping benchmark_returns also
             # kills the client-side correlation fallback in
-            # CorrelationWithBenchmark.tsx. Log + emit an error flag so the
-            # frontend can surface "Benchmark data unavailable due to compute
-            # error" instead of the indistinguishable "no benchmark assigned"
-            # empty state.
+            # CorrelationWithBenchmark.tsx. Log so the regression surfaces in
+            # Railway instead of producing the indistinguishable "no benchmark
+            # assigned" empty state silently.
+            # PR #181 take-2 type-design F10: dropped the
+            # `benchmark_returns_error` JSONB key — no consumer reads it
+            # (verified via repo-wide grep). WARNING log is the operator
+            # signal.
             logger.warning(
                 "benchmark_returns serialization failed (returns_len=%s, benchmark_len=%s): %s",
                 len(returns) if returns is not None else None,
@@ -537,7 +763,6 @@ def compute_all_metrics(
                 exc,
                 exc_info=True,
             )
-            metrics_json["benchmark_returns_error"] = str(exc)[:200]
 
     # METRICS-11: 10 new qstats scalars merged into the inner metrics_json
     # JSONB sub-dict (D-01 storage split — these are scalars, they live in
@@ -692,7 +917,7 @@ def _daily_returns_grid_from_series(returns: pd.Series) -> list[SeriesPoint]:
 def compute_qstats_scalars(
     returns: pd.Series,
     benchmark: pd.Series | None,
-) -> dict[str, float | None | str]:
+) -> QstatsScalarsResult:
     """METRICS-11: Compute the 10 new qstats scalars.
 
     Audit 2026-05-07 H-0710 / H-0713 / H-0723:
@@ -727,7 +952,7 @@ def compute_qstats_scalars(
         time_in_market (fraction in [0, 1], not ceil-rounded percent),
         r_squared_status (companion: 'no_benchmark' | 'ok' | 'error').
     """
-    result: dict[str, float | None | str] = {
+    result: QstatsScalarsResult = {
         "recovery_factor": None,
         "ulcer_index": None,
         "upi": None,

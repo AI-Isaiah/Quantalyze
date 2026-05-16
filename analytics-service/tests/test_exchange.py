@@ -2792,3 +2792,528 @@ class TestG12BOkxFundingRowContract:
             "guard at services/position_reconstruction.py:533 filters "
             "it out without inflating fill totals."
         )
+
+
+# audit-2026-05-07 silent-failure sweep regression
+class TestFetchDailyPnlBybitFailLoud:
+    """Pre-sweep, `fetch_daily_pnl` wrapped the Bybit closed-pnl RPC and
+    the timestamp ISO-conversion loop in a single `except: pass`. Two
+    distinct failure modes (RPC raise vs ISO conversion raise) silently
+    collapsed into "no bybit daily_pnl" with no Railway log. Post-sweep,
+    the call remains best-effort (the parent sync still wants to continue)
+    BUT a WARNING is emitted naming the failure mode.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bybit_closed_pnl_rpc_failure_emits_warning(self, caplog):
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        # Bybit ccxt mock whose closed_pnl endpoint raises.
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            side_effect=RuntimeError("simulated Bybit closed_pnl RPC failure")
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_daily_pnl(mock_exchange)
+        # Failure-soft contract: the call returned without raising.
+        assert result == []
+        # Operator visibility: a WARNING named the failure mode.
+        # Review-cluster gate (audit-2026-05-07): tightened from the
+        # loose 'bybit' substring filter to require the exact log prefix
+        # the sweep introduced. Loose match could pass on an UNRELATED
+        # future warning that happens to contain 'bybit' from a different
+        # module.
+        matching = [
+            r for r in caplog.records
+            if "Bybit closed_pnl" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert matching, (
+            "Bybit closed_pnl RPC failure must produce a WARNING log "
+            "with prefix 'Bybit closed_pnl' (post audit-2026-05-07 "
+            "silent-failure sweep) so operators can distinguish 'Bybit "
+            "blip / auth fail' from 'no closed positions on the account'."
+        )
+        # Pin structured-logging contract: exc_info must carry the traceback.
+        assert any(r.exc_info is not None for r in matching), (
+            "Bybit closed_pnl WARNING must use exc_info=True so operators "
+            "get the traceback in Railway logs, not just the message"
+        )
+        # Pin the boundary: the inner WARNING must be THE log — the
+        # outer wrapper's ERROR ('fetch_daily_pnl failed') must NOT
+        # fire. A refactor that re-raises from the inner Bybit branch
+        # would create a doubled WARNING+ERROR; this assertion catches it.
+        assert not any(
+            r.levelno == logging.ERROR
+            and "fetch_daily_pnl failed" in r.getMessage()
+            for r in caplog.records
+        ), (
+            "Bybit closed_pnl failure must NOT escalate to the outer "
+            "fetch_daily_pnl ERROR — the fail-loud transformation is "
+            "WARNING-only at the inner branch (best-effort enrichment)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_bybit_closed_pnl_item_parse_failure_emits_warning(self, caplog):
+        """A malformed item INSIDE the Bybit closed_pnl response (e.g.,
+        `closedPnl: 'NaN-string'` which `float()` rejects) raises inside
+        the per-item loop. Pre-sweep, the outer bare-pass swallowed it
+        and downstream timestamps remained malformed with no log.
+        Post-sweep, a WARNING fires.
+
+        Review-cluster gate rename (audit-2026-05-07): the prior test
+        name 'test_bybit_iso_conversion_failure' was misleading — the
+        actual trigger is closedPnl parsing, not the ISO conversion (the
+        mock data here has a valid digit-string createdTime). Renamed
+        to accurately describe what's tested. A separate test for the
+        true ISO-conversion path is a follow-up (would require mocking
+        datetime.fromtimestamp to raise).
+        """
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+        # `float('NaN-string')` raises ValueError inside the per-item
+        # parse loop, which is wrapped by the Bybit try/except.
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "closedPnl": "NaN-string",
+                            "createdTime": "1700000000000",
+                        }
+                    ]
+                }
+            }
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_daily_pnl(mock_exchange)
+        # Failure-soft contract: the call returned without raising.
+        assert isinstance(result, list)
+        # Operator visibility: WARNING with exact prefix.
+        matching = [
+            r for r in caplog.records
+            if "Bybit closed_pnl" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert matching, (
+            "Bybit closed_pnl item-parse failure must produce a WARNING "
+            "log with prefix 'Bybit closed_pnl' (post audit-2026-05-07 "
+            "silent-failure sweep)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_bybit_iso_conversion_overflow_emits_warning(self, caplog):
+        """PR #181 take-2 silent-failure-hunter F13 + pr-test LOW #3:
+        the original Bybit-branch WARNING text 'Bybit closed_pnl fetch
+        / ISO-conversion failed' names TWO failure modes. The renamed
+        sibling test_bybit_closed_pnl_item_parse_failure covers the
+        per-item parse path; the RPC-failure test covers the RPC path.
+        This test exercises the TRUE ISO-conversion failure mode: a
+        createdTime that passes the isdigit() guard but overflows when
+        passed to datetime.fromtimestamp via int(ts_raw) / 1000.
+
+        Take-2 atomicity (red-team F5): in addition to emitting the
+        WARNING, the failure must NOT partially mutate daily_pnl —
+        either all entries are converted, or none are (atomic
+        contract). After F5, the Bybit ISO conversion builds a NEW
+        list before mutating daily_pnl; on mid-loop failure, the
+        partial state is discarded and daily_pnl remains uniform.
+        """
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+        # 22-digit createdTime passes `str.isdigit()` but `int(.) / 1000`
+        # overflows datetime.fromtimestamp on most platforms (year ~10^14).
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "closedPnl": "5.0",
+                            "createdTime": "9" * 22,
+                        }
+                    ]
+                }
+            }
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_daily_pnl(mock_exchange)
+
+        # F5 atomicity: on ISO failure, no Bybit rows leak into daily_pnl
+        # (build-then-extend means a mid-loop overflow discards the
+        # partial converted list).
+        assert isinstance(result, list)
+        # Operator visibility: WARNING fired for the ISO-conversion path.
+        matching = [
+            r for r in caplog.records
+            if "Bybit closed_pnl" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert matching, (
+            "Bybit ISO-conversion overflow must produce a WARNING log "
+            "with prefix 'Bybit closed_pnl' (PR #181 take-2 F13)"
+        )
+
+
+# PR #181 take-2 silent-failure-hunter F4: OKX bills aggregator pre-take2
+# had no else branch on the `ts_raw.isdigit()` guard — bills with empty
+# or non-digit ts were silently dropped. Now logs a WARNING with
+# billId + billType for cross-exchange triage consistency.
+class TestFetchDailyPnlOkxFailLoud:
+    """Take-2 regression coverage for the OKX bill-aggregator silent-drop fix."""
+
+    @pytest.mark.asyncio
+    async def test_okx_bill_dropped_on_non_digit_ts_logs_warning(self, caplog):
+        """A bill with a non-digit ts (e.g., ISO string from a schema drift)
+        must produce a WARNING naming the billId / billType so operators
+        can spot the regression instead of seeing silently truncated
+        daily_pnl.
+        """
+        import logging
+        from datetime import datetime, timezone, timedelta
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "okx"
+        # Recent bills: one valid, one with non-digit ts (mimics OKX
+        # returning an ISO string for a future schema-drift bill).
+        valid_ts = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+        recent_resp = {
+            "data": [
+                {"ts": valid_ts, "pnl": "1.0", "fee": "0", "billId": "B1", "billType": "8"},
+                {"ts": "2026-01-01T00:00:00Z", "pnl": "2.0", "fee": "0", "billId": "B2", "billType": "8"},
+                {"ts": "", "pnl": "3.0", "fee": "0", "billId": "B3", "billType": "8"},
+            ]
+        }
+        archive_resp = {"data": []}
+
+        async def mock_recent(params):
+            return recent_resp
+
+        async def mock_archive(params):
+            return archive_resp
+
+        mock_exchange.private_get_account_bills = AsyncMock(
+            side_effect=mock_recent
+        )
+        mock_exchange.private_get_account_bills_archive = AsyncMock(
+            side_effect=mock_archive
+        )
+
+        # since_ms recent (no archive needed)
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=2)).timestamp() * 1000)
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            await fetch_daily_pnl(mock_exchange, since_ms=since_ms)
+
+        dropped = [
+            r for r in caplog.records
+            if "OKX bill dropped" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        # Both bad bills (ISO + empty-string) should emit a WARNING.
+        assert len(dropped) >= 2, (
+            "PR #181 take-2 F4: each OKX bill with non-digit ts must "
+            f"emit a WARNING; observed {len(dropped)}"
+        )
+        msgs = " | ".join(r.getMessage() for r in dropped)
+        assert "B2" in msgs, "WARNING must include billId for the ISO-ts row"
+        assert "B3" in msgs, "WARNING must include billId for the empty-ts row"
+
+
+# PR #181 take-2 silent-failure-hunter F3: fetch_mark_prices pre-take2
+# silently dropped Binance/Bybit rows whose markPrice was missing or
+# malformed. Now logs a WARNING with the symbol + the unparseable
+# markPrice value. Schema drift on the ticker endpoint would corrupt
+# valuation (caller treats absent symbols as flat positions) with no
+# operator signal without this WARNING.
+class TestFetchMarkPricesFailLoud:
+    """Take-2 regression coverage for the per-row silent-drop fix."""
+
+    @pytest.mark.asyncio
+    async def test_binance_drops_unparseable_mark_price_with_warning(self, caplog):
+        import logging
+        from services.exchange import (
+            fetch_mark_prices,
+            _reset_mark_price_cache_for_tests,
+        )
+
+        _reset_mark_price_cache_for_tests()
+        mock_exchange = MagicMock()
+        mock_exchange.id = "binance"
+        # Mixed response: BTCUSDT is fine, ETHUSDT has a non-numeric markPrice.
+        mock_exchange.fapiPublic_get_premiumindex = AsyncMock(
+            return_value=[
+                {"symbol": "BTCUSDT", "markPrice": "60000.0"},
+                {"symbol": "ETHUSDT", "markPrice": "NaN-string"},
+                {"symbol": "SOLUSDT"},  # missing markPrice entirely
+            ]
+        )
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_mark_prices(
+                mock_exchange, ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+            )
+        # The good row is kept; the bad rows are dropped.
+        assert result.get("BTCUSDT") == 60000.0
+        assert "ETHUSDT" not in result
+        assert "SOLUSDT" not in result
+        # WARNINGs must name the dropped symbols.
+        drops = [
+            r for r in caplog.records
+            if "fetch_mark_prices Binance" in r.getMessage()
+            and "dropping sym=" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert len(drops) >= 2, (
+            f"PR #181 take-2 F3: expected per-symbol WARNING for each "
+            f"dropped row; observed {len(drops)}"
+        )
+        msgs = " | ".join(r.getMessage() for r in drops)
+        assert "ETHUSDT" in msgs, "WARNING must name ETHUSDT drop"
+        assert "SOLUSDT" in msgs, "WARNING must name SOLUSDT drop"
+
+    @pytest.mark.asyncio
+    async def test_bybit_drops_unparseable_mark_price_with_warning(self, caplog):
+        import logging
+        from services.exchange import (
+            fetch_mark_prices,
+            _reset_mark_price_cache_for_tests,
+        )
+
+        _reset_mark_price_cache_for_tests()
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_market_tickers = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {"symbol": "BTCUSDT", "markPrice": "60000.0"},
+                        {"symbol": "ETHUSDT", "markPrice": "NaN-string"},
+                    ]
+                }
+            }
+        )
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_mark_prices(
+                mock_exchange, ["BTCUSDT", "ETHUSDT"]
+            )
+        assert result.get("BTCUSDT") == 60000.0
+        assert "ETHUSDT" not in result
+        drops = [
+            r for r in caplog.records
+            if "fetch_mark_prices Bybit" in r.getMessage()
+            and "dropping sym=ETHUSDT" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert drops, (
+            "PR #181 take-2 F3: ETHUSDT drop must emit a Bybit-specific "
+            "WARNING naming the symbol"
+        )
+
+
+# Review-cluster gate (audit-2026-05-07): the Binance branch fix at
+# exchange.py:552-562 — pre-gate it had NO regression test. A /simplify
+# pass that drops the new WARNING would land silently.
+class TestFetchDailyPnlBinanceFailLoud:
+    """Pre-sweep, the Binance futures-income failure path silently
+    swallowed the exception and fell back to BTC spot trades with no
+    log attributing the fallback to a futures-income drift. Post-sweep,
+    a WARNING fires before the fallback so operators can spot systemic
+    issues (Binance schema change, auth failure masquerading as
+    futures-permission denial) instead of only seeing 'BTC spot
+    fallback fired' in the data.
+    """
+
+    @pytest.mark.asyncio
+    async def test_binance_futures_income_failure_logs_warning_before_fallback(
+        self, caplog
+    ):
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "binance"
+        # fapiPrivate_get_income raises → WARNING + fallback to fetch_my_trades.
+        mock_exchange.fapiPrivate_get_income = AsyncMock(
+            side_effect=RuntimeError(
+                "simulated Binance futures-income RPC failure"
+            )
+        )
+        # The fallback returns one trade so we can verify the path was taken.
+        # Note: ccxt trade dicts use `datetime` as the ISO-string key (see
+        # exchange.py:572 — `t["datetime"]`), distinct from Python's
+        # datetime module. The fallback ALSO reads `t["symbol"]` /
+        # `t["side"]` / etc. via subscript (no .get default), so the
+        # mock must populate every required key.
+        mock_exchange.fetch_my_trades = AsyncMock(
+            return_value=[
+                {
+                    "symbol": "BTC/USDT",
+                    "amount": 0.1,
+                    "price": 50000.0,
+                    "side": "buy",
+                    "fee": {"cost": 0.5, "currency": "USDT"},
+                    "timestamp": 1700000000000,
+                    "datetime": "2023-11-14T22:13:20.000Z",
+                    "type": "market",
+                }
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_daily_pnl(mock_exchange)
+        # Failure-soft + fallback contract: result is non-empty (fallback ran).
+        assert isinstance(result, list)
+        assert len(result) >= 1, (
+            "Binance branch must fall back to fetch_my_trades when "
+            "futures-income raises; fallback produced no rows"
+        )
+        # Operator visibility: WARNING naming the Binance futures-income mode.
+        matching = [
+            r for r in caplog.records
+            if "Binance futures-income" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert matching, (
+            "Binance futures-income failure must produce a WARNING log with "
+            "prefix 'Binance futures-income' (post audit-2026-05-07 "
+            "silent-failure sweep); the prior bare-pass swallow is a "
+            "regression"
+        )
+        # PR #181 take-2 security F7: structured-logging contract changed
+        # to drop exc_info=True on this site to prevent ccxt network-class
+        # exception messages from leaking the signed URL +
+        # &signature=<HMAC> into the traceback. The new contract carries
+        # the exception class via `exc_class=` and the scrubbed message
+        # via `scrubbed=` in the WARNING template.
+        assert any(
+            "exc_class=" in r.getMessage() for r in matching
+        ), (
+            "Binance futures-income WARNING must include exc_class= label "
+            "(PR #181 take-2 HMAC-leak fix)"
+        )
+        assert any(
+            "scrubbed=" in r.getMessage() for r in matching
+        ), (
+            "Binance futures-income WARNING must include scrubbed= label "
+            "for the redacted message (PR #181 take-2 HMAC-leak fix)"
+        )
+        assert all(
+            r.exc_info is None for r in matching
+        ), (
+            "Binance futures-income WARNING must NOT use exc_info=True — "
+            "the traceback's first line includes str(exc) which carries "
+            "the signed URL + signature. Use scrubbed string instead."
+        )
+
+    @pytest.mark.asyncio
+    async def test_binance_fallback_failure_escapes_to_outer_error(self, caplog):
+        """Documents the cascade boundary (silent-failure-hunter LOW #5):
+        if BOTH futures-income AND the fallback fetch_my_trades raise,
+        the inner Binance WARNING fires AND the OUTER 'fetch_daily_pnl
+        failed' ERROR also fires (because the fallback has no try/except
+        of its own). Operators see TWO logs and can disambiguate
+        'transient' vs 'systemic' Binance issues. This test pins that
+        boundary so a future refactor wrapping the fallback in its own
+        try/except doesn't silently swallow the cascade.
+        """
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "binance"
+        mock_exchange.fapiPrivate_get_income = AsyncMock(
+            side_effect=RuntimeError("simulated futures-income failure")
+        )
+        mock_exchange.fetch_my_trades = AsyncMock(
+            side_effect=RuntimeError("simulated spot-trades fallback failure")
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_daily_pnl(mock_exchange)
+        # Outer wrapper still returns [] (best-effort enrichment path).
+        assert result == []
+        # Inner WARNING fired naming the futures-income mode.
+        inner = [
+            r for r in caplog.records
+            if "Binance futures-income" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert inner, "inner Binance WARNING must fire"
+        # Outer wrapper ERROR fired (fallback also raised, escapes to L620).
+        outer = [
+            r for r in caplog.records
+            if "fetch_daily_pnl failed" in r.getMessage()
+            and r.levelno == logging.ERROR
+        ]
+        assert outer, (
+            "outer fetch_daily_pnl ERROR must fire when the fallback also "
+            "raises — this is the documented cascade contract"
+        )
+
+    @pytest.mark.asyncio
+    async def test_binance_futures_income_warning_scrubs_hmac_signature(
+        self, caplog
+    ):
+        """PR #181 take-2 security F7: the Binance futures-income WARNING
+        previously used `exc_info=True` and interpolated the raw exception.
+        For ccxt network-class errors (RequestTimeout, ExchangeNotAvailable
+        etc.) the exception message embeds the signed request URL, which
+        ends with `&signature=<HMAC-SHA256>` for signed fapiPrivate
+        endpoints. The new contract scrubs the message via
+        `services.redact.scrub_freeform_string` so the HMAC is replaced
+        with the REDACTED token before reaching Railway/Sentry. Pre-take2
+        the HMAC plaintext landed in logs on every Binance fapi network
+        failure.
+        """
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "binance"
+        # Simulate the shape of a ccxt RequestTimeout: `details` =
+        # `id method url`, where url contains `&signature=<HMAC>`.
+        # The exception's str() will carry this verbatim.
+        fake_url = (
+            "https://fapi.binance.com/fapi/v1/income?"
+            "timestamp=1700000000000&recvWindow=5000&"
+            "signature=abcdef0123456789deadbeefcafebabe1111222233334444"
+        )
+        signed_exc_msg = f"binance GET {fake_url}"
+        mock_exchange.fapiPrivate_get_income = AsyncMock(
+            side_effect=RuntimeError(signed_exc_msg)
+        )
+        # Fallback succeeds so we only observe the inner WARNING.
+        mock_exchange.fetch_my_trades = AsyncMock(return_value=[])
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            await fetch_daily_pnl(mock_exchange)
+
+        binance_warns = [
+            r for r in caplog.records
+            if "Binance futures-income" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert binance_warns, "Binance WARNING must fire on RPC failure"
+        # The raw HMAC plaintext must NOT appear anywhere in the WARNING
+        # message text.
+        for rec in binance_warns:
+            msg = rec.getMessage()
+            assert "abcdef0123456789deadbeefcafebabe1111222233334444" not in msg, (
+                f"HMAC signature plaintext leaked into Binance WARNING: {msg!r}"
+            )
+            # exc_info must be None (we dropped it as part of the scrub fix).
+            assert rec.exc_info is None, (
+                "Binance WARNING must not carry exc_info=True (HMAC-leak fix)"
+            )

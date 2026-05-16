@@ -636,7 +636,26 @@ class TestExchangeErrorHandling:
 
     @pytest.mark.asyncio
     async def test_bybit_api_timeout(self):
-        """Bybit timeout is silently caught (the except pass block)."""
+        """PR #181 take-2 silent-failure-hunter F12: rewritten contract.
+
+        Pre-sweep: the Bybit branch wrapped the RPC + ISO-conversion loop
+        in `except: pass`, silently swallowing every failure (including
+        timeouts). The original docstring 'Bybit timeout is silently
+        caught (the except pass block)' encoded that swallow contract
+        and any new developer reading this test would assume the silent
+        behavior was intentional.
+
+        Post-sweep (audit-2026-05-07 silent-failure sweep): the Bybit
+        branch now logs a WARNING via the inner-branch handler at
+        exchange.py:614-617 ('Bybit closed_pnl fetch / ISO-conversion
+        failed'). The outer fetch_daily_pnl wrapper does NOT escalate
+        to ERROR for this branch (the inner handler catches it). The
+        observable result is unchanged (empty list), but the WARNING
+        is the load-bearing operator signal — a future /simplify pass
+        that drops the WARNING would re-introduce the silent failure
+        mode the sweep removed. The dedicated WARNING-pin test lives
+        in test_exchange.py::TestFetchDailyPnlBybitFailLoud.
+        """
         exchange = _make_bybit_exchange()
         exchange.private_get_v5_position_closed_pnl = AsyncMock(
             side_effect=ccxt.RequestTimeout("Bybit timeout")

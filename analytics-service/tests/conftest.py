@@ -5,6 +5,29 @@ import json
 from pathlib import Path
 
 
+# PR #181 take-2 red-team F16: services.metrics maintains a process-level
+# `_FAIL_LOUD_TRACEBACK_EMITTED` set so the first occurrence of each
+# (scalar_name, exc-type) pair emits `exc_info=True` and subsequent
+# occurrences emit a single-line WARNING without traceback. Tests that
+# pin the exc_info contract assume "first occurrence" semantics, so we
+# reset the set before every test. The reset is a no-op for tests that
+# don't import metrics.
+@pytest.fixture(autouse=True)
+def _reset_fail_loud_traceback_dedupe():
+    try:
+        from services.metrics import (
+            _reset_fail_loud_traceback_dedupe_for_tests,
+        )
+    except ImportError:
+        # services.metrics not on the path for this test (e.g., import-failure
+        # smoke tests) — nothing to reset.
+        yield
+        return
+    _reset_fail_loud_traceback_dedupe_for_tests()
+    yield
+    _reset_fail_loud_traceback_dedupe_for_tests()
+
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 

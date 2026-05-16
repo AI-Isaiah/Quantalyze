@@ -38,6 +38,74 @@ class TestSafeFloat:
     def test_numpy_inf(self):
         assert _safe_float(np.inf) is None
 
+    # PR #181 take-2 pr-test F17 + silent-failure-hunter F18: pin the
+    # DEBUG-vs-None contract. The sweep added DEBUG logging to _safe_float
+    # for both failure modes; pre-take2 these had no test coverage so a
+    # /simplify pass dropping the logger.debug calls would land silently.
+    # Also pin F18: None is a fast-path return BEFORE the try/except, not
+    # a "coerce failed" DEBUG line — sanitize_metrics walks ~10K values
+    # per analytics payload and several are legitimately None.
+    def test_nan_logs_debug_with_type_marker(self, caplog):
+        """NaN coercion emits DEBUG with the originating type."""
+        with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.metrics"):
+            assert _safe_float(float("nan")) is None
+        debug_records = [
+            r for r in caplog.records
+            if r.levelno == logging.DEBUG
+            and "_safe_float coerced to None" in r.getMessage()
+            and "NaN/Inf" in r.getMessage()
+        ]
+        assert debug_records, (
+            "_safe_float NaN path must emit a DEBUG record naming "
+            "'NaN/Inf' (post audit-2026-05-07 silent-failure sweep)"
+        )
+        # Negative assertion (pr-test LOW #5): DEBUG, never WARNING — the
+        # high call-frequency would flood Railway on legitimate-None paths
+        # in sanitize_metrics if this site were ever promoted to WARNING.
+        warning_records = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "_safe_float" in r.getMessage()
+        ]
+        assert not warning_records, (
+            "_safe_float NaN must NEVER emit at WARNING level — high call "
+            "frequency would flood Railway in production INFO config"
+        )
+
+    def test_string_coerce_failure_logs_debug_with_type_marker(self, caplog):
+        """Non-numeric input emits DEBUG naming the originating type."""
+        with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.metrics"):
+            assert _safe_float("not a number") is None
+        debug_records = [
+            r for r in caplog.records
+            if r.levelno == logging.DEBUG
+            and "_safe_float coerce failed" in r.getMessage()
+            and "type=str" in r.getMessage()
+        ]
+        assert debug_records, (
+            "_safe_float string-coerce path must emit a DEBUG record "
+            "naming type=str (post audit-2026-05-07 silent-failure sweep)"
+        )
+
+    def test_none_returns_none_without_debug_emission(self, caplog):
+        """PR #181 take-2 F18: None is a legitimate normal-path input from
+        sanitize_metrics + qs.stats returns; it must return None WITHOUT
+        emitting any DEBUG log (which would flood Railway in DEBUG mode).
+        """
+        with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics.metrics"):
+            assert _safe_float(None) is None
+        # Critical: NO log of any level for the None input.
+        any_safe_float_log = [
+            r for r in caplog.records
+            if "_safe_float" in r.getMessage()
+        ]
+        assert not any_safe_float_log, (
+            "_safe_float(None) is a legitimate normal-path input — it "
+            "must not emit any log (DEBUG or otherwise). Pre-take2 the "
+            "TypeError branch fired DEBUG on every None, flooding the "
+            "DEBUG channel from sanitize_metrics' ~10K-value walks"
+        )
+
 
 class TestSanitizeMetrics:
     def test_replaces_nan(self):
@@ -947,3 +1015,330 @@ def test_qstats_scalars_dispatch_table_per_entry(
     assert result[result_key] is None
     matching = [r for r in caplog.records if result_key in r.getMessage()]
     assert matching, f"failure for qs.stats.{qs_attr} must log WARNING naming {result_key!r}"
+
+
+# audit-2026-05-07 silent-failure sweep: regression tests for the
+# bare-pass scalar swallows in compute_all_metrics that the H-0710
+# conversion missed. Pre-sweep, each of these scalars used `except: pass`
+# which left ZERO operator signal in Railway logs when qs.stats raised.
+# After the sweep, the failure-soft contract is preserved (other scalars
+# still computed) AND the failing scalar emits a WARNING naming itself.
+@pytest.mark.parametrize(
+    "scalar_key,qs_attr",
+    [
+        ("var_1d_95", "value_at_risk"),
+        ("cvar", "cvar"),
+        ("omega", "omega"),
+        ("gain_pain", "gain_to_pain_ratio"),
+        ("tail_ratio", "tail_ratio"),
+        ("smart_sharpe", "smart_sharpe"),
+        ("smart_sortino", "smart_sortino"),
+        ("profit_factor", "profit_factor"),
+    ],
+)
+def test_compute_all_metrics_inline_qstats_scalar_failures_log_warning(
+    golden_returns, caplog, monkeypatch, scalar_key, qs_attr
+):
+    """Pre-sweep, these inline `try/except: pass` blocks in compute_all_metrics
+    swallowed every qs.stats failure silently — the field went missing with no
+    log, no DQF flag, nothing for an operator to triage. Post-sweep, the field
+    is still failure-soft (other scalars unaffected) but the failure emits a
+    WARNING naming the scalar + returns_len, mirroring the H-0710 /
+    H-0713 / H-0723 pattern already used by `_safe_qstats_scalar`.
+    """
+    import services.metrics as metrics_module
+
+    def boom(*args, **kwargs):
+        raise RuntimeError(f"simulated qs.stats.{qs_attr} failure")
+
+    monkeypatch.setattr(metrics_module.qs.stats, qs_attr, boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    # Failure-soft contract: the failing scalar is absent (or None), but
+    # compute_all_metrics still returned a result.
+    mj = result["metrics_json"]
+    assert scalar_key not in mj or mj[scalar_key] is None, (
+        f"scalar {scalar_key!r} should be absent/None when qs.stats.{qs_attr} raises"
+    )
+    # Fail-loud-on-observability: a WARNING must name the failing scalar.
+    matching = [
+        r for r in caplog.records
+        if scalar_key in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert matching, (
+        f"compute_all_metrics must log WARNING naming {scalar_key!r} when "
+        f"qs.stats.{qs_attr} raises, not silently swallow it"
+    )
+
+
+def test_compute_all_metrics_does_not_call_qstats_gini(
+    golden_returns, caplog
+):
+    """PR #181 take-2 red-team F1: the `qs.stats.gini` call was removed
+    because the pinned quantstats==0.0.81 has no `gini` attribute and
+    the sweep's WARNING wrapper produced one permanent Railway log line
+    per analytics run with no resolution path. The dead call is gone;
+    `gini` is absent from metrics_json AND no WARNING fires that mentions
+    `gini`. If gini is re-introduced (manual implementation or qs
+    upgrade), this test should be replaced with a positive coverage
+    assertion (`mj['gini'] is not None`).
+    """
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    mj = result["metrics_json"]
+    assert "gini" not in mj, (
+        "PR #181 take-2 removed the dead qs.stats.gini call; the key must "
+        "no longer be present in metrics_json"
+    )
+    gini_warnings = [
+        r for r in caplog.records
+        if "gini" in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert not gini_warnings, (
+        "PR #181 take-2 dropped the gini call site; no WARNING mentioning "
+        "'gini' should fire anymore (silencing the permanent noise floor)"
+    )
+
+
+def test_compute_all_metrics_var_1d_95_uses_correct_kwarg(
+    golden_returns, caplog
+):
+    """PR #181 take-2 red-team F2: pre-take2, the var_1d_95 call passed
+    `cutoff=0.05` but `qs.stats.value_at_risk`'s signature uses
+    `confidence=0.95`. Every analytics run raised TypeError; the
+    sweep's WARNING then made var_1d_95 a permanent Railway noise
+    floor. Post-take2 the call uses `confidence=0.95` and var_1d_95
+    is populated successfully — confirms the fix is wired and no
+    'cutoff' WARNING fires on the live qs version.
+    """
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    mj = result["metrics_json"]
+    # Positive coverage: var_1d_95 is populated (a finite negative
+    # number for healthy returns since it's the lower-tail VaR).
+    assert mj.get("var_1d_95") is not None, (
+        "PR #181 take-2 expects var_1d_95 to be populated on the live "
+        "quantstats version after the cutoff->confidence kwarg fix"
+    )
+    # Negative assertion: no var_1d_95 WARNING should fire about kwargs.
+    bad_warnings = [
+        r for r in caplog.records
+        if "var_1d_95" in r.getMessage()
+        and r.levelno == logging.WARNING
+        and ("cutoff" in r.getMessage() or "unexpected keyword" in r.getMessage())
+    ]
+    assert not bad_warnings, (
+        "PR #181 take-2 fixed the cutoff/confidence kwarg drift; no "
+        "WARNING about unexpected keyword 'cutoff' should fire anymore"
+    )
+
+
+def test_compute_all_metrics_outlier_ratios_failure_logs_warning(
+    golden_returns, caplog, monkeypatch
+):
+    """Pre-sweep, the outlier_win_ratio / outlier_loss_ratio pair was
+    wrapped in a single bare `try/except: pass`. Post-sweep, the pair
+    still degrades together (consistent UI state) but emits a WARNING
+    when it fails.
+
+    Review-cluster gate (audit-2026-05-07): the previous test recreated
+    the exception handler inline AND grepped `inspect.getsource()` for
+    the literal string — that was a tautology: a /simplify revert to
+    bare-pass with the comment string left intact would have passed.
+    This version REAL-TRIGGERS the protected block: monkeypatches
+    `pd.Series.std` (called exactly once in compute_all_metrics — inside
+    the outlier block, at line 563 of services/metrics.py) to raise,
+    then calls compute_all_metrics. The WARNING must fire from the real
+    code path, not from a re-emit in the test body.
+    """
+    # The outlier block is the FIRST site in compute_all_metrics that
+    # calls `(returns > X).mean()` on a BOOLEAN Series (lines 566-567).
+    # Every earlier `.mean()` call is on numeric Series. Patch
+    # `pd.Series.mean` to raise ONLY when self.dtype is bool — a precise
+    # unique trigger that doesn't cascade through qs.stats internals.
+    orig_mean = pd.Series.mean
+
+    def _mean_raises_on_bool_series(self, *args, **kwargs):
+        # numpy dtype comparison is safer via str() — the .dtype object
+        # of a boolean pandas Series is numpy.dtype('bool'), distinct
+        # from the Python `bool` type.
+        if str(getattr(self, "dtype", "")) == "bool":
+            raise RuntimeError("simulated outlier ratios boolean-Series.mean failure")
+        return orig_mean(self, *args, **kwargs)
+
+    monkeypatch.setattr(pd.Series, "mean", _mean_raises_on_bool_series)
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    # Failure-soft: outlier ratios may be absent, but the function still
+    # produced a result.
+    mj = result["metrics_json"]
+    assert "outlier_win_ratio" not in mj or mj["outlier_win_ratio"] is None
+    assert "outlier_loss_ratio" not in mj or mj["outlier_loss_ratio"] is None
+    # The real code path must have emitted the WARNING. Tightened from
+    # the prior loose 'outlier' substring filter to require the exact
+    # log message prefix this sweep introduced — pins the contract.
+    matching = [
+        r for r in caplog.records
+        if "outlier ratios failed" in r.getMessage()
+        and r.levelno == logging.WARNING
+    ]
+    assert matching, (
+        "compute_all_metrics must log WARNING 'outlier ratios failed' when "
+        "the inner block raises (post audit-2026-05-07 silent-failure sweep); "
+        "the prior bare-pass swallow is a regression"
+    )
+    # Pin structured-logging contract: exc_info must propagate the traceback.
+    assert any(r.exc_info is not None for r in matching), (
+        "outlier-ratios WARNING must use exc_info=True so operators get "
+        "the traceback in Railway logs, not just the message"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review-cluster gate (audit-2026-05-07): regression tests for the 3 sweep
+# sites that the original parametrized test did NOT cover (var_1m_99 uses
+# np.percentile, skewness uses Series.skew, kurtosis uses Series.kurtosis —
+# all non-qs.stats so they can't be parametrized through the qs.stats
+# monkeypatch path). A /simplify pass that drops these 3 WARNINGs would
+# have shipped silently pre-gate.
+# ---------------------------------------------------------------------------
+
+
+def test_compute_all_metrics_var_1m_99_np_percentile_failure_logs_warning(
+    golden_returns, caplog, monkeypatch
+):
+    """var_1m_99 uses `np.percentile(monthly_rets, 1)`, not qs.stats. The
+    sweep added a WARNING for that site; this test pins the contract.
+
+    PR #181 take-2 fix: pre-take2 the monkeypatch replaced np.percentile
+    globally with a boom() function. On Python 3.12 + older pandas, the
+    pandas Series.quantile internals route through np.percentile, so the
+    boom() trips _return_quantiles BEFORE the var_1m_99 try block is
+    reached. On Python 3.14 + newer pandas, Series.quantile uses a
+    different code path and the boom() only fires inside var_1m_99 as
+    intended. To make the test cross-runtime-stable, narrow the
+    boom-trigger to the EXACT call signature var_1m_99 uses:
+    `np.percentile(monthly_rets, 1)` — single positional arg pair, no
+    axis, no method kwarg.
+    """
+    import services.metrics as metrics_module
+
+    orig_percentile = metrics_module.np.percentile
+
+    def boom_on_var_1m_99_only(*args, **kwargs):
+        # var_1m_99's call shape is np.percentile(monthly_rets, 1) — a
+        # 1D Series-derived array as positional arg 0, the SCALAR int
+        # 1 as positional arg 1, no axis/method kwargs. Pandas
+        # internals call np.percentile with an ARRAY q positional and
+        # axis=/method= kwargs. Trip only on the var_1m_99 shape
+        # (axis/method absent + arg[1] is an int-typed scalar) so the
+        # pandas-internal calls pass through to real numpy.
+        if (
+            len(args) == 2
+            and "axis" not in kwargs
+            and "method" not in kwargs
+            and isinstance(args[1], int)
+            and args[1] == 1
+        ):
+            raise RuntimeError("simulated np.percentile failure")
+        return orig_percentile(*args, **kwargs)
+
+    monkeypatch.setattr(metrics_module.np, "percentile", boom_on_var_1m_99_only)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    mj = result["metrics_json"]
+    assert "var_1m_99" not in mj or mj["var_1m_99"] is None
+    matching = [
+        r for r in caplog.records
+        if "var_1m_99" in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert matching, (
+        "compute_all_metrics must log WARNING naming 'var_1m_99' when "
+        "np.percentile raises (post audit-2026-05-07 silent-failure sweep); "
+        "pre-sweep bare-pass swallow is a regression"
+    )
+
+
+def test_compute_all_metrics_skewness_pandas_failure_logs_warning(
+    golden_returns, caplog, monkeypatch
+):
+    """skewness uses `returns.skew()`, a pandas Series method. The sweep
+    added a WARNING for that site; this test pins the contract.
+    """
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("simulated Series.skew failure")
+
+    monkeypatch.setattr(pd.Series, "skew", boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    mj = result["metrics_json"]
+    assert "skewness" not in mj or mj["skewness"] is None
+    matching = [
+        r for r in caplog.records
+        if "skewness" in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert matching, (
+        "compute_all_metrics must log WARNING naming 'skewness' when "
+        "Series.skew raises (post audit-2026-05-07 silent-failure sweep)"
+    )
+
+
+def test_compute_all_metrics_kurtosis_pandas_failure_logs_warning(
+    golden_returns, caplog, monkeypatch
+):
+    """kurtosis uses `returns.kurtosis()`, a pandas Series method. The sweep
+    added a WARNING for that site; this test pins the contract.
+    """
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("simulated Series.kurtosis failure")
+
+    monkeypatch.setattr(pd.Series, "kurtosis", boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    mj = result["metrics_json"]
+    assert "kurtosis" not in mj or mj["kurtosis"] is None
+    matching = [
+        r for r in caplog.records
+        if "kurtosis" in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert matching, (
+        "compute_all_metrics must log WARNING naming 'kurtosis' when "
+        "Series.kurtosis raises (post audit-2026-05-07 silent-failure sweep)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review-cluster gate (audit-2026-05-07): pin the structured-logging
+# contract (exc_info=True) for the parametrized qs.stats scalars. A
+# /simplify pass that drops `exc_info=True` as 'unused' would lose the
+# operator-triage trail in Railway. This test adds the missing assertion.
+# ---------------------------------------------------------------------------
+
+
+def test_compute_all_metrics_qstats_scalar_warnings_carry_exc_info(
+    golden_returns, caplog, monkeypatch
+):
+    """The 11 sweep WARNINGs use `exc_info=True` to attach the traceback.
+    The original parametrized test asserted message + level only — a
+    regression that drops exc_info=True would pass. This test pins it for
+    one representative scalar; the assertion structure mirrors what
+    operators rely on in Railway log aggregation.
+    """
+    import services.metrics as metrics_module
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated qs.stats.value_at_risk failure")
+
+    monkeypatch.setattr(metrics_module.qs.stats, "value_at_risk", boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        compute_all_metrics(golden_returns)
+    matching = [
+        r for r in caplog.records
+        if "var_1d_95" in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert matching, "expected a WARNING naming var_1d_95 for sanity"
+    assert any(r.exc_info is not None for r in matching), (
+        "qstats scalar WARNINGs must use exc_info=True so operators get "
+        "the traceback (post audit-2026-05-07 silent-failure sweep)"
+    )
