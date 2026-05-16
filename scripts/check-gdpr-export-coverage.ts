@@ -221,6 +221,145 @@ function readManifestTables(): Set<string> {
 }
 
 /**
+ * Audit 2026-05-07 H-0455/H-0457 - tables in USER_EXPORT_TABLES that
+ * intentionally do NOT appear in the sanitize_user matrix. Each entry
+ * documents the rationale inline.
+ *
+ * Convention: a manifest entry that doesn't fall through a sanitize
+ * DELETE/UPDATE OR an `-- <table> | <STRATEGY> | ...` matrix row MUST
+ * appear here with a `reason` and an `addedIn` pointer to the
+ * migration / sprint that introduced the policy. New manifest entries
+ * default to "must appear in matrix" - landing here is the explicit
+ * override.
+ */
+const SANITIZE_PARITY_ALLOWLIST: Record<
+  string,
+  { reason: string; addedIn: string }
+> = {
+  // audit_log_for_user is the projected NAME for audit_log (which IS
+  // in the sanitize matrix as PRESERVE per migration
+  // 20260417110538_sanitize_user.sql:103). The projection's role is
+  // export-side cross-party PII redaction; the underlying source
+  // table's sanitize policy is unchanged.
+  audit_log_for_user: {
+    reason:
+      "Projection of audit_log (PRESERVE per sanitize matrix). The projected name appears in the manifest for bundle clarity; the sanitize policy is for the source table.",
+    addedIn: "Lane E audit P460/P697/P707",
+  },
+  // allocator_equity_snapshots: user-owned via allocator_id (=
+  // api_keys.user_id), the f5 owner-coherence trigger keeps the
+  // relationship inviolate. The sanitize_user PURGE on api_keys
+  // does NOT cascade to allocator_equity_snapshots (no FK ON DELETE
+  // CASCADE today); the table is intentionally PRESERVE so the
+  // anonymized profile's historical equity curve survives for any
+  // future audit. If a future PR adds a CASCADE FK or chooses
+  // PURGE, REMOVE this allowlist entry and add a matching row to
+  // the sanitize matrix.
+  allocator_equity_snapshots: {
+    reason:
+      "PRESERVE-historical: equity curve tied to the anonymized profile; no PII left after profiles anonymize. Matches the portfolio_analytics/weight_snapshots PRESERVE policy in the existing matrix.",
+    addedIn: "Phase 07 migration 070",
+  },
+  allocator_holdings: {
+    reason:
+      "PRESERVE-historical: exchange position/balance snapshots tied to the anonymized profile; no standalone PII. Matches the position_snapshots PRESERVE policy in the existing matrix.",
+    addedIn: "Phase 06 migration 066",
+  },
+  // bridge_outcomes / bridge_outcome_dismissals: cross-party bridge
+  // surfaces. Matching the contact_requests PRESERVE pattern - the
+  // anonymized profile's identity is non-resolvable once
+  // profiles.display_name is set to '[deleted]'.
+  bridge_outcomes: {
+    reason:
+      "PRESERVE-cross-party: bridge audit trail mirrors contact_requests PRESERVE pattern; anonymized profile makes allocator_id non-resolvable.",
+    addedIn: "Sprint 6 bridge surfaces",
+  },
+  bridge_outcome_dismissals: {
+    reason:
+      "PRESERVE-cross-party: dismissals are the allocator's own state on cross-party bridge surfaces. Mirrors bridge_outcomes policy.",
+    addedIn: "Sprint 6 bridge surfaces",
+  },
+  // strategy_analytics: indirect child of strategies; sanitize
+  // ANONYMIZE on strategies preserves the strategy id but blanks
+  // identifying columns, so the child analytics survives keyed to
+  // an anonymized parent.
+  strategy_analytics: {
+    reason:
+      "Strategy-scoped historical analytics. Strategies are ANONYMIZE per matrix; the child rows survive keyed to the anonymized strategy id. Mirrors the trades ANONYMIZE policy.",
+    addedIn: "Sprint 5",
+  },
+};
+
+/**
+ * Audit 2026-05-07 H-0455/H-0457 - sanitize_user/USER_EXPORT_TABLES
+ * parity check.
+ *
+ * The GDPR export manifest (this file) and the sanitize_user PL/pgSQL
+ * function (migrations 20260417110538_sanitize_user.sql and
+ * 20260513073518_sanitize_user_hardening.sql) MUST cover the same
+ * set of user-owned tables. Otherwise:
+ *   - A manifest-only table means an Art. 17 deletion request leaves
+ *     data the Art. 15 export keeps surfacing.
+ *   - A sanitize-only table means the user cannot see (via export)
+ *     what was deleted - opaque erasure violates Art. 15/12.
+ *
+ * The sanitize_user matrix is documented as a `-- table_name |
+ * Strategy | Rationale` block in the original migration. We extract
+ * those rows AND every DELETE/UPDATE statement body, treating either
+ * as proof the table is in the sanitize policy.
+ */
+function scanSanitizeUserCoverage(): Set<string> {
+  const files = readdirSync(MIGRATIONS_DIR).filter(
+    (f) => f.endsWith(".sql") && /sanitize_user/i.test(f),
+  );
+  const covered = new Set<string>();
+  for (const filename of files) {
+    const content = readFileSync(join(MIGRATIONS_DIR, filename), "utf8");
+    // Matrix comment-block lines: `-- <table> | <STRATEGY> | ...`
+    const matrixLineRe =
+      /^--\s+([a-z_]+)\s+\|\s+(ANONYMIZE|PURGE|PRESERVE|CASCADE|SKIPPED)\b/gim;
+    let m: RegExpExecArray | null;
+    while ((m = matrixLineRe.exec(content)) !== null) {
+      covered.add(m[1]);
+    }
+    // SQL body: any DELETE FROM <table> or UPDATE <table>.
+    const stmtRe =
+      /\b(?:DELETE\s+FROM|UPDATE)\s+(?:public\.)?([a-z_]+)\b/gi;
+    while ((m = stmtRe.exec(content)) !== null) {
+      const table = m[1];
+      // Drop auth.* (not in the public-schema manifest scope).
+      if (table === "users" || table === "sessions" || table === "refresh_tokens") {
+        continue;
+      }
+      covered.add(table);
+    }
+  }
+  return covered;
+}
+
+/**
+ * Build the set of source-table names from the manifest (treating
+ * projected entries by `source_table`). Indirect entries contribute
+ * BOTH child and parent_table.
+ */
+function readManifestTablesForParity(): Set<string> {
+  const src = readFileSync(MANIFEST_FILE, "utf8");
+  const arrMatch = src.match(
+    /USER_EXPORT_TABLES:\s*readonly\s+UserExportTable\[\]\s*=\s*\[([\s\S]*?)\]\s*as\s*const\s*;/,
+  );
+  if (!arrMatch) return new Set();
+  const body = arrMatch[1];
+  const names = new Set<string>();
+  const tableLiteralRe =
+    /\b(?:source_table|parent_table|table):\s*"([a-z0-9_]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = tableLiteralRe.exec(body)) !== null) {
+    names.add(m[1]);
+  }
+  return names;
+}
+
+/**
  * P698 - per-table user-id filter audit.
  *
  * Walk every entry in USER_EXPORT_TABLES and assert each has an
@@ -382,6 +521,54 @@ function main(): void {
       "\nIf the table genuinely should NOT appear in the export (e.g., cross-party " +
         "audit-only), add it to EXCLUDED_TABLES in scripts/check-gdpr-export-coverage.ts " +
         "and document the rationale in migration 055's per-table matrix.",
+    );
+    process.exit(1);
+  }
+
+  // Audit 2026-05-07 H-0455/H-0457 - sanitize_user parity. Run AFTER
+  // the migration->manifest diff so the operator sees the simpler
+  // "missing from manifest" message first when both fail.
+  let manifestForParity: Set<string>;
+  let sanitizeCoverage: Set<string>;
+  try {
+    manifestForParity = readManifestTablesForParity();
+    sanitizeCoverage = scanSanitizeUserCoverage();
+  } catch (err) {
+    console.error(
+      "[check-gdpr-export-coverage] Failed to scan sanitize_user coverage:",
+      err instanceof Error ? err.message : err,
+    );
+    process.exit(2);
+  }
+  const parityGaps: string[] = [];
+  for (const table of manifestForParity) {
+    if (sanitizeCoverage.has(table)) continue;
+    if (table in SANITIZE_PARITY_ALLOWLIST) continue;
+    parityGaps.push(table);
+  }
+  if (parityGaps.length > 0) {
+    console.error(
+      "[check-gdpr-export-coverage] FAIL (H-0455/H-0457) - " +
+        parityGaps.length +
+        " USER_EXPORT_TABLES entry/entries have no matching row in the " +
+        "sanitize_user matrix (migrations 20260417110538_sanitize_user.sql / " +
+        "20260513073518_sanitize_user_hardening.sql):",
+    );
+    for (const t of parityGaps) {
+      console.error(
+        `  - ${t} -> add a PURGE/ANONYMIZE/PRESERVE/CASCADE row to the ` +
+          `sanitize_user matrix comment block AND (if needed) a DELETE/UPDATE ` +
+          `statement to the function body. If the table is genuinely ` +
+          `out-of-scope for sanitize (e.g., historical analytics ` +
+          `keyed to an anonymized parent), add it to ` +
+          `SANITIZE_PARITY_ALLOWLIST in this script with a documented reason.`,
+      );
+    }
+    console.error(
+      "\nGDPR parity: every table exposed in the Art. 15 export bundle must " +
+        "have a corresponding Art. 17 erasure policy. Without parity, a " +
+        "deletion request can leave data the export keeps surfacing, or " +
+        "purge data the user has no way to see was deleted.",
     );
     process.exit(1);
   }

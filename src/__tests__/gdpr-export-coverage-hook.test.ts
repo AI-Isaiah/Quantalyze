@@ -40,6 +40,45 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     expect(result.stdout).toContain("manifest covers all");
   }, 30_000);
 
+  it("H-0455/H-0457: exits 1 when a manifest entry has no matching sanitize_user policy", () => {
+    // Add a brand-new manifest entry whose name does NOT appear in
+    // the sanitize_user matrix or DELETE/UPDATE body — and is NOT in
+    // SANITIZE_PARITY_ALLOWLIST. The parity check should fail loud.
+    const scratch = mkdtempSync(join(tmpdir(), "gdpr-parity-test-"));
+    mkdirSync(join(scratch, "scripts"), { recursive: true });
+    mkdirSync(join(scratch, "src", "lib"), { recursive: true });
+    mkdirSync(join(scratch, "supabase"), { recursive: true });
+
+    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-gdpr-export-coverage.ts"));
+    cpSync(
+      join(REPO_ROOT, MIGRATIONS_REL),
+      join(scratch, MIGRATIONS_REL),
+      { recursive: true },
+    );
+
+    const originalManifest = readFileSync(MANIFEST_ABS, "utf8");
+    // Inject a synthetic manifest entry whose table name is "xxx_orphan_table".
+    // The sanitize_user matrix has no row for it AND the regex won't
+    // find a DELETE FROM xxx_orphan_table or UPDATE xxx_orphan_table.
+    // The migration-coverage check should NOT fail (there's no migration
+    // declaring xxx_orphan_table either), but the parity check MUST fail.
+    const mutated = originalManifest.replace(
+      /\{\s*kind:\s*"direct",\s*table:\s*"user_notes",\s*user_column:\s*"user_id"\s*\},?/,
+      `{ kind: "direct", table: "user_notes", user_column: "user_id" },
+  { kind: "direct", table: "xxx_orphan_table", user_column: "user_id" },`,
+    );
+    expect(mutated).not.toBe(originalManifest);
+    writeFileSync(join(scratch, MANIFEST_REL), mutated);
+
+    const result = spawnSync("npx", ["tsx", "scripts/check-gdpr-export-coverage.ts"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("H-0455/H-0457");
+    expect(result.stderr).toContain("xxx_orphan_table");
+  }, 30_000);
+
   it("exits 1 with a specific error when a user-owned table is missing", () => {
     // Copy the script + manifest + migrations into a scratch dir so we
     // can mutate the manifest without polluting the working tree.
