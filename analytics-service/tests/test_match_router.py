@@ -23,21 +23,19 @@ from fastapi.testclient import TestClient
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def client() -> TestClient:
-    """Bare FastAPI app with routers.match mounted — no middleware."""
+    """Bare FastAPI app with routers.match mounted — no middleware.
+
+    Module-scoped so the FastAPI app + router include only happen once per
+    test file. Tests monkeypatch module-level globals on `routers.match`,
+    not state on the app itself, so sharing the client is safe.
+    """
     from routers.match import router
 
     app = FastAPI()
     app.include_router(router)
     return TestClient(app)
-
-
-def _utc(offset_hours: float) -> str:
-    """ISO-8601 UTC timestamp `offset_hours` ago (positive = past)."""
-    return (
-        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=offset_hours)
-    ).isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -646,9 +644,57 @@ class TestCronTotalFailureLogging:
         body = r.json()
         assert body["processed"] == 0
         assert body["failed"] == 2
+        # Phase B silent-failure F1: status discriminator must distinguish a
+        # structural fault from a healthy cron. "ok" with processed=0 and
+        # failed>0 would let a dashboard switch green while the engine is
+        # broken — operators need a distinct status to alert on.
+        assert body["status"] == "total_failure", (
+            f"Expected status='total_failure' when every allocator fails; got {body['status']}"
+        )
         # Must emit a TOTAL FAILURE error log so Sentry alerts fire.
         assert any(
             "TOTAL FAILURE" in rec.getMessage() for rec in caplog.records
+        )
+
+    def test_majority_failure_returns_degraded_status(
+        self, client, monkeypatch, caplog
+    ):
+        """Phase B silent-failure F1: when most (but not all) allocators
+        fail, the response must surface 'degraded' so monitoring can
+        differentiate partial-success from healthy."""
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+            MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
+        )
+        monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
+        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
+        monkeypatch.setattr(
+            "routers.match._load_candidate_universe",
+            lambda: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr("routers.match._should_skip_allocator", _no_skip)
+
+        async def _score(allocator_id, universe):
+            if allocator_id in ("a1", "a2"):
+                raise RuntimeError(f"{allocator_id} explodes")
+            return {}
+
+        monkeypatch.setattr("routers.match._score_one_allocator", _score)
+        monkeypatch.setattr("routers.match._retention_sweep", lambda aid: 0)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            r = client.post("/api/match/cron-recompute")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["processed"] == 1
+        assert body["failed"] == 2
+        assert body["status"] == "degraded", (
+            f"Expected status='degraded' when failures outnumber successes; got {body['status']}"
         )
 
 
@@ -754,6 +800,46 @@ class TestShouldSkipMandateParseFailure:
         )
         assert any(
             "bad mandate_edited_at" in rec.getMessage() for rec in caplog.records
+        )
+
+    # Phase B pr-test-analyzer F9: Trigger 2 (engine_version mismatch) forces
+    # a recompute regardless of computed_at recency. A regression that flips
+    # the engine_version comparison would silently downgrade this to a no-op
+    # — the same class of silent-skip the mandate_edited_at parse-failure
+    # test pins, but for a different trigger.
+    async def test_engine_version_mismatch_forces_recompute(
+        self, monkeypatch
+    ):
+        from routers.match import ENGINE_VERSION, _should_skip_allocator
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+        one_hour_ago = (
+            (now - _dt.timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+        )
+
+        sb = MagicMock()
+        # match_batches → FRESH batch (1h old, well within the 12h age guard)
+        # but written by an OLDER engine version → Trigger 2 must force a
+        # recompute regardless of recency.
+        stale_version = (
+            "v0-stale" if ENGINE_VERSION != "v0-stale" else "v1-fallback"
+        )
+        sb.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = (
+            MagicMock(
+                data=[
+                    {"computed_at": one_hour_ago, "engine_version": stale_version}
+                ]
+            )
+        )
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+            MagicMock(data={"mandate_edited_at": None})
+        )
+        monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
+
+        result = await _should_skip_allocator("alloc-version-drift", force=False)
+        assert result is False, (
+            "engine_version mismatch must force recompute even within the "
+            "12h age guard. Got True — Trigger 2 is silently degraded."
         )
 
 
@@ -867,6 +953,193 @@ class TestScoreOneAllocatorOrphanRollback:
         assert any(
             "rolling back" in rec.getMessage() for rec in caplog.records
         )
+
+    # Phase B pr-test-analyzer F5: the existing test exercises the `data=[]`
+    # network-success-but-empty-data path. The OTHER failure mode (insert
+    # raises an exception) must ALSO roll back the parent batch AND chain
+    # the original exception via `from insert_err`.
+    async def test_insert_raising_exception_still_rolls_back_batch(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        captured_deletes: list[tuple[str, str]] = []
+        sb = MagicMock()
+
+        def _table(name):
+            t = MagicMock()
+            if name == "match_batches":
+                t.insert.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "batch-raise"}]
+                )
+
+                def _eq_capture(col, val):
+                    captured_deletes.append((col, val))
+                    return MagicMock(
+                        execute=MagicMock(
+                            return_value=MagicMock(data=[{"id": val}])
+                        )
+                    )
+
+                t.delete.return_value.eq.side_effect = _eq_capture
+            elif name == "match_candidates":
+                # Insert RAISES — different control path from the data=[] case.
+                t.insert.return_value.execute.side_effect = RuntimeError(
+                    "FK violation: batch_id"
+                )
+            return t
+
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        monkeypatch.setattr(
+            match_mod,
+            "_load_allocator_context",
+            lambda aid: {
+                "preferences": {},
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": None,
+                "thumbs_down_ids": set(),
+                "_holdings_rows_eligible": [],
+            },
+        )
+        import services.feedback_engine
+        monkeypatch.setattr(
+            services.feedback_engine, "compute_adjusted_weights", lambda aid: {}
+        )
+        monkeypatch.setattr(
+            match_mod,
+            "score_candidates",
+            lambda **kw: {
+                "candidates": [
+                    {
+                        "strategy_id": "strat-1",
+                        "score": 88,
+                        "score_breakdown": {},
+                        "reasons": [],
+                        "rank": 1,
+                    }
+                ],
+                "excluded": [],
+                "excluded_total": 0,
+                "mode": "personalized",
+                "filter_relaxed": False,
+                "effective_preferences": {},
+                "effective_thresholds": {},
+                "source_strategy_count": 1,
+            },
+        )
+
+        universe = {
+            "strategies_by_id": {"strat-1": {"strategy_id": "strat-1"}},
+            "returns_by_id": {},
+        }
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            with pytest.raises(RuntimeError, match="match_candidates insert failed") as excinfo:
+                await match_mod._score_one_allocator(
+                    "22222222-2222-2222-2222-222222222222", universe
+                )
+
+        # The rollback DELETE must have fired with the parent batch id even
+        # though insert raised (vs. returning empty data).
+        assert ("id", "batch-raise") in captured_deletes, (
+            "orphan batch row must be deleted on candidate-insert raise too"
+        )
+        # The original FK error must be chained via __cause__ so the operator
+        # can see the root cause.
+        assert excinfo.value.__cause__ is not None
+        assert "FK violation" in str(excinfo.value.__cause__)
+
+    # Phase B pr-test-analyzer F6: if the rollback DELETE itself raises
+    # (e.g. RLS regression that lets INSERT but not DELETE), the function
+    # must STILL surface the insert-failure RuntimeError (not the delete
+    # error) so operators don't chase the wrong root cause.
+    async def test_rollback_delete_failure_does_not_mask_insert_error(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+
+        def _table(name):
+            t = MagicMock()
+            if name == "match_batches":
+                t.insert.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "batch-cleanup-fail"}]
+                )
+                # Delete raises — the inner except must catch and log.
+                t.delete.return_value.eq.return_value.execute.side_effect = (
+                    RuntimeError("delete forbidden by RLS")
+                )
+            elif name == "match_candidates":
+                t.insert.return_value.execute.return_value = MagicMock(data=[])
+            return t
+
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        monkeypatch.setattr(
+            match_mod,
+            "_load_allocator_context",
+            lambda aid: {
+                "preferences": {},
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": None,
+                "thumbs_down_ids": set(),
+                "_holdings_rows_eligible": [],
+            },
+        )
+        import services.feedback_engine
+        monkeypatch.setattr(
+            services.feedback_engine, "compute_adjusted_weights", lambda aid: {}
+        )
+        monkeypatch.setattr(
+            match_mod,
+            "score_candidates",
+            lambda **kw: {
+                "candidates": [
+                    {
+                        "strategy_id": "strat-1",
+                        "score": 88,
+                        "score_breakdown": {},
+                        "reasons": [],
+                        "rank": 1,
+                    }
+                ],
+                "excluded": [],
+                "excluded_total": 0,
+                "mode": "personalized",
+                "filter_relaxed": False,
+                "effective_preferences": {},
+                "effective_thresholds": {},
+                "source_strategy_count": 1,
+            },
+        )
+
+        universe = {
+            "strategies_by_id": {"strat-1": {"strategy_id": "strat-1"}},
+            "returns_by_id": {},
+        }
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            with pytest.raises(RuntimeError, match="match_candidates insert failed"):
+                await match_mod._score_one_allocator(
+                    "33333333-3333-3333-3333-333333333333", universe
+                )
+
+        # Both log lines must be emitted so the operator sees the cascade.
+        messages = [rec.getMessage() for rec in caplog.records]
+        assert any("rolling back" in m for m in messages), (
+            "expected 'rolling back' attempt log when insert returned empty data"
+        )
+        assert any(
+            "failed to roll back" in m or "rollback" in m.lower() for m in messages
+        ), "expected cleanup-failure log when rollback delete also raises"
 
 
 class TestScoreOneAllocatorDemoFilter:

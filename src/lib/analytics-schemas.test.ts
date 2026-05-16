@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   EnqueueComputeJobResponseSchema,
   EncryptKeyResponseSchema,
+  RecomputeMatchResponseSchema,
   TickJobsResponseSchema,
 } from "./analytics-schemas";
 
@@ -187,5 +188,59 @@ describe("EncryptKeyResponseSchema (envelope-encryption contract)", () => {
     };
     const result = EncryptKeyResponseSchema.safeParse(legacyFlat);
     expect(result.success).toBe(false);
+  });
+});
+
+/**
+ * Phase B pr-test-analyzer F8 — `RecomputeMatchResponseSchema` covers ONLY
+ * the per-allocator `/api/match/recompute` endpoint (3 statuses). The wider
+ * cron-recompute status set (`no_allocators`, `empty_universe`, `degraded`,
+ * `total_failure`) is intentionally NOT in this schema. Negative tests pin
+ * the contract so a future contributor that wires cron-recompute through
+ * the same parser sees a loud failure rather than silent drift.
+ */
+describe("RecomputeMatchResponseSchema", () => {
+  it("accepts the three valid status values", () => {
+    expect(
+      RecomputeMatchResponseSchema.parse({ status: "ok" }).status,
+    ).toBe("ok");
+    expect(
+      RecomputeMatchResponseSchema.parse({ status: "disabled" }).status,
+    ).toBe("disabled");
+    expect(
+      RecomputeMatchResponseSchema.parse({ status: "skipped" }).status,
+    ).toBe("skipped");
+  });
+
+  it.each([
+    "throttled",
+    "no_allocators",
+    "empty_universe",
+    "total_failure",
+    "degraded",
+    "",
+    "OK", // case-sensitive
+  ])("rejects unknown status value %p", (status) => {
+    const result = RecomputeMatchResponseSchema.safeParse({ status });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects payloads missing the required status field", () => {
+    const result = RecomputeMatchResponseSchema.safeParse({
+      allocator_id: "00000000-0000-0000-0000-000000000abc",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("passes through extra fields (.passthrough() forward-compat)", () => {
+    const parsed = RecomputeMatchResponseSchema.parse({
+      status: "ok",
+      allocator_id: "00000000-0000-0000-0000-000000000abc",
+      processed: 12,
+      reason: "future_field",
+    }) as { status: string; reason?: string; processed?: number };
+    expect(parsed.status).toBe("ok");
+    expect(parsed.reason).toBe("future_field");
+    expect(parsed.processed).toBe(12);
   });
 });

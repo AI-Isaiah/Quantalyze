@@ -712,6 +712,53 @@ def test_derived_trade_metrics_normalizes_percent_win_rate():
     )
 
 
+# Phase B pr-test-analyzer F11: the named boundary case for the
+# WIN_RATE_PERCENT_HEURISTIC_THRESHOLD constant. A ULP drift from
+# `winners/total` at 100% winners (e.g. 1.0001) must stay fractional. The
+# OLD threshold of `> 1.0` would have rescaled this to 0.010001 — shipping
+# a 1% win-rate for a 100%-winner strategy (catastrophic 100× error in the
+# WRONG direction). The current `> 1.5` threshold pins the regression.
+def test_derived_trade_metrics_win_rate_ulp_drift_stays_fractional():
+    from services.analytics_runner import (
+        _compute_derived_trade_metrics,
+        WIN_RATE_PERCENT_HEURISTIC_THRESHOLD,
+    )
+
+    # Pin the threshold value too — a refactor that lowers it back to 1.0
+    # would re-introduce the catastrophic mis-rescale.
+    assert WIN_RATE_PERCENT_HEURISTIC_THRESHOLD == 1.5, (
+        "WIN_RATE_PERCENT_HEURISTIC_THRESHOLD must stay at 1.5 to keep ULP "
+        f"drift at 1.0 fractional; got {WIN_RATE_PERCENT_HEURISTIC_THRESHOLD}"
+    )
+
+    v = {
+        "buy_volume_pct": 0.0,
+        "sell_volume_pct": 0.0,
+        "total_fills": 0,
+        "total_volume_usd": 0.0,
+    }
+    base = {
+        "avg_winning_trade": 0.05,
+        "avg_losing_trade": -0.025,
+        "winners_count": 30,
+        "losers_count": 20,
+        "realized_pnl_per_trade": [],
+    }
+    baseline = _compute_derived_trade_metrics(v, {**base, "win_rate": 1.0})
+    ulp_drift = _compute_derived_trade_metrics(v, {**base, "win_rate": 1.0001})
+    # Both should yield expectancy = 1.0 * avg_win - 0 * |avg_loss| = avg_win.
+    # If the rescale fires, ulp_drift's expectancy would be ~0.01 * avg_win
+    # minus 0.99 * |avg_loss| = ~-0.0245 — a 100× error in the wrong
+    # direction (positive expectancy flips negative). Tolerance is the
+    # natural ULP gap between win_rate=1.0 and win_rate=1.0001 baselines.
+    assert baseline["expectancy"] is not None
+    assert ulp_drift["expectancy"] is not None
+    assert abs(baseline["expectancy"] - ulp_drift["expectancy"]) < 1e-3, (
+        f"win_rate=1.0001 must stay fractional (no /100 rescale). "
+        f"baseline={baseline['expectancy']} ulp={ulp_drift['expectancy']}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Phase 12 Plan 05 / METRICS-09 — volume aggregator over raw fills
 # Phase 12 Plan 05 / METRICS-10 — Trade Mix (audit-gated 4-bucket vs 2-bucket)
@@ -3006,12 +3053,13 @@ class TestPositionFlagsPropagateToTopLevel:
 
 class TestLoadPositionTimeSeriesNavSafety:
     @pytest.mark.asyncio
-    async def test_nav_does_not_leak_account_balance_when_balance_present(
+    async def test_nav_proxy_uses_rolling_max_gross_exposure(
         self,
     ) -> None:
-        """The constant 1.0 NAV proxy is the contract — if a future change
-        re-introduces `nav_by_date[d] = float(account_balance)`, this test
-        fails before the leak ships."""
+        """C-0221 is now enforced by construction (account_balance is not a
+        parameter of `_load_position_time_series`), but the NAV-proxy
+        contract still needs a regression guard: nav values must equal the
+        rolling-max gross exposure, constant within a run."""
         from services.analytics_runner import _load_position_time_series
 
         snapshot_rows = [
@@ -3047,19 +3095,13 @@ class TestLoadPositionTimeSeriesNavSafety:
         async def _mock_db_execute(fn):
             return await asyncio.to_thread(fn)
 
-        secret_balance = 1234567.89  # canary value
         with patch(
             "services.analytics_runner.db_execute", side_effect=_mock_db_execute
         ):
             _, _, nav_by_date = await _load_position_time_series(
-                "strat-test", mock_supabase, account_balance=secret_balance
+                "strat-test", mock_supabase
             )
 
-        # Must NOT echo the raw balance.
-        assert secret_balance not in nav_by_date.values(), (
-            "C-0221 regression: raw account_balance leaked into nav_by_date. "
-            f"Got {nav_by_date}, secret={secret_balance}"
-        )
         # Contract: NAV proxy is per-strategy rolling max gross exposure,
         # constant within a run. max(|10000| over 2024-01-15, |12000| over
         # 2024-01-16) = 12000.
@@ -3071,12 +3113,12 @@ class TestLoadPositionTimeSeriesNavSafety:
         )
 
     @pytest.mark.asyncio
-    async def test_nav_proxy_is_rolling_max_when_balance_missing(
+    async def test_nav_proxy_handles_multi_symbol_same_day(
         self,
     ) -> None:
-        """When account_balance is None, NAV uses the per-strategy rolling
-        max gross exposure (same as when balance is present, per C-0221
-        + H-0636 follow-up). Pins the H-0632 branch."""
+        """NAV proxy sums |size_usd| across all symbols on a date when picking
+        the rolling-max gross exposure (C-0221 + H-0636 follow-up).
+        Pins the H-0632 branch."""
         from services.analytics_runner import _load_position_time_series
 
         snapshot_rows = [
@@ -3115,7 +3157,7 @@ class TestLoadPositionTimeSeriesNavSafety:
             "services.analytics_runner.db_execute", side_effect=_mock_db_execute
         ):
             _, _, nav = await _load_position_time_series(
-                "strat-test", mock_supabase, account_balance=None
+                "strat-test", mock_supabase
             )
 
         # max_gross_exposure on 2024-01-15 = |10000| + |-5000| = 15000.
@@ -3149,7 +3191,7 @@ class TestLoadPositionTimeSeriesNavSafety:
             "services.analytics_runner.db_execute", side_effect=_mock_db_execute
         ):
             positions, prices, nav = await _load_position_time_series(
-                "strat-test", mock_supabase, account_balance=10000.0
+                "strat-test", mock_supabase
             )
 
         assert positions == {} and prices == {} and nav == {}
@@ -3235,7 +3277,7 @@ class TestLoadPositionTimeSeriesNavSafety:
             "services.analytics_runner.db_execute", side_effect=_mock_db_execute
         ):
             positions, _, _ = await _load_position_time_series(
-                "strat-test", mock_supabase, account_balance=None
+                "strat-test", mock_supabase
             )
 
         # Both pages worth of symbols must appear in positions.
@@ -3298,7 +3340,7 @@ class TestLoadPositionTimeSeriesNavSafety:
             "services.analytics_runner.db_execute", side_effect=_mock_db_execute
         ):
             positions, _, _ = await _load_position_time_series(
-                "strat-test", mock_supabase, account_balance=10000.0
+                "strat-test", mock_supabase
             )
 
         assert positions["2024-01-15"]["ETHUSDT"] == -5000.0, (
@@ -3349,7 +3391,7 @@ class TestLoadPositionTimeSeriesNavSafety:
             "services.analytics_runner.db_execute", side_effect=_mock_db_execute
         ):
             positions, prices, _ = await _load_position_time_series(
-                "strat-test", mock_supabase, account_balance=10000.0
+                "strat-test", mock_supabase
             )
 
         # ETH is kept, BTC residual is skipped.
@@ -3397,9 +3439,176 @@ class TestLoadPositionTimeSeriesNavSafety:
             "services.analytics_runner.db_execute", side_effect=_mock_db_execute
         ):
             positions, prices, _ = await _load_position_time_series(
-                "strat-test", mock_supabase, account_balance=10000.0
+                "strat-test", mock_supabase
             )
 
         # Position recorded, price omitted.
         assert positions["2024-01-15"]["BTCUSDT"] == 10000.0
         assert "BTCUSDT" not in prices.get("2024-01-15", {})
+
+    # Phase B pr-test-analyzer F7: `_load_position_time_series` declares
+    # `except PaginatedSelectTruncated: raise` to fail loud. The runner has
+    # a broad `except Exception` immediately after; a reorder regression
+    # would let the typed exception fall through into the SNAPSHOTS_LOAD_FAILED
+    # DQF path. This test pins the re-raise contract.
+    @pytest.mark.asyncio
+    async def test_snapshot_pagination_truncation_raises_typed_exception(
+        self,
+    ) -> None:
+        from services.analytics_runner import _load_position_time_series
+        from services.db import PaginatedSelectTruncated
+
+        # Build a mock whose `.range()` ALWAYS returns a full page — the
+        # helper will run until it hits hard_cap_pages and then raise.
+        page_size = 1000
+        full_page = [
+            {
+                "snapshot_date": "2024-01-01",
+                "symbol": f"SYM{i}",
+                "side": "long",
+                "size_usd": "100",
+                "mark_price": "1",
+            }
+            for i in range(page_size)
+        ]
+
+        order = MagicMock()
+        order.execute.return_value = MagicMock(data=full_page)
+
+        def _range(_start, _end):
+            r = MagicMock()
+            r.execute.return_value = MagicMock(data=full_page)
+            return r
+
+        order.range = MagicMock(side_effect=_range)
+        order.order.return_value = order
+
+        mock_supabase = MagicMock()
+        t = MagicMock()
+        sel = MagicMock()
+        eq = MagicMock()
+        eq.order.return_value = order
+        sel.eq.return_value = eq
+        t.select.return_value = sel
+        mock_supabase.table.return_value = t
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ):
+            with pytest.raises(PaginatedSelectTruncated):
+                await _load_position_time_series("strat-truncated", mock_supabase)
+
+    # Phase C red-team Finding 1: the inner re-raise is half the story.
+    # The outer `except Exception as e:` in `run_strategy_analytics` used
+    # to swallow `PaginatedSelectTruncated`, map it to a generic
+    # HTTPException(500), and lose the page-count + hint context. The
+    # worker dispatcher then classified the 500 as `unknown` → indefinite
+    # retry on a permanent fault. This test pins the new dedicated handler:
+    # the typed exception must ESCAPE `run_strategy_analytics` AND the
+    # strategy_analytics row must carry a truncation-specific error message.
+    @pytest.mark.asyncio
+    async def test_pagination_truncation_propagates_through_run_strategy_analytics(
+        self,
+    ) -> None:
+        from services.analytics_runner import run_strategy_analytics
+        from services.db import PaginatedSelectTruncated
+
+        upsert_payloads: list[dict] = []
+        trade_rows = _minimal_daily_rows(15)
+
+        def _mock_table(name):
+            t = MagicMock()
+            if name == "strategy_analytics":
+                def _upsert(payload, **kwargs):
+                    upsert_payloads.append(payload)
+                    return MagicMock(
+                        execute=MagicMock(return_value=MagicMock(data=[payload]))
+                    )
+
+                t.upsert.side_effect = _upsert
+            elif name == "strategies":
+                # Minimal published strategy with no api_key_id.
+                data = {"id": "strat-trunc", "user_id": "u1", "api_key_id": None}
+                t.select.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(
+                    data=data
+                )
+            elif name == "trades":
+                # Provide enough rows so the runner clears the >=2 trade-
+                # history check and reaches the position-snapshot load.
+                t.select.return_value.eq.return_value.neq.return_value.order.return_value.execute.return_value = MagicMock(
+                    data=trade_rows
+                )
+            return t
+
+        mock_supabase = MagicMock()
+        mock_supabase.table.side_effect = _mock_table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        dates = pd.bdate_range("2024-01-01", periods=15)
+        mock_returns = pd.Series([0.001] * 15, index=dates)
+        mock_meta = {
+            "used_heuristic_capital": False,
+            "balance_error": False,
+            "computation_status_hint": "complete",
+        }
+
+        async def _raise_truncated(*_args, **_kwargs):
+            raise PaginatedSelectTruncated(
+                page_count=1000,
+                page_size=1000,
+                hint="position_snapshots strategy_id=strat-trunc",
+            )
+
+        with (
+            patch(
+                "services.analytics_runner.db_execute",
+                side_effect=_mock_db_execute,
+            ),
+            patch(
+                "services.analytics_runner.get_supabase",
+                return_value=mock_supabase,
+            ),
+            patch(
+                "services.analytics_runner.trades_to_daily_returns_with_status",
+                return_value=(mock_returns, mock_meta),
+            ),
+            patch(
+                "services.analytics_runner.get_benchmark_returns",
+                new=AsyncMock(return_value=(None, True)),
+            ),
+            patch(
+                "services.position_reconstruction.reconstruct_positions",
+                new=AsyncMock(return_value={}),
+            ),
+            patch(
+                "services.analytics_runner._load_position_time_series",
+                side_effect=_raise_truncated,
+            ),
+        ):
+            with pytest.raises(PaginatedSelectTruncated):
+                await run_strategy_analytics("strat-trunc")
+
+        # The strategy_analytics row must carry the truncation-specific
+        # message (page count + hint), not the generic
+        # "Analytics computation failed" placeholder.
+        failure_upserts = [
+            p for p in upsert_payloads
+            if p.get("computation_status") == "failed"
+        ]
+        assert failure_upserts, (
+            "Expected a failed-status upsert when PaginatedSelectTruncated "
+            "propagates through run_strategy_analytics"
+        )
+        last_failure = failure_upserts[-1]
+        error_msg = last_failure.get("computation_error", "")
+        assert "operator intervention required" in error_msg, (
+            f"Expected truncation-specific computation_error; got: {error_msg!r}"
+        )
+        assert "position_snapshots" in error_msg, (
+            f"Expected truncation hint in computation_error; got: {error_msg!r}"
+        )
