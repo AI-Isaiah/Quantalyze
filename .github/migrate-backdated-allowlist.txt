@@ -1,0 +1,25 @@
+# Allowlist for backdated migrations approved as history-only restorations.
+# Each entry is a 14-digit timestamp (basename prefix of a migration file).
+# Add a comment above each entry citing the PR + reason.
+#
+# A "backdated" migration is a local file whose timestamp is older than the
+# most-recently-applied remote migration. The supabase-migrate.yml workflow's
+# "Backdated-migration safety guard" step rejects any unallowlisted backdated
+# migration before `db push --include-all` can apply it.
+#
+# Add entries here ONLY when:
+#   1. The migration is a history-only restoration (the SQL was already
+#      executed against the remote DB via a different path), AND
+#   2. The body is idempotent (re-application is a no-op), AND
+#   3. There is a corresponding PR documenting the reconciliation.
+
+# PR #174 — history-only restoration of migration 092
+# (trades_dedup_fill_full_unique). Index already live in prod; local file
+# body byte-recovered from prod's schema_migrations.statements[] array so
+# `supabase db push` sees matching version on both sides and skips the DDL.
+20260430081243
+
+# PR #176 — history-only restoration of enable_pg_cron. The pg_cron
+# extension is already installed in prod; CREATE EXTENSION IF NOT EXISTS
+# is idempotent. File restored to reconcile local-vs-remote history.
+20260513094906
