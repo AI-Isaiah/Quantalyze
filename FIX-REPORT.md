@@ -81,4 +81,12 @@ copy, color, or layout change.
 4. `fix(allocator-retro): preserve empty-tiles layout + export DashboardRecoveryReason` (H4, M12)
 5. `fix(allocator-retro): ScenarioCommitDiff Zod alignment + exhaustive switch + RejectionReason narrowing + SubmitResponse validation` (H5, M7, M11, M13)
 6. `fix(allocator-retro): split composer/drawer seam + recovery banner regression tests + behavior H-1197 test + WidgetProps.data JSDoc + widget views reset` (H6, H7, M3, M6, M14, M15)
-7. (final) `chore: v0.22.40.23 + FIX-REPORT for PR #189 retro follow-up`
+7. (final) `chore: v0.22.40.23 + CHANGELOG + FIX-REPORT for PR #189 retro follow-up`
+
+## PR
+
+- URL: https://github.com/AI-Isaiah/Quantalyze/pull/195
+- CI: GREEN (Vercel Deployment + Vercel Preview Comments both pass)
+- Mergeable status: `CONFLICTING` against `main` — expected; PR #190 (open) targets an overlapping version slot. Per task spec, this PR is NOT merged; rebase + version-slot reconciliation is a separate step for the operator.
+- Applied: 20 code fixes + 1 verified false positive = 21 of 21 in scope
+- Deferred: 5 MED/7 + 9 LOW + 1 INFO (below threshold per spec)
