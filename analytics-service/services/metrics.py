@@ -310,14 +310,34 @@ def compute_all_metrics(
 
     # Extended metrics
     metrics_json: dict[str, Any] = {}
+    # audit-2026-05-07 silent-failure sweep: each scalar try below previously
+    # swallowed exceptions with bare `except: pass`. That collapsed three
+    # operationally distinct states ("scalar computed", "scalar absent because
+    # insufficient data", "qs raised — operator should know") into the single
+    # "field missing" surface, with no Railway log to triage. Mirror the
+    # H-0710 / H-0713 / H-0723 pattern already used by `_safe_qstats_scalar`
+    # (above) and the post-G11.E.1 sites for drawdown/benchmark fan-outs:
+    # log with scalar name + returns_len context so operators can spot
+    # silent regressions instead of inferring from latency. Math is still
+    # failure-soft (single qs failure must not take down compute_all_metrics);
+    # only the observability changes.
+    returns_len_for_log = len(returns) if returns is not None else None
+    # fail-soft: optional scalar — single qs failure must not abort compute.
     try:
         metrics_json["var_1d_95"] = _safe_float(qs.stats.value_at_risk(returns, cutoff=0.05))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar var_1d_95 failed (returns_len=%s): %s",
+            returns_len_for_log, exc, exc_info=True,
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["cvar"] = _safe_float(qs.stats.cvar(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar cvar failed (returns_len=%s): %s",
+            returns_len_for_log, exc, exc_info=True,
+        )
 
     metrics_json["mtd"] = _safe_float(returns[returns.index >= pd.Timestamp(returns.index[-1].replace(day=1))].add(1).prod() - 1)
     metrics_json["ytd"] = _safe_float(returns[returns.index >= pd.Timestamp(f"{returns.index[-1].year}-01-01")].add(1).prod() - 1)
@@ -330,45 +350,81 @@ def compute_all_metrics(
         metrics_json["worst_month"] = _safe_float(monthly_rets.min())
 
     # Additional risk metrics
+    # fail-soft: optional scalar — monthly_rets percentile may raise on empty.
     try:
         if len(monthly_rets) > 0:
             metrics_json["var_1m_99"] = _safe_float(np.percentile(monthly_rets, 1))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar var_1m_99 failed (returns_len=%s, monthly_len=%s): %s",
+            returns_len_for_log, len(monthly_rets), exc, exc_info=True,
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["gini"] = _safe_float(qs.stats.gini(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar gini failed (returns_len=%s): %s",
+            returns_len_for_log, exc, exc_info=True,
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["omega"] = _safe_float(qs.stats.omega(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar omega failed (returns_len=%s): %s",
+            returns_len_for_log, exc, exc_info=True,
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["gain_pain"] = _safe_float(qs.stats.gain_to_pain_ratio(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar gain_pain failed (returns_len=%s): %s",
+            returns_len_for_log, exc, exc_info=True,
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["tail_ratio"] = _safe_float(qs.stats.tail_ratio(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar tail_ratio failed (returns_len=%s): %s",
+            returns_len_for_log, exc, exc_info=True,
+        )
 
     # Distribution metrics
+    # fail-soft: optional scalar.
     try:
         metrics_json["skewness"] = _safe_float(returns.skew())
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar skewness failed (returns_len=%s): %s",
+            returns_len_for_log, exc, exc_info=True,
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["kurtosis"] = _safe_float(returns.kurtosis())
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar kurtosis failed (returns_len=%s): %s",
+            returns_len_for_log, exc, exc_info=True,
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["smart_sharpe"] = _safe_float(qs.stats.smart_sharpe(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar smart_sharpe failed (returns_len=%s): %s",
+            returns_len_for_log, exc, exc_info=True,
+        )
+    # fail-soft: optional scalar.
     try:
         metrics_json["smart_sortino"] = _safe_float(qs.stats.smart_sortino(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar smart_sortino failed (returns_len=%s): %s",
+            returns_len_for_log, exc, exc_info=True,
+        )
 
     # Win/Loss metrics
     wins = returns[returns > 0]
@@ -382,10 +438,14 @@ def compute_all_metrics(
         avg_loss_abs = abs(float(losses.mean()))
         if avg_loss_abs > 0:
             metrics_json["payoff_ratio"] = _safe_float(wins.mean() / avg_loss_abs)
+    # fail-soft: optional scalar.
     try:
         metrics_json["profit_factor"] = _safe_float(qs.stats.profit_factor(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar profit_factor failed (returns_len=%s): %s",
+            returns_len_for_log, exc, exc_info=True,
+        )
 
     # Risk of Ruin (Cox-Miller approximation)
     if len(wins) > 0 and len(losses) > 0:
@@ -465,6 +525,8 @@ def compute_all_metrics(
         metrics_json["drawdown_episodes_error"] = str(exc)[:200]
 
     # Outlier ratios
+    # fail-soft: optional pair — both ratios share one try so they degrade
+    # together (consistent UI state).
     try:
         mean_ret = float(returns.mean())
         std_ret = float(returns.std())
@@ -472,8 +534,11 @@ def compute_all_metrics(
             outlier_threshold = 2 * std_ret
             metrics_json["outlier_win_ratio"] = _safe_float((returns > mean_ret + outlier_threshold).mean())
             metrics_json["outlier_loss_ratio"] = _safe_float((returns < mean_ret - outlier_threshold).mean())
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "outlier ratios failed (returns_len=%s): %s",
+            returns_len_for_log, exc, exc_info=True,
+        )
 
     # Benchmark metrics (single greeks() call for alpha + beta)
     if benchmark_returns is not None and len(benchmark_returns) > 0:

@@ -549,7 +549,17 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         from datetime import datetime, timezone
                         ts = int(entry["timestamp"]) / 1000
                         entry["timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                # fail-soft fallback: keep the spot-trades fallback so the
+                # parent sync never aborts on Binance futures-income drift,
+                # but log the underlying error so operators can spot a
+                # systemic regression (Binance schema change, auth failure
+                # masquerading as futures-permission denial) instead of
+                # only seeing "BTC spot fallback fired" in the data.
+                logger.warning(
+                    "Binance futures-income failed (falling back to BTC spot trades): %s",
+                    exc, exc_info=True,
+                )
                 # Fallback: fetch spot trades for BTC only
                 trades = await exchange.fetch_my_trades("BTC/USDT", since=since_ms, limit=1000)
                 for t in trades:
@@ -563,7 +573,23 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     })
 
         elif exchange.id == "bybit":
-            # Bybit: fetch closed PnL
+            # Bybit: fetch closed PnL.
+            # audit-2026-05-07 silent-failure sweep: the previous bare
+            # `except: pass` here wrapped BOTH the Bybit RPC and the
+            # timestamp ISO-conversion loop. Two distinct failure modes
+            # collapsed into one silent surface:
+            #   (a) RPC raised — bybit daily_pnl silently missing,
+            #       caller could not distinguish "no closed positions" from
+            #       "Bybit blip / auth failure / network".
+            #   (b) ISO conversion raised on a malformed createdTime —
+            #       timestamps stayed as digit-strings or empty, and the
+            #       downstream `datetime.fromisoformat` consumer raised
+            #       another layer up with NO context about why.
+            # Both are now logged at WARNING. We deliberately keep the
+            # call best-effort (no re-raise) because fetch_daily_pnl is
+            # a fire-and-forget enrichment path — its failure must not
+            # abort the parent sync. But the silent surface is gone.
+            # fail-soft: best-effort enrichment, but log the failure mode.
             try:
                 params = {"category": "linear", "limit": 200}
                 result = await exchange.private_get_v5_position_closed_pnl(params)
@@ -585,8 +611,11 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         from datetime import datetime, timezone
                         ts = int(entry["timestamp"]) / 1000
                         entry["timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Bybit closed_pnl fetch / ISO-conversion failed: %s",
+                    exc, exc_info=True,
+                )
 
     except Exception as e:
         logger.error("fetch_daily_pnl failed: %s", str(e))
