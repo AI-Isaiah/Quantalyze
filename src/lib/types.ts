@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AlertSeverity } from "./utils";
+import type { AlertSeverity, DocType, SupportedExchange } from "./utils";
 
 export type Role = "manager" | "allocator" | "both";
 
@@ -466,7 +466,10 @@ export function parsePositionRows(rows: unknown[]): Position[] {
 export interface FundingFee {
   id: string;
   strategy_id: string;
-  exchange: "binance" | "okx" | "bybit";
+  // audit-2026-05-07 H-1117: single source of truth — alias for the
+  // canonical `SupportedExchange` tuple in utils.ts. Prevents drift when
+  // Sprint 6 adds a fourth exchange.
+  exchange: SupportedExchange;
   symbol: string;
   amount: number;
   currency: string;
@@ -507,7 +510,8 @@ export interface ContactRequest {
 export interface ApiKey {
   id: string;
   user_id: string;
-  exchange: "binance" | "okx" | "bybit";
+  // audit-2026-05-07 H-0519: alias `SupportedExchange` for single source.
+  exchange: SupportedExchange;
   label: string;
   is_active: boolean;
   sync_status: string | null;
@@ -743,7 +747,10 @@ export interface PortfolioDocument {
   id: string;
   portfolio_id: string;
   strategy_id: string | null;
-  doc_type: "contract" | "note" | "factsheet" | "founder_update" | "other";
+  // audit-2026-05-07 H-0519: alias `DocType` from utils.ts. The canonical
+  // tuple `DOC_TYPES` is the single source of truth so a new doc_type
+  // forces an update in exactly one place.
+  doc_type: DocType;
   title: string;
   file_path: string | null;
   content: string | null;
@@ -780,7 +787,7 @@ export interface PortfolioAlert {
 export interface VerificationRequest {
   id: string;
   email: string;
-  exchange: "binance" | "okx" | "bybit";
+  exchange: SupportedExchange;
   status: "pending" | "processing" | "complete" | "failed";
   error_message: string | null;
   results: Record<string, unknown> | null;
@@ -853,7 +860,7 @@ export interface ComputeJob {
   error_kind: ErrorKind | null;
   idempotency_key: string | null;
   /** sync_trades only; NULL for compute_analytics and compute_portfolio. */
-  exchange: "binance" | "okx" | "bybit" | null;
+  exchange: SupportedExchange | null;
   /** Populated after a successful fetch_trades run, for observability. */
   trade_count: number | null;
   created_at: string;
@@ -900,7 +907,7 @@ export interface PositionSnapshot {
   entry_price: number | null;
   mark_price: number | null;
   unrealized_pnl: number | null;
-  exchange: "binance" | "okx" | "bybit" | null;
+  exchange: SupportedExchange | null;
   computed_at: string;
   created_at: string;
 }
