@@ -1051,29 +1051,33 @@ async def cron_recompute() -> dict[str, Any]:
 
     duration_s = _duration()
 
-    # When every allocator failed, the cause is structural (schema drift,
-    # KEK missing, Supabase client raising). Emit logger.error so Sentry
-    # lights up — we still return 200 with the failure breakdown so the
-    # cron caller does not retry-loop on a structural fault.
+    # Pick a status discriminator that lets monitoring switch on a single
+    # field. Returning "ok" on a structural fault (every allocator failed)
+    # would let dashboards stay green while the engine is broken — distinct
+    # statuses surface the breakdown without forcing log-text parsing.
     if failed > 0 and processed == 0:
+        status_value = "total_failure"
         logger.error(
             "match_engine cron: TOTAL FAILURE — processed=0 failed=%d "
             "(structural; see preceding exceptions)",
             failed,
         )
     elif failed > 0 and failed > processed:
+        status_value = "degraded"
         logger.error(
             "match_engine cron: majority failure — processed=%d failed=%d",
             processed, failed,
         )
+    else:
+        status_value = "ok"
 
     logger.info(
-        "match_engine cron complete: processed=%d skipped=%d failed=%d "
-        "retention_deleted=%d duration_s=%.2f",
-        processed, skipped, failed, retention_total, duration_s,
+        "match_engine cron complete: status=%s processed=%d skipped=%d "
+        "failed=%d retention_deleted=%d duration_s=%.2f",
+        status_value, processed, skipped, failed, retention_total, duration_s,
     )
     return {
-        "status": "ok",
+        "status": status_value,
         "processed": processed,
         "skipped": skipped,
         "failed": failed,
