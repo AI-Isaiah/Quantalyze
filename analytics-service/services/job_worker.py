@@ -936,6 +936,7 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             row = res.data or {}
             return dict(row.get("data_quality_flags") or {})
 
+        flag_load_failed = False
         try:
             existing_flags = await db_execute(_load_existing_flags)
         except Exception as load_exc:  # noqa: BLE001
@@ -948,6 +949,7 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 strategy_id, load_exc,
             )
             existing_flags = {}
+            flag_load_failed = True
 
         flag_was_set = existing_flags.get("phase2_fill_ingestion_failed") is True
 
@@ -957,11 +959,26 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             existing_flags["phase2_failed_at"] = datetime.now(timezone.utc).isoformat()
             write_needed = True
         else:
-            # phase2_complete=True. Clear the lingering flag if present.
+            # Phase 2 ran without raising — clear the lingering flag if present.
+            # Red-team M-conf=8: when the read itself failed we cannot tell
+            # from an empty dict whether the DB row carries a stale failure
+            # flag. Write the recovery payload defensively in that case so a
+            # recovered strategy whose read transiently blipped no longer
+            # perma-stays in "needs attention" on the admin health card.
+            # PostgREST upsert merges JSONB keys, so emitting an EXPLICIT
+            # `phase2_fill_ingestion_failed=False` is required on the
+            # load-failed path (a pop here would not actually remove the
+            # stale key from the DB row since we never read it).
             if flag_was_set:
                 existing_flags.pop("phase2_fill_ingestion_failed", None)
                 existing_flags.pop("phase2_error", None)
                 existing_flags.pop("phase2_failed_at", None)
+                existing_flags["phase2_recovered_at"] = (
+                    datetime.now(timezone.utc).isoformat()
+                )
+                write_needed = True
+            elif flag_load_failed:
+                existing_flags["phase2_fill_ingestion_failed"] = False
                 existing_flags["phase2_recovered_at"] = (
                     datetime.now(timezone.utc).isoformat()
                 )
