@@ -47,12 +47,18 @@ export {
 } from "./seed-demo-profiles";
 export type { StrategyProfile } from "./seed-demo-profiles";
 import {
+  ALLOCATOR_COLD,
+  ALLOCATOR_ACTIVE,
+  ALLOCATOR_STALLED,
   STRATEGY_PROFILES,
   STRATEGY_UUIDS,
   MANAGER_INSTITUTIONAL_A,
   MANAGER_INSTITUTIONAL_B,
   MANAGER_EXPLORATORY_A,
   MANAGER_EXPLORATORY_B,
+  ACTIVE_PORTFOLIO_ID,
+  COLD_PORTFOLIO_ID,
+  STALLED_PORTFOLIO_ID,
 } from "./seed-demo-profiles";
 import type { StrategyProfile } from "./seed-demo-profiles";
 

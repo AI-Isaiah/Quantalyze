@@ -300,22 +300,23 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
     // second-to-last <td> per row, which means the LAST <svg> per row.
     const probe = await page.evaluate<DrawdownStrokeProbe>(() => {
       const rows = Array.from(document.querySelectorAll("table tbody tr"));
-      const strokes = rows
-        .map((row) => {
-          const svgs = row.querySelectorAll("svg");
-          const lastSvg = svgs[svgs.length - 1] as SVGElement | undefined;
-          if (!lastSvg) return null;
-          const path = lastSvg.querySelector(
-            "path[stroke]",
-          ) as SVGPathElement | null;
-          return path?.getAttribute("stroke") ?? null;
-        })
-        .filter((s): s is string => s !== null);
+      const strokes: (string | null)[] = rows.map((row) => {
+        const svgs = row.querySelectorAll("svg");
+        const lastSvg = svgs[svgs.length - 1] as SVGElement | undefined;
+        if (!lastSvg) return null;
+        const path = lastSvg.querySelector(
+          "path[stroke]",
+        ) as SVGPathElement | null;
+        return path?.getAttribute("stroke") ?? null;
+      });
       return { strokes };
     });
 
-    expect(probe.strokes.length).toBeGreaterThan(0);
-    for (const stroke of probe.strokes) {
+    const negativeStrokes = probe.strokes.filter(
+      (s): s is string => s !== null,
+    );
+    expect(negativeStrokes.length).toBeGreaterThan(0);
+    for (const stroke of negativeStrokes) {
       // Accept either the literal #DC2626 hex OR the CSS-var form
       // var(--color-negative). The Sparkline component passes `color`
       // straight through to the SVG stroke attribute, so the CSS-var

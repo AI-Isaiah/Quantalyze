@@ -7,6 +7,17 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.54] - 2026-05-17
+
+**fix(ci): three frontend-typecheck regressions from PRs #214, #222, #214 cherry-picks.** CI on main has been red since #214 because of three import / parse bugs that the rebase-and-cherry-pick squash pattern dropped. This restores typecheck + lint to green on main.
+
+- **`scripts/seed-demo-data.ts` — missing imports (#214 fallout).** When `STRATEGY_PROFILES` and the allocator/portfolio UUID constants got extracted into `scripts/seed-demo-profiles.ts`, the new file added them to the `export { ... }` re-export block but DROPPED them from the local `import { ... }` block, so internal references (`ALLOCATOR_COLD`, `ALLOCATOR_ACTIVE`, `ALLOCATOR_STALLED`, `ACTIVE_PORTFOLIO_ID`, `COLD_PORTFOLIO_ID`, `STALLED_PORTFOLIO_ID`) failed with `Cannot find name 'X'`. Restored to import block.
+- **`scripts/check-admin-route-manifest.ts` — JSDoc block terminated early by `*/` inside backtick (#222 fallout).** The docstring contained `` `/\/\/[^\n]*/g` `` to describe the line-comment regex. Block comments terminate at the first literal `*/` regardless of backtick nesting, so the JSDoc closed at the wrong place and TS parsed the rest of the prose as code, producing 60+ syntax errors. Rewrote as `` `/\/\/[^\n]*` (with g flag) `` — same semantics, no embedded `*/`.
+- **`e2e/discovery-sparkline-regression.spec.ts` — type-predicate filter on shared probe interface (#214 fallout).** The second `DrawdownStrokeProbe` test was pre-filtering nulls inside `page.evaluate`, but the interface declares `strokes: (string | null)[]`, so the for-loop variable was typed `string | null` and `stroke.trim()` errored. Moved the null-filter outside the evaluate to match the first test's pattern and preserve the shared interface contract.
+
+No production behavior changes. CI-only fix to unblock landings.
+
+
 ## [0.22.40.53] - 2026-05-17
 
 **audit-2026-05-07 — auth-lib RBAC close-out (cluster-H).** Multi-phase review on the auth library (`src/lib/auth.ts`, `auth-types.ts`, `admin.ts`, `auth/rbac-manifest.ts`) + ADMIN_ROUTE_MANIFEST CI drift check + audit-2026-05-07 cluster-H closures. Squashes 15 prior commits on `fix/auth-lib-critical-2026-05-17` into 12 substantive commits onto current main (base v0.22.40.52).
