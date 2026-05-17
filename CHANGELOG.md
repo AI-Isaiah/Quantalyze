@@ -7,6 +7,23 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.53] - 2026-05-17
+
+**audit-2026-05-07 — auth-lib RBAC close-out (cluster-H).** Multi-phase review on the auth library (`src/lib/auth.ts`, `auth-types.ts`, `admin.ts`, `auth/rbac-manifest.ts`) + ADMIN_ROUTE_MANIFEST CI drift check + audit-2026-05-07 cluster-H closures. Squashes 15 prior commits on `fix/auth-lib-critical-2026-05-17` into 12 substantive commits onto current main (base v0.22.40.52).
+
+- **Cluster-H phase 2** — tightened RBAC type contract; `auth-before-CSRF` ordering in route wrapper.
+- **ADMIN_ROUTE_MANIFEST + CI drift check (C-0153)** — `src/lib/auth/rbac-manifest.ts` declares every admin route's wrapper choice + role; `scripts/check-admin-route-manifest.ts` is a CI grep that fails on drift (route lacks a wrapper, or wrapper disagrees with manifest); regression suite at `src/__tests__/check-admin-route-manifest.test.ts` + `rbac-manifest.test.ts`.
+- **React.cache() memoization (M-0501)** — per-request memoize `getUserRolesResult` via React `cache()`; dedup applies to same-SupabaseClient-instance callers (`withRole` guarantees this in Route Handlers; cross-request scoping is not yet pinned by integration test — see ADR-0005 follow-up).
+- **Testing** — auth.ts cache-dedup tests; admin-union fallback ordering tests; ADMIN_ROUTE_MANIFEST contract tests; check-admin-route-manifest script regression suite.
+- **Red-team** — script strips strings/templates + dead-code branches (no false positives on comment-only routes); short-circuit admin-union fallback (3 round-trips → 2); narrowed React.cache() scope claim in JSDoc (per-instance dedup only, not request-scoped — caveat documented); threaded CSRF check through `requireAdmin(supabase, user, req)` for defense-in-depth on the mutating POST path (approve route reconciled with cluster-K's pre-rate-limit guard — first call now passes `req`, post-load TOCTOU close renamed to `rpcGuard` to avoid redeclaration).
+- **Simplify + comment-analyzer** — cluster-H Phase-2 diff simplified; corrected stale 'profiles.is_admin canonical' claim in auth.ts file-header (post-P459 the canonical source is the three-signal UNION).
+- **Docs + lint wiring + manifest notes** — closes S2 + M1 + M3 (lint rule references the manifest; manifest notes capture cluster-H ratchet).
+
+Cross-cluster reconciliation: cluster-K's CAS approach on `approve/route.ts` (PR #219) and cluster-H's CSRF-threading were both wanted; resolved by keeping pre-rate-limit `requireAdmin(...,req)` AND a post-load `rpcGuard = requireAdmin(...,req)` — both pass `req` (CSRF defense-in-depth), variable renamed to avoid redeclaration.
+
+No production behavior regressions; 12 substantive cherry-picks onto current main, 3 conflicts resolved (approve route's adminGuard variable, auth.ts JSDoc block, auth.test.ts import block).
+
+
 ## [0.22.40.52] - 2026-05-17
 
 **audit-2026-05-07 — analytics-service `funding_fetch.py` close-out.** Multi-phase review on `analytics-service/services/funding_fetch.py` + tests. Squashes 11 prior commits on `fix/funding-fetch-service-critical-2026-05-17` into 7 substantive commits onto current main (base v0.22.40.51).
