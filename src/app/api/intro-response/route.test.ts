@@ -36,9 +36,22 @@ vi.mock("next/server", async () => {
   };
 });
 
-vi.mock("@/lib/csrf", () => ({
-  assertSameOrigin: () => null,
+const csrfState = vi.hoisted(() => ({
+  // null = pass; set to a status code to force same-origin rejection.
+  result: null as null | { status: number },
 }));
+vi.mock("@/lib/csrf", async () => {
+  const { NextResponse: NR } =
+    await vi.importActual<typeof import("next/server")>("next/server");
+  return {
+    assertSameOrigin: () => {
+      if (csrfState.result) {
+        return NR.json({ error: "Forbidden" }, { status: csrfState.result.status });
+      }
+      return null;
+    },
+  };
+});
 
 const TEST_USER = vi.hoisted(() => ({
   id: "00000000-0000-4000-8000-000000000001",
@@ -55,6 +68,7 @@ const supabaseState = vi.hoisted(() => ({
         allocator_id: string;
         strategies: { user_id: string | null; name: string | null };
       },
+  lookupError: null as null | { message: string },
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -72,7 +86,7 @@ vi.mock("@/lib/supabase/server", () => ({
         eq: () => ({
           maybeSingle: async () => ({
             data: supabaseState.lookupResult,
-            error: null,
+            error: supabaseState.lookupError,
           }),
         }),
       }),
@@ -82,6 +96,13 @@ vi.mock("@/lib/supabase/server", () => ({
 
 const adminUpdate = vi.hoisted(() => vi.fn());
 const adminFromCalls = vi.hoisted<string[]>(() => []);
+const adminState = vi.hoisted(() => ({
+  // Tunable contact_requests update().eq().select() resolution. Default mirrors
+  // the prior single-row success so existing happy-path tests stay green.
+  updateResult: { data: [{ id: "stub" }] as Array<{ id: string }> | null, error: null as null | { message: string } },
+  // Tunable profiles lookup result (after() allocator-email fetch).
+  profileResult: { data: { email: "allocator@example.test" } as { email: string | null } | null, error: null as null | { message: string } },
+}));
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     from: (table: string) => {
@@ -92,10 +113,7 @@ vi.mock("@/lib/supabase/admin", () => ({
             adminUpdate(payload);
             return {
               eq: () => ({
-                select: () => Promise.resolve({
-                  data: [{ id: "stub" }],
-                  error: null,
-                }),
+                select: () => Promise.resolve(adminState.updateResult),
               }),
             };
           },
@@ -105,10 +123,7 @@ vi.mock("@/lib/supabase/admin", () => ({
       return {
         select: () => ({
           eq: () => ({
-            single: async () => ({
-              data: { email: "allocator@example.test" },
-              error: null,
-            }),
+            single: async () => adminState.profileResult,
           }),
         }),
       };
@@ -116,9 +131,12 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
+const rateLimitState = vi.hoisted(() => ({
+  result: { success: true as boolean, retryAfter: 0 as number },
+}));
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: {},
-  checkLimit: async () => ({ success: true, retryAfter: 0 }),
+  checkLimit: async () => rateLimitState.result,
 }));
 
 const notifySpy = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
@@ -150,9 +168,15 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
         name: "Stellar Neutral Alpha",
       },
     };
+    supabaseState.lookupError = null;
+    csrfState.result = null;
+    rateLimitState.result = { success: true, retryAfter: 0 };
+    adminState.updateResult = { data: [{ id: "stub" }], error: null };
+    adminState.profileResult = { data: { email: "allocator@example.test" }, error: null };
     adminUpdate.mockReset();
     adminFromCalls.length = 0;
     notifySpy.mockClear();
+    notifySpy.mockResolvedValue(undefined);
     auditSpy.mockClear();
     afterCalls.length = 0;
   });
@@ -253,5 +277,182 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     expect(event.entity_type).toBe("contact_request");
     expect(event.metadata.new_status).toBe("intro_made");
     expect(event.metadata.actor_role).toBe("manager");
+  });
+
+  // Audit-2026-05-07 testing/csrf-negative — pins the assertSameOrigin
+  // early-return so a regression that silently dropped/inverted the CSRF
+  // guard would fail this test.
+  it("short-circuits on the assertSameOrigin CSRF guard before auth/lookup/update", async () => {
+    csrfState.result = { status: 403 };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        id: "33333333-3333-4333-8333-333333333333",
+        action: "accept",
+      }),
+    );
+    expect(res.status).toBe(403);
+    // None of the downstream side effects fired.
+    expect(adminUpdate).not.toHaveBeenCalled();
+    expect(auditSpy).not.toHaveBeenCalled();
+    expect(afterCalls).toHaveLength(0);
+  });
+
+  // Audit-2026-05-07 testing/rate-limit-negative — pins the 429 branch and
+  // Retry-After header shape (route.ts L63-69).
+  it("returns 429 with Retry-After when checkLimit reports the user is throttled", async () => {
+    rateLimitState.result = { success: false, retryAfter: 5 };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        id: "33333333-3333-4333-8333-333333333333",
+        action: "accept",
+      }),
+    );
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("5");
+    // Throttled callers must not reach lookup / update / notify / audit.
+    expect(adminUpdate).not.toHaveBeenCalled();
+    expect(auditSpy).not.toHaveBeenCalled();
+    expect(afterCalls).toHaveLength(0);
+  });
+
+  // Audit-2026-05-07 testing/lookup-error-negative — pins the 500 on
+  // contact_requests lookup failure (route.ts L93-95).
+  it("returns 500 and does not run the admin update when the lookup query errors", async () => {
+    supabaseState.lookupError = { message: "db down" };
+    supabaseState.lookupResult = null;
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        id: "33333333-3333-4333-8333-333333333333",
+        action: "accept",
+      }),
+    );
+    expect(res.status).toBe(500);
+    expect(adminUpdate).not.toHaveBeenCalled();
+    expect(auditSpy).not.toHaveBeenCalled();
+  });
+
+  // Audit-2026-05-07 testing/not-found-negative — pins the 404 branch
+  // (route.ts L96-98) distinct from the 403 ownership-mismatch path. The
+  // RLS-row-hidden case must not be reclassified as 403/500.
+  it("returns 404 when the row is hidden by RLS (data:null with no error)", async () => {
+    supabaseState.lookupResult = null;
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        id: "33333333-3333-4333-8333-333333333333",
+        action: "accept",
+      }),
+    );
+    expect(res.status).toBe(404);
+    expect(adminUpdate).not.toHaveBeenCalled();
+  });
+
+  // Audit-2026-05-07 testing/update-error-negative — pins the 500 on admin
+  // update error (route.ts L122-124). A regression that silently dropped
+  // updateError and returned 200 would slip a "succeeded" UI on a failed
+  // DB write past tests; this case prevents that.
+  it("returns 500 and skips notify+audit when the admin update returns an error", async () => {
+    adminState.updateResult = { data: null, error: { message: "boom" } };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        id: "33333333-3333-4333-8333-333333333333",
+        action: "accept",
+      }),
+    );
+    expect(res.status).toBe(500);
+    expect(auditSpy).not.toHaveBeenCalled();
+    expect(afterCalls).toHaveLength(0);
+  });
+
+  // Audit-2026-05-07 testing/empty-rowset-negative — pins the defensive
+  // empty-array branch (route.ts L125-132). This mirrors the original
+  // audit #44 silent-success defect on the server: a successful query
+  // affecting zero rows must surface as 500, never 200.
+  it("returns 500 when the admin update affects zero rows (defensive empty-array guard)", async () => {
+    adminState.updateResult = { data: [], error: null };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        id: "33333333-3333-4333-8333-333333333333",
+        action: "accept",
+      }),
+    );
+    expect(res.status).toBe(500);
+    expect(auditSpy).not.toHaveBeenCalled();
+    expect(afterCalls).toHaveLength(0);
+  });
+
+  // Audit-2026-05-07 testing/after-catch-negative — pins the try/catch
+  // around notifyAllocatorIntroStatus inside after() (route.ts L165-170).
+  // A regression that removed the try/catch would unhandled-reject; this
+  // test asserts the swallow-and-log contract.
+  it("swallows notify errors in the after() continuation and does not throw", async () => {
+    notifySpy.mockRejectedValueOnce(new Error("smtp down"));
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        id: "33333333-3333-4333-8333-333333333333",
+        action: "accept",
+      }),
+    );
+    // The HTTP response was already 200 before after() ran.
+    expect(res.status).toBe(200);
+    expect(afterCalls).toHaveLength(1);
+    // Flushing the continuation must not throw — the route catches errors
+    // and logs them via console.error.
+    await expect(afterCalls[0]()).resolves.toBeUndefined();
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+  });
+
+  // Audit-2026-05-07 testing/notify-skip-negative — pins the notify-gating
+  // condition `allocator?.email && strategy.name` (route.ts L158). Sending
+  // notify(undefined, …) or notify(email, null, …) would ship a malformed
+  // email; these cases pin the skip contract.
+  it("does NOT call notifyAllocatorIntroStatus when the allocator profile lookup returns null", async () => {
+    adminState.profileResult = { data: null, error: null };
+    const { POST } = await import("./route");
+    await POST(
+      makeRequest({
+        id: "33333333-3333-4333-8333-333333333333",
+        action: "accept",
+      }),
+    );
+    expect(afterCalls).toHaveLength(1);
+    await afterCalls[0]();
+    expect(notifySpy).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call notifyAllocatorIntroStatus when the strategy name is null", async () => {
+    supabaseState.lookupResult!.strategies.name = null;
+    const { POST } = await import("./route");
+    await POST(
+      makeRequest({
+        id: "33333333-3333-4333-8333-333333333333",
+        action: "accept",
+      }),
+    );
+    expect(afterCalls).toHaveLength(1);
+    await afterCalls[0]();
+    expect(notifySpy).not.toHaveBeenCalled();
+  });
+
+  // Audit-2026-05-07 testing/json-parse-rejection — pins the
+  // `await req.json().catch(() => null)` guard at route.ts L71-78. A
+  // regression that removed the catch would propagate the JSON parse
+  // rejection instead of returning a clean 400.
+  it("returns 400 when req.json() rejects with a parse error", async () => {
+    const { POST } = await import("./route");
+    const badReq = {
+      json: async () => {
+        throw new Error("bad json");
+      },
+    } as unknown as NextRequest;
+    const res = await POST(badReq);
+    expect(res.status).toBe(400);
+    expect(adminUpdate).not.toHaveBeenCalled();
   });
 });
