@@ -1,123 +1,141 @@
-# PR #189 Retroactive Fix-Content Follow-up — FIX REPORT (2026-05-16)
+# PR #188 Retro Follow-up — Fix Report
 
-Branch: `fix/pr189-retro-followup-2026-05-16`
-Base: `origin/main` (`609b625b`)
-Version: bumped to `v0.22.40.23` (VERSION + package.json).
+**Branch:** `fix/pr188-retro-followup-2026-05-16`
+**Base:** `origin/main` @ `609b625b` (refactor(ci): code-simplifier retro on PR #188 fix-content)
+**Version:** 0.22.40.18 -> 0.22.40.22
 
-Source threshold findings (from `.review/specialist-fix-content.*.jsonl` +
-`red-team-fix-content.jsonl` on the `allocator-dashboard-retroactive`
-worktree): CRITICAL + HIGH≥7 + MED≥8 + LOW≥9.
+## Summary
 
-## Applied: 21 in scope (20 code fixes + 1 verified false positive)
+Threshold-filtered (CRITICAL / HIGH conf>=7 / MED conf>=8 / LOW conf>=9)
+retroactive specialist findings on the PR #188 CI hardening fix-content
+turned up 26 in-scope items. 11 applied as atomic fixes, 5 deferred with
+documented reasons, 4 covered by other applied fixes, 1 out-of-scope.
 
-### HIGH (7 of 8 applied — 1 false positive)
+## Findings catalogue + decisions
 
-| ID | Severity / conf | File | Status |
-|---|---|---|---|
-| H1 | HIGH / 9 | `AllocationDashboardV2.tsx` | Recovery banner hoisted above EmptyState early-return + rendered in both branches |
-| H2 | HIGH / 9 | `OutcomesWidget.tsx` | Curve-fetch error hoisted to panel level; rendered regardless of per-window pending state |
-| H3 | HIGH / 8 | `EquityChart.tsx` | y-tick walker safety cap at 50 ticks with one-shot warn + 3-tick fallback |
-| H4 | HIGH / 8 | `useDashboardConfig.ts` | Preserve user's empty-tiles layout instead of silently replacing with DEFAULT_LAYOUT |
-| H5 | HIGH / 9 | `ScenarioComposer.tsx` | Client `ScenarioCommitDiff` aligned to Zod wire contract (holding_ref required on BridgeRecommendedDiff, percent_allocated added to VoluntaryModifyDiff, effective_date added to all members, rejection_reason narrowed to RejectionReason enum, note narrowed to string\|null\|undefined) |
-| H6 | HIGH / 8 | `ScenarioComposer.tsx` | Export narrower `ComposerProducedDiff` (voluntary_remove + voluntary_add) for the composer→drawer seam; handleCommit retypes locally |
-| H7 | HIGH / 8 | `AllocationDashboardV2.retro-audit.test.tsx` | Per-test override hook for consumeDashboardRecoveryFlag + 7 new tests covering banner copy / EmptyState branch / dismiss / null control |
-| H8 | HIGH / 8 | `AllocationDashboardV2.tsx` | **False positive** — `warning` IS a registered Tailwind `@theme inline` token in `src/app/globals.css`; existing files (`src/app/security/page.tsx`, `WithdrawalWarningStrip.tsx`, `WizardIpAllowlistHint.tsx`) use `border-warning` + `bg-warning/N` successfully; verified by grep. No code change required. |
+Full findings extracted from
+`/Users/helios-mammut/claude-projects/quantalyze-worktrees/pr188-retro-audit/.review/follow-up-pr-findings.md`.
 
-### MEDIUM ≥8 (13 in scope)
+| ID | Sev/Conf | File | Disposition |
+|----|----------|------|-------------|
+| F1 | HIGH/9 | `src/__tests__/critical-regressions.test.ts` | APPLIED — commit `ed8d4ebe` |
+| F2 | HIGH/9 | `src/__tests__/critical-regressions.test.ts` | APPLIED — commit `b55af44f` |
+| F3 | HIGH/9 | `src/__tests__/critical-regressions.test.ts` | APPLIED — commit `b55af44f` |
+| F4 | HIGH/8 | `src/__tests__/critical-regressions.test.ts` | APPLIED — commit `b55af44f` |
+| F5 | HIGH/8 | `src/__tests__/critical-regressions.test.ts` | APPLIED — commit `ed8d4ebe` |
+| F6 | HIGH/8 | `.github/workflows/ci.yml` (playwright-report gate) | APPLIED — commit `38028344` |
+| F7 | HIGH/9 | `.github/workflows/ci.yml` (security playwright trace exfil) | COVERED by F6 |
+| F8 | HIGH/9 | `src/__tests__/critical-regressions.test.ts` (YAML anchor guard) | APPLIED — commit `b55af44f` |
+| F9 | MED/9 | `.github/dependabot.yml` | APPLIED — commit `7a5994b9` |
+| F10 | MED/8 | `src/__tests__/critical-regressions.test.ts` (permissions cardinality) | APPLIED — commit `b55af44f` |
+| F11 | MED/8 | `docs/runbooks/ci-hardening-permissions-c0293.md` | APPLIED — commit `c0a245ef` |
+| D1 | MED/9 | `.github/workflows/ci.yml` `.next/cache` comment | COVERED by PR #192 |
+| D2 | HIGH/9 | SHA-pin enforcement script | COVERED by existing test invariant |
+| D3 | HIGH/9 | Artifact-content runtime gate | DEFERRED — separate scope (runtime grep, different layer) |
+| D4 | HIGH/8 | `.github/workflows/ci.yml` rebuild verification | APPLIED — commit `e6fae768` |
+| D5 | HIGH/8 | SQL tests for new migrations | OUT-OF-SCOPE (PR #188 is CI scope, not SQL) |
+| D6 | MED/9 | `supabase-migrate.yml` plan-job password removal | DEFERRED — substantive runtime change |
+| D7 | MED/8 | CRITICAL-C0293 file isolation | DEFERRED — refactor, no posture change |
+| D8 | MED/8 | Nightly SHA-drift detection cron | DEFERRED — auto-issue design needed |
+| D9 | MED/8 | Rebuild step contract test brittle on rename | DEFERRED — current test works |
+| D10 | MED/8 | `nightly.yml` playwright-report retention | COVERED — PR #188 removed the upload entirely |
 
-| ID | Severity / conf | File | Status |
-|---|---|---|---|
-| M1 | MED / 8 | `EquityChart.tsx` | Guard CUSTOM range startEpoch/endEpoch against NaN, fall back to ALL-period with breadcrumb |
-| M2 | MED / 8 | `OutcomesWidget.tsx` | Reset `error` to null at the start of each effect run |
-| M3 | MED / 8 | `AllocationDashboardV2.retro-audit.test.tsx` | New behavior test mounts empty→populated transition and asserts widget_viewed fires via mocked synchronous IntersectionObserver |
-| M6 | MED / 8 | `AllocationDashboardV2.tsx` | Third widgetViewsFiredRef reset effect keyed on `[holdingsEmpty, hasSyncing]` so empty→populated transitions get a fresh dedup |
-| M7 | MED / 9 | `ScenarioCommitDrawer.tsx` | buildSubmitDiffs replaced with exhaustive switch + assertNever default |
-| M8 | MED / 8 | `EquityChart.tsx` | Malformed-date breadcrumb hoisted into parseISO itself with module-scoped dedup Set |
-| M11 | MED / 8 | `ScenarioCommitDrawer.tsx` | Validate `recorded` is a finite number BEFORE lifting JSON into state; emit malformed-response failure otherwise |
-| M12 | MED / 8 | `useDashboardConfig.ts` + `AllocationDashboardV2.tsx` | Export `DashboardRecoveryReason` named type, replace 3 hand-typed literal unions |
-| M13 | MED / 8 | `ScenarioCommitDrawer.tsx` | PerRowState.rejection_reason narrowed from `string?` to `RejectionReason` enum |
-| M14 | MED / 8 | `lib/types.ts` | WidgetProps.data:any JSDoc explaining the deferral rationale, blocking constraint, and pointer to follow-ups |
-| M15 | MED / 8 | `AllocationDashboardV2.retro-audit.test.tsx` | BASE_PAYLOAD now `satisfies Partial<MyAllocationDashboardPayload>`; api_key_id added to holdingsSummary; all 4 `as any` render-site casts replaced with `as unknown as MyAllocationDashboardPayload` |
-| M17 | MED / 8 | `OutcomesWidget.tsx` | Subsumed by H2 — error rendered ONCE at panel level (not 3× per column) |
-| M18 | MED / 8 | `EquityChart.tsx` | EquityChartWidget.periodReturn guards `last` against NaN (chip can never render "NaN%") |
+**Applied:** 11
+**Covered by other fixes:** 4 (F7 by F6; D1 by PR #192; D2 by existing test; D10 by PR #188 itself)
+**Deferred with reason:** 5 (D3, D6, D7, D8, D9)
+**Out of scope:** 1 (D5 — SQL tests, unrelated to CI hardening scope)
 
-### DEFERRED (below threshold)
+## Commits
 
-Per spec, only CRITICAL + HIGH≥7 + MED≥8 + LOW≥9 are in scope. Findings
-explicitly listed in `.review/follow-up-pr-findings.md` as DEFERRED:
-
-- M4 (perf MED/7 — console.warn flood in sliceByPeriod filter)
-- M5 (perf MED/7 — two adjacent useEffect for prev-value tracking)
-- M9 (silent-failure MED/7 — aria-hidden on stale dimmer)
-- M10 (silent-failure MED/7 — module-level fallback for locked-storage setRecoveryFlag failure)
-- M16 (type-design MED/7 — split SubmitState.failure invariant)
-- All 9 LOW findings (none reach LOW≥9 threshold)
-- 1 INFO finding (positive defense-in-depth, no action)
-
-## Visual contract preservation
-
-Per CLAUDE.md `feedback_dashboard_parity_visual_fidelity`: only
-logic/data/wiring changes; no Tailwind translation or new visual surfaces
-introduced beyond the H2 hoist (which REPLACES three identical per-column
-alerts with one panel-level alert — net visual REDUCTION, not addition).
-
-The H1 recovery banner was already present in PR #189; H1 only changes
-its rendering position so it survives the EmptyState short-circuit. No
-copy, color, or layout change.
+| Hash | Subject |
+|------|---------|
+| `ed8d4ebe` | fix(ci-retro): broaden frontend-build secret check + tighten env-block regex (closes follow-up F1+F5) |
+| `b55af44f` | fix(ci-retro): add regression tests for PR #188 invariants (closes follow-up F2+F3+F4+F8+F10) |
+| `38028344` | fix(ci-retro): tighten playwright-report gate to fail-closed allow-list (closes follow-up F6) |
+| `e6fae768` | fix(ci-retro): assert seed-gated rebuild inlined real env into .next/ (closes follow-up D4) |
+| `7a5994b9` | fix(ci-retro): add dependabot config for github-actions ecosystem (closes follow-up F9) |
+| `c0a245ef` | docs(ci-retro): expand runbook with regression-gate matrix + enforcement gaps (closes follow-up F11) |
+| `0500c3da` | chore: bump v0.22.40.22 — CI hardening retro follow-up |
+| `79a2b66b` | docs: CHANGELOG v0.22.40.22 entry — PR #188 retro follow-up |
 
 ## Test verification
 
-- TypeScript: `npm run typecheck` → PASS, 0 errors
-- Vitest (full suite): 3689 passed, 228 skipped, 0 failed
-- Vitest (allocations dir, 68 files, 780 tests): all pass
-- Vitest (retro-audit only): 13/13 pass (6 pre-existing + 7 new H7/M3)
-- ESLint: 0 errors (23 pre-existing warnings unchanged)
+- `npx vitest run src/__tests__/critical-regressions.test.ts` — 63 passed (was 48 pre-PR; +15 new tests).
+- `npx vitest run` (full suite) — 3695 passed, 228 skipped, 0 failed.
+- `actionlint .github/workflows/*.yml` — clean.
 
-## Commits (atomic, one per fix bundle)
+## Deferred items (must surface in next planning cycle)
 
-1. `fix(allocator-retro): render recovery banner before EmptyState short-circuit` (H1)
-2. `fix(allocator-retro): hoist OutcomesWidget curve-error to panel level + reset on refetch` (H2, M2, M17)
-3. `fix(allocator-retro): EquityChart NaN guards + tick-count cap + parseISO breadcrumb` (H3, M1, M8, M18)
-4. `fix(allocator-retro): preserve empty-tiles layout + export DashboardRecoveryReason` (H4, M12)
-5. `fix(allocator-retro): ScenarioCommitDiff Zod alignment + exhaustive switch + RejectionReason narrowing + SubmitResponse validation` (H5, M7, M11, M13)
-6. `fix(allocator-retro): split composer/drawer seam + recovery banner regression tests + behavior H-1197 test + WidgetProps.data JSDoc + widget views reset` (H6, H7, M3, M6, M14, M15)
-7. (final) `chore: v0.22.40.23 + CHANGELOG + FIX-REPORT for PR #189 retro follow-up`
+These were flagged HIGH/MED by the retro audit but require separate
+scope:
 
-## PR
+- **D3 — artifact-content runtime gate** (pr-test-analyzer #35, HIGH/9):
+  add a CI step that downloads the `nextjs-build` artifact in the same
+  run and greps it for `TEST_SUPABASE_*`. The applied F1 covers the
+  source-text regression layer; the runtime grep would catch a buggy
+  build that drifts inlined values vs source despite passing F1.
 
-- URL: https://github.com/AI-Isaiah/Quantalyze/pull/195
-- CI: GREEN (Vercel Deployment + Vercel Preview Comments both pass)
-- Mergeable status: `CONFLICTING` against `main` — expected; PR #190 (open) targets an overlapping version slot. Per task spec, this PR is NOT merged; rebase + version-slot reconciliation is a separate step for the operator.
-- Applied: 20 code fixes + 1 verified false positive = 21 of 21 in scope
-- Deferred: 5 MED/7 + 9 LOW + 1 INFO (below threshold per spec)
+- **D6 — supabase-migrate plan-job password removal** (red-team #38,
+  MEDIUM/9): replace `SUPABASE_DB_PASSWORD` with `SUPABASE_ACCESS_TOKEN`
+  -only auth in the plan job. Actually reduces exposure surface (vs the
+  applied F4 which achieves symmetry). Requires validation that the
+  read-only flow works end-to-end with `version: 2.98.2`.
 
-## Rebase phase (post-#191)
+- **D7 — CRITICAL-C0293 file isolation** (red-team #43, MEDIUM/8):
+  move the `[CRITICAL-C0293]` describe block to its own test file so it
+  runs in every vitest shard. Mitigates the single-shard-flake risk
+  on a doc-only PR merging concurrent ci.yml regression.
 
-PR #195 was opened at v0.22.40.23. Between then and 2026-05-16 23:01, main advanced to v0.22.40.26 via PR merges #193, #194, #196, #197, #191. The PR became CONFLICTING+DIRTY on VERSION / package.json / CHANGELOG.md.
+- **D8 — Nightly SHA-drift detection cron** (red-team #28, MEDIUM/8):
+  `gh api repos/<org>/<action>/git/ref/tags/<tag>` probe per pinned
+  action in `docs/runbooks/ci-hardening-permissions-c0293.md`, with
+  auto-issue routing matching the existing demo-pdf-coldstart pattern.
+  ~10s nightly cost.
 
-### Rebase mechanics
+- **D9 — Rebuild step contract test refactor** (pr-test-analyzer #45,
+  MEDIUM/8): refactor the seed-gated rebuild contract test to key on
+  the unique combination of `if:` + `rm -rf` wipe + `npm run build` +
+  `secrets.TEST_SUPABASE_URL` env binding rather than the exact step
+  name string. Lower priority — current test still works, the refactor
+  is biased toward future renames.
 
-- Fetched origin/main (tip `0.22.40.26`).
-- `git rebase origin/main` — applied 6 of 8 commits cleanly; commit 7/8 (`b7d71b55` — v0.22.40.23 + CHANGELOG + FIX-REPORT) hit expected 3-way conflicts on three files only:
-  - `VERSION` — main `0.22.40.26` vs branch `0.22.40.23` → resolved to `0.22.40.27`
-  - `package.json` — `"version"` field, same pattern → resolved to `0.22.40.27`
-  - `CHANGELOG.md` — main had `[0.22.40.26]` + `[0.22.40.25]` + `[0.22.40.20]` headers; branch had `[0.22.40.23]` → re-headered the PR's narrative under new `[0.22.40.27]` slot above main's entries, preserving main's `.26 / .25 / .20 / .18 / .17` headers verbatim. PR-narrative paragraph updated to note rebase target (`.26` was the new tip) and 5-PR ancestry (#193/#194/#196/#197/#191).
-- No `src/` conflicts (as predicted in task brief — main's recent merges were CI workflow / types.ts tightening / SQL migrations, disjoint from allocator dashboard fix surface).
-- 8/8 commits rebased; `rebase --continue` ended without further intervention.
+## Rebase phase (post-#191/#195)
 
-### Re-bump marker
+**Date:** 2026-05-17
+**Outcome:** Rebased + force-with-lease pushed; CI green; PR mergeable=CLEAN.
 
-The version-bump conflict resolution already brought VERSION + package.json to `0.22.40.27` inside the existing commit (`59c6b394`). Added an explicit empty marker commit `chore: re-bump version after rebase against main (v0.22.40.27)` on top (commit `a56b3dab`) so the version slot claim is grep-able and the branch log records the re-bump intent independently. Both files moved together per CLAUDE.md `feedback_version_bump_both_files` (VERSION + package.json must bump in the same commit so `critical-regressions.test.ts` stays green).
+### Sequence
 
-### Push + CI
+1. **First rebase attempt** — onto `origin/main` @ `8c1d71cc` (v0.22.40.26 — types.ts tightening from PR #191). Expected conflicts on VERSION + package.json + CHANGELOG.md. Resolved to v0.22.40.27, force-with-lease pushed `7b74f29e`.
 
-- `git push origin fix/pr189-retro-followup-2026-05-16 --force-with-lease` (lease against `1173ab7c`, the pre-rebase tip).
-- CI auto-triggered on force-push (workflow run `25972869975`). No manual nudge required.
-- All 14 checks passed: `frontend-build`, `frontend-lint`, `frontend-policy`, `frontend-test (1/2/3)`, `frontend-typecheck`, `python`, `sql-tests`, `e2e`, `secret-scan`, `docs-link-check`, `frontend`, `Vercel`, `Vercel Preview Comments`. No regressions.
+2. **PR #195 landed in parallel** — while the first push was settling, PR #195 merged claiming patch slot v0.22.40.27 (`701fa883`). GitHub kept reporting `mergeable: false / mergeable_state: dirty` for PR #194; `git merge-tree origin/main HEAD` confirmed renewed conflicts on the same files plus FIX-REPORT.md.
+
+3. **Second rebase** — onto `origin/main` @ `701fa883` (v0.22.40.27 — PR #195 retro follow-up on PR #189). Re-resolved:
+   - **VERSION + package.json**: bumped to `0.22.40.28` (claims clean slot above PR #195's .27).
+   - **CHANGELOG.md**: re-headered this PR's entry under `[0.22.40.28] - 2026-05-17`; preserved PR #195's `[0.22.40.27]` section verbatim.
+   - **FIX-REPORT.md** (root-level): both PRs added a top-level FIX-REPORT.md. Took `--theirs` (incoming PR #194 content); the upstream PR #195 FIX-REPORT.md was a transient working file with no semantic dependency on this PR's content.
+   - The original "bump v0.22.40.22" commit was auto-dropped by `git rebase` as "patch contents already upstream" — now consolidated into the single `chore: re-bump version after rebase against main (v0.22.40.28)` commit (`b05cba0c`).
+
+4. **Force-with-lease pushed** `b05cba0c`. CI run `25977671615` triggered automatically.
 
 ### Final state
 
-- `gh pr view 195 --json mergeable,mergeStateStatus` → `{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}`
-- New version: `0.22.40.27`
-- Branch tip: `a56b3dab` (re-bump marker on top of `4d194eae`, `59c6b394`, plus the 6 fix-content commits).
+- Branch tip: `b05cba0c chore: re-bump version after rebase against main (v0.22.40.28)`
+- Version: `0.22.40.28` in VERSION + package.json; CHANGELOG entry `[0.22.40.28] - 2026-05-17`
+- CI run `25977671615`: ALL checks green (frontend-lint, frontend-policy, frontend-test 1/2/3, frontend-typecheck, frontend-build, sql-tests, secret-scan, python, e2e, docs-link-check, Vercel deployment).
+- PR state: `gh pr view 194 --json mergeable,mergeStateStatus` -> `{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}`.
 - DID NOT merge / DID NOT /land-and-deploy — handoff back to orchestrator per task spec.
+
+### Commits ahead of origin/main (9)
+
+```
+b05cba0c chore: re-bump version after rebase against main (v0.22.40.28)
+295f9260 docs: FIX-REPORT for PR #188 retro follow-up
+0a4c6422 docs: CHANGELOG v0.22.40.22 entry — PR #188 retro follow-up
+9ab1c5d4 docs(ci-retro): expand runbook with regression-gate matrix + enforcement gaps (closes follow-up F11)
+f77c897a fix(ci-retro): add dependabot config for github-actions ecosystem (closes follow-up F9)
+c2c8d31e fix(ci-retro): assert seed-gated rebuild inlined real env into .next/ (closes follow-up D4)
+e8b5821f fix(ci-retro): tighten playwright-report gate to fail-closed allow-list (closes follow-up F6)
+44ee6598 fix(ci-retro): add regression tests for PR #188 invariants (closes follow-up F2+F3+F4+F8+F10)
+8bf3ae80 fix(ci-retro): broaden frontend-build secret check + tighten env-block regex (closes follow-up F1+F5)
+```

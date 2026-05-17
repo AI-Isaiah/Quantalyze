@@ -115,3 +115,56 @@ grep -r "TEST_SUPABASE_URL\|test-supabase\|qmnijlgmdhviwzwfyzlc" /tmp/check/.nex
 
 A non-zero count would mean the rebuild step ran on the artifact-uploaded
 path (a regression) — reopen C-0293(c).
+
+## Automated regression gates (per-PR)
+
+`src/__tests__/critical-regressions.test.ts` includes a
+`[CRITICAL-C0293] CI hardening invariants` describe block that runs in
+every PR's `frontend-test` job. Each invariant catches a specific
+regression class at the test layer — no CI runner round-trip needed.
+
+| Invariant | Source | Failure mode caught |
+|-----------|--------|---------------------|
+| Every `uses:` is a 40-char SHA | retro-PR179-H2 | Mutable tag reintroduced (e.g. `@v4`) re-opens the tj-actions class. |
+| Workflow-level `permissions: contents: read` | retro-PR179-H2 | A new workflow inherits the repo default (write-on-everything). |
+| `frontend-build` env uses placeholder NEXT_PUBLIC_* values | retro-PR179-H3 | A "re-optimize" PR re-adds the seed-aware ternary that uploads real creds. |
+| `frontend-build` env contains no `secrets.TEST_SUPABASE_*` | retro-PR188-F1 | URL banned originally; ANON_KEY + SERVICE_ROLE_KEY now also banned (F1 widened the prefix). |
+| Seed-gated rebuild step has its required shape | retro-PR179-H4 | A drift in the wipe list or env wiring silently breaks Path 2. |
+| `Upload Playwright report on failure` is gated against seed-gated | retro-PR188-F2 | A "let me see traces on every failure" revert re-opens the trace-zip exfil pivot. |
+| Every `actions/checkout` sets `persist-credentials: false` | retro-PR188-F3 | A new checkout step inherits the persisted GITHUB_TOKEN attack surface. |
+| `supabase-migrate.yml` plan + apply both set `environment: Production` | retro-PR188-F4 | A rebase drops the plan-side env gate; SUPABASE_DB_PASSWORD bypasses approval. |
+| No YAML anchors/aliases at value position in workflow files | retro-PR188-F8 | A future PR uses `&name` / `*name` to indirect a `uses:` past the SHA-pin regex. |
+| Exactly one top-level `permissions:` block per workflow | retro-PR188-F10 | A split block (top-level + per-job same-key) causes silent default fallback. |
+| `frontend-build` upload sets `include-hidden-files: true` | retro-PR179-M (#20/#21) | A `with:` drop silently excludes `.next/`; e2e crashes. |
+
+## Enforcement gaps (deferred)
+
+The following hardening items were flagged by the PR #188 retroactive
+specialist audit but are NOT applied here — they require separate
+scope or design work. Until landed, these protections depend on human
+review of the YAML diff.
+
+- **SHA-drift detection cron** (red-team #28, MEDIUM/8). A nightly
+  `gh api repos/<org>/<action>/git/ref/tags/<tag>` probe that fails
+  when any pinned SHA no longer resolves to the documented tag.
+  Catches upstream force-push or org takeover within 24h. Deferred:
+  needs a `nightly.yml` job design + auto-issue routing.
+- **Artifact-content runtime gate** (pr-test-analyzer #35, HIGH/9).
+  A post-upload CI step that downloads the `nextjs-build` artifact in
+  the same run and greps for `TEST_SUPABASE_*` / project ref. Deferred:
+  the test-time placeholder-only invariant (F1) covers the source-text
+  regression; the runtime grep would catch a buggy build that drifts
+  the inlined values vs the source despite passing F1.
+- **`supabase-migrate` plan-job password removal** (red-team #38,
+  MEDIUM/9). The plan job currently consumes `SUPABASE_DB_PASSWORD`
+  even though `supabase migration list` is read-only. Replacing it
+  with `SUPABASE_ACCESS_TOKEN`-only auth would actually reduce the
+  exposure surface (the current PR #188 fix only achieves plan/apply
+  symmetry). Deferred: needs validation that the read-only flow works
+  end-to-end with the pinned CLI version.
+- **CRITICAL-C0293 file isolation** (red-team #43, MEDIUM/8). Moving
+  the describe block to its own file
+  (`src/__tests__/ci-hardening-invariants.test.ts`) would let it run
+  in every vitest shard, hardening against a single-shard flake
+  swallowing the gate. Deferred: depends on the project's vitest
+  shard config which currently treats shards uniformly.

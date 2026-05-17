@@ -529,16 +529,49 @@ describe("Critical regression guards", () => {
     // uploaded artifact. A regression that re-introduces the ternary
     // (or any non-placeholder value) re-opens the exfil pivot.
     describe("frontend-build env: placeholder NEXT_PUBLIC_* values only", () => {
-      it("ci.yml frontend-build env block uses placeholder NEXT_PUBLIC_* values and does not reference secrets.TEST_SUPABASE_URL", () => {
+      it("ci.yml frontend-build env block uses placeholder NEXT_PUBLIC_* values and does not reference secrets.TEST_SUPABASE_*", () => {
         const src = readText(".github/workflows/ci.yml");
         // Find the frontend-build job's `npm run build` step env block.
         // The placeholder MUST appear directly in the env literal, not
         // via a secret/var expression.
-        const envBlock = findOrFail(
-          src,
-          /frontend-build:[\s\S]*?-\s*run:\s*npm run build[\s\S]*?env:\s*\n([\s\S]*?)(?=\n\s{0,6}-\s|\n[a-z])/,
+        //
+        // retro-PR188-F5 (red-team #36): the previous regex boundary
+        // `(?=\n\s{0,6}-\s|\n[a-z])` over-captured past the env block into
+        // following YAML comments. A benign doc comment mentioning
+        // `secrets.TEST_SUPABASE_URL` would have triggered a false-positive.
+        // Tighter approach — walk lines from the `env:` line forward,
+        // collecting only indented KEY: VALUE lines (no comments, no shell
+        // continuation lines), and stop at the first non-indented line or
+        // dash-prefixed step. That mirrors the real YAML semantics.
+        const buildStepRe =
+          /frontend-build:[\s\S]*?-\s*run:\s*npm run build[\s\S]*?env:\s*\n/;
+        const m = src.match(buildStepRe);
+        expect(
+          m,
           "ci.yml: could not locate frontend-build npm run build env block",
-        );
+        ).not.toBeNull();
+        const envStart = m!.index! + m![0].length;
+        const tail = src.slice(envStart).split("\n");
+        const envLines: string[] = [];
+        // Indented YAML key lines look like `          KEY: VALUE` —
+        // require at least one leading space (the env block is a YAML map
+        // nested under `env:`). Stop at first non-indented line, dash-step,
+        // or comment.
+        for (const line of tail) {
+          if (line.trim() === "") break;
+          // Step boundary: a line starting with `<spaces>-` is the next step.
+          if (/^\s+-\s/.test(line)) break;
+          // Stop at any non-indented line (e.g. next job).
+          if (/^\S/.test(line)) break;
+          // Skip pure comment lines but DO NOT include them in the block.
+          if (/^\s+#/.test(line)) continue;
+          envLines.push(line);
+        }
+        const envBlock = envLines.join("\n");
+        expect(
+          envBlock.length,
+          "ci.yml: frontend-build env block walked empty — env block format drifted",
+        ).toBeGreaterThan(0);
         expectMatch(
           envBlock,
           /NEXT_PUBLIC_SUPABASE_URL:\s*https:\/\/placeholder\.supabase\.co/,
@@ -549,13 +582,17 @@ describe("Critical regression guards", () => {
           /NEXT_PUBLIC_SUPABASE_ANON_KEY:\s*placeholder\b/,
           "frontend-build env NEXT_PUBLIC_SUPABASE_ANON_KEY is not the literal placeholder — C-0293(c) regression",
         );
-        // Defensive: secrets.TEST_SUPABASE_URL must NOT appear in the
-        // frontend-build env block (it belongs only in the rebuild
-        // step further down in the e2e job).
+        // retro-PR188-F1 (red-team #34): defensive — NO test-Supabase
+        // secret may appear in the frontend-build env block. The prior
+        // check only banned TEST_SUPABASE_URL; ANON_KEY + SERVICE_ROLE_KEY
+        // are equally load-bearing leak vectors (the URL+anon pair is
+        // enough to auth against the test project; SERVICE_ROLE_KEY bypasses
+        // RLS entirely). Broaden to a prefix match so any current or future
+        // TEST_SUPABASE_* secret addition is caught.
         expectNoMatch(
           envBlock,
-          /secrets\.TEST_SUPABASE_URL/,
-          "frontend-build env references secrets.TEST_SUPABASE_URL — C-0293(c) seed-aware ternary regression",
+          /secrets\.TEST_SUPABASE_/,
+          "frontend-build env references a secrets.TEST_SUPABASE_* — C-0293(c) seed-aware ternary regression (URL/ANON_KEY/SERVICE_ROLE_KEY all banned)",
         );
       });
 
@@ -620,6 +657,214 @@ describe("Critical regression guards", () => {
           "frontend-build upload step missing include-hidden-files: true — .next/ silently excluded, e2e crashes",
         );
       });
+
+      // retro-PR188-F2 (pr-test-analyzer #41, HIGH/9) + F6/F7
+      // (red-team #26/#37, HIGH/8-9): the playwright-report artifact
+      // upload MUST be gated so it does not fire on the seed-gated path
+      // (where the rebuilt `.next/` contains real TEST_SUPABASE_URL /
+      // ANON_KEY and Playwright's on-failure trace captures the JS
+      // chunks). A future PR could trivially revert the conditional to
+      // bare `if: failure()`, re-opening the exfil pivot. Pin the gate.
+      //
+      // Fail-CLOSED semantics: the gate should be checked against the
+      // literal 'true' string only. A fail-OPEN inverted gate
+      // (!= 'false') would open the upload on the seed-gated path.
+      it("ci.yml Upload Playwright report on failure is gated against the seed-gated path", () => {
+        const src = readText(".github/workflows/ci.yml");
+        // Locate the step by its unique name, then walk to the next step
+        // boundary (`<spaces>-`) or non-indented line, or EOF. The previous
+        // attempt's lookahead boundary `(?=\n\s{0,6}-\s|\n[a-z])` did not
+        // match this step because it is the LAST step in the e2e job —
+        // there is no trailing step or next job to anchor on.
+        const stepStart = src.search(/-\s*name:\s*Upload Playwright report on failure/);
+        expect(
+          stepStart,
+          "ci.yml: Upload Playwright report on failure step not found — retro-PR179-H1 fix reverted?",
+        ).toBeGreaterThanOrEqual(0);
+        const stepTail = src.slice(stepStart).split("\n");
+        const stepLines: string[] = [];
+        for (let i = 0; i < stepTail.length; i++) {
+          const line = stepTail[i];
+          if (i > 0 && /^\s+-\s/.test(line)) break;
+          if (i > 0 && /^\S/.test(line)) break;
+          stepLines.push(line);
+        }
+        const step = stepLines.join("\n");
+        expect(
+          step.length,
+          "ci.yml: Upload Playwright report on failure step body walked empty",
+        ).toBeGreaterThan(0);
+        // Must reference the seed-gate variable explicitly.
+        expectMatch(
+          step,
+          /vars\.E2E_TEST_DB_CONFIGURED/,
+          "Upload Playwright report step lost the vars.E2E_TEST_DB_CONFIGURED gate — retro-PR179-H1 / C-0293(c) exfil re-opens",
+        );
+        // Accept either an explicit allow-list (== '' || == 'false') OR
+        // the documented `!= 'true'` form. Both deny upload when the
+        // seed-gated rebuild ran. Reject other gate variants.
+        const hasFailClosedAllowlist =
+          /E2E_TEST_DB_CONFIGURED\s*==\s*''|E2E_TEST_DB_CONFIGURED\s*==\s*'false'/.test(step);
+        const hasNegationGate = /E2E_TEST_DB_CONFIGURED\s*!=\s*'true'/.test(step);
+        expect(
+          hasFailClosedAllowlist || hasNegationGate,
+          "Upload Playwright report step gate must check vars.E2E_TEST_DB_CONFIGURED against 'true' — current expression does not match either accepted form",
+        ).toBe(true);
+        // Anti-pattern explicitly forbidden: a `!= 'false'` negation
+        // (the inverse of the intent) would open the upload on the
+        // seed-gated path. If a future refactor flips the operator this
+        // test fails loud.
+        expectNoMatch(
+          step,
+          /E2E_TEST_DB_CONFIGURED\s*!=\s*'false'/,
+          "Upload Playwright report step uses the INVERTED gate (!= 'false') — opens uploads on the seed-gated REAL-creds path",
+        );
+      });
+    });
+
+    // retro-PR188-F3 (pr-test-analyzer #42, red-team #39/#42, HIGH/9):
+    // every actions/checkout invocation across all 4 workflow files
+    // MUST set `persist-credentials: false`. Without it, GITHUB_TOKEN
+    // is written to .git/config and stays readable to every subsequent
+    // step in the same job — including pinned third-party actions
+    // (gitleaks-action, lycheeverse/lychee-action, supabase/setup-cli)
+    // whose SHAs could in principle be compromised. The PR-188 fix
+    // applied the flag at all 15 sites; this test prevents a future
+    // PR from quietly dropping it from a new checkout site or an
+    // existing one.
+    describe("persist-credentials policy: every actions/checkout sets persist-credentials: false", () => {
+      for (const rel of WORKFLOW_FILES) {
+        it(`${rel} — every actions/checkout invocation sets persist-credentials: false`, () => {
+          const src = readText(rel);
+          // Find each `uses: actions/checkout@...` and the immediate
+          // `with:` block that follows. The with block is the indented
+          // YAML map at the next line; we collect lines until the next
+          // step boundary (`-` prefix) or non-indented line.
+          const checkoutRe = /-\s*uses:\s*actions\/checkout@[a-f0-9]+[^\n]*\n/g;
+          const matches: { idx: number; matchText: string }[] = [];
+          let m: RegExpExecArray | null;
+          while ((m = checkoutRe.exec(src)) !== null) {
+            matches.push({ idx: m.index + m[0].length, matchText: m[0] });
+          }
+          expect(
+            matches.length,
+            `${rel} has zero actions/checkout invocations — workflow may have lost the checkout step entirely`,
+          ).toBeGreaterThan(0);
+          const offenders: string[] = [];
+          for (const { idx, matchText } of matches) {
+            // Walk lines after the `uses:` line. Stop at the next step
+            // (`<spaces>-`) or non-indented line.
+            const after = src.slice(idx).split("\n");
+            const blockLines: string[] = [];
+            for (const line of after) {
+              if (line.trim() === "") {
+                blockLines.push(line);
+                continue;
+              }
+              if (/^\s+-\s/.test(line)) break;
+              if (/^\S/.test(line)) break;
+              blockLines.push(line);
+            }
+            const block = blockLines.join("\n");
+            if (!/persist-credentials:\s*false/.test(block)) {
+              offenders.push(matchText.trim());
+            }
+          }
+          expect(
+            offenders.length,
+            `${rel} has actions/checkout site(s) missing persist-credentials: false — retro-PR179-M-persist-chain regression. Offenders:\n  ${offenders.join("\n  ")}`,
+          ).toBe(0);
+        });
+      }
+    });
+
+    // retro-PR188-F4 (pr-test-analyzer #43, HIGH/8): both jobs in
+    // supabase-migrate.yml MUST declare `environment: Production` so
+    // the SUPABASE_DB_PASSWORD secret routes through the same
+    // required-reviewer gate. PR #188 commit 4 made the plan job
+    // mirror apply; without a test the asymmetry can re-emerge in a
+    // future rebase.
+    describe("supabase-migrate plan/apply env-gate symmetry", () => {
+      it("supabase-migrate.yml plan job declares environment: Production", () => {
+        const src = readText(".github/workflows/supabase-migrate.yml");
+        // Anchor on the start-of-line `  plan:` job key followed by its
+        // body. Stop at the next top-level job key (2-space indent + name).
+        const planJob = findOrFail(
+          src,
+          /^ {2}plan:\s*\n([\s\S]*?)(?=\n {2}[a-z])/m,
+          "supabase-migrate.yml: plan job not found",
+        );
+        expectMatch(
+          planJob,
+          /environment:\s*Production/,
+          "supabase-migrate plan job lost the environment: Production gate — SUPABASE_DB_PASSWORD plan/apply gate-skew (red-team #38 threat)",
+        );
+      });
+      it("supabase-migrate.yml apply job declares environment: Production", () => {
+        const src = readText(".github/workflows/supabase-migrate.yml");
+        // Apply is the last top-level job; capture from `^  apply:` to EOF.
+        // The `$` anchor in multiline mode only matches end-of-line, so use
+        // a lookahead that matches either the next top-level job or EOL+EOF.
+        const applyIdx = src.search(/^ {2}apply:\s*\n/m);
+        expect(
+          applyIdx,
+          "supabase-migrate.yml: apply job not found",
+        ).toBeGreaterThanOrEqual(0);
+        const applyJob = src.slice(applyIdx);
+        expectMatch(
+          applyJob,
+          /environment:\s*Production/,
+          "supabase-migrate apply job lost the environment: Production gate — required-reviewer protection bypass",
+        );
+      });
+    });
+
+    // retro-PR188-F8 (red-team #35, HIGH/9): the SHA-pin regex test
+    // operates on source text. YAML anchors (&name) + aliases (*name)
+    // could in theory be used to indirect a uses: value through an
+    // alias, bypassing the per-line regex assertion. Add a defensive
+    // negative assertion: no anchors or aliases may appear in
+    // workflow files. None do today; the test refuses to allow them
+    // to creep in until a proper YAML-AST walker lands.
+    describe("YAML anchor/alias guard (defensive)", () => {
+      for (const rel of WORKFLOW_FILES) {
+        it(`${rel} — no YAML anchors or aliases at value position`, () => {
+          const src = readText(rel);
+          // Restrict to YAML "value" position: after a `:` and whitespace.
+          // This avoids false positives on `**/*.js` glob patterns or
+          // `&&` shell operators inside run: blocks.
+          const anchorRe = /:\s+&[A-Za-z_][\w-]*/;
+          const aliasRe = /:\s+\*[A-Za-z_][\w-]*/;
+          expectNoMatch(
+            src,
+            anchorRe,
+            `${rel} contains a YAML anchor — SHA-pin invariant test does not dereference anchors`,
+          );
+          expectNoMatch(
+            src,
+            aliasRe,
+            `${rel} contains a YAML alias — SHA-pin invariant test does not dereference aliases`,
+          );
+        });
+      }
+    });
+
+    // retro-PR188-F10 (red-team #40, MEDIUM/8): every workflow must
+    // declare EXACTLY ONE top-level `permissions:` block. The
+    // existing PERMISSIONS_BLOCK_RE matches greedily; a future PR
+    // splitting the block could pass undetected. Pin the cardinality.
+    describe("permissions block cardinality: exactly one top-level permissions block per workflow", () => {
+      for (const rel of WORKFLOW_FILES) {
+        it(`${rel} — declares exactly one top-level permissions: block`, () => {
+          const src = readText(rel);
+          // Top-level = column-0 `permissions:` (multiline anchor).
+          const topLevel = src.match(/^permissions:/gm) ?? [];
+          expect(
+            topLevel.length,
+            `${rel} top-level permissions: block count = ${topLevel.length} (expected 1) — split or missing block can confuse GH Actions defaults`,
+          ).toBe(1);
+        });
+      }
     });
   });
 });

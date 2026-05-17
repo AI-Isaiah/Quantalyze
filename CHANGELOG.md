@@ -7,6 +7,42 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.28] - 2026-05-17
+
+**CI hardening retro follow-up on PR #188 — ~8 HIGH retroactive specialist findings closed.** The PR #188 retroactive specialist audit (code-reviewer + security + performance + pr-test-analyzer + silent-failure-hunter + type-design-analyzer + red-team) on the CI hardening fix-content turned up regression-gate gaps the original PR did not pin. This PR closes them.
+
+Closes follow-up findings:
+- **F1 (red-team #34, HIGH/9)** — `frontend-build` env-block negative-assertion only banned `secrets.TEST_SUPABASE_URL`; ANON_KEY + SERVICE_ROLE_KEY would have passed silently. Broadened to `secrets\.TEST_SUPABASE_` prefix so any current or future TEST_SUPABASE_* secret addition trips the guard.
+- **F2 (pr-test-analyzer #41, HIGH/9)** — PR #188 commit 1 gated `Upload Playwright report on failure` on the seed-gated path; no regression test asserted the gate stays in place. Added test pinning the gate expression and rejecting the inverted-operator anti-pattern.
+- **F3 (pr-test-analyzer #42 + red-team #39/#42, HIGH/9)** — PR #188 commit 3 set `persist-credentials: false` on all 15 `actions/checkout` invocations but added no regression test. Per-workflow loop now asserts every checkout step contains the flag.
+- **F4 (pr-test-analyzer #43, HIGH/8)** — PR #188 commit 4 added `environment: Production` to the supabase-migrate plan job; no test asserted both jobs declare the env gate. Test pins symmetry.
+- **F5 (red-team #36, HIGH/8)** — `frontend-build` env-block extraction regex over-captured by ~750 bytes past the env block. A benign doc comment containing `secrets.TEST_SUPABASE_URL` would have caused a false-positive. Replaced with a line-by-line walk that respects real YAML semantics.
+- **F6 (red-team #37, HIGH/8)** — `Upload Playwright report` gate was `!= 'true'` (fail-OPEN). Any non-`'true'` value (case-mismatched `'True'`, `'1'`, typos) fired the upload. Tightened to explicit allow-list `== '' || == 'false'`.
+- **F8 (red-team #35, HIGH/9)** — SHA-pin regex test was source-text only; YAML anchors/aliases could in theory bypass it. Added defensive negative-assertion that rejects anchors/aliases until a YAML-AST walker lands.
+- **F9 (pr-test-analyzer #37, MEDIUM/9)** — SHA-pinning trades the mutable-tag attack for stale-version drift, and stale pins are silent. Added `.github/dependabot.yml` for github-actions ecosystem (weekly, grouped security advisories).
+- **F10 (red-team #40, MEDIUM/8)** — `permissions:` block regex matches greedily. Per-workflow cardinality test now asserts exactly one top-level block.
+- **F11 (pr-test-analyzer #38, MEDIUM/8)** — runbook listed actionlint + manual `gh run download` as the post-merge verification with no map of automated gates vs human-review gaps. Added "Automated regression gates (per-PR)" matrix (11 invariants) and "Enforcement gaps (deferred)" section (4 deferred items) so a reader can distinguish mechanically-enforced from eyeball-only.
+- **D4 (pr-test-analyzer #36, HIGH/8)** — seed-gated rebuild step had no assertion the rebuild actually inlined the real TEST_SUPABASE_URL into `.next/`. If the `rm -rf` list drifts, the build could short-circuit silently and seed-gated specs would self-skip via HAS_SEED_ENV — green CI, zero coverage. Added a verification step that greps `.next/static` + `.next/server` for the test host and fails loud on zero hits.
+
+Rebased onto `origin/main` (0.22.40.27) after PRs #190/#192/#193/#196/#197/#191/#195 advanced main past this PR's base — version re-bumped from 0.22.40.22 to 0.22.40.28 to claim a clean slot.
+
+### Added
+- `.github/dependabot.yml` (F9) — github-actions ecosystem updates, weekly, grouped.
+- `src/__tests__/critical-regressions.test.ts` (F2/F3/F4/F8/F10) — 15 new tests across 6 describe blocks (playwright-report gate, persist-credentials policy, supabase-migrate env-gate symmetry, YAML anchor/alias guard, permissions cardinality, frontend-build secret prefix). Test count: 48 -> 63.
+- `.github/workflows/ci.yml` (D4) — `Verify rebuild inlined real test-Supabase URL` step gated on `vars.E2E_TEST_DB_CONFIGURED == 'true'`.
+
+### Changed
+- `.github/workflows/ci.yml` (F6) — `Upload Playwright report on failure` gate tightened from `!= 'true'` to explicit allow-list `(== '' || == 'false')`.
+- `src/__tests__/critical-regressions.test.ts` (F1+F5) — `frontend-build` env-block check broadened from `TEST_SUPABASE_URL` to `TEST_SUPABASE_` prefix; extraction regex replaced with line-walker to eliminate bleed-past-env-block false-positives.
+- `docs/runbooks/ci-hardening-permissions-c0293.md` (F11) — added "Automated regression gates (per-PR)" matrix + "Enforcement gaps (deferred)" subsection.
+
+### Deferred (out of scope here, separate PRs/scope)
+- **D3 — artifact-content runtime gate**: a CI step that downloads the `nextjs-build` artifact in the same run and greps it for test-Supabase markers. Source-level invariant F1 covers the test-time regression; runtime grep catches a buggy build that drifts inlined values vs source despite F1 passing. Defer reason: meaningfully different layer.
+- **D6 — supabase-migrate plan-job password removal**: replace `SUPABASE_DB_PASSWORD` with `SUPABASE_ACCESS_TOKEN`-only auth in the plan job. Substantive runtime behavior change; needs validation that `supabase migration list` works on a token-only flow with the pinned CLI version.
+- **D7 — CRITICAL-C0293 file isolation**: move the describe block to its own test file so it runs in every vitest shard. Refactor scope, no security-posture change under correct branch-protection.
+- **D8 — nightly SHA-drift detection cron**: `gh api repos/<org>/<action>/git/ref/tags/<tag>` probe per pinned action. Needs auto-issue routing design.
+
+
 ## [0.22.40.27] - 2026-05-16
 
 **PR #189 fix-content retroactive follow-up — close 7 HIGH + 13 MED specialist findings on the allocator dashboard fix content from PR #189.** The retroactive specialist suite (code-reviewer, security, performance, silent-failure-hunter, type-design-analyzer + red-team) re-audited the FIX CONTENT of PR #189 against PR #189's stated closures and found multiple new issues introduced by the fix itself plus surfaces the original fix left silently open. Each finding above threshold (CRITICAL + HIGH>=7 + MED>=8 + LOW>=9) is closed atomically in this PR; 5 MED/7 + 9 LOW + 1 INFO sit below threshold and are listed in `.review/follow-up-pr-findings.md`. One finding (H8 — `border-warning`/`bg-warning` Tailwind tokens) verified as false positive — `warning` IS a registered `@theme inline` token used by existing code; no change.
