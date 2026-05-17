@@ -101,6 +101,29 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
     await loginAs(page, email, password);
     await page.goto("/discovery/crypto-sma");
     await page.waitForSelector("table tbody tr", { timeout: 15000 });
+
+    // Red-team RT-J02 (CRITICAL): the 'No strategies match your filters.'
+    // empty-state row in StrategyTable.tsx:493-499 is ALSO a `tr` inside
+    // tbody, so `waitForSelector('table tbody tr')` above succeeds even
+    // when the test DB has no seed data. Without this guard the three
+    // negative-property tests would either pass vacuously OR fail with
+    // confusing "expected >0 to be >0" diagnostics 15s later. Symmetric
+    // with discovery-hide-examples-default.spec.ts:144-153 — both specs
+    // share the same external `npm run seed:demo` dependency and must
+    // surface it identically.
+    const rowsText = await page
+      .locator("table tbody tr")
+      .allTextContents();
+    const hasEmptyStateRow = rowsText.some((t) =>
+      /no strategies/i.test(t),
+    );
+    expect(
+      hasEmptyStateRow,
+      "discovery table must not render the 'no strategies' empty state " +
+        "before the sparkline assertions run — this indicates the test " +
+        "DB lacks the demo seed data (run `npm run seed:demo` against " +
+        "TEST_SUPABASE_URL before re-running)",
+    ).toBe(false);
   });
 
   test.afterEach(async () => {
@@ -228,9 +251,16 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
     // indicator, etc.) and could pass on a non-sparkline element. The
     // testid binds the assertion to the column the WHY actually cares
     // about and survives column reordering.
+    // Red-team RT-J03: scope the testid selector to the discovery table.
+    // The bare `svg[data-testid="sparkline-returns"]` selector would match
+    // ANY sibling component on /discovery/* that reuses the same testid
+    // (recently-viewed, compare drawer, selected-portfolio preview — all
+    // realistic future surfaces). Symmetric with the drawdown probe below
+    // which uses `table tbody tr` scoping. Matches the existing
+    // SPARKLINE_SVG_SELECTOR pattern (`table svg:has(path[stroke])`).
     const probe = await page.evaluate<DrawdownStrokeProbe>(() => {
       const sparklines = Array.from(
-        document.querySelectorAll('svg[data-testid="sparkline-returns"]'),
+        document.querySelectorAll('table svg[data-testid="sparkline-returns"]'),
       ) as SVGElement[];
       const strokes: (string | null)[] = sparklines.map((svg) => {
         const path = svg.querySelector(
