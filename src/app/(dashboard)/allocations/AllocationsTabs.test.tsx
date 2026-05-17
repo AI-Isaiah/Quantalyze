@@ -3,24 +3,29 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { ReadonlyURLSearchParams } from "next/navigation";
 
 /**
- * Phase 09.1 Plan 02 Task 3 — 6-tab routing tests for AllocationsTabs.
+ * Phase 09.1 Plan 02 Task 3 — routing tests for AllocationsTabs.
  * Supersedes the Phase 07 2-tab suite. Verifies tab-shell routing only;
  * each panel body is mocked to a marker div so this file doesn't depend
- * on widget grids, holdings tables, or any downstream Plan 04/05/08/10
- * implementation.
+ * on widget grids, holdings tables, or any downstream implementation.
  *
- * Cases (per 09.1-02-PLAN.md Task 3):
+ * Tablist contract (PR3 dashboard parity): 5 visible tab buttons —
+ * Overview / Holdings / Outcomes / Mandate / Risk. Scenario stays
+ * routable via ?tab=scenario (and the "+ Allocation" chip) but has no
+ * button in the tablist.
+ *
+ * Cases:
  *   1. No tab param → Overview active.
  *   2. ?tab=holdings → Holdings active.
  *   3. ?tab=outcomes → Outcomes active.
  *   4. ?tab=mandate  → Mandate active.
  *   5. ?tab=risk     → Risk active.
- *   6. ?tab=scenario → Scenario active.
+ *   6. ?tab=scenario → Scenario panel visible, NO Scenario tab button.
  *   7. ?tab=performance (legacy Phase 07 alias) → Overview + router.replace
  *      strips the param.
  *   8. ?tab=xyz (unknown) → Overview silent fallback (D-04). No URL cleanup
  *      because unknown is not in {overview, performance}.
- *   9. ArrowRight wraps focus across all 6 tabs in D-05 order.
+ *   9. ArrowRight wraps focus across the 5 visible tabs in D-05 order
+ *      (Scenario is excluded from arrow nav per PR3).
  */
 
 // --- next/navigation mocks --------------------------------------------------
