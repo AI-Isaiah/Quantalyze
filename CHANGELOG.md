@@ -7,6 +7,11 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.31] - 2026-05-17
+
+**Chore: canonicalize audit-2026-05-07 bookkeeping (G13–G22 + G23 retro audits).** Adds a tracked summary runbook at `docs/runbooks/audit-canonical-integration-2026-05-17.md` documenting the audit data structure, ID taxonomies, and known gaps. Local `.planning/audit-2026-05-07/` (gitignored, per-developer) receives the G13–G22 specialist + red-team fan-out records in `SPECIALIST-LOG.md`, a new `HIGH-INVENTORY-G13-G22-2026-05-17.md` supplement (28 CRITICAL + 195 HIGH grouped by file), a `## G23 retroactive audits` per-file fold-in section appended to `FIX-LIST.md` (5 retro-audit JSONLs canonicalized from `.review/` to `findings/batch-G23.*.pr-NNN.jsonl`), `## G13–G22 batch coverage` sections in `PR-PLAN.md` + `SHIP-PLAN.md`, and a `pr-briefs/MISSING-PR-BRIEFS-G13-G22.md` known-debt inventory. No code or test changes; pure documentation + bookkeeping.
+
+
 ## [0.22.40.30] - 2026-05-17
 
 **PR #193 retroactive audit follow-up — 4 actionable findings closed (Task #58).** The PR #193 scope-extended `migration-reviewer` audit on the PR-time backdated-migration guard relocation (`.github/workflows/migration-policy.yml`) surfaced 4 findings (0 CRITICAL / 1 HIGH / 3 MEDIUM / 0 LOW). All four are closed in this PR. The relocation itself works — PR #197's apply confirmed no false-positive blocks on legacy migrations — these are hardening fixes on the new guard.
