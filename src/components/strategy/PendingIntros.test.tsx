@@ -22,17 +22,12 @@
  * transition, (d) triggers notifyAllocatorIntroStatus on every accept
  * AND decline. Component tests now assert the fetch contract.
  *
- * Branches verified:
- *   1. POST /api/intro-response { id, action: 'accept' } on click and
- *      router.refresh() fires on success.
- *   2. action='accept' renders the "We'll connect you within 48h"
- *      confirm message.
- *   3. action='decline' issues { action: 'decline' } and does NOT render
- *      the accept-only confirm message.
- *   4. res.ok=false (500) → generic failure copy rendered AND
- *      router.refresh() does NOT fire (silent-success protection).
- *   5. res.status=403 (caller not manager) → permission-style error.
- *   6. fetch rejects (network) → generic failure copy.
+ * Coverage spans the audit-2026-05-07 testing fingerprints
+ * (404-classification-gap, decline-refresh-assertion-gap) and the
+ * red-team 2026-05-17 fingerprints (double-click-race useRef gate,
+ * loading-flag-released-too-early ordering, 409 TOCTOU refresh-copy
+ * mapping) on top of the original happy-path / 403 / 500 / network
+ * contract. Each test names the specific finding it pins.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
