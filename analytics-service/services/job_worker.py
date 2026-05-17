@@ -154,8 +154,7 @@ class DispatchOutcome(str, Enum):
                 calls mark_compute_job_failed(id, error, error_kind).
     DEFERRED  - handler itself already called defer_compute_job (e.g.
                 circuit-breaker cooldown). main_worker must NOT call
-                mark_* — the DB row was already transitioned. (Commit 4
-                path; commit 2 never returns this.)
+                mark_* — the DB row was already transitioned.
     """
 
     DONE = "done"
@@ -187,7 +186,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "sync_trades": 15 * 60,      # 15 minutes (supports 90-day raw fill backfill)
     "compute_analytics": 15 * 60,  # 15 minutes
     "compute_portfolio": 10 * 60,  # 10 minutes
-    "poll_positions": 3 * 60,    # 3 minutes (stub; real handler lands commit 3)
+    "poll_positions": 3 * 60,    # 3 minutes (services.positions.fetch_positions)
     "sync_funding": 3 * 60,      # 3 minutes (funding volume << trade volume)
     "reconcile_strategy": 5 * 60,  # 5 minutes (fetch_my_trades + DB scan + diff)
     "compute_intro_snapshot": 2 * 60,  # 2 minutes (pure DB; no exchange I/O)
@@ -969,8 +968,8 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # signal — including a successful fetch that returned ZERO new fills
     # (paused account, weekend, flat window). The earlier gate of
     # `phase2_complete` only flipped True when at least one batch was
-    # persisted (line 775's `if raw_fills:`), so a healthy strategy with
-    # no new fills would carry a stale phase2_fill_ingestion_failed=True
+    # persisted (gated by the `if raw_fills:` block above), so a healthy
+    # strategy with no new fills would carry a stale phase2_fill_ingestion_failed=True
     # flag forever (HIGH code-review finding). We skip the read entirely
     # only when Phase 2 was not run at all (_RAW_TRADE_INGESTION_ENABLED
     # is False).

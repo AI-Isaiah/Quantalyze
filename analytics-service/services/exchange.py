@@ -651,10 +651,10 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
 
     try:
         if exchange.id == "okx":
-            # OKX: fetch account bills (P&L history) with pagination for full history
+            # OKX: fetch account bills (P&L history) across all instrument
+            # types, paginated for full history.
             all_bills: list[dict] = []
 
-            # Fetch bills across all instrument types, paginate for full history
             for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
                 after_id = ""
                 type_count = 0
