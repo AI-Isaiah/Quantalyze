@@ -111,9 +111,34 @@ function makeAdminClient() {
             maybeSingle: () => requestLoadMock(),
           }),
         }),
-        update: (patch: unknown) => ({
-          eq: (_col: string, id: string) => requestUpdateMock(id, patch),
-        }),
+        // Cluster-K (audit-2026-05-07): approve now does a CAS
+        // `.update().eq("id", ...).is("completed_at", null).select("id")`.
+        // Reject still uses `.update().eq()`. Stub BOTH shapes so the
+        // shared mock works for both routes — the inner `.is().select()`
+        // path returns a single-element array when the requestUpdateMock
+        // succeeds (we mirror error responses through too).
+        update: (patch: unknown) => {
+          const recordSimple = (id: string) => requestUpdateMock(id, patch);
+          return {
+            eq: (_col: string, id: string) => {
+              const simple = recordSimple(id);
+              return Object.assign(simple, {
+                is: (_completedCol: string, _nullSentinel: unknown) => ({
+                  select: async (_cols: string) => {
+                    const res = await Promise.resolve(simple);
+                    if ((res as { error?: unknown }).error) {
+                      return {
+                        data: null,
+                        error: (res as { error: unknown }).error,
+                      };
+                    }
+                    return { data: [{ id }], error: null };
+                  },
+                }),
+              });
+            },
+          };
+        },
       };
     },
     rpc: (fn: string, args: unknown) => {
@@ -133,6 +158,16 @@ vi.mock("@/lib/supabase/admin", () => ({
 
 vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: (req: unknown) => assertSameOriginMock(req),
+}));
+
+// Cluster-K C-0032: approve route now calls checkLimit at entry.
+// Stub it as always-pass so the self-action tests stay focused on
+// auth/preamble semantics; rate-limit-specific behavior is covered
+// by the dedicated approve route test.
+vi.mock("@/lib/ratelimit", () => ({
+  adminActionLimiter: {} as unknown,
+  checkLimit: async () => ({ success: true }) as const,
+  isRateLimitMisconfigured: () => false,
 }));
 
 vi.mock("next/server", async (orig) => {

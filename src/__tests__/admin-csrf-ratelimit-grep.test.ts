@@ -82,8 +82,11 @@ const RATE_LIMIT_EXEMPTIONS: Record<string, string> = {
   // (v0.22.40.37) — exemption removed; route now binds adminActionLimiter.
   "src/app/api/admin/match/preferences/[allocator_id]/route.ts":
     "out-of-scope for Lane 5 (review-fix P-followup, C3 discovery); PUT handler — CSRF via assertSameOrigin only. Follow-up sweep should add adminActionLimiter.",
-  "src/app/api/admin/deletion-requests/[id]/approve/route.ts":
-    "out-of-scope for Lane 5 (review-fix P-followup, I4 discovery); POST handler wrapped by withRole (CSRF only — withRole does NOT enforce rate-limit). Follow-up sweep should add adminActionLimiter at the route layer.",
+  // Cluster-K C-0032 (audit-2026-05-07, 2026-05-17) closed the approve
+  // route's rate-limit gap — `adminActionLimiter` keyed on the acting
+  // admin's user id now fires BEFORE the irreversible sanitize_user
+  // RPC. The exemption was removed once the wrapper landed; if a future
+  // refactor strips checkLimit out, this test will catch it.
   "src/app/api/admin/deletion-requests/[id]/reject/route.ts":
     "out-of-scope for Lane 5 (review-fix P-followup, I4 discovery); POST handler wrapped by withRole (CSRF only — withRole does NOT enforce rate-limit). Follow-up sweep should add adminActionLimiter at the route layer.",
 };
