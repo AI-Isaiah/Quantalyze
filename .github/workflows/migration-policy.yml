@@ -91,16 +91,69 @@ jobs:
           # Drop persisted GITHUB_TOKEN cred — no git writes happen here,
           # only a local diff against the already-checked-out base SHA.
           persist-credentials: false
+      - name: Detect newly-added migrations in diff
+        id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # Compute the migration-additions list BEFORE the secrets-check
+        # so the secrets-check can decide fail-OPEN vs fail-CLOSED based
+        # on whether the PR actually touches migrations (retro-PR193
+        # M-3). This step never fails the job by itself — its sole
+        # output is a boolean used downstream.
+        run: |
+          set -euo pipefail
+
+          if [ -z "$BASE_SHA" ]; then
+            echo "::error::github.event.pull_request.base.sha is empty — this workflow only makes sense on pull_request events."
+            exit 1
+          fi
+
+          if ! git cat-file -e "$BASE_SHA" 2>/dev/null; then
+            echo "::error::Base SHA $BASE_SHA not reachable in this checkout. fetch-depth: 0 may have failed."
+            exit 1
+          fi
+
+          ADDED_FILES=$(git diff --name-only --diff-filter=A "$BASE_SHA"..HEAD -- 'supabase/migrations/*.sql')
+          if [ -z "$ADDED_FILES" ]; then
+            echo "has_migrations=false" >> "$GITHUB_OUTPUT"
+            echo "No newly-added migration files in this PR."
+          else
+            echo "has_migrations=true" >> "$GITHUB_OUTPUT"
+            echo "Newly-added migration files in this PR:"
+            echo "$ADDED_FILES" | sed 's/^/  - /'
+          fi
       - name: Check secrets are configured
         id: check
         env:
           SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          HAS_MIGRATIONS: ${{ steps.diff.outputs.has_migrations }}
+        # retro-PR193 M-3 fix: fork-PR fail-open gap.
+        #
+        # `on: pull_request` runs from forks with secrets stripped. The
+        # previous shape of this step ALWAYS passed the job when secrets
+        # were missing — meaning a fork-PR that adds a backdated
+        # migration would land without the guard firing.
+        #
+        # New behavior:
+        #   - Secrets present  → configured=true, run the enforcement.
+        #   - Secrets missing AND no migrations in diff → configured=false,
+        #     job passes with a notice (non-migration PRs from forks are
+        #     legitimately not gated by this workflow at all).
+        #   - Secrets missing AND migrations in diff → FAIL the job. A
+        #     fork-PR that touches `supabase/migrations/` cannot proceed
+        #     until either secrets are wired up or the PR is re-targeted
+        #     from a maintainer branch where secrets resolve.
         run: |
           if [ -z "$SUPABASE_PROJECT_REF" ] || [ -z "$SUPABASE_ACCESS_TOKEN" ] || [ -z "$SUPABASE_DB_PASSWORD" ]; then
+            if [ "$HAS_MIGRATIONS" = "true" ]; then
+              echo "::error::Migration Policy cannot run — SUPABASE_PROJECT_REF (var), SUPABASE_ACCESS_TOKEN (secret), or SUPABASE_DB_PASSWORD (secret) is empty, and this PR adds migration files to supabase/migrations/. Fail-closed: a backdated-migration check that cannot reach the remote DB MUST NOT pass silently. If this is a fork-PR, re-target from a maintainer branch where repo secrets resolve. If repo secrets are genuinely missing, wire them up before merging migration changes."
+              echo "configured=false" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Migration Policy skipped — SUPABASE_PROJECT_REF (var), SUPABASE_ACCESS_TOKEN (secret), or SUPABASE_DB_PASSWORD (secret) not configured. PR cannot be gated on backdated-migration policy until these are set."
+            echo "::notice::Migration Policy skipped — secrets not configured, but PR adds no migration files. Non-migration PRs are not gated by this workflow."
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
