@@ -320,6 +320,22 @@ describe("proxy public-route gating (anonymous session)", () => {
       "/for-quants/about",
       "/security",
       "/security/contact",
+      // 2026-05-17 UAT regression — these are public-routes (so unauthed
+      // share-link viewers can render them) AND must be reachable by the
+      // authed user who clicked the in-app button. Pre-fix, the proxy
+      // redirected authed users to /discovery/crypto-sma, making the
+      // "Factsheet" button on the strategy detail page reroute to the
+      // discovery overview. Pin the fix.
+      "/factsheet",
+      "/factsheet/abc-123",
+      "/strategy",
+      "/strategy/abc-123",
+      "/browse",
+      "/browse/sub",
+      "/portfolio-pdf",
+      "/portfolio-pdf/abc-123",
+      "/legal",
+      "/legal/privacy",
     ])(
       "%s with session does NOT redirect to dashboard",
       async (path) => {
@@ -327,9 +343,9 @@ describe("proxy public-route gating (anonymous session)", () => {
           method: "GET",
         });
         const res = await proxy(req);
-        // The marketing-exempt branch keeps the user on the page (200), even
-        // though `isPublicRoute && session` would otherwise redirect to the
-        // default authenticated route.
+        // The auth-bounce-exempt branch keeps the user on the page (200),
+        // even though `isPublicRoute && session` would otherwise redirect
+        // to the default authenticated route.
         expect(res.status).toBe(200);
         expect(res.headers.get("location")).toBeNull();
       },
