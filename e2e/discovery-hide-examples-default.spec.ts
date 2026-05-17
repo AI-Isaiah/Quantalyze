@@ -52,8 +52,18 @@ import { STRATEGY_PROFILES } from "../scripts/seed-demo-data";
 function escapeForRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+/**
+ * Red-team RT-J04 (HIGH conf 7): anchor each alternation with `\b` word
+ * boundaries so the regex matches whole tokens, not substrings of arbitrary
+ * row text. Without anchors, `tr.textContent` substring collisions (badge
+ * labels, AUM digits, SyncBadge timestamp, Verified tooltip, or a future
+ * user-created strategy named "Helios L/S Stat Arb v2") would falsely
+ * trigger the seed-name regex in BOTH directions — the pre-toggle "zero
+ * matches" assertion AND the post-toggle "any match" poll. Word-boundary
+ * anchoring closes both vectors while staying minimally invasive.
+ */
 const SEED_NAMES_REGEX = new RegExp(
-  STRATEGY_PROFILES.map((p) => escapeForRegex(p.name)).join("|"),
+  STRATEGY_PROFILES.map((p) => `\\b${escapeForRegex(p.name)}\\b`).join("|"),
 );
 
 const HAS_SEED_ENV =
@@ -122,9 +132,34 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     // discovery-watchlist.spec.ts which already uses waitForSelector.
     await page.waitForSelector("table", { timeout: 15000 });
     const rowsLocator = page.locator("table tbody tr");
+    // Red-team RT-J07 (MED conf 8): the prior poll `rowsLocator.count() > 0`
+    // succeeded as soon as the empty-state tr was rendered (StrategyTable
+    // renders <table>+<tbody> unconditionally and shows a single "No
+    // strategies" tr while data is still in flight). On a slow Supabase
+    // cold start the poll captured the transient empty state, the hide-
+    // examples filter then evaluated against zero rows, and the downstream
+    // `hasEmptyStateRow` guard fired a false-positive "test DB lacks demo
+    // seed data" diagnostic. Wait specifically for a NON-empty-state row.
+    // If the DB really is empty, the poll will time out and the next
+    // guard's empty-state diagnostic fires with the correct
+    // `npm run seed:demo` message. Either way the failure mode is
+    // unambiguous.
     await expect
-      .poll(() => rowsLocator.count(), { timeout: 10000 })
-      .toBeGreaterThan(0);
+      .poll(
+        async () => {
+          const txts = await rowsLocator.allTextContents();
+          return txts.some((t) => !/no strategies/i.test(t));
+        },
+        {
+          timeout: 10000,
+          message:
+            "discovery table never produced a non-empty-state row in 10s — " +
+            "either the test DB lacks demo seed data (run " +
+            "`npm run seed:demo` against TEST_SUPABASE_URL) or the page " +
+            "is stuck in a transient loading state",
+        },
+      )
+      .toBe(true);
 
     // C-0301/C-0302/H-1034 fix: no silent `if (rowCount > 0)` gate.
     // The seeded allocator + the migration 091 backfill guarantee the
