@@ -55,6 +55,85 @@ const state = vi.hoisted(() => ({
 const callOrder: string[] = [];
 
 /**
+ * audit-2026-05-07 maintainability M (DRY) — factories so the
+ * default-shape mocks are defined ONCE and consumed by BOTH the hoisted
+ * `vi.mock` (above the describe) and `reapplyDefaultMocks()` (called
+ * after `vi.resetModules` per-test). Per-test divergent overrides
+ * (denial / misconfig / UPDATE error) still inline their own shape —
+ * those intentionally differ from the default and must not share the
+ * factory.
+ *
+ * Wrapped in `vi.hoisted` so the factories are available to the hoisted
+ * `vi.mock(..., factory)` calls that vitest pulls above any non-hoisted
+ * module code at transform time.
+ */
+const { buildDefaultAdminMock, buildDefaultRateLimitMock } = vi.hoisted(
+  () => ({
+    buildDefaultAdminMock: (
+      s: {
+        deletionRow: unknown;
+        casWins: boolean;
+        updateCompleted: (patch: Record<string, unknown>) => void;
+        sanitizeRpc: (name: string, args: Record<string, unknown>) => void;
+      },
+      order: string[],
+      testRequestId: string,
+    ) => ({
+      createAdminClient: () => ({
+        from: (table: string) => {
+          if (table !== "data_deletion_requests") {
+            throw new Error(`Unexpected admin table: ${table}`);
+          }
+          return {
+            select: () => ({
+              eq: () => ({
+                maybeSingle: async () => ({
+                  data: s.deletionRow,
+                  error: null,
+                }),
+              }),
+            }),
+            // Cluster-K (audit-2026-05-07): the approve route now does a
+            // compare-and-swap `.update(...).eq("id",...).is("completed_at",
+            // null).select("id")` to close the C-0033 / H-0217 double-audit
+            // race. The mock returns an empty array when `casWins` is false
+            // so race tests can simulate "another admin already approved".
+            update: (patch: Record<string, unknown>) => ({
+              eq: (_idCol: string, _idVal: string) => ({
+                is: (_completedCol: string, _nullSentinel: unknown) => ({
+                  select: async (_cols: string) => {
+                    s.updateCompleted(patch);
+                    return {
+                      data: s.casWins ? [{ id: testRequestId }] : [],
+                      error: null,
+                    };
+                  },
+                }),
+              }),
+            }),
+          };
+        },
+        rpc: async (name: string, args: Record<string, unknown>) => {
+          order.push(`rpc:${name}`);
+          s.sanitizeRpc(name, args);
+          return { data: true, error: null };
+        },
+      }),
+    }),
+    buildDefaultRateLimitMock: (
+      recorder: (identifier: string) => void,
+    ) => ({
+      adminActionLimiter: {} as unknown,
+      checkLimit: async (_limiter: unknown, identifier: string) => {
+        recorder(identifier);
+        return { success: true } as const;
+      },
+      isRateLimitMisconfigured: () => false,
+    }),
+  }),
+);
+
+/**
  * Lane F (audit-2026-05-07 P705) wired `requireAdmin(supabase, user)` into
  * the approve route immediately before the sanitize_user RPC. `requireAdmin`
  * calls `isAdminUser` which OR's THREE signals:
@@ -129,48 +208,9 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
-vi.mock("@/lib/supabase/admin", () => ({
-  createAdminClient: () => ({
-    from: (table: string) => {
-      if (table !== "data_deletion_requests") {
-        throw new Error(`Unexpected admin table: ${table}`);
-      }
-      return {
-        select: () => ({
-          eq: () => ({
-            maybeSingle: async () => ({
-              data: state.deletionRow,
-              error: null,
-            }),
-          }),
-        }),
-        // Cluster-K (audit-2026-05-07): the approve route now does a
-        // compare-and-swap `.update(...).eq("id",...).is("completed_at",
-        // null).select("id")` to close the C-0033 / H-0217 double-audit
-        // race. The mock returns an empty array when `casWins` is false
-        // so race tests can simulate "another admin already approved".
-        update: (patch: Record<string, unknown>) => ({
-          eq: (_idCol: string, _idVal: string) => ({
-            is: (_completedCol: string, _nullSentinel: unknown) => ({
-              select: async (_cols: string) => {
-                state.updateCompleted(patch);
-                return {
-                  data: state.casWins ? [{ id: TEST_REQUEST_ID }] : [],
-                  error: null,
-                };
-              },
-            }),
-          }),
-        }),
-      };
-    },
-    rpc: async (name: string, args: Record<string, unknown>) => {
-      callOrder.push(`rpc:${name}`);
-      state.sanitizeRpc(name, args);
-      return { data: true, error: null };
-    },
-  }),
-}));
+vi.mock("@/lib/supabase/admin", () =>
+  buildDefaultAdminMock(state, callOrder, TEST_REQUEST_ID),
+);
 
 vi.mock("@/lib/audit", () => ({
   logAuditEvent: (
@@ -191,14 +231,7 @@ vi.mock("@/lib/csrf", () => ({
 // so mock the module to always return success and surface a per-call
 // recorder for the rate-limit test.
 const rateLimitRecorder = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/ratelimit", () => ({
-  adminActionLimiter: {} as unknown,
-  checkLimit: async (_limiter: unknown, identifier: string) => {
-    rateLimitRecorder(identifier);
-    return { success: true } as const;
-  },
-  isRateLimitMisconfigured: () => false,
-}));
+vi.mock("@/lib/ratelimit", () => buildDefaultRateLimitMock(rateLimitRecorder));
 
 function makeReq(): NextRequest {
   return new NextRequest(
@@ -224,51 +257,12 @@ function makeCtx() {
  * we re-install them explicitly here.
  */
 function reapplyDefaultMocks() {
-  vi.doMock("@/lib/ratelimit", () => ({
-    adminActionLimiter: {} as unknown,
-    checkLimit: async (_limiter: unknown, identifier: string) => {
-      rateLimitRecorder(identifier);
-      return { success: true } as const;
-    },
-    isRateLimitMisconfigured: () => false,
-  }));
-  vi.doMock("@/lib/supabase/admin", () => ({
-    createAdminClient: () => ({
-      from: (table: string) => {
-        if (table !== "data_deletion_requests") {
-          throw new Error(`Unexpected admin table: ${table}`);
-        }
-        return {
-          select: () => ({
-            eq: () => ({
-              maybeSingle: async () => ({
-                data: state.deletionRow,
-                error: null,
-              }),
-            }),
-          }),
-          update: (patch: Record<string, unknown>) => ({
-            eq: (_idCol: string, _idVal: string) => ({
-              is: (_completedCol: string, _nullSentinel: unknown) => ({
-                select: async (_cols: string) => {
-                  state.updateCompleted(patch);
-                  return {
-                    data: state.casWins ? [{ id: TEST_REQUEST_ID }] : [],
-                    error: null,
-                  };
-                },
-              }),
-            }),
-          }),
-        };
-      },
-      rpc: async (name: string, args: Record<string, unknown>) => {
-        callOrder.push(`rpc:${name}`);
-        state.sanitizeRpc(name, args);
-        return { data: true, error: null };
-      },
-    }),
-  }));
+  vi.doMock("@/lib/ratelimit", () =>
+    buildDefaultRateLimitMock(rateLimitRecorder),
+  );
+  vi.doMock("@/lib/supabase/admin", () =>
+    buildDefaultAdminMock(state, callOrder, TEST_REQUEST_ID),
+  );
 }
 
 describe("POST /api/admin/deletion-requests/[id]/approve (P452)", () => {
@@ -552,6 +546,98 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", () => {
       (call) => (call[0] as { action: string }).action,
     );
     expect(actions).toContain("account.sanitize");
+    expect(actions).not.toContain("deletion.request.approve");
+  });
+
+  /**
+   * audit-2026-05-07 testing-MED — complementary invariant to
+   * H-0216/M-0265. The cluster-K fix moved `account.sanitize` audit
+   * emission to IMMEDIATELY after a successful sanitize_user return so
+   * an UPDATE-side failure can't strand the destruction un-audited.
+   * That established the contract: "audit fires whenever sanitize_user
+   * succeeded". The complementary contract — "audit MUST NOT fire when
+   * sanitize_user errored" — has no test pin. A future refactor that
+   * moves either logAuditEvent above the rpcErr early-return would
+   * write a phantom anonymize record into the IMMUTABLE audit_log
+   * (migration 049 REVOKEs UPDATE/DELETE), and a regulator audit would
+   * see a destruction that never happened.
+   *
+   * This test forces the sanitize_user RPC to return an error and
+   * asserts:
+   *   - response status 500
+   *   - sanitize_user RPC was invoked (we attempted destruction)
+   *   - completed_at UPDATE was NOT issued (no terminal-state write)
+   *   - account.sanitize audit was NOT emitted (destruction did not
+   *     actually succeed, so no forensic claim)
+   *   - deletion.request.approve audit was NOT emitted (no CAS win)
+   */
+  it("audit-2026-05-07 testing-MED — rpcErr suppresses BOTH audit events + UPDATE", async () => {
+    state.authedUser = TEST_ADMIN;
+    state.userRoles = ["admin"];
+    state.deletionRow = {
+      id: TEST_REQUEST_ID,
+      user_id: TEST_TARGET_USER_ID,
+      requested_at: "2026-05-01T00:00:00Z",
+      completed_at: null,
+      rejected_at: null,
+    };
+
+    // Override the admin client mock so sanitize_user errors out. The
+    // route must short-circuit at the rpcErr branch (route.ts L128-137)
+    // BEFORE emitting any audit and BEFORE attempting the CAS UPDATE.
+    vi.resetModules();
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: (_table: string) => ({
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({
+                data: state.deletionRow,
+                error: null,
+              }),
+            }),
+          }),
+          // UPDATE must NEVER be reached on the rpcErr branch — wire
+          // the mock to record-and-fail so a regression that skips the
+          // early-return surfaces as an explicit assertion failure
+          // (state.updateCompleted called) rather than a silent pass.
+          update: (patch: Record<string, unknown>) => ({
+            eq: (_idCol: string, _idVal: string) => ({
+              is: (_c: string, _n: unknown) => ({
+                select: async (_cols: string) => {
+                  state.updateCompleted(patch);
+                  return { data: [], error: null };
+                },
+              }),
+            }),
+          }),
+        }),
+        rpc: async (name: string, args: Record<string, unknown>) => {
+          state.sanitizeRpc(name, args);
+          return {
+            data: null,
+            error: { message: "rpc failed" },
+          };
+        },
+      }),
+    }));
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(), makeCtx());
+
+    expect(res.status).toBe(500);
+    // The destructive RPC was attempted (we have to record the attempt
+    // even if it failed — for retry diagnostics elsewhere).
+    expect(state.sanitizeRpc).toHaveBeenCalledTimes(1);
+    // CRITICAL: no UPDATE ran — terminal state must not be claimed
+    // when the destructive step itself errored.
+    expect(state.updateCompleted).not.toHaveBeenCalled();
+    // CRITICAL: NEITHER audit event was emitted — destruction did not
+    // succeed, so the audit_log must not claim it did.
+    const actions = state.auditLog.mock.calls.map(
+      (call) => (call[0] as { action: string }).action,
+    );
+    expect(actions).not.toContain("account.sanitize");
     expect(actions).not.toContain("deletion.request.approve");
   });
 
