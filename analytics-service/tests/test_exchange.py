@@ -4219,3 +4219,153 @@ class TestClusterIBybitPageCapTruncationFlag:
         flags = get_and_clear_last_dq_flags()
         assert flags.get("sync_truncated_bybit") is True
         assert flags.get("sync_truncated_bybit_pages") == 100
+
+
+class TestRedTeamPhase2RegressionEntrySeamClobbers:
+    """Audit-2026-05-07 red-team CRITICAL conf=9 — Phase-2 introduced a
+    silent-drop regression: ``fetch_daily_pnl`` sets
+    ``bybit_daily_pnl_includes_funding=True`` (the C-0319 double-count
+    flag) and ``fetch_raw_trades`` then resets the buffer at its entry
+    seam, wiping the flag before the worker can drain it. Pin the full
+    production sequence (fetch_daily_pnl -> fetch_raw_trades) so a
+    regression that drops the worker-side pre-drain is caught at CI.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bybit_funding_flag_survives_fetch_raw_trades_reset(
+        self,
+    ) -> None:
+        """The flag must be capturable by a drain placed BETWEEN
+        fetch_daily_pnl and fetch_raw_trades. This pins the contract
+        the C-0319 fix relies on: callers MUST drain between the two
+        exchange calls.
+        """
+        import asyncio
+        from services.exchange import (
+            fetch_daily_pnl,
+            fetch_raw_trades,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.markets = {}
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "closedPnl": "12.34",
+                            "createdTime": "1700000000000",
+                        }
+                    ]
+                }
+            }
+        )
+        # Bybit fetch_raw_trades reads from private_get_v5_execution_list.
+        mock_exchange.private_get_v5_execution_list = AsyncMock(
+            return_value={"result": {"list": [], "nextPageCursor": ""}}
+        )
+
+        mock_supabase = MagicMock()
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        # Step 1: fetch_daily_pnl (mirrors fetch_all_trades on Bybit).
+        await fetch_daily_pnl(mock_exchange, since_ms=None)
+        # Step 2: simulated worker-side drain — the fix's contract.
+        daily_flags = get_and_clear_last_dq_flags()
+        assert daily_flags.get("bybit_daily_pnl_includes_funding") is True, (
+            "fetch_daily_pnl must set the C-0319 funding flag"
+        )
+
+        # Step 3: fetch_raw_trades — its entry-seam reset must NOT see
+        # the flag (we already drained), so the reset is a no-op in
+        # terms of dropped signal.
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+        post_flags = get_and_clear_last_dq_flags()
+        # No leak: post-fetch_raw_trades drain is empty because Bybit
+        # returned no fills (the truncation flag is not set on a clean
+        # single-page response).
+        assert post_flags.get("bybit_daily_pnl_includes_funding") is None
+
+
+class TestRedTeamListMergeCap:
+    """Audit-2026-05-07 red-team MEDIUM conf=8 — ``_record_dq_flag``'s
+    list-merge branch had no cap. A Binance allocator whose 1500-symbol
+    cold-start sweep all 500-errors could land 1500 strings in the
+    JSONB row, blowing past TOAST inline threshold. Pin the cap at
+    ``_DQ_LIST_MERGE_CAP``.
+    """
+
+    def test_list_merge_caps_at_dq_list_merge_cap(self) -> None:
+        from services.exchange import (
+            _DQ_LIST_MERGE_CAP,
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        # Push more than the cap in one shot.
+        oversized = [f"SYM{i}" for i in range(_DQ_LIST_MERGE_CAP * 4)]
+        _record_dq_flag("binance_partial_symbols", oversized)
+        flags = get_and_clear_last_dq_flags()
+        merged = flags.get("binance_partial_symbols") or []
+        assert len(merged) <= _DQ_LIST_MERGE_CAP, (
+            f"list-merge cap breached: {len(merged)} > {_DQ_LIST_MERGE_CAP}"
+        )
+
+    def test_list_merge_cap_holds_across_appends(self) -> None:
+        """Two separate _record_dq_flag calls that each push 40 items
+        must still respect the global cap on the merged value.
+        """
+        from services.exchange import (
+            _DQ_LIST_MERGE_CAP,
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        _record_dq_flag(
+            "binance_partial_symbols",
+            [f"SYM_A_{i}" for i in range(40)],
+        )
+        _record_dq_flag(
+            "binance_partial_symbols",
+            [f"SYM_B_{i}" for i in range(40)],
+        )
+        flags = get_and_clear_last_dq_flags()
+        merged = flags.get("binance_partial_symbols") or []
+        assert len(merged) <= _DQ_LIST_MERGE_CAP
+
+
+class TestRedTeamContextVarSharedDefaultIsolation:
+    """Audit-2026-05-07 red-team MEDIUM conf=8 — the ContextVar default
+    ``{}`` is shared across every reader. ``get_and_clear_last_dq_flags``
+    must return a defensive copy so callers that mutate the return value
+    cannot mutate the shared module default and leak across tasks.
+    """
+
+    def test_get_and_clear_returns_defensive_copy(self) -> None:
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        _record_dq_flag("sync_truncated_okx", True)
+        drained = get_and_clear_last_dq_flags()
+        assert drained.get("sync_truncated_okx") is True
+
+        # Mutating the drained dict must NOT pollute the next drain.
+        drained["sync_truncated_okx"] = "POISONED"
+        drained["new_key"] = "leak"
+        next_drain = get_and_clear_last_dq_flags()
+        assert next_drain == {}, (
+            "get_and_clear must return a defensive copy; "
+            f"shared-default leak detected: {next_drain!r}"
+        )

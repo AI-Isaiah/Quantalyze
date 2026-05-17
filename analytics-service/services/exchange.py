@@ -22,9 +22,31 @@ logger = logging.getLogger("quantalyze.analytics")
 # that a Binance sync only fetched 3 of 5 symbols, or that an OKX pagination
 # hit the 100-page cap, or that a fill paid its fee in BNB while the quote
 # was USDT.
+#
+# Audit-2026-05-07 red-team MEDIUM conf=8 — the ``default={}`` literal is
+# captured ONCE at module load and SHARED across every reader that calls
+# ``.get({})``. CALLERS MUST TREAT THE RETURN OF ``.get({})`` AS READ-ONLY:
+# never mutate the returned dict in place (e.g. ``current = _LAST_DQ_FLAGS.get({});
+# current['x'] = ...``), because on the no-set path that mutation lands on
+# the shared module default and leaks across asyncio tasks. The current
+# call sites build a fresh ``dict(...)`` copy before write (see
+# ``_record_dq_flag``); ``get_and_clear_last_dq_flags`` returns a defensive
+# copy too. Read-only ``.get(..., default).get('subkey', default2)`` chains
+# (e.g. ``_check_fee_currency_mismatch``) are safe.
 _LAST_DQ_FLAGS: ContextVar[dict[str, Any]] = ContextVar(
     "_LAST_DQ_FLAGS", default={}
 )
+
+
+# Audit-2026-05-07 red-team MEDIUM conf=8 — cap on the per-task list-valued
+# DQ flag merge so a hostile / mis-behaving exchange returning thousands of
+# strings (e.g. a 1500-symbol Binance cold-start sweep that 500-errors on
+# every symbol) cannot inflate the JSONB row beyond the PostgreSQL TOAST
+# inline threshold. ``_check_fee_currency_mismatch`` already self-bounds
+# its sample list at 16; this is the global belt for any list-valued DQ
+# key surfaced via ``_record_dq_flag`` (currently
+# ``binance_partial_symbols`` and ``fee_currency_mismatch_samples``).
+_DQ_LIST_MERGE_CAP = 64
 
 
 def get_and_clear_last_dq_flags() -> dict[str, Any]:
@@ -42,28 +64,41 @@ def get_and_clear_last_dq_flags() -> dict[str, Any]:
 
     Closed audit findings: C-0225 (partial-symbol failures),
     M-0663 (sync_truncated), H-0670 (fee_currency_mismatch).
+
+    Audit-2026-05-07 red-team MEDIUM conf=8 — return a SHALLOW COPY so a
+    caller that mutates the returned dict cannot mutate the shared
+    module-default ``{}`` on the no-set path. The empty-buffer return
+    is a fresh dict, not the module default.
     """
     flags = _LAST_DQ_FLAGS.get({})
     if flags:
         _LAST_DQ_FLAGS.set({})
-    return flags
+        return dict(flags)
+    return {}
 
 
 def _record_dq_flag(key: str, value: Any) -> None:
     """Merge a single data_quality_flag into the per-task buffer.
 
-    Lists are appended (for symbol lists); booleans OR-merge; counters
-    sum. Other types overwrite. Defensive: never raises so a logging
-    branch can't take down a sync.
+    Lists are appended (for symbol lists, capped at
+    ``_DQ_LIST_MERGE_CAP``); booleans OR-merge; counters sum. Other
+    types overwrite. Defensive: never raises so a logging branch can't
+    take down a sync.
     """
     try:
         current = dict(_LAST_DQ_FLAGS.get({}))
         if key in current:
             existing = current[key]
             if isinstance(existing, list) and isinstance(value, list):
-                # Dedup while preserving order (small lists).
+                # Dedup while preserving order (small lists). Audit
+                # red-team MEDIUM conf=8: cap at _DQ_LIST_MERGE_CAP so an
+                # exchange-controlled symbol list (e.g. a 1500-symbol
+                # cold-start sweep failing per-symbol) cannot blow past
+                # the PostgreSQL TOAST inline threshold on the JSONB row.
                 merged = list(existing)
                 for item in value:
+                    if len(merged) >= _DQ_LIST_MERGE_CAP:
+                        break
                     if item not in merged:
                         merged.append(item)
                 current[key] = merged

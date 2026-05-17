@@ -669,8 +669,24 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     )
 
     raw_fills: list = []
+    # Audit-2026-05-07 red-team CRITICAL conf=9 — ``fetch_all_trades`` /
+    # ``fetch_daily_pnl`` writes ``bybit_daily_pnl_includes_funding`` (the
+    # C-0319 double-count signal) into the per-task DQ buffer. The next
+    # call (``fetch_raw_trades``) resets the buffer at its entry seam as
+    # defense-in-depth against cross-task leaks; that reset would wipe
+    # the funding flag before we can read it. Drain the buffer HERE so
+    # the daily-PnL flags are captured into ``exchange_dq_flags`` and
+    # survive the ``fetch_raw_trades`` reset for the strategy_analytics
+    # stamp below.
+    exchange_dq_flags: dict[str, Any] = {}
     try:
         trades = await fetch_all_trades(ctx.exchange, since_ms=since_ms)
+        # Drain BEFORE the next exchange call so the Bybit funding flag
+        # (and any other daily-PnL-set keys) does not get clobbered by
+        # ``fetch_raw_trades``' entry-seam reset on the same asyncio task.
+        daily_pnl_dq_flags = get_and_clear_last_dq_flags()
+        if daily_pnl_dq_flags:
+            exchange_dq_flags.update(daily_pnl_dq_flags)
         account_balance = await fetch_usdt_balance(ctx.exchange)
 
         # --- Phase 2: Raw fill ingestion (gated by feature flag) ---
@@ -692,13 +708,20 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         # the strategy_analytics stamp loop below cannot merge them into
         # ``data_quality_flags`` — silently dropping the very signals
         # that batch added.
-        exchange_dq_flags: dict[str, Any] = {}
         if _RAW_TRADE_INGESTION_ENABLED:
             try:
                 raw_fills = await fetch_raw_trades(
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
                 )
-                exchange_dq_flags = get_and_clear_last_dq_flags()
+                fetch_raw_dq_flags = get_and_clear_last_dq_flags()
+                if fetch_raw_dq_flags:
+                    # Shallow merge — last-write-wins per key. The daily-PnL
+                    # branch and the fetch_raw branch own disjoint key
+                    # namespaces in practice (daily PnL: bybit_daily_pnl_*;
+                    # fetch_raw: binance_partial_symbols, sync_truncated_*,
+                    # fee_currency_mismatch*), so this is effectively a
+                    # union.
+                    exchange_dq_flags.update(fetch_raw_dq_flags)
             except Exception as e:
                 # Drain even on failure so a partial accumulation does not
                 # leak into the next call on this asyncio task. The drained
@@ -734,6 +757,17 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 phase2_error_message = str(e)[:200]
     except ccxt.RateLimitExceeded:
         await _stamp_429(ctx.supabase, ctx.key_row)
+        # Audit-2026-05-07 red-team HIGH conf=8 — RateLimitExceeded can
+        # bubble out of ``fetch_all_trades`` / ``fetch_usdt_balance`` /
+        # ``fetch_raw_trades`` AFTER the daily-PnL branch has populated
+        # ``bybit_daily_pnl_includes_funding`` (or fetch_raw has
+        # accumulated partial truncation flags). Worker pools reuse
+        # asyncio tasks (see ``run_reconcile_strategy_job`` comment); a
+        # bare re-raise here would leak those flags onto the next
+        # compute_jobs task scheduled on the same asyncio task.
+        # Mirror the explicit drain in ``run_reconcile_strategy_job``'s
+        # RateLimitExceeded handler.
+        get_and_clear_last_dq_flags()
         raise
     finally:
         try:
@@ -1599,6 +1633,19 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
         # the DQ buffer with any meaningful data, but drain defensively
         # in case the entry-seam reset+partial work left a residue.
         get_and_clear_last_dq_flags()
+    except Exception:
+        # Audit-2026-05-07 red-team HIGH conf=8 — every untyped exception
+        # path that escapes ``fetch_raw_trades`` (BinancePerSymbolFetchError,
+        # ccxt.NetworkError, ccxt.ExchangeError, generic Exception) used to
+        # propagate WITHOUT draining the per-task DQ buffer. Worker pools
+        # reuse asyncio tasks, so a partial accumulation (e.g. truncated
+        # binance_partial_symbols list or sync_truncated_okx=True) would
+        # leak forward and surface on an unrelated strategy's
+        # ``data_quality_flags`` row. The bare drain closes the gap left by
+        # the explicit per-class handlers; we re-raise unchanged so the
+        # outer dispatcher's classifier still sees the original exception.
+        get_and_clear_last_dq_flags()
+        raise
     finally:
         try:
             await ctx.exchange.close()
