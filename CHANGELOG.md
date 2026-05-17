@@ -7,6 +7,20 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.47] - 2026-05-17
+
+**audit-2026-05-07 — AllocationsTabs top-shell close-out (cluster-P).** Multi-phase review on `src/app/(dashboard)/allocations/AllocationsTabs.tsx` + its tests. Squashes 18 prior commits on `fix/allocations-top-shell-critical-2026-05-17` into 14 substantive commits onto current main (base v0.22.40.46).
+
+- **Cluster-P inline fixes** — log silent failures (instead of swallowing dispatch errors), retry picker dispatch on `no_listener` race, announce export redirect via live region (a11y), memo-wrap `AllocationDashboardV2`, regression tests for the tab shell.
+- **Maintainability** — dropped speculative memo (premature optimization), collapsed type discriminator, force live-region re-announce on identical content.
+- **Testing** — direct tests for `dispatchWidgetPicker`, interval-keeps-polling, boundary cases.
+- **Red-team** — eliminate dispatch silent-failure path; ZWS (zero-width space) clipboard leak guard; type-tighten `KNOWN_TAB_RAW`; regression tests for no-listener race + ZWS clipboard safety.
+- **Simplify** — `/simplify dispatchWidgetPicker` refactor; hoist `resetRouterMocks` to all describes; extract tab-button class constants.
+- **Comment-analyzer (Phase 6)** — refresh `AllocationsTabs.tsx` stale block + line refs; refresh `AllocationsTabs.test.tsx` header to match 5+1 tablist (one prior + 5 dashboard tabs).
+
+No production behavior regressions; 14 substantive cherry-picks onto current main, conflict-free.
+
+
 ## [0.22.40.46] - 2026-05-17
 
 **audit-2026-05-07 — useDashboardConfigV2 hook close-out (cluster-G).** Multi-phase review on `useDashboardConfigV2` hook + widget-registry + tests. Squashes 15 prior commits on `fix/useDashboardConfig-hook-critical-2026-05-17` into 12 substantive commits onto current main (base v0.22.40.45).

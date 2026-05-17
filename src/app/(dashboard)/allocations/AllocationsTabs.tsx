@@ -1,6 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
@@ -15,6 +20,25 @@ import { Tweaks } from "./components/Tweaks";
 import { OnboardingBanner } from "./components/OnboardingBanner";
 import { MandateQuickSetCard } from "./components/MandateQuickSetCard";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
+
+// audit-2026-05-07 cluster P (C-0336, M-1045, M-1047) — surface previously
+// silent failure paths to the browser console so support has a breadcrumb
+// trail. console.warn is non-blocking, runs only on the affected branch,
+// and intentionally avoids adding a new telemetry surface (PostHog is
+// already addressed via trackUsageEventClient for the picker dispatch).
+function warnAudit(tag: string, detail: Record<string, unknown> = {}): void {
+  if (typeof console === "undefined") return;
+  console.warn(`[AllocationsTabs] ${tag}`, detail);
+}
+
+// audit-2026-05-07 cluster P (M-0043 / M-1043 / maintainability MED) —
+// do NOT re-introduce a `memo(AllocationDashboardV2)` wrapper here. The
+// parent server component does not yet stabilise the payload reference, so
+// React.memo's default shallow compare always sees a fresh props identity
+// and re-renders. The wrapper was removed in this audit; only restore it
+// AFTER the payload reference is stable (and add a test that pins the
+// short-circuit), otherwise it ships as misleading optimization signal.
 
 // Phase A6 — Holdings / Outcomes / Mandate / Risk tab panels lazy-load via
 // next/dynamic with ssr: false. Together they pull in HoldingsTable +
@@ -108,21 +132,47 @@ const ScenarioComposer = dynamic(
   },
 );
 
-// Phase 10 / 10-06b — re-introduce the `allocations.ui_v2` flag handler.
-// v0.15.7.0 retired V1 / made V2 the default-for-all in production; this
+// Phase 10 / 10-06b — `allocations.ui_v2` flag handler.
+//
+// audit-2026-05-07 cluster P (H-1188 doc, H-0060 type discriminator)
+// — the persisted localStorage key NAME is "allocations.ui_v2" for
+// back-compat with shipped opt-outs, but in current main its SCOPE is the
+// Scenario tab only (ScenarioComposer vs ScenarioStub in the scenario
+// tabpanel below). The Overview / Holdings / Outcomes / Mandate / Risk
+// panels are not gated by this flag. Treat any documentation that calls
+// it a "broader UI rollback" as stale.
+//
+// v0.15.7.0 retired V1 / made V2 the default-for-all in production; the
 // helper preserves the BRANCH point so an explicit "false" still routes to
 // the legacy ScenarioStub for rollback safety. Default behavior (no flag,
-// or any value other than the literal string "false") returns true so
-// production users continue to land on the V2 composer.
+// or any value other than the literal string "false") yields V2.
 const UI_V2_STORAGE_KEY = "allocations.ui_v2";
 
-function loadUiV2Flag(): boolean {
-  if (typeof window === "undefined") return true;
+// audit-2026-05-07 maintainability MED — the only consumer (the post-mount
+// useEffect inside AllocationsTabs) reads "is this an explicit opt-out?".
+// Collapsed from a 4-variant discriminator union to a 2-variant
+// ("explicit-false" vs "default") so unused branches don't accumulate
+// without tests exercising them. C-0336 storage-error breadcrumb is
+// preserved; SSR and storage-error paths both collapse to "default" since
+// both yield V2 with no rollback. Re-introduce a richer discriminator only
+// when a second consumer needs it.
+type UiV2FlagState = "explicit-false" | "default";
+
+function readUiV2Flag(): UiV2FlagState {
+  if (typeof window === "undefined") {
+    return "default";
+  }
   try {
     const raw = window.localStorage.getItem(UI_V2_STORAGE_KEY);
-    return raw !== "false";
-  } catch {
-    return true;
+    if (raw === "false") return "explicit-false";
+    return "default";
+  } catch (err) {
+    // audit-2026-05-07 C-0336 (silent-failure-hunter c10) — log the
+    // storage failure so a P1 "V1 users seeing V2" / "rollback not
+    // honoured" issue is debuggable. Default-true behaviour is preserved.
+    const reason = err instanceof Error ? err.message : String(err);
+    warnAudit("loadUiV2Flag_failed", { reason });
+    return "default";
   }
 }
 
@@ -135,14 +185,17 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
 /**
  * Phase 09.1 Plan 02 / D-05 / D-06 — Tabs shell for /allocations.
  *
- * Six surfaces (D-05 order):
+ * Visible tablist (PR3 dashboard parity — 5 buttons, see VISIBLE_TAB_KEYS):
  *   - Overview (default) — wraps AllocationDashboardV2.
- *   - Holdings — full-width HoldingsTable (Plan 08 fills body).
- *   - Outcomes — full-width OutcomesWidget (Plan 10 restyles).
- *   - Mandate — link to /profile?tab=mandate + future MandateSnapshot
- *     (Plan 10 fills body).
- *   - Risk — curated grid of 6 risk widgets (Plan 10 fills body).
- *   - Scenario — placeholder Card for the Phase 10 builder.
+ *   - Holdings — full-width HoldingsTable.
+ *   - Outcomes — full-width OutcomesWidget.
+ *   - Mandate  — link to /profile?tab=mandate + MandateSnapshot.
+ *   - Risk     — curated grid of risk widgets.
+ *
+ * Routable-but-hidden surface:
+ *   - Scenario — ScenarioComposer (V2 default) / ScenarioStub (rollback).
+ *     Reachable only via ?tab=scenario or the "+ Allocation" header chip;
+ *     no tab button is rendered in the tablist.
  *
  * URL state (D-04 / D-05):
  *   /allocations                  → Overview
@@ -153,7 +206,7 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
  *   /allocations?tab=outcomes     → Outcomes
  *   /allocations?tab=mandate      → Mandate
  *   /allocations?tab=risk         → Risk
- *   /allocations?tab=scenario     → Scenario
+ *   /allocations?tab=scenario     → Scenario (panel only — no tab button)
  *   /allocations?tab=<unknown>    → Overview (D-04 silent fallback)
  *
  * Per VOICES-ACCEPTED f3: `activeTab` is DERIVED from `searchParams` on
@@ -189,6 +242,31 @@ const VISIBLE_TAB_KEYS: readonly TabKey[] = [
   "risk",
 ] as const;
 
+// audit-2026-05-07 M-1045 (silent-failure-hunter c8) — D-04 says unknown
+// values silently fall back to Overview. We keep the user-facing fallback
+// (no error UI, no redirect surprise) but log a breadcrumb so support can
+// distinguish "user typoed a bookmark" from "marketing shipped a broken
+// outbound link". The known legacy alias "performance" and the canonical
+// keys are NOT logged — only genuinely unknown non-empty raw values.
+//
+// audit-2026-05-07 Phase-4 red-team (MED conf 8) — entries are typed as
+// `TabKey | "performance"` and derived from `VISIBLE_TAB_KEYS` + the
+// routable-but-not-visible "scenario" + the legacy "performance" alias so
+// a future TabKey rename can't leave a stale string here that silently
+// suppresses `invalid_tab_fallback`. `VISIBLE_TAB_KEYS` is the single
+// TabKey-typed source of truth; the spread here keeps the two constants
+// in lockstep at compile time. The Set is exposed as `ReadonlySet<string>`
+// so `.has(raw)` still accepts an arbitrary search-param string at the
+// call site without per-call casts.
+const KNOWN_TAB_RAW_ENTRIES: readonly (TabKey | "performance")[] = [
+  ...VISIBLE_TAB_KEYS,
+  "scenario",
+  "performance", // Phase 07 legacy alias — cleaned up by the URL effect.
+] as const;
+const KNOWN_TAB_RAW: ReadonlySet<string> = new Set<string>(
+  KNOWN_TAB_RAW_ENTRIES,
+);
+
 function parseTab(raw: string | null): TabKey {
   // D-05: 6-tab set. Overview is default. Anything else (null, empty, unknown
   // values, the legacy "performance" alias) collapses to "overview" — silent
@@ -201,6 +279,9 @@ function parseTab(raw: string | null): TabKey {
     case "scenario":
       return raw;
     default:
+      if (raw && raw.length > 0 && !KNOWN_TAB_RAW.has(raw)) {
+        warnAudit("invalid_tab_fallback", { raw });
+      }
       return "overview"; // Phase 07 "performance" URL also lands here.
   }
 }
@@ -214,6 +295,21 @@ const TAB_LABELS: Record<TabKey, string> = {
   scenario: "Scenario",
 };
 
+// Tab-button class strings — pulled out of the render JSX so the active /
+// inactive delta isn't hidden in two ~200-char ternary branches that share
+// ~90% of their characters. The full strings below are byte-identical to
+// the previous inlined versions so the Tailwind class order matches the
+// dashboard-parity contract.
+const TAB_BUTTON_ACTIVE =
+  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-accent text-accent transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent";
+const TAB_BUTTON_INACTIVE =
+  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent";
+
+const TAB_COUNT_BADGE_ACTIVE =
+  "rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] font-mono leading-none text-accent";
+const TAB_COUNT_BADGE_INACTIVE =
+  "rounded-full bg-page px-1.5 py-0.5 text-[10px] font-mono leading-none text-text-muted";
+
 export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   const router = useRouter();
   const pathname = usePathname();
@@ -221,6 +317,18 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
 
   // Per VOICES-ACCEPTED f3: derive each render — no local state snapshot.
   const activeTab: TabKey = parseTab(searchParams.get("tab"));
+
+  // audit-2026-05-07 Phase-4 red-team (HIGH conf 8) — capture the latest
+  // activeTab via a ref so deferred (queueMicrotask + setTimeout 100ms)
+  // callbacks in `dispatchWidgetPicker` read the LATEST tab at fire time,
+  // not the snapshot captured at click time. This lets the safety-net
+  // dispatch detect "user navigated away from Overview before the 100ms
+  // timer fired" and emit a `no_listener` breadcrumb + telemetry follow-up
+  // instead of silently lying with a 'deferred' success ack.
+  const activeTabRef = useRef<TabKey>(activeTab);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
 
   // Phase 10 / 10-06b — `allocations.ui_v2` flag drives the scenario panel
   // body. SSR-stable initialization (review-pass P1 fix): start with `true`
@@ -237,8 +345,21 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     // ONCE on mount, only when the localStorage rollback flag is set to
     // the literal string "false". The alternative (useSyncExternalStore)
     // is overkill for a one-shot post-mount read of a stable value.
+    const result = readUiV2Flag();
     /* eslint-disable react-hooks/set-state-in-effect */
-    if (loadUiV2Flag() === false) setUiV2Flag(false);
+    if (result === "explicit-false") {
+      setUiV2Flag(false);
+      // audit-2026-05-07 H-1188 (red-team c8) — the persisted flag's
+      // SCOPE is Scenario only in current main; the Overview / Holdings /
+      // Outcomes / Mandate / Risk panels remain V2 regardless. Log a
+      // breadcrumb when the explicit-false rollback path is hit so
+      // support can correlate "I set the flag but my dashboard didn't
+      // roll back" tickets.
+      warnAudit("ui_v2_rollback_scope_scenario_only", {
+        storage_key: UI_V2_STORAGE_KEY,
+        affected_surface: "scenario",
+      });
+    }
     /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
@@ -260,10 +381,22 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // Live-refresh polling — only while on Overview + document visible
   // (Phase 06 D-11 inherited pattern). Never polls on Holdings / Outcomes /
   // Mandate / Risk / Scenario.
+  //
+  // audit-2026-05-07 M-1046 (red-team c8) — wrap router.refresh in a
+  // try/catch + breadcrumb. router.refresh has no AbortController; if it
+  // throws (e.g. a route handler 5xx mid-flight, or the user navigates
+  // away during the tick) we don't want the interval to silently die.
   useEffect(() => {
     if (activeTab !== "overview") return;
     const id = setInterval(() => {
-      if (document.visibilityState === "visible") router.refresh();
+      if (document.visibilityState !== "visible") return;
+      try {
+        router.refresh();
+      } catch (err) {
+        warnAudit("router_refresh_failed", {
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
     }, PERFORMANCE_POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, [activeTab, router]);
@@ -318,6 +451,137 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     holdings: holdingsCount,
     outcomes: outcomesCount,
   };
+
+  // audit-2026-05-07 H-1187 / H-1190 / H-1191 / M-1047 — picker dispatch
+  // race + silent drop. The proper fix (lifting pickerOpen state into
+  // AllocationsTabs) requires editing AllocationDashboardV2, which is
+  // out-of-scope for this cluster's PR. In-scope mitigation:
+  //   - On Overview: dispatch synchronously (listener already mounted).
+  //   - From a non-Overview tab: queueMicrotask + a 100ms setTimeout
+  //     safety net. The handler `setPickerOpen(true)` is idempotent, so
+  //     a duplicate delivery is harmless. One PostHog event per click
+  //     (status reflects whether the synchronous send raised).
+  //
+  // audit-2026-05-07 Phase-4 red-team (HIGH conf 8) — under rapid
+  // re-navigation (Risk → Widget chip → Holdings within 100ms) the
+  // 100ms safety-net timer fires AFTER AllocationDashboardV2 unmounts on
+  // the Holdings tab change. `dispatchEvent` for an unhandled event
+  // returns true and doesn't throw, so neither the `failed` breadcrumb
+  // nor the synchronous-throw path fires — telemetry sells 'deferred'
+  // success but the picker never opens. Fix: read the LATEST activeTab via
+  // `activeTabRef` inside the deferred callback. If the user has navigated
+  // away from Overview by the time the timer fires, emit a follow-up
+  // `widget_picker_dispatch_no_listener` warnAudit + a separate
+  // `widget_viewed` telemetry event so the silent-failure class M-1047 set
+  // out to eliminate is actually surfaced.
+  //
+  // audit-2026-05-07 Phase-4 red-team (MED conf 8) — wrap the deferred
+  // scheduling in try/catch. On hostile / old WebView surfaces (embedded
+  // Chromium <71, iOS <12.2 — still in regulated APAC trading desktops)
+  // `queueMicrotask` can be undefined; the throw would escape
+  // `dispatchWidgetPicker` BEFORE `trackUsageEventClient` was called and
+  // leave the click in a broken state with no telemetry. Two-line guard
+  // downgrades 'deferred' to 'failed' + emits a
+  // `widget_picker_schedule_failed` breadcrumb.
+  const dispatchWidgetPicker = (wasAlreadyOnOverview: boolean): void => {
+    if (typeof window === "undefined") return;
+
+    const fire = (): boolean => {
+      try {
+        window.dispatchEvent(
+          new CustomEvent("allocations:open-widget-picker"),
+        );
+        return true;
+      } catch (err) {
+        warnAudit("widget_picker_dispatch_failed", {
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        return false;
+      }
+    };
+
+    if (wasAlreadyOnOverview) {
+      const ok = fire();
+      trackUsageEventClient("widget_viewed", {
+        widget_picker_dispatch: ok ? "sync" : "failed",
+        source: "tab_row_chip",
+        wasAlreadyOnOverview: true,
+      });
+      return;
+    }
+
+    // Non-Overview source — AllocationDashboardV2's listener mounts on
+    // commit of the tab change. Microtask + 100ms safety-net catches the
+    // listener-not-yet-attached race that the original synchronous
+    // dispatch dropped. Telemetry fires once per click.
+    //
+    // The deferred-fire wrapper checks `activeTabRef.current` at fire time:
+    // if the user has already re-navigated to another tab (Holdings / Risk
+    // / …) by the time the 100ms timer fires, AllocationDashboardV2 is
+    // unmounted and the dispatch lands on a window with no listener. We
+    // emit a `no_listener` follow-up so support has a breadcrumb that
+    // distinguishes "delivered but unopened" from "user re-navigated".
+    let noListenerReported = false;
+    const fireWithListenerCheck = (): void => {
+      if (activeTabRef.current !== "overview") {
+        if (!noListenerReported) {
+          noListenerReported = true;
+          warnAudit("widget_picker_dispatch_no_listener", {
+            currentTab: activeTabRef.current,
+            source: "tab_row_chip",
+          });
+          trackUsageEventClient("widget_viewed", {
+            widget_picker_dispatch: "no_listener",
+            source: "tab_row_chip",
+            wasAlreadyOnOverview: false,
+          });
+        }
+        return;
+      }
+      fire();
+    };
+
+    try {
+      queueMicrotask(fireWithListenerCheck);
+      window.setTimeout(fireWithListenerCheck, 100);
+    } catch (err) {
+      warnAudit("widget_picker_schedule_failed", {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      trackUsageEventClient("widget_viewed", {
+        widget_picker_dispatch: "failed",
+        source: "tab_row_chip",
+        wasAlreadyOnOverview: false,
+      });
+      return;
+    }
+    trackUsageEventClient("widget_viewed", {
+      widget_picker_dispatch: "deferred",
+      source: "tab_row_chip",
+      wasAlreadyOnOverview: false,
+    });
+  };
+
+  // audit-2026-05-07 M-1044 (silent-failure-hunter c8) — Export chip
+  // navigates to Holdings as a stub; users from Risk/Outcomes/Mandate see
+  // their tab change silently. Surface a polite aria-live announcement
+  // explaining the redirect. Visually-hidden via DESIGN-bundle .sr-only
+  // utility so the design contract is unchanged.
+  //
+  // audit-2026-05-07 Phase-4 red-team (MED conf 8) — the previous Phase-2
+  // fix used a monotonically-increasing zero-width-space (U+200B) suffix to
+  // force React to re-render on repeat clicks (Object.is bail-out
+  // otherwise). That suffix leaked into the DOM textContent — Select-All,
+  // JS clipboard reads, and some VoiceOver virtual-cursor flows surfaced
+  // it as N invisible characters per click, breaking downstream string
+  // equality / regex / JSON.parse for users who copied a region containing
+  // the live message. Replaced with a microtask-clear pattern: set the
+  // string to "" first, then queueMicrotask sets the real message. React
+  // commits the empty render between announcements so aria-live=polite
+  // re-announces without any sentinel characters, and textContent stays
+  // equal to the human-readable string for clipboard safety. Also drops
+  // the unbounded `exportAnnouncementSeqRef` counter the suffix needed.
+  const [exportAnnouncement, setExportAnnouncement] = useState<string>("");
 
   // PR1 QA — inline header row matching designer-bundle/project/src/app.jsx
   // (lines 460-510): "My Allocation" + entity name on the left, tab list +
@@ -388,11 +652,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
                 tabIndex={isActive ? 0 : -1}
                 onClick={() => changeTab(key)}
                 onKeyDown={(e) => handleTabKeyDown(e, key)}
-                className={
-                  isActive
-                    ? "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-accent text-accent transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-                    : "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-                }
+                className={isActive ? TAB_BUTTON_ACTIVE : TAB_BUTTON_INACTIVE}
               >
                 {label}
                 {typeof count === "number" && count > 0 ? (
@@ -400,8 +660,8 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
                     aria-hidden
                     className={
                       isActive
-                        ? "rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] font-mono leading-none text-accent"
-                        : "rounded-full bg-page px-1.5 py-0.5 text-[10px] font-mono leading-none text-text-muted"
+                        ? TAB_COUNT_BADGE_ACTIVE
+                        : TAB_COUNT_BADGE_INACTIVE
                     }
                   >
                     {count}
@@ -420,34 +680,13 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
             type="button"
             onClick={() => {
               // Route to Overview where the widget picker is mounted, then
-              // dispatch a custom event that AllocationDashboardV2 listens
-              // for to open the picker. The event-based bridge avoids
-              // hoisting picker state out of the dashboard.
-              //
-              // WR-01 fix: when the user is on a non-Overview tab,
-              // AllocationDashboardV2 is unmounted (lazy via `activeTab ===
-              // "overview" && <AllocationDashboardV2 />`), so its
-              // open-picker listener does not exist yet. Dispatching
-              // synchronously drops the event. Defer the dispatch to the
-              // next microtask so React has flushed the tab change render
-              // and the new effect has registered the listener before we
-              // fire. AllocationDashboardV2 is a direct (non-dynamic)
-              // import so its mount-time effect runs in the same tick as
-              // the render — one microtask is sufficient.
+              // dispatch via the helper. The helper handles the microtask /
+              // 100ms safety-net race that audit-2026-05-07 H-1187 / H-1190
+              // / H-1191 flagged: AllocationDashboardV2's listener mounts
+              // on the commit of the tab change, not before.
               const wasAlreadyOnOverview = activeTab === "overview";
               changeTab("overview");
-              if (typeof window === "undefined") return;
-              const dispatch = () =>
-                window.dispatchEvent(
-                  new CustomEvent("allocations:open-widget-picker"),
-                );
-              if (wasAlreadyOnOverview) {
-                // Listener already exists — fire immediately to preserve
-                // the previous behavior on Overview.
-                dispatch();
-              } else {
-                queueMicrotask(dispatch);
-              }
+              dispatchWidgetPicker(wasAlreadyOnOverview);
             }}
             className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
             aria-label="Add widget"
@@ -465,7 +704,24 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
             onClick={() => {
               // Stub: export-CSV / export-PDF flows are owned by the
               // Holdings tab today. Route there until the global export
-              // surface lands.
+              // surface lands. audit-2026-05-07 M-1044 — announce the
+              // navigation via the live region so screen-reader and
+              // keyboard users learn why the surface changed.
+              //
+              // audit-2026-05-07 Phase-4 red-team (MED conf 8) —
+              // microtask-clear pattern replaces the ZWS suffix to avoid
+              // leaking invisible characters into clipboard / VoiceOver
+              // selection. Clearing to "" first lets React commit an
+              // empty render between announcements, then the microtask
+              // sets the real message so aria-live=polite re-announces
+              // identical content WITHOUT a sentinel character. textContent
+              // stays equal to the human-readable string.
+              if (activeTab !== "holdings") {
+                const message =
+                  "Export lives in the Holdings tab — taking you there.";
+                setExportAnnouncement("");
+                queueMicrotask(() => setExportAnnouncement(message));
+              }
               changeTab("holdings");
             }}
             className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
@@ -490,6 +746,19 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
             + Allocation
           </button>
         </div>
+      </div>
+
+      {/* audit-2026-05-07 M-1044 — polite live region for the Export chip
+          stub-navigation announcement. Visually hidden (sr-only) so the
+          DESIGN.md visual contract is unchanged. */}
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+        data-testid="allocations-tabs-live-region"
+      >
+        {exportAnnouncement}
       </div>
 
       {/* Tabpanel pattern below has two cooperating conditions, by design:
