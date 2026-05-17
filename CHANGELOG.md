@@ -7,6 +7,35 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.41] - 2026-05-17
+
+**audit-2026-05-07 — `admin/match/send-intro` cluster-E close-out.** Multi-phase review pipeline (specialists → fix → red-team → red-team-fix → simplify → comment-analyzer) applied to the admin manual-introduction route `src/app/api/admin/match/send-intro/route.ts` and its scaffolding. Squashes 8 prior commits on `fix/admin-send-intro-critical-2026-05-17`.
+
+Closes 2 CRITICAL + 9 HIGH + 5 MEDIUM audit findings plus 1 HIGH + 5 MED red-team conf-8 findings:
+
+- **C-0047/H-0228/H-0232/M-0283** — bind `adminActionLimiter` on the route (was previously exempted in the rate-limit grep gate).
+- **C-0049** — replace `void` fire-and-forget Resend dispatch with `next/server` `after()` so the dispatch survives Vercel's response-flush. The `dispatchAdminIntroEmails` task now also constructs its OWN `createAdminClient()` inside the `after()` body instead of capturing the request-scoped client via closure (Fluid Compute / Node serverless tears down request-scoped fetch agents).
+- **C-0047/H-0229/M-0282** — re-resolve `original_strategy_id` against the allocator's `portfolio_strategies` to block IDOR-style audit poisoning.
+- **HIGH conf 8 red-team — candidate_id IDOR** — pre-RPC ownership check on `body.candidate_id` against `match_candidates(id).allocator_id === body.allocator_id`. Previously only `original_strategy_id` was tenancy-checked; `candidate_id` was forwarded raw, letting a hostile/compromised admin client corrupt `bridge_outcomes` lineage across allocators.
+- **H-0234** — POST gated on `system_flags.match_engine_enabled`; **MED conf 8 red-team — kill-switch fail-OPEN** — read errors on `system_flags` now fail-CLOSED (503 `error: "could not be verified"`) instead of treating `flagErr` as "enabled".
+- **H-0231/M-0284** — cap `admin_note` at 4000 chars, Content-Length at 32 KB.
+- **MED conf 8 red-team — Content-Length NaN bypass** — `Number('not-a-number') === NaN; NaN > MAX` is false, so a non-numeric or absent Content-Length header disabled the body-size cap. Switched from `req.json()` to `req.text() + JSON.parse()` and added a hard post-text() `Buffer.byteLength()` check against `MAX_JSON_BODY_BYTES` as the real enforcer; the CL pre-check is kept as a fast-path early reject.
+- **H-0230** — strict `SendIntroBody` type guard post-validation.
+- **M-0281** — 400 on `original_strategy_id === strategy_id`.
+- **M-0280** — `success: true` in response for sibling-PUT parity.
+- **MED conf 8 red-team — audit-missing-on-error** — RPC error path previously emitted NO audit event (500-storm forensically invisible). Adds `intro.send_failed` to the `AuditAction` union and emits via `logAuditEventAsUser` with `entity_type=strategy`, metadata mirroring success path minus `contact_request_id` / `match_decision_id`, plus the RPC error code.
+- **MED conf 8 red-team — silent zero-email window** — Resend rejections and outer-catch throws in `dispatchAdminIntroEmails` now escalate to Sentry via `captureToSentry` (tags: `route=admin/match/send-intro`, `phase=dispatch|dispatch_outer`, `recipient=allocator|manager`). Persisted `intro_dispatch_attempts` + Resend webhook (H-0236) tracked separately.
+- Audit metadata records only `admin_note_length` (not raw note content).
+- Red-team conf-8 — coerce empty-string `candidate_id` to `null` before RPC.
+- Phase-2 maintainability — flatten Content-Length cap conditional to single early-return.
+- Phase-5 simplify — drop `user!.id` non-null assertion on RPC `p_decided_by` arg (already narrowed by earlier 401 guard); remove unused `bodyBytes(body)` test helper.
+- Phase-6 comment-analyzer — refresh five stale `route.ts:NNN-NNN` line references in `route.test.ts` that drifted after Phase-5; anchor on code expressions rather than brittle line ranges. One comment still claimed the validator wrapped `req.json()` after the Phase-4 switch to `req.text() + JSON.parse()`.
+
+Test coverage: `src/app/api/admin/match/send-intro/route.test.ts` adds 20 cases covering auth split, CSRF, rate-limit (429/503), kill-switch (incl. fail-CLOSED on read error), all body-shape paths, body-size cap, Content-Length bypass (bogus header + absent header + oversized body), candidate-id IDOR (wrong-allocator, fabricated-uuid, lookup-error, happy-path, null-skip), holdings RBAC, dispatch-via-`after()` with fresh admin client, Sentry-on-Resend-reject, audit emission shape (success + failure), RPC error, and empty-`candidate_id` regression guard. `src/__tests__/admin-csrf-ratelimit-grep.test.ts` drops the corresponding RATE_LIMIT_EXEMPTIONS entry now that the route binds a limiter directly. `src/lib/audit.ts` adds `intro.send_failed` to the `AuditAction` type. Skipped sub-threshold: H-0235 (email-suppression list — out-of-scope schema work), H-0236 (persisted `intro_dispatch_attempts` table — separate schema PR), 1 LOW conf-9 (`allocatorName` HTML-escape on `notifyManagerOfAdminIntro` — verified already escaped at line 665), 1 LOW maintainability + 3 LOW testing (dead helper, MAX_JSON_BODY_BYTES boundary, ADMIN_NOTE_MAX boundary).
+
+Typecheck + vitest green on the touched scope.
+
+
 ## [0.22.40.40] - 2026-05-17
 
 **audit-2026-05-07 — TS API routes cluster close-out.** Multi-phase review pipeline (specialists → fix → red-team → red-team-fix → simplify → comment-analyzer) applied to:
