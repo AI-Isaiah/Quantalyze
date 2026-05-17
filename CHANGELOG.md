@@ -7,6 +7,17 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.30] - 2026-05-17
+
+**PR #193 retroactive audit follow-up — 4 actionable findings closed (Task #58).** The PR #193 scope-extended `migration-reviewer` audit on the PR-time backdated-migration guard relocation (`.github/workflows/migration-policy.yml`) surfaced 4 findings (0 CRITICAL / 1 HIGH / 3 MEDIUM / 0 LOW). All four are closed in this PR. The relocation itself works — PR #197's apply confirmed no false-positive blocks on legacy migrations — these are hardening fixes on the new guard.
+
+Closes audit findings:
+- **H-1 (HIGH conf 8)** — `environment: Production` on the PR-policy job. Per ADR-0009 the Production environment will gain required-reviewer protection at scale; once that lands, the automated PR-gate would itself require a manual approval before running, converting a pre-merge automated check into a manually-gated post-merge afterthought. Removed `environment: Production` from the policy job; updated the comment to explain that production env-gating belongs on WRITE paths (`supabase-migrate.yml` apply) not on the read-only PR check. Repo-level secret access is sufficient for the read-only `db query` this job runs.
+- **M-2 (MED conf 9)** — `.github/migrate-backdated-allowlist.txt` header documentation was stale: still claimed the guard lives in `supabase-migrate.yml` and runs before `db push --include-all`. Refreshed lines 5-8 to reference `migration-policy.yml` and PR-time enforcement.
+- **M-3 (MED conf 8)** — Fork-PR fail-open gap: missing secrets silently flipped the guard to `configured=false` + a `::notice::` and PASSED the job. Restructured the policy job into two steps: a new diff-detection step computes `has_migrations` first, then the secrets-check fails-CLOSED with `exit 1` when migrations are present in the diff but secrets are missing. Non-migration PRs from forks still pass cleanly (with a notice) — they're legitimately not gated by this workflow.
+- **M-4 (MED conf 8)** — Reject-path and malformed-filename branches had never run in CI; only the early-exit branch was exercised by PR #193 itself. Added (a) `scripts/test-migration-policy-algorithm.sh` extracting the supabase-independent core of the algorithm into a self-contained shell driver, (b) `.github/workflows/migration-policy-self-test.yml` driving the script against a 6-case matrix (early-exit / forward / allowlisted / REJECT / MALFORMED / MIXED), and (c) 6 source-text invariants in `src/__tests__/critical-regressions.test.ts` (`retro-PR193-M-4`) pinning the literal comparison + grep + regex + the no-Production-env property at the YAML/script source level.
+
+
 ## [0.22.40.29] - 2026-05-17
 
 **PR #182 retroactive audit follow-up — 3 actionable findings closed (Task #57).** The PR #182 retroactive `migration-reviewer` + `rls-policy-auditor` audits surfaced 15 findings (9 + 6). This PR closes the 3 items that represent an active live gap or test gap; 6 other findings are explicitly deferred with rationale in `follow-up-pr-findings.md`. All 20 PR #182 migrations are applied to prod (supabase-migrate run 25972386247 SUCCESS on 2026-05-17), so per migration-reviewer invariant #11 ALL fixes ship as NEW corrective migrations.
