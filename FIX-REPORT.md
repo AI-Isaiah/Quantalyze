@@ -146,3 +146,132 @@ re-introducing the perf footgun 20260516170300 closed.
 - No LLM template artifacts (`grep -cE '</?(content|invoke|function_calls|antml:|parameter)'` returns 0 on both new migrations)
 - No `RAISE EXCEPTION ... || ...` concatenation in new migrations (invariant #21)
 - New migrations time-ordered after the existing tip (`20260516170600`)
+
+---
+
+# PR #193 retroactive audit follow-up — fix report (Task #58)
+
+**Branch:** `fix/pr193-audit-followup-2026-05-17`
+**Base:** `origin/main` @ `b3fb111d` (v0.22.40.29)
+**Version:** 0.22.40.29 -> 0.22.40.30
+**Source artifact:** `.review/retro-audit-pr193.migration-reviewer.jsonl`
+(4 findings: 0 CRITICAL / 1 HIGH / 3 MEDIUM / 0 LOW — all apply
+threshold met, all 4 closed in this PR).
+
+## Findings closed
+
+### H-1 — `environment: Production` on PR-policy job (HIGH conf 8)
+**File:** `.github/workflows/migration-policy.yml` line 70 (pre-fix).
+
+**Failure mode:** the policy job was pinned to the `Production`
+GitHub Environment with a justification comment claiming this lets
+"future required-reviewer protection (ADR-0009) apply uniformly".
+Once ADR-0009 lands, the automated PR-gate would itself require a
+manual approval before running — converting an automated pre-merge
+check into a manually-gated post-merge afterthought. That defeats
+the architectural reason the guard was relocated out of
+`supabase-migrate.yml` in PR #193.
+
+**Fix:** removed `environment: Production` from the policy job;
+replaced the misleading justification comment with one explaining
+that production env-gating belongs on WRITE paths (the apply job
+in `supabase-migrate.yml`) not on the read-only PR check. Repo-
+level secret access (SUPABASE_ACCESS_TOKEN / SUPABASE_DB_PASSWORD)
+is sufficient for the read-only `db query` this job runs.
+
+**Commit:** `b1025045`.
+
+### M-2 — Stale allowlist header documentation (MEDIUM conf 9)
+**File:** `.github/migrate-backdated-allowlist.txt` lines 5-8 (pre-fix).
+
+**Failure mode:** allowlist header still claimed "the
+supabase-migrate.yml workflow's 'Backdated-migration safety guard'
+step rejects any unallowlisted backdated migration before
+`db push --include-all` can apply it." After PR #193 the guard
+runs on `pull_request` events at PR-time (pre-merge), NOT at
+apply-time. An operator reading the stale header forms a wrong
+mental model.
+
+**Fix:** replaced the stale paragraph with one referencing
+`.github/workflows/migration-policy.yml`, the `pull_request`
+trigger, and PR-time enforcement.
+
+**Commit:** `f1856579`.
+
+### M-3 — Fork-PR fail-open gap (MEDIUM conf 8)
+**File:** `.github/workflows/migration-policy.yml` line 43 (pre-fix).
+
+**Failure mode:** `on: pull_request` runs from forks with secrets
+stripped. The previous secrets-check step emitted `configured=false`
++ a `::notice::` and PASSED the job whenever any secret was absent.
+A fork-PR that adds a backdated migration would silently bypass the
+entire guard.
+
+**Fix:** restructured the policy job into two ordered steps:
+1. New `Detect newly-added migrations in diff` step runs FIRST,
+   computes the same `git diff --diff-filter=A` over
+   `supabase/migrations/*.sql` and exports a `has_migrations`
+   boolean output.
+2. The secrets-check step now branches on `has_migrations`:
+   - Secrets present → `configured=true` (normal flow).
+   - Secrets missing + no migrations → `configured=false`, PASS
+     with notice (non-migration PRs are legitimately not gated).
+   - Secrets missing + migrations in diff → FAIL the job with an
+     explicit error (fail-CLOSED).
+
+**Commit:** `53635153`.
+
+### M-4 — Reject + malformed branches never exercised in CI (MEDIUM conf 8)
+**File:** `.github/workflows/migration-policy.yml` line 215 (pre-fix).
+
+**Failure mode:** PR #193 self-ran the workflow and printed
+"No newly-added migration files in this PR. Migration policy OK."
+— exercising only the early-exit branch. The reject branch and
+the malformed-filename branch had never run in CI.
+
+**Fix:** three artifacts (lightest-weight options chosen):
+1. `scripts/test-migration-policy-algorithm.sh` — extracts the
+   supabase-independent core of the algorithm into a self-
+   contained shell driver. Body is byte-equivalent to the
+   algorithm in the real workflow modulo skipping the supabase
+   CLI lines (REMOTE_TIP taken as an env-var input).
+2. `.github/workflows/migration-policy-self-test.yml` — drives
+   the script against a 6-case matrix on `workflow_dispatch` and
+   on `pull_request` paths-filtered to self-test files:
+   - Case 1: empty ADDED_FILES → exit 0 (early-exit)
+   - Case 2: forward-only → exit 0
+   - Case 3: allowlisted backdated → exit 0
+   - Case 4: REJECT path → exit 1
+   - Case 5: MALFORMED filename → exit 1
+   - Case 6: MIXED (both classes) → exit 1 + both error strings
+3. 6 new source-text invariants in
+   `src/__tests__/critical-regressions.test.ts` (describe block
+   `retro-PR193-M-4`) pin the literal comparison, the grep, the
+   regex, the no-Production-env property, the byte-equivalence
+   of the self-test script, and the presence of all 6 cases in
+   the self-test workflow.
+
+All 6 cases exercised locally via bash before commit. Local
+vitest run on critical-regressions: 79 passed (79).
+
+**Commit:** `19861057`.
+
+## Verification
+
+- Local `vitest run src/__tests__/critical-regressions.test.ts`:
+  **79 passed (79)** including the new 6 retro-PR193-M-4 tests.
+- Local bash exercise of the self-test algorithm against all 6
+  synthetic cases: all expected exit codes / error strings observed.
+- VERSION (0.22.40.30) + package.json (0.22.40.30) bumped together
+  per the [CRITICAL-02] drift invariant.
+
+## Items closed
+
+| Severity | Conf | Closed | Commit |
+|----------|------|--------|--------|
+| HIGH     | 8    | yes    | b1025045 |
+| MEDIUM   | 9    | yes    | f1856579 |
+| MEDIUM   | 8    | yes    | 53635153 |
+| MEDIUM   | 8    | yes    | 19861057 |
+
+Items closed: **4 / 4** (apply threshold: HIGH conf ≥ 7, MEDIUM conf ≥ 8).
