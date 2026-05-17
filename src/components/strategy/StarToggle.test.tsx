@@ -18,28 +18,29 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { StarToggle } from "./StarToggle";
+import { installFetchMock, restoreFetchMock, type FetchMock } from "@/test/helpers/fetch";
 
 const STRATEGY_ID = "cccccccc-0001-4000-8000-000000000001";
 const STRATEGY_NAME = "Stellar Neutral Alpha";
 
-// vitest's globalThis.fetch typing accepts the broader RequestInfo union.
-type FetchMock = ReturnType<typeof vi.fn>;
-
 let fetchMock: FetchMock;
 
 beforeEach(() => {
-  fetchMock = vi.fn().mockResolvedValue({ ok: true });
-  // @ts-expect-error — node test env exposes a mutable global.fetch
-  globalThis.fetch = fetchMock;
+  fetchMock = installFetchMock();
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  restoreFetchMock();
 });
 
 describe("StarToggle", () => {
-  it("renders the outline star icon when starred=false", () => {
-    const { container } = render(
+  it("renders the outline star icon (not the filled one) when starred=false", () => {
+    // C-0137: assert intent (which icon variant), not a fill-attribute
+    // negation that any wrong rendering satisfies. The outline path has
+    // fill=null, so the legacy `path.fill !== accent` check was
+    // trivially true for every conceivable wrong icon.
+    render(
       <StarToggle
         strategyId={STRATEGY_ID}
         name={STRATEGY_NAME}
@@ -47,16 +48,19 @@ describe("StarToggle", () => {
         onToggle={() => {}}
       />,
     );
-    // Outline icon path uses stroke="currentColor" with no fill="var(--color-accent)".
-    const svg = container.querySelector("svg");
-    expect(svg).not.toBeNull();
-    const path = svg!.querySelector("path");
-    expect(path).not.toBeNull();
-    expect(path!.getAttribute("fill")).not.toBe("var(--color-accent)");
+    const outline = screen.getByTestId("star-outline");
+    expect(outline).not.toBeNull();
+    expect(screen.queryByTestId("star-filled")).toBeNull();
+    // Defensive: the outline path's behavioural contract is
+    // stroke="currentColor" with NO accent fill anywhere in the subtree.
+    const strokedPath = outline.querySelector("path[stroke]");
+    expect(strokedPath).not.toBeNull();
+    expect(strokedPath!.getAttribute("stroke")).toBe("currentColor");
+    expect(outline.querySelector('[fill="var(--color-accent)"]')).toBeNull();
   });
 
-  it("renders the filled star icon when starred=true", () => {
-    const { container } = render(
+  it("renders the filled star icon (not the outline one) when starred=true", () => {
+    render(
       <StarToggle
         strategyId={STRATEGY_ID}
         name={STRATEGY_NAME}
@@ -64,9 +68,10 @@ describe("StarToggle", () => {
         onToggle={() => {}}
       />,
     );
-    const svg = container.querySelector("svg");
-    expect(svg).not.toBeNull();
-    const path = svg!.querySelector("path");
+    const filled = screen.getByTestId("star-filled");
+    expect(filled).not.toBeNull();
+    expect(screen.queryByTestId("star-outline")).toBeNull();
+    const path = filled.querySelector("path");
     expect(path).not.toBeNull();
     expect(path!.getAttribute("fill")).toBe("var(--color-accent)");
   });
@@ -211,8 +216,18 @@ describe("StarToggle", () => {
     // completing. The post-retry revert (`onToggle` call #2) and the
     // showRetryHint state update must be skipped because the mount guard
     // short-circuits when isMountedRef.current === false.
+    //
+    // C-0138 / M-0469: deterministic signal instead of a wall-clock sleep.
+    // The legacy `await new Promise(r => setTimeout(r, 800))` was coupled
+    // to the production 600ms retry constant — bumping retry to >800ms
+    // (or running on a slow CI runner) would make the assertion fire
+    // BEFORE the would-be second onToggle call, false-passing the unmount
+    // guard. We now wait until BOTH fetch attempts have settled (the
+    // retry chain has fully completed) and only then assert the revert
+    // was suppressed. This pins the behavioural contract without any
+    // dependency on the retry-gap constant.
     const onToggle = vi.fn();
-    fetchMock.mockResolvedValue({ ok: false, status: 500 });
+    fetchMock.mockResolvedValue({ ok: false, status: 500 } as Response);
 
     const { unmount } = render(
       <StarToggle
@@ -230,19 +245,32 @@ describe("StarToggle", () => {
     // Unmount immediately, while the retry chain is still in flight.
     unmount();
 
-    // Wait long enough for the 600ms retry gap + both fetches to settle.
-    // After the chain completes, the revert path must NOT have called
-    // onToggle a second time because isMountedRef.current === false.
+    // Wait for the retry chain to fully complete — fetchMock must have
+    // been called twice (initial + retry). At this point the retry chain
+    // has reached the post-second-attempt branch where the revert
+    // onToggle would have fired IF isMountedRef.current were still true.
+    await waitFor(
+      () => {
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      },
+      { timeout: 3000 },
+    );
+    // Flush any pending microtasks queued after the second fetch
+    // resolves so the recordFailure check has had its chance to run.
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 800));
+      await Promise.resolve();
+      await Promise.resolve();
     });
 
+    // The mount guard at recordFailure short-circuits: onToggle is still
+    // called exactly once (the optimistic flip), never twice (would-be
+    // revert).
     expect(onToggle).toHaveBeenCalledTimes(1);
   });
 
   it("reverts the optimistic flip and shows the retry hint when both fetch attempts fail", async () => {
     const onToggle = vi.fn();
-    fetchMock.mockResolvedValue({ ok: false, status: 500 });
+    fetchMock.mockResolvedValue({ ok: false, status: 500 } as Response);
 
     render(
       <StarToggle
@@ -276,7 +304,7 @@ describe("StarToggle", () => {
 
   it("does NOT retry on a 401 — surfaces the auth-specific hint immediately", async () => {
     const onToggle = vi.fn();
-    fetchMock.mockResolvedValue({ ok: false, status: 401 });
+    fetchMock.mockResolvedValue({ ok: false, status: 401 } as Response);
 
     render(
       <StarToggle
@@ -299,7 +327,7 @@ describe("StarToggle", () => {
 
   it("does NOT retry on a 403 — same auth-no-retry path as 401", async () => {
     const onToggle = vi.fn();
-    fetchMock.mockResolvedValue({ ok: false, status: 403 });
+    fetchMock.mockResolvedValue({ ok: false, status: 403 } as Response);
 
     render(
       <StarToggle
@@ -324,7 +352,7 @@ describe("StarToggle", () => {
     // Both attempts return 429 so we exhaust the retry chain and surface
     // the hint. The retry delay is driven by Retry-After, not the 600ms
     // fallback.
-    fetchMock.mockResolvedValue({ ok: false, status: 429, headers });
+    fetchMock.mockResolvedValue({ ok: false, status: 429, headers } as unknown as Response);
 
     render(
       <StarToggle
@@ -345,6 +373,46 @@ describe("StarToggle", () => {
     expect(onToggle).toHaveBeenNthCalledWith(2, STRATEGY_ID, false);
   });
 
+  it("honours the Retry-After: 1 (=1000ms) delay — second fetch is not issued before 1000ms (L-0087)", async () => {
+    // L-0087: the loose-timeout 429 test above would also pass if the
+    // route reverted to a hardcoded 600ms delay (ignoring Retry-After).
+    // This deterministic fake-timer test pins the actual delay: under a
+    // Retry-After: 1 header the second fetch MUST NOT fire before 1000ms.
+    // A regression dropping the Retry-After parsing back to the 600ms
+    // default would call fetchMock the 2nd time at 600ms — caught here.
+    vi.useFakeTimers();
+    const onToggle = vi.fn();
+    const headers = new Headers({ "Retry-After": "1" });
+    fetchMock.mockResolvedValue({ ok: false, status: 429, headers } as unknown as Response);
+
+    render(
+      <StarToggle
+        strategyId={STRATEGY_ID}
+        name={STRATEGY_NAME}
+        starred={false}
+        onToggle={onToggle}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+
+    // Drain the microtasks so the initial fetch resolves and the retry
+    // delay timer is scheduled.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Advance to just under the Retry-After window — second fetch must
+    // NOT have fired yet. A regression to the 600ms hardcoded delay would
+    // have produced fetchMock.calls === 2 here.
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Cross the 1000ms boundary — the retry fires.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+  });
+
   it("uses the network-specific hint when fetch rejects (no response)", async () => {
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
 
@@ -363,7 +431,7 @@ describe("StarToggle", () => {
   });
 
   it("renders the failure hint as a live region (role=status, aria-live=polite)", async () => {
-    fetchMock.mockResolvedValue({ ok: false, status: 500 });
+    fetchMock.mockResolvedValue({ ok: false, status: 500 } as Response);
 
     render(
       <StarToggle
