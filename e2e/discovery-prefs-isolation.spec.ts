@@ -17,6 +17,7 @@
 
 import { test, expect } from "@playwright/test";
 import { seedTestAllocator } from "./helpers/seed-test-project";
+import { loginAs } from "./helpers/login";
 
 const HAS_E2E_USER_ENV =
   !!process.env.E2E_USER_A_EMAIL &&
@@ -29,18 +30,6 @@ const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
 
 const SHOULD_RUN = HAS_E2E_USER_ENV || HAS_SEED_ENV;
-
-async function loginViaForm(
-  page: import("@playwright/test").Page,
-  email: string,
-  password: string,
-) {
-  await page.goto("/login");
-  await page.fill('input[name="email"], input[placeholder*="email" i]', email);
-  await page.fill('input[type="password"]', password);
-  await page.click('button:has-text("Sign in")');
-  await page.waitForURL(/\/(discovery|strategies|dashboard)/, { timeout: 10000 });
-}
 
 async function signOut(page: import("@playwright/test").Page) {
   // Try the user-menu sign-out button first (TODOS.md Q3 — there is no
@@ -107,7 +96,7 @@ test.describe("DISCO-02 cross-account localStorage isolation", () => {
     }
 
     // Step 1 — Login as A and persist a non-default view via the cog drawer.
-    await loginViaForm(page, userA.email, userA.password);
+    await loginAs(page, userA.email, userA.password);
     await page.goto("/discovery/crypto-sma");
     await page.waitForSelector("table, [role='tabpanel']", { timeout: 10000 });
     await page.click('button[aria-label="Customize discovery view"]');
@@ -129,7 +118,7 @@ test.describe("DISCO-02 cross-account localStorage isolation", () => {
 
     // Step 3 — Sign out, sign in as B.
     await signOut(page);
-    await loginViaForm(page, userB.email, userB.password);
+    await loginAs(page, userB.email, userB.password);
 
     // Step 4 — Navigate to discovery and read out B's localStorage.
     await page.goto("/discovery/crypto-sma");
