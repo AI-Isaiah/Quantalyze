@@ -1,13 +1,12 @@
 /**
  * Shared login helper for /discovery E2E specs.
  *
- * audit-2026-05-07 maintainability finding
- * (e2e/discovery-sparkline-regression.spec.ts:64:maintainability):
- * extracted from three near-identical copies that had drifted on
- * timeout (15000 in sparkline spec vs 10000 in prefs-isolation spec)
- * and lived inline in discovery-hide-examples-default. Any future
- * change to the login form selectors or post-login redirect target
- * now happens in one place.
+ * audit-2026-05-07 maintainability finding (duplicate-login-helper in
+ * the discovery-* specs): extracted from three near-identical copies
+ * that had drifted on timeout (15000 in sparkline spec vs 10000 in
+ * prefs-isolation spec) and lived inline in
+ * discovery-hide-examples-default. Any future change to the login form
+ * selectors or post-login redirect target now happens in one place.
  */
 import type { Page } from "@playwright/test";
 
