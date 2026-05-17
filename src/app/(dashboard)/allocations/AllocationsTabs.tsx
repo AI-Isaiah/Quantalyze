@@ -577,10 +577,10 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
             type="button"
             onClick={() => {
               // Route to Overview where the widget picker is mounted, then
-              // dispatch via the retry-on-three-ticks helper so the event
-              // reaches AllocationDashboardV2's listener even when the
-              // tab change commit takes longer than one microtask
-              // (audit-2026-05-07 H-1187 / H-1190 / H-1191).
+              // dispatch via the helper. The helper handles the microtask /
+              // 100ms safety-net race that audit-2026-05-07 H-1187 / H-1190
+              // / H-1191 flagged: AllocationDashboardV2's listener mounts
+              // on the commit of the tab change, not before.
               const wasAlreadyOnOverview = activeTab === "overview";
               changeTab("overview");
               dispatchWidgetPicker(wasAlreadyOnOverview);
