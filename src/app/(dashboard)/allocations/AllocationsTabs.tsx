@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import {
+  memo,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
@@ -26,6 +32,18 @@ function warnAudit(tag: string, detail: Record<string, unknown> = {}): void {
   if (typeof console === "undefined") return;
   console.warn(`[AllocationsTabs] ${tag}`, detail);
 }
+
+// audit-2026-05-07 cluster P (M-0043, M-1043 — performance c8) — wrap
+// AllocationDashboardV2 in React.memo so identity-equal payloads short-
+// circuit. Today `<AllocationDashboardV2 {...props} />` receives a fresh
+// props OBJECT every parent render (the 30s router.refresh ticks the
+// reference) — memo with React's default shallow compare doesn't help
+// because spreading creates new identities, but memo + a stable payload
+// reference DOES eliminate the cascade. We can't enforce stable identity
+// from inside this shell (the parent server component owns it) so the
+// memo here is a defensive baseline that costs nothing today and unlocks
+// the win the moment a parent stabilises the payload reference.
+const MemoAllocationDashboardV2 = memo(AllocationDashboardV2);
 
 // Phase A6 — Holdings / Outcomes / Mandate / Risk tab panels lazy-load via
 // next/dynamic with ssr: false. Together they pull in HoldingsTable +
@@ -672,7 +690,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
         aria-labelledby="tab-overview"
         hidden={activeTab !== "overview"}
       >
-        {activeTab === "overview" && <AllocationDashboardV2 {...props} />}
+        {activeTab === "overview" && <MemoAllocationDashboardV2 {...props} />}
       </div>
       <div
         role="tabpanel"
