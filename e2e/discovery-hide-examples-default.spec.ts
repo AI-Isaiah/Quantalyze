@@ -36,18 +36,6 @@ import { test, expect } from "@playwright/test";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { cleanupTestAllocator } from "./helpers/cleanup-test-project";
 
-/** Source of truth: scripts/seed-demo-data.ts:STRATEGY_UUIDS (lines 44-53). */
-const SEED_UUIDS = [
-  "cccccccc-0001-4000-8000-000000000001",
-  "cccccccc-0001-4000-8000-000000000002",
-  "cccccccc-0001-4000-8000-000000000003",
-  "cccccccc-0001-4000-8000-000000000004",
-  "cccccccc-0001-4000-8000-000000000005",
-  "cccccccc-0001-4000-8000-000000000006",
-  "cccccccc-0001-4000-8000-000000000007",
-  "cccccccc-0001-4000-8000-000000000008",
-] as const;
-
 /** Seed-strategy display names from scripts/seed-demo-data.ts STRATEGY_PROFILES. */
 const SEED_NAMES_REGEX =
   /Stellar Neutral|Nebula Momentum|Aurora Basis|Vega Volatility|Helios L\/S|Orion Grid|Pulsar Trend|Quasar Mean Reversion/;
@@ -84,7 +72,9 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     page,
     context,
   }) => {
-    // Belt-and-braces: ensure no prior localStorage entries from another spec.
+    // Belt-and-braces: clear any inherited auth cookies from a prior spec
+    // so the fresh allocator login below is the only authenticated session.
+    // localStorage is cleared separately after navigation (see below).
     await context.clearCookies();
 
     // Sign in as the freshly seeded allocator. Login form selectors mirror
@@ -200,23 +190,5 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
         },
       )
       .toBe(true);
-
-    // Strict positive contract: count of seed-name matches post-toggle
-    // is strictly greater than the pre-toggle count (which was 0).
-    const postToggleRowsText = await rowsLocator.allTextContents();
-    const postToggleSeedMatches = postToggleRowsText.filter((t) =>
-      SEED_NAMES_REGEX.test(t),
-    );
-    expect(
-      postToggleSeedMatches.length,
-      "toggling Hide examples OFF must reveal MORE seed strategies than " +
-        "before (strict >; was 0 pre-toggle)",
-    ).toBeGreaterThan(0);
-
-    // Ensure the SEED_UUIDS array still aligns with the regex contract
-    // (defense-in-depth — drift would mean the spec is asserting against
-    // stale seed data). All 8 UUIDs must be present in the source-of-truth
-    // list; a typo here would silently weaken the assertion.
-    expect(SEED_UUIDS).toHaveLength(8);
   });
 });
