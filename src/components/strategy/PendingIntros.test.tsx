@@ -204,6 +204,85 @@ describe("PendingIntros — Audit C-0135/C-0136 server-route refactor", () => {
     expect(refreshMock).not.toHaveBeenCalled();
   });
 
+  // Red-team 2026-05-17 (red-team:double-click-race, HIGH conf 8): a
+  // double-click within the same render tick used to fire TWO POSTs to
+  // /api/intro-response because `disabled={loading === r.id}` flipped
+  // async via setState — both clicks saw loading=null and both passed.
+  // The synchronous useRef-backed in-flight gate inside handleRespond
+  // now blocks the second entry before fetch(). This test fires two
+  // synchronous fireEvent.click()s and asserts only ONE fetch lands.
+  it("does NOT double-fire on a double-click within the same render tick (useRef sync gate)", async () => {
+    // Resolve slowly so the first call is still in-flight when the
+    // second click fires.
+    let resolveFirst: (r: Response) => void = () => undefined;
+    const firstPromise = new Promise<Response>((res) => {
+      resolveFirst = res;
+    });
+    fetchMock.mockReturnValueOnce(firstPromise as unknown as Promise<Response>);
+    render(<PendingIntros requests={[REQUEST]} />);
+    const button = screen.getByRole("button", { name: /accept/i });
+    // Two synchronous clicks — no awaits in between. The async setState
+    // for `loading` has NOT flushed yet between these two events.
+    fireEvent.click(button);
+    fireEvent.click(button);
+    // Only ONE fetch should have been issued — the synchronous useRef
+    // gate inside handleRespond rejected the second entry.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Resolve the in-flight POST so the test cleans up.
+    await act(async () => {
+      resolveFirst({ ok: true, status: 200 } as Response);
+      await firstPromise;
+    });
+    await waitFor(() => expect(refreshMock).toHaveBeenCalledTimes(1));
+  });
+
+  // Red-team 2026-05-17 (red-team:loading-flag-released-too-early, MED
+  // conf 8): on a !res.ok response, the error copy must render in the
+  // SAME paint as the button re-enable. The previous order called
+  // setLoading(null) BEFORE setError, leaving a 100-200ms window where
+  // the button was clickable but no error text was on screen — a
+  // frustrated manager could double-click into a still-pending error
+  // render. Asserting that the error text is present by the time the
+  // button is re-enabled pins the new ordering.
+  it("renders the error banner in the same paint as the button re-enable (no flag-released-too-early gap)", async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 500 } as Response);
+    render(<PendingIntros requests={[REQUEST]} />);
+    const button = screen.getByRole("button", { name: /accept/i });
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    // By the time the error banner is in the DOM, the button must be
+    // re-enabled (loading flag released). If the new ordering regressed
+    // back to setLoading(null) BEFORE setError, the banner would render
+    // a paint later — this assertion holds because we wait on the
+    // banner first.
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Failed to update request\. Please try again\./i),
+      ).toBeDefined(),
+    );
+    const acceptAfter = screen.getByRole("button", { name: /accept/i });
+    expect((acceptAfter as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  // Red-team 2026-05-17: a 409 from the server (TOCTOU close — request
+  // already resolved elsewhere) should surface the permission-style
+  // refresh copy, NOT the generic "try again" copy. Refresh is what
+  // the manager needs because the row is no longer pending.
+  it("surfaces the refresh-style copy on a 409 (TOCTOU: resolved elsewhere)", async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 409 } as Response);
+    render(<PendingIntros requests={[REQUEST]} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /accept/i }));
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByText(/your account may not have permission/i),
+      ).toBeDefined(),
+    );
+    expect(refreshMock).not.toHaveBeenCalled();
+  });
+
   // Source-grep regression locks live in
   // src/__tests__/critical-regressions.test.ts under the
   // [AUDIT-2026-05-07 C-0135 + C-0136] block — see that file for the
