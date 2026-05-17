@@ -185,9 +185,10 @@ def _bucket_8h(ts: datetime) -> str:
     Windows: [00:00, 08:00), [08:00, 16:00), [16:00, 24:00) UTC.
     Returns an ISO-like string suitable for embedding in a match_key.
 
-    Kept for the OKX dedup path (archive + recent endpoints overlap on
-    the same event). For match_key construction prefer
-    :func:`_bucket_for_exchange`.
+    Thin wrapper retained so the boundary-regression test
+    ``TestBucket8hBoundary`` can pin the 8h bucket arithmetic without
+    importing the per-exchange dispatcher. For match_key construction
+    prefer :func:`_bucket_for_exchange`.
     """
     return _bucket_for_exchange(ts, hours=8)
 

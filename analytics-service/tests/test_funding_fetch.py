@@ -452,7 +452,6 @@ class TestOKXArchiveEndpoint:
     async def test_okx_calls_archive_endpoint_for_old_since(self) -> None:
         """since_ms older than 90d → archive endpoint must be awaited."""
         from datetime import datetime, timezone
-        import time
 
         old_since_ms = int(
             (datetime.now(timezone.utc).timestamp() - 100 * 86400) * 1000
