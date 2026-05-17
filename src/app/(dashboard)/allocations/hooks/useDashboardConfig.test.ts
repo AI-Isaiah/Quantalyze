@@ -364,35 +364,58 @@ describe("useDashboardConfigV2", () => {
   });
 
   it("persist effect: addWidget writes the new config to localStorage[STORAGE_KEY]", () => {
-    const { result } = renderHook(() => useDashboardConfigV2());
+    vi.useFakeTimers();
+    try {
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
 
-    act(() => {
-      result.current.addWidget("correlation-matrix");
-    });
+      act(() => {
+        result.current.addWidget("correlation-matrix");
+      });
+      // audit-2026-05-07 M-0126/M-0134 — persist now uses a trailing debounce
+      // so the timer must be drained before the assertion. The unmount-flush
+      // path ALSO drains the pending write; either advancing timers or
+      // unmounting works. Advance first to assert the debounce window is the
+      // happy path (drag-coalesce contract), then unmount.
+      act(() => {
+        vi.runAllTimers();
+      });
 
-    const stored = store.get(STORAGE_KEY);
-    expect(stored).toBeDefined();
-    const parsed = JSON.parse(stored!);
-    expect(parsed.tiles.some((t: { k: string }) => t.k === "correlation-matrix")).toBe(true);
-    expect(parsed.layoutVersion).toBe(LAYOUT_VERSION);
+      const stored = store.get(STORAGE_KEY);
+      expect(stored).toBeDefined();
+      const parsed = JSON.parse(stored!);
+      expect(parsed.tiles.some((t: { k: string }) => t.k === "correlation-matrix")).toBe(true);
+      expect(parsed.layoutVersion).toBe(LAYOUT_VERSION);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("single storage key invariant: V2 mutations NEVER write to a -v2 suffix key", () => {
-    const { result } = renderHook(() => useDashboardConfigV2());
+    vi.useFakeTimers();
+    try {
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
 
-    act(() => {
-      result.current.addWidget("correlation-matrix");
-      result.current.removeWidget(keyOf("bridge"));
-      result.current.resizeWidget(keyOf("kpi"), 2);
-    });
+      act(() => {
+        result.current.addWidget("correlation-matrix");
+        result.current.removeWidget(keyOf("bridge"));
+        result.current.resizeWidget(keyOf("kpi"), 2);
+      });
+      act(() => {
+        vi.runAllTimers();
+      });
 
-    // The V2 state lives at the canonical key.
-    expect(store.get(STORAGE_KEY)).toBeDefined();
-    // No parallel suffix key is ever touched. We construct candidate keys
-    // from STORAGE_KEY + suffix so the source file doesn't carry a literal
-    // forbidden-key string (D-02 — single source of truth, no suffix split).
-    for (const suffix of ["-v2", "-legacy", "-V2"]) {
-      expect(store.get(`${STORAGE_KEY}${suffix}`)).toBeUndefined();
+      // The V2 state lives at the canonical key.
+      expect(store.get(STORAGE_KEY)).toBeDefined();
+      // No parallel suffix key is ever touched. We construct candidate keys
+      // from STORAGE_KEY + suffix so the source file doesn't carry a literal
+      // forbidden-key string (D-02 — single source of truth, no suffix split).
+      for (const suffix of ["-v2", "-legacy", "-V2"]) {
+        expect(store.get(`${STORAGE_KEY}${suffix}`)).toBeUndefined();
+      }
+      unmount();
+    } finally {
+      vi.useRealTimers();
     }
   });
 
@@ -417,15 +440,24 @@ describe("useDashboardConfigV2", () => {
   });
 
   it("setTimeframe updates the timeframe and persists", () => {
-    const { result } = renderHook(() => useDashboardConfigV2());
+    vi.useFakeTimers();
+    try {
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
 
-    act(() => {
-      result.current.setTimeframe("3M");
-    });
+      act(() => {
+        result.current.setTimeframe("3M");
+      });
+      act(() => {
+        vi.runAllTimers();
+      });
 
-    expect(result.current.config.timeframe).toBe("3M");
-    const stored = JSON.parse(store.get(STORAGE_KEY)!);
-    expect(stored.timeframe).toBe("3M");
+      expect(result.current.config.timeframe).toBe("3M");
+      const stored = JSON.parse(store.get(STORAGE_KEY)!);
+      expect(stored.timeframe).toBe("3M");
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("resetToDefaults restores the v4 DEFAULT_LAYOUT (normalized)", () => {
@@ -538,16 +570,22 @@ describe("dual-hook ping-pong (Phase A3 regression)", () => {
   });
 
   it("toggling the flag 5x preserves the V2 blob the user customised", () => {
-    // User on V2 customises layout → real persist call.
+    vi.useFakeTimers();
+    // User on V2 customises layout → real persist call (debounced; drain
+    // via vi.runAllTimers before reading the persisted blob).
     const { result: v2, unmount: unmountV2 } = renderHook(() =>
       useDashboardConfigV2(),
     );
     act(() => {
       v2.current.addWidget("correlation-matrix");
     });
+    act(() => {
+      vi.runAllTimers();
+    });
     const customisedBlob = store.get(STORAGE_KEY);
     expect(customisedBlob).toBeDefined();
     unmountV2();
+    vi.useRealTimers();
 
     // Five toggle cycles: V1 mount → unmount → V2 mount → unmount → ...
     for (let i = 0; i < 5; i++) {
@@ -655,56 +693,65 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
   });
 
   it("persistV2: localStorage.setItem throwing QuotaExceededError surfaces a distinct quota message", () => {
-    localStorageMock.setItem.mockImplementationOnce(() => {
-      const err = new DOMException(
-        "quota",
-        "QuotaExceededError",
-      );
-      throw err;
-    });
+    vi.useFakeTimers();
+    try {
+      localStorageMock.setItem.mockImplementationOnce(() => {
+        const err = new DOMException(
+          "quota",
+          "QuotaExceededError",
+        );
+        throw err;
+      });
 
-    const { result } = renderHook(() => useDashboardConfigV2());
-    // First mutation triggers the persist effect (hasMutated.current → true,
-    // then next render flips it; setTimeframe forces a re-render via
-    // setConfig).
-    act(() => {
-      result.current.setTimeframe("1M");
-    });
-    // The persist runs in the second effect pass, so trigger another
-    // mutation to push the change through.
-    act(() => {
-      result.current.setTimeframe("3M");
-    });
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
+      act(() => {
+        result.current.setTimeframe("1M");
+      });
+      // audit-2026-05-07 M-0126/M-0134 — drain the debounce timer to fire
+      // the (failing) persist call so warnSpy can capture the quota message.
+      act(() => {
+        vi.runAllTimers();
+      });
 
-    expect(
-      warnSpy.mock.calls.some(
-        (c: unknown[]) =>
-          typeof c[0] === "string" && c[0].includes("quota exceeded"),
-      ),
-    ).toBe(true);
+      expect(
+        warnSpy.mock.calls.some(
+          (c: unknown[]) =>
+            typeof c[0] === "string" && c[0].includes("quota exceeded"),
+        ),
+      ).toBe(true);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("persistV2: a generic setItem failure uses the non-quota copy", () => {
-    localStorageMock.setItem.mockImplementation(() => {
-      throw new Error("storage unavailable");
-    });
+    vi.useFakeTimers();
+    try {
+      localStorageMock.setItem.mockImplementation(() => {
+        throw new Error("storage unavailable");
+      });
 
-    const { result } = renderHook(() => useDashboardConfigV2());
-    act(() => {
-      result.current.setTimeframe("1M");
-    });
-    act(() => {
-      result.current.setTimeframe("3M");
-    });
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
+      act(() => {
+        result.current.setTimeframe("1M");
+      });
+      act(() => {
+        vi.runAllTimers();
+      });
 
-    expect(
-      warnSpy.mock.calls.some(
-        (c: unknown[]) =>
-          typeof c[0] === "string" &&
-          c[0].includes("localStorage write failed") &&
-          !c[0].includes("quota"),
-      ),
-    ).toBe(true);
+      expect(
+        warnSpy.mock.calls.some(
+          (c: unknown[]) =>
+            typeof c[0] === "string" &&
+            c[0].includes("localStorage write failed") &&
+            !c[0].includes("quota"),
+        ),
+      ).toBe(true);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("loadLegacyConfig: corrupt JSON triggers console.warn (legacy hook parity with V2)", () => {
@@ -780,6 +827,16 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
     store.clear();
     sessionStore.clear();
     vi.clearAllMocks();
+    // Restore the default localStorage mock implementations — the prior
+    // describe block (silent-failure-hunter) installs throw-on-setItem
+    // implementations via mockImplementation that vi.clearAllMocks does
+    // NOT reset (clearAllMocks only resets call history). Without this
+    // reseat, every test below inherits a throwing setItem and the
+    // debounced persist never lands its write.
+    localStorageMock.setItem.mockImplementation((key: string, value: string) => {
+      store.set(key, value);
+    });
+    localStorageMock.getItem.mockImplementation((key: string) => store.get(key) ?? null);
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
@@ -890,6 +947,86 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
     const kpi = result.current.config.tiles.find((t) => t.k === "kpi-strip");
     expect(corr?.config).toBeUndefined();
     expect(kpi?.config).toEqual({ foo: "bar" });
+  });
+
+  it("debounce: 5 rapid resizeWidget calls coalesce into a single localStorage.setItem (M-0126/M-0134)", () => {
+    vi.useFakeTimers();
+    try {
+      // Seed a known v4 blob so the hook loads cleanly and we can count
+      // setItem calls AFTER the load path (which itself never writes).
+      store.set(
+        STORAGE_KEY,
+        JSON.stringify({
+          tiles: [{ k: "kpi-strip", w: 1 }],
+          timeframe: "YTD",
+          layoutVersion: LAYOUT_VERSION,
+        }),
+      );
+
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
+      localStorageMock.setItem.mockClear();
+
+      // Simulate a resize-drag: pointermove fires onResize at 60Hz. Five
+      // synchronous setConfig calls within one debounce window must produce
+      // exactly one write, not five.
+      act(() => {
+        result.current.resizeWidget("kpi-strip", 2);
+        result.current.resizeWidget("kpi-strip", 3);
+        result.current.resizeWidget("kpi-strip", 4);
+        result.current.resizeWidget("kpi-strip", 3);
+        result.current.resizeWidget("kpi-strip", 2);
+      });
+      // Before the debounce drains: NO writes have hit localStorage yet.
+      expect(localStorageMock.setItem).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.runAllTimers();
+      });
+
+      // One write, carrying the LAST mutation's value (w=2).
+      expect(localStorageMock.setItem).toHaveBeenCalledTimes(1);
+      const stored = JSON.parse(store.get(STORAGE_KEY)!);
+      const kpi = stored.tiles.find((t: { k: string }) => t.k === "kpi-strip");
+      expect(kpi.w).toBe(2);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("debounce: unmount before timer fires still flushes the pending write (M-0126/M-0134)", () => {
+    vi.useFakeTimers();
+    try {
+      store.set(
+        STORAGE_KEY,
+        JSON.stringify({
+          tiles: [{ k: "kpi-strip", w: 1 }],
+          timeframe: "YTD",
+          layoutVersion: LAYOUT_VERSION,
+        }),
+      );
+
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
+      localStorageMock.setItem.mockClear();
+
+      act(() => {
+        result.current.resizeWidget("kpi-strip", 3);
+      });
+      // Pending — debounce window has not elapsed.
+      expect(localStorageMock.setItem).not.toHaveBeenCalled();
+
+      // Tab close / route change before the timer fires: the cleanup
+      // effect MUST flush the pending mutation so the user's resize is
+      // not silently lost.
+      unmount();
+
+      expect(localStorageMock.setItem).toHaveBeenCalledTimes(1);
+      const stored = JSON.parse(store.get(STORAGE_KEY)!);
+      const kpi = stored.tiles.find((t: { k: string }) => t.k === "kpi-strip");
+      expect(kpi.w).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("coerces a non-string `timeframe` to the 'YTD' default at load time (M-0127)", () => {

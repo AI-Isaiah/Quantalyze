@@ -593,6 +593,18 @@ export interface UseDashboardConfigV2Return {
   resetToDefaults: () => void;
 }
 
+/**
+ * audit-2026-05-07 (M-0126 / M-0134 c8-9) — trailing-debounce delay for the
+ * V2 persist effect. Pre-fix every onLayoutChange / resize step / move /
+ * timeframe flip synchronously JSON.stringified the entire config and called
+ * localStorage.setItem on the main thread. Resize-drag pointer events fire
+ * dozens of times per second; coalescing them into a single write at idle
+ * (~150ms after the last mutation) cuts main-thread time without losing
+ * data on tab-close: the cleanup flushes pending writes via the unmount
+ * path AND a beforeunload handler.
+ */
+const PERSIST_DEBOUNCE_MS = 150;
+
 export function useDashboardConfigV2(): UseDashboardConfigV2Return {
   const [config, setConfig] = useState<DashboardConfig>(loadV2Config);
 
@@ -603,13 +615,54 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
   // first run; user-driven mutations (addWidget / resizeWidget / etc.)
   // flip the ref and write normally.
   const hasMutated = useRef(false);
+  // audit-2026-05-07 (M-0126 / M-0134) — `pendingConfigRef` always holds
+  // the latest config queued for persistence. The debounced setTimeout
+  // callback reads it (NOT a stale closure), and the unmount-flush /
+  // beforeunload-flush paths also read it so a tab-close mid-debounce
+  // persists the user's freshest mutation.
+  const pendingConfigRef = useRef(config);
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     if (!hasMutated.current) {
       hasMutated.current = true;
       return;
     }
-    persistV2(config);
+    // Update the pending snapshot before (re)scheduling so a flush
+    // triggered between this effect running and the timer firing writes
+    // the freshest value.
+    pendingConfigRef.current = config;
+    if (persistTimerRef.current !== null) {
+      clearTimeout(persistTimerRef.current);
+    }
+    persistTimerRef.current = setTimeout(() => {
+      persistTimerRef.current = null;
+      persistV2(pendingConfigRef.current);
+    }, PERSIST_DEBOUNCE_MS);
   }, [config]);
+
+  // Final-flush effect: on unmount OR before the tab unloads, drain any
+  // pending debounced write so a user who closes the tab mid-drag still
+  // gets their preference persisted. Without this, a 150ms debounce could
+  // silently lose the last mutation.
+  useEffect(() => {
+    function flush() {
+      if (persistTimerRef.current !== null) {
+        clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+        persistV2(pendingConfigRef.current);
+      }
+    }
+    if (typeof window !== "undefined") {
+      window.addEventListener("beforeunload", flush);
+    }
+    return () => {
+      if (typeof window !== "undefined") {
+        window.removeEventListener("beforeunload", flush);
+      }
+      flush();
+    };
+  }, []);
 
   const addWidget = useCallback((k: string) => {
     setConfig((prev) => {
