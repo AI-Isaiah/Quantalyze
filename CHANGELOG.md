@@ -7,6 +7,29 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.27] - 2026-05-16
+
+**PR #189 fix-content retroactive follow-up — close 7 HIGH + 13 MED specialist findings on the allocator dashboard fix content from PR #189.** The retroactive specialist suite (code-reviewer, security, performance, silent-failure-hunter, type-design-analyzer + red-team) re-audited the FIX CONTENT of PR #189 against PR #189's stated closures and found multiple new issues introduced by the fix itself plus surfaces the original fix left silently open. Each finding above threshold (CRITICAL + HIGH>=7 + MED>=8 + LOW>=9) is closed atomically in this PR; 5 MED/7 + 9 LOW + 1 INFO sit below threshold and are listed in `.review/follow-up-pr-findings.md`. One finding (H8 — `border-warning`/`bg-warning` Tailwind tokens) verified as false positive — `warning` IS a registered `@theme inline` token used by existing code; no change.
+
+Rebased onto `origin/main` (0.22.40.26) after PRs #193/#194/#196/#197/#191 advanced main past this PR's base — version re-bumped from 0.22.40.23 to 0.22.40.27 to claim a clean slot.
+
+### Changed
+- `src/app/(dashboard)/allocations/AllocationDashboardV2.tsx`: recovery banner hoisted to a const above the EmptyState early-return so empty-holdings allocators see the recovery breadcrumb (H1). `recoveryReason` useState now imports the named `DashboardRecoveryReason` type (M12). New third widget_viewed dedup reset effect keyed on `[holdingsEmpty, hasSyncing]` so empty->populated transitions get a fresh dedup (M6).
+- `src/app/(dashboard)/allocations/widgets/outcomes/OutcomesWidget.tsx`: curve-fetch error rendered ONCE at panel level above the 3-col grid (replaces 3x duplicated per-column alert) and surfaces regardless of per-window pending state (H2 + M17). Error state reset to null at the start of each effect run (M2).
+- `src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx`: y-tick walker safety cap at 50 ticks (H3). Guard CUSTOM range startEpoch/endEpoch against NaN (M1). Malformed-date breadcrumb hoisted into parseISO itself with module-scoped dedup (M8). EquityChartWidget.periodReturn guards `last` against NaN so chip can never render "NaN%" (M18).
+- `src/app/(dashboard)/allocations/hooks/useDashboardConfig.ts`: preserve the user's explicit empty-tiles layout instead of overwriting with DEFAULT_LAYOUT (H4). Export `DashboardRecoveryReason` (M12).
+- `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx`: client `ScenarioCommitDiff` discriminated union aligned to Zod wire contract — `BridgeRecommendedDiff.holding_ref` required, `VoluntaryModifyDiff` accepts `percent_allocated`, `effective_date?: string` added, `VoluntaryRemoveDiff.rejection_reason` narrowed to `RejectionReason` enum, `note` to `string | null | undefined` (H5). New `ComposerProducedDiff` narrower union for producer seam (H6).
+- `src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.tsx`: `buildSubmitDiffs` rewritten as exhaustive switch with `assertNever` default (M7). `SubmitResponse` shape validated before lifting into state (M11). `PerRowState.rejection_reason` narrowed to `RejectionReason` (M13).
+- `src/app/(dashboard)/allocations/lib/types.ts`: WidgetProps.data:any annotated with JSDoc explaining deferral rationale (M14).
+
+### Added
+- `src/app/(dashboard)/allocations/AllocationDashboardV2.retro-audit.test.tsx`: per-test override hook for `consumeDashboardRecoveryFlag` + 7 new tests covering each banner-reason branch (populated + EmptyState), Dismiss button wiring, and no-reason control (H7). New behavior test for H-1197 IntersectionObserver re-attach with mocked synchronous IO (M3). BASE_PAYLOAD now `satisfies Partial<MyAllocationDashboardPayload>` with `api_key_id` field added; all 4 `as any` casts replaced with explicit `as unknown as MyAllocationDashboardPayload` (M15). 13/13 tests pass.
+
+### Notes
+- Visual-fidelity preserved per CLAUDE.md `feedback_dashboard_parity_visual_fidelity`: only logic/data/wiring changes; H2 hoist is a net visual REDUCTION (1 alert vs 3). H1 only changes banner rendering position.
+- 5 MED/7 + 9 LOW + 1 INFO findings deferred per spec to `.review/follow-up-pr-findings.md`.
+- Full vitest suite green: 3689 passed, 228 skipped, 0 failed. `npm run typecheck` PASS. ESLint 0 errors.
+
 ## [0.22.40.26] - 2026-05-16
 
 **audit-2026-05-07 — `src/lib/types.ts` full type-system tightening (2 CRITICAL + 14 HIGH + 12 MED closed).** This PR tightens the TypeScript types in `src/lib/types.ts` (imported by 50+ files) using the same five-stage pipeline that closed the other audit-2026-05-07 worktrees: fix-impl → comment-analyzer → simplifier → 7-specialist inline review → red-team. The work eliminates an entire class of bugs where the type system promised more than the runtime delivered (and vice versa).

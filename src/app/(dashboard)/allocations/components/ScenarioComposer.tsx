@@ -107,23 +107,40 @@ const SYNTHETIC_BASELINE_AUM = 1;
  * `kind` lets the consumer narrow exhaustively and surfaces missing-
  * field bugs at the type seam instead of at runtime.
  *
- * Field-level required-ness mirrors the existing JSDoc that ScenarioCommitDrawer
- * already documents. Optional fields (rejection_reason, percent_allocated,
- * note) remain optional because they are filled in by the drawer's per-row
- * inputs AFTER the diff is constructed; the composer hands the partial diff
- * to the drawer where the user completes it.
+ * pr189-followup H5 (type-design-analyzer HIGH/9) — fields aligned to the
+ * Zod wire contract at src/app/api/allocator/scenario/commit/route.ts so
+ * a diff that type-checks client-side WILL pass server validation:
+ *   - BridgeRecommendedDiff: holding_ref is REQUIRED (NOT NULL on the SQL
+ *     side per migration 20260516160600).
+ *   - VoluntaryModifyDiff: percent_allocated added as the canonical
+ *     percent encoding alongside the legacy new_weight (Migration 128
+ *     removed the SQL-side fallback; the route accepts either).
+ *   - VoluntaryRemoveDiff: rejection_reason narrowed from `string?` to
+ *     `RejectionReason` (the enum exported from @/lib/bridge-outcome-schema)
+ *     so a non-enum value can't slip through the type seam.
+ *   - effective_date added to all members (z.string().date().optional()).
+ *   - note narrowed to `string | null | undefined` matching z.nullish().
+ *
+ * Optional fields (rejection_reason, percent_allocated, note) remain
+ * optional because they are filled in by the drawer's per-row inputs
+ * AFTER the diff is constructed; the composer hands the partial diff to
+ * the drawer where the user completes it.
  */
+import type { RejectionReason } from "@/lib/bridge-outcome-schema";
+
 interface ScenarioCommitDiffBase {
   size_at_decision_usd: number;
+  /** ISO date (YYYY-MM-DD). Optional — server defaults to now() when absent. */
+  effective_date?: string;
   /** Optional free-text note (max 2000 chars). Per-row drawer input. */
-  note?: string;
+  note?: string | null;
 }
 
 export interface VoluntaryRemoveDiff extends ScenarioCommitDiffBase {
   kind: "voluntary_remove";
   holding_ref: string;
   /** Required for voluntary_remove. Collected by ScenarioCommitDrawer. */
-  rejection_reason?: string;
+  rejection_reason?: RejectionReason;
 }
 
 export interface VoluntaryAddDiff extends ScenarioCommitDiffBase {
@@ -136,11 +153,18 @@ export interface VoluntaryAddDiff extends ScenarioCommitDiffBase {
 export interface VoluntaryModifyDiff extends ScenarioCommitDiffBase {
   kind: "voluntary_modify";
   holding_ref: string;
-  new_weight: number;
+  /** Legacy 0..1 fraction. Server-side accepts either this OR percent_allocated. */
+  new_weight?: number;
+  /** Canonical 0..100 percent. Post-Migration-128 the RPC reads ONLY this field;
+   *  the route imperatively normalises new_weight → percent_allocated when needed. */
+  percent_allocated?: number;
 }
 
 export interface BridgeRecommendedDiff extends ScenarioCommitDiffBase {
   kind: "bridge_recommended";
+  /** REQUIRED — the holding being substituted out. NOT NULL on the SQL side
+   *  per migration 20260516160600; without it the route rejects with 400. */
+  holding_ref: string;
   strategy_id: string;
   /** Required for bridge_recommended (0..100). Collected by ScenarioCommitDrawer. */
   percent_allocated?: number;
@@ -151,6 +175,26 @@ export type ScenarioCommitDiff =
   | VoluntaryAddDiff
   | VoluntaryModifyDiff
   | BridgeRecommendedDiff;
+
+/**
+ * pr189-followup H6 (type-design-analyzer HIGH/8) — narrower union for the
+ * composer→drawer hand-off. `handleCommit` only constructs the two kinds
+ * below today (voluntary_remove + voluntary_add); the wider four-arm
+ * `ScenarioCommitDiff` is the WIRE contract for the server, not the
+ * producer contract for the composer.
+ *
+ * Exporting both makes the producer/consumer seam explicit: a future
+ * producer that wants to construct `voluntary_modify` or `bridge_recommended`
+ * (currently unreachable from this composer) must consciously widen the
+ * return type, surfacing the missing percent_allocated / holding_ref
+ * normalisation contract at the type level.
+ *
+ * The drawer still consumes the full `ScenarioCommitDiff[]` because it
+ * has to render and submit any kind (including future kinds wired by
+ * other producers). The seam is producer-side narrowness, not consumer-
+ * side narrowness.
+ */
+export type ComposerProducedDiff = VoluntaryRemoveDiff | VoluntaryAddDiff;
 
 export interface ScenarioComposerProps {
   payload: MyAllocationDashboardPayload;
@@ -530,7 +574,12 @@ export function ScenarioComposer({
   // wiring with the real ScenarioCommitDrawer.
   // -------------------------------------------------------------------------
   function handleCommit() {
-    const diffs: ScenarioCommitDiff[] = [];
+    // pr189-followup H6 — narrow to ComposerProducedDiff at the producer
+    // seam. Today only voluntary_remove + voluntary_add are constructed
+    // here; if a future change attempts voluntary_modify / bridge_recommended
+    // construction in this function, the type will reject it and surface
+    // the missing-kind contract at the seam.
+    const diffs: ComposerProducedDiff[] = [];
     for (const [scopeRef, on] of Object.entries(scenario.draft.toggleByScopeRef)) {
       if (on) continue;
       if (!scopeRef.startsWith("holding:")) continue;

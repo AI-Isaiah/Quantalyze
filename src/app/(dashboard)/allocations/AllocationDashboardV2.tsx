@@ -13,6 +13,7 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import {
   useDashboardConfigV2,
   consumeDashboardRecoveryFlag,
+  type DashboardRecoveryReason,
 } from "./hooks/useDashboardConfig";
 import { WidgetGrid } from "./components/WidgetGrid";
 import { WidgetPicker } from "./components/WidgetPicker";
@@ -92,9 +93,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   // non-blocking dismissible banner so the user sees that their saved
   // layout was reset; without this consumer the C-0332..0335 fix was
   // logic-only and never reached the user-facing surface.
-  const [recoveryReason, setRecoveryReason] = useState<
-    "parse_failed" | "version_reset" | "legacy_in_v2_blob" | null
-  >(null);
+  // pr189-followup M12 (type-design-analyzer MED/8) — use the exported
+  // DashboardRecoveryReason union instead of duplicating the literal.
+  const [recoveryReason, setRecoveryReason] = useState<DashboardRecoveryReason | null>(null);
   useEffect(() => {
     const reason = consumeDashboardRecoveryFlag();
     // Mount-only drain of an external one-shot sessionStorage flag —
@@ -232,6 +233,31 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     }
   }, [portfolio?.id]);
 
+  // pr189-followup M6 (silent-failure-hunter MED/8) — the previous two
+  // reset effects covered the showOutcomes toggle and portfolio.id
+  // switch but missed the empty→populated transition. The IntersectionObserver
+  // effect below re-runs on [holdingsEmpty, hasSyncing] (H-1197 fix) and
+  // re-observes tiles that mount after the EmptyState short-circuit
+  // releases, but the dedup Set is per-component-instance and still holds
+  // any ids from before the transition. After delete-key-and-reconnect
+  // within the same session, the first widget_viewed for each tile is
+  // suppressed. Clear the dedup when the observer re-attaches so each
+  // populated mount gets a fresh slate. Uses the same null-baseline
+  // ref pattern as the adjacent effects so the first observation
+  // doesn't trigger a no-op reset.
+  const lastHoldingsGateRef = useRef<string | null>(null);
+  useEffect(() => {
+    const next = `${holdingsEmpty ? "1" : "0"}:${hasSyncing ? "1" : "0"}`;
+    if (lastHoldingsGateRef.current === null) {
+      lastHoldingsGateRef.current = next;
+      return;
+    }
+    if (lastHoldingsGateRef.current !== next) {
+      lastHoldingsGateRef.current = next;
+      widgetViewsFiredRef.current = new Set();
+    }
+  }, [holdingsEmpty, hasSyncing]);
+
   useEffect(() => {
     if (typeof IntersectionObserver === "undefined") return;
     const root = dashboardContainerRef.current;
@@ -352,11 +378,47 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     [props, config.timeframe],
   );
 
+  // pr189-followup H1 (silent-failure-hunter HIGH/9) — render the recovery
+  // banner ABOVE both render paths so empty-holdings allocators see the
+  // same "saved layout was reset" signal as populated ones. The flag is
+  // consumed on mount (drained from sessionStorage), so without this the
+  // empty-holdings short-circuit silently swallowed the breadcrumb for
+  // exactly the population most likely to hit it (new allocators with no
+  // holdings still picking up a stale-version persisted layout).
+  const recoveryBanner = recoveryReason != null && (
+    <div
+      role="status"
+      data-testid="dashboard-recovery-banner"
+      data-recovery-reason={recoveryReason}
+      className="mt-3 flex items-start justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-4 py-2 text-sm text-text-primary"
+    >
+      <div className="flex items-start gap-2">
+        <span aria-hidden className="font-semibold">Heads up:</span>
+        <span>
+          {recoveryReason === "parse_failed"
+            ? "We couldn't read your saved dashboard layout and reset it to defaults."
+            : recoveryReason === "version_reset"
+              ? "Your saved dashboard layout was from an older version and has been reset to the latest defaults."
+              : "Your saved dashboard layout used a legacy format and has been migrated to the new defaults."}
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={dismissRecoveryBanner}
+        aria-label="Dismiss layout reset notice"
+        className="shrink-0 rounded-md px-2 py-0.5 text-xs font-medium text-text-muted transition-colors hover:bg-warning/20 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+      >
+        Dismiss
+      </button>
+    </div>
+  );
+
   // Phase 07 D-08 short-circuit — must come AFTER all hook calls above so
   // hook-order invariant holds across the empty / non-empty render paths.
   if (holdingsEmpty && !hasSyncing) {
     return (
       <div data-ui-v2-shell="true">
+        {recoveryBanner}
         <EmptyState hasSyncing={false} />
       </div>
     );
@@ -379,33 +441,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         flaggedCount={flaggedHoldings.length}
         className="mt-3 px-1"
       />
-      {recoveryReason != null && (
-        <div
-          role="status"
-          data-testid="dashboard-recovery-banner"
-          data-recovery-reason={recoveryReason}
-          className="mt-3 flex items-start justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-4 py-2 text-sm text-text-primary"
-        >
-          <div className="flex items-start gap-2">
-            <span aria-hidden className="font-semibold">Heads up:</span>
-            <span>
-              {recoveryReason === "parse_failed"
-                ? "We couldn't read your saved dashboard layout and reset it to defaults."
-                : recoveryReason === "version_reset"
-                  ? "Your saved dashboard layout was from an older version and has been reset to the latest defaults."
-                  : "Your saved dashboard layout used a legacy format and has been migrated to the new defaults."}
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={dismissRecoveryBanner}
-            aria-label="Dismiss layout reset notice"
-            className="shrink-0 rounded-md px-2 py-0.5 text-xs font-medium text-text-muted transition-colors hover:bg-warning/20 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
+      {recoveryBanner}
       <div
         ref={dashboardContainerRef}
         className="relative"

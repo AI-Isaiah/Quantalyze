@@ -67,6 +67,19 @@ const LAYOUT_VERSION_LEGACY = 3;
  * exported before the v4 bump. Retained while the legacy hook is dormant;
  * deleted alongside the hook in the follow-up legacy-tree cleanup PR.
  */
+
+// pr189-followup M12 (type-design-analyzer MED/8) — single source of
+// truth for the recovery-reason union. Previously the same closed
+// string-literal union was hand-typed in three places (this function's
+// argument type, consumeDashboardRecoveryFlag's return type, and
+// AllocationDashboardV2's useState). Adding a fourth reason required
+// editing every site with no compile-time pressure to keep them in sync.
+// Exported so consumers import it.
+export type DashboardRecoveryReason =
+  | "parse_failed"
+  | "version_reset"
+  | "legacy_in_v2_blob";
+
 /**
  * Best-effort: mark that the V2 loader recovered from a corrupt or
  * version-mismatched blob so the dashboard can surface a one-time toast.
@@ -74,9 +87,7 @@ const LAYOUT_VERSION_LEGACY = 3;
  * in the same private-mode contexts that produced the corrupt read), but
  * the parent console.warn already reported the underlying error.
  */
-function setRecoveryFlag(
-  reason: "parse_failed" | "version_reset" | "legacy_in_v2_blob",
-): void {
+function setRecoveryFlag(reason: DashboardRecoveryReason): void {
   if (typeof window === "undefined") return;
   try {
     window.sessionStorage.setItem(RECOVERY_FLAG_KEY, reason);
@@ -374,12 +385,12 @@ function loadV2Config(): DashboardConfig {
       // log the corruption case so engineering sees the truncation.
       if (
         !Array.isArray(parsed.tiles) ||
-        parsed.tiles.length === 0 ||
         parsed.tiles.some(looksLikeLegacyTile)
       ) {
         if (Array.isArray(parsed.tiles) && parsed.tiles.some(looksLikeLegacyTile)) {
           setRecoveryFlag("legacy_in_v2_blob");
-        } else if (!Array.isArray(parsed.tiles)) {
+        } else {
+          // !Array.isArray(parsed.tiles)
           if (typeof console !== "undefined") {
             console.warn(
               "[useDashboardConfigV2] persisted tiles is not an array; falling back to defaults",
@@ -388,10 +399,22 @@ function loadV2Config(): DashboardConfig {
           }
           setRecoveryFlag("parse_failed");
         }
-        // parsed.tiles.length === 0 falls through with no flag — that is
-        // the "user removed every widget" intentional state. Not silent
-        // because the user explicitly produced it.
         return defaultV2Config();
+      }
+      // pr189-followup H4 (silent-failure-hunter HIGH/8) — preserve the
+      // user's explicit empty-tiles state instead of silently replacing
+      // it with DEFAULT_LAYOUT on every reload. The previous code path
+      // claimed the empty-array case was "intentional state" but then
+      // overwrote it with defaults, so the user removed every widget,
+      // reloaded, and watched them all come back without warning. The
+      // worst of both worlds: no flag (so the user isn't told their
+      // choice was overridden) AND defaults reset (so the choice IS
+      // silently overridden). Return the parsed config with an empty
+      // tiles array — the dashboard's empty-grid callout already
+      // surfaces "Connect a strategy / add a widget" so the user has
+      // an obvious recovery path without us overriding their state.
+      if (parsed.tiles.length === 0) {
+        return { ...parsed, tiles: [] };
       }
       // Phase 09.1 Plan 05 / D-19 — normalize any persisted short keys to
       // WIDGET_REGISTRY ids on read, so even a hand-edited localStorage
@@ -447,11 +470,7 @@ function persistV2(config: DashboardConfig): void {
  * the dashboard only surfaces the breadcrumb once per tab. Safe to call
  * during render or inside a useEffect.
  */
-export function consumeDashboardRecoveryFlag():
-  | "parse_failed"
-  | "version_reset"
-  | "legacy_in_v2_blob"
-  | null {
+export function consumeDashboardRecoveryFlag(): DashboardRecoveryReason | null {
   if (typeof window === "undefined") return null;
   try {
     const value = window.sessionStorage.getItem(RECOVERY_FLAG_KEY);

@@ -347,6 +347,14 @@ function ExpandedPanel({
     let cancelled = false;
     const controller = new AbortController();
 
+    // pr189-followup M2 (code-reviewer MED/8) — reset error to null at
+    // the start of each effect run so a previously-failed outcome.id
+    // doesn't carry the stale alert into a subsequent successful fetch
+    // (e.g. expanding outcome A fails, then expanding the same row
+    // refreshes the outcome.id and the cache-hit branch succeeds).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setError(null);
+
     if (curvesCache.current.has(outcome.id)) {
       setCurve(curvesCache.current.get(outcome.id)!);
       return () => {
@@ -417,6 +425,25 @@ function ExpandedPanel({
       >
         Realized delta vs held baseline
       </div>
+      {/* pr189-followup H2 (silent-failure-hunter HIGH/9) + M17 (red-team
+          MED/8) — the pre-followup error rendered per-column (3x
+          duplicated alert) AND was gated by `!isPending`. For
+          freshly-allocated outcomes ALL THREE deltas are pending (null)
+          so the per-column error never reached the DOM and the fetch
+          failure stayed silent for the most-common population. Hoist
+          the alert to panel level (one row above the 3-col grid), where
+          it surfaces regardless of per-column pending state and avoids
+          the 3x duplicate-alert visual + SR announcement. */}
+      {error && (
+        <div
+          role="alert"
+          data-testid="outcomes-curve-error"
+          className="mb-2 text-[11px] italic"
+          style={{ color: "var(--color-text-muted)" }}
+        >
+          Couldn&apos;t load curve
+        </div>
+      )}
       <div className="grid grid-cols-3 gap-3.5">
         {columns.map((col) => {
           const d = formatDelta(col.delta);
@@ -459,22 +486,10 @@ function ExpandedPanel({
                   {d.text}
                 </div>
               )}
-              {isPending || isLoading ? null : error ? (
-                // retro audit (silent-failure-hunter L8 c9): pre-fix
-                // path silently rendered `null` here when the curves
-                // fetch failed, so `setError("Failed to load curves")`
-                // was state-only and the user saw an empty sparkline
-                // area indistinguishable from "still loading". Surface
-                // the error so the user understands the chart isn't
-                // missing data — it failed to load.
-                <div
-                  role="alert"
-                  className="mt-2 text-[11px] italic"
-                  style={{ color: "var(--color-text-muted)" }}
-                >
-                  Couldn&apos;t load curve
-                </div>
-              ) : (
+              {/* Per-column sparkline. Error visibility moved to the
+                  panel-level alert above (H2 + M17), so this branch is
+                  just the success/loading split. */}
+              {isPending || isLoading || error ? null : (
                 <div className="mt-2">
                   <Sparkline points={col.points} />
                 </div>
