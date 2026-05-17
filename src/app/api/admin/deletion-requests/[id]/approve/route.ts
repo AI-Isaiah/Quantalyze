@@ -185,7 +185,7 @@ export const POST = withRole<{ id: string }>("admin")(
         { status: 500 },
       );
     }
-    const rowsAffected = Array.isArray(updatedRows) ? updatedRows.length : 0;
+    const rowsAffected = (updatedRows ?? []).length;
 
     // Audit: approval event (anchored to the request row). Only emit
     // when the CAS won — the loser of a race already saw account.sanitize
