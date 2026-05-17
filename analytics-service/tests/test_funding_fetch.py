@@ -1316,3 +1316,226 @@ class TestFundingFeeRowTypedDict:
         out = serialize_funding_row(row)
         assert out["match_key"] == "mk"
         assert out["amount"] == "-0.01"
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 phase-2 fix-loop additions:
+# Threshold-met testing gaps surfaced by SPECIALIST-testing-REPORT.md.
+# ---------------------------------------------------------------------------
+
+
+class TestBybitInverseMidPaginationRaises:
+    """specialist:testing (funding_fetch.py:542): the inverse-category
+    BadRequest tolerance is intentionally narrow — only page_idx==0 is
+    treated as 'inverse not enabled'. A BadRequest mid-pagination on
+    inverse (e.g. expired cursor) MUST re-raise so the whole job is
+    classified transient-failed and retried. Without this regression
+    test a future refactor could broaden the guard to all pages and
+    silently truncate inverse-funding history.
+    """
+
+    @pytest.mark.asyncio
+    async def test_inverse_bad_request_mid_pagination_raises(self) -> None:
+        import ccxt.async_support as ccxt_mod
+
+        linear_empty = {"result": {"list": [], "nextPageCursor": ""}}
+        inverse_page0 = {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSD",
+                        "type": "SETTLEMENT",
+                        "funding": "-0.02",
+                        "currency": "BTC",
+                        "transactionTime": "1700000000000",
+                        "id": "inv-1",
+                    }
+                ],
+                # Non-empty cursor → fetcher proceeds to page 1.
+                "nextPageCursor": "c",
+            }
+        }
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_account_transaction_log = AsyncMock(
+            side_effect=[
+                linear_empty,
+                inverse_page0,
+                ccxt_mod.BadRequest("cursor expired"),
+            ]
+        )
+
+        with pytest.raises(ccxt_mod.BadRequest):
+            await fetch_funding_bybit(
+                mock_exchange, STRATEGY_ID, since_ms=None
+            )
+
+
+class TestDroppedRowCounterOKXAndBybit:
+    """M-S2-1 / M-0930 (specialist:testing): the OKX and Bybit dropped-
+    row WARN blocks (funding_fetch.py:480 and :635) mirror the Binance
+    contract but were not covered. A regression silently removing the
+    `if dropped > 0: logger.warning(...)` block on either exchange would
+    hide a field-shape regression. These regression tests pin the
+    structured-warn signal so the operator always sees the count.
+    """
+
+    @pytest.mark.asyncio
+    async def test_okx_logs_dropped_count(self, caplog) -> None:
+        import logging
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_account_bills = AsyncMock(return_value={
+            "data": [
+                # 2 valid + 3 dropped (bad pnl, bad ts, empty instId).
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "type": "8",
+                    "pnl": "-0.01",
+                    "ccy": "USDT",
+                    "ts": "1700000000000",
+                    "billId": "ok1",
+                },
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "type": "8",
+                    "pnl": "not-a-number",
+                    "ccy": "USDT",
+                    "ts": "1700000000000",
+                    "billId": "bad-pnl",
+                },
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "type": "8",
+                    "pnl": "-0.02",
+                    "ccy": "USDT",
+                    "ts": "garbage",
+                    "billId": "bad-ts",
+                },
+                {
+                    "instId": "",  # empty symbol → _normalize_funding_row drops
+                    "type": "8",
+                    "pnl": "-0.03",
+                    "ccy": "USDT",
+                    "ts": "1700000300000",
+                    "billId": "bad-sym",
+                },
+                {
+                    "instId": "ETH-USDT-SWAP",
+                    "type": "8",
+                    "pnl": "0.005",
+                    "ccy": "USDT",
+                    "ts": "1700003000000",
+                    "billId": "ok2",
+                },
+            ]
+        })
+
+        caplog.set_level(
+            logging.WARNING, logger="quantalyze.analytics.funding_fetch"
+        )
+        rows = await fetch_funding_okx(
+            mock_exchange, STRATEGY_ID, since_ms=None
+        )
+
+        assert len(rows) == 2
+        warn_messages = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "okx funding_fetch: dropped 3 malformed rows" in m
+            for m in warn_messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_bybit_logs_dropped_count(self, caplog) -> None:
+        import logging
+
+        linear = {
+            "result": {
+                "list": [
+                    # 1 valid + 2 dropped (empty symbol, non-numeric funding).
+                    {
+                        "symbol": "BTCUSDT",
+                        "type": "SETTLEMENT",
+                        "funding": "-0.01",
+                        "currency": "USDT",
+                        "transactionTime": "1700000000000",
+                        "id": "ok1",
+                    },
+                    {
+                        "symbol": "",  # empty symbol → dropped
+                        "type": "SETTLEMENT",
+                        "funding": "-0.02",
+                        "currency": "USDT",
+                        "transactionTime": "1700000300000",
+                        "id": "bad-sym",
+                    },
+                    {
+                        "symbol": "ETHUSDT",
+                        "type": "SETTLEMENT",
+                        "funding": "not-a-number",
+                        "currency": "USDT",
+                        "transactionTime": "1700000600000",
+                        "id": "bad-amt",
+                    },
+                ],
+                "nextPageCursor": "",
+            }
+        }
+        inverse_empty = {"result": {"list": [], "nextPageCursor": ""}}
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_account_transaction_log = AsyncMock(
+            side_effect=[linear, inverse_empty]
+        )
+
+        caplog.set_level(
+            logging.WARNING, logger="quantalyze.analytics.funding_fetch"
+        )
+        rows = await fetch_funding_bybit(
+            mock_exchange, STRATEGY_ID, since_ms=None
+        )
+
+        assert len(rows) == 1
+        warn_messages = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "bybit funding_fetch: dropped 2 malformed rows" in m
+            for m in warn_messages
+        )
+
+
+class TestMatchKeyUnknownExchangeDefault:
+    """specialist:testing (funding_fetch.py:194): `_build_match_key`
+    falls back to an 8h bucket via ``_FUNDING_BUCKET_HOURS.get(exchange,
+    8)``. If a future contributor adds a sub-8h exchange (e.g. a 4h
+    'deribit') and forgets to wire it into the dict, two events 4h
+    apart would silently collide on the same match_key — the H-1099
+    bug this PR fixes. Pin the default contract.
+    """
+
+    def test_unknown_exchange_defaults_to_8h_bucket(self) -> None:
+        from datetime import datetime, timezone
+
+        from services.funding_fetch import _build_match_key
+
+        ts_a = datetime(2024, 1, 1, 1, 0, 0, tzinfo=timezone.utc)
+        ts_b = datetime(2024, 1, 1, 7, 0, 0, tzinfo=timezone.utc)
+
+        key_a = _build_match_key("s", "kraken", "BTCUSD", ts_a)
+        key_b = _build_match_key("s", "kraken", "BTCUSD", ts_b)
+
+        # Same 00-08 bucket → keys collapse. This pins the default; a
+        # typo in _FUNDING_BUCKET_HOURS that broke the unknown-exchange
+        # fallback would change this comparison.
+        assert key_a == key_b
+        assert "T00:00:00" in key_a
