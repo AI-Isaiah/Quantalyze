@@ -8,13 +8,15 @@
  * admin_note / founder_notes / allocation_amount via the path that
  * RLS was permitting (closes C-0136 application-layer surface).
  *
- * Branches verified:
- *   1. Unauthenticated caller → 401.
- *   2. Caller is not the strategy manager → 403 (ownership check).
- *   3. Invalid body (missing action) → 400.
- *   4. Happy path (manager owns the strategy) → 200 + service-role UPDATE
- *      writes only { status, responded_at }.
- *   5. Happy path → notifyAllocatorIntroStatus is invoked from `after()`.
+ * Coverage spans the audit-2026-05-07 testing-coverage additions (csrf /
+ * rate-limit / lookup-error / 404-RLS-hidden / update-error / 500-array-
+ * shape / 400-json-parse / notify-skip / after()-catch / audit emit) and
+ * the red-team 2026-05-17 fingerprints (toctou-status-overwrite TOCTOU
+ * 409 path, notify-replay-amplification 409 pre-update guard, audit-
+ * after-jwt-expiry logAuditEventAsUser signature, null-allocator-id
+ * silent-skip, join-shape-cast-fragile 500). Each test names the
+ * specific finding it pins so a regression can be traced back to the
+ * audit finding without re-deriving intent.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -81,7 +83,11 @@ vi.mock("@/lib/supabase/server", () => ({
         error: null,
       }),
     },
-    // logAuditEvent calls .rpc on this client.
+    // Defensive stub: the route currently emits audit via
+    // logAuditEventAsUser(adminClient, ...) so this user-scoped .rpc is
+    // not invoked, but earlier signatures called rpc on this client.
+    // Keep the no-op so an audit-path revert can't silently fail by
+    // hitting `undefined.rpc`.
     rpc: async () => ({ data: null, error: null }),
     from: () => ({
       select: () => ({
@@ -370,10 +376,11 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     expect(adminUpdate).not.toHaveBeenCalled();
   });
 
-  // Audit-2026-05-07 testing/update-error-negative — pins the 500 on admin
-  // update error (route.ts L122-124). A regression that silently dropped
-  // updateError and returned 200 would slip a "succeeded" UI on a failed
-  // DB write past tests; this case prevents that.
+  // Audit-2026-05-07 testing/update-error-negative — pins the 500 on the
+  // admin .update().eq().eq().select() error branch in route.ts. A
+  // regression that silently dropped updateError and returned 200 would
+  // slip a "succeeded" UI on a failed DB write past tests; this case
+  // prevents that.
   it("returns 500 and skips notify+audit when the admin update returns an error", async () => {
     adminState.updateResult = { data: null, error: { message: "boom" } };
     const { POST } = await import("./route");
@@ -532,9 +539,9 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
   });
 
   // Audit-2026-05-07 testing/after-catch-negative — pins the try/catch
-  // around notifyAllocatorIntroStatus inside after() (route.ts L165-170).
-  // A regression that removed the try/catch would unhandled-reject; this
-  // test asserts the swallow-and-log contract.
+  // around notifyAllocatorIntroStatus inside the after() block in
+  // route.ts. A regression that removed the try/catch would
+  // unhandled-reject; this test asserts the swallow-and-log contract.
   it("swallows notify errors in the after() continuation and does not throw", async () => {
     notifySpy.mockRejectedValueOnce(new Error("smtp down"));
     const { POST } = await import("./route");
@@ -554,9 +561,10 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
   });
 
   // Audit-2026-05-07 testing/notify-skip-negative — pins the notify-gating
-  // condition `allocator?.email && strategy.name` (route.ts L158). Sending
-  // notify(undefined, …) or notify(email, null, …) would ship a malformed
-  // email; these cases pin the skip contract.
+  // condition `allocator?.email && strategy.name` inside the after()
+  // block in route.ts. Sending notify(undefined, …) or notify(email,
+  // null, …) would ship a malformed email; these cases pin the skip
+  // contract.
   it("does NOT call notifyAllocatorIntroStatus when the allocator profile lookup returns null", async () => {
     adminState.profileResult = { data: null, error: null };
     const { POST } = await import("./route");
@@ -586,9 +594,9 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
   });
 
   // Audit-2026-05-07 testing/json-parse-rejection — pins the
-  // `await req.json().catch(() => null)` guard at route.ts L71-78. A
-  // regression that removed the catch would propagate the JSON parse
-  // rejection instead of returning a clean 400.
+  // `await req.json().catch(() => null)` guard in route.ts. A regression
+  // that removed the catch would propagate the JSON parse rejection
+  // instead of returning a clean 400.
   it("returns 400 when req.json() rejects with a parse error", async () => {
     const { POST } = await import("./route");
     const badReq = {
