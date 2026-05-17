@@ -11,6 +11,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  *     set so the wrapper itself issues exactly ONE getUserRoles round-trip.
  *
  * Mocks: Supabase server client, CSRF helper, user/role DB fetches.
+ *
+ * audit-2026-05-07 testing T5 (MED conf 8): the H-0428 and H-0430 / default
+ * RoleHandler tests below assert COMPILE-TIME contracts via
+ * `@ts-expect-error`. Vitest does NOT surface those directives at runtime —
+ * only `tsc --noEmit` does. The `frontend-typecheck` CI job (.github/workflows/ci.yml)
+ * runs `npm run typecheck` BEFORE the test job, which is what actually
+ * enforces "fail the build if the type widens." If those tests are moved
+ * to a runner that skips typecheck, the contract is silently lost — update
+ * the runner or migrate to a tsd-style assertion (e.g. `expect-type`).
  */
 
 vi.mock("server-only", () => ({}));
@@ -105,6 +114,7 @@ import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   getUserRoles,
+  getUserRolesResult,
   requireRole,
   withRole,
   APP_ROLES,
@@ -243,6 +253,57 @@ describe("getUserRoles", () => {
   });
 });
 
+describe("getUserRolesResult — M-0501 React cache() dedup contract", () => {
+  // audit-2026-05-07 M-0501 (testing T3, HIGH conf 8): the wrap is
+  // `cache(getUserRolesResult)` from `react`. The load-bearing invariant is
+  // "two calls inside the SAME request with the SAME (supabase, userId)
+  // pair share ONE DB round-trip." Without this assertion, a future
+  // refactor that unwraps cache(), passes distinct supabase identities,
+  // or swaps to a non-memoizing wrapper would not fail any test.
+  //
+  // The security specialist also flagged (S2, MED conf 8) that the JSDoc
+  // previously claimed `createClient()` is itself `cache()`-wrapped (it is
+  // NOT — see `src/lib/supabase/server.ts`). The cache keys on argument
+  // identity, so two distinct SupabaseClient instances + the same userId
+  // is a cache MISS — the second test below pins that behaviour explicitly
+  // so a doc-vs-reality drift surfaces here, not in production.
+
+  it("dedupes round-trips across two calls with the SAME (supabase, userId)", async () => {
+    userRolesQueryMock.mockResolvedValue({
+      data: [{ role: "admin" }],
+      error: null,
+    });
+    const supabase = makeFromOnly();
+    const first = await getUserRolesResult(supabase, "u-cache-same");
+    const second = await getUserRolesResult(supabase, "u-cache-same");
+    expect(first).toEqual({ ok: true, roles: ["admin"] });
+    expect(second).toEqual({ ok: true, roles: ["admin"] });
+    // ONE DB round-trip for both calls — that is the M-0501 contract.
+    // If React cache() is unwrapped, this assertion fails.
+    expect(userRolesQueryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT dedupe across DISTINCT supabase client instances (cache keys on identity)", async () => {
+    // S2 (security MED conf 8): the cache hits only when the caller reuses
+    // a single SupabaseClient per request. `withRole` guarantees this;
+    // other call sites must enforce it themselves. If `createClient()` is
+    // later wrapped with React.cache (the S2 fix's option (a)), update
+    // this test to assert the dedup holds across `await createClient()`
+    // calls — but as of this commit, two distinct clients = two round-trips.
+    userRolesQueryMock.mockResolvedValue({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+    const supabaseA = makeFromOnly();
+    const supabaseB = makeFromOnly();
+    await getUserRolesResult(supabaseA, "u-cache-distinct");
+    await getUserRolesResult(supabaseB, "u-cache-distinct");
+    // TWO round-trips — proves the cache is per-instance, not per-userId,
+    // so cross-user contamination is impossible.
+    expect(userRolesQueryMock).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("requireRole", () => {
   const mockUser = { id: "user-1", email: "user@test.com" } as Parameters<
     typeof requireRole
@@ -359,6 +420,49 @@ describe("requireRole", () => {
       ]);
     }
   });
+
+  // audit-2026-05-07 P459/P699/P703 (testing T4, HIGH conf 7): the
+  // admin-union fallback inside requireRole. When user_app_roles returns
+  // no 'admin' row, the legacy `isAdminUser` union (profiles.is_admin OR
+  // ADMIN_EMAIL) gets a vote and the resolved set must include 'admin'.
+  // Without these tests, a future refactor that drops the synthesized
+  // 'admin' role from the resolved set — or accidentally returns 403 even
+  // when isAdminUser is true — fails no test.
+  it("admin-union fallback: profiles.is_admin=true + empty user_app_roles → { roles } with 'admin' synthesized", async () => {
+    // Empty user_app_roles for both the primary lookup AND the
+    // hasAdminRoleRow re-check inside isAdminUser.
+    userRolesQueryMock.mockResolvedValue({ data: [], error: null });
+    // Flip the legacy is_admin signal TRUE — this is the only place the
+    // fallback fires.
+    profilesIsAdminQueryMock.mockResolvedValueOnce({
+      data: { is_admin: true },
+      error: null,
+    });
+    const result = await requireRole(makeFromOnly(), mockUser, "admin");
+    expect("roles" in result).toBe(true);
+    if ("roles" in result) {
+      // The synthesized 'admin' role must appear in the resolved set so
+      // downstream handlers see a consistent answer.
+      expect(result.roles).toContain("admin");
+    }
+  });
+
+  it("admin-union fallback is admin-scoped only: caller requesting non-admin role still gets 403 even when is_admin=true", async () => {
+    // Belt-and-suspenders: a user who is only admin via the legacy union
+    // does NOT silently acquire 'allocator' (or any other role). The
+    // fallback synthesizes 'admin' ONLY; non-admin role requests stay
+    // gated by user_app_roles alone.
+    userRolesQueryMock.mockResolvedValue({ data: [], error: null });
+    profilesIsAdminQueryMock.mockResolvedValueOnce({
+      data: { is_admin: true },
+      error: null,
+    });
+    const result = await requireRole(makeFromOnly(), mockUser, "allocator");
+    expect("forbidden" in result).toBe(true);
+    if ("forbidden" in result) {
+      expect(result.forbidden.status).toBe(403);
+    }
+  });
 });
 
 describe("withRole", () => {
@@ -379,6 +483,92 @@ describe("withRole", () => {
     const res = await wrapped(makeRequest({ body: { action: "grant" } }) as never);
     expect(res).toBe(csrfResponse);
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("M-0499: unauthenticated GET returns 401 WITHOUT running CSRF (order-swap is method-agnostic)", async () => {
+    // audit-2026-05-07 (testing T6, MED conf 8): GET is normally exempt
+    // from CSRF (safe method) — but the order-swap (auth → CSRF) must
+    // not regress that property. An unauthenticated GET should bail at
+    // auth with 401 and never touch assertSameOrigin.
+    getUserMock.mockResolvedValue({ data: { user: null } });
+    const csrfResponse = new Response("csrf denied", { status: 403 });
+    assertSameOriginMock.mockReturnValue(csrfResponse as never);
+
+    const handler = vi.fn();
+    const wrapped = withRole("admin")(handler as never);
+
+    const getReq = new Request("http://localhost:3000/api/admin/health", {
+      method: "GET",
+    });
+    const res = await wrapped(getReq as never);
+    expect(res.status).toBe(401);
+    expect(assertSameOriginMock).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("M-0499: authenticated POST with passing CSRF + missing role → 403, CSRF called exactly once, handler not called", async () => {
+    // audit-2026-05-07 (testing T6, MED conf 8): the auth → csrf → role
+    // chain on the happy authenticated-but-non-admin path. The default
+    // assertSameOriginMock returns null (pass); we still assert it was
+    // CALLED so a future refactor that skips CSRF for authenticated
+    // callers fails this test.
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-non-admin", email: "n@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+
+    const handler = vi.fn();
+    const wrapped = withRole("admin")(handler as never);
+
+    const res = await wrapped(
+      makeRequest({ body: { action: "grant" } }) as never,
+    );
+    expect(res.status).toBe(403);
+    expect(assertSameOriginMock).toHaveBeenCalledTimes(1);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("M-0499: authenticated POST call ordering is createClient → getUser → assertSameOrigin → role-fetch → handler", async () => {
+    // audit-2026-05-07 (testing T6, MED conf 8): the load-bearing
+    // reorder. Without an order assertion, a future refactor that
+    // re-introduces the CSRF-before-auth path silently regresses the
+    // information-disclosure fix. We pin the sequence via a shared
+    // call-log fed by the relevant mocks.
+    const callOrder: string[] = [];
+    getUserMock.mockImplementation(async () => {
+      callOrder.push("getUser");
+      return { data: { user: { id: "u-admin", email: "a@t.com" } } };
+    });
+    assertSameOriginMock.mockImplementation(() => {
+      callOrder.push("assertSameOrigin");
+      return null;
+    });
+    userRolesQueryMock.mockImplementationOnce(async () => {
+      callOrder.push("userRolesQuery");
+      return { data: [{ role: "admin" }], error: null };
+    });
+
+    const handler = vi.fn().mockImplementation(async () => {
+      callOrder.push("handler");
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    const wrapped = withRole("admin")(handler as never);
+
+    const res = await wrapped(
+      makeRequest({ body: { action: "grant" } }) as never,
+    );
+    expect(res.status).toBe(200);
+    // createClient runs implicitly inside the wrapper before getUser; we
+    // assert on the externally observable sequence.
+    expect(callOrder).toEqual([
+      "getUser",
+      "assertSameOrigin",
+      "userRolesQuery",
+      "handler",
+    ]);
   });
 
   it("M-0499: unauthenticated POST returns 401 WITHOUT running CSRF (no origin-vs-auth distinguisher)", async () => {
