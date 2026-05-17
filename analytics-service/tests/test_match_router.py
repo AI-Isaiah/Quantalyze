@@ -1304,3 +1304,141 @@ class TestScoreOneAllocatorDemoFilter:
         assert scored_ids == {"ex-1", "real-1"}, (
             "non-demo allocator must see the full universe"
         )
+
+
+# ---------------------------------------------------------------------------
+# Red-team CRITICAL (audit-2026-05-07) — explicitly_excluded must not reach
+# match_candidates while the SQL CHECK migration is still pending. See
+# routers/match.py persistence-boundary filter for the failure mode this
+# pins (CHECK violation tears down the whole batch via rollback).
+# ---------------------------------------------------------------------------
+
+
+class TestScoreOneAllocatorExplicitlyExcludedFilter:
+    """Red-team CRITICAL: H-0705 added ExclusionReason.EXPLICITLY_EXCLUDED
+    ('explicitly_excluded') as a NEW enum value, but no companion migration
+    widened the SQL CHECK on match_candidates.exclusion_reason. The persistence
+    boundary in routers/match.py must therefore drop rows with that reason
+    until the CHECK migration ships — otherwise the bulk insert raises and
+    the rollback path tears down the entire match_batches parent row.
+
+    This test fails-closed on a regression to (a) persisting the reason
+    directly OR (b) accidentally renaming the magic string."""
+
+    async def test_explicitly_excluded_rows_are_not_persisted_to_match_candidates(
+        self, monkeypatch
+    ):
+        from routers import match as match_mod
+
+        # Capture every row passed to match_candidates.insert(...).
+        captured_inserts: list[list[dict[str, Any]]] = []
+
+        sb = MagicMock()
+
+        def _table(name):
+            t = MagicMock()
+            if name == "match_batches":
+                t.insert.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "batch-explicit-filter"}]
+                )
+            elif name == "match_candidates":
+                def _capture_insert(rows):
+                    captured_inserts.append(rows)
+                    return MagicMock(
+                        execute=MagicMock(
+                            return_value=MagicMock(data=rows)
+                        )
+                    )
+
+                t.insert.side_effect = _capture_insert
+            return t
+
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        monkeypatch.setattr(
+            match_mod,
+            "_load_allocator_context",
+            lambda aid: {
+                "preferences": {},
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": None,
+                "thumbs_down_ids": set(),
+                "_holdings_rows_eligible": [],
+            },
+        )
+        import services.feedback_engine
+        monkeypatch.setattr(
+            services.feedback_engine, "compute_adjusted_weights", lambda aid: {}
+        )
+
+        # score_candidates returns ONE legitimate candidate + ONE explicitly_excluded
+        # row + ONE below_min_sharpe row. The persistence layer must keep
+        # the candidate + the below_min_sharpe row but drop explicitly_excluded.
+        monkeypatch.setattr(
+            match_mod,
+            "score_candidates",
+            lambda **kw: {
+                "candidates": [
+                    {
+                        "strategy_id": "good-strat",
+                        "score": 75,
+                        "score_breakdown": {},
+                        "reasons": [],
+                        "rank": 1,
+                    }
+                ],
+                "excluded": [
+                    {
+                        "strategy_id": "banned-strat",
+                        "exclusion_reason": "explicitly_excluded",
+                        "exclusion_provenance": "caller",
+                    },
+                    {
+                        "strategy_id": "low-sharpe-strat",
+                        "exclusion_reason": "below_min_sharpe",
+                        "exclusion_provenance": "0.50",
+                    },
+                ],
+                "excluded_total": 2,
+                "mode": "personalized",
+                "filter_relaxed": False,
+                "effective_preferences": {},
+                "effective_thresholds": {},
+                "source_strategy_count": 3,
+            },
+        )
+
+        universe = {
+            "strategies_by_id": {
+                "good-strat": {"strategy_id": "good-strat"},
+                "banned-strat": {"strategy_id": "banned-strat"},
+                "low-sharpe-strat": {"strategy_id": "low-sharpe-strat"},
+            },
+            "returns_by_id": {},
+        }
+
+        await match_mod._score_one_allocator(
+            "44444444-4444-4444-4444-444444444444", universe
+        )
+
+        assert len(captured_inserts) == 1, (
+            "expected exactly one match_candidates insert call"
+        )
+        inserted_rows = captured_inserts[0]
+        inserted_reasons = [r["exclusion_reason"] for r in inserted_rows]
+        # The legitimate candidate has exclusion_reason=None; the soft exclusion
+        # passes through; the explicitly_excluded row is filtered out.
+        assert "explicitly_excluded" not in inserted_reasons, (
+            "explicitly_excluded must be dropped at the persistence boundary "
+            "until the SQL CHECK migration ships — otherwise the bulk insert "
+            "raises a CHECK violation and tears down the parent batch row"
+        )
+        assert "below_min_sharpe" in inserted_reasons, (
+            "other exclusion reasons must still persist normally"
+        )
+        # The good candidate (rank=1) must still appear.
+        ranked_ids = {r["strategy_id"] for r in inserted_rows if r["rank"] is not None}
+        assert ranked_ids == {"good-strat"}
