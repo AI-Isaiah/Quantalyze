@@ -1,12 +1,15 @@
 """Tests for analytics-service/services/match_engine.py — the perfect-match engine.
 
-21 unit tests covering eligibility (hard + soft split), relaxation invariants,
+Unit tests cover eligibility (hard + soft split), relaxation invariants,
 sub-scores, mode selection, exclusion reasons, single-element normalization,
-short-overlap None corr, zero-AUM fallback, determinism, helper alias imports.
+short-overlap None corr, zero-AUM fallback, determinism, and helper alias
+imports.
 
-Phase 3 / D-15 extends with 20 mandate-fit tests covering per-dimension math,
+Phase 3 / D-15 extends with mandate-fit tests covering per-dimension math,
 composition, overrides renormalization, determinism, backward compat, and a
-v1→v2 golden-snapshot regression.
+v1→v2 golden-snapshot regression. Audit-2026-05-07 closures C-0239 / C-0240 /
+C-0241 / H-0779 / M-0741..M-0744 added precondition-first assertions and the
+2× floor-clamp boundary parametrized case (test 5b).
 
 See docs/superpowers/plans/2026-04-07-perfect-match-engine.md Phase 2 Task 4.
 """
@@ -27,10 +30,12 @@ from services.match_engine import (
     _compute_corr_with_portfolio,
 )
 
-# Phase 3 / D-15: _compute_mandate_fit_score is the Wave-1 helper. During Wave 0
-# the symbol does not yet exist — import lazily and skip mandate_fit tests that
-# need it. Tests that only assert on ENGINE_VERSION / score_breakdown shape can
-# still go red (intentional TDD red state for Wave 0).
+# Phase 3 / D-15: _compute_mandate_fit_score ships in services/match_engine.py
+# (Wave 1 has landed; ENGINE_VERSION == v2.1.0). Lazy import is retained as a
+# defensive guard so that if a future refactor renames or removes the helper,
+# the mandate-fit tests degrade to skips with a clear flag rather than collapsing
+# the whole module on collection. Under normal operation MANDATE_FIT_IMPORTED is
+# always True.
 try:
     from services.match_engine import _compute_mandate_fit_score  # noqa: F401
     MANDATE_FIT_IMPORTED = True
@@ -682,12 +687,12 @@ def test_engine_version_is_set():
 
 
 # =========================================================================
-# Phase 3 / D-15 — mandate fit tests (Wave 0: placeholder stubs, Wave 1: green)
+# Phase 3 / D-15 — mandate fit tests
 # =========================================================================
-# These 20 tests cover the new _compute_mandate_fit_score helper and its
-# composition inside W_PREFERENCE_FIT. During Wave 0 they are scaffolded red
-# (intentionally failing assertions OR pytest.skip markers that flip to pass
-# once Wave 1 ships the production code). Do NOT modify these during Wave 1.
+# These tests cover the _compute_mandate_fit_score helper and its composition
+# inside W_PREFERENCE_FIT. Wave 1 has shipped the production helper; tests are
+# green under the live build. The MANDATE_FIT_IMPORTED guard remains as a
+# defensive skip path if a future refactor renames or removes the helper.
 # =========================================================================
 
 
