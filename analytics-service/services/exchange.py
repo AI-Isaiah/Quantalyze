@@ -1,7 +1,6 @@
 import asyncio
 import ccxt.async_support as ccxt
 import logging
-import math
 import os
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -114,6 +113,11 @@ def _infer_quote_currency(symbol: str) -> str | None:
     return None
 
 
+# Cap on the per-task fee-currency mismatch sample list — keeps the
+# JSONB row bounded while still giving operators a representative set.
+_FEE_CCY_MISMATCH_SAMPLE_CAP = 16
+
+
 def _check_fee_currency_mismatch(
     *, exchange: str, symbol: str, fee_currency: str | None
 ) -> None:
@@ -127,49 +131,37 @@ def _check_fee_currency_mismatch(
     if not fee_currency:
         return
     quote = _infer_quote_currency(symbol)
-    if quote is None:
+    if quote is None or fee_currency.upper() == quote:
         return
-    if fee_currency.upper() != quote:
-        _record_dq_flag("fee_currency_mismatch", True)
-        # Bounded list of distinct (exchange, symbol, fee_currency)
-        # tuples so the operator can see scope without runaway growth.
-        existing = _LAST_DQ_FLAGS.get({}).get(
-            "fee_currency_mismatch_samples", []
-        )
-        sample = f"{exchange}:{symbol}:{fee_currency}"
-        if sample not in existing and len(existing) < 16:
-            _record_dq_flag(
-                "fee_currency_mismatch_samples", [sample]
-            )
+    _record_dq_flag("fee_currency_mismatch", True)
+    existing = _LAST_DQ_FLAGS.get({}).get("fee_currency_mismatch_samples", [])
+    if len(existing) >= _FEE_CCY_MISMATCH_SAMPLE_CAP:
+        return
+    sample = f"{exchange}:{symbol}:{fee_currency}"
+    if sample not in existing:
+        _record_dq_flag("fee_currency_mismatch_samples", [sample])
 
 
 def _finite_float(value: Any, *, label: str) -> float | None:
-    """Audit-2026-05-07 H-0661 (partial) — coerce an exchange-supplied value
-    to a finite ``float`` or return ``None``. Rejects NaN, +/-inf,
-    non-numeric strings, and bool. Logs at WARNING so schema drift is
-    visible without aborting the sync.
-
-    Full pydantic validation across all branches is deferred (cross-codebase
-    schema change). This is the file-local defense-in-depth that closes
-    the NaN/inf gap.
+    """Audit-2026-05-07 H-0661 (partial) — exchange-ingestion variant of
+    ``_safe_float``: reject bool (which Python's ``float()`` would
+    silently coerce to 1.0/0.0) and log at WARNING (not DEBUG) so
+    operators see schema drift on the ingestion path. Otherwise
+    delegates to ``_safe_float`` for the NaN/inf/non-numeric rejection.
     """
-    try:
-        if isinstance(value, bool):
-            return None
-        f = float(value) if value is not None else None
-    except (TypeError, ValueError):
+    if isinstance(value, bool):
+        logger.warning("_finite_float: bool rejected for %s=%r", label, value)
+        return None
+    out = _safe_float(value)
+    if out is None and value is not None:
+        # ``_safe_float`` already DEBUG-logged the rejection cause; mirror
+        # at WARNING so the ingestion path's bad-fill signal is visible
+        # without flipping LOG_LEVEL=DEBUG.
         logger.warning(
-            "_finite_float: non-numeric %s=%r (rejected)", label, value
+            "_finite_float: rejected %s=%r (NaN/inf or non-numeric)",
+            label, value,
         )
-        return None
-    if f is None:
-        return None
-    if not math.isfinite(f):
-        logger.warning(
-            "_finite_float: non-finite %s=%r (NaN/inf rejected)", label, value
-        )
-        return None
-    return f
+    return out
 
 
 # Audit-2026-05-07 G12.B.5 — overlap window for late-arriving exchange fills.
