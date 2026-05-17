@@ -86,36 +86,6 @@ export type GetUserRolesResult =
   | { ok: false; error: { code: string | null; message: string } };
 
 /**
- * Per-request memoized inner implementation of {@link getUserRolesResult}.
- *
- * M-0501 (audit-2026-05-07): `requireRole` runs on every wrapped
- * request, which hits Supabase Auth + a `user_app_roles` SELECT. Within
- * a SINGLE request multiple guards may run (e.g., a nested call site
- * or a parallel-route render that branches). React's `cache()` wraps
- * the function so duplicate calls inside the same request return the
- * cached result — one DB round-trip per (supabase-client, userId) pair
- * per request.
- *
- * Limits (deliberately scoped): cache() is REQUEST-SCOPED. It does
- * NOT memoize across requests, across Lambda invocations, or into a
- * session. Cross-request caching (JWT custom claims, Edge Config)
- * is tracked as a Sprint 7 follow-up — see ADR-0005.
- *
- * The cache key is the tuple `(supabase, userId)`. A new supabase
- * client per request (which is the normal path through `createClient()`,
- * itself wrapped with `cache()` in `src/lib/supabase/server.ts`) means
- * the cache key is stable within a request and turns over between them.
- */
-const getUserRolesResultCached = cache(
-  async (
-    supabase: SupabaseClient,
-    userId: string,
-  ): Promise<GetUserRolesResult> => {
-    return await getUserRolesResultRaw(supabase, userId);
-  },
-);
-
-/**
  * Fetch the role set for a specific user, returning an explicit
  * discriminated union. Returns `{ ok: true, roles: [] }` for the
  * expected "no roles visible" path (RLS denial or empty result),
@@ -125,18 +95,16 @@ const getUserRolesResultCached = cache(
  * "fetch failed" — typically inside a guard that wants to return 500
  * on real DB faults rather than 403.
  *
- * Per-request memoized via React `cache()` (M-0501). Multiple calls
- * inside the same request with the same `(supabase, userId)` pair
- * share a single DB round-trip.
+ * M-0501 (audit-2026-05-07): wrapped with React `cache()` so duplicate
+ * calls inside the SAME request with the same `(supabase, userId)`
+ * pair share one DB round-trip. The cache is REQUEST-SCOPED — does NOT
+ * memoize across requests, Lambda invocations, or sessions. The
+ * supabase client identity is stable within a request because
+ * `createClient()` in `src/lib/supabase/server.ts` is itself
+ * `cache()`-wrapped. Cross-request caching (JWT custom claims, Edge
+ * Config) is tracked as a Sprint 7 follow-up — see ADR-0005.
  */
-export async function getUserRolesResult(
-  supabase: SupabaseClient,
-  userId: string,
-): Promise<GetUserRolesResult> {
-  return getUserRolesResultCached(supabase, userId);
-}
-
-async function getUserRolesResultRaw(
+export const getUserRolesResult = cache(async function getUserRolesResult(
   supabase: SupabaseClient,
   userId: string,
 ): Promise<GetUserRolesResult> {
@@ -176,7 +144,7 @@ async function getUserRolesResultRaw(
       (APP_ROLES as readonly string[]).includes(role),
     );
   return { ok: true, roles };
-}
+});
 
 /**
  * Fetch the role set for a specific user. Returns an empty array if the
@@ -276,11 +244,8 @@ export async function requireRole(
   }
   const userRoles = rolesResult.roles;
 
-  // H-0428 (audit-2026-05-07): the `roles` tuple is typed
-  // `[AppRole, ...AppRole[]]` so `roles.length >= 1` is enforced at the
-  // type layer. The previous zero-arg fall-through (auth-only branch)
-  // has been removed — callers wanting authenticated-only gating must
-  // use `withAuth` explicitly.
+  // The non-empty tuple type on `roles` (H-0428) guarantees length >= 1
+  // here, so we never need a zero-role fall-through branch.
   const hasAny = roles.some((r) => userRoles.includes(r));
   if (!hasAny) {
     // audit-2026-05-07 P459 + P699 + P703: admin-gate consolidation.
