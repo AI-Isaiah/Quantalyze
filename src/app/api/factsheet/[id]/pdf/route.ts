@@ -13,11 +13,24 @@ import { safeCompare } from "@/lib/timing-safe-compare";
 
 export const maxDuration = 30;
 
-// Phase 18 / round-2 (Claude adv conf 4) — function-form (vs module-load
-// const) so vi.resetModules() in tests can drop a stale value, mirroring the
-// cron route's appUrl()/vercelEnv() pattern. Vercel injects the env at
-// runtime so the cost of re-reading per request is negligible.
-function appUrl(): string {
+// Cluster L / Fix C-0086 — resolve the inner factsheet URL from the request
+// origin first, falling back to NEXT_PUBLIC_APP_URL only when origin is
+// unavailable (e.g. unit tests that bypass NextRequest plumbing). The legacy
+// behavior — env fallback to `http://localhost:3000` — silently caused
+// production puppeteer to navigate to localhost (15s timeout → 500) if the
+// public env var was misconfigured. Preferring origin guarantees the inner
+// page render hits the SAME deployment serving this request, which is also
+// the only correct behavior for preview deployments.
+//
+// Final fallback is `http://localhost:3000` so local `next dev` keeps
+// working even when neither origin nor env is set. Production callers
+// always have `req.nextUrl.origin` so the fallback is dev-only.
+//
+// Function-form (vs module-load const) preserved so vi.resetModules() in
+// tests can drop a stale value, mirroring the cron route's appUrl() pattern.
+function appUrl(req: NextRequest): string {
+  const origin = req.nextUrl.origin;
+  if (origin && origin !== "null") return origin;
   return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 }
 
@@ -106,7 +119,7 @@ export async function GET(
     page.setDefaultTimeout(15_000);
     await page.setViewport({ width: 800, height: 1100 });
 
-    await page.goto(`${appUrl()}/factsheet/${id}`, {
+    await page.goto(`${appUrl(req)}/factsheet/${id}`, {
       waitUntil: "networkidle0",
       timeout: 25000,
     });
@@ -127,9 +140,15 @@ export async function GET(
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${sanitizeFilename(strategy.name, "Strategy")}-factsheet.pdf"`,
-        // Auth-gated route — keep browser caching on for the same viewer but
-        // do not let the shared CDN hold onto it.
-        "Cache-Control": "private, max-age=86400",
+        // Cluster L / Fix M-0311 — `/api/factsheet` is in PUBLIC_ROUTES
+        // (src/proxy.ts) and this handler has no `auth.getUser()` gate; it
+        // only checks `status='published'` + IP rate-limit. The previous
+        // `private, max-age=86400` directive misrepresented the auth
+        // contract to caches and prevented Vercel's shared CDN from
+        // absorbing duplicate hits (e.g. social-card scrapers / a
+        // newsletter blast). Match the sibling tearsheet.pdf route which
+        // is also public and uses CDN s-maxage.
+        "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400",
       },
     });
   } catch (err) {

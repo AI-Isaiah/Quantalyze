@@ -195,3 +195,125 @@ describe("GET /api/factsheet/[id]/pdf — x-internal-token bypass (Phase 18 / Pl
     expect(createAdminClient).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Cluster L / Fix C-0086 + M-0311 — receiver-side coverage for the URL-origin
+ * preference (no more silent localhost fallback in production) and the
+ * Cache-Control directive (must be public/CDN-cacheable because the route is
+ * in PUBLIC_ROUTES, not auth-gated). These tests drive the success path
+ * through puppeteer mocks and assert on `page.goto` and response headers.
+ */
+function singlePublishedComplete() {
+  const single = vi.fn().mockResolvedValue({
+    data: {
+      id: "00000000-0000-0000-0000-000000000001",
+      name: "Momentum Strategy",
+      status: "published",
+      strategy_analytics: [{ computation_status: "complete" }],
+    },
+    error: null,
+  });
+  const eq2 = vi.fn().mockReturnValue({ single });
+  const eq1 = vi.fn().mockReturnValue({ eq: eq2 });
+  const select = vi.fn().mockReturnValue({ eq: eq1 });
+  const from = vi.fn().mockReturnValue({ select });
+  vi.mocked(createAdminClient).mockReturnValue({ from } as never);
+}
+
+describe("GET /api/factsheet/[id]/pdf — URL origin + Cache-Control (Cluster L / C-0086, M-0311)", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.mocked(checkLimit).mockReset();
+    vi.mocked(checkLimit).mockResolvedValue({ success: true, retryAfter: 0 } as never);
+    vi.mocked(createAdminClient).mockReset();
+    singlePublishedComplete();
+
+    // Build a fresh puppeteer mock per test so we can spy on page.goto.
+    const puppeteer = await import("@/lib/puppeteer");
+    vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
+    const goto = vi.fn().mockResolvedValue(undefined);
+    const setDefaultNavigationTimeout = vi.fn();
+    const setDefaultTimeout = vi.fn();
+    const setViewport = vi.fn().mockResolvedValue(undefined);
+    const evaluate = vi.fn().mockResolvedValue(undefined);
+    const pdf = vi.fn().mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    const newPage = vi.fn().mockResolvedValue({
+      goto,
+      setDefaultNavigationTimeout,
+      setDefaultTimeout,
+      setViewport,
+      evaluate,
+      pdf,
+    });
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(puppeteer.launchBrowser).mockResolvedValue({ newPage, close } as never);
+    // Expose goto so tests can read it.
+    (globalThis as unknown as { __pdfGoto: typeof goto }).__pdfGoto = goto;
+  });
+
+  afterEach(() => {
+    process.env = { ...ENV_BACKUP };
+    delete (globalThis as unknown as { __pdfGoto?: unknown }).__pdfGoto;
+  });
+
+  it("Fix C-0086: puppeteer navigates to req.nextUrl.origin, NOT NEXT_PUBLIC_APP_URL or localhost", async () => {
+    // Worst case the prior bug guarded against: env var unset, request
+    // arrives on production origin. Old code would navigate to
+    // http://localhost:3000 (15s timeout → 500). New code prefers origin.
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    const req = new NextRequest(
+      "https://quantalyze.example.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      { method: "GET" },
+    );
+    const res = await GET(req, { params });
+    expect(res.status).toBe(200);
+    const goto = (globalThis as unknown as { __pdfGoto: ReturnType<typeof vi.fn> }).__pdfGoto;
+    expect(goto).toHaveBeenCalledTimes(1);
+    expect(goto.mock.calls[0][0]).toBe(
+      "https://quantalyze.example.com/factsheet/00000000-0000-0000-0000-000000000001",
+    );
+    // Must NEVER be the silent localhost fallback in this scenario.
+    expect(goto.mock.calls[0][0]).not.toContain("localhost");
+  });
+
+  it("Fix C-0086: origin preferred even when NEXT_PUBLIC_APP_URL is set to a different host", async () => {
+    // Defense-in-depth: misconfigured env var must not redirect puppeteer
+    // away from the current deployment (the trigger for C-0090 amplification).
+    process.env.NEXT_PUBLIC_APP_URL = "https://wrong-host.example.com";
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    const req = new NextRequest(
+      "https://correct-host.example.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      { method: "GET" },
+    );
+    const res = await GET(req, { params });
+    expect(res.status).toBe(200);
+    const goto = (globalThis as unknown as { __pdfGoto: ReturnType<typeof vi.fn> }).__pdfGoto;
+    expect(goto.mock.calls[0][0]).toBe(
+      "https://correct-host.example.com/factsheet/00000000-0000-0000-0000-000000000001",
+    );
+    expect(goto.mock.calls[0][0]).not.toContain("wrong-host");
+  });
+
+  it("Fix M-0311: Cache-Control is public + s-maxage (matches PUBLIC_ROUTES contract), NOT private", async () => {
+    // The route is in PUBLIC_ROUTES (src/proxy.ts) with no auth.getUser()
+    // gate. The previous `private, max-age=86400` directive lied to caches
+    // and blocked the shared CDN from absorbing duplicate hits. Must match
+    // sibling tearsheet.pdf's public CDN cache policy.
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    const req = new NextRequest(
+      "https://quantalyze.example.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      { method: "GET" },
+    );
+    const res = await GET(req, { params });
+    expect(res.status).toBe(200);
+    const cc = res.headers.get("Cache-Control");
+    expect(cc).toBe("public, s-maxage=3600, stale-while-revalidate=86400");
+    // Regression guard — explicit anti-assertion against the old directive.
+    expect(cc).not.toContain("private");
+    expect(cc).not.toMatch(/^max-age=/);
+  });
+});
