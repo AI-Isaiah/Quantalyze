@@ -93,7 +93,13 @@ export const POST = withRole<{ id: string }>("admin")(
     // inside sanitize_user (migration 120) is the third half of the
     // defense; this TS re-check returns a clean 403 before either the
     // rate-limit token or the RPC are touched.
-    const adminGuard = await requireAdmin(supabase, user);
+    //
+    // audit-2026-05-07 red-team (MED conf 8): pass `req` so requireAdmin
+    // also re-runs the CSRF same-origin check — defense-in-depth on the
+    // mutating POST path. `withRole` already ran the check upstream;
+    // the second pass is cheap (one Origin-header comparison, no I/O)
+    // and protects against a future refactor that drops the outer CSRF.
+    const adminGuard = await requireAdmin(supabase, user, req);
     if (adminGuard) return adminGuard;
 
     // Cluster-K C-0032: rate-limit BEFORE doing any work. Key on the
@@ -146,6 +152,19 @@ export const POST = withRole<{ id: string }>("admin")(
     );
     if (!loaded.ok) return loaded.res;
     const reqRow = loaded.row;
+
+    // audit-2026-05-07 P705: post-load TOCTOU close. Re-verify admin
+    // status IMMEDIATELY before invoking sanitize_user — the gap
+    // between the pre-rate-limit `requireAdmin` above and this RPC
+    // call (loadDeletionRequest round-trip) is wide enough for a
+    // concurrent admin revoke to slip through. The pre-rate-limit
+    // check (red-team-MED rate-limit-burn-before-toctou) and this
+    // post-load check together cover the full window. The DB-side
+    // sentinel trigger inside sanitize_user (migration 120) is the
+    // last half of the defense; this TS re-check returns a clean 403
+    // before the RPC fires at all in the common case.
+    const rpcGuard = await requireAdmin(supabase, user, req);
+    if (rpcGuard) return rpcGuard;
 
     // Fire the anonymize RPC. Returns BOOLEAN: TRUE on the first-run
     // anonymize, FALSE on idempotent re-run (already sanitized). Either

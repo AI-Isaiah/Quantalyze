@@ -352,9 +352,10 @@ export async function requireRole(
  *   - a `NextResponse` — caller is no longer an admin (or never was);
  *     return this response immediately. Caller MUST NOT continue.
  *
- * Typical use:
+ * Typical use (inside a `withRole`-wrapped handler, which has already
+ * run the CSRF check — pass `req` anyway for defense-in-depth):
  *
- *   const guard = await requireAdmin(supabase, user);
+ *   const guard = await requireAdmin(supabase, user, req);
  *   if (guard) return guard;
  *   const { data } = await admin.rpc('sanitize_user', { p_user_id });
  *
@@ -364,13 +365,44 @@ export async function requireRole(
  * DB-side sentinel trigger inside `sanitize_user` (migration 120) is
  * the second half of the defense-in-depth: even if a race slips this
  * TS check, the RPC refuses to fire without an admin context.
+ *
+ * CSRF (audit-2026-05-07 red-team, MED conf 8): when `req` is
+ * supplied, mutating-method calls (POST/PUT/PATCH/DELETE) also pass
+ * through `assertSameOrigin` — closing the gap where a future caller
+ * uses `requireAdmin` STANDALONE inside a mutating route (without
+ * going through `withRole` / `withAdminAuth`) and inherits no CSRF
+ * defense. The `req` parameter is OPTIONAL only to keep the
+ * sub-resource TOCTOU-close call sites (which already ran CSRF in the
+ * outer wrapper) source-compatible; new mutating call sites MUST pass
+ * `req` so the CSRF gate fires.
+ *
+ * Defense-in-depth (call sites are encouraged to pass `req` even
+ * inside a withRole-wrapped handler): an attacker who somehow lands a
+ * mutating POST past the outer wrapper but bypasses CSRF still gets a
+ * second CSRF veto here. The cost is one Origin-header comparison
+ * (no I/O), which is negligible.
  */
 export async function requireAdmin(
   supabase: SupabaseClient,
   user: User | null,
+  req?: NextRequest,
 ): Promise<NextResponse | null> {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  // CSRF defense-in-depth on mutating requests. GET/HEAD/OPTIONS are
+  // safe methods and skip the origin check. We only run the check if
+  // a request object was supplied; older call sites that did not pass
+  // `req` remain compatible (they are all inside withRole/withAdminAuth
+  // wrappers that already ran CSRF). audit-2026-05-07 red-team MED.
+  if (
+    req &&
+    req.method !== "GET" &&
+    req.method !== "HEAD" &&
+    req.method !== "OPTIONS"
+  ) {
+    const csrfError = assertSameOrigin(req);
+    if (csrfError) return csrfError;
   }
   const ok = await isAdminUser(supabase, user);
   if (!ok) {

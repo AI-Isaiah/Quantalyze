@@ -115,6 +115,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   getUserRoles,
   getUserRolesResult,
+  requireAdmin,
   requireRole,
   withRole,
   APP_ROLES,
@@ -844,6 +845,103 @@ describe("withRole", () => {
       makeRequest({ body: {} }) as never,
     );
     expect(res.status).toBe(200);
+  });
+});
+
+describe("requireAdmin — TOCTOU close + CSRF defense-in-depth", () => {
+  const mockUser = { id: "user-1", email: "user@test.com" } as Parameters<
+    typeof requireAdmin
+  >[1];
+
+  it("returns { status: 401 } when user is null", async () => {
+    const res = await requireAdmin(makeFromOnly(), null);
+    expect(res).not.toBeNull();
+    if (res) expect(res.status).toBe(401);
+  });
+
+  it("returns null when user IS an admin (via user_app_roles)", async () => {
+    userRolesQueryMock.mockResolvedValue({
+      data: [{ role: "admin" }],
+      error: null,
+    });
+    const res = await requireAdmin(makeFromOnly(), mockUser);
+    expect(res).toBeNull();
+  });
+
+  it("returns { status: 403 } when user is NOT an admin", async () => {
+    userRolesQueryMock.mockResolvedValue({ data: [], error: null });
+    // profiles.is_admin defaults to false (beforeEach reset above).
+    const res = await requireAdmin(makeFromOnly(), mockUser);
+    expect(res).not.toBeNull();
+    if (res) expect(res.status).toBe(403);
+  });
+
+  it("red-team CSRF: when `req` is supplied on a POST, runs assertSameOrigin", async () => {
+    // audit-2026-05-07 red-team (MED conf 8): a future caller that uses
+    // requireAdmin STANDALONE inside a mutating route (without going
+    // through withRole/withAdminAuth) would inherit no CSRF defense.
+    // Post-fix the optional `req` parameter threads the request into a
+    // mutating-method CSRF check.
+    userRolesQueryMock.mockResolvedValue({
+      data: [{ role: "admin" }],
+      error: null,
+    });
+    const csrfResponse = new Response("csrf denied", { status: 403 });
+    assertSameOriginMock.mockReturnValueOnce(csrfResponse as never);
+
+    const req = new Request("http://localhost:3000/api/admin/x", {
+      method: "POST",
+    }) as unknown as Parameters<typeof requireAdmin>[2];
+    const res = await requireAdmin(makeFromOnly(), mockUser, req);
+    expect(res).toBe(csrfResponse);
+    expect(assertSameOriginMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("red-team CSRF: when `req` is supplied on a GET, does NOT run assertSameOrigin", async () => {
+    // Safe methods (GET/HEAD/OPTIONS) skip the CSRF check — matches
+    // withRole's behaviour.
+    userRolesQueryMock.mockResolvedValue({
+      data: [{ role: "admin" }],
+      error: null,
+    });
+    const req = new Request("http://localhost:3000/api/admin/x", {
+      method: "GET",
+    }) as unknown as Parameters<typeof requireAdmin>[2];
+    const res = await requireAdmin(makeFromOnly(), mockUser, req);
+    expect(res).toBeNull();
+    expect(assertSameOriginMock).not.toHaveBeenCalled();
+  });
+
+  it("red-team CSRF: when `req` is OMITTED, does NOT run assertSameOrigin (source-compat)", async () => {
+    // Source-compat path: pre-fix callers passed only (supabase, user)
+    // — they must keep working without a CSRF check at this layer
+    // because the outer wrapper (withRole/withAdminAuth) already ran one.
+    // New mutating call sites are expected to pass `req`; this test
+    // pins the back-compat behaviour for the existing sub-resource
+    // TOCTOU-close call sites.
+    userRolesQueryMock.mockResolvedValue({
+      data: [{ role: "admin" }],
+      error: null,
+    });
+    const res = await requireAdmin(makeFromOnly(), mockUser);
+    expect(res).toBeNull();
+    expect(assertSameOriginMock).not.toHaveBeenCalled();
+  });
+
+  it("red-team CSRF: 401 (no user) short-circuits BEFORE the CSRF check (consistent with withRole's auth-first ordering)", async () => {
+    // M-0499 set the precedent: auth runs FIRST so unauth callers
+    // always get 401 regardless of Origin (eliminates the
+    // unauth-with-good-origin = 401 vs unauth-with-bad-origin = 403
+    // information disclosure). requireAdmin mirrors that ordering.
+    const csrfResponse = new Response("csrf denied", { status: 403 });
+    assertSameOriginMock.mockReturnValue(csrfResponse as never);
+    const req = new Request("http://localhost:3000/api/admin/x", {
+      method: "POST",
+    }) as unknown as Parameters<typeof requireAdmin>[2];
+    const res = await requireAdmin(makeFromOnly(), null, req);
+    expect(res).not.toBeNull();
+    if (res) expect(res.status).toBe(401);
+    expect(assertSameOriginMock).not.toHaveBeenCalled();
   });
 });
 
