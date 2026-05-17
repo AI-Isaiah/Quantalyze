@@ -1,7 +1,7 @@
 import type { WidgetMeta } from "./types";
 
 // ---------------------------------------------------------------------------
-// Widget Registry — all 39 widgets for the My Allocation dashboard
+// Widget Registry — widgets available for the My Allocation dashboard
 // ---------------------------------------------------------------------------
 //
 // Phase 09.1 Plan 05 / D-08 — picker no longer surfaces "soon" badges for
@@ -22,7 +22,7 @@ import type { WidgetMeta } from "./types";
 // which is preferred over a misleading badge.
 
 export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
-  // ── Performance (10) ────────────────────────────────────────────────
+  // ── Performance ─────────────────────────────────────────────────────
   "equity-curve": {
     id: "equity-curve",
     name: "Equity Curve",
@@ -140,7 +140,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Risk (6) ────────────────────────────────────────────────────────
+  // ── Risk ────────────────────────────────────────────────────────────
   "correlation-matrix": {
     id: "correlation-matrix",
     name: "Correlation Matrix",
@@ -218,7 +218,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Allocation (6) ─────────────────────────────────────────────────
+  // ── Allocation ──────────────────────────────────────────────────────
   // PR1 QA — "allocation-by-style" is the V2 Overview default after the
   // dashboard-parity QA pass; DESIGNER_KEY_TO_WIDGET_ID["allocation"] points
   // here. Faithful port of designer-bundle/project/src/app.jsx
@@ -286,7 +286,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Attribution (3) ────────────────────────────────────────────────
+  // ── Attribution ─────────────────────────────────────────────────────
   "attribution-waterfall": {
     id: "attribution-waterfall",
     name: "Attribution Waterfall",
@@ -318,7 +318,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Positions (5+1 with PR1) ──────────────────────────────────────
+  // ── Positions ───────────────────────────────────────────────────────
   // Phase 09.1 PR1 (dashboard parity) — V2 Overview holdings tile.
   // Compact dashboard variant of components/HoldingsTable's NEW MODE.
   // Distinct from `positions-table` (kept) which is the wider detail
@@ -390,7 +390,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Monitoring (4) ─────────────────────────────────────────────────
+  // ── Monitoring ──────────────────────────────────────────────────────
   "portfolio-alerts": {
     id: "portfolio-alerts",
     name: "Portfolio Alerts",
@@ -432,7 +432,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Intelligence (3) ───────────────────────────────────────────────
+  // ── Intelligence ────────────────────────────────────────────────────
   "morning-briefing": {
     id: "morning-briefing",
     name: "Morning Briefing",
@@ -464,7 +464,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Meta (3) ───────────────────────────────────────────────────────
+  // ── Meta ────────────────────────────────────────────────────────────
   // Phase 09.1 PR1 (dashboard parity) — V2 Overview KPI strip. Distinct
   // from `custom-kpi-strip` (kept for picker/legacy callers): KpiStripWidget
   // renders the prototype's 5-cell vertical-bar-divided layout with
@@ -512,7 +512,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Outcomes (1) ─────────────────────────────────────────────────
+  // ── Outcomes ────────────────────────────────────────────────────────
   "outcomes-timeline": {
     id: "outcomes-timeline",
     name: "Bridge Outcomes",
@@ -524,12 +524,14 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Bridge (1) — Phase 09.1 Plan 09 / D-14 + D-15 ───────────────
+  // ── Bridge entry (category: intelligence) — Phase 09.1 Plan 09 / D-14 + D-15 ──
   // Hero Bridge widget: portfolio-level entry point with Review CTA that
   // opens BridgeDrawer (cross-holdings browse → confirm). Default Overview
   // tile per D-15. Per-row inline BridgeOutcomeBanner stays on Plan 08's
   // HoldingsTable (D-14 / S3 accepted) — no double-mount because this
   // widget renders a portfolio-level summary, not a per-holding banner.
+  // Lives in the "intelligence" picker category (no separate "bridge"
+  // category exists in WIDGET_CATEGORIES below).
   "bridge-hero": {
     id: "bridge-hero",
     name: "Bridge",
