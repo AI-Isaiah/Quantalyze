@@ -57,6 +57,8 @@ const TEST_USER = vi.hoisted(() => ({
   id: "00000000-0000-4000-8000-000000000001",
 }));
 
+const CONTACT_REQUEST_ID = "33333333-3333-4333-8333-333333333333";
+
 const supabaseState = vi.hoisted(() => ({
   currentUser: TEST_USER as { id: string } | null,
   lookupResult: null as
@@ -171,7 +173,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
   beforeEach(() => {
     supabaseState.currentUser = TEST_USER;
     supabaseState.lookupResult = {
-      id: "33333333-3333-4333-8333-333333333333",
+      id: CONTACT_REQUEST_ID,
       strategy_id: "22222222-2222-4222-8222-222222222222",
       status: "pending",
       allocator_id: "44444444-4444-4444-8444-444444444444",
@@ -199,7 +201,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     const res = await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -218,7 +220,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     const res = await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -232,7 +234,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     const res = await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -250,7 +252,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "decline",
       }),
     );
@@ -262,7 +264,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "decline",
       }),
     );
@@ -280,7 +282,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -305,7 +307,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     const res = await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -323,7 +325,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     const res = await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -343,7 +345,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     const res = await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -360,7 +362,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     const res = await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -377,7 +379,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     const res = await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -399,7 +401,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     const res = await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -419,14 +421,14 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
     // The chain is .update(...).eq('id', id).eq('status', 'pending').select()
     // Both eq calls land in adminEqCalls in that order.
     expect(adminEqCalls).toEqual([
-      ["id", "33333333-3333-4333-8333-333333333333"],
+      ["id", CONTACT_REQUEST_ID],
       ["status", "pending"],
     ]);
   });
@@ -445,7 +447,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     const res = await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -474,7 +476,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
       const { POST } = await import("./route");
       const res = await POST(
         makeRequest({
-          id: "33333333-3333-4333-8333-333333333333",
+          id: CONTACT_REQUEST_ID,
           action: "accept",
         }),
       );
@@ -514,7 +516,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
       const { POST } = await import("./route");
       const res = await POST(
         makeRequest({
-          id: "33333333-3333-4333-8333-333333333333",
+          id: CONTACT_REQUEST_ID,
           action: "accept",
         }),
       );
@@ -538,7 +540,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     const res = await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -560,7 +562,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
@@ -574,7 +576,7 @@ describe("POST /api/intro-response — audit C-0135 + C-0136", () => {
     const { POST } = await import("./route");
     await POST(
       makeRequest({
-        id: "33333333-3333-4333-8333-333333333333",
+        id: CONTACT_REQUEST_ID,
         action: "accept",
       }),
     );
