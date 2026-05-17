@@ -81,6 +81,41 @@ const STORAGE_KEY = "quantalyze-dashboard-config";
 const RECOVERY_FLAG_KEY = "dashboard.config.recoveredFromCorruption";
 const LEGACY_LAYOUT_VERSION = 3;
 
+/**
+ * Seed the mock localStorage with a v4-shape blob. Tests across this file
+ * call `store.set(STORAGE_KEY, JSON.stringify({ tiles, timeframe, layoutVersion }))`
+ * with the same defaults (`timeframe: "YTD"`, `layoutVersion: LAYOUT_VERSION`)
+ * ~15 times; this helper centralises the boilerplate so version bumps and
+ * shape tweaks land in one place.
+ */
+function seedV2Blob(
+  tiles: ReadonlyArray<Record<string, unknown>>,
+  opts: { timeframe?: string; layoutVersion?: number } = {},
+): void {
+  store.set(
+    STORAGE_KEY,
+    JSON.stringify({
+      tiles,
+      timeframe: opts.timeframe ?? "YTD",
+      layoutVersion: opts.layoutVersion ?? LAYOUT_VERSION,
+    }),
+  );
+}
+
+/**
+ * Reseat the localStorage mock's setItem/getItem implementations to the
+ * happy-path defaults. Several describe blocks below install hostile
+ * implementations (throw-on-setItem) via `mockImplementation`, and
+ * `vi.clearAllMocks()` only clears call history — not the implementation.
+ * Without reseating, every later test inherits the throwing setItem.
+ */
+function resetLocalStorageMocks(): void {
+  localStorageMock.setItem.mockImplementation((key: string, value: string) => {
+    store.set(key, value);
+  });
+  localStorageMock.getItem.mockImplementation((key: string) => store.get(key) ?? null);
+}
+
 // ---------------------------------------------------------------------------
 // LEGACY hook tests — useDashboardConfig
 // ---------------------------------------------------------------------------
@@ -161,16 +196,12 @@ describe("useDashboardConfig (legacy)", () => {
     // Pre-populate the SHARED key with V2-shape state — Voice-D8 cross-hook
     // reset: the legacy hook doesn't recognise v4 so it resets to its own v3
     // defaults rather than partially consuming the foreign blob.
-    store.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        tiles: [
-          { k: "bridge", w: 4 },
-          { k: "kpi", w: 4 },
-        ],
-        timeframe: "1Y",
-        layoutVersion: LAYOUT_VERSION, // 4
-      }),
+    seedV2Blob(
+      [
+        { k: "bridge", w: 4 },
+        { k: "kpi", w: 4 },
+      ],
+      { timeframe: "1Y" }, // layoutVersion defaults to LAYOUT_VERSION (4)
     );
 
     const { result } = renderHook(() => useDashboardConfig());
@@ -197,13 +228,9 @@ describe("useDashboardConfigV2", () => {
   });
 
   it("v3 reset: legacy-shape persisted blob (layoutVersion: 3) → V2 loads v4 DEFAULT_LAYOUT (normalized)", () => {
-    store.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        tiles: [{ i: "a", widgetId: "b", x: 0, y: 0, w: 12, h: 4 }],
-        timeframe: "YTD",
-        layoutVersion: 3,
-      }),
+    seedV2Blob(
+      [{ i: "a", widgetId: "b", x: 0, y: 0, w: 12, h: 4 }],
+      { layoutVersion: 3 },
     );
 
     const { result } = renderHook(() => useDashboardConfigV2());
@@ -423,16 +450,9 @@ describe("useDashboardConfigV2", () => {
     // Defensive belt-and-braces: even if a malicious / corrupted writer stamps
     // layoutVersion: 4 onto legacy-shape tiles, the V2 hook treats it as a
     // mismatch and resets — never let legacy tiles into the V2 config path.
-    store.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        tiles: [
-          { i: "a", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 },
-        ],
-        timeframe: "YTD",
-        layoutVersion: 4,
-      }),
-    );
+    seedV2Blob([
+      { i: "a", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 },
+    ]);
 
     const { result } = renderHook(() => useDashboardConfigV2());
 
@@ -480,14 +500,7 @@ describe("useDashboardConfigV2", () => {
 
   it("D-19 write-time normalization: addWidget with a designer short key lands the registry id in tiles", () => {
     // Seed a minimal v4 blob so the V2 hook loads cleanly.
-    store.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        tiles: [{ k: "correlation-matrix", w: 2 }],
-        timeframe: "YTD",
-        layoutVersion: 4,
-      }),
-    );
+    seedV2Blob([{ k: "correlation-matrix", w: 2 }]);
 
     const { result } = renderHook(() => useDashboardConfigV2());
 
@@ -647,14 +660,7 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
   });
 
   it("loadV2Config: layoutVersion drift sets version_reset recovery flag without console.warn (expected drift, not error)", () => {
-    store.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        tiles: [{ k: "kpi-strip", w: 4 }],
-        timeframe: "YTD",
-        layoutVersion: 9999, // future version
-      }),
-    );
+    seedV2Blob([{ k: "kpi-strip", w: 4 }], { layoutVersion: 9999 }); // future version
 
     renderHook(() => useDashboardConfigV2());
 
@@ -664,17 +670,10 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
   });
 
   it("loadV2Config: a v2 blob carrying legacy-shape tiles sets legacy_in_v2_blob recovery flag", () => {
-    store.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        tiles: [
-          // v4 shape mixed with v3 (legacy) shape — looksLikeLegacyTile trips
-          { i: "equity-curve-1", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 },
-        ],
-        timeframe: "YTD",
-        layoutVersion: LAYOUT_VERSION,
-      }),
-    );
+    seedV2Blob([
+      // v4 shape mixed with v3 (legacy) shape — looksLikeLegacyTile trips
+      { i: "equity-curve-1", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 },
+    ]);
 
     renderHook(() => useDashboardConfigV2());
 
@@ -827,16 +826,12 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
     store.clear();
     sessionStore.clear();
     vi.clearAllMocks();
-    // Restore the default localStorage mock implementations — the prior
-    // describe block (silent-failure-hunter) installs throw-on-setItem
-    // implementations via mockImplementation that vi.clearAllMocks does
-    // NOT reset (clearAllMocks only resets call history). Without this
-    // reseat, every test below inherits a throwing setItem and the
-    // debounced persist never lands its write.
-    localStorageMock.setItem.mockImplementation((key: string, value: string) => {
-      store.set(key, value);
-    });
-    localStorageMock.getItem.mockImplementation((key: string) => store.get(key) ?? null);
+    // The prior describe block (silent-failure-hunter) installs
+    // throw-on-setItem implementations via mockImplementation that
+    // vi.clearAllMocks does NOT reset (clearAllMocks only resets call
+    // history). Without this reseat, every test below inherits a
+    // throwing setItem and the debounced persist never lands its write.
+    resetLocalStorageMocks();
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
@@ -845,19 +840,12 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
   });
 
   it("drops tiles whose `k` is not a non-empty string, keeps salvageable tiles", () => {
-    store.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        tiles: [
-          { k: "correlation-matrix", w: 2 },
-          { k: 42, w: 2 }, // non-string k → drop
-          { k: "", w: 2 }, // empty k → drop
-          { k: "kpi-strip", w: 4 },
-        ],
-        timeframe: "YTD",
-        layoutVersion: LAYOUT_VERSION,
-      }),
-    );
+    seedV2Blob([
+      { k: "correlation-matrix", w: 2 },
+      { k: 42, w: 2 }, // non-string k → drop
+      { k: "", w: 2 }, // empty k → drop
+      { k: "kpi-strip", w: 4 },
+    ]);
 
     const { result } = renderHook(() => useDashboardConfigV2());
 
@@ -876,19 +864,12 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
   });
 
   it("clamps non-1|2|3|4 widths to a valid value at load time (M-1076)", () => {
-    store.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        tiles: [
-          { k: "correlation-matrix", w: 7 }, // out of range high → clamp to 4
-          { k: "kpi-strip", w: -3 }, // out of range low → clamp to 1
-          { k: "rolling-sharpe", w: "wide" }, // wrong type → clamp default 2
-          { k: "tail-risk", w: Number.NaN }, // NaN → clamp default 2
-        ],
-        timeframe: "YTD",
-        layoutVersion: LAYOUT_VERSION,
-      }),
-    );
+    seedV2Blob([
+      { k: "correlation-matrix", w: 7 }, // out of range high → clamp to 4
+      { k: "kpi-strip", w: -3 }, // out of range low → clamp to 1
+      { k: "rolling-sharpe", w: "wide" }, // wrong type → clamp default 2
+      { k: "tail-risk", w: Number.NaN }, // NaN → clamp default 2
+    ]);
 
     const { result } = renderHook(() => useDashboardConfigV2());
 
@@ -905,18 +886,11 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
   });
 
   it("when every tile is unusable, resets to defaults AND sets the parse_failed recovery flag", () => {
-    store.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        tiles: [
-          { k: 1, w: 2 }, // numeric k
-          { k: null, w: 2 }, // null k
-          { notK: "missing", w: 2 }, // missing k entirely
-        ],
-        timeframe: "YTD",
-        layoutVersion: LAYOUT_VERSION,
-      }),
-    );
+    seedV2Blob([
+      { k: 1, w: 2 }, // numeric k
+      { k: null, w: 2 }, // null k
+      { notK: "missing", w: 2 }, // missing k entirely
+    ]);
 
     const { result } = renderHook(() => useDashboardConfigV2());
 
@@ -927,17 +901,10 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
   });
 
   it("drops a tile whose `config` is the wrong shape (array / scalar) but keeps the rest", () => {
-    store.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        tiles: [
-          { k: "correlation-matrix", w: 2, config: ["not", "an", "object"] },
-          { k: "kpi-strip", w: 4, config: { foo: "bar" } },
-        ],
-        timeframe: "YTD",
-        layoutVersion: LAYOUT_VERSION,
-      }),
-    );
+    seedV2Blob([
+      { k: "correlation-matrix", w: 2, config: ["not", "an", "object"] },
+      { k: "kpi-strip", w: 4, config: { foo: "bar" } },
+    ]);
 
     const { result } = renderHook(() => useDashboardConfigV2());
 
@@ -954,14 +921,7 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
     try {
       // Seed a known v4 blob so the hook loads cleanly and we can count
       // setItem calls AFTER the load path (which itself never writes).
-      store.set(
-        STORAGE_KEY,
-        JSON.stringify({
-          tiles: [{ k: "kpi-strip", w: 1 }],
-          timeframe: "YTD",
-          layoutVersion: LAYOUT_VERSION,
-        }),
-      );
+      seedV2Blob([{ k: "kpi-strip", w: 1 }]);
 
       const { result, unmount } = renderHook(() => useDashboardConfigV2());
       localStorageMock.setItem.mockClear();
@@ -997,14 +957,7 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
   it("debounce: unmount before timer fires still flushes the pending write (M-0126/M-0134)", () => {
     vi.useFakeTimers();
     try {
-      store.set(
-        STORAGE_KEY,
-        JSON.stringify({
-          tiles: [{ k: "kpi-strip", w: 1 }],
-          timeframe: "YTD",
-          layoutVersion: LAYOUT_VERSION,
-        }),
-      );
+      seedV2Blob([{ k: "kpi-strip", w: 1 }]);
 
       const { result, unmount } = renderHook(() => useDashboardConfigV2());
       localStorageMock.setItem.mockClear();
@@ -1039,14 +992,7 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
     // branch was asserted.
     vi.useFakeTimers();
     try {
-      store.set(
-        STORAGE_KEY,
-        JSON.stringify({
-          tiles: [{ k: "kpi-strip", w: 1 }],
-          timeframe: "YTD",
-          layoutVersion: LAYOUT_VERSION,
-        }),
-      );
+      seedV2Blob([{ k: "kpi-strip", w: 1 }]);
 
       const { result, unmount } = renderHook(() => useDashboardConfigV2());
       localStorageMock.setItem.mockClear();
@@ -1111,14 +1057,7 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
     // assert the warn surfaces via the load-path validator instead:
     // clampWidth runs on every persisted tile's `w` field at load time
     // (per the per-tile validation fix), so a string `w` trips the warn.
-    store.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        tiles: [{ k: "kpi-strip", w: "wide" }],
-        timeframe: "YTD",
-        layoutVersion: LAYOUT_VERSION,
-      }),
-    );
+    seedV2Blob([{ k: "kpi-strip", w: "wide" }]);
     warnSpy.mockClear();
 
     renderHook(() => useDashboardConfigV2());
@@ -1133,11 +1072,13 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
   });
 
   it("coerces a non-string `timeframe` to the 'YTD' default at load time (M-0127)", () => {
+    // timeframe: null is intentional — non-string was silently passed through pre-fix.
+    // seedV2Blob's default would force timeframe="YTD" so we open-code this case.
     store.set(
       STORAGE_KEY,
       JSON.stringify({
         tiles: [{ k: "kpi-strip", w: 4 }],
-        timeframe: null, // non-string — was silently passed through pre-fix
+        timeframe: null,
         layoutVersion: LAYOUT_VERSION,
       }),
     );
@@ -1163,10 +1104,8 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
     store.clear();
     sessionStore.clear();
     vi.clearAllMocks();
-    localStorageMock.setItem.mockImplementation((key: string, value: string) => {
-      store.set(key, value);
-    });
-    localStorageMock.getItem.mockImplementation((key: string) => store.get(key) ?? null);
+    // Same hostile-mock reseat reason as the per-tile-validation block above.
+    resetLocalStorageMocks();
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
@@ -1183,20 +1122,13 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
     // and landed in render. Post-fix: hasOwnProperty.call gates BOTH
     // the registry hit and the designer-key fallback, and the validator
     // double-checks the resolved id is an own key — so all three drop.
-    store.set(
-      STORAGE_KEY,
-      JSON.stringify({
-        tiles: [
-          { k: "constructor", w: 2 },
-          { k: "toString", w: 1 },
-          { k: "__proto__", w: 3 },
-          { k: "hasOwnProperty", w: 4 },
-          { k: "kpi-strip", w: 4 }, // one legitimate tile so the load doesn't fall back to defaults
-        ],
-        timeframe: "YTD",
-        layoutVersion: LAYOUT_VERSION,
-      }),
-    );
+    seedV2Blob([
+      { k: "constructor", w: 2 },
+      { k: "toString", w: 1 },
+      { k: "__proto__", w: 3 },
+      { k: "hasOwnProperty", w: 4 },
+      { k: "kpi-strip", w: 4 }, // one legitimate tile so the load doesn't fall back to defaults
+    ]);
 
     const { result } = renderHook(() => useDashboardConfigV2());
 
@@ -1257,14 +1189,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
   it("pagehide flushes the pending debounced write (iOS Safari / mobile lifecycle)", () => {
     vi.useFakeTimers();
     try {
-      store.set(
-        STORAGE_KEY,
-        JSON.stringify({
-          tiles: [{ k: "kpi-strip", w: 1 }],
-          timeframe: "YTD",
-          layoutVersion: LAYOUT_VERSION,
-        }),
-      );
+      seedV2Blob([{ k: "kpi-strip", w: 1 }]);
 
       const { result, unmount } = renderHook(() => useDashboardConfigV2());
       localStorageMock.setItem.mockClear();
@@ -1382,14 +1307,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
     // sees the freshest value.
     vi.useFakeTimers();
     try {
-      store.set(
-        STORAGE_KEY,
-        JSON.stringify({
-          tiles: [{ k: "kpi-strip", w: 1 }],
-          timeframe: "YTD",
-          layoutVersion: LAYOUT_VERSION,
-        }),
-      );
+      seedV2Blob([{ k: "kpi-strip", w: 1 }]);
 
       const { result, unmount } = renderHook(() => useDashboardConfigV2());
       localStorageMock.setItem.mockClear();
