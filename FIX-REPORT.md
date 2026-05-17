@@ -1,141 +1,148 @@
-# PR #188 Retro Follow-up — Fix Report
+# PR #182 Retro Audit Follow-up — Fix Report
 
-**Branch:** `fix/pr188-retro-followup-2026-05-16`
-**Base:** `origin/main` @ `609b625b` (refactor(ci): code-simplifier retro on PR #188 fix-content)
-**Version:** 0.22.40.18 -> 0.22.40.22
+**Branch:** `fix/pr182-audit-followup-2026-05-17`
+**Base:** `origin/main` @ `2fd79ffe` (v0.22.40.28 fix(ci-retro): close ~8 HIGH retroactive specialist findings on PR #188 fix-content)
+**Version:** 0.22.40.28 -> 0.22.40.29
+**Task:** #57 — close actionable findings from the retroactive migration-reviewer + rls-policy-auditor audits of PR #182.
 
 ## Summary
 
 Threshold-filtered (CRITICAL / HIGH conf>=7 / MED conf>=8 / LOW conf>=9)
-retroactive specialist findings on the PR #188 CI hardening fix-content
-turned up 26 in-scope items. 11 applied as atomic fixes, 5 deferred with
-documented reasons, 4 covered by other applied fixes, 1 out-of-scope.
+retroactive findings on PR #182 turned up 15 total items (9 from
+migration-reviewer, 6 from rls-policy-auditor). This PR closes the 3
+items that represent an active live gap or test gap (+ 1 self-review
+perf companion); the other 6 are explicitly deferred with documented
+rationale in `follow-up-pr-findings.md`.
+
+All 20 PR #182 migrations are applied to prod (supabase-migrate run
+25972386247 SUCCESS on 2026-05-17). Per migration-reviewer invariant
+#11 ("edit-applied-migration prohibition"), ALL fixes ship as NEW
+corrective migrations, NOT edits to applied files.
 
 ## Findings catalogue + decisions
 
-Full findings extracted from
-`/Users/helios-mammut/claude-projects/quantalyze-worktrees/pr188-retro-audit/.review/follow-up-pr-findings.md`.
+Sources:
+- `/Users/helios-mammut/claude-projects/quantalyze/.review/retro-audit-pr182.migration-reviewer.jsonl` (9 findings)
+- `/Users/helios-mammut/claude-projects/quantalyze/.review/retro-audit-pr182.rls-policy-auditor.jsonl` (6 findings)
 
-| ID | Sev/Conf | File | Disposition |
-|----|----------|------|-------------|
-| F1 | HIGH/9 | `src/__tests__/critical-regressions.test.ts` | APPLIED — commit `ed8d4ebe` |
-| F2 | HIGH/9 | `src/__tests__/critical-regressions.test.ts` | APPLIED — commit `b55af44f` |
-| F3 | HIGH/9 | `src/__tests__/critical-regressions.test.ts` | APPLIED — commit `b55af44f` |
-| F4 | HIGH/8 | `src/__tests__/critical-regressions.test.ts` | APPLIED — commit `b55af44f` |
-| F5 | HIGH/8 | `src/__tests__/critical-regressions.test.ts` | APPLIED — commit `ed8d4ebe` |
-| F6 | HIGH/8 | `.github/workflows/ci.yml` (playwright-report gate) | APPLIED — commit `38028344` |
-| F7 | HIGH/9 | `.github/workflows/ci.yml` (security playwright trace exfil) | COVERED by F6 |
-| F8 | HIGH/9 | `src/__tests__/critical-regressions.test.ts` (YAML anchor guard) | APPLIED — commit `b55af44f` |
-| F9 | MED/9 | `.github/dependabot.yml` | APPLIED — commit `7a5994b9` |
-| F10 | MED/8 | `src/__tests__/critical-regressions.test.ts` (permissions cardinality) | APPLIED — commit `b55af44f` |
-| F11 | MED/8 | `docs/runbooks/ci-hardening-permissions-c0293.md` | APPLIED — commit `c0a245ef` |
-| D1 | MED/9 | `.github/workflows/ci.yml` `.next/cache` comment | COVERED by PR #192 |
-| D2 | HIGH/9 | SHA-pin enforcement script | COVERED by existing test invariant |
-| D3 | HIGH/9 | Artifact-content runtime gate | DEFERRED — separate scope (runtime grep, different layer) |
-| D4 | HIGH/8 | `.github/workflows/ci.yml` rebuild verification | APPLIED — commit `e6fae768` |
-| D5 | HIGH/8 | SQL tests for new migrations | OUT-OF-SCOPE (PR #188 is CI scope, not SQL) |
-| D6 | MED/9 | `supabase-migrate.yml` plan-job password removal | DEFERRED — substantive runtime change |
-| D7 | MED/8 | CRITICAL-C0293 file isolation | DEFERRED — refactor, no posture change |
-| D8 | MED/8 | Nightly SHA-drift detection cron | DEFERRED — auto-issue design needed |
-| D9 | MED/8 | Rebuild step contract test brittle on rename | DEFERRED — current test works |
-| D10 | MED/8 | `nightly.yml` playwright-report retention | COVERED — PR #188 removed the upload entirely |
+| ID | Source | Sev/Conf | File | Disposition |
+|----|--------|----------|------|-------------|
+| F1 | rls-policy HIGH #1 | HIGH/8 | `20260516170000` GRANT EXECUTE to authenticated (probe-oracle) | APPLIED — commit `ec475bcd` |
+| F2 | rls-policy HIGH #4 | HIGH/8 | test gap: visibility-trigger leak scopes uncovered | APPLIED — commit `928e2555` |
+| F3 | migration-rev MED #8 | MED/8 | `20260516160100` GDPR recipient_email case-sensitivity | APPLIED — commit `a2adba3b` |
+| F3b | self-review perf companion | n/a | functional index on `LOWER(recipient_email)` for sanitize_user perf parity | APPLIED — commit `9ad4a397` |
+| F4 | migration-rev HIGH #1 | HIGH/8 | `20260516170400` CONCURRENTLY in-tx split | DEFERRED — Task #47 |
+| F5 | migration-rev HIGH #2 | HIGH/7 | `20260516160700` REVOKE service_role bad-shape | DEFERRED — corrected by 170000 in prod |
+| F6 | migration-rev MED #3 | MED/8 | `20260516160700` trigger missing search_path | DEFERRED — corrected by 170000 in prod |
+| F7 | migration-rev MED #4 | MED/8 | `20260516160800` bare ::numeric casts | DEFERRED — corrected by 170600 in prod |
+| F8 | migration-rev MED #5 | MED/8 | `20260516160800` _validate_scenario_diff missing search_path | DEFERRED — corrected by 170600 in prod |
+| F9 | migration-rev MED #6 | MED/8 | `20260516170000` GRANT EXECUTE to authenticated | CLOSED by F1 (same root cause) |
+| F10 | migration-rev MED #7 | MED/8 | `20260516160200` _assert_retention_columns over-restrictive ACL | DEFERRED — no live impact |
+| F11 | migration-rev MED #9 | MED/8 | `20260516170400` DROP+CONCURRENTLY planner-blind window | DEFERRED — Task #47 (CONCURRENTLY split covers this) |
+| F12 | rls-policy HIGH #2 | HIGH/8 | `20260516160700` orphan-org widening bad-shape | DEFERRED — corrected by 170000 in prod |
+| F13 | rls-policy HIGH #3 | HIGH/9 | `20260516160700` REVOKE service_role production-breaker | DEFERRED — corrected by 170000 in prod |
+| F14 | rls-policy MED #5 | MED/8 | `20260516160700` trigger search_path drift | DEFERRED — corrected by 170000 in prod |
+| F15 | rls-policy MED #6 | MED/8 | `20260516170100` PUBLIC EXECUTE leak window (one-time, closed) | DEFERRED — historical, leak window closed at deploy |
 
-**Applied:** 11
-**Covered by other fixes:** 4 (F7 by F6; D1 by PR #192; D2 by existing test; D10 by PR #188 itself)
-**Deferred with reason:** 5 (D3, D6, D7, D8, D9)
-**Out of scope:** 1 (D5 — SQL tests, unrelated to CI hardening scope)
+**Closed:** 3
+**Deferred:** 9 (with rationale in `follow-up-pr-findings.md`)
+**Covered by other fixes:** 1 (F9 is duplicate root cause of F1)
+**Out-of-scope (separate task):** 2 (F4, F11 → Task #47)
 
-## Commits
+## Applied fixes — detail
 
-| Hash | Subject |
-|------|---------|
-| `ed8d4ebe` | fix(ci-retro): broaden frontend-build secret check + tighten env-block regex (closes follow-up F1+F5) |
-| `b55af44f` | fix(ci-retro): add regression tests for PR #188 invariants (closes follow-up F2+F3+F4+F8+F10) |
-| `38028344` | fix(ci-retro): tighten playwright-report gate to fail-closed allow-list (closes follow-up F6) |
-| `e6fae768` | fix(ci-retro): assert seed-gated rebuild inlined real env into .next/ (closes follow-up D4) |
-| `7a5994b9` | fix(ci-retro): add dependabot config for github-actions ecosystem (closes follow-up F9) |
-| `c0a245ef` | docs(ci-retro): expand runbook with regression-gate matrix + enforcement gaps (closes follow-up F11) |
-| `0500c3da` | chore: bump v0.22.40.22 — CI hardening retro follow-up |
-| `79a2b66b` | docs: CHANGELOG v0.22.40.22 entry — PR #188 retro follow-up |
+### F1 — REVOKE EXECUTE on _assert_strategy_visible_to_allocator FROM authenticated (HIGH/8)
 
-## Test verification
+**Live gap:** authenticated users could call the SECDEF helper directly
+to probe (a) strategy_id UUID existence, (b) owner-scoped vs org-scoped
+classification, (c) (strategy_id, user_id) -> org-membership boolean —
+bypassing strategies RLS that otherwise hides org-scoped strategy
+existence from non-members.
 
-- `npx vitest run src/__tests__/critical-regressions.test.ts` — 63 passed (was 48 pre-PR; +15 new tests).
-- `npx vitest run` (full suite) — 3695 passed, 228 skipped, 0 failed.
-- `actionlint .github/workflows/*.yml` — clean.
+**Fix:** new migration `20260517013000_revoke_probe_oracle_assert_strategy_visible_to_allocator.sql`.
+- REVOKE EXECUTE FROM authenticated
+- Defensive REVOKE FROM PUBLIC, anon
+- GRANT EXECUTE TO service_role re-asserted (the BEFORE INSERT trigger
+  fires under service_role for the two PR-182 admin-client routes;
+  removing service_role EXECUTE is the CRITICAL-1 bug pattern 170000
+  closed)
+- Self-verifying DO block asserts authenticated/anon lack EXECUTE +
+  service_role has EXECUTE
 
-## Deferred items (must surface in next planning cycle)
+**Commit:** `ec475bcd`
 
-These were flagged HIGH/MED by the retro audit but require separate
-scope:
+### F2 — Regression tests for visibility-trigger leak scopes (HIGH/8)
 
-- **D3 — artifact-content runtime gate** (pr-test-analyzer #35, HIGH/9):
-  add a CI step that downloads the `nextjs-build` artifact in the same
-  run and greps it for `TEST_SUPABASE_*`. The applied F1 covers the
-  source-text regression layer; the runtime grep would catch a buggy
-  build that drifts inlined values vs source despite passing F1.
+**Test gap:** `src/__tests__/match-decisions-xor-rls.test.ts` covers
+the `kind` NOT-NULL contract from PR #182 but zero regression coverage
+for the visibility-trigger leak scopes. A future regression
+(replacing the trigger function or revoking the GRANT) would land
+silently.
 
-- **D6 — supabase-migrate plan-job password removal** (red-team #38,
-  MEDIUM/9): replace `SUPABASE_DB_PASSWORD` with `SUPABASE_ACCESS_TOKEN`
-  -only auth in the plan job. Actually reduces exposure surface (vs the
-  applied F4 which achieves symmetry). Requires validation that the
-  read-only flow works end-to-end with `version: 2.98.2`.
+**Fix:** new sibling test file
+`src/__tests__/match-decisions-visibility-trigger-rls.test.ts`
+covering 5 scopes:
+1. Cross-org allocator INSERT → 42501
+2. In-org allocator INSERT → succeeds
+3. Orphan-org strategy INSERT → fails-closed (post-170000 MED-3)
+4. service_role direct INSERT → succeeds (CRITICAL-1 regression probe)
+5. NULL-org (owner-scoped) strategy INSERT → succeeds (no org gate)
 
-- **D7 — CRITICAL-C0293 file isolation** (red-team #43, MEDIUM/8):
-  move the `[CRITICAL-C0293]` describe block to its own test file so it
-  runs in every vitest shard. Mitigates the single-shard-flake risk
-  on a doc-only PR merging concurrent ci.yml regression.
+Gated by `HAS_LIVE_DB`; skips gracefully in CI without test-DB
+secrets. Uses test-DB Supabase project `qmnijlgmdhviwzwfyzlc` (per
+memory `reference_test_supabase_project`).
 
-- **D8 — Nightly SHA-drift detection cron** (red-team #28, MEDIUM/8):
-  `gh api repos/<org>/<action>/git/ref/tags/<tag>` probe per pinned
-  action in `docs/runbooks/ci-hardening-permissions-c0293.md`, with
-  auto-issue routing matching the existing demo-pdf-coldstart pattern.
-  ~10s nightly cost.
+**Commit:** `928e2555`
 
-- **D9 — Rebuild step contract test refactor** (pr-test-analyzer #45,
-  MEDIUM/8): refactor the seed-gated rebuild contract test to key on
-  the unique combination of `if:` + `rm -rf` wipe + `npm run build` +
-  `secrets.TEST_SUPABASE_URL` env binding rather than the exact step
-  name string. Lower priority — current test still works, the refactor
-  is biased toward future renames.
+### F3 — sanitize_user recipient_email DELETE case-insensitive (MED/8)
 
-## Rebase phase (post-#191/#195)
-
-**Date:** 2026-05-17
-**Outcome:** Rebased + force-with-lease pushed; CI green; PR mergeable=CLEAN.
-
-### Sequence
-
-1. **First rebase attempt** — onto `origin/main` @ `8c1d71cc` (v0.22.40.26 — types.ts tightening from PR #191). Expected conflicts on VERSION + package.json + CHANGELOG.md. Resolved to v0.22.40.27, force-with-lease pushed `7b74f29e`.
-
-2. **PR #195 landed in parallel** — while the first push was settling, PR #195 merged claiming patch slot v0.22.40.27 (`701fa883`). GitHub kept reporting `mergeable: false / mergeable_state: dirty` for PR #194; `git merge-tree origin/main HEAD` confirmed renewed conflicts on the same files plus FIX-REPORT.md.
-
-3. **Second rebase** — onto `origin/main` @ `701fa883` (v0.22.40.27 — PR #195 retro follow-up on PR #189). Re-resolved:
-   - **VERSION + package.json**: bumped to `0.22.40.28` (claims clean slot above PR #195's .27).
-   - **CHANGELOG.md**: re-headered this PR's entry under `[0.22.40.28] - 2026-05-17`; preserved PR #195's `[0.22.40.27]` section verbatim.
-   - **FIX-REPORT.md** (root-level): both PRs added a top-level FIX-REPORT.md. Took `--theirs` (incoming PR #194 content); the upstream PR #195 FIX-REPORT.md was a transient working file with no semantic dependency on this PR's content.
-   - The original "bump v0.22.40.22" commit was auto-dropped by `git rebase` as "patch contents already upstream" — now consolidated into the single `chore: re-bump version after rebase against main (v0.22.40.28)` commit (`b05cba0c`).
-
-4. **Force-with-lease pushed** `b05cba0c`. CI run `25977671615` triggered automatically.
-
-### Final state
-
-- Branch tip: `b05cba0c chore: re-bump version after rebase against main (v0.22.40.28)`
-- Version: `0.22.40.28` in VERSION + package.json; CHANGELOG entry `[0.22.40.28] - 2026-05-17`
-- CI run `25977671615`: ALL checks green (frontend-lint, frontend-policy, frontend-test 1/2/3, frontend-typecheck, frontend-build, sql-tests, secret-scan, python, e2e, docs-link-check, Vercel deployment).
-- PR state: `gh pr view 194 --json mergeable,mergeStateStatus` -> `{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}`.
-- DID NOT merge / DID NOT /land-and-deploy — handoff back to orchestrator per task spec.
-
-### Commits ahead of origin/main (9)
-
+**Live gap:** `20260516160100` ships
 ```
-b05cba0c chore: re-bump version after rebase against main (v0.22.40.28)
-295f9260 docs: FIX-REPORT for PR #188 retro follow-up
-0a4c6422 docs: CHANGELOG v0.22.40.22 entry — PR #188 retro follow-up
-9ab1c5d4 docs(ci-retro): expand runbook with regression-gate matrix + enforcement gaps (closes follow-up F11)
-f77c897a fix(ci-retro): add dependabot config for github-actions ecosystem (closes follow-up F9)
-c2c8d31e fix(ci-retro): assert seed-gated rebuild inlined real env into .next/ (closes follow-up D4)
-e8b5821f fix(ci-retro): tighten playwright-report gate to fail-closed allow-list (closes follow-up F6)
-44ee6598 fix(ci-retro): add regression tests for PR #188 invariants (closes follow-up F2+F3+F4+F8+F10)
-8bf3ae80 fix(ci-retro): broaden frontend-build secret check + tighten env-block regex (closes follow-up F1+F5)
+DELETE FROM notification_dispatches WHERE recipient_email = v_target_email;
 ```
+Both columns are TEXT with no canonicalization. RFC 5321 says email
+domains are always case-insensitive and local-parts are case-
+insensitive in practice. A `User@Example.com` / `user@example.com`
+mismatch between `profiles.email` and
+`notification_dispatches.recipient_email` would silently miss rows —
+breaching the GDPR Art. 17 immediate-erasure invariant the parent
+migration claims.
+
+**Fix:** new migration
+`20260517013100_sanitize_user_recipient_email_case_insensitive.sql`.
+- CREATE OR REPLACE sanitize_user with whole body verbatim from
+  20260516160100 EXCEPT the M-0796 DELETE clause changed to
+    `WHERE LOWER(recipient_email) = LOWER(v_target_email)`
+- Self-verifying DO block asserts the case-insensitive pattern + all
+  preservation gates from 20260516160100
+
+**Commit:** `a2adba3b`
+
+### F3b — Functional index on LOWER(recipient_email) (self-review perf companion)
+
+**Self-review concern:** F3's `LOWER(...)` predicate cannot use the
+plain B-tree `idx_notification_dispatches_recipient_email` (built by
+20260516170300). Without a functional index, every sanitize_user run
+inside the advisory lock seq-scans `notification_dispatches` —
+re-introducing the perf footgun 20260516170300 closed.
+
+**Fix:** new migration
+`20260517013200_notification_dispatches_recipient_email_lower_idx.sql`.
+- `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_notification_dispatches_recipient_email_lower
+  ON public.notification_dispatches (LOWER(recipient_email))`
+- NO-BEGIN/COMMIT migration per invariant #5
+- Additive index — plain `recipient_email = ?` callers still use the
+  existing plain index
+
+**Commit:** `9ad4a397`
+
+## Verification
+
+- `npx tsc --noEmit` → PASS (no type errors)
+- `npx eslint src/__tests__/match-decisions-visibility-trigger-rls.test.ts` → PASS
+- `npx vitest run src/__tests__/match-decisions-visibility-trigger-rls.test.ts` → 5 skipped (HAS_LIVE_DB gated, expected without test-DB env)
+- `npx vitest run src/__tests__/match-decisions-xor-rls.test.ts` → 8 skipped (regression check on adjacent test file, no break)
+- Migration filenames conform to `YYYYMMDDHHMMSS_<snake_name>.sql` pattern
+- No LLM template artifacts (`grep -cE '</?(content|invoke|function_calls|antml:|parameter)'` returns 0 on both new migrations)
+- No `RAISE EXCEPTION ... || ...` concatenation in new migrations (invariant #21)
+- New migrations time-ordered after the existing tip (`20260516170600`)

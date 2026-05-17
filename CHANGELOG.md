@@ -7,6 +7,22 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.29] - 2026-05-17
+
+**PR #182 retroactive audit follow-up — 3 actionable findings closed (Task #57).** The PR #182 retroactive `migration-reviewer` + `rls-policy-auditor` audits surfaced 15 findings (9 + 6). This PR closes the 3 items that represent an active live gap or test gap; 6 other findings are explicitly deferred with rationale in `follow-up-pr-findings.md`. All 20 PR #182 migrations are applied to prod (supabase-migrate run 25972386247 SUCCESS on 2026-05-17), so per migration-reviewer invariant #11 ALL fixes ship as NEW corrective migrations.
+
+Closes follow-up findings:
+- **F1 (rls-policy-auditor HIGH/8)** — `20260516170000` GRANTed EXECUTE on the SECDEF `_assert_strategy_visible_to_allocator(uuid,uuid)` helper to `authenticated`, opening a probe-oracle that bypasses strategies RLS (enumerable strategy existence + owner-vs-org classification + (strategy_id, user_id) → org-membership boolean). New migration `20260517013000` REVOKEs EXECUTE FROM authenticated; keeps service_role EXECUTE (the BEFORE INSERT trigger fires under service_role for the two admin-client routes).
+- **F2 (rls-policy-auditor HIGH/8)** — `src/__tests__/match-decisions-xor-rls.test.ts` covered the new `kind` NOT-NULL contract but zero regression coverage for the visibility-trigger leak scopes. New sibling test `src/__tests__/match-decisions-visibility-trigger-rls.test.ts` pins 5 scopes: cross-org allocator → 42501, in-org allocator → ok, orphan-org strategy → fails-closed, service_role direct INSERT → ok (CRITICAL-1 probe), NULL-org strategy → ok.
+- **F3 (migration-reviewer MED/8)** — `20260516160100` sanitize_user purged `notification_dispatches` via case-sensitive `recipient_email = v_target_email`; per RFC 5321 emails are case-insensitive so a casing mismatch between `profiles.email` and `notification_dispatches.recipient_email` would silently breach the GDPR Art. 17 invariant. New migration `20260517013100` re-CREATEs sanitize_user with `LOWER(...) = LOWER(...)`. Self-review companion `20260517013200` adds a functional index on `LOWER(recipient_email)` to keep the predicate index-eligible (preserves the 20260516170300 perf gain).
+
+Deferred follow-ups (see `follow-up-pr-findings.md` for rationale):
+- 6 findings where the bad shape was already corrected by a later migration in PR #182 itself (no active live gap; rollback-only risk; editing applied migrations is forbidden per invariant #11)
+- 2 findings about `20260516170400` CONCURRENTLY-in-tx + DROP+CONCURRENTLY planner-blind window — separately tracked under Task #47
+- 1 finding about `20260516160200` over-restrictive ACL — no live impact, docs-only fix
+- 1 finding about `20260516170100` historical PUBLIC EXECUTE leak window — closed at deploy, action item is forward-looking CI/lint gate
+
+
 ## [0.22.40.28] - 2026-05-17
 
 **CI hardening retro follow-up on PR #188 — ~8 HIGH retroactive specialist findings closed.** The PR #188 retroactive specialist audit (code-reviewer + security + performance + pr-test-analyzer + silent-failure-hunter + type-design-analyzer + red-team) on the CI hardening fix-content turned up regression-gate gaps the original PR did not pin. This PR closes them.
