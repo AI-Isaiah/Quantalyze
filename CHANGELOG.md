@@ -7,6 +7,11 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.32] - 2026-05-17
+
+**Chore: pre-compact re-verification of FIX-LIST.md (CRITICAL + HIGH-tier files).** Re-verifies the audit-2026-05-07 `FIX-LIST.md` against current `origin/main` so the next session can `/compact` with a clean work-queue. 91 CRITICAL-bearing files re-checked against 31 merged PRs (#169–#205) and the per-file `FIX-REPORT-*.md` artifacts. Result: 46 findings closed (7 CRITICAL / 24 HIGH / 14 MEDIUM / 1 LOW) and recorded in the gitignored `.planning/audit-2026-05-07/FIX-LIST-FIXED.md` closure log; 105 findings re-classified `⚠️ AMBIGUOUS-2026-05-17` (file touched by a merged PR but the specific ID not enumerated in the PR body — manual re-read required before further action). New surviving totals: 1929 findings (135 C / 726 H / 995 M / 73 L), down from 2001. Conservative bias preserved — under-closure favoured over false-closure. Tracked substance of this PR is the runbook + VERSION bump; the `.planning/` mutations are local-only per-developer state. Details: `docs/runbooks/fix-list-reverify-2026-05-17.md`.
+
+
 ## [0.22.40.31] - 2026-05-17
 
 **Chore: canonicalize audit-2026-05-07 bookkeeping (G13–G22 + G23 retro audits).** Adds a tracked summary runbook at `docs/runbooks/audit-canonical-integration-2026-05-17.md` documenting the audit data structure, ID taxonomies, and known gaps. Local `.planning/audit-2026-05-07/` (gitignored, per-developer) receives the G13–G22 specialist + red-team fan-out records in `SPECIALIST-LOG.md`, a new `HIGH-INVENTORY-G13-G22-2026-05-17.md` supplement (28 CRITICAL + 195 HIGH grouped by file), a `## G23 retroactive audits` per-file fold-in section appended to `FIX-LIST.md` (5 retro-audit JSONLs canonicalized from `.review/` to `findings/batch-G23.*.pr-NNN.jsonl`), `## G13–G22 batch coverage` sections in `PR-PLAN.md` + `SHIP-PLAN.md`, and a `pr-briefs/MISSING-PR-BRIEFS-G13-G22.md` known-debt inventory. No code or test changes; pure documentation + bookkeeping.
