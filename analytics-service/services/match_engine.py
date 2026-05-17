@@ -15,7 +15,9 @@ Key design decisions baked in from the dual-voice eng review:
 - Two modes: 'personalized' (uses portfolio_fit) and 'screening' (cold-start, no portfolio).
 - Deterministic: same inputs → identical output (modulo dict ordering).
 
-The function signature matches the plan's Task 4. Tests in tests/test_match_engine.py.
+The function signature matches the plan's Task 4. See tests/test_match_engine*.py
+(test_match_engine.py for the original suite, test_match_engine_service.py for
+the cluster-N regression suite added in audit-2026-05-07).
 """
 
 import json
@@ -66,9 +68,20 @@ class ExclusionReason(str, Enum):
 
     @property
     def is_hard(self) -> bool:
+        # NOTE: _HARD_REASONS is defined BELOW this class. Safe only because
+        # `is_hard` is a runtime property — the name is resolved at call
+        # time, not at class-definition time. Do NOT introduce any code in
+        # this class body (e.g. a default argument referencing _HARD_REASONS)
+        # that would force resolution before _HARD_REASONS exists, or rely
+        # on this property at class build.
         return self in _HARD_REASONS
 
 
+# NOTE: _HARD_REASONS MUST stay defined after `ExclusionReason` — moving it
+# above the class causes a NameError because the frozenset values reference
+# `ExclusionReason.OWNED` etc. (the enum members do not exist until the
+# class statement completes). The forward-reference pattern is documented
+# on the `is_hard` property above.
 _HARD_REASONS: frozenset["ExclusionReason"] = frozenset({
     ExclusionReason.OWNED,
     ExclusionReason.THUMBS_DOWN,
@@ -538,6 +551,22 @@ def _compute_capacity_fit(
     return _clamp(1 - (concentration / max_concentration), 0, 1)
 
 
+def _empty_pf_components() -> dict[str, Optional[float]]:
+    """Single source of truth for the empty portfolio_fit components dict.
+
+    Returns a fresh dict on each call so callers can mutate without aliasing.
+    Adding a new portfolio_fit sidecar field (e.g. M-0675 data_completeness)
+    requires ONE edit here — previously four sites needed lockstep updates.
+    """
+    return {
+        "sharpe_lift": None,
+        "corr_reduction": None,
+        "dd_improvement": None,
+        "corr_with_portfolio": None,
+        "data_completeness": None,
+    }
+
+
 def _compute_portfolio_fit_components(
     portfolio_returns_series: pd.Series,
     portfolio_weights: dict[str, float],
@@ -550,24 +579,12 @@ def _compute_portfolio_fit_components(
     All four can be None if the data is too sparse to compute meaningfully.
     """
     if portfolio_returns_series.empty or candidate_returns.empty:
-        return {
-            "sharpe_lift": None,
-            "corr_reduction": None,
-            "dd_improvement": None,
-            "corr_with_portfolio": None,
-            "data_completeness": None,
-        }
+        return _empty_pf_components()
 
     # Align candidate to portfolio dates
     port_df = pd.DataFrame(portfolio_strategies_returns).dropna()
     if port_df.empty:
-        return {
-            "sharpe_lift": None,
-            "corr_reduction": None,
-            "dd_improvement": None,
-            "corr_with_portfolio": None,
-            "data_completeness": None,
-        }
+        return _empty_pf_components()
 
     w_arr = np.array([portfolio_weights.get(sid, 0) for sid in port_df.columns])
     if w_arr.sum() > 0:
@@ -582,13 +599,12 @@ def _compute_portfolio_fit_components(
     if len(aligned) < 30:
         portfolio_count = max(len(portfolio_weights), 1)
         data_completeness_short = len(port_df.columns) / portfolio_count
-        return {
-            "sharpe_lift": None,
-            "corr_reduction": None,
-            "dd_improvement": None,
-            "corr_with_portfolio": _compute_corr_with_portfolio(current_port, candidate_returns),
-            "data_completeness": _safe_float(data_completeness_short),
-        }
+        components = _empty_pf_components()
+        components["corr_with_portfolio"] = _compute_corr_with_portfolio(
+            current_port, candidate_returns,
+        )
+        components["data_completeness"] = _safe_float(data_completeness_short)
+        return components
 
     new_weights = {sid: w * (1 - add_weight) for sid, w in portfolio_weights.items()}
     new_weights["__cand__"] = add_weight
@@ -715,16 +731,25 @@ def score_candidates(
 ) -> ScoreCandidatesResult:
     """Score every candidate strategy for an allocator. See module docstring.
 
-    Returns a dict with shape:
+    Returns a dict with shape (the canonical TypedDict is ScoreCandidatesResult):
     {
       "mode": "personalized" | "screening",
       "filter_relaxed": bool,
       "engine_version": str,
       "weights_version": str,
-      "effective_preferences": dict,
+      "effective_preferences": dict,   # H-0695: reflects relaxed dict when relaxation fires
+      "relaxed_overrides": dict | None,# H-0695: deltas applied; None when no relaxation
       "effective_thresholds": dict,
-      "candidates": [{strategy_id, score, rank, score_breakdown, reasons}, ...],
-      "excluded": [{strategy_id, exclusion_reason, exclusion_provenance, almost_passed}, ...],
+      "candidates": [
+        {
+          strategy_id, score, rank, score_breakdown, reasons,
+          "score_error": bool,         # H-0704: True when math produced NaN/Inf
+        },
+        ...,
+      ],
+      "excluded": [{strategy_id, exclusion_reason, exclusion_provenance}, ...],
+      "excluded_total": int,            # Full pre-_top_excluded count
+      "source_strategy_count": int,     # Size of input candidate_strategies
     }
     """
     prefs = merge_with_defaults(preferences or {})
@@ -880,13 +905,7 @@ def score_candidates(
                 add_weight,
             )
         else:
-            pf_components = {
-                "sharpe_lift": None,
-                "corr_reduction": None,
-                "dd_improvement": None,
-                "corr_with_portfolio": None,
-                "data_completeness": None,
-            }
+            pf_components = _empty_pf_components()
 
         manager_aum = cand.get("manager_aum") or 0
         ticket = prefs.get("target_ticket_size_usd") or 0
