@@ -129,4 +129,41 @@ describe("validateDisplayName", () => {
     const padded = "     " + "x".repeat(199);
     expect(validateDisplayName(padded)).toBe("x".repeat(199));
   });
+
+  /**
+   * Audit-2026-05-07 red-team R-0007 (MED c8): `[deleted]` is the GDPR
+   * sanitize_user sentinel that gates /api/account/export. A user
+   * setting their own display_name to this string locks themselves out
+   * of Art. 15 access and the route returns the misleading "Account
+   * sanitized" message. Reject the value at the user-controlled write
+   * path so the sentinel space cannot collide with user-chosen names.
+   * The sanitize_user RPC keeps writing it via service_role.
+   */
+  it("R-0007: rejects '[deleted]' as a reserved sentinel (sanitize-loop sentinel collision)", () => {
+    expect(() => validateDisplayName("[deleted]")).toThrow(
+      ProfileValidationError,
+    );
+    try {
+      validateDisplayName("[deleted]");
+    } catch (err) {
+      expect((err as ProfileValidationError).reason).toBe("reserved_value");
+    }
+  });
+
+  it("R-0007: case-folded — '[Deleted]' / '[DELETED]' are also rejected", () => {
+    expect(() => validateDisplayName("[Deleted]")).toThrow(
+      ProfileValidationError,
+    );
+    expect(() => validateDisplayName("[DELETED]")).toThrow(
+      ProfileValidationError,
+    );
+  });
+
+  it("R-0007: legitimate names containing 'deleted' substring still pass", () => {
+    // "Deleted Recipes Maker" is a legitimate name; the reserved-value
+    // check is exact-match (case-folded), not substring.
+    expect(validateDisplayName("Deleted Recipes Maker")).toBe(
+      "Deleted Recipes Maker",
+    );
+  });
 });

@@ -7,6 +7,28 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.40] - 2026-05-17
+
+**audit-2026-05-07 — TS API routes cluster close-out.** Multi-phase review pipeline (specialists → fix → red-team → red-team-fix → simplify → comment-analyzer) applied to:
+- `src/app/api/account/export/route.ts` (GDPR Art. 15 export)
+- `src/app/api/admin/partner-import/route.ts`
+- `src/app/api/demo/match/[allocator_id]/route.ts`
+- `src/app/api/portfolio-optimizer/route.ts`
+- `src/lib/audit.ts`, `src/lib/analytics-schemas.ts`, `src/lib/profile-validation.ts`
+
+Key closures (CRITICAL + HIGH only — full list in commit body):
+- HIGH `demo-match-unredacted-founder-notes`: anonymous-tier mask extended to cover `decisions[].founder_note`, `preferences.founder_notes`, `effective_preferences`, `existing_contact_requests`.
+- HIGH `portfolio-optimizer-asymmetric-token-refund`: 503/504 paths now refund rate-limit tokens.
+- HIGH `partner-import-cross-tenant-profile-overwrite`: `PartnerTagConflictError` blocks rebranding existing users.
+- HIGH `account-export-audit-metadata-rename`: `object_key_sha256` documented breaking change in CHANGELOG; downstream CSV consumers warned.
+- MED: `capAuditMetadata` 32-deep recursion guard; partner-import `StrategyTierConflictError`; refund-failure counter; `[deleted]` sentinel collision; per-user refund-bucket serialization Map.
+- CI repair: `audit-fanout-integration.test.ts` mock extended with `.select().in()` chain for partner-tag conflict pre-check (regression introduced by red-team fix R-0003, surfaced post-push).
+
+Code-simplifier + comment-analyzer passes: 2 simplifications (DRY destructure, dead `void`-prefixed import) + minor PR-body refresh.
+
+can bump without ambiguity.
+
+
 ## [0.22.40.39] - 2026-05-17
 
 **audit-2026-05-07 — Cluster C (E2E specs) close-out.** Multi-phase review pipeline (specialists → fix → red-team → red-team-fix → simplify → comment-analyzer) applied to `e2e/demo-public.spec.ts`, `e2e/discovery-watchlist.spec.ts`, `e2e/portfolio-pdf-demo.spec.ts`, `e2e/helpers/seed-test-project.ts`, and `src/lib/demo-pdf-token.ts`.

@@ -376,6 +376,88 @@ export interface AuditEvent {
 }
 
 /**
+ * Per-field length cap (in chars) for string values stored in
+ * `audit_log.metadata`. Audit-2026-05-07 H-0238 (security c8): the
+ * `metadata` JSONB column is unbounded by default, and several routes
+ * drop attacker-influenced strings into it (partner-import's
+ * `partner_tag`, intro-request body fields, strategy-review notes,
+ * alert types). Without a cap a malicious / hostile caller could write
+ * multi-megabyte values that:
+ *   - bloat Postgres TOAST hot rows (perf/cost regression),
+ *   - reflect XSS-style payloads back through /api/me/audit-log/export
+ *     CSV streams or the GDPR Art. 15 export bundle.
+ *
+ * 1024 chars is generous for legitimate metadata (display names,
+ * partner tags, short admin notes) but a tight cap on unbounded input.
+ * Longer textual fields belong in the canonical source table, not
+ * duplicated into audit metadata. Numbers / booleans / nested objects
+ * pass through untouched; only string leaves are clamped.
+ */
+export const AUDIT_METADATA_VALUE_MAX_CHARS = 1024;
+
+/**
+ * Audit-2026-05-07 red-team R-0005 (MED c8): depth guard. The helper is
+ * exported and documented as a general-purpose audit-emission boundary
+ * — every current caller passes a flat (1-2 deep) object, but the type
+ * signature `<T>(value: T): T` invites future callers to pipe attacker-
+ * influenced JSON through it. Postgres JSONB allows ~104k nesting
+ * levels; V8's default stack is ~10k frames; a 20k-deep payload crashes
+ * the route with `Maximum call stack size exceeded` and the `after()`
+ * scheduler turns it into an unhandled rejection.
+ *
+ * 32 levels covers every legitimate audit payload (the deepest current
+ * metadata is ~4 levels in the GDPR refused branch). Past the cap we
+ * emit a forensic sentinel so the audit row still lands with a clear
+ * "this was too deep" marker rather than stack-overflow + silent drop.
+ */
+export const AUDIT_METADATA_MAX_DEPTH = 32;
+
+/**
+ * Recursively clamp every string leaf inside an audit metadata object
+ * to {@link AUDIT_METADATA_VALUE_MAX_CHARS}. Truncated strings get an
+ * explicit `…[truncated:<original-length>]` suffix so forensic review
+ * can spot the truncation without re-running the original payload.
+ *
+ * Arrays and nested objects are walked depth-first. Non-string leaves
+ * are returned as-is. The function is pure and returns a new object —
+ * the caller's metadata is never mutated in place.
+ *
+ * Use at the audit-emission boundary in routes that drop request-body
+ * fields into metadata. Routes that only put server-derived constants
+ * (uuids, counts, booleans) into metadata do not need this — but
+ * applying it defensively is cheap.
+ *
+ * Audit-2026-05-07 red-team R-0005: depth-guarded. Beyond
+ * AUDIT_METADATA_MAX_DEPTH the function returns a sentinel
+ * `{ __audit_metadata_too_deep: true, depth }` instead of recursing —
+ * stack-safe even against attacker-influenced payloads.
+ */
+export function capAuditMetadata<T>(value: T, depth = 0): T {
+  if (depth > AUDIT_METADATA_MAX_DEPTH) {
+    return { __audit_metadata_too_deep: true, depth } as unknown as T;
+  }
+  if (typeof value === "string") {
+    if (value.length <= AUDIT_METADATA_VALUE_MAX_CHARS) return value;
+    const truncated = `${value.slice(
+      0,
+      AUDIT_METADATA_VALUE_MAX_CHARS,
+    )}…[truncated:${value.length}]`;
+    return truncated as unknown as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => capAuditMetadata(v, depth + 1)) as unknown as T;
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = capAuditMetadata(v, depth + 1);
+    }
+    return out as unknown as T;
+  }
+  return value;
+}
+
+/**
  * Emit an audit event via the user-scoped path.
  *
  * Returns void — the call is fire-and-forget. The provided `client`

@@ -68,8 +68,18 @@ export const PortfolioAnalyticsResponseSchema = z.object({
 }).passthrough();
 
 // --- /api/portfolio-optimizer ---
+// Audit-2026-05-07 M-0332 (type-design-analyzer c8): model `suggestions`
+// in the schema so a Python contract change (e.g. rename
+// suggestions→recommendations) fails the parse instead of silently
+// emitting an empty array via the route's `Array.isArray(undefined)`
+// fallback. Suggestions themselves are open-shaped because the Python
+// side fans out per-candidate fields; we pin the wrapper contract.
 export const PortfolioOptimizerResponseSchema = z.object({
   status: z.string().optional(),
+  ok: z.boolean().optional(),
+  portfolio_id: z.string().optional(),
+  suggestions: z.array(z.record(z.string(), z.unknown())).optional(),
+  persisted: z.boolean().optional(),
 }).passthrough();
 
 // --- /api/verify-strategy ---

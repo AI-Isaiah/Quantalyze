@@ -43,6 +43,23 @@ function makeUserClient() {
   return {
     auth: { getUser: getUserMock },
     rpc: logAuditRpcMock,
+    // Audit-2026-05-07 C-0022 / C-0023 sanitize-loop gate: the route
+    // reads profiles.display_name BEFORE the rate-limit consume. The
+    // existing pre-cluster-A tests pre-date this gate; we return a
+    // benign Alice display_name so the gate passes through and the
+    // tests below continue to assert on their original concerns. A
+    // dedicated test for the sanitize-state gate lives in
+    // src/app/api/account/export/route.test.ts.
+    from: (_table: string) => ({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => ({
+            data: { display_name: "Alice" },
+            error: null,
+          }),
+        }),
+      }),
+    }),
   };
 }
 
@@ -81,6 +98,10 @@ vi.mock("@/lib/ratelimit", () => ({
     resetUsedTokens: (key: string) => resetUsedTokensMock(key),
   },
   checkLimit: (limiter: unknown, key: string) => checkLimitMock(limiter, key),
+  // Audit-2026-05-07 simplify pass: the route now uses the shared
+  // `getClientIp` helper from the ratelimit module for the H-0200
+  // fingerprint. Stub returns "unknown" to match the no-header default.
+  getClientIp: (_headers: Headers): string => "unknown",
 }));
 
 vi.mock("@/lib/gdpr-export", () => ({
@@ -516,7 +537,7 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     consoleErrorSpy.mockRestore();
   });
 
-  it("emits account.export audit event with storage_path + expires_at + table_count + total_row_count", async () => {
+  it("emits account.export audit event with object_key_sha256 + expires_at + table_count + total_row_count", async () => {
     const { POST } = await loadRoute();
     const res = await POST(makeRequest());
     expect(res.status).toBe(200);
@@ -535,8 +556,13 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     expect(args.p_entity_type).toBe("user");
     expect(args.p_entity_id).toBe("user-ttl");
     const metadata = args.p_metadata as Record<string, unknown>;
-    expect(typeof metadata.storage_path).toBe("string");
-    expect((metadata.storage_path as string).startsWith("user-ttl/")).toBe(true);
+    // Audit-2026-05-07 H-0202 / H-0203: storage_path is now hashed in
+    // audit metadata so a future bucket-RLS regression cannot turn the
+    // audit-log CSV stream into a bundle-treasure-map. The raw
+    // objectKey lives in the server log line only.
+    expect(metadata.storage_path).toBeUndefined();
+    expect(typeof metadata.object_key_sha256).toBe("string");
+    expect((metadata.object_key_sha256 as string)).toMatch(/^[0-9a-f]{64}$/);
     expect(typeof metadata.expires_at).toBe("string");
     expect(metadata.table_count).toBe(2);
     expect(metadata.total_row_count).toBe(3);
