@@ -7,6 +7,47 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.38] - 2026-05-17
+
+**Docs: Phase-6 comment-analyzer pass on `fix/match-engine-tests-critical-2026-05-17` (audit-2026-05-07).** Closed wave-0 / wave-1 forward-rot in `analytics-service/tests/test_match_engine.py`. Three comment blocks (module docstring, lazy-import preamble, mandate-fit section header) referenced a stale TDD-scaffold state — Wave 1 has shipped (`_compute_mandate_fit_score` exported, ENGINE_VERSION == v2.1.0), tests are green under the live build, and the suite IS being maintained (this audit added the 2× floor-clamp boundary case 5b). Rewrites:
+
+- Module docstring: dropped stale per-section test counts (21 / 20), added audit-2026-05-07 closure ID list (C-0239..C-0241, H-0779, M-0741..M-0744).
+- Lazy-import preamble: reframed `MANDATE_FIT_IMPORTED` as a defensive guard against future rename / removal rather than a TDD red-state hatch.
+- Mandate-fit section header: removed "Wave 0: placeholder stubs, Wave 1: green" + "Do NOT modify these during Wave 1" (both actively misleading post-Wave-1).
+
+No code or assertion changes; comment-only. All audit-closure ID tags preserved verbatim. Python parses (`py_compile`). Trail: `.planning/audit-2026-05-07/PHASE-6-COMMENT-ANALYZER.md`.
+
+
+## [0.22.40.37] - 2026-05-17
+
+**Chore: Phase-5 simplify pass on `fix/match-engine-tests-critical-2026-05-17` (audit-2026-05-07).** Code-simplifier pass over the single in-scope source file (`analytics-service/tests/test_match_engine.py`) intentionally produced **zero simplification commits**. The branch is a test-only audit-closure landing (8 findings: C-0239, C-0240, C-0241, H-0779, M-0741, M-0742, M-0743, M-0744). Every "verbose" element in the diff — long precondition assertions, inline `# Precondition:` comments, docstrings citing audit IDs — is load-bearing per the simplify protocol's "leave alone" list. Specific candidates considered and deliberately not applied:
+
+- 14× repeated `if not MANDATE_FIT_IMPORTED: pytest.skip(...)` left as imperative skips (decorator form would silently fork a TDD-scaffold convention).
+- `_compute_mandate_fit_score = None` in the `except ImportError` branch left as a documented wave-0 / wave-1 import-gate marker.
+- `assert score == score` NaN idiom left in place (inline comment is unambiguous; rewriting to `math.isnan` is speculative).
+- Exclusion-reason assertion blocks left inline (each call site ≤3 lines, error messages carry audit-ID context; per Rule 5 "three similar lines beats premature abstraction").
+
+Trail: `.planning/audit-2026-05-07/PHASE-5-SIMPLIFY.md`. No code or test changes — VERSION / package.json / CHANGELOG only.
+
+
+## [0.22.40.36] - 2026-05-17
+
+**Test hardening: close 4C+1H+3M silent-pass / tautology findings on `analytics-service/tests/test_match_engine.py` (audit-2026-05-07 cluster D).** Eight findings from `FIX-LIST.md` (C-0239, C-0240, C-0241, H-0779, M-0741, M-0742, M-0743, M-0744) flagged tests that green-passed without exercising their stated intent — four had `if`-guards or OR-disjunctions that let the core assertion be skipped when the guarded value was None / empty, two asserted only bounds the engine's own invariants already guaranteed (vacuous), and one mandate-fit boundary (max_weight floor clamp at 2× ceiling) had no coverage.
+
+Per CLAUDE.md Rule 9 ("Tests verify intent, not just behavior"), the fixes assert preconditions FIRST so a regression that produces None / empty FAILS LOUDLY rather than green-passing. Detailed closures:
+
+- C-0239 / M-0741 / M-0744(a): `test_eligibility_excludes_low_sharpe_with_reason` now uses 5+ healthy candidates so relaxation does not fire, then asserts the `below_min_sharpe` exclusion reason directly without an OR-disjunction. Added companion `test_eligibility_relaxation_resurrects_low_sharpe` to pin the relaxation branch.
+- C-0240 / M-0744(b): `test_portfolio_fit_uses_correlation` — removed the if-guard, bumped to 200-day series, asserts `corr_with_portfolio` non-None as a hard precondition.
+- C-0241 / M-0744(b): `test_add_weight_derived_from_ticket_size` — same treatment plus a `> 1e-6` minimum-difference threshold (FP-drift-resistant).
+- H-0779 / M-0744(c): `test_reason_generation_skips_none_metrics` — asserts `len(candidates) == 1` unconditionally; also asserts `corr_with_portfolio is None` as the precondition the test exercises.
+- M-0742: `test_weight_overrides_normalization_invariant` — added uniform-scaling cancellation invariant (uniform `× s` overrides must renormalize back to baseline so final_score is byte-identical). Catches a dropped-renormalize regression that the prior bounds-only check could not.
+- M-0743: added parametrized `test_max_weight_floor_clamp_at_two_times_boundary` covering `add_weight` at 1.5×, 2×, 3× of `max_weight` — pins the `max(0, ·)` floor clamp.
+
+Specialist fan-out (testing + maintainability) closed 3 additional self-findings: tightened a brittle FP-equality check, tightened a too-broad reason-substring match, and cleaned a stale docstring describing an unimplemented approach. Red-team pass: NO FINDINGS at threshold.
+
+Test count on `test_match_engine.py`: 47 → 51 passing. Coverage on `services/match_engine.py`: 93% (well above the 80% gate). Full analytics-service suite unchanged: 1610 passed / 52 skipped.
+
+
 ## [0.22.40.31] - 2026-05-17
 
 **Chore: canonicalize audit-2026-05-07 bookkeeping (G13–G22 + G23 retro audits).** Adds a tracked summary runbook at `docs/runbooks/audit-canonical-integration-2026-05-17.md` documenting the audit data structure, ID taxonomies, and known gaps. Local `.planning/audit-2026-05-07/` (gitignored, per-developer) receives the G13–G22 specialist + red-team fan-out records in `SPECIALIST-LOG.md`, a new `HIGH-INVENTORY-G13-G22-2026-05-17.md` supplement (28 CRITICAL + 195 HIGH grouped by file), a `## G23 retroactive audits` per-file fold-in section appended to `FIX-LIST.md` (5 retro-audit JSONLs canonicalized from `.review/` to `findings/batch-G23.*.pr-NNN.jsonl`), `## G13–G22 batch coverage` sections in `PR-PLAN.md` + `SHIP-PLAN.md`, and a `pr-briefs/MISSING-PR-BRIEFS-G13-G22.md` known-debt inventory. No code or test changes; pure documentation + bookkeeping.
