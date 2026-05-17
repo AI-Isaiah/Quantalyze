@@ -7,6 +7,17 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.38] - 2026-05-17
+
+**Docs: Phase-6 comment-analyzer pass on `fix/match-engine-tests-critical-2026-05-17` (audit-2026-05-07).** Closed wave-0 / wave-1 forward-rot in `analytics-service/tests/test_match_engine.py`. Three comment blocks (module docstring, lazy-import preamble, mandate-fit section header) referenced a stale TDD-scaffold state — Wave 1 has shipped (`_compute_mandate_fit_score` exported, ENGINE_VERSION == v2.1.0), tests are green under the live build, and the suite IS being maintained (this audit added the 2× floor-clamp boundary case 5b). Rewrites:
+
+- Module docstring: dropped stale per-section test counts (21 / 20), added audit-2026-05-07 closure ID list (C-0239..C-0241, H-0779, M-0741..M-0744).
+- Lazy-import preamble: reframed `MANDATE_FIT_IMPORTED` as a defensive guard against future rename / removal rather than a TDD red-state hatch.
+- Mandate-fit section header: removed "Wave 0: placeholder stubs, Wave 1: green" + "Do NOT modify these during Wave 1" (both actively misleading post-Wave-1).
+
+No code or assertion changes; comment-only. All audit-closure ID tags preserved verbatim. Python parses (`py_compile`). Trail: `.planning/audit-2026-05-07/PHASE-6-COMMENT-ANALYZER.md`.
+
+
 ## [0.22.40.37] - 2026-05-17
 
 **Chore: Phase-5 simplify pass on `fix/match-engine-tests-critical-2026-05-17` (audit-2026-05-07).** Code-simplifier pass over the single in-scope source file (`analytics-service/tests/test_match_engine.py`) intentionally produced **zero simplification commits**. The branch is a test-only audit-closure landing (8 findings: C-0239, C-0240, C-0241, H-0779, M-0741, M-0742, M-0743, M-0744). Every "verbose" element in the diff — long precondition assertions, inline `# Precondition:` comments, docstrings citing audit IDs — is load-bearing per the simplify protocol's "leave alone" list. Specific candidates considered and deliberately not applied:
