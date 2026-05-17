@@ -103,14 +103,16 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
     await page.waitForSelector("table tbody tr", { timeout: 15000 });
 
     // Red-team RT-J02 (CRITICAL): the 'No strategies match your filters.'
-    // empty-state row in StrategyTable.tsx:493-499 is ALSO a `tr` inside
-    // tbody, so `waitForSelector('table tbody tr')` above succeeds even
-    // when the test DB has no seed data. Without this guard the three
+    // empty-state row in StrategyTable.tsx (search: `No strategies match
+    // your filters`) is ALSO a `tr` inside tbody, so
+    // `waitForSelector('table tbody tr')` above succeeds even when the
+    // test DB has no seed data. Without this guard the three
     // negative-property tests would either pass vacuously OR fail with
     // confusing "expected >0 to be >0" diagnostics 15s later. Symmetric
-    // with discovery-hide-examples-default.spec.ts:144-153 — both specs
-    // share the same external `npm run seed:demo` dependency and must
-    // surface it identically.
+    // with the `hasEmptyStateRow` guard in
+    // discovery-hide-examples-default.spec.ts — both specs share the same
+    // external `npm run seed:demo` dependency and must surface it
+    // identically.
     const rowsText = await page
       .locator("table tbody tr")
       .allTextContents();
@@ -139,12 +141,14 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
     const probe = await page.evaluate<SparklineStrokeProbe, string>(
       (selector) => {
         // Red-team RT-J01: scope to SVGs that actually have a stroked path.
-        // The row-level checkbox icon (StrategyTable.tsx line 434) renders
-        // an `<svg>` with `fill="currentColor"` and NO stroked path — it
-        // matches a bare `table svg` selector but contributes a stroke set
-        // of size 0, which silently passes the "no green+red" disjunction
-        // AND breaks the `size===1` tightening in the next test. Restricting
-        // to `svg:has(path[stroke])` selects ONLY actual sparkline SVGs.
+        // The row-level verified-badge icon in StrategyTable.tsx (the
+        // `<svg className="h-4 w-4" ... fill="currentColor">` rendered
+        // when `s.api_key_id` is set) has `fill="currentColor"` and NO
+        // stroked path — it matches a bare `table svg` selector but
+        // contributes a stroke set of size 0, which silently passes the
+        // "no green+red" disjunction AND breaks the `size===1` tightening
+        // in the next test. Restricting to `svg:has(path[stroke])` selects
+        // ONLY actual sparkline SVGs.
         const svgs = Array.from(
           document.querySelectorAll(selector),
         ) as SVGElement[];
@@ -239,13 +243,15 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
     // transparent). Add a POSITIVE contract: at least one returns
     // sparkline on /discovery/crypto-sma must be stroked with the
     // accent color (var(--color-accent), the canonical positive stroke
-    // per src/lib/sparkline-color.ts:20). Seed data has positive
+    // per the `positive` key in `STROKE_BY_TONE` in
+    // src/lib/sparkline-color.ts). Seed data has positive
     // annualizedReturn for all 8 STRATEGY_PROFILES, so the accent
     // branch MUST be exercised in the live DOM.
     //
     // audit-2026-05-07 testing finding M-discovery-sparkline:231 —
     // bind to the explicit `data-testid='sparkline-returns'` attribute
-    // (added to the returns Sparkline at StrategyTable.tsx:471) rather
+    // (passed to the returns <Sparkline> in StrategyTable.tsx — search
+    // `data-testid="sparkline-returns"`) rather
     // than "every non-last SVG per row". The old loop would silently
     // include any future row-level icon SVG (favorites star, sync
     // indicator, etc.) and could pass on a non-sparkline element. The
@@ -288,9 +294,10 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
     page,
   }) => {
     // The drawdown sparkline is the LAST sparkline cell per row in the
-    // table (Sparkline at StrategyTable.tsx:464 with color="var(--color-negative)").
-    // Locate it via td order: drawdown is the second-to-last <td> per row,
-    // which means the LAST <svg> per row.
+    // table (the <Sparkline> in StrategyTable.tsx rendered with
+    // `color="var(--color-negative)"` and `fill` — search the file for
+    // that color literal). Locate it via td order: drawdown is the
+    // second-to-last <td> per row, which means the LAST <svg> per row.
     const probe = await page.evaluate<DrawdownStrokeProbe>(() => {
       const rows = Array.from(document.querySelectorAll("table tbody tr"));
       const strokes = rows

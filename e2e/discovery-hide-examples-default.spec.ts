@@ -2,20 +2,21 @@
  * Phase 13 / Plan 13-05 / DISCO-05 — Fresh-allocator hide-examples-by-default.
  *
  * Proves the cross-plan invariant: with Plan 13-02's
- * `DEFAULTS.hide_examples = true` (src/lib/discovery-prefs.ts:42) AND
- * Plan 13-05's `is_example = true` backfill on the 8 seed strategy UUIDs
- * (supabase/migrations/20260429063138_seed_is_example_backfill.sql), a brand-new
- * allocator with no prior `discovery_view_preferences:*` localStorage
- * entries lands on `/discovery/[slug]` and sees ZERO example strategies.
+ * `DEFAULTS.hide_examples = true` (src/lib/discovery-prefs.ts `DEFAULTS`)
+ * AND Plan 13-05's `is_example = true` backfill on the 8 seed strategy
+ * UUIDs (supabase/migrations/20260429063138_seed_is_example_backfill.sql),
+ * a brand-new allocator with no prior `discovery_view_preferences:*`
+ * localStorage entries lands on `/discovery/[slug]` and sees ZERO example
+ * strategies.
  *
- * Then toggles "Hide examples" OFF via the inline filter checkbox
- * (StrategyFilters.tsx:343-351) and asserts the seed strategies become
- * visible — proving the toggle actually controls visibility (not just
- * the empty-state default).
+ * Then toggles "Hide examples" OFF via the inline filter checkbox in
+ * StrategyFilters.tsx (search: `Hide examples toggle`) and asserts the
+ * seed strategies become visible — proving the toggle actually controls
+ * visibility (not just the empty-state default).
  *
  * Env wiring (matches discovery-prefs-isolation.spec.ts pattern):
  *   The active path is the `seedTestAllocator()` helper from
- *   `e2e/helpers/seed-test-project.ts:60`. When `TEST_SUPABASE_URL` /
+ *   `e2e/helpers/seed-test-project.ts`. When `TEST_SUPABASE_URL` /
  *   `TEST_SUPABASE_SERVICE_ROLE_KEY` are not wired, the spec is
  *   `test.skip`'d so it is authored-but-not-CI-blocking.
  *
@@ -201,8 +202,9 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     ).toEqual([]);
 
     // Now toggle "Hide examples" OFF via the inline checkbox in
-    // StrategyFilters.tsx:342-351. The checkbox is checked={!showExamples}
-    // and clicking the surrounding <label> flips it.
+    // StrategyFilters.tsx (search: `Hide examples toggle`). The checkbox
+    // is `checked={!showExamples}` and clicking the surrounding <label>
+    // flips it.
     //
     // C-0301/H-1034 fix: no `if (hideExamplesLabel.count())` silent skip.
     // The toggle must exist; a UI rename is a real regression we want to

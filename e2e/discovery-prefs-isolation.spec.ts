@@ -8,7 +8,7 @@
  * Env wiring (TODOS.md Q4 RESOLVED 2026-04-28):
  *   E2E_USER_A_EMAIL / E2E_USER_A_PASSWORD / E2E_USER_B_EMAIL / E2E_USER_B_PASSWORD
  *   are NOT wired into CI today. The active path is the seed-helper fallback —
- *   `seedTestAllocator()` from `e2e/helpers/seed-test-project.ts:60` creates two
+ *   `seedTestAllocator()` from `e2e/helpers/seed-test-project.ts` creates two
  *   fresh allocators per spec run.
  *
  * Behaviour: when the seed-helper service-role env (TEST_SUPABASE_*) is missing,
