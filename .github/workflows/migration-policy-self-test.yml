@@ -1,0 +1,171 @@
+name: Migration Policy — Self Test
+
+# Exercises every branch of the migration-policy algorithm against
+# SYNTHETIC inputs, without touching the remote Supabase project.
+#
+# Why: PR #193 relocated the backdated-migration guard into
+# `.github/workflows/migration-policy.yml`. The retroactive audit
+# (Task #58, MEDIUM conf 8) flagged that the early-exit branch
+# (ADDED_FILES empty) was the ONLY path exercised in CI — the
+# reject branch (backdated unallowlisted → exit 1) and the
+# malformed-filename branch (basename prefix not 14 digits → exit 1)
+# had never run. A future regression to either path would land
+# silently.
+#
+# This workflow runs the algorithm extracted into
+# `scripts/test-migration-policy-algorithm.sh` against a matrix of
+# synthetic test cases. Each case mocks REMOTE_TIP + ADDED_FILES +
+# ALLOWLIST_FILE; the script's exit code is asserted against the
+# expected value for the case.
+#
+# The script must stay byte-equivalent to the algorithm in
+# `migration-policy.yml`. The `critical-regressions.test.ts`
+# source-text guard (retro-PR193-M-4) pins the workflow YAML to
+# contain the same key literals (`if [[ "$ts" < "$REMOTE_TIP" ]]`,
+# `grep -qFx`, etc.) so the contract holds at the source level.
+#
+# Security: the only `${{ }}` interpolations in run: blocks are
+# `steps.prep.outputs.allowlist` (a deterministic tempfile path
+# produced by an earlier step in the same job) and the concurrency
+# group key (GitHub-controlled, not attacker-controlled). No
+# untrusted github.event.* fields are interpolated into shell.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/test-migration-policy-algorithm.sh'
+      - '.github/workflows/migration-policy-self-test.yml'
+      - '.github/workflows/migration-policy.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: migration-policy-self-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    # No `environment: Production` (same rationale as migration-policy.yml).
+    # No secrets consumed — the script bypasses `supabase link/query` by
+    # taking REMOTE_TIP as an input env var.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Prepare synthetic allowlist
+        id: prep
+        run: |
+          set -euo pipefail
+          ALLOWLIST=$(mktemp)
+          {
+            echo "# Self-test allowlist"
+            echo "# (comment lines + blanks are ignored, same as the real allowlist)"
+            echo ""
+            echo "20260101000000"
+          } > "$ALLOWLIST"
+          echo "allowlist=$ALLOWLIST" >> "$GITHUB_OUTPUT"
+          echo "Generated synthetic allowlist:"
+          cat "$ALLOWLIST"
+      - name: Case 1 — early-exit (empty ADDED_FILES, expect exit 0)
+        env:
+          ALLOWLIST_FILE: ${{ steps.prep.outputs.allowlist }}
+        run: |
+          set +e
+          REMOTE_TIP=20260516000000 ADDED_FILES="" \
+            ./scripts/test-migration-policy-algorithm.sh
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::error::Case 1 (early-exit) expected exit 0, got $rc"
+            exit 1
+          fi
+          echo "Case 1 PASS (early-exit)"
+      - name: Case 2 — forward-only (timestamp > remote tip, expect exit 0)
+        env:
+          ALLOWLIST_FILE: ${{ steps.prep.outputs.allowlist }}
+        run: |
+          set +e
+          REMOTE_TIP=20260516000000 ADDED_FILES="supabase/migrations/20260520120000_new_feature.sql" \
+            ./scripts/test-migration-policy-algorithm.sh
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::error::Case 2 (forward-only) expected exit 0, got $rc"
+            exit 1
+          fi
+          echo "Case 2 PASS (forward-only)"
+      - name: Case 3 — allowlisted backdated (in allowlist, expect exit 0)
+        env:
+          ALLOWLIST_FILE: ${{ steps.prep.outputs.allowlist }}
+        run: |
+          set +e
+          REMOTE_TIP=20260516000000 ADDED_FILES="supabase/migrations/20260101000000_restore.sql" \
+            ./scripts/test-migration-policy-algorithm.sh
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::error::Case 3 (allowlisted backdated) expected exit 0, got $rc"
+            exit 1
+          fi
+          echo "Case 3 PASS (allowlisted backdated)"
+      - name: Case 4 — REJECT path (backdated unallowlisted, expect exit 1)
+        env:
+          ALLOWLIST_FILE: ${{ steps.prep.outputs.allowlist }}
+        run: |
+          set +e
+          REMOTE_TIP=20260516000000 ADDED_FILES="supabase/migrations/20260401000000_silent_attack.sql" \
+            ./scripts/test-migration-policy-algorithm.sh
+          rc=$?
+          if [ $rc -ne 1 ]; then
+            echo "::error::Case 4 (reject) expected exit 1, got $rc"
+            exit 1
+          fi
+          echo "Case 4 PASS (reject path exited 1 as expected)"
+      - name: Case 5 — MALFORMED filename (no 14-digit prefix, expect exit 1)
+        env:
+          ALLOWLIST_FILE: ${{ steps.prep.outputs.allowlist }}
+        run: |
+          set +e
+          REMOTE_TIP=20260516000000 ADDED_FILES="supabase/migrations/not-a-timestamp.sql" \
+            ./scripts/test-migration-policy-algorithm.sh
+          rc=$?
+          if [ $rc -ne 1 ]; then
+            echo "::error::Case 5 (malformed) expected exit 1, got $rc"
+            exit 1
+          fi
+          echo "Case 5 PASS (malformed branch exited 1 as expected)"
+      - name: Case 6 — MIXED (malformed + reject in same diff, expect exit 1 with both errors)
+        env:
+          ALLOWLIST_FILE: ${{ steps.prep.outputs.allowlist }}
+        run: |
+          set +e
+          MIXED=$(printf '%s\n%s' "supabase/migrations/short_ts.sql" "supabase/migrations/20260401000000_silent.sql")
+          OUT=$(REMOTE_TIP=20260516000000 ADDED_FILES="$MIXED" \
+            ./scripts/test-migration-policy-algorithm.sh 2>&1)
+          rc=$?
+          if [ $rc -ne 1 ]; then
+            echo "::error::Case 6 (mixed) expected exit 1, got $rc"
+            echo "$OUT"
+            exit 1
+          fi
+          if ! echo "$OUT" | grep -q "malformed names"; then
+            echo "::error::Case 6 (mixed) missing 'malformed names' error in output"
+            echo "$OUT"
+            exit 1
+          fi
+          if ! echo "$OUT" | grep -q "Backdated migration additions"; then
+            echo "::error::Case 6 (mixed) missing 'Backdated migration additions' error in output"
+            echo "$OUT"
+            exit 1
+          fi
+          echo "Case 6 PASS (mixed: both error classes surfaced)"
+      - name: Summary
+        run: |
+          echo "All 6 migration-policy algorithm branches exercised:"
+          echo "  - empty ADDED_FILES (early-exit)"
+          echo "  - forward-only (timestamp > remote tip)"
+          echo "  - allowlisted backdated"
+          echo "  - reject path (backdated unallowlisted)"
+          echo "  - malformed filename (no 14-digit prefix)"
+          echo "  - mixed (malformed + reject in same diff)"

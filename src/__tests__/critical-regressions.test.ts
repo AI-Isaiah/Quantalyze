@@ -446,6 +446,7 @@ describe("Critical regression guards", () => {
       ".github/workflows/phase-19-stability.yml",
       ".github/workflows/supabase-migrate.yml",
       ".github/workflows/migration-policy.yml",
+      ".github/workflows/migration-policy-self-test.yml",
     ];
 
     // Test helpers — collapse the repeated regex-assertion pattern below.
@@ -865,6 +866,104 @@ describe("Critical regression guards", () => {
           ).toBe(1);
         });
       }
+    });
+
+    // retro-PR193-M-4 (migration-reviewer MEDIUM/8): the
+    // migration-policy.yml reject + malformed branches had never been
+    // exercised in CI before this PR; only the early-exit branch ran
+    // on PR #193 itself. Three guards pin the algorithm at the source
+    // level so future regressions can't silently elide a branch:
+    //
+    //   1. The workflow YAML contains the literal timestamp-comparison
+    //      `if [[ "$ts" < "$REMOTE_TIP" ]]` (reject decision point)
+    //      AND the literal `grep -qFx` allowlist match. Removing
+    //      either expression would skip the reject path entirely.
+    //   2. The workflow YAML contains the malformed-filename regex
+    //      check `[[ "$ts" =~ ^[0-9]{14}$ ]]`. Removing it would
+    //      skip the malformed branch.
+    //   3. The byte-equivalent algorithm is also extracted into
+    //      `scripts/test-migration-policy-algorithm.sh`, which the
+    //      `migration-policy-self-test.yml` workflow drives against
+    //      a 6-case matrix (early-exit, forward, allowlisted, reject,
+    //      malformed, mixed). The shell script MUST contain the same
+    //      literals; if a regression removes a branch from EITHER the
+    //      real workflow OR the self-test script, the matrix or this
+    //      test fails.
+    //
+    // This mirrors the [CRITICAL-02] VERSION/package.json drift and
+    // SHA-pin source-text invariants — pin the contract at the text
+    // level so it can't drift unnoticed.
+    describe("retro-PR193-M-4 — migration-policy algorithm source-text invariants", () => {
+      it("migration-policy.yml contains the reject-path timestamp comparison literal", () => {
+        const src = readText(".github/workflows/migration-policy.yml");
+        expect(
+          /if \[\[ "\$ts" < "\$REMOTE_TIP" \]\]/.test(src),
+          "migration-policy.yml: reject-path comparison literal `if [[ \"$ts\" < \"$REMOTE_TIP\" ]]` missing — backdated migrations would not be detected",
+        ).toBe(true);
+      });
+      it("migration-policy.yml contains the allowlist exact-match grep literal", () => {
+        const src = readText(".github/workflows/migration-policy.yml");
+        expect(
+          /grep -qFx "\$ts"/.test(src),
+          "migration-policy.yml: allowlist exact-match `grep -qFx \"$ts\"` missing — allowlist entries would be ignored or partial-match (security hole: substring match would allowlist any timestamp containing an entry as a substring)",
+        ).toBe(true);
+      });
+      it("migration-policy.yml contains the malformed-filename 14-digit regex", () => {
+        const src = readText(".github/workflows/migration-policy.yml");
+        expect(
+          /\[\[ "\$ts" =~ \^\[0-9\]\{14\}\$ \]\]/.test(src),
+          "migration-policy.yml: malformed-filename regex `[[ \"$ts\" =~ ^[0-9]{14}$ ]]` missing — files without a 14-digit prefix would pass silently",
+        ).toBe(true);
+      });
+      it("migration-policy.yml policy job does NOT pin environment: Production (retro-PR193 H-1)", () => {
+        const src = readText(".github/workflows/migration-policy.yml");
+        // Locate the `policy:` job body, stop at the next top-level
+        // key (column 0) or EOF. The policy job is the only job in
+        // this workflow so we anchor on `  policy:` and read to EOF.
+        const m = src.match(/^ {2}policy:\s*\n([\s\S]*)/m);
+        expect(
+          m,
+          "migration-policy.yml: policy job not found",
+        ).not.toBeNull();
+        expect(
+          /^\s*environment:\s*Production/m.test(m![1]),
+          "migration-policy.yml policy job inherited `environment: Production` — PR-gate would block on future ADR-0009 required-reviewer protection, defeating the automated-gate property (retro-PR193 H-1)",
+        ).toBe(false);
+      });
+      it("scripts/test-migration-policy-algorithm.sh contains the byte-equivalent reject + malformed literals", () => {
+        const src = readText("scripts/test-migration-policy-algorithm.sh");
+        expect(
+          /if \[\[ "\$ts" < "\$REMOTE_TIP" \]\]/.test(src),
+          "test-migration-policy-algorithm.sh: missing reject-path comparison — self-test would not exercise the reject branch",
+        ).toBe(true);
+        expect(
+          /grep -qFx "\$ts"/.test(src),
+          "test-migration-policy-algorithm.sh: missing allowlist exact-match — self-test would not exercise the allowlisted branch",
+        ).toBe(true);
+        expect(
+          /\[\[ "\$ts" =~ \^\[0-9\]\{14\}\$ \]\]/.test(src),
+          "test-migration-policy-algorithm.sh: missing malformed-filename regex — self-test would not exercise the malformed branch",
+        ).toBe(true);
+      });
+      it("migration-policy-self-test.yml drives all six algorithm cases", () => {
+        const src = readText(".github/workflows/migration-policy-self-test.yml");
+        // Each case is a named step; pin the case-name literals so
+        // a future PR can't quietly drop one.
+        const required = [
+          /Case 1 — early-exit/,
+          /Case 2 — forward-only/,
+          /Case 3 — allowlisted backdated/,
+          /Case 4 — REJECT path/,
+          /Case 5 — MALFORMED filename/,
+          /Case 6 — MIXED/,
+        ];
+        for (const re of required) {
+          expect(
+            re.test(src),
+            `migration-policy-self-test.yml missing required case step matching ${re}`,
+          ).toBe(true);
+        }
+      });
     });
   });
 });
