@@ -11,7 +11,10 @@
  * StarToggle child fires fetch on click; we mock it here so the toggle
  * state under test is just StrategyTable's own watchedSet mutation.
  *
- * Plan reference: 13-01-PLAN.md Step 3c lists the seven cases below.
+ * Plan reference: 13-01-PLAN.md Step 3c (Watchlist surface cases). The
+ * suite has since grown to cover Save-preferences re-render (view-mode +
+ * hide-examples) and the DISCO-04 sparkline color rule branches; each
+ * test names its own anchor.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -418,10 +421,10 @@ describe("StrategyTable — DISCO-04 sparkline color rule (returns column only)"
 
   it("does NOT change the drawdown sparkline color (always var(--color-negative)) — Pitfall 7 invariant", () => {
     // Even when sparkline_returns ends positive (which would tint the
-    // returns sparkline accent-green), the drawdown sparkline cell at
-    // line ~464 of StrategyTable.tsx must still render with the static
-    // var(--color-negative) prop. This proves the new sign-driven rule
-    // does NOT bleed into the drawdown call site.
+    // returns sparkline accent-green), the drawdown sparkline cell
+    // (data-testid="sparkline-cell-drawdown") must still render with
+    // the static var(--color-negative) prop. This proves the new
+    // sign-driven rule does NOT bleed into the drawdown call site.
     const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
     fixture.analytics.sparkline_returns = [0, 0.05, 0.1]; // ends positive → accent
     fixture.analytics.sparkline_drawdown = [0, -0.1, -0.2, -0.05, 0];
