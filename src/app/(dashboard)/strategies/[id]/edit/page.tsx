@@ -46,17 +46,44 @@ export default async function EditStrategyPage({
           <StrategyForm strategy={strategy} mode="edit" />
         </div>
         <div className="space-y-6">
-          <ApiKeyManager strategyId={strategy.id} currentKeyId={strategy.api_key_id} defaultExchange={strategy.supported_exchanges?.[0]?.toLowerCase()} />
           {/*
-            Sprint 5 Task 5.8: live key-scope viewer. Only the strategy
-            owner can reach this page (the .eq("user_id", user.id) filter
-            above gates it), so it's safe to render the badge here without
-            an additional ownership check — the API route does its own.
+            2026-05-17 UAT: render only the panel that matches the
+            strategy's actual data source. Pre-fix the page rendered
+            ApiKeyManager AND CsvUpload unconditionally, so a CSV-uploaded
+            strategy (`source = 'csv'`) showed an irrelevant Exchange API
+            Keys panel and an offer to "Add Key" — confusing for managers
+            who never connected an exchange. Mirrors the wizard's
+            source-branching: 'csv' strategies own a pnl CSV, every other
+            source (`legacy`, `wizard`, `admin_import`, `allocator_connected`,
+            `okx`, `binance`, `bybit`) is API-key-backed.
+
+            Note: `api_key_id` is allowed to be null even for non-CSV
+            strategies (e.g. wizard-source in draft state, broker rows
+            mid-finalize), so we key off `source` rather than presence of
+            api_key_id. The key-scope badge stays gated on api_key_id
+            since it has no live badge when the column is null.
           */}
-          {strategy.api_key_id && (
-            <KeyPermissionBadge apiKeyId={strategy.api_key_id} />
+          {strategy.source === "csv" ? (
+            <CsvUpload strategyId={strategy.id} />
+          ) : (
+            <>
+              <ApiKeyManager
+                strategyId={strategy.id}
+                currentKeyId={strategy.api_key_id}
+                defaultExchange={strategy.supported_exchanges?.[0]?.toLowerCase()}
+              />
+              {/*
+                Sprint 5 Task 5.8: live key-scope viewer. Only the strategy
+                owner can reach this page (the .eq("user_id", user.id)
+                filter above gates it), so it's safe to render the badge
+                here without an additional ownership check — the API route
+                does its own.
+              */}
+              {strategy.api_key_id && (
+                <KeyPermissionBadge apiKeyId={strategy.api_key_id} />
+              )}
+            </>
           )}
-          <CsvUpload strategyId={strategy.id} />
         </div>
       </div>
     </>
