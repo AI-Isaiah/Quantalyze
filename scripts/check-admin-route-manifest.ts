@@ -26,69 +26,68 @@
  * ----------
  *   0  manifest matches reality.
  *   1  drift detected (one or more violations).
+ *
+ * Invocation
+ * ----------
+ * Wired into `npm run check:admin-route-manifest` (package.json) and
+ * `npm run lint`, which is the CI hook in `.github/workflows/ci.yml`
+ * (frontend-lint job). To run by itself: `npm run check:admin-route-manifest`.
+ *
+ * audit-2026-05-07 testing T1 (HIGH conf 8) + security S1 (MED conf 8) +
+ * maintainability M2 (MED conf 8): split into pure helpers + a
+ * `runCheck(rootDir)` entry point so the regression suite at
+ * `src/__tests__/check-admin-route-manifest.test.ts` can drive it
+ * against a tmp fixture tree. The `detectMechanism` helper now strips
+ * comments before regex matching (S1) and the mechanism alternation is
+ * derived from the imported `AdminGateMechanism` union (M2 — no more
+ * three-copy DRY violation).
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, relative, join } from "node:path";
 
+import {
+  ADMIN_ROUTE_MANIFEST,
+  type AdminGateMechanism,
+  type AdminRouteEntry,
+} from "../src/lib/auth/rbac-manifest";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 
-type ManifestEntry = {
-  route: string;
-  current:
-    | "withRole"
-    | "withAdminAuth"
-    | "isAdminUser-inline"
-    | "authenticated-non-admin";
-};
-
-function loadManifest(): ManifestEntry[] {
-  const manifestPath = resolve(
-    REPO_ROOT,
-    "src/lib/auth/rbac-manifest.ts",
-  );
-  const src = readFileSync(manifestPath, "utf-8");
-  // Parse the ADMIN_ROUTE_MANIFEST literal by extracting each
-  // `{ route: "...", current: "...", ... }` block. Deliberately simple
-  // regex so the script does not depend on a TS parser at CI time.
-  const blockRegex =
-    /\{\s*route:\s*"([^"]+)",\s*current:\s*"(withRole|withAdminAuth|isAdminUser-inline|authenticated-non-admin)"/g;
-  const entries: ManifestEntry[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = blockRegex.exec(src)) !== null) {
-    entries.push({
-      route: m[1] as string,
-      current: m[2] as ManifestEntry["current"],
-    });
-  }
-  if (entries.length === 0) {
-    throw new Error(
-      "[check-admin-route-manifest] No entries parsed from rbac-manifest.ts — script is broken or manifest is empty.",
-    );
-  }
-  return entries;
+/**
+ * Strip line + block comments before mechanism detection. Without this,
+ * a comment containing `// withRole("admin")` would classify the file
+ * as `withRole` even if the runtime body uses `isAdminUser` inline (or
+ * nothing). Security S1 (audit-2026-05-07, MED conf 8): comment-only
+ * mention is not a real call.
+ *
+ * Deliberately simple — no string-aware tokenizer. A literal containing
+ * the substring `//` is rare in route handlers; if it becomes a problem,
+ * swap to ts-morph or the TypeScript compiler API for AST walking. The
+ * fingerprint here is "good enough" to defeat the documented bypass.
+ */
+export function stripComments(contents: string): string {
+  return contents
+    .replace(/\/\*[\s\S]*?\*\//g, "") // block comments
+    .replace(/\/\/[^\n]*/g, ""); // line comments
 }
 
-function detectMechanism(
+export function detectMechanism(
   contents: string,
-):
-  | "withRole"
-  | "withAdminAuth"
-  | "isAdminUser-inline"
-  | "authenticated-non-admin"
-  | "UNGATED" {
-  if (/\bwithRole\s*[<(]/.test(contents)) return "withRole";
-  if (/\bwithAdminAuth\s*\(/.test(contents)) return "withAdminAuth";
+): AdminGateMechanism | "UNGATED" {
+  const stripped = stripComments(contents);
+  if (/\bwithRole\s*[<(]/.test(stripped)) return "withRole";
+  if (/\bwithAdminAuth\s*\(/.test(stripped)) return "withAdminAuth";
   // Only count a real CALL to isAdminUser, not just a comment mention.
-  if (/\bisAdminUser\s*\(/.test(contents)) return "isAdminUser-inline";
+  if (/\bisAdminUser\s*\(/.test(stripped)) return "isAdminUser-inline";
   // No admin gate detected, but the route still gates on auth via
   // supabase.auth.getUser() + an early `!user` 401. The manifest entry
   // must declare this carve-out explicitly via current === "authenticated-non-admin".
   if (
-    /supabase\.auth\.getUser\s*\(/.test(contents) &&
-    /!\s*user\b/.test(contents)
+    /supabase\.auth\.getUser\s*\(/.test(stripped) &&
+    /!\s*user\b/.test(stripped)
   ) {
     return "authenticated-non-admin";
   }
@@ -99,7 +98,7 @@ function detectMechanism(
  * Recursive walk for `route.ts` files under a root. Avoids node:fs.globSync
  * which is not yet declared in the `@types/node` we ship with.
  */
-function findRouteFiles(root: string): string[] {
+export function findRouteFiles(root: string): string[] {
   const out: string[] = [];
   let entries: string[];
   try {
@@ -124,14 +123,26 @@ function findRouteFiles(root: string): string[] {
   return out;
 }
 
-function main(): void {
-  const manifest = loadManifest();
-  const manifestByRoute = new Map<string, ManifestEntry>();
+/**
+ * Pure entry point for the gate. Takes a root directory (so tests can
+ * drive a tmp fixture tree) and an explicit manifest (so tests can
+ * inject fixture entries without monkey-patching the import). Returns
+ * the violation list — empty list = pass. The CLI `main()` below
+ * exit-codes based on whether the list is empty.
+ *
+ * audit-2026-05-07 testing T1 (HIGH conf 8): this shape is exactly
+ * what the regression suite needs.
+ */
+export function runCheck(
+  rootDir: string,
+  manifest: readonly AdminRouteEntry[] = ADMIN_ROUTE_MANIFEST,
+): string[] {
+  const manifestByRoute = new Map<string, AdminRouteEntry>();
   for (const entry of manifest) manifestByRoute.set(entry.route, entry);
 
   const adminRoutes = findRouteFiles(
-    resolve(REPO_ROOT, "src/app/api/admin"),
-  ).map((abs) => relative(REPO_ROOT, abs));
+    resolve(rootDir, "src/app/api/admin"),
+  ).map((abs) => relative(rootDir, abs));
 
   const violations: string[] = [];
 
@@ -145,7 +156,7 @@ function main(): void {
       continue;
     }
     // Rule 3: declared mechanism matches reality.
-    const fileSrc = readFileSync(resolve(REPO_ROOT, route), "utf-8");
+    const fileSrc = readFileSync(resolve(rootDir, route), "utf-8");
     const actual = detectMechanism(fileSrc);
     if (actual === "UNGATED") {
       violations.push(
@@ -170,6 +181,12 @@ function main(): void {
     }
   }
 
+  return violations;
+}
+
+function main(): void {
+  const violations = runCheck(REPO_ROOT);
+
   if (violations.length > 0) {
     console.error(
       `[check-admin-route-manifest] ${violations.length} violation(s):\n`,
@@ -181,9 +198,20 @@ function main(): void {
     process.exit(1);
   }
 
+  const adminRoutes = findRouteFiles(
+    resolve(REPO_ROOT, "src/app/api/admin"),
+  );
   console.log(
     `[check-admin-route-manifest] OK — ${adminRoutes.length} admin routes, all declared in manifest.`,
   );
 }
 
-main();
+// Only run the CLI when invoked directly (not when imported by tests).
+// Vitest/Node import this file via the .ts extension and never matches
+// process.argv[1] — main() stays dormant under tests.
+if (
+  import.meta.url === `file://${process.argv[1]}` ||
+  import.meta.url.endsWith(process.argv[1] ?? "")
+) {
+  main();
+}
