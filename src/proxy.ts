@@ -59,17 +59,51 @@ export async function proxy(request: NextRequest) {
   }
 
   const isApiRoute = path.startsWith("/api/");
-  // Exclude `/demo/*`, `/for-quants/*`, and `/security/*` from the logged-in
-  // redirect branch so admins/founders viewing public marketing surfaces
-  // while signed in (or managers sharing the landing page with a colleague)
-  // stay on those pages instead of being bounced to the dashboard.
+  // Exclude routes from the logged-in redirect branch.
+  //
+  // Two intents here:
+  //
+  //   (a) Marketing surfaces (`/demo`, `/for-quants`, `/security`) — admins
+  //       and founders viewing the public marketing pages while signed in,
+  //       or sharing the landing page with a colleague, stay on the page
+  //       instead of being bounced to the dashboard.
+  //
+  //   (b) Shared artifacts (`/factsheet/:id`, `/strategy/:id`, `/browse`,
+  //       `/portfolio-pdf/:id`) — these live in PUBLIC_ROUTES so unauthed
+  //       users following a shared link can render them, but authenticated
+  //       users ALSO need to view them (a logged-in allocator clicking the
+  //       "Factsheet" button on a strategy detail page must NOT be yanked
+  //       back to /discovery/crypto-sma). Pre-2026-05-17 these were lumped
+  //       into PUBLIC_ROUTES with no exemption, so authed users hit a
+  //       silent redirect — symptom: factsheet button reroutes to discovery.
+  //
+  // The non-exempt public routes are `/login` and `/signup` — those SHOULD
+  // bounce authed users back to the dashboard (no point seeing the login
+  // form once you're in). The test at "authenticated user on /login DOES
+  // redirect away" pins that intent.
   const isDemoRoute = path === "/demo" || path.startsWith("/demo/");
   const isForQuantsRoute =
     path === "/for-quants" || path.startsWith("/for-quants/");
   const isSecurityRoute =
     path === "/security" || path.startsWith("/security/");
-  const isMarketingExempt = isDemoRoute || isForQuantsRoute || isSecurityRoute;
-  if (session && isPublicRoute && !isApiRoute && !isMarketingExempt) {
+  const isFactsheetRoute =
+    path === "/factsheet" || path.startsWith("/factsheet/");
+  const isStrategyRoute =
+    path === "/strategy" || path.startsWith("/strategy/");
+  const isBrowseRoute = path === "/browse" || path.startsWith("/browse/");
+  const isPortfolioPdfRoute =
+    path === "/portfolio-pdf" || path.startsWith("/portfolio-pdf/");
+  const isLegalRoute = path === "/legal" || path.startsWith("/legal/");
+  const isAuthBounceExempt =
+    isDemoRoute ||
+    isForQuantsRoute ||
+    isSecurityRoute ||
+    isFactsheetRoute ||
+    isStrategyRoute ||
+    isBrowseRoute ||
+    isPortfolioPdfRoute ||
+    isLegalRoute;
+  if (session && isPublicRoute && !isApiRoute && !isAuthBounceExempt) {
     const redirect = request.nextUrl.searchParams.get("redirect");
     const safePath = redirect && /^\/[a-z]/.test(redirect) ? redirect : DEFAULT_AUTHENTICATED_ROUTE;
     const url = request.nextUrl.clone();
