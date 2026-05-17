@@ -84,7 +84,10 @@ export function WatchlistTabs({ scope, onScopeChange, count, idBase, panelId }: 
       >
         My Watchlist
         {count > 0 && (
-          <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-accent text-white text-[11px] font-semibold">
+          <span
+            data-testid="watchlist-count-badge"
+            className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-accent text-white text-[11px] font-semibold"
+          >
             {count}
           </span>
         )}

@@ -166,6 +166,7 @@ export function StarToggle({
 function StarOutlineIcon() {
   return (
     <svg
+      data-testid="star-outline"
       width="16"
       height="16"
       viewBox="0 0 16 16"
@@ -186,6 +187,7 @@ function StarOutlineIcon() {
 function StarFilledIcon() {
   return (
     <svg
+      data-testid="star-filled"
       width="16"
       height="16"
       viewBox="0 0 16 16"
