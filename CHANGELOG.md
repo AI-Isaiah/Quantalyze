@@ -7,6 +7,19 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.45] - 2026-05-17
+
+**audit-2026-05-07 — discovery E2E batch (specialist + red-team + comment-analyzer close-out).** Multi-phase review on the `/discovery` E2E specs (hide-examples-default, sparkline-regression, prefs-isolation), shared E2E helpers (loginAs, cleanupTestAllocator), and the seed-data pipeline (`STRATEGY_PROFILES` extraction). Squashes 17 prior commits on `fix/discovery-e2e-batch-critical-2026-05-17` into 14 substantive commits onto current main (base v0.22.40.44).
+
+- **E2E spec tightening (cluster-J)** — `e2e/discovery-hide-examples-default.spec.ts`, `e2e/discovery-sparkline-regression.spec.ts`, `e2e/discovery-prefs-isolation.spec.ts`: removed hardcoded credentials, removed silent-pass gates, scoped `Sparkline` selector to svgs with stroked paths, detect 'no strategies' empty-state on first paint, simplified hide-examples (dropped redundant block + dead `SEED_UUIDS`).
+- **Red-team** — `cleanupTestAllocator` now fails loud in CI instead of swallowing errors; `loginAs` redirect regex is pathname-anchored (catches host injection); seed-name regex anchored to prevent over-match; sparkline-regression empty-state poll race fixed; scoped `data-testid` for assertion binding.
+- **Maintainability** — extracted shared `loginAs` helper out of three duplicates in `e2e/helpers/login.ts`. `STRATEGY_PROFILES` moved into `scripts/seed-demo-profiles.ts` as a data-only module; `scripts/seed-demo-data.ts` imports it. `SEED_NAMES_REGEX` derived from `STRATEGY_PROFILES` (single source of truth).
+- **Components** — `src/components/charts/Sparkline.tsx` + `src/components/strategy/StrategyTable.tsx` carry minor test-hook adjustments to support the scoped selector / testid changes.
+- **Comment-analyzer (Phase 6)** — de-line-numbered docstrings in `e2e/helpers/login.ts` + discovery spec refs so they don't rot when files reshape.
+
+No production behavior regressions; 14 cherry-picked commits onto current main, conflict-free.
+
+
 ## [0.22.40.44] - 2026-05-17
 
 **audit-2026-05-07 — factsheet PDF routes (cluster-L) close-out + FIX-LIST runbook tuck-in.** Multi-phase review pipeline (cluster-L fix → maintainability → red-team → simplify → comment-analyzer) on the factsheet PDF route + sanitize-filename helpers. Squashes 11 prior commits on `fix/factsheet-pdf-routes-critical-2026-05-17` into 7 substantive commits onto current main.
