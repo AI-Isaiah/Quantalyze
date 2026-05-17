@@ -11,6 +11,7 @@ import {
   detectMechanism,
   runCheck,
   stripComments,
+  stripUnreachableIfFalseBlocks,
 } from "../../scripts/check-admin-route-manifest";
 import type { AdminRouteEntry } from "../lib/auth/rbac-manifest";
 
@@ -91,6 +92,68 @@ export async function POST() {
 }
 `;
 
+// audit-2026-05-07 red-team (HIGH conf 8): the STRING-literal bypass.
+// The string contains `withRole("admin")` as message text — the route's
+// REAL gate is the inline `isAdminUser` call. Pre-fix `stripComments`
+// only stripped `//` and `/* */`, so this would classify as `withRole`.
+const STRING_LITERAL_WITH_ROLE_BUT_REAL_ISADMIN_ROUTE = `import { isAdminUser } from "@/lib/admin";
+import { createClient } from "@/lib/supabase/server";
+export async function POST() {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  const deprecationHint = JSON.stringify({ hint: "withRole(\\"admin\\") deprecated" });
+  if (!isAdminUser(supabase, user)) {
+    return new Response(deprecationHint, { status: 403 });
+  }
+  return new Response("ok");
+}
+`;
+
+// Template-literal bypass — same shape, backtick-delimited so the
+// `${...}` substitution path of the tokenizer also gets exercised.
+const TEMPLATE_LITERAL_WITH_ROLE_BUT_REAL_ISADMIN_ROUTE = `import { isAdminUser } from "@/lib/admin";
+import { createClient } from "@/lib/supabase/server";
+const role = "admin";
+const ERROR = \`use withRole(\${role}) instead — see ADR-0005\`;
+export async function POST() {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!isAdminUser(supabase, user)) {
+    return new Response(ERROR, { status: 403 });
+  }
+  return new Response("ok");
+}
+`;
+
+// The line-comment-inside-string hazard. Pre-fix the regex
+// `/\\/\\/[^\\n]*/g` would destroy the rest of the line starting at the
+// `//` INSIDE the string literal, masking the real `isAdminUser(` call
+// that follows on the same physical line. Post-fix the tokenizer is
+// inside a string state at the `//` and treats it as inert content.
+const SAME_LINE_URL_AND_ISADMIN_ROUTE = `import { isAdminUser } from "@/lib/admin";
+import { createClient } from "@/lib/supabase/server";
+export async function POST() {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  const docs = "https://docs/withRole"; if (!isAdminUser(supabase, user)) return new Response("nope", { status: 403 });
+  return new Response(docs);
+}
+`;
+
+// audit-2026-05-07 red-team (MED conf 8): dead-code closure bypass. A
+// `withRole('admin')(...)` guarded inside an `if (false) { ... }` is
+// statically unreachable; the real export is UNGATED. Pre-fix the
+// detector returned `withRole`, letting the manifest gate pass on a
+// route that has NO runtime gate.
+const DEAD_CODE_WITH_ROLE_BUT_UNGATED_ROUTE = `import { withRole } from "@/lib/auth";
+export async function GET() {
+  if (false) {
+    return withRole("admin")(async () => new Response("dead"))(new Request("http://x"));
+  }
+  return new Response("ok");
+}
+`;
+
 beforeEach(() => {
   fixtureRoot = mkdtempSync(join(tmpdir(), "check-admin-route-manifest-"));
 });
@@ -101,16 +164,117 @@ afterEach(() => {
 
 describe("stripComments", () => {
   it("removes line comments", () => {
-    expect(stripComments("// withRole('admin')\nfoo()")).toBe("\nfoo()");
+    // Tokenizer pass replaces each comment char with a space rather than
+    // deleting it, so line numbers stay aligned. We only care that the
+    // matchable `withRole` token is gone post-strip.
+    expect(stripComments("// withRole('admin')\nfoo()").includes("withRole")).toBe(false);
   });
   it("removes block comments (multiline)", () => {
     const src = "/*\n  withRole('admin')\n*/\nfoo()";
     expect(stripComments(src).includes("withRole")).toBe(false);
   });
   it("preserves non-comment code", () => {
-    expect(stripComments("const x = withRole('admin');")).toBe(
-      "const x = withRole('admin');",
-    );
+    // The tokenizer erases STRING contents, so the substring `'admin'`
+    // inside the string literal is replaced with whitespace. The
+    // surrounding `withRole(` call IS a real call (not a string) and
+    // survives — that is what detectMechanism keys on.
+    const stripped = stripComments("const x = withRole('admin');");
+    expect(stripped.includes("withRole(")).toBe(true);
+    expect(stripped.includes("'admin'")).toBe(false);
+  });
+
+  // audit-2026-05-07 red-team (HIGH conf 8): the string + template bypass.
+  it("red-team: strips DOUBLE-QUOTED string contents", () => {
+    const src = `const msg = "withRole(\\"admin\\")"; foo();`;
+    const stripped = stripComments(src);
+    expect(stripped.includes("withRole")).toBe(false);
+    // `foo()` is real code and must survive.
+    expect(stripped.includes("foo()")).toBe(true);
+  });
+
+  it("red-team: strips SINGLE-QUOTED string contents", () => {
+    const src = `const msg = 'withRole("admin")'; foo();`;
+    const stripped = stripComments(src);
+    expect(stripped.includes("withRole")).toBe(false);
+    expect(stripped.includes("foo()")).toBe(true);
+  });
+
+  it("red-team: strips TEMPLATE-LITERAL contents (including substitutions)", () => {
+    const src = "const msg = `use withRole(${role}) instead`; foo();";
+    const stripped = stripComments(src);
+    expect(stripped.includes("withRole")).toBe(false);
+    expect(stripped.includes("foo()")).toBe(true);
+  });
+
+  it("red-team: a `//` INSIDE a string literal does NOT eat the rest of the line", () => {
+    // Pre-fix the bare line-comment regex `/\/\/[^\n]*/g` would match
+    // the `//` inside `"https://docs/..."` and delete EVERYTHING that
+    // followed — including a real `isAdminUser(` call on the same line.
+    // The tokenizer is in a string state at the `//` and treats it as
+    // inert content, so the real call survives.
+    const src = `const docs = "https://docs/withRole"; isAdminUser(supabase, user);`;
+    const stripped = stripComments(src);
+    expect(stripped.includes("withRole")).toBe(false);
+    // Real call survives.
+    expect(stripped.includes("isAdminUser(")).toBe(true);
+  });
+
+  it("red-team: respects escape sequences inside strings (`\\\"` does not terminate)", () => {
+    const src = `const msg = "a \\"withRole(\\\\\\"admin\\\\\\")\\" b"; foo();`;
+    const stripped = stripComments(src);
+    // The whole string is one token — the embedded escaped quote does
+    // not exit string state.
+    expect(stripped.includes("withRole")).toBe(false);
+    expect(stripped.includes("foo()")).toBe(true);
+  });
+
+  it("red-team: preserves newlines so any future line-aware diagnostic stays aligned", () => {
+    const src = "/* line 1\nline 2 */\nfoo();";
+    const stripped = stripComments(src);
+    // Two newlines preserved (one in the block comment, one between */
+    // and `foo();`).
+    expect((stripped.match(/\n/g) ?? []).length).toBe(2);
+  });
+});
+
+describe("stripUnreachableIfFalseBlocks", () => {
+  // audit-2026-05-07 red-team (MED conf 8): dead-code closure bypass.
+  it("erases the body of an `if (false) { ... }` block", () => {
+    const src = "before(); if (false) { withRole('admin')(...) } after();";
+    const stripped = stripUnreachableIfFalseBlocks(src);
+    expect(stripped.includes("withRole")).toBe(false);
+    expect(stripped.includes("before()")).toBe(true);
+    expect(stripped.includes("after()")).toBe(true);
+  });
+
+  it("handles arbitrary whitespace between `if`, `(`, `false`, `)`, `{`", () => {
+    const src = "if   (\n  false\n)  {\n  withRole('admin')(...)\n}\nafter();";
+    const stripped = stripUnreachableIfFalseBlocks(src);
+    expect(stripped.includes("withRole")).toBe(false);
+    expect(stripped.includes("after()")).toBe(true);
+  });
+
+  it("handles nested braces inside the dead block", () => {
+    const src = "if (false) { { withRole('admin')(...) } } after();";
+    const stripped = stripUnreachableIfFalseBlocks(src);
+    expect(stripped.includes("withRole")).toBe(false);
+    expect(stripped.includes("after()")).toBe(true);
+  });
+
+  it("does NOT erase a live `if (someCondition)` block", () => {
+    const src = "if (cond) { withRole('admin')(...) } after();";
+    const stripped = stripUnreachableIfFalseBlocks(src);
+    // Live branch — keep the call.
+    expect(stripped.includes("withRole")).toBe(true);
+  });
+
+  it("does NOT match identifier prefixes (e.g. `iffalse`, `if_x`)", () => {
+    // The function name `iffoo` happens to start with `if` followed by
+    // an identifier-continue char — must not trigger the dead-code
+    // stripper.
+    const src = "function iffoo() { withRole('admin')(); }";
+    const stripped = stripUnreachableIfFalseBlocks(src);
+    expect(stripped.includes("withRole")).toBe(true);
   });
 });
 
@@ -147,6 +311,45 @@ describe("detectMechanism", () => {
     expect(
       detectMechanism(COMMENT_ONLY_WITH_ROLE_BUT_REAL_ISADMIN_ROUTE),
     ).toBe("isAdminUser-inline");
+  });
+
+  it("red-team: string-literal-only `withRole` mention does NOT classify (uses the real gate)", () => {
+    // audit-2026-05-07 red-team (HIGH conf 8): the string-literal
+    // bypass. `withRole("admin")` inside a `JSON.stringify` argument is
+    // not a real call. Post-fix the tokenizer erases the string body
+    // before regex matching — the real gate (isAdminUser inline) is
+    // what surfaces.
+    expect(
+      detectMechanism(STRING_LITERAL_WITH_ROLE_BUT_REAL_ISADMIN_ROUTE),
+    ).toBe("isAdminUser-inline");
+  });
+
+  it("red-team: template-literal `withRole(${role})` does NOT classify (uses the real gate)", () => {
+    expect(
+      detectMechanism(TEMPLATE_LITERAL_WITH_ROLE_BUT_REAL_ISADMIN_ROUTE),
+    ).toBe("isAdminUser-inline");
+  });
+
+  it("red-team: `//` inside a URL string + same-line isAdminUser still detects the gate", () => {
+    // Pre-fix: the line-comment regex matched `//` inside
+    // `"https://docs/withRole"` and ate everything after, including the
+    // real `isAdminUser(` call later on the line — flipping detection
+    // to UNGATED. Post-fix the tokenizer treats `//` inside a string
+    // as inert content and the call survives stripping.
+    expect(detectMechanism(SAME_LINE_URL_AND_ISADMIN_ROUTE)).toBe(
+      "isAdminUser-inline",
+    );
+  });
+
+  it("red-team: dead-code `if (false) { withRole('admin')(...) }` does NOT classify (UNGATED)", () => {
+    // audit-2026-05-07 red-team (MED conf 8): closure / dead-branch
+    // bypass. The route's REAL export is unauth — the dead branch is
+    // statically unreachable. Pre-fix the detector returned `withRole`.
+    // Post-fix `stripUnreachableIfFalseBlocks` erases the block before
+    // regex matching.
+    expect(detectMechanism(DEAD_CODE_WITH_ROLE_BUT_UNGATED_ROUTE)).toBe(
+      "UNGATED",
+    );
   });
 });
 

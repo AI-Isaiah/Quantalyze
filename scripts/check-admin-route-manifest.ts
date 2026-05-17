@@ -41,6 +41,14 @@
  * comments before regex matching (S1) and the mechanism alternation is
  * derived from the imported `AdminGateMechanism` union (M2 — no more
  * three-copy DRY violation).
+ *
+ * audit-2026-05-07 red-team (HIGH conf 8 + MED conf 8): hardened
+ * further — `stripComments` is now a character-by-character tokenizer
+ * that also erases STRING and TEMPLATE-LITERAL contents (closes the
+ * `JSON.stringify({hint:"withRole('admin')..."})` bypass), and
+ * `stripUnreachableIfFalseBlocks` erases statically-dead
+ * `if (false) { ... }` branches so a half-removed wrapper guarded
+ * inside an unreachable block is not detected as the route's real gate.
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -57,27 +65,246 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 
 /**
- * Strip line + block comments before mechanism detection. Without this,
- * a comment containing `// withRole("admin")` would classify the file
- * as `withRole` even if the runtime body uses `isAdminUser` inline (or
- * nothing). Security S1 (audit-2026-05-07, MED conf 8): comment-only
- * mention is not a real call.
+ * Strip line + block comments AND string / template-literal contents
+ * before mechanism detection. Without this, a comment containing
+ * `// withRole("admin")` would classify the file as `withRole` even if
+ * the runtime body uses `isAdminUser` inline — and a STRING containing
+ * `withRole("admin")` (e.g. an error message, a JSON.stringify arg, a
+ * doc URL) would have the same false-positive shape.
  *
- * Deliberately simple — no string-aware tokenizer. A literal containing
- * the substring `//` is rare in route handlers; if it becomes a problem,
- * swap to ts-morph or the TypeScript compiler API for AST walking. The
- * fingerprint here is "good enough" to defeat the documented bypass.
+ * Security S1 (audit-2026-05-07, MED conf 8) closed the comment bypass.
+ * red-team finding (audit-2026-05-07 red-team, HIGH conf 8) extends the
+ * closure to STRING and TEMPLATE-LITERAL bypasses — the simple regex
+ * variant could not distinguish `withRole("admin")` in a code call from
+ * the same characters inside a string literal. The regex-pair also had a
+ * second hazard: the line-comment regex `/\/\/[^\n]*/g` would destroy
+ * any text following `//` inside a string (e.g. `"https://docs/..."`),
+ * which could MASK a real `isAdminUser(` call on the same line.
+ *
+ * The implementation here is a single-pass character tokenizer that
+ * tracks four mutually exclusive states: code, line-comment,
+ * block-comment, single-quoted string, double-quoted string, and
+ * template literal (backtick). Each state knows how to terminate
+ * itself; while inside a string/comment state, characters are SKIPPED
+ * (replaced with whitespace so line numbers / column positions are
+ * preserved for any future diagnostic use). Escapes (`\`) inside
+ * quote-delimited strings consume the next character so an embedded
+ * `\"` does not terminate a `"..."`. Template literals do NOT need
+ * full expression-tracking — a `${...}` inside a backtick string can
+ * itself contain code with calls, but for detection purposes the whole
+ * template body is treated as a string (a `withRole(` inside a
+ * `${...}` substitution is still inside a string literal at the source
+ * level, and detecting it as a real call would be the same bypass we
+ * are closing).
+ *
+ * Deliberately a hand-rolled tokenizer rather than ts-morph or the
+ * TypeScript compiler API: zero new deps, ~50 LOC, no AST overhead in
+ * the lint hot path, and the surface we care about (line + block
+ * comments, three string variants) is small and stable. If the script
+ * later needs to inspect export statements / call expressions
+ * specifically, that is the right time to take the AST upgrade.
  */
 export function stripComments(contents: string): string {
-  return contents
-    .replace(/\/\*[\s\S]*?\*\//g, "") // block comments
-    .replace(/\/\/[^\n]*/g, ""); // line comments
+  const out: string[] = [];
+  let i = 0;
+  const n = contents.length;
+  while (i < n) {
+    const c = contents[i];
+    const next = i + 1 < n ? contents[i + 1] : "";
+
+    // Block comment.
+    if (c === "/" && next === "*") {
+      out.push("  ");
+      i += 2;
+      while (i < n) {
+        if (contents[i] === "*" && i + 1 < n && contents[i + 1] === "/") {
+          out.push("  ");
+          i += 2;
+          break;
+        }
+        // Preserve newlines so line numbers stay aligned.
+        out.push(contents[i] === "\n" ? "\n" : " ");
+        i += 1;
+      }
+      continue;
+    }
+
+    // Line comment.
+    if (c === "/" && next === "/") {
+      while (i < n && contents[i] !== "\n") {
+        out.push(" ");
+        i += 1;
+      }
+      continue;
+    }
+
+    // String literal: single / double quote. Honour `\` escapes so
+    // `"a \" b"` is one token, not three.
+    if (c === "'" || c === '"') {
+      const quote = c;
+      out.push(" ");
+      i += 1;
+      while (i < n) {
+        const ch = contents[i];
+        if (ch === "\\" && i + 1 < n) {
+          // Skip escape + escaped char.
+          out.push(contents[i + 1] === "\n" ? "\n" : " ");
+          out.push(contents[i + 1] === "\n" ? "" : " ");
+          i += 2;
+          continue;
+        }
+        if (ch === quote) {
+          out.push(" ");
+          i += 1;
+          break;
+        }
+        if (ch === "\n") {
+          // Unterminated string — bail to code state at the newline so
+          // a syntactically broken file does not eat the rest of the
+          // tokenizer's input.
+          out.push("\n");
+          i += 1;
+          break;
+        }
+        out.push(" ");
+        i += 1;
+      }
+      continue;
+    }
+
+    // Template literal. Treat the whole body (including ${...}) as
+    // string content for detection purposes.
+    if (c === "`") {
+      out.push(" ");
+      i += 1;
+      while (i < n) {
+        const ch = contents[i];
+        if (ch === "\\" && i + 1 < n) {
+          out.push(" ");
+          out.push(contents[i + 1] === "\n" ? "\n" : " ");
+          i += 2;
+          continue;
+        }
+        if (ch === "`") {
+          out.push(" ");
+          i += 1;
+          break;
+        }
+        if (ch === "$" && i + 1 < n && contents[i + 1] === "{") {
+          // Walk the `${...}` substitution as a brace-balanced run so a
+          // call like `${withRole("admin")}` inside the template is still
+          // erased — substitutions are part of the string at the source
+          // level. Nested braces are tracked.
+          out.push("  ");
+          i += 2;
+          let depth = 1;
+          while (i < n && depth > 0) {
+            const sc = contents[i];
+            if (sc === "{") depth += 1;
+            else if (sc === "}") depth -= 1;
+            out.push(sc === "\n" ? "\n" : " ");
+            i += 1;
+          }
+          continue;
+        }
+        out.push(ch === "\n" ? "\n" : " ");
+        i += 1;
+      }
+      continue;
+    }
+
+    out.push(c);
+    i += 1;
+  }
+  return out.join("");
+}
+
+/**
+ * Strip statically-unreachable `if (false) { ... }` blocks. Closes the
+ * red-team gap (audit-2026-05-07 red-team, MED conf 8): a route that
+ * keeps a dead `if (false) { withRole('admin')(...) }` branch — for
+ * example a half-completed refactor where the wrapper was REMOVED but
+ * the import and a guarded call stayed — would otherwise classify as
+ * `withRole` and pass the manifest gate while the actual export is
+ * UNGATED at runtime.
+ *
+ * Brace-balanced walk anchored on the literal sequence `if (false) {`
+ * (with arbitrary internal whitespace). We do not attempt to evaluate
+ * arbitrary constant expressions — only the canonical `false` literal
+ * shape, which is enough to defuse the documented bypass without
+ * pulling in a JS evaluator. A future migration to ts-morph could
+ * widen this to constant-folded `process.env.X === undefined && false`
+ * style branches; that is out of scope for the surgical fix.
+ */
+export function stripUnreachableIfFalseBlocks(contents: string): string {
+  const out: string[] = [];
+  let i = 0;
+  const n = contents.length;
+  while (i < n) {
+    // Match `if` `(` `false` `)` `{` with arbitrary whitespace between.
+    if (
+      contents[i] === "i" &&
+      contents[i + 1] === "f" &&
+      // Avoid matching identifier prefixes like `iff` / `if_`. The char
+      // before must not be alphanumeric or `_` (identifier-continue).
+      !/[A-Za-z0-9_$]/.test(contents[i - 1] ?? " ") &&
+      !/[A-Za-z0-9_$]/.test(contents[i + 2] ?? " ")
+    ) {
+      // Tentatively skip "if" and capture position so we can rewind on
+      // a non-match.
+      let j = i + 2;
+      // Skip whitespace.
+      while (j < n && /\s/.test(contents[j])) j += 1;
+      if (contents[j] === "(") {
+        j += 1;
+        while (j < n && /\s/.test(contents[j])) j += 1;
+        if (contents.slice(j, j + 5) === "false") {
+          const afterFalse = j + 5;
+          // No identifier-continue char immediately after `false`.
+          if (!/[A-Za-z0-9_$]/.test(contents[afterFalse] ?? " ")) {
+            let k = afterFalse;
+            while (k < n && /\s/.test(contents[k])) k += 1;
+            if (contents[k] === ")") {
+              k += 1;
+              while (k < n && /\s/.test(contents[k])) k += 1;
+              if (contents[k] === "{") {
+                // Walk the brace-balanced block. Replace contents with
+                // whitespace so line numbers stay aligned.
+                let depth = 1;
+                let m = k + 1;
+                while (m < n && depth > 0) {
+                  if (contents[m] === "{") depth += 1;
+                  else if (contents[m] === "}") depth -= 1;
+                  m += 1;
+                }
+                // Emit whitespace for [i, m).
+                for (let p = i; p < m; p += 1) {
+                  out.push(contents[p] === "\n" ? "\n" : " ");
+                }
+                i = m;
+                continue;
+              }
+            }
+          }
+        }
+      }
+    }
+    out.push(contents[i]);
+    i += 1;
+  }
+  return out.join("");
 }
 
 export function detectMechanism(
   contents: string,
 ): AdminGateMechanism | "UNGATED" {
-  const stripped = stripComments(contents);
+  // Two-pass cleanup: (1) strip comments + string/template literals
+  // (closes the COMMENT + STRING + TEMPLATE-LITERAL bypass surface),
+  // then (2) erase dead `if (false) { ... }` blocks so a half-removed
+  // wrapper guarded inside an unreachable branch is not detected as the
+  // route's real gate. Both passes preserve newlines so any future
+  // line-aware diagnostic stays aligned with the original source.
+  const stripped = stripUnreachableIfFalseBlocks(stripComments(contents));
   if (/\bwithRole\s*[<(]/.test(stripped)) return "withRole";
   if (/\bwithAdminAuth\s*\(/.test(stripped)) return "withAdminAuth";
   // Only count a real CALL to isAdminUser, not just a comment mention.
