@@ -92,13 +92,15 @@ class FundingFeeRow(TypedDict):
 # accidental PII/secret echo and guarantee JSON-serializability across
 # ccxt versions by limiting to known scalars / well-known IDs.
 _RAW_DATA_WHITELIST: tuple[str, ...] = (
-    # Binance
-    "tranId", "income", "incomeType", "asset", "symbol", "time",
-    # OKX
-    "billId", "instId", "pnl", "ccy", "ts", "type",
-    # Bybit
-    "id", "funding", "change", "cashFlow", "currency", "transactionTime",
-    "created_time", "category",
+    # Binance fapiPrivate_get_income
+    "tranId", "income", "incomeType", "asset", "time",
+    # OKX private_get_account_bills (type=8)
+    "billId", "instId", "pnl", "ccy", "ts",
+    # Bybit private_get_v5_account_transaction_log
+    "id", "funding", "change", "cashFlow", "transactionTime", "created_time",
+    "category",
+    # Shared across producers
+    "symbol", "type", "currency",
 )
 
 
@@ -129,10 +131,8 @@ def _sanitize_raw(value: Any) -> Any:
 def _extract_raw_data(raw_item: dict) -> dict[str, Any]:
     """Project ``raw_item`` onto the whitelist + sanitize each value.
 
-    L-0052 deliberately excluded from this fix-loop (severity L), but the
-    sanitizer step is required for M-0931 (raw_data JSON-encode failure)
-    so it lives next to the whitelist for cohesion. Keys not in
-    ``_RAW_DATA_WHITELIST`` are dropped.
+    Keys not in ``_RAW_DATA_WHITELIST`` are dropped; values are passed
+    through :func:`_sanitize_raw` so the result is always JSON-safe.
     """
     return {
         key: _sanitize_raw(raw_item.get(key))
@@ -154,7 +154,7 @@ def _extract_raw_data(raw_item: dict) -> dict[str, Any]:
 # match_key, where ON CONFLICT DO NOTHING dropped the second one. Use a
 # tighter bucket for exchanges that can run sub-8h cycles.
 _FUNDING_BUCKET_HOURS: dict[str, int] = {
-    "binance": 1,  # honour any cadence ≥ 1h Binance publishes
+    "binance": 1,  # honour any cadence >= 1h Binance publishes
     "okx": 8,
     "bybit": 8,
 }

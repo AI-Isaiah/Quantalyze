@@ -1076,13 +1076,15 @@ class TestRawDataSanitization:
         assert raw["symbol"] == "BTCUSDT"
 
     @pytest.mark.asyncio
-    async def test_raw_data_sanitizes_non_json_values(self) -> None:
-        """Decimal/datetime in raw_item must be coerced so a downstream
-        json.dumps cannot TypeError-out the whole batch.
+    async def test_raw_data_end_to_end_json_safe(self) -> None:
+        """End-to-end: the serialized row produced by the Binance fetcher
+        must be json-encodable without TypeError. Guards against future
+        regressions where a non-whitelisted ccxt type sneaks in.
         """
-        from datetime import datetime, timezone
+        import json
 
-        custom_dt = datetime(2024, 1, 1, 8, 0, 0, tzinfo=timezone.utc)
+        from services.funding_fetch import serialize_funding_row
+
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
         mock_exchange.fapiPrivate_get_income = AsyncMock(return_value=[
@@ -1092,26 +1094,15 @@ class TestRawDataSanitization:
                 "income": "-0.01",
                 "asset": "USDT",
                 "time": 1700000000000,
-                "tranId": "with-decimal",
-                # Whitelisted-but-non-JSON values:
-                "incomeType": "FUNDING_FEE",  # noqa: F601 (deliberate override)
+                "tranId": "abc",
             },
         ])
-        # Inject a Decimal under a whitelisted key by monkeypatching the
-        # returned list — the goal is to exercise _sanitize_raw.
         rows = await fetch_funding_binance(
             mock_exchange, STRATEGY_ID, since_ms=None
         )
-        import json
-
-        # The serialized row must be JSON-encodable end-to-end.
-        from services.funding_fetch import serialize_funding_row
-
         out = serialize_funding_row(rows[0])
-        # If sanitization is correct, json.dumps does not raise.
         encoded = json.dumps(out)
         assert "BTCUSDT" in encoded
-        del custom_dt  # silence unused
 
     def test_sanitize_raw_handles_decimal_and_datetime(self) -> None:
         from datetime import datetime, timezone
