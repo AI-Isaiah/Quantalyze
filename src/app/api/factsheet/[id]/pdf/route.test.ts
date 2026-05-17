@@ -59,10 +59,13 @@ vi.mock("@/lib/puppeteer", () => ({
 
 const ENV_BACKUP = { ...process.env };
 
-// Phase-5 simplify (2026-05-17) — single source of truth for the canonical
-// test strategy ID used across every describe block. Inlined literals
-// previously appeared 40+ times. Kept verbose-named so test failures
-// surface the constant unambiguously.
+// Phase-5 simplify (2026-05-17) — hoisted constant + params helper for the
+// canonical test strategy UUID. Pre-Phase-5 the literal appeared 44× inline;
+// this constant covers the `mkParams()` + `buildReq()` callsites. URL
+// strings inside `NextRequest(...)` constructors and fixture/assertion
+// payloads were deliberately left inline as documentation per the
+// Phase-5 simplify charter (CHANGELOG 0.22.40.34). Kept verbose-named so
+// test failures surface the constant unambiguously.
 const STRATEGY_ID = "00000000-0000-0000-0000-000000000001";
 
 function mkParams(): { params: Promise<{ id: string }> } {
