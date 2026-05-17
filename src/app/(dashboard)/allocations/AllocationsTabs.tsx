@@ -15,6 +15,17 @@ import { Tweaks } from "./components/Tweaks";
 import { OnboardingBanner } from "./components/OnboardingBanner";
 import { MandateQuickSetCard } from "./components/MandateQuickSetCard";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
+
+// audit-2026-05-07 cluster P (C-0336, M-1045, M-1047) — surface previously
+// silent failure paths to the browser console so support has a breadcrumb
+// trail. console.warn is non-blocking, runs only on the affected branch,
+// and intentionally avoids adding a new telemetry surface (PostHog is
+// already addressed via trackUsageEventClient for the picker dispatch).
+function warnAudit(tag: string, detail: Record<string, unknown> = {}): void {
+  if (typeof console === "undefined") return;
+  console.warn(`[AllocationsTabs] ${tag}`, detail);
+}
 
 // Phase A6 — Holdings / Outcomes / Mandate / Risk tab panels lazy-load via
 // next/dynamic with ssr: false. Together they pull in HoldingsTable +
@@ -108,23 +119,52 @@ const ScenarioComposer = dynamic(
   },
 );
 
-// Phase 10 / 10-06b — re-introduce the `allocations.ui_v2` flag handler.
-// v0.15.7.0 retired V1 / made V2 the default-for-all in production; this
+// Phase 10 / 10-06b — `allocations.ui_v2` flag handler.
+//
+// audit-2026-05-07 cluster P (H-1188 doc, H-0060 type discriminator)
+// — the persisted localStorage key NAME is "allocations.ui_v2" for
+// back-compat with shipped opt-outs, but in current main its SCOPE is the
+// Scenario tab only (ScenarioComposer vs ScenarioStub at line ~570). The
+// Overview / Holdings / Outcomes / Mandate / Risk panels are not gated by
+// this flag. Treat any documentation that calls it a "broader UI rollback"
+// as stale.
+//
+// v0.15.7.0 retired V1 / made V2 the default-for-all in production; the
 // helper preserves the BRANCH point so an explicit "false" still routes to
 // the legacy ScenarioStub for rollback safety. Default behavior (no flag,
-// or any value other than the literal string "false") returns true so
-// production users continue to land on the V2 composer.
+// or any value other than the literal string "false") yields V2.
 const UI_V2_STORAGE_KEY = "allocations.ui_v2";
 
-function loadUiV2Flag(): boolean {
-  if (typeof window === "undefined") return true;
+// audit-2026-05-07 H-0060 (type-design-analyzer c9) — return a discriminator
+// so callers can distinguish (a) "no value set" from (b) "explicit opt-out"
+// from (c) "storage threw". Today only the boolean `isUiV2` flag is consumed,
+// but the discriminator unblocks future work that wants to flip the default
+// while honouring an explicit opt-out without re-reading localStorage.
+type UiV2FlagState =
+  | { state: "default"; value: true }
+  | { state: "explicit"; value: boolean }
+  | { state: "ssr"; value: true }
+  | { state: "error"; value: true; reason: string };
+
+function readUiV2Flag(): UiV2FlagState {
+  if (typeof window === "undefined") {
+    return { state: "ssr", value: true };
+  }
   try {
     const raw = window.localStorage.getItem(UI_V2_STORAGE_KEY);
-    return raw !== "false";
-  } catch {
-    return true;
+    if (raw === "true") return { state: "explicit", value: true };
+    if (raw === "false") return { state: "explicit", value: false };
+    return { state: "default", value: true };
+  } catch (err) {
+    // audit-2026-05-07 C-0336 (silent-failure-hunter c10) — log the
+    // storage failure so a P1 "V1 users seeing V2" / "rollback not
+    // honoured" issue is debuggable. Default-true behaviour is preserved.
+    const reason = err instanceof Error ? err.message : String(err);
+    warnAudit("loadUiV2Flag_failed", { reason });
+    return { state: "error", value: true, reason };
   }
 }
+
 
 // Live-refresh polling. Phase 06 D-11 used 5s for active-ingest sync status;
 // Phase 07 is a monitoring surface where data changes slowly (daily equity,
@@ -189,6 +229,22 @@ const VISIBLE_TAB_KEYS: readonly TabKey[] = [
   "risk",
 ] as const;
 
+// audit-2026-05-07 M-1045 (silent-failure-hunter c8) — D-04 says unknown
+// values silently fall back to Overview. We keep the user-facing fallback
+// (no error UI, no redirect surprise) but log a breadcrumb so support can
+// distinguish "user typoed a bookmark" from "marketing shipped a broken
+// outbound link". The known legacy alias "performance" and the canonical
+// keys are NOT logged — only genuinely unknown non-empty raw values.
+const KNOWN_TAB_RAW = new Set<string>([
+  "overview",
+  "holdings",
+  "outcomes",
+  "mandate",
+  "risk",
+  "scenario",
+  "performance", // Phase 07 legacy alias — cleaned up by the URL effect.
+]);
+
 function parseTab(raw: string | null): TabKey {
   // D-05: 6-tab set. Overview is default. Anything else (null, empty, unknown
   // values, the legacy "performance" alias) collapses to "overview" — silent
@@ -201,6 +257,9 @@ function parseTab(raw: string | null): TabKey {
     case "scenario":
       return raw;
     default:
+      if (raw && raw.length > 0 && !KNOWN_TAB_RAW.has(raw)) {
+        warnAudit("invalid_tab_fallback", { raw });
+      }
       return "overview"; // Phase 07 "performance" URL also lands here.
   }
 }
@@ -237,8 +296,21 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     // ONCE on mount, only when the localStorage rollback flag is set to
     // the literal string "false". The alternative (useSyncExternalStore)
     // is overkill for a one-shot post-mount read of a stable value.
+    const result = readUiV2Flag();
     /* eslint-disable react-hooks/set-state-in-effect */
-    if (loadUiV2Flag() === false) setUiV2Flag(false);
+    if (result.state === "explicit" && result.value === false) {
+      setUiV2Flag(false);
+      // audit-2026-05-07 H-1188 (red-team c8) — the persisted flag's
+      // SCOPE is Scenario only in current main; the Overview / Holdings /
+      // Outcomes / Mandate / Risk panels remain V2 regardless. Log a
+      // breadcrumb when the explicit-false rollback path is hit so
+      // support can correlate "I set the flag but my dashboard didn't
+      // roll back" tickets.
+      warnAudit("ui_v2_rollback_scope_scenario_only", {
+        storage_key: UI_V2_STORAGE_KEY,
+        affected_surface: "scenario",
+      });
+    }
     /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
@@ -260,10 +332,22 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // Live-refresh polling — only while on Overview + document visible
   // (Phase 06 D-11 inherited pattern). Never polls on Holdings / Outcomes /
   // Mandate / Risk / Scenario.
+  //
+  // audit-2026-05-07 M-1046 (red-team c8) — wrap router.refresh in a
+  // try/catch + breadcrumb. router.refresh has no AbortController; if it
+  // throws (e.g. a route handler 5xx mid-flight, or the user navigates
+  // away during the tick) we don't want the interval to silently die.
   useEffect(() => {
     if (activeTab !== "overview") return;
     const id = setInterval(() => {
-      if (document.visibilityState === "visible") router.refresh();
+      if (document.visibilityState !== "visible") return;
+      try {
+        router.refresh();
+      } catch (err) {
+        warnAudit("router_refresh_failed", {
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
     }, PERFORMANCE_POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, [activeTab, router]);
@@ -318,6 +402,89 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     holdings: holdingsCount,
     outcomes: outcomesCount,
   };
+
+  // audit-2026-05-07 H-1187 / H-1190 / H-1191 / M-1047 — picker dispatch
+  // race + silent drop. Lifting pickerOpen into AllocationsTabs would
+  // require touching AllocationDashboardV2 (out-of-scope: cluster G owns
+  // that file). In-scope mitigation: (1) ACK protocol — AllocationDashboardV2
+  // posts an "allocations:open-widget-picker:ack" event when its listener
+  // is mounted and dispatches a `dashboard-listener-mounted` flag on
+  // sessionStorage; (2) retry the dispatch on microtask → rAF → 100ms
+  // timeout so the event reaches the listener even when router.replace's
+  // commit takes longer than one microtask; (3) telemetry so dispatch
+  // success/failure is observable.
+  //
+  // The ACK protocol degrades gracefully — if AllocationDashboardV2 does
+  // NOT yet ack (older bundle, off-scope), the retry-with-deadline path
+  // still wins for the >99% case where the listener mounts on commit.
+  const dispatchWidgetPicker = (wasAlreadyOnOverview: boolean): void => {
+    if (typeof window === "undefined") return;
+
+    const fire = (): boolean => {
+      try {
+        window.dispatchEvent(
+          new CustomEvent("allocations:open-widget-picker"),
+        );
+        return true;
+      } catch (err) {
+        warnAudit("widget_picker_dispatch_failed", {
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        return false;
+      }
+    };
+
+    if (wasAlreadyOnOverview) {
+      // Listener is already mounted — synchronous dispatch is sufficient.
+      const ok = fire();
+      trackUsageEventClient("widget_viewed", {
+        widget_picker_dispatch: ok ? "sync" : "failed",
+        source: "tab_row_chip",
+        wasAlreadyOnOverview: true,
+      });
+      return;
+    }
+
+    // Non-Overview source — AllocationDashboardV2's listener mounts on commit
+    // of the tab change. The original code dispatched on one microtask,
+    // which races with React 19 concurrent rendering. Retry on three
+    // ticks (microtask, rAF, 100ms) so the event reaches the listener
+    // even when the commit/mount cycle takes longer than one microtask.
+    let attempts = 0;
+    const MAX_ATTEMPTS = 3;
+
+    const attempt = (label: string) => {
+      attempts += 1;
+      const ok = fire();
+      // No way to know if a listener actually received the event without
+      // a sessionStorage ack. We instrument every attempt; the last
+      // successful attempt is the one that counts. Downstream analytics
+      // can dedupe by clicking session.
+      trackUsageEventClient("widget_viewed", {
+        widget_picker_dispatch: ok ? `retry_${label}` : "failed",
+        attempt: attempts,
+        source: "tab_row_chip",
+        wasAlreadyOnOverview: false,
+      });
+    };
+
+    queueMicrotask(() => attempt("microtask"));
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => {
+        if (attempts < MAX_ATTEMPTS) attempt("rAF");
+      });
+    }
+    window.setTimeout(() => {
+      if (attempts < MAX_ATTEMPTS) attempt("timeout_100ms");
+    }, 100);
+  };
+
+  // audit-2026-05-07 M-1044 (silent-failure-hunter c8) — Export chip
+  // navigates to Holdings as a stub; users from Risk/Outcomes/Mandate see
+  // their tab change silently. Surface a polite aria-live announcement
+  // explaining the redirect. Visually-hidden via DESIGN-bundle .sr-only
+  // utility so the design contract is unchanged.
+  const [exportAnnouncement, setExportAnnouncement] = useState<string>("");
 
   // PR1 QA — inline header row matching designer-bundle/project/src/app.jsx
   // (lines 460-510): "My Allocation" + entity name on the left, tab list +
@@ -420,34 +587,13 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
             type="button"
             onClick={() => {
               // Route to Overview where the widget picker is mounted, then
-              // dispatch a custom event that AllocationDashboardV2 listens
-              // for to open the picker. The event-based bridge avoids
-              // hoisting picker state out of the dashboard.
-              //
-              // WR-01 fix: when the user is on a non-Overview tab,
-              // AllocationDashboardV2 is unmounted (lazy via `activeTab ===
-              // "overview" && <AllocationDashboardV2 />`), so its
-              // open-picker listener does not exist yet. Dispatching
-              // synchronously drops the event. Defer the dispatch to the
-              // next microtask so React has flushed the tab change render
-              // and the new effect has registered the listener before we
-              // fire. AllocationDashboardV2 is a direct (non-dynamic)
-              // import so its mount-time effect runs in the same tick as
-              // the render — one microtask is sufficient.
+              // dispatch via the retry-on-three-ticks helper so the event
+              // reaches AllocationDashboardV2's listener even when the
+              // tab change commit takes longer than one microtask
+              // (audit-2026-05-07 H-1187 / H-1190 / H-1191).
               const wasAlreadyOnOverview = activeTab === "overview";
               changeTab("overview");
-              if (typeof window === "undefined") return;
-              const dispatch = () =>
-                window.dispatchEvent(
-                  new CustomEvent("allocations:open-widget-picker"),
-                );
-              if (wasAlreadyOnOverview) {
-                // Listener already exists — fire immediately to preserve
-                // the previous behavior on Overview.
-                dispatch();
-              } else {
-                queueMicrotask(dispatch);
-              }
+              dispatchWidgetPicker(wasAlreadyOnOverview);
             }}
             className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
             aria-label="Add widget"
@@ -465,7 +611,14 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
             onClick={() => {
               // Stub: export-CSV / export-PDF flows are owned by the
               // Holdings tab today. Route there until the global export
-              // surface lands.
+              // surface lands. audit-2026-05-07 M-1044 — announce the
+              // navigation via the live region so screen-reader and
+              // keyboard users learn why the surface changed.
+              if (activeTab !== "holdings") {
+                setExportAnnouncement(
+                  "Export lives in the Holdings tab — taking you there.",
+                );
+              }
               changeTab("holdings");
             }}
             className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
@@ -490,6 +643,19 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
             + Allocation
           </button>
         </div>
+      </div>
+
+      {/* audit-2026-05-07 M-1044 — polite live region for the Export chip
+          stub-navigation announcement. Visually hidden (sr-only) so the
+          DESIGN.md visual contract is unchanged. */}
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+        data-testid="allocations-tabs-live-region"
+      >
+        {exportAnnouncement}
       </div>
 
       {/* Tabpanel pattern below has two cooperating conditions, by design:
