@@ -3,9 +3,13 @@
 # Add a comment above each entry citing the PR + reason.
 #
 # A "backdated" migration is a local file whose timestamp is older than the
-# most-recently-applied remote migration. The supabase-migrate.yml workflow's
-# "Backdated-migration safety guard" step rejects any unallowlisted backdated
-# migration before `db push --include-all` can apply it.
+# most-recently-applied remote migration. The `.github/workflows/migration-policy.yml`
+# workflow runs on `pull_request` events targeting main and rejects any newly-added
+# backdated migration before the PR can be merged, unless its 14-digit timestamp
+# is allowlisted below. Enforcement is PR-time (pre-merge), NOT apply-time:
+# the previous incarnation of this guard lived inside `supabase-migrate.yml`'s
+# apply job, but by the time apply runs the files have already merged to main —
+# too late to prevent the bad merge.
 #
 # Add entries here ONLY when:
 #   1. The migration is a history-only restoration (the SQL was already
