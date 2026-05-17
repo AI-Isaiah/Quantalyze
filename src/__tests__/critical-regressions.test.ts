@@ -321,29 +321,31 @@ describe("Critical regression guards", () => {
     // UI could mutate admin_note / founder_notes / allocation_amount on
     // rows for their strategies. The fix routes through a server
     // endpoint that whitelists columns and triggers the notify.
+    const PENDING_INTROS_SRC = "src/components/strategy/PendingIntros.tsx";
+
     it("PendingIntros.tsx must NOT import the Supabase browser client (no direct manager UPDATE)", () => {
-      const src = readText("src/components/strategy/PendingIntros.tsx");
+      const src = readText(PENDING_INTROS_SRC);
       expect(
         /from\s+["']@\/lib\/supabase\/client["']/.test(src),
         "PendingIntros.tsx re-introduced the Supabase browser client — C-0135 (silent notify drop) + C-0136 (column-write surface) regressions possible",
       ).toBe(false);
     });
     it("PendingIntros.tsx must NOT reference contact_requests directly (server-route enforcement)", () => {
-      const src = readText("src/components/strategy/PendingIntros.tsx");
+      const src = readText(PENDING_INTROS_SRC);
       expect(
         /contact_requests/.test(src),
         "PendingIntros.tsx writes to contact_requests directly — manager-side direct UPDATE bypasses server validation",
       ).toBe(false);
     });
     it("PendingIntros.tsx must POST to /api/intro-response", () => {
-      const src = readText("src/components/strategy/PendingIntros.tsx");
+      const src = readText(PENDING_INTROS_SRC);
       expect(
         /\/api\/intro-response/.test(src),
         "PendingIntros.tsx no longer targets /api/intro-response — notifyAllocatorIntroStatus path is bypassed",
       ).toBe(true);
     });
     it("PendingIntros.tsx must still surface a permission-style error on 401/403", () => {
-      const src = readText("src/components/strategy/PendingIntros.tsx");
+      const src = readText(PENDING_INTROS_SRC);
       expect(
         /may not have permission/.test(src),
         "PendingIntros.tsx no longer surfaces the permission-style error copy — silent-403 regression possible",
