@@ -580,14 +580,10 @@ export const WIDGET_CATEGORIES = [
 //     Persisted layouts already carrying "equity-curve" continue to
 //     render the legacy widget; only newly-defaulted layouts pick up the
 //     SVG chart.
-//   - "mandate" currently routes to "mandate-compliance" — there is no
-//     widget for it yet, so the renderer falls back to a generic "Unknown
-//     widget" message until Plan 10 lands "mandate-snapshot" (which may
-//     also become the canonical mapping for "mandate").
-//   - "kpi" / "holdings" / "bridge" point to ids that don't yet exist in
-//     the registry. The picker only ever surfaces real registry ids, so
-//     these short keys CAN'T be re-introduced via addWidget; the
-//     mapping exists for the DEFAULT_LAYOUT import path only.
+//   - "mandate" routes to "mandate-snapshot" — PR1 flipped this from
+//     "mandate-compliance" (unregistered, rendered "Unknown widget"
+//     fallback). All seven default short keys now resolve to real
+//     registry ids.
 //
 // If a short key has no entry in this map AND is not already a valid
 // WIDGET_REGISTRY id, `resolveWidgetId` returns it unchanged (the

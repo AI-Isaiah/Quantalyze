@@ -62,12 +62,6 @@ const RECOVERY_FLAG_KEY = "dashboard.config.recoveredFromCorruption";
  */
 const LAYOUT_VERSION_LEGACY = 3;
 
-/**
- * Legacy v3 default layout — frozen snapshot of what `dashboard-defaults.ts`
- * exported before the v4 bump. Retained while the legacy hook is dormant;
- * deleted alongside the hook in the follow-up legacy-tree cleanup PR.
- */
-
 // pr189-followup M12 (type-design-analyzer MED/8) — single source of
 // truth for the recovery-reason union. Previously the same closed
 // string-literal union was hand-typed in three places (this function's
@@ -110,6 +104,11 @@ function setRecoveryFlag(reason: DashboardRecoveryReason): void {
   }
 }
 
+/**
+ * Legacy v3 default layout — frozen snapshot of what `dashboard-defaults.ts`
+ * exported before the v4 bump. Retained while the legacy hook is dormant;
+ * deleted alongside the hook in the follow-up legacy-tree cleanup PR.
+ */
 const LEGACY_DEFAULT_LAYOUT: LegacyTileConfig[] = [
   { i: "equity-curve-1", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 },
   { i: "drawdown-chart-1", widgetId: "drawdown-chart", x: 0, y: 4, w: 12, h: 4 },
@@ -840,6 +839,7 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
   };
 }
 
-// Suppress unused-import warning if a TileConfig consumer is not in this
-// file but is re-exported via type usage above.
+// Re-export so consumers importing `useDashboardConfigV2` can also pull
+// the TileConfig shape from the same module — keeps the hook + tile-shape
+// contract co-located at the import site.
 export type { TileConfig };
