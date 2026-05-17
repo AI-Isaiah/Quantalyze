@@ -36,10 +36,24 @@ function sign(payload: string, secret: string): string {
 /**
  * Generate a token for `portfolioId` valid for ~30 minutes from now.
  * Throws if `DEMO_PDF_SECRET` is not configured.
+ *
+ * `expSeconds` is an optional override used by the expired-token e2e spec
+ * (`e2e/portfolio-pdf-demo.spec.ts`) so the spec can mint a token with a
+ * past expiry WITHOUT re-implementing the HMAC payload format. Centralising
+ * the signer here means an algorithm rotation (separator change, payload
+ * versioning, base64url switch) automatically propagates to the expiry test;
+ * a shadow signer in the spec would let the verifier reject the spec's
+ * tokens on signature-mismatch BEFORE checking expiry, making the 401
+ * assertion pass for the wrong reason (audit-2026-05-07
+ * SPECIALIST-testing / SPECIALIST-maintainability,
+ * e2e/portfolio-pdf-demo.spec.ts:62/94).
  */
-export function signDemoPdfToken(portfolioId: string): string {
+export function signDemoPdfToken(
+  portfolioId: string,
+  expSeconds?: number,
+): string {
   const secret = getSecret();
-  const exp = Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS;
+  const exp = expSeconds ?? Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS;
   const payload = `${portfolioId}.${exp}`;
   const sig = sign(payload, secret);
   return `${exp}.${sig}`;

@@ -33,6 +33,17 @@ import {
   assertSupabaseServiceRoleKey,
 } from "../../src/lib/test-safety";
 
+/**
+ * Build a collision-resistant unique suffix. `Date.now()` collides at
+ * millisecond granularity when parallel beforeAll seeds fire in the same
+ * tick; the random part eliminates the burst. Helper exists because the
+ * same pattern appears 6× across the email + password generators below
+ * (audit-2026-05-07 red-team `parallel-seed-burst`).
+ */
+function uniqueSuffix(randLen: number): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 2 + randLen)}`;
+}
+
 function getAdmin(): SupabaseClient {
   const url = process.env.TEST_SUPABASE_URL;
   const key = process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
@@ -67,8 +78,14 @@ export async function seedTestAllocator(): Promise<SeededAllocator> {
   // unrouted) instead of @example.com (an IANA-reserved real domain that
   // could trigger noise in any real-time email-verification check
   // upstream). Same convention as audit-log/export/route.test.ts.
-  const email = `e2e-onboarding-${Date.now()}@example.test`;
-  const password = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  //
+  // audit-2026-05-07 red-team `parallel-seed-burst` — append a random
+  // suffix so two seedTestAllocator() calls in the same millisecond
+  // (e.g. parallel beforeAll seeds across workers) don't collide on
+  // the unique email constraint. The password helper already uses
+  // Math.random; align the email to the same idiom.
+  const email = `e2e-onboarding-${uniqueSuffix(6)}@example.test`;
+  const password = `e2e-${uniqueSuffix(8)}`;
   const { data, error } = await admin.auth.admin.createUser({
     email,
     password,
@@ -136,6 +153,8 @@ export async function seedTestAllocator(): Promise<SeededAllocator> {
 export interface SeededStrategy {
   strategyId: string;
   ownerUserId: string;
+  categoryId: string | null;
+  categorySlug: string | null;
 }
 
 /**
@@ -149,17 +168,60 @@ export interface SeededStrategy {
  * strategy is owned by a different profile from the funnel-test allocator
  * — closer to real-world conditions where the recommendation comes from
  * an external manager.
+ *
+ * audit-2026-05-07 SPECIALIST-red-team
+ * `e2e/discovery-watchlist.spec.ts:110:red-team:seed-strategy-missing-category` —
+ * `getStrategiesByCategory()` (src/lib/queries.ts:196-205) filters via
+ * a PostgREST `discovery_categories!inner(slug)` inner-join, so a
+ * strategy with `category_id = NULL` NEVER appears on
+ * `/discovery/<slug>`. The Phase-2 fix that added this helper to the
+ * watchlist spec's `beforeAll` made the strategy invisible on
+ * `/discovery/crypto-sma`, which silently re-relocated the happy-path
+ * failure from a skip to a 30s star-button timeout, and structurally
+ * disabled the RLS-leak detector. Accept an optional `categorySlug`
+ * and resolve `category_id` from `discovery_categories.slug` BEFORE
+ * the insert so the seeded strategy is actually queryable on the
+ * category page.
  */
-export async function seedBridgeCandidate(): Promise<SeededStrategy> {
+export async function seedBridgeCandidate(opts?: {
+  categorySlug?: string;
+}): Promise<SeededStrategy> {
   const admin = getAdmin();
+
+  // Resolve category_id from slug if requested. The discovery_categories
+  // rows are seeded by migration 20260405061911_initial_schema.sql:147
+  // and `crypto-sma` is the default test category. Pull the id before
+  // the strategy insert so the join-bound `getStrategiesByCategory()`
+  // path renders the row instead of empty-state.
+  let categoryId: string | null = null;
+  let categorySlug: string | null = null;
+  if (opts?.categorySlug) {
+    const { data: cat, error: catErr } = await admin
+      .from("discovery_categories")
+      .select("id, slug")
+      .eq("slug", opts.categorySlug)
+      .single();
+    if (catErr || !cat) {
+      throw new Error(
+        `seedBridgeCandidate: discovery_categories slug="${opts.categorySlug}" not found — ${catErr?.message ?? "no row"}`,
+      );
+    }
+    categoryId = cat.id as string;
+    categorySlug = cat.slug as string;
+  }
 
   // Create a separate "manager" user that owns the candidate strategy.
   // Phase 11 WR-05: @example.test (see seedTestAllocator note).
-  const ownerEmail = `e2e-bridge-owner-${Date.now()}@example.test`;
+  // audit-2026-05-07 red-team `parallel-seed-burst` — append a random
+  // suffix to Date.now() so two seedTestAllocator/seedBridgeCandidate
+  // calls in the same millisecond don't collide on the unique email
+  // constraint (Supabase admin.createUser returns 409). The password
+  // already uses Math.random; align the email to the same idiom.
+  const ownerEmail = `e2e-bridge-owner-${uniqueSuffix(6)}@example.test`;
   const { data: ownerData, error: ownerError } =
     await admin.auth.admin.createUser({
       email: ownerEmail,
-      password: `bridge-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      password: `bridge-${uniqueSuffix(8)}`,
       email_confirm: true,
     });
   if (ownerError || !ownerData.user) {
@@ -175,21 +237,29 @@ export async function seedBridgeCandidate(): Promise<SeededStrategy> {
       { onConflict: "id" },
     );
 
+  const insertPayload: Record<string, unknown> = {
+    user_id: ownerData.user.id,
+    name: `E2E Bridge Candidate ${Date.now()}`,
+    status: "published",
+    benchmark: "BTC",
+  };
+  if (categoryId) insertPayload.category_id = categoryId;
+
   const { data, error } = await admin
     .from("strategies")
-    .insert({
-      user_id: ownerData.user.id,
-      name: `E2E Bridge Candidate ${Date.now()}`,
-      status: "published",
-      benchmark: "BTC",
-    })
+    .insert(insertPayload)
     .select("id")
     .single();
   if (error || !data) {
     throw new Error(`seedBridgeCandidate failed: ${error?.message}`);
   }
 
-  return { strategyId: data.id, ownerUserId: ownerData.user.id };
+  return {
+    strategyId: data.id,
+    ownerUserId: ownerData.user.id,
+    categoryId,
+    categorySlug,
+  };
 }
 
 /**
@@ -225,13 +295,11 @@ export async function seedStrategyWithHistory(opts: {
   const admin = getAdmin();
 
   // Owner profile — separate from any test allocator, mirrors seedBridgeCandidate.
-  const ownerEmail = `e2e-strategy-v2-owner-${Date.now()}-${Math.random()
-    .toString(36)
-    .slice(2, 8)}@example.test`;
+  const ownerEmail = `e2e-strategy-v2-owner-${uniqueSuffix(6)}@example.test`;
   const { data: ownerData, error: ownerError } =
     await admin.auth.admin.createUser({
       email: ownerEmail,
-      password: `seed-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      password: `seed-${uniqueSuffix(8)}`,
       email_confirm: true,
     });
   if (ownerError || !ownerData.user) {
