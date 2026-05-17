@@ -983,21 +983,29 @@ async def cron_recompute() -> dict[str, Any]:
     def _duration() -> float:
         return round(time.monotonic() - overall_start, 2)
 
-    # _kill_switch_enabled does sync Supabase IO; off-load to keep the event
-    # loop unblocked. Every cron return shape carries the full set of
-    # counters + a `status` discriminator so monitoring can switch on one
-    # field instead of guessing at key presence.
-    if not await asyncio.to_thread(_kill_switch_enabled):
-        logger.info("match_engine cron: kill switch off, skipping")
+    def _early_return(status: str, **extras: Any) -> dict[str, Any]:
+        """Build the uniform early-return response shape.
+
+        Every cron return carries `status` + the four counters + `duration_s` so
+        monitoring can switch on one field instead of guessing at key presence
+        (see TestCronResponseShape._REQUIRED_KEYS). `extras` carries
+        branch-specific flags (e.g. `disabled=True`, `reason=...`).
+        """
         return {
-            "status": "disabled",
-            "disabled": True,
+            "status": status,
             "processed": 0,
             "skipped": 0,
             "failed": 0,
             "retention_deleted": 0,
             "duration_s": _duration(),
+            **extras,
         }
+
+    # _kill_switch_enabled does sync Supabase IO; off-load to keep the event
+    # loop unblocked.
+    if not await asyncio.to_thread(_kill_switch_enabled):
+        logger.info("match_engine cron: kill switch off, skipping")
+        return _early_return("disabled", disabled=True)
 
     supabase = get_supabase()
 
@@ -1011,28 +1019,13 @@ async def cron_recompute() -> dict[str, Any]:
     allocators = allocators_result.data or []
     if not allocators:
         logger.info("match_engine cron: no allocators found")
-        return {
-            "status": "no_allocators",
-            "processed": 0,
-            "skipped": 0,
-            "failed": 0,
-            "retention_deleted": 0,
-            "duration_s": _duration(),
-        }
+        return _early_return("no_allocators")
 
     # Load universe ONCE for the whole cron run.
     universe = await asyncio.to_thread(_load_candidate_universe)
     if not universe["strategies_by_id"]:
         logger.warning("match_engine cron: no strategies in universe")
-        return {
-            "status": "empty_universe",
-            "processed": 0,
-            "skipped": 0,
-            "failed": 0,
-            "retention_deleted": 0,
-            "reason": "empty_universe",
-            "duration_s": _duration(),
-        }
+        return _early_return("empty_universe", reason="empty_universe")
 
     processed = 0
     skipped = 0
