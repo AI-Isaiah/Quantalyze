@@ -1128,6 +1128,175 @@ class TestRawDataSanitization:
         assert sorted(out["tags"]) == ["a", "b"]
         assert out["nested"] == {"x": "1.23"}
 
+    def test_sanitize_raw_coerces_arbitrary_classes_via_str_fallback(
+        self,
+    ) -> None:
+        """H-S5-1 (specialist:pr-test-analyzer): ccxt internal classes /
+        enums / domain objects must NOT raise inside json.dumps; the
+        sanitizer's catch-all branch stringifies them so the row still
+        round-trips.
+        """
+        import json
+
+        from services.funding_fetch import _sanitize_raw
+
+        class _Opaque:
+            def __repr__(self) -> str:
+                return "<opaque>"
+
+        out = _sanitize_raw({"thing": _Opaque(), "list_of": [_Opaque()]})
+        # End-to-end: the sanitized result must be JSON-encodable.
+        encoded = json.dumps(out)
+        assert "<opaque>" in encoded
+        assert out["thing"] == "<opaque>"
+        assert out["list_of"] == ["<opaque>"]
+
+
+class TestBybitInverseCategoryToleratesPermissionError:
+    """H-S6-1 (specialist:red-team): a strategy whose Bybit API key
+    lacks 'inverse' permission would previously have caused the whole
+    sync_funding job to fail after M-0921 added the inverse iteration.
+    The fetcher now treats BadRequest/PermissionDenied on the FIRST
+    inverse page as 'category not enabled' and continues with the
+    linear results.
+    """
+
+    @pytest.mark.asyncio
+    async def test_inverse_bad_request_does_not_kill_linear(self) -> None:
+        import ccxt.async_support as ccxt_mod
+
+        linear = {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "type": "SETTLEMENT",
+                        "funding": "-0.01",
+                        "currency": "USDT",
+                        "transactionTime": "1700000000000",
+                        "id": "linear-1",
+                    }
+                ],
+                "nextPageCursor": "",
+            }
+        }
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_account_transaction_log = AsyncMock(
+            side_effect=[
+                linear,
+                ccxt_mod.BadRequest("inverse not enabled"),
+            ]
+        )
+
+        rows = await fetch_funding_bybit(
+            mock_exchange, STRATEGY_ID, since_ms=None
+        )
+        # Linear row preserved; inverse silently skipped.
+        assert len(rows) == 1
+        assert rows[0]["symbol"] == "BTCUSDT"
+
+    @pytest.mark.asyncio
+    async def test_inverse_permission_denied_does_not_kill_linear(
+        self,
+    ) -> None:
+        import ccxt.async_support as ccxt_mod
+
+        linear_empty = {"result": {"list": [], "nextPageCursor": ""}}
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_account_transaction_log = AsyncMock(
+            side_effect=[
+                linear_empty,
+                ccxt_mod.PermissionDenied("403"),
+            ]
+        )
+
+        rows = await fetch_funding_bybit(
+            mock_exchange, STRATEGY_ID, since_ms=None
+        )
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_linear_bad_request_still_raises(self) -> None:
+        """Sanity: BadRequest on the linear (first) call MUST still
+        propagate — we only tolerate it for the inverse fallback.
+        """
+        import ccxt.async_support as ccxt_mod
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_account_transaction_log = AsyncMock(
+            side_effect=ccxt_mod.BadRequest("linear bad request")
+        )
+        with pytest.raises(ccxt_mod.BadRequest):
+            await fetch_funding_bybit(
+                mock_exchange, STRATEGY_ID, since_ms=None
+            )
+
+
+class TestDroppedRowCounter:
+    """M-S2-1 / M-0930 (specialist:silent-failure-hunter): each fetcher
+    must log a structured WARN when _normalize_funding_row dropped any
+    rows so a Binance/OKX/Bybit field-shape regression has an operator-
+    visible signal.
+    """
+
+    @pytest.mark.asyncio
+    async def test_binance_logs_dropped_count(self, caplog) -> None:
+        import logging
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.fapiPrivate_get_income = AsyncMock(return_value=[
+            # 2 valid + 2 dropped (bad amount, bad ts)
+            {
+                "symbol": "BTCUSDT",
+                "incomeType": "FUNDING_FEE",
+                "income": "-0.01",
+                "asset": "USDT",
+                "time": 1700000000000,
+                "tranId": "ok1",
+            },
+            {
+                "symbol": "BTCUSDT",
+                "incomeType": "FUNDING_FEE",
+                "income": "not-a-number",
+                "asset": "USDT",
+                "time": 1700000000000,
+                "tranId": "bad-amt",
+            },
+            {
+                "symbol": "BTCUSDT",
+                "incomeType": "FUNDING_FEE",
+                "income": "-0.02",
+                "asset": "USDT",
+                "time": "garbage",
+                "tranId": "bad-ts",
+            },
+            {
+                "symbol": "ETHUSDT",
+                "incomeType": "FUNDING_FEE",
+                "income": "0.005",
+                "asset": "USDT",
+                "time": 1700003000000,
+                "tranId": "ok2",
+            },
+        ])
+
+        caplog.set_level(logging.WARNING, logger="quantalyze.analytics.funding_fetch")
+        rows = await fetch_funding_binance(
+            mock_exchange, STRATEGY_ID, since_ms=None
+        )
+
+        assert len(rows) == 2
+        # Structured-warn signal so the operator can see the regression.
+        warn_messages = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any("dropped 2 malformed rows" in m for m in warn_messages)
+
 
 class TestFundingFeeRowTypedDict:
     """M-0929: producer-side TypedDict makes the row schema explicit so

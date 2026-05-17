@@ -269,7 +269,7 @@ async def fetch_funding_binance(
     exchange: ccxt.Exchange,
     strategy_id: str,
     since_ms: int | None,
-) -> list[dict[str, Any]]:
+) -> list[FundingFeeRow]:
     """Fetch signed funding fees from Binance fapiPrivate_get_income.
 
     Uses incomeType=FUNDING_FEE filter (Binance enforces a 30-day max
@@ -281,9 +281,10 @@ async def fetch_funding_binance(
     = paid, positive = received. Preserved verbatim via Decimal to avoid
     float drift.
     """
-    rows: list[dict[str, Any]] = []
+    rows: list[FundingFeeRow] = []
     current_since = since_ms
     last_seen_ts: int | None = None
+    dropped = 0
 
     for page_idx in range(MAX_PAGES):
         params: dict[str, Any] = {
@@ -325,6 +326,7 @@ async def fetch_funding_binance(
                 raw_item=item,
             )
             if row is None:
+                dropped += 1
                 continue
 
             rows.append(row)
@@ -340,6 +342,15 @@ async def fetch_funding_binance(
             break
         current_since = last_seen_ts + 1
 
+    # M-0930 / specialist:silent-failure-hunter: emit a structured warn
+    # when normalize_funding_row dropped rows. Production filters at
+    # WARN+; a non-zero count means a Binance field-shape regression.
+    if dropped > 0:
+        logger.warning(
+            "binance funding_fetch: dropped %d malformed rows for "
+            "strategy %s (kept %d)",
+            dropped, strategy_id, len(rows),
+        )
     logger.info(
         "binance funding_fetch: %d rows for strategy %s", len(rows), strategy_id
     )
@@ -354,14 +365,18 @@ async def fetch_funding_okx(
     exchange: ccxt.Exchange,
     strategy_id: str,
     since_ms: int | None,
-) -> list[dict[str, Any]]:
+) -> list[FundingFeeRow]:
     """Fetch signed funding fees from OKX private_get_account_bills type=8.
 
     OKX caps recent bills at 3 months; the archive endpoint
     (account/bills-archive) covers older history. We call the archive
     endpoint when since_ms is older than ~90 days.
     """
-    rows: list[dict[str, Any]] = []
+    rows: list[FundingFeeRow] = []
+    # M-0930 / specialist:silent-failure-hunter: counter for rows that
+    # _normalize_funding_row drops. Wrapped in a list so the nested
+    # _paginate closure can mutate without a ``nonlocal`` declaration.
+    nonlocal_dropped: list[int] = [0]
     three_months_ago_ms = int(
         (datetime.now(timezone.utc).timestamp() - 90 * 86400) * 1000
     )
@@ -441,6 +456,7 @@ async def fetch_funding_okx(
                     raw_item=item,
                 )
                 if row is None:
+                    nonlocal_dropped[0] += 1
                     continue
                 rows.append(row)
 
@@ -454,13 +470,19 @@ async def fetch_funding_okx(
 
     # Dedup by match_key (archive + recent may overlap)
     seen: set[str] = set()
-    deduped: list[dict[str, Any]] = []
+    deduped: list[FundingFeeRow] = []
     for row in rows:
         if row["match_key"] in seen:
             continue
         seen.add(row["match_key"])
         deduped.append(row)
 
+    if nonlocal_dropped[0] > 0:
+        logger.warning(
+            "okx funding_fetch: dropped %d malformed rows for "
+            "strategy %s (kept %d, after dedup %d)",
+            nonlocal_dropped[0], strategy_id, len(rows), len(deduped),
+        )
     logger.info(
         "okx funding_fetch: %d rows (%d after dedup) for strategy %s",
         len(rows), len(deduped), strategy_id,
@@ -476,7 +498,7 @@ async def fetch_funding_bybit(
     exchange: ccxt.Exchange,
     strategy_id: str,
     since_ms: int | None,
-) -> list[dict[str, Any]]:
+) -> list[FundingFeeRow]:
     """Fetch signed funding fees from Bybit v5/account/transaction-log.
 
     Filters for type=SETTLEMENT which covers perpetual funding settlements.
@@ -485,7 +507,8 @@ async def fetch_funding_bybit(
 
     Uses cursor-based pagination.
     """
-    rows: list[dict[str, Any]] = []
+    rows: list[FundingFeeRow] = []
+    dropped = 0
 
     # M-0921: Bybit perpetuals split into 'linear' (USDT-quoted) and
     # 'inverse' (coin-margined like BTCUSD). The v5 API requires a
@@ -493,6 +516,14 @@ async def fetch_funding_bybit(
     # all funding for inverse-perp strategies. Iterate both.
     for category in ("linear", "inverse"):
         cursor = ""
+        # H-S6-1 (specialist:red-team): the inverse-category call can
+        # 4xx for accounts whose API key lacks 'inverse' permission. The
+        # `linear` call has already succeeded by the time we reach
+        # inverse, so killing the whole job would be a regression vs.
+        # the pre-M-0921 contract (where inverse was never called).
+        # Treat permission/argument errors on the inverse call as
+        # category-not-enabled and continue. Anything else (auth on the
+        # linear call, network errors, RateLimitExceeded) still raises.
         for page_idx in range(MAX_PAGES):
             params: dict[str, str] = {
                 "category": category,
@@ -508,6 +539,35 @@ async def fetch_funding_bybit(
                 result = await exchange.private_get_v5_account_transaction_log(
                     params
                 )
+            except ccxt.BadRequest as exc:
+                if category == "inverse" and page_idx == 0:
+                    logger.warning(
+                        "Bybit inverse category returned BadRequest for "
+                        "strategy %s (likely API key lacks inverse "
+                        "permission); skipping inverse: %s",
+                        strategy_id, exc,
+                    )
+                    break
+                logger.error(
+                    "Bybit funding fetch BadRequest page %d category=%s "
+                    "for strategy %s: %s",
+                    page_idx, category, strategy_id, exc,
+                )
+                raise
+            except ccxt.PermissionDenied as exc:
+                if category == "inverse" and page_idx == 0:
+                    logger.warning(
+                        "Bybit inverse category PermissionDenied for "
+                        "strategy %s; skipping inverse: %s",
+                        strategy_id, exc,
+                    )
+                    break
+                logger.error(
+                    "Bybit funding fetch PermissionDenied page %d "
+                    "category=%s for strategy %s: %s",
+                    page_idx, category, strategy_id, exc,
+                )
+                raise
             except Exception as exc:
                 # C-0322 / H-1103: was warn+break (partial truncation).
                 # Re-raise so the worker classifies as transient-failed.
@@ -563,6 +623,7 @@ async def fetch_funding_bybit(
                     raw_item=item,
                 )
                 if row is None:
+                    dropped += 1
                     continue
                 rows.append(row)
 
@@ -571,6 +632,12 @@ async def fetch_funding_bybit(
                 break
             cursor = next_cursor
 
+    if dropped > 0:
+        logger.warning(
+            "bybit funding_fetch: dropped %d malformed rows for "
+            "strategy %s (kept %d)",
+            dropped, strategy_id, len(rows),
+        )
     logger.info(
         "bybit funding_fetch: %d rows for strategy %s", len(rows), strategy_id
     )
@@ -588,7 +655,7 @@ async def fetch_funding(
     strategy_id: str,
     since_ms: int | None,
     passphrase: str | None = None,
-) -> list[dict[str, Any]]:
+) -> list[FundingFeeRow]:
     """Convenience dispatcher that constructs the exchange, routes to the
     right normalizer, and closes the connection in a finally block.
 
@@ -618,11 +685,15 @@ async def fetch_funding(
 # ---------------------------------------------------------------------------
 
 
-def serialize_funding_row(row: dict) -> dict:
-    """Serialize a funding_fees dict for JSON-safe UPSERT.
+def serialize_funding_row(row: "FundingFeeRow | dict[str, Any]") -> dict[str, Any]:
+    """Serialize a funding_fees row for JSON-safe UPSERT.
 
     Converts Decimal amounts to strings and datetime timestamps to ISO
     strings. Returns a new dict; does not mutate the input.
+
+    Accepts either :class:`FundingFeeRow` (the new producer contract) or
+    a plain dict for backward compatibility with backfill scripts that
+    pre-date the TypedDict.
     """
     ts = row["timestamp"]
     if hasattr(ts, "isoformat"):
