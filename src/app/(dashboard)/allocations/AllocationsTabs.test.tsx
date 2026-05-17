@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { ReadonlyURLSearchParams } from "next/navigation";
 
 /**
@@ -36,6 +36,18 @@ vi.mock("next/navigation", async () => {
     usePathname: vi.fn(() => "/allocations"),
   };
 });
+
+// audit-2026-05-07 testing HIGH (conf 9) — `trackUsageEventClient` is hoisted
+// to a `vi.fn` so dispatchWidgetPicker tests can assert the documented
+// payload shape (widget_picker_dispatch + source + wasAlreadyOnOverview).
+// `vi.hoisted` lets the mock factory below capture this fn by reference
+// without TDZ issues across vi.mock hoisting.
+const { mockTrackUsageEventClient } = vi.hoisted(() => ({
+  mockTrackUsageEventClient: vi.fn(),
+}));
+vi.mock("@/lib/analytics/usage-events-client", () => ({
+  trackUsageEventClient: mockTrackUsageEventClient,
+}));
 
 import { useSearchParams, useRouter } from "next/navigation";
 
@@ -305,8 +317,6 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
 
 // --- audit-2026-05-07 cluster P regression tests ----------------------------
 
-import { within } from "@testing-library/react";
-
 describe("AllocationsTabs — audit-2026-05-07 cluster P count badges (H-1189 / M-1042)", () => {
   beforeEach(() => {
     mockReplace.mockReset();
@@ -518,7 +528,63 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P silent-failure breadcru
     warnSpy.mockRestore();
     vi.useRealTimers();
   });
+
+  // audit-2026-05-07 testing HIGH (conf 8) — the previous M-1046 test only
+  // advances one 31s tick. A regression that lets the throw escape the
+  // interval callback (e.g. removing the try/catch) would STILL pass that
+  // test because setInterval keeps firing the SAME callback even after
+  // a throw escapes it — but the breadcrumb assertion would also pass on
+  // the FIRST tick. The whole point of the M-1046 fix is "we don't want
+  // the interval to silently die" — this test pins that by advancing TWO
+  // ticks and asserting mockRefresh fires twice AND the breadcrumb fires
+  // twice. Cleanup: unmount and advance a third tick — mockRefresh must
+  // NOT be called a third time.
+  it("router.refresh throw — interval keeps polling across multiple ticks and cleans up on unmount (M-1046)", () => {
+    vi.useFakeTimers();
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    mockRefresh.mockImplementation(() => {
+      throw new Error("simulated route-handler 5xx");
+    });
+    setSearchParams("");
+    const { unmount } = render(<AllocationsTabs {...STUB_PROPS} />);
+
+    // Two ticks (60s + slop). Each must call refresh + emit a breadcrumb;
+    // the interval MUST keep polling after the first throw is swallowed.
+    vi.advanceTimersByTime(62_000);
+
+    expect(mockRefresh.mock.calls.length).toBeGreaterThanOrEqual(2);
+    const breadcrumbCount = warnSpy.mock.calls.filter(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("router_refresh_failed"),
+    ).length;
+    expect(breadcrumbCount).toBeGreaterThanOrEqual(2);
+
+    // Cleanup contract — unmount must clearInterval. Advance a 3rd tick
+    // worth and assert mockRefresh stays at its current call count.
+    const beforeUnmount = mockRefresh.mock.calls.length;
+    unmount();
+    vi.advanceTimersByTime(31_000);
+    expect(mockRefresh.mock.calls.length).toBe(beforeUnmount);
+
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
 });
+
+// audit-2026-05-07 testing MED — capture the ORIGINAL window.localStorage
+// descriptor exactly once at module load, before any describe block has had
+// a chance to install a shim. Restoring via descriptor avoids the
+// "originalLocalStorage captured a partial-failure shim" leak that a
+// per-describe beforeEach would have if a prior test crashed mid-setup.
+// Also more robust against test reordering: regardless of which test runs
+// first, the restore always points back to the real jsdom Storage.
+const ORIGINAL_LOCALSTORAGE_DESCRIPTOR = Object.getOwnPropertyDescriptor(
+  window,
+  "localStorage",
+);
 
 describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / H-0060)", () => {
   // Vitest's jsdom environment here exposes a localStorage backend that
@@ -536,7 +602,6 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / 
     readonly length: number;
   };
   let storageShim: StorageShim;
-  let originalLocalStorage: Storage | undefined;
 
   beforeEach(() => {
     mockReplace.mockReset();
@@ -551,7 +616,6 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / 
       prefetch: vi.fn(),
     } as unknown as ReturnType<typeof useRouter>);
 
-    originalLocalStorage = window.localStorage;
     const map = new Map<string, string>();
     storageShim = {
       map,
@@ -575,10 +639,15 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / 
   });
 
   afterEach(() => {
-    Object.defineProperty(window, "localStorage", {
-      configurable: true,
-      value: originalLocalStorage,
-    });
+    // Restore from the module-load descriptor so partial-failure shims
+    // installed by a prior test can never leak into subsequent describes.
+    if (ORIGINAL_LOCALSTORAGE_DESCRIPTOR) {
+      Object.defineProperty(
+        window,
+        "localStorage",
+        ORIGINAL_LOCALSTORAGE_DESCRIPTOR,
+      );
+    }
   });
 
   it("localStorage getItem throw emits loadUiV2Flag_failed breadcrumb (C-0336)", () => {
@@ -638,5 +707,280 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / 
     );
     expect(matching).toBeUndefined();
     warnSpy.mockRestore();
+  });
+});
+
+// --- audit-2026-05-07 Phase-2 testing-specialist additions ------------------
+//
+// Each describe below resets the router mocks in beforeEach via the shared
+// resetRouterMocks helper to avoid duplicating the four-line setup the
+// maintainability specialist flagged. New coverage:
+//   - dispatchWidgetPicker (sync / deferred / failed paths + telemetry)
+//   - parseTab boundary cases (empty / whitespace / uppercase / canonical
+//     parameterized) — pins the KNOWN_TAB_RAW contract as a test instead of
+//     a comment.
+//   - Export chip scroll:false + single-shot routing pin (M-1041 hardening)
+//   - Export chip same-tab repeat click re-announce (M-1044 silent-failure
+//     fix is itself uncovered against the React Object.is bail-out path).
+
+function resetRouterMocks(): void {
+  mockReplace.mockReset();
+  mockRefresh.mockReset();
+  mockPush.mockReset();
+  mockTrackUsageEventClient.mockReset();
+  vi.mocked(useRouter).mockReturnValue({
+    replace: mockReplace,
+    refresh: mockRefresh,
+    push: mockPush,
+    back: vi.fn(),
+    forward: vi.fn(),
+    prefetch: vi.fn(),
+  } as unknown as ReturnType<typeof useRouter>);
+}
+
+describe("AllocationsTabs — audit-2026-05-07 Phase-2 dispatchWidgetPicker (HIGH conf 9)", () => {
+  beforeEach(() => {
+    resetRouterMocks();
+  });
+
+  it("Widget chip from Overview dispatches synchronously + telemetry 'sync'", () => {
+    setSearchParams("");
+    const evtSpy = vi.fn();
+    window.addEventListener("allocations:open-widget-picker", evtSpy);
+
+    try {
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      fireEvent.click(screen.getByRole("button", { name: "Add widget" }));
+
+      // Synchronous fire — no microtask / timer flush needed on Overview.
+      expect(evtSpy).toHaveBeenCalledTimes(1);
+      expect(mockTrackUsageEventClient).toHaveBeenCalledTimes(1);
+      const [eventName, payload] = mockTrackUsageEventClient.mock.calls[0];
+      expect(eventName).toBe("widget_viewed");
+      expect(payload).toMatchObject({
+        widget_picker_dispatch: "sync",
+        source: "tab_row_chip",
+        wasAlreadyOnOverview: true,
+      });
+    } finally {
+      window.removeEventListener("allocations:open-widget-picker", evtSpy);
+    }
+  });
+
+  it("Widget chip from non-Overview defers via microtask + 100ms safety-net (telemetry 'deferred')", async () => {
+    vi.useFakeTimers();
+    setSearchParams("tab=risk");
+    const evtSpy = vi.fn();
+    window.addEventListener("allocations:open-widget-picker", evtSpy);
+
+    try {
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      fireEvent.click(screen.getByRole("button", { name: "Add widget" }));
+
+      // Microtask queue flush — queueMicrotask resolves on the next
+      // microtask checkpoint, which vi.advanceTimersByTime(0) reaches via
+      // the queued Promise chain.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(evtSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
+
+      // 100ms setTimeout safety net — second dispatch (listener is
+      // idempotent so this is intentional).
+      await vi.advanceTimersByTimeAsync(100);
+      expect(evtSpy).toHaveBeenCalledTimes(2);
+
+      // Telemetry: exactly one event per click with status 'deferred'.
+      expect(mockTrackUsageEventClient).toHaveBeenCalledTimes(1);
+      const [, payload] = mockTrackUsageEventClient.mock.calls[0];
+      expect(payload).toMatchObject({
+        widget_picker_dispatch: "deferred",
+        source: "tab_row_chip",
+        wasAlreadyOnOverview: false,
+      });
+    } finally {
+      window.removeEventListener("allocations:open-widget-picker", evtSpy);
+      vi.useRealTimers();
+    }
+  });
+
+  it("Widget chip on Overview — dispatchEvent throws → 'failed' telemetry + warnAudit breadcrumb", () => {
+    setSearchParams("");
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    const originalDispatch = window.dispatchEvent.bind(window);
+    const dispatchSpy = vi
+      .spyOn(window, "dispatchEvent")
+      .mockImplementation((evt: Event) => {
+        if (evt.type === "allocations:open-widget-picker") {
+          throw new Error("simulated CustomEvent throw");
+        }
+        return originalDispatch(evt);
+      });
+
+    try {
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      fireEvent.click(screen.getByRole("button", { name: "Add widget" }));
+
+      // Telemetry status reflects the failed dispatch.
+      expect(mockTrackUsageEventClient).toHaveBeenCalledTimes(1);
+      const [, payload] = mockTrackUsageEventClient.mock.calls[0];
+      expect(payload).toMatchObject({
+        widget_picker_dispatch: "failed",
+        source: "tab_row_chip",
+        wasAlreadyOnOverview: true,
+      });
+
+      // warnAudit breadcrumb fires with reason string.
+      const matching = warnSpy.mock.calls.find(
+        (c) =>
+          typeof c[0] === "string" &&
+          c[0].includes("widget_picker_dispatch_failed"),
+      );
+      expect(matching).toBeDefined();
+      expect(
+        (matching![1] as { reason: string }).reason,
+      ).toContain("simulated CustomEvent throw");
+    } finally {
+      dispatchSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe("AllocationsTabs — audit-2026-05-07 Phase-2 parseTab boundary cases (MED conf 8)", () => {
+  beforeEach(() => {
+    resetRouterMocks();
+  });
+
+  // Pin the KNOWN_TAB_RAW contract — none of these canonical keys should
+  // emit invalid_tab_fallback. Locks the constant set as part of the
+  // tested contract instead of leaving it as documentation.
+  for (const raw of [
+    "overview",
+    "holdings",
+    "outcomes",
+    "mandate",
+    "risk",
+    "scenario",
+    "performance",
+  ] as const) {
+    it(`?tab=${raw} (canonical) does NOT emit invalid_tab_fallback breadcrumb`, () => {
+      const warnSpy = vi
+        .spyOn(console, "warn")
+        .mockImplementation(() => undefined);
+      setSearchParams(`tab=${raw}`);
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      const matching = warnSpy.mock.calls.find(
+        (c) =>
+          typeof c[0] === "string" &&
+          c[0].includes("invalid_tab_fallback"),
+      );
+      expect(matching).toBeUndefined();
+      warnSpy.mockRestore();
+    });
+  }
+
+  it("?tab= (empty string) does NOT warn (length>0 guard pins this)", () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    setSearchParams("tab=");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const matching = warnSpy.mock.calls.find(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("invalid_tab_fallback"),
+    );
+    expect(matching).toBeUndefined();
+    warnSpy.mockRestore();
+  });
+
+  it("?tab=%20 (whitespace) DOES warn — case-sensitive, no .trim() in parseTab", () => {
+    // Documents the current contract: whitespace is non-empty and not in
+    // KNOWN_TAB_RAW → it warns. If a future fix adds .trim(), this test
+    // is the canonical place to flip the assertion to .toBeUndefined().
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    setSearchParams("tab=%20");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const matching = warnSpy.mock.calls.find(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("invalid_tab_fallback"),
+    );
+    expect(matching).toBeDefined();
+    warnSpy.mockRestore();
+  });
+
+  it("?tab=HOLDINGS (uppercase canonical) DOES warn — case-sensitive contract", () => {
+    // Documents the current contract: canonical keys are lowercase-only.
+    // If a future fix adds toLowerCase(), this test is the canonical
+    // place to flip the assertion to .toBeUndefined().
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    setSearchParams("tab=HOLDINGS");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const matching = warnSpy.mock.calls.find(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("invalid_tab_fallback"),
+    );
+    expect(matching).toBeDefined();
+    warnSpy.mockRestore();
+  });
+});
+
+describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (MED conf 8)", () => {
+  beforeEach(() => {
+    resetRouterMocks();
+  });
+
+  it("Export chip from Risk: router.replace called exactly ONCE with { scroll: false }", () => {
+    setSearchParams("tab=risk");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    // Pre-render setup may call replace zero times (no cleanup needed for
+    // tab=risk since risk is canonical and stays). Clear to isolate the
+    // click's effect.
+    mockReplace.mockClear();
+
+    const exportChip = screen.getByRole("button", { name: "Export" });
+    fireEvent.click(exportChip);
+
+    // Single-shot: exactly one replace call from the click path.
+    expect(mockReplace).toHaveBeenCalledTimes(1);
+    const [, opts] = mockReplace.mock.calls[0];
+    expect(opts).toEqual({ scroll: false });
+  });
+
+  it("Export chip clicked twice from Risk → re-announces (Object.is bail-out pinned)", () => {
+    // The maintainability specialist flagged that setExportAnnouncement
+    // with the SAME string skips React's re-render → aria-live=polite
+    // does not re-announce identical content. The seq-suffix fix
+    // guarantees each click produces a non-equal string. This test pins
+    // the new contract so a regression that drops the suffix breaks here.
+    setSearchParams("tab=risk");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const liveRegion = screen.getByTestId("allocations-tabs-live-region");
+    const exportChip = screen.getByRole("button", { name: "Export" });
+
+    fireEvent.click(exportChip);
+    const firstText = liveRegion.textContent ?? "";
+    expect(firstText).toContain("Export");
+    expect(firstText).toContain("Holdings");
+
+    // Simulate user navigating back to Risk and clicking Export again
+    // from the same tab. The URL change is mocked, so re-set the params.
+    setSearchParams("tab=risk");
+    fireEvent.click(exportChip);
+    const secondText = liveRegion.textContent ?? "";
+
+    // String identities must differ so aria-live=polite re-announces.
+    // The visible portion ("Export lives in the Holdings tab…") is the
+    // same; the zero-width-space suffix makes the strings non-equal.
+    expect(secondText).not.toBe(firstText);
+    expect(secondText).toContain("Export");
+    expect(secondText).toContain("Holdings");
   });
 });
