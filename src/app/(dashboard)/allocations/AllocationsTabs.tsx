@@ -424,13 +424,11 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // race + silent drop. The proper fix (lifting pickerOpen state into
   // AllocationsTabs) requires editing AllocationDashboardV2, which is
   // out-of-scope for this cluster's PR. In-scope mitigation:
-  //   (1) Retry the dispatch on three ticks — microtask, rAF, 100ms
-  //       setTimeout — so the event reaches AllocationDashboardV2's
-  //       listener even when its commit takes longer than one microtask.
-  //       The listener's setPickerOpen(true) handler is idempotent so
-  //       multiple deliveries cannot harm state.
-  //   (2) Telemetry on every attempt so a dropped picker is observable
-  //       in PostHog without waiting for a user-filed bug.
+  //   - On Overview: dispatch synchronously (listener already mounted).
+  //   - From a non-Overview tab: queueMicrotask + a 100ms setTimeout
+  //     safety net. The handler `setPickerOpen(true)` is idempotent, so
+  //     a duplicate delivery is harmless. One PostHog event per click
+  //     (status reflects whether the synchronous send raised).
   const dispatchWidgetPicker = (wasAlreadyOnOverview: boolean): void => {
     if (typeof window === "undefined") return;
 
@@ -449,7 +447,6 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     };
 
     if (wasAlreadyOnOverview) {
-      // Listener is already mounted — synchronous dispatch is sufficient.
       const ok = fire();
       trackUsageEventClient("widget_viewed", {
         widget_picker_dispatch: ok ? "sync" : "failed",
@@ -459,38 +456,17 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
       return;
     }
 
-    // Non-Overview source — AllocationDashboardV2's listener mounts on commit
-    // of the tab change. The original code dispatched on one microtask,
-    // which races with React 19 concurrent rendering. Retry on three
-    // ticks (microtask, rAF, 100ms) so the event reaches the listener
-    // even when the commit/mount cycle takes longer than one microtask.
-    let attempts = 0;
-    const MAX_ATTEMPTS = 3;
-
-    const attempt = (label: string) => {
-      attempts += 1;
-      const ok = fire();
-      // No way to know if a listener actually received the event without
-      // a sessionStorage ack. We instrument every attempt; the last
-      // successful attempt is the one that counts. Downstream analytics
-      // can dedupe by clicking session.
-      trackUsageEventClient("widget_viewed", {
-        widget_picker_dispatch: ok ? `retry_${label}` : "failed",
-        attempt: attempts,
-        source: "tab_row_chip",
-        wasAlreadyOnOverview: false,
-      });
-    };
-
-    queueMicrotask(() => attempt("microtask"));
-    if (typeof window.requestAnimationFrame === "function") {
-      window.requestAnimationFrame(() => {
-        if (attempts < MAX_ATTEMPTS) attempt("rAF");
-      });
-    }
-    window.setTimeout(() => {
-      if (attempts < MAX_ATTEMPTS) attempt("timeout_100ms");
-    }, 100);
+    // Non-Overview source — AllocationDashboardV2's listener mounts on
+    // commit of the tab change. Microtask + 100ms safety-net catches the
+    // listener-not-yet-attached race that the original synchronous
+    // dispatch dropped. Telemetry fires once per click.
+    queueMicrotask(fire);
+    window.setTimeout(fire, 100);
+    trackUsageEventClient("widget_viewed", {
+      widget_picker_dispatch: "deferred",
+      source: "tab_row_chip",
+      wasAlreadyOnOverview: false,
+    });
   };
 
   // audit-2026-05-07 M-1044 (silent-failure-hunter c8) — Export chip
