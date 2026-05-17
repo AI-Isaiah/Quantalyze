@@ -22,6 +22,15 @@ export const maxDuration = 30;
 // page render hits the SAME deployment serving this request, which is also
 // the only correct behavior for preview deployments.
 //
+// Why the `origin !== "null"` guard: per the WHATWG URL spec, opaque-origin
+// URLs (e.g. `file://`, sandboxed iframes, certain SSR contexts that
+// construct a NextRequest without a real host) serialize their origin as
+// the LITERAL string `"null"` — not the JS `null` value. Without this
+// guard, those callers would produce `page.goto("null/factsheet/<id>")`
+// and silently 500. The string-compare is deliberate (and load-bearing);
+// DO NOT remove or simplify to a truthy-check during refactors — fall
+// through to the env/localhost branch in that case instead.
+//
 // Final fallback is `http://localhost:3000` so local `next dev` keeps
 // working even when neither origin nor env is set. Production callers
 // always have `req.nextUrl.origin` so the fallback is dev-only.
@@ -30,6 +39,7 @@ export const maxDuration = 30;
 // tests can drop a stale value, mirroring the cron route's appUrl() pattern.
 function appUrl(req: NextRequest): string {
   const origin = req.nextUrl.origin;
+  // origin !== "null" — literal string from opaque-origin URLs, see comment block above.
   if (origin && origin !== "null") return origin;
   return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 }
