@@ -1,43 +1,44 @@
 /**
- * Audit-2026-05-07 #44 — PendingIntros regression tests.
+ * Audit-2026-05-07 #44 + C-0135 + C-0136 — PendingIntros regression tests.
  *
- * The component used to UPDATE contact_requests without `.select("id")` and
- * trust the absence of `updateError` as success. RLS could silently filter
- * the affected-row set to 0, leaving the row at status='pending' while the
- * UI optimistically rendered "Accepted". The fix attaches `.select("id")`
- * and surfaces a user-visible error when zero rows came back.
+ * History:
+ *   - #44 (resolved): the component used to UPDATE contact_requests
+ *     without `.select("id")` and trust the absence of `updateError` as
+ *     success. RLS could silently filter the affected-row set to 0,
+ *     leaving the row at status='pending' while the UI optimistically
+ *     rendered "Accepted".
+ *   - C-0135: even with the .select("id") fix, the manager-side direct
+ *     Supabase write bypassed `/api/admin/intro-request` and therefore
+ *     skipped the notifyAllocatorIntroStatus email — allocators never
+ *     learned their request had been accepted or declined.
+ *   - C-0136: the manager-side direct UPDATE could mutate any column on
+ *     contact_requests (admin_note, founder_notes, allocation_amount)
+ *     because the RLS UPDATE policy had no column-level grant and no
+ *     WITH CHECK clause.
+ *
+ * Fix: route manager responses through POST /api/intro-response, which
+ * (a) enforces caller-is-strategy-manager, (b) writes only `status +
+ * responded_at` via the service-role admin client, (c) audits the
+ * transition, (d) triggers notifyAllocatorIntroStatus on every accept
+ * AND decline. Component tests now assert the fetch contract.
  *
  * Branches verified:
- *   1. Update returns rows → router.refresh() fires, no error surfaced.
- *   2. Update returns rows AND action="accept" → confirmMessage rendered.
- *   3. supabase update returns updateError → generic failure copy rendered.
- *   4. supabase update returns data:[] (RLS-zero) → permission-style error
- *      rendered AND router.refresh() does NOT fire (no false-positive).
+ *   1. POST /api/intro-response { id, action: 'accept' } on click and
+ *      router.refresh() fires on success.
+ *   2. action='accept' renders the "We'll connect you within 48h"
+ *      confirm message.
+ *   3. action='decline' issues { action: 'decline' } and does NOT render
+ *      the accept-only confirm message.
+ *   4. res.ok=false (500) → generic failure copy rendered AND
+ *      router.refresh() does NOT fire (silent-success protection).
+ *   5. res.status=403 (caller not manager) → permission-style error.
+ *   6. fetch rejects (network) → generic failure copy.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { PendingIntros } from "./PendingIntros";
-
-type UpdateResult = { data: unknown; error: { message: string } | null };
-
-let nextUpdateResult: UpdateResult = { data: [{ id: "stub" }], error: null };
-const updateSpy = vi.fn();
-
-vi.mock("@/lib/supabase/client", () => ({
-  createClient: () => ({
-    from: (table: string) => ({
-      update: (payload: unknown) => {
-        updateSpy({ table, payload });
-        return {
-          eq: () => ({
-            select: () => Promise.resolve(nextUpdateResult),
-          }),
-        };
-      },
-    }),
-  }),
-}));
+import { installFetchMock, restoreFetchMock, type FetchMock } from "@/test/helpers/fetch";
 
 const refreshMock = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -67,26 +68,39 @@ const REQUEST = {
   },
 };
 
-describe("PendingIntros — Audit #44 RLS-zero detection", () => {
-  beforeEach(() => {
-    nextUpdateResult = { data: [{ id: "stub" }], error: null };
-    updateSpy.mockReset();
-    refreshMock.mockReset();
-  });
+let fetchMock: FetchMock;
 
-  it("calls update and refreshes the router on a successful response (rows returned)", async () => {
+beforeEach(() => {
+  fetchMock = installFetchMock();
+  refreshMock.mockReset();
+});
+
+afterEach(() => {
+  restoreFetchMock();
+});
+
+describe("PendingIntros — Audit C-0135/C-0136 server-route refactor", () => {
+  it("POSTs to /api/intro-response { id, action: 'accept' } and refreshes the router on success", async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200 } as Response);
     render(<PendingIntros requests={[REQUEST]} />);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /accept/i }));
     });
     await waitFor(() => expect(refreshMock).toHaveBeenCalledTimes(1));
-    expect(updateSpy).toHaveBeenCalledTimes(1);
-    const call = updateSpy.mock.calls[0][0];
-    expect(call.table).toBe("contact_requests");
-    expect((call.payload as { status: string }).status).toBe("intro_made");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/intro-response");
+    expect((init as RequestInit).method).toBe("POST");
+    const body = JSON.parse((init as RequestInit).body as string) as {
+      id: string;
+      action: string;
+    };
+    expect(body).toEqual({ id: REQUEST.id, action: "accept" });
   });
 
   it("shows the confirm message after a successful Accept", async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200 } as Response);
     render(<PendingIntros requests={[REQUEST]} />);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /accept/i }));
@@ -98,7 +112,8 @@ describe("PendingIntros — Audit #44 RLS-zero detection", () => {
     );
   });
 
-  it("does NOT render the confirm message after a successful Decline", async () => {
+  it("issues { action: 'decline' } and does NOT render the accept-only confirm message", async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200 } as Response);
     render(<PendingIntros requests={[REQUEST]} />);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /decline/i }));
@@ -107,16 +122,14 @@ describe("PendingIntros — Audit #44 RLS-zero detection", () => {
     expect(
       screen.queryByText(/Our team will connect you within 48h/i),
     ).toBeNull();
-    // status payload is "declined" for the decline path
-    const payload = updateSpy.mock.calls[0][0].payload as { status: string };
-    expect(payload.status).toBe("declined");
+    const body = JSON.parse(
+      (fetchMock.mock.calls[0][1] as RequestInit).body as string,
+    ) as { action: string };
+    expect(body.action).toBe("decline");
   });
 
-  it("surfaces the generic failure copy when supabase returns updateError", async () => {
-    nextUpdateResult = {
-      data: null,
-      error: { message: "boom" },
-    };
+  it("surfaces the generic failure copy when the server returns 500 and does NOT refresh", async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 500 } as Response);
     render(<PendingIntros requests={[REQUEST]} />);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /accept/i }));
@@ -129,12 +142,13 @@ describe("PendingIntros — Audit #44 RLS-zero detection", () => {
     expect(refreshMock).not.toHaveBeenCalled();
   });
 
-  it("surfaces the RLS-zero permission error when supabase returns data:[] (regression: Audit #44)", async () => {
-    // The exact bug class the fix protects against — PostgREST returns
-    // an empty data array when the RLS policy filters the row out, with
-    // NO error object. Pre-fix, the UI would render "intro_made" and
-    // call router.refresh() despite the DB row still being 'pending'.
-    nextUpdateResult = { data: [], error: null };
+  it("surfaces the permission-style error on 403 (caller not strategy manager) — closes C-0136", async () => {
+    // 403 means the server's ownership check (strategies.user_id !== user.id)
+    // rejected the call. Pre-refactor, a malicious manager could mutate any
+    // column on contact_requests for their strategies; post-refactor they
+    // can't even submit the response because the server now validates
+    // ownership. The UI surfaces a permission-style copy on the 403.
+    fetchMock.mockResolvedValue({ ok: false, status: 403 } as Response);
     render(<PendingIntros requests={[REQUEST]} />);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /accept/i }));
@@ -144,24 +158,26 @@ describe("PendingIntros — Audit #44 RLS-zero detection", () => {
         screen.getByText(/your account may not have permission/i),
       ).toBeDefined(),
     );
-    // CRITICAL: refresh must NOT have fired — that's the silent-success
-    // bug we're protecting against.
     expect(refreshMock).not.toHaveBeenCalled();
   });
 
-  it("surfaces the RLS-zero permission error when supabase returns data:null (defensive)", async () => {
-    // PostgREST may also return data:null on an unexpected shape — the
-    // `!updated || updated.length === 0` guard must catch both.
-    nextUpdateResult = { data: null, error: null };
+  it("surfaces the generic failure copy when fetch rejects (network error)", async () => {
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
     render(<PendingIntros requests={[REQUEST]} />);
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /decline/i }));
+      fireEvent.click(screen.getByRole("button", { name: /accept/i }));
     });
     await waitFor(() =>
       expect(
-        screen.getByText(/your account may not have permission/i),
+        screen.getByText(/Failed to update request\. Please try again\./i),
       ).toBeDefined(),
     );
     expect(refreshMock).not.toHaveBeenCalled();
   });
+
+  // Source-grep regression locks live in
+  // src/__tests__/critical-regressions.test.ts under the
+  // [AUDIT-2026-05-07 C-0135 + C-0136] block — see that file for the
+  // file-level pins on `@/lib/supabase/client` import, `contact_requests`
+  // reference, `/api/intro-response` target, and permission-error copy.
 });

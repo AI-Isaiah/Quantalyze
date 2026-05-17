@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -27,39 +26,42 @@ export function PendingIntros({ requests }: { requests: IntroRequest[] }) {
 
   if (requests.length === 0) return null;
 
+  // Audit-2026-05-07 C-0135 + C-0136: route manager responses through
+  // /api/intro-response so (a) notifyAllocatorIntroStatus fires on every
+  // transition (no more silent notification drop) and (b) the writeable
+  // column set is whitelisted server-side (no more direct manager UPDATE
+  // on admin_note / founder_notes / allocation_amount via Supabase
+  // browser client). The previous .select('id') / updated.length===0
+  // RLS-zero detection is no longer needed because the server route
+  // returns a proper 4xx on the manager-not-owner path.
   async function handleRespond(id: string, action: "accept" | "decline") {
     setLoading(id);
     setError(null);
     setConfirmMessage(null);
 
-    const supabase = createClient();
-    const newStatus = action === "accept" ? "intro_made" : "declined";
-
-    // Audit-2026-05-07 #44: Use `.select("id")` so we know how many rows
-    // PostgREST actually mutated. RLS may silently reduce the affected-row
-    // set to 0 if the policy filter doesn't match — without this, the UI
-    // would optimistically render "Accepted" while the DB still showed
-    // 'pending', and the founder dashboard would never see the change.
-    const { data: updated, error: updateError } = await supabase
-      .from("contact_requests")
-      .update({
-        status: newStatus,
-        responded_at: new Date().toISOString(),
-      })
-      .eq("id", id)
-      .select("id");
-
-    setLoading(null);
-
-    if (updateError) {
+    let res: Response;
+    try {
+      res = await fetch("/api/intro-response", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, action }),
+      });
+    } catch {
+      setLoading(null);
       setError("Failed to update request. Please try again.");
       return;
     }
 
-    if (!updated || updated.length === 0) {
-      setError(
-        "Update did not apply — your account may not have permission to respond to this request. Refresh and try again, or contact the team if the problem persists.",
-      );
+    setLoading(null);
+
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        setError(
+          "Your account may not have permission to respond to this request. Refresh and try again, or contact the team if the problem persists.",
+        );
+        return;
+      }
+      setError("Failed to update request. Please try again.");
       return;
     }
 

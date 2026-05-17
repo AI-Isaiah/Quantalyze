@@ -312,25 +312,41 @@ describe("Critical regression guards", () => {
     });
   });
 
-  describe("[AUDIT-2026-05-07 #44] PendingIntros detects RLS-zero updates", () => {
-    it("PendingIntros.tsx must call .select('id') on the update so PostgREST returns the affected rowset", () => {
+  describe("[AUDIT-2026-05-07 C-0135 + C-0136] PendingIntros routes through /api/intro-response", () => {
+    // Supersedes #44 (RLS-zero detection on direct browser-client UPDATE).
+    // The 2026-05-07 audit identified two compound defects on the direct
+    // path: (1) C-0135 — notifyAllocatorIntroStatus never fired on
+    // manager-driven transitions (allocators silently uninformed); (2)
+    // C-0136 — no RLS WITH CHECK + no column-level grant meant a manager
+    // UI could mutate admin_note / founder_notes / allocation_amount on
+    // rows for their strategies. The fix routes through a server
+    // endpoint that whitelists columns and triggers the notify.
+    it("PendingIntros.tsx must NOT import the Supabase browser client (no direct manager UPDATE)", () => {
       const src = readText("src/components/strategy/PendingIntros.tsx");
       expect(
-        /\.select\(\s*["']id["']\s*\)/.test(src),
-        "PendingIntros.tsx no longer chains .select('id') on the contact_requests update — RLS-zero silent-success regression possible",
+        /from\s+["']@\/lib\/supabase\/client["']/.test(src),
+        "PendingIntros.tsx re-introduced the Supabase browser client — C-0135 (silent notify drop) + C-0136 (column-write surface) regressions possible",
+      ).toBe(false);
+    });
+    it("PendingIntros.tsx must NOT reference contact_requests directly (server-route enforcement)", () => {
+      const src = readText("src/components/strategy/PendingIntros.tsx");
+      expect(
+        /contact_requests/.test(src),
+        "PendingIntros.tsx writes to contact_requests directly — manager-side direct UPDATE bypasses server validation",
+      ).toBe(false);
+    });
+    it("PendingIntros.tsx must POST to /api/intro-response", () => {
+      const src = readText("src/components/strategy/PendingIntros.tsx");
+      expect(
+        /\/api\/intro-response/.test(src),
+        "PendingIntros.tsx no longer targets /api/intro-response — notifyAllocatorIntroStatus path is bypassed",
       ).toBe(true);
     });
-
-    it("PendingIntros.tsx must check updated.length === 0 and surface a permission-style error", () => {
+    it("PendingIntros.tsx must still surface a permission-style error on 401/403", () => {
       const src = readText("src/components/strategy/PendingIntros.tsx");
       expect(
-        /updated\.length\s*===\s*0/.test(src) ||
-          /updated\.length\s*<\s*1/.test(src),
-        "PendingIntros.tsx no longer checks for a zero-row update — RLS-zero silent-success regression possible",
-      ).toBe(true);
-      expect(
         /may not have permission/.test(src),
-        "PendingIntros.tsx no longer surfaces the permission-style error copy",
+        "PendingIntros.tsx no longer surfaces the permission-style error copy — silent-403 regression possible",
       ).toBe(true);
     });
   });
