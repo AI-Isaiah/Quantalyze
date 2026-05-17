@@ -183,7 +183,6 @@ function readUiV2Flag(): UiV2FlagState {
   }
 }
 
-
 // Live-refresh polling. Phase 06 D-11 used 5s for active-ingest sync status;
 // Phase 07 is a monitoring surface where data changes slowly (daily equity,
 // periodic trades) so 30s is enough for a timely read without re-fetching the
@@ -422,19 +421,16 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   };
 
   // audit-2026-05-07 H-1187 / H-1190 / H-1191 / M-1047 — picker dispatch
-  // race + silent drop. Lifting pickerOpen into AllocationsTabs would
-  // require touching AllocationDashboardV2 (out-of-scope: cluster G owns
-  // that file). In-scope mitigation: (1) ACK protocol — AllocationDashboardV2
-  // posts an "allocations:open-widget-picker:ack" event when its listener
-  // is mounted and dispatches a `dashboard-listener-mounted` flag on
-  // sessionStorage; (2) retry the dispatch on microtask → rAF → 100ms
-  // timeout so the event reaches the listener even when router.replace's
-  // commit takes longer than one microtask; (3) telemetry so dispatch
-  // success/failure is observable.
-  //
-  // The ACK protocol degrades gracefully — if AllocationDashboardV2 does
-  // NOT yet ack (older bundle, off-scope), the retry-with-deadline path
-  // still wins for the >99% case where the listener mounts on commit.
+  // race + silent drop. The proper fix (lifting pickerOpen state into
+  // AllocationsTabs) requires editing AllocationDashboardV2, which is
+  // out-of-scope for this cluster's PR. In-scope mitigation:
+  //   (1) Retry the dispatch on three ticks — microtask, rAF, 100ms
+  //       setTimeout — so the event reaches AllocationDashboardV2's
+  //       listener even when its commit takes longer than one microtask.
+  //       The listener's setPickerOpen(true) handler is idempotent so
+  //       multiple deliveries cannot harm state.
+  //   (2) Telemetry on every attempt so a dropped picker is observable
+  //       in PostHog without waiting for a user-filed bug.
   const dispatchWidgetPicker = (wasAlreadyOnOverview: boolean): void => {
     if (typeof window === "undefined") return;
 
