@@ -32,16 +32,13 @@ function warnAudit(tag: string, detail: Record<string, unknown> = {}): void {
   console.warn(`[AllocationsTabs] ${tag}`, detail);
 }
 
-// audit-2026-05-07 cluster P (M-0043 / M-1043 / maintainability MED) — the
-// previous `MemoAllocationDashboardV2 = memo(AllocationDashboardV2)` wrapper
-// was a no-op: the consumer below renders `<AllocationDashboardV2 {...props}/>`,
-// so React.memo's default shallow compare always saw a fresh props identity
-// and re-rendered. The wrapper added an indirection layer and a misleading
-// optimization signal for future readers without delivering any current
-// behavioral benefit. Removed per the audit's "no speculative abstractions
-// for single-use code" guidance. Re-introduce memo only AFTER the parent
-// server component stabilises the payload reference — at which point the
-// wrapper would actually short-circuit.
+// audit-2026-05-07 cluster P (M-0043 / M-1043 / maintainability MED) —
+// do NOT re-introduce a `memo(AllocationDashboardV2)` wrapper here. The
+// parent server component does not yet stabilise the payload reference, so
+// React.memo's default shallow compare always sees a fresh props identity
+// and re-renders. The wrapper was removed in this audit; only restore it
+// AFTER the payload reference is stable (and add a test that pins the
+// short-circuit), otherwise it ships as misleading optimization signal.
 
 // Phase A6 — Holdings / Outcomes / Mandate / Risk tab panels lazy-load via
 // next/dynamic with ssr: false. Together they pull in HoldingsTable +
@@ -140,10 +137,10 @@ const ScenarioComposer = dynamic(
 // audit-2026-05-07 cluster P (H-1188 doc, H-0060 type discriminator)
 // — the persisted localStorage key NAME is "allocations.ui_v2" for
 // back-compat with shipped opt-outs, but in current main its SCOPE is the
-// Scenario tab only (ScenarioComposer vs ScenarioStub at line ~570). The
-// Overview / Holdings / Outcomes / Mandate / Risk panels are not gated by
-// this flag. Treat any documentation that calls it a "broader UI rollback"
-// as stale.
+// Scenario tab only (ScenarioComposer vs ScenarioStub in the scenario
+// tabpanel below). The Overview / Holdings / Outcomes / Mandate / Risk
+// panels are not gated by this flag. Treat any documentation that calls
+// it a "broader UI rollback" as stale.
 //
 // v0.15.7.0 retired V1 / made V2 the default-for-all in production; the
 // helper preserves the BRANCH point so an explicit "false" still routes to
@@ -151,13 +148,14 @@ const ScenarioComposer = dynamic(
 // or any value other than the literal string "false") yields V2.
 const UI_V2_STORAGE_KEY = "allocations.ui_v2";
 
-// audit-2026-05-07 maintainability MED — the only consumer (line ~318) reads
-// "is this an explicit opt-out?". Collapsed from a 4-variant discriminator
-// union to a 2-variant ("explicit-false" vs "default") so unused branches
-// don't accumulate without tests exercising them. C-0336 storage-error
-// breadcrumb is preserved; SSR and storage-error paths both collapse to
-// "default" since both yield V2 with no rollback. Re-introduce a richer
-// discriminator only when a second consumer needs it.
+// audit-2026-05-07 maintainability MED — the only consumer (the post-mount
+// useEffect inside AllocationsTabs) reads "is this an explicit opt-out?".
+// Collapsed from a 4-variant discriminator union to a 2-variant
+// ("explicit-false" vs "default") so unused branches don't accumulate
+// without tests exercising them. C-0336 storage-error breadcrumb is
+// preserved; SSR and storage-error paths both collapse to "default" since
+// both yield V2 with no rollback. Re-introduce a richer discriminator only
+// when a second consumer needs it.
 type UiV2FlagState = "explicit-false" | "default";
 
 function readUiV2Flag(): UiV2FlagState {
@@ -187,14 +185,17 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
 /**
  * Phase 09.1 Plan 02 / D-05 / D-06 — Tabs shell for /allocations.
  *
- * Six surfaces (D-05 order):
+ * Visible tablist (PR3 dashboard parity — 5 buttons, see VISIBLE_TAB_KEYS):
  *   - Overview (default) — wraps AllocationDashboardV2.
- *   - Holdings — full-width HoldingsTable (Plan 08 fills body).
- *   - Outcomes — full-width OutcomesWidget (Plan 10 restyles).
- *   - Mandate — link to /profile?tab=mandate + future MandateSnapshot
- *     (Plan 10 fills body).
- *   - Risk — curated grid of 6 risk widgets (Plan 10 fills body).
- *   - Scenario — placeholder Card for the Phase 10 builder.
+ *   - Holdings — full-width HoldingsTable.
+ *   - Outcomes — full-width OutcomesWidget.
+ *   - Mandate  — link to /profile?tab=mandate + MandateSnapshot.
+ *   - Risk     — curated grid of risk widgets.
+ *
+ * Routable-but-hidden surface:
+ *   - Scenario — ScenarioComposer (V2 default) / ScenarioStub (rollback).
+ *     Reachable only via ?tab=scenario or the "+ Allocation" header chip;
+ *     no tab button is rendered in the tablist.
  *
  * URL state (D-04 / D-05):
  *   /allocations                  → Overview
@@ -205,7 +206,7 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
  *   /allocations?tab=outcomes     → Outcomes
  *   /allocations?tab=mandate      → Mandate
  *   /allocations?tab=risk         → Risk
- *   /allocations?tab=scenario     → Scenario
+ *   /allocations?tab=scenario     → Scenario (panel only — no tab button)
  *   /allocations?tab=<unknown>    → Overview (D-04 silent fallback)
  *
  * Per VOICES-ACCEPTED f3: `activeTab` is DERIVED from `searchParams` on
