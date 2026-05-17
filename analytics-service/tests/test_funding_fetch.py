@@ -1514,28 +1514,254 @@ class TestDroppedRowCounterOKXAndBybit:
         )
 
 
-class TestMatchKeyUnknownExchangeDefault:
-    """specialist:testing (funding_fetch.py:194): `_build_match_key`
-    falls back to an 8h bucket via ``_FUNDING_BUCKET_HOURS.get(exchange,
-    8)``. If a future contributor adds a sub-8h exchange (e.g. a 4h
-    'deribit') and forgets to wire it into the dict, two events 4h
-    apart would silently collide on the same match_key — the H-1099
-    bug this PR fixes. Pin the default contract.
+class TestMatchKeyUnknownExchangeRaises:
+    """specialist:red-team (funding_fetch.py:194 conf=8 — phase-4):
+    Phase-2 pinned the legacy ``_FUNDING_BUCKET_HOURS.get(exchange, 8)``
+    8h fallback. That defence is still the H-1099 latent bug for any
+    future sub-8h cadence — the test locked in the buggy behaviour
+    instead of fixing it.
+
+    The new contract: producers MUST register a cadence before being
+    added to ``EXCHANGE_CLASSES``. ``_build_match_key`` mirrors the
+    fail-loud contract that :func:`fetch_funding` already uses for
+    unsupported exchanges. Pin the raise.
     """
 
-    def test_unknown_exchange_defaults_to_8h_bucket(self) -> None:
+    def test_unknown_exchange_raises(self) -> None:
         from datetime import datetime, timezone
 
         from services.funding_fetch import _build_match_key
 
-        ts_a = datetime(2024, 1, 1, 1, 0, 0, tzinfo=timezone.utc)
-        ts_b = datetime(2024, 1, 1, 7, 0, 0, tzinfo=timezone.utc)
+        ts = datetime(2024, 1, 1, 1, 0, 0, tzinfo=timezone.utc)
 
-        key_a = _build_match_key("s", "kraken", "BTCUSD", ts_a)
-        key_b = _build_match_key("s", "kraken", "BTCUSD", ts_b)
+        with pytest.raises(KeyError, match="_FUNDING_BUCKET_HOURS"):
+            _build_match_key("s", "kraken", "BTCUSD", ts)
 
-        # Same 00-08 bucket → keys collapse. This pins the default; a
-        # typo in _FUNDING_BUCKET_HOURS that broke the unknown-exchange
-        # fallback would change this comparison.
-        assert key_a == key_b
-        assert "T00:00:00" in key_a
+    def test_known_exchanges_still_resolve(self) -> None:
+        """Regression-guard: a typo in the new raise that broke known
+        exchanges would mass-fail production. Pin the happy path."""
+        from datetime import datetime, timezone
+
+        from services.funding_fetch import _build_match_key
+
+        ts = datetime(2024, 1, 1, 1, 0, 0, tzinfo=timezone.utc)
+        for exch in ("binance", "okx", "bybit"):
+            key = _build_match_key("s", exch, "BTCUSDT", ts)
+            assert exch in key
+
+
+class TestFundingFetchCeilingExceeded:
+    """specialist:red-team (funding_fetch.py:289 conf=8 — phase-4):
+    Phase-2 promoted every other partial-completion path
+    (per-page exception, OKX shape/endpoint drift) to a re-raise.
+    Hitting ``MAX_PAGES`` while the exchange still has more rows was
+    the only remaining silent-truncation path. Bybit (10k rows per
+    category) is the worst exposure for whale strategies backfilling
+    >3 months. All three paginators must now raise
+    :class:`FundingFetchCeilingExceeded`.
+
+    The tests patch ``MAX_PAGES`` down to 2 so we don't have to mock
+    200 round-trips.
+    """
+
+    @pytest.mark.asyncio
+    async def test_binance_raises_on_ceiling_with_full_final_page(
+        self, monkeypatch
+    ) -> None:
+        from services import funding_fetch as ff
+
+        monkeypatch.setattr(ff, "MAX_PAGES", 2)
+        monkeypatch.setattr(ff, "BINANCE_PAGE_SIZE", 2)
+
+        full_page = [
+            {
+                "symbol": "BTCUSDT",
+                "incomeType": "FUNDING_FEE",
+                "income": "-0.01",
+                "asset": "USDT",
+                "time": 1700000000000,
+                "tranId": f"b{i}",
+            }
+            for i in range(2)
+        ]
+        # Two full pages → loop exhausts MAX_PAGES with last_page_full=True.
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.fapiPrivate_get_income = AsyncMock(
+            side_effect=[full_page, full_page]
+        )
+
+        with pytest.raises(
+            ff.FundingFetchCeilingExceeded, match="MAX_PAGES=2"
+        ):
+            await ff.fetch_funding_binance(
+                mock_exchange, STRATEGY_ID, since_ms=None
+            )
+
+    @pytest.mark.asyncio
+    async def test_binance_clean_exit_on_short_final_page(
+        self, monkeypatch
+    ) -> None:
+        """Counter-test: a short final page must NOT trigger the raise.
+        This locks in that ``last_page_full`` correctly tracks the final
+        response, not just the first one."""
+        from services import funding_fetch as ff
+
+        monkeypatch.setattr(ff, "MAX_PAGES", 2)
+        monkeypatch.setattr(ff, "BINANCE_PAGE_SIZE", 2)
+
+        full_page = [
+            {
+                "symbol": "BTCUSDT",
+                "incomeType": "FUNDING_FEE",
+                "income": "-0.01",
+                "asset": "USDT",
+                "time": 1700000000000 + i,
+                "tranId": f"b{i}",
+            }
+            for i in range(2)
+        ]
+        short_page: list[dict] = []
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.fapiPrivate_get_income = AsyncMock(
+            side_effect=[full_page, short_page]
+        )
+        rows = await ff.fetch_funding_binance(
+            mock_exchange, STRATEGY_ID, since_ms=None
+        )
+        assert len(rows) == 2
+
+    @pytest.mark.asyncio
+    async def test_okx_raises_on_ceiling_with_active_cursor(
+        self, monkeypatch
+    ) -> None:
+        from services import funding_fetch as ff
+
+        monkeypatch.setattr(ff, "MAX_PAGES", 2)
+        monkeypatch.setattr(ff, "OKX_PAGE_SIZE", 2)
+
+        def make_page(prefix: str) -> dict:
+            return {
+                "data": [
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "pnl": "-0.01",
+                        "ccy": "USDT",
+                        "ts": "1700000000000",
+                        "billId": f"{prefix}{i}",
+                    }
+                    for i in range(2)
+                ]
+            }
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_account_bills = AsyncMock(
+            side_effect=[make_page("a"), make_page("b")]
+        )
+
+        with pytest.raises(
+            ff.FundingFetchCeilingExceeded, match="MAX_PAGES=2"
+        ):
+            await ff.fetch_funding_okx(
+                mock_exchange, STRATEGY_ID, since_ms=None
+            )
+
+    @pytest.mark.asyncio
+    async def test_bybit_raises_on_ceiling_with_active_cursor(
+        self, monkeypatch
+    ) -> None:
+        from services import funding_fetch as ff
+
+        monkeypatch.setattr(ff, "MAX_PAGES", 2)
+        monkeypatch.setattr(ff, "BYBIT_PAGE_SIZE", 1)
+
+        def make_page(prefix: str) -> dict:
+            return {
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "type": "SETTLEMENT",
+                            "funding": "-0.0001",
+                            "currency": "USDT",
+                            "transactionTime": "1700000000000",
+                            "id": f"{prefix}1",
+                        }
+                    ],
+                    "nextPageCursor": f"cursor-{prefix}",
+                }
+            }
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_account_transaction_log = AsyncMock(
+            side_effect=[make_page("a"), make_page("b")]
+        )
+
+        with pytest.raises(
+            ff.FundingFetchCeilingExceeded, match="MAX_PAGES=2"
+        ):
+            await ff.fetch_funding_bybit(
+                mock_exchange, STRATEGY_ID, since_ms=None
+            )
+
+
+class TestBybitResponseShapeValidation:
+    """specialist:red-team (funding_fetch.py:581 conf=8 — phase-4):
+    Bybit v5 returns ``{retCode: <non-zero>, retMsg, result: null}`` on
+    auth/scope errors that ccxt does NOT translate to a typed exception.
+    The previous duck-typed ``.get('result', {}).get('list', [])`` chain
+    silently treated this as "no items, break" and the worker reported
+    SUCCESS with zero rows — the exact silent-truncation pattern that
+    Phase-2 explicitly fixed for OKX (M-0928).
+
+    Mirror the OKX hardening: non-dict response / non-dict ``result`` /
+    non-list ``result.list`` all raise.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bybit_raises_on_non_dict_response(self) -> None:
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_account_transaction_log = AsyncMock(
+            return_value=["unexpected", "list"]
+        )
+        with pytest.raises(RuntimeError, match="non-dict response"):
+            await fetch_funding_bybit(
+                mock_exchange, STRATEGY_ID, since_ms=None
+            )
+
+    @pytest.mark.asyncio
+    async def test_bybit_raises_on_null_result_envelope(self) -> None:
+        """The exact retCode!=0 / result=null shape Bybit returns on
+        scope errors. Previously: silent empty break + SUCCESS. Now:
+        raise + transient-failed job + Sentry."""
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_account_transaction_log = AsyncMock(
+            return_value={
+                "retCode": 10001,
+                "retMsg": "params error",
+                "result": None,
+            }
+        )
+        with pytest.raises(RuntimeError, match="non-dict 'result'"):
+            await fetch_funding_bybit(
+                mock_exchange, STRATEGY_ID, since_ms=None
+            )
+
+    @pytest.mark.asyncio
+    async def test_bybit_raises_on_non_list_inner_list(self) -> None:
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_account_transaction_log = AsyncMock(
+            return_value={
+                "result": {"list": {"oops": "object"}, "nextPageCursor": ""}
+            }
+        )
+        with pytest.raises(RuntimeError, match="non-list"):
+            await fetch_funding_bybit(
+                mock_exchange, STRATEGY_ID, since_ms=None
+            )

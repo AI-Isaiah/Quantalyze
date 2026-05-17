@@ -63,6 +63,25 @@ MAX_PAGES = 200
 FUNDING_UPSERT_BATCH_SIZE = 100
 
 
+class FundingFetchCeilingExceeded(RuntimeError):
+    """Raised when a paginator exhausts ``MAX_PAGES`` while the exchange
+    still indicates more data is available.
+
+    Phase-4 red-team (audit-2026-05-07, finding red-team:289 conf=8): the
+    Phase-2 hardening promoted every other partial-completion mode
+    (page-N exception, OKX shape mismatch, missing endpoint) from
+    silent-warn to re-raise. Hitting ``MAX_PAGES`` while the exchange
+    still has more rows (Binance: full final page + advancing
+    ``last_seen_ts``; OKX: full final page + non-empty ``after_id``;
+    Bybit: non-empty ``nextPageCursor``) was the only remaining silent
+    truncation. Bybit is the worst exposure — at limit=50 × 200 pages =
+    10k rows per category, a multi-pair whale strategy backfilling
+    >3 months easily exceeds it.
+    Raising here lets ``run_sync_funding_job`` classify the job as
+    transient-failed and Sentry surfaces the trace.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Row contract — TypedDict mirrors funding_fees columns (M-0929)
 # ---------------------------------------------------------------------------
@@ -191,7 +210,21 @@ def _bucket_for_exchange(ts: datetime, hours: int) -> str:
 def _build_match_key(
     strategy_id: str, exchange: str, symbol: str, ts: datetime
 ) -> str:
-    hours = _FUNDING_BUCKET_HOURS.get(exchange, 8)
+    # Phase-4 red-team (audit-2026-05-07, finding red-team:194 conf=8):
+    # the previous `_FUNDING_BUCKET_HOURS.get(exchange, 8)` silently
+    # bucketed an unknown exchange at 8h — exactly the H-1099 latent bug
+    # for any future sub-8h cadence (e.g. a 4h 'deribit'). Producers
+    # MUST register their funding cadence before being added to
+    # ``EXCHANGE_CLASSES``. The dispatcher at :func:`fetch_funding`
+    # already raises ``ValueError`` for unsupported exchanges; mirror
+    # that fail-loud contract here so a missing dict entry surfaces at
+    # the producer rather than as silent 50% data loss months later.
+    if exchange not in _FUNDING_BUCKET_HOURS:
+        raise KeyError(
+            f"Add {exchange!r} to _FUNDING_BUCKET_HOURS before fetching "
+            f"its funding (no implicit 8h fallback — see H-1099)"
+        )
+    hours = _FUNDING_BUCKET_HOURS[exchange]
     return (
         f"{strategy_id}:{exchange}:{symbol}:"
         f"{_bucket_for_exchange(ts, hours=hours)}"
@@ -285,6 +318,7 @@ async def fetch_funding_binance(
     current_since = since_ms
     last_seen_ts: int | None = None
     dropped = 0
+    last_page_full = False
 
     for page_idx in range(MAX_PAGES):
         params: dict[str, Any] = {
@@ -308,8 +342,10 @@ async def fetch_funding_binance(
             raise
 
         if not data:
+            last_page_full = False
             break
 
+        last_page_full = len(data) >= BINANCE_PAGE_SIZE
         for item in data:
             # Defense-in-depth: filter by incomeType even though we asked
             # for FUNDING_FEE (some exchange variants return extras).
@@ -341,6 +377,26 @@ async def fetch_funding_binance(
         if last_seen_ts is None:
             break
         current_since = last_seen_ts + 1
+    else:
+        # Phase-4 red-team (audit-2026-05-07, red-team:289 conf=8):
+        # ``for ... else`` runs only when the loop exhausts the
+        # ``range(MAX_PAGES)`` iterator without breaking. If the final
+        # page was full (``last_page_full``), Binance still has more
+        # rows past ``last_seen_ts`` and silently truncating here would
+        # leave partial P&L attribution. Raise so the worker classifies
+        # the job as transient-failed and retries with a tighter window.
+        if last_page_full:
+            logger.error(
+                "Binance funding_fetch hit MAX_PAGES=%d ceiling for "
+                "strategy %s with full final page (last_seen_ts=%s) — "
+                "more rows remain",
+                MAX_PAGES, strategy_id, last_seen_ts,
+            )
+            raise FundingFetchCeilingExceeded(
+                f"Binance funding_fetch exhausted MAX_PAGES={MAX_PAGES} "
+                f"with full final page; strategy {strategy_id} has "
+                f"more funding history past last_seen_ts={last_seen_ts}"
+            )
 
     # M-0930 / specialist:silent-failure-hunter: emit a structured warn
     # when normalize_funding_row dropped rows. Production filters at
@@ -463,6 +519,21 @@ async def fetch_funding_okx(
             after_id = data[-1].get("billId", "") or ""
             if len(data) < OKX_PAGE_SIZE or not after_id:
                 return
+        else:
+            # Phase-4 red-team (audit-2026-05-07, red-team:289 conf=8):
+            # exhausted MAX_PAGES while ``after_id`` still points at a
+            # next page AND the final page was full. Promote the silent
+            # truncation to a re-raise — symmetric with the post-Phase-2
+            # philosophy that every other partial-completion path raises.
+            logger.error(
+                "OKX %s funding_fetch hit MAX_PAGES=%d ceiling for "
+                "strategy %s with after_id=%s (more rows remain)",
+                endpoint_name, MAX_PAGES, strategy_id, after_id,
+            )
+            raise FundingFetchCeilingExceeded(
+                f"OKX {endpoint_name} exhausted MAX_PAGES={MAX_PAGES} "
+                f"with cursor still active for strategy {strategy_id}"
+            )
 
     await _paginate("private_get_account_bills")
     if need_archive:
@@ -578,7 +649,49 @@ async def fetch_funding_bybit(
                 )
                 raise
 
-            items = result.get("result", {}).get("list", [])
+            # Phase-4 red-team (audit-2026-05-07, red-team:581 conf=8):
+            # the previous duck-typed chain silently treated any non-dict
+            # response, a non-dict ``result`` field, or a missing/None
+            # ``list`` as "no items, break" — the exact silent-truncation
+            # pattern that Phase-2 explicitly fixed for OKX (M-0928).
+            # Bybit v5 returns ``{retCode: <non-zero>, retMsg: '...',
+            # result: null}`` on auth/scope errors that ccxt does not
+            # translate to a typed exception. Mirror the OKX hardening so
+            # the worker fails loudly instead of reporting SUCCESS on
+            # zero rows.
+            if not isinstance(result, dict):
+                logger.error(
+                    "Bybit transaction-log returned unexpected shape "
+                    "for strategy %s category=%s: type=%s",
+                    strategy_id, category, type(result).__name__,
+                )
+                raise RuntimeError(
+                    f"Bybit transaction-log returned non-dict response: "
+                    f"{type(result).__name__}"
+                )
+            inner = result.get("result")
+            if not isinstance(inner, dict):
+                logger.error(
+                    "Bybit transaction-log 'result' field is non-dict "
+                    "for strategy %s category=%s: type=%s retCode=%s",
+                    strategy_id, category, type(inner).__name__,
+                    result.get("retCode"),
+                )
+                raise RuntimeError(
+                    f"Bybit transaction-log returned non-dict 'result': "
+                    f"{type(inner).__name__}"
+                )
+            items = inner.get("list", [])
+            if not isinstance(items, list):
+                logger.error(
+                    "Bybit transaction-log 'result.list' is non-list for "
+                    "strategy %s category=%s: type=%s",
+                    strategy_id, category, type(items).__name__,
+                )
+                raise RuntimeError(
+                    f"Bybit transaction-log returned non-list "
+                    f"'result.list': {type(items).__name__}"
+                )
             if not items:
                 break
 
@@ -627,10 +740,29 @@ async def fetch_funding_bybit(
                     continue
                 rows.append(row)
 
-            next_cursor = result.get("result", {}).get("nextPageCursor", "")
+            next_cursor = inner.get("nextPageCursor", "") or ""
             if not next_cursor:
                 break
             cursor = next_cursor
+        else:
+            # Phase-4 red-team (audit-2026-05-07, red-team:289 conf=8):
+            # exhausted MAX_PAGES while ``nextPageCursor`` still points
+            # at more data. Bybit is the worst-case exposure (limit=50 ×
+            # 200 pages = 10k rows per category) — multi-pair whale
+            # strategies with >3 months of history hit this first.
+            # Re-raise instead of silently moving on to the next
+            # category and returning DONE with partial coverage.
+            logger.error(
+                "Bybit funding_fetch hit MAX_PAGES=%d ceiling for "
+                "strategy %s category=%s with active cursor (more "
+                "rows remain)",
+                MAX_PAGES, strategy_id, category,
+            )
+            raise FundingFetchCeilingExceeded(
+                f"Bybit funding_fetch exhausted MAX_PAGES={MAX_PAGES} "
+                f"with cursor still active for strategy {strategy_id} "
+                f"category={category}"
+            )
 
     if dropped > 0:
         logger.warning(
