@@ -56,7 +56,7 @@ function makeUserClient() {
       if (table === "user_app_roles") {
         return {
           select: () => ({
-            eq: (col1: string, val1: string) => {
+            eq: (_col1: string, val1: string) => {
               const bare = userRolesQueryMock(val1);
               // Support the chained `.eq("user_id", id).eq("role",
               // 'admin').limit(1)` shape used by hasAdminRoleRow.
@@ -72,7 +72,6 @@ function makeUserClient() {
                   },
                 }),
               });
-              void col1;
             },
           }),
         };
