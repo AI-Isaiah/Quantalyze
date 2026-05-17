@@ -529,12 +529,15 @@ def test_add_weight_derived_from_ticket_size():
     assert whale_lift is not None, (
         "sharpe_lift is None for whale allocator — overlap insufficient or engine regression"
     )
-    # Different ticket-size / portfolio_aum ratios must produce different
-    # portfolio_fit math. Exact equality means add_weight has no influence on
-    # sharpe_lift — the core intent of this test.
-    assert tiny_lift != whale_lift, (
-        f"sharpe_lift identical for tiny ({tiny_lift}) and whale ({whale_lift}) — "
-        "add_weight derivation from ticket_size / portfolio_aum is broken"
+    # Different ticket-size / portfolio_aum ratios must produce meaningfully
+    # different portfolio_fit math. We require a non-trivial difference
+    # (> 1e-6) rather than exact inequality so the test is not flaky to
+    # last-bit FP drift across numpy/pandas versions but still catches a
+    # regression where add_weight has no influence on sharpe_lift.
+    assert abs(tiny_lift - whale_lift) > 1e-6, (
+        f"sharpe_lift indistinguishable for tiny ({tiny_lift}) and whale "
+        f"({whale_lift}) — add_weight derivation from ticket_size / "
+        "portfolio_aum is broken (or numerically masked)"
     )
 
 
@@ -630,10 +633,16 @@ def test_reason_generation_skips_none_metrics():
         f"the skip-reason branch. Got {raw.get('corr_with_portfolio')!r}."
     )
     reasons = result["candidates"][0]["reasons"]
-    # No reason should mention correlation when corr was None — guards against
-    # a regression that formats None as 0.00 (the silent-misled case).
-    assert not any("correlation" in r.lower() for r in reasons), (
+    # The diversification reason (services/match_engine.py:_generate_reasons)
+    # has the literal format "Diversifies the book (correlation …)". Match
+    # that exact prefix so we catch the silent-misled case (None formatted as
+    # 0.00 via a buggy format string) without false-firing on unrelated future
+    # reasons that happen to mention "correlation" descriptively.
+    assert not any("Diversifies the book" in r for r in reasons), (
         f"Diversification reason produced despite None correlation: {reasons}"
+    )
+    assert not any("correlation 0.00" in r for r in reasons), (
+        f"Reason contains 'correlation 0.00' — None misformatted as 0.00: {reasons}"
     )
 
 
@@ -993,26 +1002,17 @@ def test_weight_overrides_normalization_invariant():
     sufficiently small. Per CLAUDE.md Rule 9 — assert the underlying invariant
     directly.
 
-    Trick: when all four sub-scores collapse to the same value v, the final
-    score equals 100 × v × (Σ effective_w) regardless of override shape. If
-    weights sum to 1.0, final_score = 100 × v exactly. If renormalization is
-    broken (Σ effective_w != 1.0), the score drifts away from 100 × v and the
-    assertion fails loudly. We use the helper-imported _compute_mandate_fit_score
-    is not needed here — we construct a candidate where the FOUR top-level
-    sub-scores are all 1.0:
-        - portfolio_fit: identical-returns same-seed → max possible
-        - preference_fit: very lenient mins → sub-scores at 1.0
-        - track_record: 730+ days → capped at 1.0
-        - capacity_fit: zero ticket size → neutral 0.5 (not 1.0)
+    Strategy: hold the FOUR sub-scores constant across runs by using the same
+    candidate inputs, then vary only the override scale uniformly. If the
+    renormalization is correct, scaled_i = W_i × s and total = s × Σ W_i = s
+    (since Σ W_i = 1.0 by construction), so effective_i = W_i — i.e. uniform
+    scaling cancels and the final score must equal the no-overrides baseline.
+    A regression that omits the division by `total` would break this
+    cancellation and produce a different score under each scale. The exact-
+    equality check (within 1e-9) is the direct invariant assertion.
 
-    Because capacity_fit cannot easily be forced to 1.0, we instead verify the
-    weighted average satisfies a tighter bound: a regression that omits the
-    division by `total` would produce final_score in [0, 100 × max(scaled)]
-    instead of [0, 100], and the upper bound on scaled per-key is 1.5 × 0.40
-    = 0.60. With a sub-score of 1.0 driving that term, the test catches the
-    missing-renormalize regression because the resulting score would still be
-    ≤ 100. So we ALSO compute the expected score using the documented
-    constants and assert byte-equality.
+    The original bounds-only check is preserved as a defense-in-depth tail
+    so extreme / clamped overrides still trip if the clamp itself regresses.
     """
     if not MANDATE_FIT_IMPORTED:
         pytest.skip("wave 0 — _compute_mandate_fit_score not yet imported")
