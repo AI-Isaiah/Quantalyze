@@ -173,6 +173,27 @@ function expectOnlyVisibleBody(testid: (typeof ACTIVE_BODIES)[number]): void {
   }
 }
 
+// Shared router/mocks reset — every describe below mounts AllocationsTabs,
+// which calls useRouter(). The Phase-2 testing specialist flagged the
+// four-line duplicated setup as maintainability noise. Hoisted here so all
+// describes share one definition. Also resets `mockTrackUsageEventClient`
+// (a no-op for the describes that don't read it) so later describes can
+// rely on a clean call history without per-block boilerplate.
+function resetRouterMocks(): void {
+  mockReplace.mockReset();
+  mockRefresh.mockReset();
+  mockPush.mockReset();
+  mockTrackUsageEventClient.mockReset();
+  vi.mocked(useRouter).mockReturnValue({
+    replace: mockReplace,
+    refresh: mockRefresh,
+    push: mockPush,
+    back: vi.fn(),
+    forward: vi.fn(),
+    prefetch: vi.fn(),
+  } as unknown as ReturnType<typeof useRouter>);
+}
+
 // Phase A6 — Holdings / Outcomes / Mandate / Risk tab bodies are now
 // loaded via next/dynamic({ ssr: false }), so they only appear after the
 // lazy chunk resolves. findByTestId polls until the body appears or the
@@ -189,17 +210,7 @@ async function expectOnlyVisibleBodyAsync(
 
 describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
   beforeEach(() => {
-    mockReplace.mockReset();
-    mockRefresh.mockReset();
-    mockPush.mockReset();
-    vi.mocked(useRouter).mockReturnValue({
-      replace: mockReplace,
-      refresh: mockRefresh,
-      push: mockPush,
-      back: vi.fn(),
-      forward: vi.fn(),
-      prefetch: vi.fn(),
-    } as unknown as ReturnType<typeof useRouter>);
+    resetRouterMocks();
   });
 
   it("no tab param → Overview tab active, only overview body rendered", () => {
@@ -319,17 +330,7 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
 
 describe("AllocationsTabs — audit-2026-05-07 cluster P count badges (H-1189 / M-1042)", () => {
   beforeEach(() => {
-    mockReplace.mockReset();
-    mockRefresh.mockReset();
-    mockPush.mockReset();
-    vi.mocked(useRouter).mockReturnValue({
-      replace: mockReplace,
-      refresh: mockRefresh,
-      push: mockPush,
-      back: vi.fn(),
-      forward: vi.fn(),
-      prefetch: vi.fn(),
-    } as unknown as ReturnType<typeof useRouter>);
+    resetRouterMocks();
   });
 
   it("renders count badges on Holdings (8) and Outcomes (4) tabs when arrays are populated", () => {
@@ -389,17 +390,7 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P count badges (H-1189 / 
 
 describe("AllocationsTabs — audit-2026-05-07 cluster P Export chip (M-1041 / M-1044)", () => {
   beforeEach(() => {
-    mockReplace.mockReset();
-    mockRefresh.mockReset();
-    mockPush.mockReset();
-    vi.mocked(useRouter).mockReturnValue({
-      replace: mockReplace,
-      refresh: mockRefresh,
-      push: mockPush,
-      back: vi.fn(),
-      forward: vi.fn(),
-      prefetch: vi.fn(),
-    } as unknown as ReturnType<typeof useRouter>);
+    resetRouterMocks();
   });
 
   it("Export chip from Risk tab navigates to Holdings (M-1041 regression)", async () => {
@@ -444,17 +435,7 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P Export chip (M-1041 / M
 
 describe("AllocationsTabs — audit-2026-05-07 cluster P silent-failure breadcrumbs (M-1045 / M-1046)", () => {
   beforeEach(() => {
-    mockReplace.mockReset();
-    mockRefresh.mockReset();
-    mockPush.mockReset();
-    vi.mocked(useRouter).mockReturnValue({
-      replace: mockReplace,
-      refresh: mockRefresh,
-      push: mockPush,
-      back: vi.fn(),
-      forward: vi.fn(),
-      prefetch: vi.fn(),
-    } as unknown as ReturnType<typeof useRouter>);
+    resetRouterMocks();
   });
 
   it("?tab=outcoms (typo) emits warnAudit invalid_tab_fallback breadcrumb (M-1045)", () => {
@@ -610,17 +591,7 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / 
   let storageShim: StorageShim;
 
   beforeEach(() => {
-    mockReplace.mockReset();
-    mockRefresh.mockReset();
-    mockPush.mockReset();
-    vi.mocked(useRouter).mockReturnValue({
-      replace: mockReplace,
-      refresh: mockRefresh,
-      push: mockPush,
-      back: vi.fn(),
-      forward: vi.fn(),
-      prefetch: vi.fn(),
-    } as unknown as ReturnType<typeof useRouter>);
+    resetRouterMocks();
 
     const map = new Map<string, string>();
     storageShim = {
@@ -719,8 +690,7 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / 
 // --- audit-2026-05-07 Phase-2 testing-specialist additions ------------------
 //
 // Each describe below resets the router mocks in beforeEach via the shared
-// resetRouterMocks helper to avoid duplicating the four-line setup the
-// maintainability specialist flagged. New coverage:
+// resetRouterMocks helper (defined near the top of this file). New coverage:
 //   - dispatchWidgetPicker (sync / deferred / failed paths + telemetry)
 //   - parseTab boundary cases (empty / whitespace / uppercase / canonical
 //     parameterized) — pins the KNOWN_TAB_RAW contract as a test instead of
@@ -728,21 +698,6 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / 
 //   - Export chip scroll:false + single-shot routing pin (M-1041 hardening)
 //   - Export chip same-tab repeat click re-announce (M-1044 silent-failure
 //     fix is itself uncovered against the React Object.is bail-out path).
-
-function resetRouterMocks(): void {
-  mockReplace.mockReset();
-  mockRefresh.mockReset();
-  mockPush.mockReset();
-  mockTrackUsageEventClient.mockReset();
-  vi.mocked(useRouter).mockReturnValue({
-    replace: mockReplace,
-    refresh: mockRefresh,
-    push: mockPush,
-    back: vi.fn(),
-    forward: vi.fn(),
-    prefetch: vi.fn(),
-  } as unknown as ReturnType<typeof useRouter>);
-}
 
 describe("AllocationsTabs — audit-2026-05-07 Phase-2 dispatchWidgetPicker (HIGH conf 9)", () => {
   beforeEach(() => {
