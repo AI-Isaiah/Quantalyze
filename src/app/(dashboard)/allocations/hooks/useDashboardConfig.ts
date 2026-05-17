@@ -367,11 +367,26 @@ function coerceTimeframe(value: unknown): string {
  * present and shape-valid; anything else is stripped so corrupted nested
  * data can't poison widget renderers.
  */
+// audit-2026-05-07 (red-team MED conf 8) — prototype-poison keys that
+// JSON.parse may surface as own properties of `tile.config` (e.g.
+// `{"__proto__":{...}, "valid":"ok"}` parses with `__proto__` as an own
+// key per ES2017). The validator is the natural moat — strip these so
+// any downstream consumer that does `Object.assign(target, tile.config)`
+// or `lodash.merge(defaults, tile.config)` can't be poisoned.
+const PROTO_POISON_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 function validateAndNormalizeTile(tile: unknown): TileConfig | null {
   if (!tile || typeof tile !== "object") return null;
   const t = tile as Record<string, unknown>;
   if (typeof t.k !== "string" || t.k.length === 0) return null;
   const k = resolveWidgetId(t.k);
+  // audit-2026-05-07 (red-team HIGH conf 8) — belt-and-braces. Even after
+  // hardening resolveWidgetId to gate on hasOwnProperty, defend in depth:
+  // if the resolved id is not an OWN key of WIDGET_REGISTRY, drop the
+  // tile. A future contributor who reintroduces a prototype-walking
+  // lookup somewhere upstream of this validator still can't slip a
+  // poisoned `k` through to render.
+  if (!Object.prototype.hasOwnProperty.call(WIDGET_REGISTRY, k)) return null;
   const w = clampWidth(t.w);
   const result: TileConfig = { k, w };
   if (
@@ -380,7 +395,14 @@ function validateAndNormalizeTile(tile: unknown): TileConfig | null {
     typeof t.config === "object" &&
     !Array.isArray(t.config)
   ) {
-    result.config = t.config as Record<string, unknown>;
+    // Strip prototype-poison keys before adopting the config sub-object.
+    const rawConfig = t.config as Record<string, unknown>;
+    const cleanConfig: Record<string, unknown> = {};
+    for (const key of Object.keys(rawConfig)) {
+      if (PROTO_POISON_KEYS.has(key)) continue;
+      cleanConfig[key] = rawConfig[key];
+    }
+    result.config = cleanConfig;
   }
   return result;
 }
@@ -629,20 +651,45 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
   // audit-2026-05-07 (M-0126 / M-0134) — `pendingConfigRef` always holds
   // the latest config queued for persistence. The debounced setTimeout
   // callback reads it (NOT a stale closure), and the unmount-flush /
-  // beforeunload-flush paths also read it so a tab-close mid-debounce
-  // persists the user's freshest mutation.
+  // beforeunload-flush / pagehide-flush / storage-event paths also read
+  // it so a tab-close mid-debounce persists the user's freshest mutation.
+  //
+  // audit-2026-05-07 (red-team MED conf 8) — `pendingConfigRef` is updated
+  // SYNCHRONOUSLY inside each action callback (see `applyConfigUpdate`
+  // below) instead of being updated inside the `[config]` effect. The
+  // effect runs AFTER React commits the render, which opens a race:
+  // beforeunload (or a synchronous `window.location` nav) firing between
+  // setState and commit leaves pendingConfigRef stale and the flush a
+  // no-op. Updating the ref at mutation time makes the flush path
+  // race-free regardless of when the render commits.
   const pendingConfigRef = useRef(config);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Stable setState updater that ALSO syncs pendingConfigRef before
+  // scheduling the React update. Used by every action below. Keeps the
+  // "ref reflects latest user intent, even mid-render-commit" invariant.
+  //
+  // We compute `next` SYNCHRONOUSLY off the current ref (which mirrors
+  // the committed state), update the ref before calling setConfig, then
+  // pass the precomputed value to setConfig. This ensures a beforeunload
+  // / pagehide firing between this call and React's commit still sees
+  // the user's freshest mutation — the updater form of setConfig defers
+  // execution to render time, which would lose the race.
+  const applyConfigUpdate = useCallback(
+    (updater: (prev: DashboardConfig) => DashboardConfig) => {
+      const next = updater(pendingConfigRef.current);
+      pendingConfigRef.current = next;
+      setConfig(next);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!hasMutated.current) {
       hasMutated.current = true;
       return;
     }
-    // Update the pending snapshot before (re)scheduling so a flush
-    // triggered between this effect running and the timer firing writes
-    // the freshest value.
-    pendingConfigRef.current = config;
+    // pendingConfigRef is already synced by the action callback; the
+    // effect's job is purely to (re)schedule the debounced write.
     if (persistTimerRef.current !== null) {
       clearTimeout(persistTimerRef.current);
     }
@@ -656,6 +703,14 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
   // pending debounced write so a user who closes the tab mid-drag still
   // gets their preference persisted. Without this, a 150ms debounce could
   // silently lose the last mutation.
+  //
+  // audit-2026-05-07 (red-team HIGH conf 8) — `beforeunload` is NOT fired
+  // reliably on iOS Safari, mobile Chrome, in-app webviews, or during
+  // bfcache eviction (Page Lifecycle API). Register `pagehide` alongside
+  // so the flush survives a swipe-close tab kill on mobile — the
+  // platform most likely to also hit the quota / private-mode errors the
+  // rest of this hook already hardens against. Same handler, same
+  // removeEventListener pair.
   useEffect(() => {
     function flush() {
       if (persistTimerRef.current !== null) {
@@ -666,17 +721,46 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
     }
     if (typeof window !== "undefined") {
       window.addEventListener("beforeunload", flush);
+      window.addEventListener("pagehide", flush);
     }
     return () => {
       if (typeof window !== "undefined") {
         window.removeEventListener("beforeunload", flush);
+        window.removeEventListener("pagehide", flush);
       }
       flush();
     };
   }, []);
 
+  // audit-2026-05-07 (red-team MED conf 8) — cross-tab sync. Without this
+  // listener, two tabs both mounted against the same storage key silently
+  // overwrite each other: Tab A adds a widget → debounced write; Tab B's
+  // in-memory `config` is stale (loaded at its mount); Tab B's next
+  // mutation overwrites Tab A's write. Reload from storage when another
+  // tab writes through to the same key. Compare against the in-memory
+  // serialization to avoid render thrash from no-op storage events.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    function onStorage(e: StorageEvent) {
+      if (e.key !== STORAGE_KEY) return;
+      if (e.newValue === null) return; // ignore clears
+      const reloaded = loadV2Config();
+      setConfig((prev) => {
+        if (JSON.stringify(prev) === JSON.stringify(reloaded)) return prev;
+        // Keep pendingConfigRef in sync — a cross-tab reload is the new
+        // baseline, not a queued local mutation.
+        pendingConfigRef.current = reloaded;
+        return reloaded;
+      });
+    }
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
   const addWidget = useCallback((k: string) => {
-    setConfig((prev) => {
+    applyConfigUpdate((prev) => {
       // Phase 09.1 Plan 05 / D-19 — normalize short keys to registry ids
       // at write time. After this point, prev.tiles[*].k IS guaranteed to
       // be a valid WIDGET_REGISTRY id; any caller passing a designer
@@ -689,25 +773,25 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
       const w = clampWidth(meta?.defaultW);
       return { ...prev, tiles: [...prev.tiles, { k: resolved, w }] };
     });
-  }, []);
+  }, [applyConfigUpdate]);
 
   const removeWidget = useCallback((k: string) => {
-    setConfig((prev) => ({
+    applyConfigUpdate((prev) => ({
       ...prev,
       tiles: prev.tiles.filter((t) => t.k !== k),
     }));
-  }, []);
+  }, [applyConfigUpdate]);
 
   const resizeWidget = useCallback((k: string, w: 1 | 2 | 3 | 4) => {
-    setConfig((prev) => ({
+    applyConfigUpdate((prev) => ({
       ...prev,
       tiles: prev.tiles.map((t) => (t.k === k ? { ...t, w } : t)),
     }));
-  }, []);
+  }, [applyConfigUpdate]);
 
   const moveWidget = useCallback((fromK: string, toK: string) => {
     if (fromK === toK) return;
-    setConfig((prev) => {
+    applyConfigUpdate((prev) => {
       const fromIdx = prev.tiles.findIndex((t) => t.k === fromK);
       const toIdx = prev.tiles.findIndex((t) => t.k === toK);
       if (fromIdx < 0 || toIdx < 0) {
@@ -735,15 +819,15 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
       next.splice(toIdx, 0, moved);
       return { ...prev, tiles: next };
     });
-  }, []);
+  }, [applyConfigUpdate]);
 
   const setTimeframe = useCallback((tf: string) => {
-    setConfig((prev) => ({ ...prev, timeframe: tf }));
-  }, []);
+    applyConfigUpdate((prev) => ({ ...prev, timeframe: tf }));
+  }, [applyConfigUpdate]);
 
   const resetToDefaults = useCallback(() => {
-    setConfig(defaultV2Config());
-  }, []);
+    applyConfigUpdate(() => defaultV2Config());
+  }, [applyConfigUpdate]);
 
   return {
     config,

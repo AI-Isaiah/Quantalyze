@@ -1147,3 +1147,273 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
     expect(result.current.config.timeframe).toBe("YTD");
   });
 });
+
+// ---------------------------------------------------------------------------
+// audit-2026-05-07 — red-team Phase-4 regressions
+// ---------------------------------------------------------------------------
+//
+// 5 red-team findings (2 HIGH conf 8, 3 MED conf 8) on the V2 hook + the
+// shared widget-registry resolver. Each test below pins one finding's
+// invariant so a future regression flips the assertion red.
+
+describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile lifecycle / cross-tab / setState race)", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    store.clear();
+    sessionStore.clear();
+    vi.clearAllMocks();
+    localStorageMock.setItem.mockImplementation((key: string, value: string) => {
+      store.set(key, value);
+    });
+    localStorageMock.getItem.mockImplementation((key: string) => store.get(key) ?? null);
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  // ---- HIGH conf 8 — prototype pollution via `in` ----
+
+  it("drops tiles whose `k` is an inherited Object.prototype key (constructor / toString / __proto__)", () => {
+    // Pre-fix: `resolveWidgetId` gated on `k in WIDGET_REGISTRY`, which
+    // walks the prototype chain. `"constructor" in {}` is true, so a
+    // hand-edited blob like `{k:"constructor", w:2}` passed validation
+    // and landed in render. Post-fix: hasOwnProperty.call gates BOTH
+    // the registry hit and the designer-key fallback, and the validator
+    // double-checks the resolved id is an own key — so all three drop.
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: [
+          { k: "constructor", w: 2 },
+          { k: "toString", w: 1 },
+          { k: "__proto__", w: 3 },
+          { k: "hasOwnProperty", w: 4 },
+          { k: "kpi-strip", w: 4 }, // one legitimate tile so the load doesn't fall back to defaults
+        ],
+        timeframe: "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      }),
+    );
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+
+    // Only the legitimate tile survives; the four prototype-key tiles are dropped.
+    expect(result.current.config.tiles.length).toBe(1);
+    expect(result.current.config.tiles[0].k).toBe("kpi-strip");
+    // Confirm none of the prototype keys leaked through as either the
+    // input k or as a resolved registry id (e.g. Object.prototype.toString).
+    const ks = result.current.config.tiles.map((t) => t.k);
+    expect(ks).not.toContain("constructor");
+    expect(ks).not.toContain("toString");
+    expect(ks).not.toContain("__proto__");
+    expect(ks).not.toContain("hasOwnProperty");
+  });
+
+  it("resolveWidgetId returns the input unchanged for prototype keys (no Object.prototype.* leak)", () => {
+    // Direct invariant guard for the resolver itself — independent of
+    // the validator's belt-and-braces own-key check.
+    expect(resolveWidgetId("constructor")).toBe("constructor");
+    expect(resolveWidgetId("toString")).toBe("toString");
+    expect(resolveWidgetId("__proto__")).toBe("__proto__");
+    expect(resolveWidgetId("hasOwnProperty")).toBe("hasOwnProperty");
+    // And a real designer short key still resolves correctly.
+    expect(resolveWidgetId("bridge")).toBe(DESIGNER_KEY_TO_WIDGET_ID["bridge"]);
+  });
+
+  // ---- MED conf 8 — config passthrough preserves __proto__ ----
+
+  it("strips prototype-poison keys (__proto__ / constructor / prototype) from tile.config at load", () => {
+    // JSON.parse surfaces "__proto__" as an OWN property of the parsed
+    // object (per ES2017). The validator is the moat — strip these so
+    // downstream Object.assign / lodash.merge consumers can't be poisoned.
+    // We construct the raw JSON manually so the source literal carries
+    // the actual `"__proto__"` key (a JS object literal `{__proto__:...}`
+    // would set the prototype, which is not what we're testing).
+    const rawJson =
+      '{"tiles":[' +
+      '{"k":"kpi-strip","w":4,"config":{"__proto__":{"polluted":true},"constructor":"bad","prototype":"bad","valid":"ok"}}' +
+      '],"timeframe":"YTD","layoutVersion":' +
+      LAYOUT_VERSION +
+      "}";
+    store.set(STORAGE_KEY, rawJson);
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+
+    expect(result.current.config.tiles.length).toBe(1);
+    const tile = result.current.config.tiles[0];
+    expect(tile.config).toBeDefined();
+    expect(tile.config!).toHaveProperty("valid", "ok");
+    // The three poison keys are stripped from the adopted config sub-object.
+    expect(Object.prototype.hasOwnProperty.call(tile.config!, "__proto__")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(tile.config!, "constructor")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(tile.config!, "prototype")).toBe(false);
+  });
+
+  // ---- HIGH conf 8 — pagehide on iOS / mobile bfcache ----
+
+  it("pagehide flushes the pending debounced write (iOS Safari / mobile lifecycle)", () => {
+    vi.useFakeTimers();
+    try {
+      store.set(
+        STORAGE_KEY,
+        JSON.stringify({
+          tiles: [{ k: "kpi-strip", w: 1 }],
+          timeframe: "YTD",
+          layoutVersion: LAYOUT_VERSION,
+        }),
+      );
+
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
+      localStorageMock.setItem.mockClear();
+
+      act(() => {
+        result.current.resizeWidget("kpi-strip", 4);
+      });
+      // Debounce timer pending — no write yet.
+      expect(localStorageMock.setItem).not.toHaveBeenCalled();
+
+      // Simulate iOS swipe-close tab kill: `pagehide` fires; `beforeunload`
+      // does NOT. The flush handler MUST drain the pending write through
+      // to localStorage.
+      act(() => {
+        window.dispatchEvent(new Event("pagehide"));
+      });
+
+      expect(localStorageMock.setItem).toHaveBeenCalledTimes(1);
+      const stored = JSON.parse(store.get(STORAGE_KEY)!);
+      expect(stored.tiles.find((t: { k: string }) => t.k === "kpi-strip").w).toBe(4);
+
+      // Listener must be removed on unmount (no stale ref / double-fire).
+      localStorageMock.setItem.mockClear();
+      unmount();
+      localStorageMock.setItem.mockClear();
+      act(() => {
+        window.dispatchEvent(new Event("pagehide"));
+      });
+      expect(localStorageMock.setItem).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ---- MED conf 8 — cross-tab storage event ----
+
+  it("reloads config when another tab writes to STORAGE_KEY (cross-tab sync)", () => {
+    // Seed Tab B with a known v4 blob.
+    const initialBlob = JSON.stringify({
+      tiles: [{ k: "kpi-strip", w: 2 }],
+      timeframe: "YTD",
+      layoutVersion: LAYOUT_VERSION,
+    });
+    store.set(STORAGE_KEY, initialBlob);
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+    expect(result.current.config.tiles.length).toBe(1);
+    expect(result.current.config.tiles[0].w).toBe(2);
+
+    // Tab A writes a new layout to the SAME key, then the browser fires
+    // a `storage` event in Tab B (this only happens cross-tab, never in
+    // the writing tab).
+    const updatedBlob = JSON.stringify({
+      tiles: [
+        { k: "kpi-strip", w: 4 },
+        { k: "correlation-matrix", w: 4 },
+      ],
+      timeframe: "1M",
+      layoutVersion: LAYOUT_VERSION,
+    });
+    store.set(STORAGE_KEY, updatedBlob);
+
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: STORAGE_KEY,
+          newValue: updatedBlob,
+          oldValue: initialBlob,
+        }),
+      );
+    });
+
+    // Tab B's hook now reflects Tab A's write.
+    expect(result.current.config.tiles.length).toBe(2);
+    expect(result.current.config.timeframe).toBe("1M");
+    expect(
+      result.current.config.tiles.some((t) => t.k === "correlation-matrix"),
+    ).toBe(true);
+  });
+
+  it("ignores storage events for unrelated keys", () => {
+    const initialBlob = JSON.stringify({
+      tiles: [{ k: "kpi-strip", w: 2 }],
+      timeframe: "YTD",
+      layoutVersion: LAYOUT_VERSION,
+    });
+    store.set(STORAGE_KEY, initialBlob);
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+    const before = result.current.config;
+
+    // A storage event for a completely different key must be a no-op.
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: "some-other-app-key",
+          newValue: "anything",
+        }),
+      );
+    });
+
+    expect(result.current.config).toBe(before);
+  });
+
+  // ---- MED conf 8 — setState → commit → effect race ----
+
+  it("beforeunload between mutation and effect commit still persists the freshest config (race-free pendingConfigRef)", () => {
+    // Pre-fix: pendingConfigRef.current was updated INSIDE the [config]
+    // effect, which runs AFTER React commits the render. If beforeunload
+    // fired between setConfig and the effect (possible under React 18
+    // concurrent rendering or a synchronous nav side-effect), the flush
+    // path read a stale pendingConfigRef and silently lost the user's
+    // last mutation. Post-fix: the ref is updated synchronously inside
+    // each action callback, so even if the effect never runs, the flush
+    // sees the freshest value.
+    vi.useFakeTimers();
+    try {
+      store.set(
+        STORAGE_KEY,
+        JSON.stringify({
+          tiles: [{ k: "kpi-strip", w: 1 }],
+          timeframe: "YTD",
+          layoutVersion: LAYOUT_VERSION,
+        }),
+      );
+
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
+      localStorageMock.setItem.mockClear();
+
+      // Mutate INSIDE act() so React's batching is consistent, but DO
+      // NOT advance timers — we want to assert the flush is race-free
+      // against a not-yet-run debounce.
+      act(() => {
+        result.current.resizeWidget("kpi-strip", 4);
+      });
+
+      // Simulate the worst-case race: beforeunload fires immediately —
+      // before any timer drain, while pendingConfigRef must already
+      // reflect the user's freshest intent.
+      act(() => {
+        window.dispatchEvent(new Event("beforeunload"));
+      });
+
+      expect(localStorageMock.setItem).toHaveBeenCalledTimes(1);
+      const stored = JSON.parse(store.get(STORAGE_KEY)!);
+      expect(stored.tiles.find((t: { k: string }) => t.k === "kpi-strip").w).toBe(4);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

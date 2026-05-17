@@ -627,8 +627,25 @@ export const DESIGNER_KEY_TO_WIDGET_ID: Record<string, string> = {
  * id; map lookup when the input is a known short key. Unknown values
  * pass through unchanged so the renderer's "unknown widget" path can
  * make the mismatch visible.
+ *
+ * audit-2026-05-07 (red-team HIGH conf 8) — prototype-pollution hardening.
+ * The previous implementation gated on `k in WIDGET_REGISTRY` and looked
+ * up `DESIGNER_KEY_TO_WIDGET_ID[k]` via plain bracket access. Both forms
+ * walk the prototype chain, so `resolveWidgetId('constructor')`,
+ * `resolveWidgetId('toString')`, `resolveWidgetId('__proto__')`, etc.
+ * either returned the input unchanged (treating Object.prototype.* as a
+ * "valid" registry id) or returned an inherited function reference
+ * (DESIGNER_KEY_TO_WIDGET_ID.toString is `Function.prototype.toString`).
+ * A hand-edited / poisoned localStorage blob shaped like
+ * `{tiles:[{k:"constructor",w:2}], layoutVersion:4}` flowed through the
+ * load-time validator and landed in the render path. Gate both lookups
+ * on own-key membership so prototype keys are routed into the
+ * "unknown" branch and dropped by the caller.
  */
 export function resolveWidgetId(k: string): string {
-  if (k in WIDGET_REGISTRY) return k;
-  return DESIGNER_KEY_TO_WIDGET_ID[k] ?? k;
+  if (Object.prototype.hasOwnProperty.call(WIDGET_REGISTRY, k)) return k;
+  if (Object.prototype.hasOwnProperty.call(DESIGNER_KEY_TO_WIDGET_ID, k)) {
+    return DESIGNER_KEY_TO_WIDGET_ID[k];
+  }
+  return k;
 }
