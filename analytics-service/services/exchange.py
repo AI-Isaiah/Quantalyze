@@ -1,6 +1,9 @@
 import asyncio
 import ccxt.async_support as ccxt
 import logging
+import math
+import os
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Literal, TypedDict
 
@@ -8,6 +11,165 @@ from services.ingestion._timestamps import coerce_to_aware_utc
 from services.metrics import _safe_float
 
 logger = logging.getLogger("quantalyze.analytics")
+
+
+# Audit-2026-05-07 C-0225 / M-0663 / H-0670 — per-call transient data-quality
+# flags. Callers (job_worker / reconcile) read these via
+# ``get_and_clear_last_dq_flags()`` AFTER awaiting ``fetch_raw_trades``. Using
+# a ContextVar keeps ``fetch_raw_trades``' public signature stable (returns
+# ``list[dict]``) while surfacing partial-failure / truncation / fee-currency-
+# mismatch information that would otherwise be silent. Without this, the
+# downstream ``data_quality_flags`` on ``strategy_analytics`` cannot reflect
+# that a Binance sync only fetched 3 of 5 symbols, or that an OKX pagination
+# hit the 100-page cap, or that a fill paid its fee in BNB while the quote
+# was USDT.
+_LAST_DQ_FLAGS: ContextVar[dict[str, Any]] = ContextVar(
+    "_LAST_DQ_FLAGS", default={}
+)
+
+
+def get_and_clear_last_dq_flags() -> dict[str, Any]:
+    """Return the data_quality_flags accumulated during the most recent
+    ``fetch_raw_trades`` call on this asyncio task, then reset to an empty
+    dict.
+
+    The flags are populated transiently inside ``fetch_raw_trades`` and
+    its per-exchange helpers; callers (job_worker, reconcile) MUST invoke
+    this immediately after the await to drain the value, otherwise a
+    subsequent call from the same task would see stale flags. Empty dict
+    on no-issue paths (most common case).
+
+    Closed audit findings: C-0225 (partial-symbol failures),
+    M-0663 (sync_truncated), H-0670 (fee_currency_mismatch).
+    """
+    flags = _LAST_DQ_FLAGS.get({})
+    if flags:
+        _LAST_DQ_FLAGS.set({})
+    return flags
+
+
+def _record_dq_flag(key: str, value: Any) -> None:
+    """Merge a single data_quality_flag into the per-task buffer.
+
+    Lists are appended (for symbol lists); booleans OR-merge; counters
+    sum. Other types overwrite. Defensive: never raises so a logging
+    branch can't take down a sync.
+    """
+    try:
+        current = dict(_LAST_DQ_FLAGS.get({}))
+        if key in current:
+            existing = current[key]
+            if isinstance(existing, list) and isinstance(value, list):
+                # Dedup while preserving order (small lists).
+                merged = list(existing)
+                for item in value:
+                    if item not in merged:
+                        merged.append(item)
+                current[key] = merged
+            elif isinstance(existing, bool) and isinstance(value, bool):
+                current[key] = existing or value
+            elif isinstance(existing, (int, float)) and isinstance(
+                value, (int, float)
+            ) and not isinstance(existing, bool):
+                current[key] = existing + value
+            else:
+                current[key] = value
+        else:
+            current[key] = value
+        _LAST_DQ_FLAGS.set(current)
+    except Exception:  # pragma: no cover - defensive
+        logger.exception(
+            "_record_dq_flag: failed to record key=%s value=%r", key, value
+        )
+
+
+def _infer_quote_currency(symbol: str) -> str | None:
+    """Audit-2026-05-07 H-0670 — heuristically extract the quote currency
+    from a normalized symbol. Returns ``None`` if we cannot confidently
+    infer (caller skips the mismatch check). Covers the four common
+    suffixes used by Binance / OKX / Bybit perp + spot lines: USDT,
+    USDC, USD, BUSD. CCXT unified ``BTC/USDT:USDT`` is also handled.
+
+    The reader is intentionally conservative — if the symbol ends in
+    anything else (BTC-pair tokens, BUSD before delisting, exotic
+    venues), we return ``None`` so we don't false-positive on the
+    mismatch flag.
+    """
+    if not symbol:
+        return None
+    # CCXT unified pattern: "BTC/USDT:USDT" or "BTC/USDT".
+    if ":" in symbol:
+        quote = symbol.rsplit(":", 1)[1]
+        if quote:
+            return quote.upper()
+    if "/" in symbol:
+        quote = symbol.split("/", 1)[1]
+        if quote:
+            return quote.upper()
+    sym_up = symbol.upper()
+    # Order matters: USDT/USDC/BUSD before USD (USDT endswith USD too).
+    for candidate in ("USDT", "USDC", "BUSD", "USD"):
+        if sym_up.endswith(candidate):
+            return candidate
+    return None
+
+
+def _check_fee_currency_mismatch(
+    *, exchange: str, symbol: str, fee_currency: str | None
+) -> None:
+    """Audit-2026-05-07 H-0670 — record a transient DQ flag when an
+    exchange-reported fee currency differs from the quote currency of
+    the trading pair. Examples: BNB-discounted fees on Binance USDT
+    pairs, ETH gas-style fees on OKX margin pairs. Pre-fix this was
+    silent and ``realized_pnl = ... - total_fees`` mixed currencies as
+    if they were all the quote.
+    """
+    if not fee_currency:
+        return
+    quote = _infer_quote_currency(symbol)
+    if quote is None:
+        return
+    if fee_currency.upper() != quote:
+        _record_dq_flag("fee_currency_mismatch", True)
+        # Bounded list of distinct (exchange, symbol, fee_currency)
+        # tuples so the operator can see scope without runaway growth.
+        existing = _LAST_DQ_FLAGS.get({}).get(
+            "fee_currency_mismatch_samples", []
+        )
+        sample = f"{exchange}:{symbol}:{fee_currency}"
+        if sample not in existing and len(existing) < 16:
+            _record_dq_flag(
+                "fee_currency_mismatch_samples", [sample]
+            )
+
+
+def _finite_float(value: Any, *, label: str) -> float | None:
+    """Audit-2026-05-07 H-0661 (partial) — coerce an exchange-supplied value
+    to a finite ``float`` or return ``None``. Rejects NaN, +/-inf,
+    non-numeric strings, and bool. Logs at WARNING so schema drift is
+    visible without aborting the sync.
+
+    Full pydantic validation across all branches is deferred (cross-codebase
+    schema change). This is the file-local defense-in-depth that closes
+    the NaN/inf gap.
+    """
+    try:
+        if isinstance(value, bool):
+            return None
+        f = float(value) if value is not None else None
+    except (TypeError, ValueError):
+        logger.warning(
+            "_finite_float: non-numeric %s=%r (rejected)", label, value
+        )
+        return None
+    if f is None:
+        return None
+    if not math.isfinite(f):
+        logger.warning(
+            "_finite_float: non-finite %s=%r (NaN/inf rejected)", label, value
+        )
+        return None
+    return f
 
 
 # Audit-2026-05-07 G12.B.5 — overlap window for late-arriving exchange fills.
@@ -85,6 +247,48 @@ class FillRow(TypedDict):
 _OKX_VALID_POS_SIDES: frozenset[str] = frozenset({"long", "short", "net"})
 
 
+# Audit-2026-05-07 M-0665 — gate full raw_data storage behind an env flag
+# so production storage stays lean (each fill's raw CCXT response is
+# 500-2000 bytes; at 50K fills that's ~50-100MB on the trades table).
+# A whitelisted subset (the fields position_reconstruction actually
+# reads) is always preserved so the downstream contract is unchanged.
+# Set EXCHANGE_STORE_RAW_DATA=1 in env to opt back in to full storage
+# for forensic / debug strategies. Migration to TOAST EXTERNAL storage
+# and ``.select(...)`` column-projection in analytics_runner /
+# position_reconstruction are out-of-scope here (cross-file).
+_STORE_FULL_RAW_DATA = os.environ.get("EXCHANGE_STORE_RAW_DATA", "0") == "1"
+# Whitelist of fields downstream consumers actually read from raw_data.
+# position_reconstruction reads ``position_direction`` (set by
+# ``_make_fill_dict`` itself) and OKX ``posSide``; the others are kept
+# because they appear in existing analytics queries and tests. Keep the
+# list small to bound JSONB size.
+_RAW_DATA_KEEP_KEYS: frozenset[str] = frozenset({
+    "posSide",            # OKX hedge-mode direction
+    "position_direction",  # canonical long/short (written by factory)
+    "instType",           # OKX instrument type (SPOT/SWAP/FUTURES)
+    "category",           # Bybit instrument category
+    "execType",           # OKX taker/maker discriminator (already mapped to is_maker but kept for audit)
+    "feeCcy",             # OKX fee-currency raw (mirrors fee_currency col)
+    "feeCurrency",        # Bybit fee-currency raw
+})
+
+
+def _trim_raw_data(raw_data: dict | None) -> dict | None:
+    """Audit-2026-05-07 M-0665 — when ``EXCHANGE_STORE_RAW_DATA`` is off,
+    keep only the whitelisted keys from the exchange response. Returns
+    ``None`` if the trimmed dict would be empty so the JSONB column
+    stays NULL (lowest storage / fastest scan).
+    """
+    if raw_data is None:
+        return None
+    if _STORE_FULL_RAW_DATA:
+        return raw_data
+    trimmed = {
+        k: v for k, v in raw_data.items() if k in _RAW_DATA_KEEP_KEYS
+    }
+    return trimmed if trimmed else None
+
+
 def _make_fill_dict(
     *,
     exchange: str,
@@ -142,6 +346,11 @@ def _make_fill_dict(
         if raw_data is None:
             raw_data = {}
         raw_data["position_direction"] = position_direction
+    # Audit-2026-05-07 M-0665 — trim to whitelist before persist so the
+    # JSONB column stays small. Full storage is opt-in via env. Apply
+    # AFTER position_direction is written so the canonical discriminator
+    # always survives the trim.
+    raw_data = _trim_raw_data(raw_data)
     return {
         "exchange": exchange,
         "symbol": symbol,
@@ -494,7 +703,20 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
             from collections import defaultdict
             daily_totals: dict[str, float] = defaultdict(float)
 
+            # Audit-2026-05-07 C-0319 — funding-fee bills (type=8) flow into a
+            # separate ``funding_fees`` table via services.funding_fetch. Pre-
+            # fix, this aggregator summed every bill regardless of ``type``,
+            # so OKX/Bybit perps double-counted funding once in ``daily_pnl``
+            # (consumed by transforms.py → Sharpe / equity curve) and once in
+            # ``positions.funding_pnl``. Mirror the Binance ``incomeType``
+            # filter cutover (Sprint 5.6) by dropping type=='8' here.
+            _OKX_FUNDING_BILL_TYPE = "8"
+            _okx_funding_bills_dropped = 0
             for bill in all_bills:
+                bill_type = str(bill.get("type", "")).strip()
+                if bill_type == _OKX_FUNDING_BILL_TYPE:
+                    _okx_funding_bills_dropped += 1
+                    continue
                 pnl_val = float(bill.get("pnl", 0)) + float(bill.get("fee", 0))
                 ts_raw = bill.get("ts", "")
                 if ts_raw and ts_raw.isdigit():
@@ -515,8 +737,9 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     )
 
             logger.info(
-                "OKX: %d bills aggregated to %d daily PnL entries",
-                len(all_bills), len(daily_totals)
+                "OKX: %d bills aggregated to %d daily PnL entries "
+                "(%d funding-fee bills excluded — see services.funding_fetch)",
+                len(all_bills), len(daily_totals), _okx_funding_bills_dropped,
             )
 
             for day, pnl in sorted(daily_totals.items()):
@@ -619,6 +842,23 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 params = {"category": "linear", "limit": 200}
                 result = await exchange.private_get_v5_position_closed_pnl(params)
                 items = result.get("result", {}).get("list", [])
+                # Audit-2026-05-07 C-0319 — Bybit's ``position_closed_pnl``
+                # endpoint returns ``closedPnl`` as a COMBINED cashflow
+                # (realized PnL + funding) per the funding_fees migration
+                # preamble (services.funding_fetch). There is no per-row
+                # type filter the way OKX exposes; the only safe option
+                # for now is to surface a data-quality flag so downstream
+                # equity-curve / Sharpe computations can warn that the
+                # daily_pnl figure for Bybit perp strategies includes
+                # funding which is ALSO ingested separately into
+                # ``funding_fees``. A migration to a non-funding endpoint
+                # (or per-row split) is the durable fix; flag here is the
+                # defense-in-depth so the double-count is at least
+                # visible to operators / the admin health card.
+                if items:
+                    _record_dq_flag(
+                        "bybit_daily_pnl_includes_funding", True
+                    )
                 # PR #181 take-2 red-team HIGH F5: build the Bybit-branch rows
                 # locally first, run the ISO conversion as a pure build of a
                 # NEW list, and only mutate `daily_pnl` on full success. The
@@ -687,6 +927,13 @@ async def fetch_raw_trades(
     from services.db import db_execute
 
     fills: list[dict[str, Any]] = []
+
+    # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — reset the per-task DQ
+    # buffer at the entry seam so callers can read the flags accumulated
+    # by THIS sync only, never a stale value from a prior call on the
+    # same asyncio task. ``get_and_clear_last_dq_flags`` is the read-and-
+    # reset surface; this reset is the write-side defense-in-depth.
+    _LAST_DQ_FLAGS.set({})
 
     # Apply overlap window for late-arriving fills (see OVERLAP_WINDOW_MS).
     effective_since = None
@@ -902,6 +1149,15 @@ async def _fetch_raw_trades_binance(
             "Binance per-symbol fetch: %d/%d symbols failed",
             len(failed_symbols), len(symbols),
         )
+        # Audit-2026-05-07 C-0225 — pre-fix, partial-symbol failures were
+        # logged but not surfaced. Allocator dashboards rendered the
+        # successful subset as canonical, silently dropping (e.g.) ETH
+        # fills while showing BTC fills. Surface the failed symbols via
+        # the per-task DQ buffer so the worker can stamp them into
+        # ``strategy_analytics.data_quality_flags.binance_partial_symbols``.
+        # Total-failure escalation (next branch) still raises so the job
+        # is marked failed_retry.
+        _record_dq_flag("binance_partial_symbols", list(failed_symbols))
         # Total failure with no successful symbols mirrors the
         # ColdStartSymbolDiscoveryError contract — every fill is silently
         # dropped, so the sync looks empty. Raise so the worker marks the
@@ -966,12 +1222,32 @@ async def _fetch_raw_trades_okx(
 
                 symbol = fill.get("instId", "").replace("-", "")
                 side = fill.get("side", "").lower()
-                price = float(fill.get("fillPx", 0))
-                amount = float(fill.get("fillSz", 0))
+                # Audit-2026-05-07 H-0661 — finite-value validation. Pre-fix
+                # NaN/inf strings could land in the typed numeric columns and
+                # corrupt every downstream metric. Drop the fill on a
+                # non-finite price / amount; treat non-finite fee as 0.
+                price_chk = _finite_float(fill.get("fillPx", 0), label="OKX fillPx")
+                amount_chk = _finite_float(fill.get("fillSz", 0), label="OKX fillSz")
+                if price_chk is None or amount_chk is None:
+                    logger.error(
+                        "OKX fill dropped: non-finite price=%r or amount=%r "
+                        "(instId=%s, tradeId=%s)",
+                        fill.get("fillPx"), fill.get("fillSz"),
+                        fill.get("instId"), fill.get("tradeId"),
+                    )
+                    continue
+                price = price_chk
+                amount = amount_chk
                 # Preserve signed fee so maker rebates (negative) reduce
                 # ``total_fees`` instead of inflating it via abs() (H-0671).
-                fee = float(fill.get("fee", 0))
+                fee_chk = _finite_float(fill.get("fee", 0), label="OKX fee")
+                fee = fee_chk if fee_chk is not None else 0.0
                 fee_currency = fill.get("feeCcy", "USDT")
+                # Audit-2026-05-07 H-0670 — surface mismatch when fees are
+                # paid in a currency other than the pair's quote.
+                _check_fee_currency_mismatch(
+                    exchange="okx", symbol=symbol, fee_currency=fee_currency,
+                )
                 is_maker = fill.get("execType", "") == "M"
 
                 raw_data = dict(fill)
@@ -1064,10 +1340,19 @@ async def _fetch_raw_trades_okx(
             raise
 
     if not natural_break:
+        # Audit-2026-05-07 M-0663 — record a transient DQ flag so the
+        # caller (job_worker) can stamp ``sync_truncated_okx`` into
+        # ``strategy_analytics.data_quality_flags``. Pre-fix the warning
+        # was log-only; the admin compute-jobs UI / health card had no
+        # way to surface truncation. A 90-day backfill on a busy
+        # strategy can exceed 100 pages × 100 fills = 10K and lose the
+        # tail silently.
         logger.warning(
             "Pagination hit %d-page cap for okx; possible truncation",
             PAGE_CAP,
         )
+        _record_dq_flag("sync_truncated_okx", True)
+        _record_dq_flag("sync_truncated_okx_pages", int(PAGE_CAP))
 
     return fills
 
@@ -1116,12 +1401,35 @@ async def _fetch_raw_trades_bybit(
 
                 symbol = fill.get("symbol", "")
                 side = fill.get("side", "").lower()
-                price = float(fill.get("execPrice", 0))
-                amount = float(fill.get("execQty", 0))
+                # Audit-2026-05-07 H-0661 — finite-value validation; same
+                # rationale as the OKX branch.
+                price_chk = _finite_float(
+                    fill.get("execPrice", 0), label="Bybit execPrice"
+                )
+                amount_chk = _finite_float(
+                    fill.get("execQty", 0), label="Bybit execQty"
+                )
+                if price_chk is None or amount_chk is None:
+                    logger.error(
+                        "Bybit fill dropped: non-finite price=%r or amount=%r "
+                        "(symbol=%s, execId=%s)",
+                        fill.get("execPrice"), fill.get("execQty"),
+                        fill.get("symbol"), fill.get("execId"),
+                    )
+                    continue
+                price = price_chk
+                amount = amount_chk
                 # Preserve signed fee so maker rebates remain negative
                 # (H-0671) — same rationale as the OKX branch.
-                fee = float(fill.get("execFee", 0))
+                fee_chk = _finite_float(
+                    fill.get("execFee", 0), label="Bybit execFee"
+                )
+                fee = fee_chk if fee_chk is not None else 0.0
                 fee_currency = fill.get("feeCurrency", "USDT")
+                # Audit-2026-05-07 H-0670 — fee-currency mismatch flag.
+                _check_fee_currency_mismatch(
+                    exchange="bybit", symbol=symbol, fee_currency=fee_currency,
+                )
                 # Audit-2026-05-07 G12.B.9 — Bybit V5 sometimes returns
                 # boolean true/false (post JSON decode) and sometimes
                 # capital "True"/"TRUE". Strict string equality silently
@@ -1180,10 +1488,16 @@ async def _fetch_raw_trades_bybit(
             raise
 
     if not natural_break:
+        # Audit-2026-05-07 M-0663 — same DQ flag pattern as OKX. Bybit
+        # cursor pagination doesn't expose a "has_more" hint other than
+        # nextPageCursor, so hitting the page cap is the only signal
+        # truncation occurred.
         logger.warning(
             "Pagination hit %d-page cap for bybit; possible truncation",
             PAGE_CAP,
         )
+        _record_dq_flag("sync_truncated_bybit", True)
+        _record_dq_flag("sync_truncated_bybit_pages", int(PAGE_CAP))
 
     return fills
 
@@ -1254,10 +1568,24 @@ def _normalize_fill(trade: dict, exchange_id: str) -> FillRow | None:
         )
         return None
 
+    normalized_symbol = (
+        trade.get("symbol", "")
+        .replace("/", "").replace(":USDT", "").replace(":USD", "")
+    )
+    # Audit-2026-05-07 H-0670 — fee-currency mismatch flag. Use the
+    # CCXT-unified ``symbol`` (pre-normalization, with the "BTC/USDT:USDT"
+    # form) so ``_infer_quote_currency`` can use the explicit ":USDT"
+    # marker; fall back to the normalized form if absent.
+    _quote_source_symbol = trade.get("symbol") or normalized_symbol
+    _check_fee_currency_mismatch(
+        exchange=exchange_id,
+        symbol=_quote_source_symbol,
+        fee_currency=fee_currency,
+    )
+
     return _make_fill_dict(
         exchange=exchange_id,
-        symbol=(trade.get("symbol", "")
-                .replace("/", "").replace(":USDT", "").replace(":USD", "")),
+        symbol=normalized_symbol,
         side=trade.get("side", ""),
         price=price,
         quantity=amount,
