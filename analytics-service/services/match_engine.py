@@ -19,11 +19,99 @@ The function signature matches the plan's Task 4. Tests in tests/test_match_engi
 """
 
 import json
+import logging
 import math
-from typing import Any, Optional
+from enum import Enum
+from typing import Any, Literal, Optional, TypedDict
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+# Mode identifier — typed at every signature so a typo (`'personlized'`) is
+# a mypy error rather than a silent fall-through to the screening branch.
+# DB column has CHECK (mode IN ('personalized', 'screening')) at
+# supabase/migrations/011_perfect_match.sql:3082 — the two must agree.
+Mode = Literal["personalized", "screening"]
+
+
+class ExclusionReason(str, Enum):
+    """Single source of truth for the exclusion-reason vocabulary.
+
+    Mirrors `migration 011`'s SQL CHECK constraint on `match_candidates.
+    exclusion_reason`. Inherits from `str` so existing JSONB persistence and
+    `result['excluded'][i]['exclusion_reason']` string comparisons continue
+    to work unchanged. New values added here MUST also be added to the SQL
+    CHECK in a follow-up migration before any caller persists them.
+    """
+
+    OWNED = "owned"
+    THUMBS_DOWN = "thumbs_down"
+    EXCLUDED_EXCHANGE = "excluded_exchange"
+    BELOW_MIN_SHARPE = "below_min_sharpe"
+    BELOW_MIN_TRACK_RECORD = "below_min_track_record"
+    EXCEEDS_MAX_DD = "exceeds_max_dd"
+    OFF_MANDATE_TYPE = "off_mandate_type"
+    STYLE_EXCLUDED = "style_excluded"
+    # H-0705: explicit-exclusion-list reason — caller passed
+    # `excluded_strategy_ids` (e.g. previously-served candidates) that
+    # should hard-skip without conflating with `owned` or `thumbs_down`.
+    # NOTE: only produced when callers pass `excluded_strategy_ids`;
+    # `routers/match.py` does NOT pass it today, so the SQL CHECK never
+    # sees this value in persisted rows. Adding it to the CHECK
+    # constraint is a pre-req for any caller that wants to persist.
+    EXPLICITLY_EXCLUDED = "explicitly_excluded"
+
+    @property
+    def is_hard(self) -> bool:
+        return self in _HARD_REASONS
+
+
+_HARD_REASONS: frozenset["ExclusionReason"] = frozenset({
+    ExclusionReason.OWNED,
+    ExclusionReason.THUMBS_DOWN,
+    ExclusionReason.EXCLUDED_EXCHANGE,
+    ExclusionReason.EXPLICITLY_EXCLUDED,
+})
+
+
+# H-0698 / H-0702 fix: schema for the score_candidates return value. TypedDict
+# (not BaseModel) keeps zero runtime cost — the existing JSONB persistence
+# path consumes plain dicts — while giving mypy/IDE static checks for every
+# downstream `result["candidates"]`, `result["mode"]`, etc. read site. Add
+# new keys here ONLY in lockstep with persistence (`routers/match.py`) and
+# any SQL CHECK constraint on `match_batches`.
+
+
+class ScoredCandidate(TypedDict, total=False):
+    strategy_id: str
+    score: float
+    score_error: bool
+    rank: int
+    score_breakdown: dict[str, Any]
+    reasons: list[str]
+
+
+class ExcludedCandidate(TypedDict, total=False):
+    strategy_id: str
+    exclusion_reason: str
+    exclusion_provenance: Optional[str]
+
+
+class ScoreCandidatesResult(TypedDict, total=False):
+    mode: Mode
+    filter_relaxed: bool
+    engine_version: str
+    weights_version: str
+    effective_preferences: dict[str, Any]
+    relaxed_overrides: Optional[dict[str, Any]]
+    effective_thresholds: dict[str, Any]
+    candidates: list[ScoredCandidate]
+    excluded: list[ExcludedCandidate]
+    excluded_total: int
+    source_strategy_count: int
 
 # Import existing private helpers without extracting them. Aliased for the file
 # so the regression test can import them from this module too.
@@ -54,6 +142,14 @@ WEIGHTS_VERSION = "v2.0.0"
 TOP_N_CANDIDATES = 30
 # Cap on excluded rows persisted (closest-to-threshold first)
 TOP_N_EXCLUDED = 50
+
+# M-0679 fix: pull relaxation magic numbers out so the values 90, 1.0, and
+# the <5 threshold are named once and only updated once. Tests can import
+# these to assert against an actual constant instead of re-typing 90.
+RELAXATION_MIN_CANDIDATES = 5
+RELAXATION_MIN_TRACK_DAYS = 90
+RELAXATION_MAX_DD_TOLERANCE = 1.0
+RELAXATION_MIN_SHARPE = 0.0
 
 # Weights for the personalized score
 W_PORTFOLIO_FIT = 0.40
@@ -142,14 +238,48 @@ def _compute_corr_with_portfolio(
 # ---------------------------------------------------------------------------
 
 
-HARD_EXCLUSION_REASONS = {"owned", "thumbs_down", "excluded_exchange"}
-SOFT_EXCLUSION_REASONS = {
-    "below_min_sharpe",
-    "below_min_track_record",
-    "exceeds_max_dd",
-    "off_mandate_type",
-    "style_excluded",  # Phase 3 / D-06 — SUBTYPE match against allocator mandate
-}
+# Public string-set views of the enum for backward-compat with code that
+# still imports the old constants (e.g. `if reason in HARD_EXCLUSION_REASONS`).
+HARD_EXCLUSION_REASONS: frozenset[str] = frozenset(r.value for r in _HARD_REASONS)
+SOFT_EXCLUSION_REASONS: frozenset[str] = frozenset(
+    r.value for r in ExclusionReason if r not in _HARD_REASONS
+)
+
+
+def _excluded_exchanges_lower(preferences: dict[str, Any]) -> set[str]:
+    """Single source of truth for excluded-exchanges case normalization.
+
+    M-0678 fix: previously the strict path used `{e.lower() for e in ...}` while
+    the hard-only path used `{(e or '').lower() for e in ...}` — an asymmetric
+    None-defensiveness that could make the same candidate pass strict but fail
+    relaxed (or vice versa) if a None ever leaked into the list. Normalize once,
+    same defensiveness in both paths.
+    """
+    return {(e or "").lower() for e in (preferences.get("excluded_exchanges") or [])}
+
+
+def _eligibility_check_hard_inner(
+    candidate: dict[str, Any],
+    preferences: dict[str, Any],
+    owned_set: set[str],
+    thumbs_down_set: set[str],
+    explicitly_excluded_set: set[str],
+) -> tuple[Optional[ExclusionReason], Optional[str]]:
+    """Shared hard-only eligibility check. Returns (reason_enum, provenance) or (None, None)."""
+    sid = candidate["strategy_id"]
+    if sid in owned_set:
+        return (ExclusionReason.OWNED, "portfolio")
+    if sid in thumbs_down_set:
+        return (ExclusionReason.THUMBS_DOWN, "match_decision")
+    # H-0705 fix: explicit exclusion set is honored as a hard filter so callers
+    # can pass previously-served candidates or other ban-lists.
+    if sid in explicitly_excluded_set:
+        return (ExclusionReason.EXPLICITLY_EXCLUDED, "caller")
+    excluded_exchanges_lower = _excluded_exchanges_lower(preferences)
+    cand_exchange = (candidate.get("exchange") or "").lower()
+    if cand_exchange and cand_exchange in excluded_exchanges_lower:
+        return (ExclusionReason.EXCLUDED_EXCHANGE, cand_exchange)
+    return (None, None)
 
 
 def _eligibility_check(
@@ -157,45 +287,42 @@ def _eligibility_check(
     preferences: dict[str, Any],
     owned_set: set[str],
     thumbs_down_set: set[str],
+    explicitly_excluded_set: Optional[set[str]] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Run eligibility checks. Returns (exclusion_reason, exclusion_provenance) or (None, None).
 
     Hard exclusions are checked first. Soft exclusions only run if no hard exclusion fired.
+    The returned reason is the string form for direct JSONB persistence.
     """
-    sid = candidate["strategy_id"]
-
-    # Hard exclusions
-    if sid in owned_set:
-        return ("owned", "portfolio")
-    if sid in thumbs_down_set:
-        return ("thumbs_down", "match_decision")
-    excluded_exchanges = preferences.get("excluded_exchanges") or []
-    excluded_exchanges_lower = {e.lower() for e in excluded_exchanges}
-    cand_exchange = (candidate.get("exchange") or "").lower()
-    if cand_exchange and cand_exchange in excluded_exchanges_lower:
-        return ("excluded_exchange", cand_exchange)
+    if explicitly_excluded_set is None:
+        explicitly_excluded_set = set()
+    hard_reason, hard_provenance = _eligibility_check_hard_inner(
+        candidate, preferences, owned_set, thumbs_down_set, explicitly_excluded_set,
+    )
+    if hard_reason is not None:
+        return (hard_reason.value, hard_provenance)
 
     # Soft exclusions
     sharpe = candidate.get("sharpe")
     if sharpe is not None and preferences.get("min_sharpe") is not None:
         if sharpe < preferences["min_sharpe"]:
-            return ("below_min_sharpe", f"{sharpe:.2f}")
+            return (ExclusionReason.BELOW_MIN_SHARPE.value, f"{sharpe:.2f}")
 
     track_days = candidate.get("track_record_days") or 0
     if preferences.get("min_track_record_days") is not None:
         if track_days < preferences["min_track_record_days"]:
-            return ("below_min_track_record", str(track_days))
+            return (ExclusionReason.BELOW_MIN_TRACK_RECORD.value, str(track_days))
 
     max_dd = candidate.get("max_drawdown_pct")
     if max_dd is not None and preferences.get("max_drawdown_tolerance") is not None:
         if abs(max_dd) > preferences["max_drawdown_tolerance"]:
-            return ("exceeds_max_dd", f"{abs(max_dd):.2f}")
+            return (ExclusionReason.EXCEEDS_MAX_DD.value, f"{abs(max_dd):.2f}")
 
     pref_types = preferences.get("preferred_strategy_types") or []
     if pref_types:
         cand_type = candidate.get("strategy_type")
         if cand_type and cand_type not in pref_types:
-            return ("off_mandate_type", cand_type)
+            return (ExclusionReason.OFF_MANDATE_TYPE.value, cand_type)
 
     # Phase 3 / D-06: style_exclusions SOFT exclude. Candidate's subtype
     # (populated from strategies.subtypes[0] in routers/match.py per Phase 3
@@ -206,7 +333,7 @@ def _eligibility_check(
     if style_exclusions:
         cand_subtype = candidate.get("subtype")
         if cand_subtype and cand_subtype in style_exclusions:
-            return ("style_excluded", cand_subtype)
+            return (ExclusionReason.STYLE_EXCLUDED.value, cand_subtype)
 
     return (None, None)
 
@@ -216,18 +343,17 @@ def _eligibility_check_hard_only(
     preferences: dict[str, Any],
     owned_set: set[str],
     thumbs_down_set: set[str],
+    explicitly_excluded_set: Optional[set[str]] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Same as _eligibility_check but only the hard rules. Used during relaxation."""
-    sid = candidate["strategy_id"]
-    if sid in owned_set:
-        return ("owned", "portfolio")
-    if sid in thumbs_down_set:
-        return ("thumbs_down", "match_decision")
-    excluded_exchanges_lower = {(e or "").lower() for e in (preferences.get("excluded_exchanges") or [])}
-    cand_exchange = (candidate.get("exchange") or "").lower()
-    if cand_exchange and cand_exchange in excluded_exchanges_lower:
-        return ("excluded_exchange", cand_exchange)
-    return (None, None)
+    if explicitly_excluded_set is None:
+        explicitly_excluded_set = set()
+    hard_reason, hard_provenance = _eligibility_check_hard_inner(
+        candidate, preferences, owned_set, thumbs_down_set, explicitly_excluded_set,
+    )
+    if hard_reason is None:
+        return (None, None)
+    return (hard_reason.value, hard_provenance)
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +429,7 @@ def _compute_mandate_fit_score(
     preferences: dict[str, Any],
     corr_with_portfolio: Optional[float],
     add_weight: float,
-    mode: str,
+    mode: Mode,
 ) -> tuple[float, dict[str, Any]]:
     """Four per-dimension contributions averaged. Returns (score, breakdown).
 
@@ -329,15 +455,20 @@ def _compute_mandate_fit_score(
     ceiling = preferences.get("correlation_ceiling")
     if ceiling is None or corr_with_portfolio is None or mode == "screening":
         cc_score = 1.0
+    # H-0700 fix: ceiling == 1.0 semantically means "no correlation cap"
+    # (the UI clamp permits 0..1 inclusive; 1.0 is the no-penalty endpoint).
+    # The old branch returned 0.0 on any micro-jitter above 1.0 from
+    # near-perfect correlation series — silently collapsing mandate_fit
+    # for allocators who legitimately said "no cap". Treat ceiling >= 1.0
+    # as "no penalty regardless of corr value".
+    elif ceiling >= 1.0:
+        cc_score = 1.0
     elif corr_with_portfolio <= ceiling:
         cc_score = 1.0
     else:
         denom = 1.0 - ceiling
-        if denom > 0:
-            cc_score = max(0.0, 1 - (corr_with_portfolio - ceiling) / denom)
-        else:
-            # ceiling == 1.0 — no headroom, any corr above it means breach.
-            cc_score = 0.0
+        # denom > 0 holds by the elif chain above (ceiling < 1.0 here).
+        cc_score = max(0.0, 1 - (corr_with_portfolio - ceiling) / denom)
 
     # Dimension 3 — liquidity_preference tier-gap (D-05). Gap direction
     # matters: allocator wants high and gets low → penalty; allocator wants
@@ -347,11 +478,15 @@ def _compute_mandate_fit_score(
         lp_score = 1.0
     else:
         cand_tier = _liquidity_tier_from_aum(candidate.get("manager_aum"))
-        if cand_tier is None:
+        # M-0674 fix: dict lookup is .get() so an out-of-vocab allocator_pref
+        # (legacy/corrupted row that somehow bypassed the SQL CHECK) returns
+        # None and we degrade to neutral 1.0 instead of KeyError-crashing
+        # the whole batch.
+        a_rank = _LIQUIDITY_TIER_RANK.get(allocator_pref)
+        c_rank = _LIQUIDITY_TIER_RANK.get(cand_tier) if cand_tier else None
+        if a_rank is None or c_rank is None:
             lp_score = 1.0
         else:
-            a_rank = _LIQUIDITY_TIER_RANK[allocator_pref]
-            c_rank = _LIQUIDITY_TIER_RANK[cand_tier]
             gap = a_rank - c_rank  # positive only when candidate is LOWER
             if gap <= 0:
                 lp_score = 1.0
@@ -420,6 +555,7 @@ def _compute_portfolio_fit_components(
             "corr_reduction": None,
             "dd_improvement": None,
             "corr_with_portfolio": None,
+            "data_completeness": None,
         }
 
     # Align candidate to portfolio dates
@@ -430,6 +566,7 @@ def _compute_portfolio_fit_components(
             "corr_reduction": None,
             "dd_improvement": None,
             "corr_with_portfolio": None,
+            "data_completeness": None,
         }
 
     w_arr = np.array([portfolio_weights.get(sid, 0) for sid in port_df.columns])
@@ -443,11 +580,14 @@ def _compute_portfolio_fit_components(
     # New portfolio = old × (1 - add_weight) + candidate × add_weight
     aligned = pd.concat([port_df, candidate_returns.rename("__cand__")], axis=1).dropna()
     if len(aligned) < 30:
+        portfolio_count = max(len(portfolio_weights), 1)
+        data_completeness_short = len(port_df.columns) / portfolio_count
         return {
             "sharpe_lift": None,
             "corr_reduction": None,
             "dd_improvement": None,
             "corr_with_portfolio": _compute_corr_with_portfolio(current_port, candidate_returns),
+            "data_completeness": _safe_float(data_completeness_short),
         }
 
     new_weights = {sid: w * (1 - add_weight) for sid, w in portfolio_weights.items()}
@@ -479,11 +619,22 @@ def _compute_portfolio_fit_components(
 
     corr_with_portfolio = _compute_corr_with_portfolio(current_port, candidate_returns)
 
+    # M-0675 fix: surface a `data_completeness` sidecar — the ratio of
+    # portfolio strategies that survived the returns-dropna join — so callers
+    # can warn (e.g. "scored against 3 of 5 holdings; 2 lack returns") rather
+    # than blindly trusting a portfolio-fit score computed on a subset of
+    # the book. Apples-to-apples is preserved (both current_port and new_port
+    # use only columns present in port_df / aligned), but transparency is
+    # cheap and stops the silent-subset failure mode the audit flagged.
+    portfolio_count = max(len(portfolio_weights), 1)
+    data_completeness = len(port_df.columns) / portfolio_count
+
     return {
         "sharpe_lift": _safe_float(sharpe_lift),
         "corr_reduction": _safe_float(corr_reduction),
         "dd_improvement": _safe_float(dd_improvement),
         "corr_with_portfolio": corr_with_portfolio,
+        "data_completeness": _safe_float(data_completeness),
     }
 
 
@@ -496,7 +647,7 @@ def _generate_reasons(
     candidate: dict[str, Any],
     preferences: dict[str, Any],
     score_breakdown: dict[str, Any],
-    mode: str,
+    mode: Mode,
 ) -> list[str]:
     """Pick the top 3 most-relevant reasons for this candidate."""
     raw = score_breakdown["raw"]
@@ -561,7 +712,7 @@ def score_candidates(
     excluded_strategy_ids: Optional[set[str]] = None,
     thumbs_down_ids: Optional[set[str]] = None,
     portfolio_aum: Optional[float] = None,
-) -> dict[str, Any]:
+) -> ScoreCandidatesResult:
     """Score every candidate strategy for an allocator. See module docstring.
 
     Returns a dict with shape:
@@ -584,14 +735,14 @@ def score_candidates(
         thumbs_down_ids = set()
 
     # Mode selection
-    mode = "personalized" if portfolio_strategies else "screening"
+    mode: Mode = "personalized" if portfolio_strategies else "screening"
 
     # Pass 1: full eligibility (hard + soft)
     eligible: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
     for cand in candidate_strategies:
         reason, provenance = _eligibility_check(
-            cand, prefs, owned_set, thumbs_down_ids,
+            cand, prefs, owned_set, thumbs_down_ids, excluded_strategy_ids,
         )
         if reason is None:
             eligible.append(cand)
@@ -604,26 +755,40 @@ def score_candidates(
             })
 
     filter_relaxed = False
-    effective_thresholds = {
+    # active_prefs is the dict actually used downstream for scoring + reasons.
+    # H-0695 fix: prior code returned `effective_preferences: prefs` even after
+    # relaxation, so the JSONB audit row lied about the inputs. Now we track
+    # the relaxed dict and return THAT in effective_preferences when relaxation
+    # fires, plus an explicit `relaxed_overrides` field documenting the deltas.
+    active_prefs = prefs
+    relaxed_overrides: Optional[dict[str, Any]] = None
+    effective_thresholds: dict[str, Any] = {
         "min_sharpe": prefs.get("min_sharpe"),
         "min_track_record_days": prefs.get("min_track_record_days"),
         "max_drawdown_tolerance": prefs.get("max_drawdown_tolerance"),
     }
 
-    # Relaxation: if <5 eligible, drop soft exclusions and re-filter
-    if len(eligible) < 5:
+    # Relaxation: if <RELAXATION_MIN_CANDIDATES eligible, drop soft exclusions and re-filter
+    if len(eligible) < RELAXATION_MIN_CANDIDATES:
         filter_relaxed = True
         relaxed_prefs = dict(prefs)
-        relaxed_prefs["min_sharpe"] = 0.0
-        relaxed_prefs["min_track_record_days"] = 90
-        relaxed_prefs["max_drawdown_tolerance"] = 1.0
+        relaxed_prefs["min_sharpe"] = RELAXATION_MIN_SHARPE
+        relaxed_prefs["min_track_record_days"] = RELAXATION_MIN_TRACK_DAYS
+        relaxed_prefs["max_drawdown_tolerance"] = RELAXATION_MAX_DD_TOLERANCE
         relaxed_prefs["preferred_strategy_types"] = []  # Drop type restriction too
+        relaxed_overrides = {
+            "min_sharpe": RELAXATION_MIN_SHARPE,
+            "min_track_record_days": RELAXATION_MIN_TRACK_DAYS,
+            "max_drawdown_tolerance": RELAXATION_MAX_DD_TOLERANCE,
+            "preferred_strategy_types": [],
+        }
+        active_prefs = relaxed_prefs
 
         eligible = []
         excluded = []
         for cand in candidate_strategies:
             reason, provenance = _eligibility_check_hard_only(
-                cand, relaxed_prefs, owned_set, thumbs_down_ids,
+                cand, relaxed_prefs, owned_set, thumbs_down_ids, excluded_strategy_ids,
             )
             if reason is None:
                 eligible.append(cand)
@@ -635,11 +800,20 @@ def score_candidates(
                     "candidate": cand,
                 })
         effective_thresholds = {
-            "min_sharpe": 0.0,
-            "min_track_record_days": 90,
-            "max_drawdown_tolerance": 1.0,
+            "min_sharpe": RELAXATION_MIN_SHARPE,
+            "min_track_record_days": RELAXATION_MIN_TRACK_DAYS,
+            "max_drawdown_tolerance": RELAXATION_MAX_DD_TOLERANCE,
             "filter_relaxed": True,
         }
+        logger.info(
+            "match_engine: relaxation engaged for allocator=%s — "
+            "min_sharpe %s→%s, min_track_days %s→%s, max_dd_tol %s→%s, "
+            "preferred_strategy_types dropped",
+            allocator_id,
+            prefs.get("min_sharpe"), RELAXATION_MIN_SHARPE,
+            prefs.get("min_track_record_days"), RELAXATION_MIN_TRACK_DAYS,
+            prefs.get("max_drawdown_tolerance"), RELAXATION_MAX_DD_TOLERANCE,
+        )
 
     # If still empty, return empty
     if not eligible:
@@ -648,13 +822,21 @@ def score_candidates(
             "filter_relaxed": filter_relaxed,
             "engine_version": ENGINE_VERSION,
             "weights_version": WEIGHTS_VERSION,
-            "effective_preferences": prefs,
+            "effective_preferences": active_prefs,
+            "relaxed_overrides": relaxed_overrides,
             "effective_thresholds": effective_thresholds,
             "candidates": [],
-            "excluded": _serialize_excluded(_top_excluded(excluded, prefs)),
+            "excluded": _serialize_excluded(_top_excluded(excluded, active_prefs)),
             "excluded_total": len(excluded),
             "source_strategy_count": len(candidate_strategies),
         }
+
+    # NOTE: scoring math below uses `prefs` (the strict, un-relaxed user
+    # preferences), NOT `active_prefs`. Relaxation widens the eligibility
+    # gate so the founder sees SOMETHING on sparse universes, but rankings
+    # within that wider set still reward strategies that would have passed
+    # the strict gate. `active_prefs` / `relaxed_overrides` are persisted
+    # in the audit trail so 'why was X scored this way?' replay is honest.
 
     # Compute add_weight from ticket size + portfolio AUM
     if mode == "personalized" and portfolio_aum and portfolio_aum > 0:
@@ -703,6 +885,7 @@ def score_candidates(
                 "corr_reduction": None,
                 "dd_improvement": None,
                 "corr_with_portfolio": None,
+                "data_completeness": None,
             }
 
         manager_aum = cand.get("manager_aum") or 0
@@ -717,6 +900,7 @@ def score_candidates(
             "corr_reduction": pf_components["corr_reduction"],
             "dd_improvement": pf_components["dd_improvement"],
             "corr_with_portfolio": pf_components["corr_with_portfolio"],
+            "data_completeness": pf_components.get("data_completeness"),
             "ticket_concentration": ticket_concentration,
         })
 
@@ -780,12 +964,17 @@ def score_candidates(
                     * _clamp(overrides.get("W_CAPACITY_FIT", 1.0), 0.5, 1.5),
             }
             total = sum(scaled.values())
-            # Pitfall 3 guard — clamp floor 0.5 × min(weights) = 0.075 > 0,
-            # so this assertion never fires in practice. Defense in depth
-            # against any future weight constant change or adversarial input.
-            assert total > 0, (
-                "scoring_weight_overrides renormalization produced non-positive sum"
-            )
+            # C-0230 / H-0699 fix: bare `assert` is stripped under `python -O`
+            # (typical production container flag), which would let the next
+            # line silently divide by zero and propagate NaN through every
+            # candidate's score. Use an explicit raise so the guard survives
+            # bytecode optimization.
+            if total <= 0:
+                raise ValueError(
+                    "scoring_weight_overrides renormalization produced "
+                    f"non-positive sum (allocator_id={allocator_id}, "
+                    f"scaled={scaled})"
+                )
             effective = {k: v / total for k, v in scaled.items()}
 
             final_score = 100 * (
@@ -819,6 +1008,7 @@ def score_candidates(
                 "sharpe": cand.get("sharpe"),
                 "max_drawdown_pct": cand.get("max_drawdown_pct"),
                 "mandate_fit_raw": mandate_fit_raw,  # Phase 3 per-dimension detail
+                "data_completeness": rc.get("data_completeness"),  # M-0675 sidecar
             },
         }
         # Only include portfolio_fit when in personalized mode — guards against
@@ -828,9 +1018,28 @@ def score_candidates(
 
         reasons = _generate_reasons(cand, prefs, score_breakdown, mode)
 
+        # H-0704 fix: `_safe_float(final_score) or 0.0` silently collapses
+        # NaN to 0 and the candidate sorts to the bottom indistinguishably
+        # from a genuine zero. Compute the safe value first and tag the row
+        # with `score_error=True` (plus a logger.warning) when the math
+        # produced NaN/Inf so downstream consumers can surface it as
+        # "computed with errors" rather than "low signal". Matches the
+        # v0.17.1 KPI-17 lesson: silent zeros are the failure mode.
+        safe_score = _safe_float(final_score)
+        score_error = safe_score is None
+        if score_error:
+            logger.warning(
+                "match_engine: NaN/Inf final_score for strategy=%s allocator=%s "
+                "raw=%r portfolio_fit=%r effective_preference_fit=%r "
+                "track_record=%r capacity_fit=%r — coerced to 0.0",
+                sid, allocator_id, final_score, portfolio_fit,
+                effective_preference_fit, track_record, capacity_fit,
+            )
+
         scored.append({
             "strategy_id": sid,
-            "score": _safe_float(final_score) or 0.0,
+            "score": safe_score if safe_score is not None else 0.0,
+            "score_error": score_error,
             "score_breakdown": score_breakdown,
             "reasons": reasons,
         })
@@ -848,10 +1057,11 @@ def score_candidates(
         "filter_relaxed": filter_relaxed,
         "engine_version": ENGINE_VERSION,
         "weights_version": WEIGHTS_VERSION,
-        "effective_preferences": prefs,
+        "effective_preferences": active_prefs,
+        "relaxed_overrides": relaxed_overrides,
         "effective_thresholds": effective_thresholds,
         "candidates": top,
-        "excluded": _serialize_excluded(_top_excluded(excluded, prefs)),
+        "excluded": _serialize_excluded(_top_excluded(excluded, active_prefs)),
         "excluded_total": len(excluded),
         "source_strategy_count": len(candidate_strategies),
     }
