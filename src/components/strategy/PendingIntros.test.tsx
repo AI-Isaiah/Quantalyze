@@ -118,7 +118,13 @@ describe("PendingIntros — Audit C-0135/C-0136 server-route refactor", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /decline/i }));
     });
+    // Audit-2026-05-07 testing/decline-refresh-assertion-gap — pin that
+    // BOTH accept and decline trigger router.refresh() on success. A
+    // regression that gated refresh() on `action === 'accept'` (matching
+    // the confirm-message branch shape) would leave the decline UI stale
+    // until full reload; this assertion catches that.
     await waitFor(() => expect(refreshMock).toHaveBeenCalledTimes(1));
+    expect(refreshMock).toHaveBeenCalledTimes(1);
     expect(
       screen.queryByText(/Our team will connect you within 48h/i),
     ).toBeNull();
@@ -172,6 +178,29 @@ describe("PendingIntros — Audit C-0135/C-0136 server-route refactor", () => {
         screen.getByText(/Failed to update request\. Please try again\./i),
       ).toBeDefined(),
     );
+    expect(refreshMock).not.toHaveBeenCalled();
+  });
+
+  // Audit-2026-05-07 testing/404-classification-gap — pins that a 404
+  // (stale id / request deleted between page load and click) falls
+  // through to the generic failure copy, NOT the 401/403 permission
+  // copy. A regression that broadened the permission branch to also
+  // match 404 would show "your account may not have permission" for
+  // a stale-row case — misleading the manager about the failure mode.
+  it("renders the generic failure copy on a 404 (not the permission copy)", async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 404 } as Response);
+    render(<PendingIntros requests={[REQUEST]} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /accept/i }));
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Failed to update request\. Please try again\./i),
+      ).toBeDefined(),
+    );
+    expect(
+      screen.queryByText(/your account may not have permission/i),
+    ).toBeNull();
     expect(refreshMock).not.toHaveBeenCalled();
   });
 
