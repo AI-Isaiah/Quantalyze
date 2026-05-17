@@ -19,12 +19,13 @@
  * route MUST appear in this manifest with an explicit current + target
  * gate declaration, OR the route is missing an explicit RBAC gate.
  *
- * The CI check `scripts/check-admin-route-manifest.ts` (run in
- * `npm run lint`) compares the on-disk admin routes against this
- * manifest and FAILS if a new route lacks an entry or if an existing
- * route's mechanism drifts from the manifest. That is the closure for
- * the audit finding: a new admin route can no longer slip through
- * without an explicit gate declaration.
+ * The CI check `scripts/check-admin-route-manifest.ts` (chained into
+ * `npm run lint` and therefore the `frontend-lint` job in
+ * `.github/workflows/ci.yml`) compares the on-disk admin routes against
+ * this manifest and FAILS if a new route lacks an entry or if an
+ * existing route's mechanism drifts from the manifest. That is the
+ * closure for the audit finding: a new admin route can no longer slip
+ * through without an explicit gate declaration.
  *
  * This file is data-only — it imports nothing and runs no logic — so
  * it can be loaded from any context (tests, CI scripts, docs gen)
@@ -84,19 +85,19 @@ export const ADMIN_ROUTE_MANIFEST: readonly AdminRouteEntry[] = [
     current: "isAdminUser-inline",
     target: "withRole",
     notes:
-      "v0.22.24.2 review-fix inlined the handler to drop withAdminAuth round-trip; Sprint 7 fanout candidate",
+      "v0.22.24.2 review-fix inlined the handler to drop withAdminAuth round-trip",
   },
   {
     route: "src/app/api/admin/allocators/[id]/holdings/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
-    notes: "Sprint 7 fanout candidate",
+    notes: "",
   },
   {
     route: "src/app/api/admin/compute-jobs/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
-    notes: "Sprint 7 fanout candidate",
+    notes: "",
   },
   {
     route: "src/app/api/admin/deletion-requests/[id]/approve/route.ts",
@@ -114,62 +115,62 @@ export const ADMIN_ROUTE_MANIFEST: readonly AdminRouteEntry[] = [
     route: "src/app/api/admin/for-quants-leads/process/route.ts",
     current: "withAdminAuth",
     target: "withRole",
-    notes: "Sprint 7 fanout candidate",
+    notes: "",
   },
   {
     route: "src/app/api/admin/intro-request/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
     notes:
-      "v0.22.24.2 review-fix inlined the handler to drop withAdminAuth round-trip; Sprint 7 fanout candidate",
+      "v0.22.24.2 review-fix inlined the handler to drop withAdminAuth round-trip",
   },
   {
     route: "src/app/api/admin/match/allocators/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
-    notes: "Sprint 7 fanout candidate",
+    notes: "",
   },
   {
     route: "src/app/api/admin/match/decisions/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
-    notes: "Sprint 7 fanout candidate",
+    notes: "",
   },
   {
     route: "src/app/api/admin/match/eval/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
-    notes: "Sprint 7 fanout candidate",
+    notes: "",
   },
   {
     route: "src/app/api/admin/match/kill-switch/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
-    notes: "Sprint 7 fanout candidate",
+    notes: "",
   },
   {
     route: "src/app/api/admin/match/preferences/[allocator_id]/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
-    notes: "Sprint 7 fanout candidate",
+    notes: "",
   },
   {
     route: "src/app/api/admin/match/recompute/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
-    notes: "Sprint 7 fanout candidate",
+    notes: "",
   },
   {
     route: "src/app/api/admin/match/send-intro/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
-    notes: "Sprint 7 fanout candidate",
+    notes: "",
   },
   {
     route: "src/app/api/admin/match/[allocator_id]/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
-    notes: "Sprint 7 fanout candidate",
+    notes: "",
   },
   {
     route: "src/app/api/admin/notify-submission/route.ts",
@@ -182,14 +183,14 @@ export const ADMIN_ROUTE_MANIFEST: readonly AdminRouteEntry[] = [
     route: "src/app/api/admin/partner-import/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
-    notes: "Sprint 7 fanout candidate",
+    notes: "",
   },
   {
     route: "src/app/api/admin/strategy-review/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
     notes:
-      "v0.22.24.2 review-fix inlined the handler to drop withAdminAuth round-trip; Sprint 7 fanout candidate",
+      "v0.22.24.2 review-fix inlined the handler to drop withAdminAuth round-trip",
   },
   {
     route: "src/app/api/admin/users/[id]/roles/route.ts",

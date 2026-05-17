@@ -59,9 +59,25 @@ describe("ADMIN_ROUTE_MANIFEST — data invariants", () => {
     }
   });
 
-  it("every entry where current != target has a non-empty `notes` string", () => {
+  it("`notes` is always a string (may be empty when no per-route detail is needed)", () => {
+    // audit-2026-05-07 maintainability M3 (MED conf 8): the boilerplate
+    // "Sprint 7 fanout candidate" added no per-route information across
+    // 11 entries — dropped to empty strings to match the audit-trail
+    // intent (notes carry per-route specificity, not a repeated label).
+    // The carve-out entry retains a non-empty note documenting WHY it
+    // is exempt from withRole convergence (see the dedicated test below).
     for (const entry of ADMIN_ROUTE_MANIFEST) {
-      if (entry.current !== entry.target) {
+      expect(typeof entry.notes).toBe("string");
+    }
+  });
+
+  it("the carve-out entry has a non-empty `notes` explaining the exemption", () => {
+    // The authenticated-non-admin carve-out is the one route whose
+    // shape genuinely needs per-route documentation: it lives under
+    // /api/admin/ but is not admin-only. New uses require explicit
+    // review (per the file docstring), so the note is load-bearing.
+    for (const entry of ADMIN_ROUTE_MANIFEST) {
+      if (entry.current === "authenticated-non-admin") {
         expect(entry.notes.length).toBeGreaterThan(0);
       }
     }

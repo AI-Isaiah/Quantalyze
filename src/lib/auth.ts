@@ -98,10 +98,19 @@ export type GetUserRolesResult =
  * M-0501 (audit-2026-05-07): wrapped with React `cache()` so duplicate
  * calls inside the SAME request with the same `(supabase, userId)`
  * pair share one DB round-trip. The cache is REQUEST-SCOPED — does NOT
- * memoize across requests, Lambda invocations, or sessions. The
- * supabase client identity is stable within a request because
- * `createClient()` in `src/lib/supabase/server.ts` is itself
- * `cache()`-wrapped. Cross-request caching (JWT custom claims, Edge
+ * memoize across requests, Lambda invocations, or sessions.
+ *
+ * React `cache()` keys on argument IDENTITY (===), so a cache hit
+ * requires the caller to pass the SAME SupabaseClient instance. The
+ * `withRole` wrapper guarantees this — it builds ONE client via
+ * `createClient()` and reuses it for `getUser()` + `requireRole()` +
+ * the handler context — but `createClient()` itself (in
+ * `src/lib/supabase/server.ts`) is NOT `cache()`-wrapped, so two
+ * independent `await createClient()` calls within the same request
+ * return two distinct clients and bypass this cache. New call sites
+ * outside `withRole` must reuse a single client per request or accept
+ * the duplicate round-trip. Audit reference: audit-2026-05-07 security
+ * S2 (MED conf 8). Cross-request caching (JWT custom claims, Edge
  * Config) is tracked as a Sprint 7 follow-up — see ADR-0005.
  */
 export const getUserRolesResult = cache(async function getUserRolesResult(
