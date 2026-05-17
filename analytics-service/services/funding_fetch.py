@@ -22,13 +22,21 @@ Why client-side match_key (not a DB generated column)?
 Shared upsert helpers (serialize_funding_row, upsert_funding_rows) live
 here so both job_worker.py and scripts/backfill_funding.py use identical
 serialization and conflict-resolution logic.
+
+Symbol normalization note (M-0923 / M-0924, audit-2026-05-07): OKX
+`instId` like ``BTC-USDT-SWAP`` is normalized to ``BTCUSDTSWAP`` here
+and the trades pipeline (analytics-service/services/exchange.py) does
+the same. Both producers MUST stay in sync — funding attribution joins
+positions and funding rows by exact ``symbol`` string equality. A future
+canonical ``normalize_symbol(exchange, raw)`` helper would deduplicate
+this contract; tracked as a defense-in-depth backlog item.
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypedDict
 
 import ccxt.async_support as ccxt
 
@@ -56,8 +64,100 @@ FUNDING_UPSERT_BATCH_SIZE = 100
 
 
 # ---------------------------------------------------------------------------
+# Row contract — TypedDict mirrors funding_fees columns (M-0929)
+# ---------------------------------------------------------------------------
+
+
+class FundingFeeRow(TypedDict):
+    """Producer-side contract for one funding_fees row.
+
+    Mirrors the table columns from migration 044 minus auto-generated
+    ``id``/``created_at``. A producer typo in any key would previously
+    silently insert a malformed row that failed downstream parsing — now
+    callers using this TypedDict get a type-checker hit.
+    """
+
+    strategy_id: str
+    exchange: str
+    symbol: str
+    amount: Decimal
+    currency: str
+    timestamp: datetime
+    match_key: str
+    raw_data: dict[str, Any]
+
+
+# Whitelist of keys preserved from the raw exchange payload into
+# funding_fees.raw_data. Defense-in-depth (L-0052 / M-0931): minimize
+# accidental PII/secret echo and guarantee JSON-serializability across
+# ccxt versions by limiting to known scalars / well-known IDs.
+_RAW_DATA_WHITELIST: tuple[str, ...] = (
+    # Binance
+    "tranId", "income", "incomeType", "asset", "symbol", "time",
+    # OKX
+    "billId", "instId", "pnl", "ccy", "ts", "type",
+    # Bybit
+    "id", "funding", "change", "cashFlow", "currency", "transactionTime",
+    "created_time", "category",
+)
+
+
+def _sanitize_raw(value: Any) -> Any:
+    """Recursively coerce a value to a JSON-serializable shape.
+
+    Defends against ccxt response payloads carrying non-JSON-native types
+    (Decimal, datetime, sets, ccxt internal classes) that would otherwise
+    raise ``TypeError`` inside supabase-py's json.dumps and cause the
+    enclosing upsert batch to fail (M-0931). The output is safe to feed
+    into PostgREST as a JSONB column.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (set, frozenset, tuple, list)):
+        return [_sanitize_raw(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _sanitize_raw(v) for k, v in value.items()}
+    # Fallback: stringify ccxt internal classes / enums so the row still
+    # round-trips. Better than dropping the row to errors[].
+    return str(value)
+
+
+def _extract_raw_data(raw_item: dict) -> dict[str, Any]:
+    """Project ``raw_item`` onto the whitelist + sanitize each value.
+
+    L-0052 deliberately excluded from this fix-loop (severity L), but the
+    sanitizer step is required for M-0931 (raw_data JSON-encode failure)
+    so it lives next to the whitelist for cohesion. Keys not in
+    ``_RAW_DATA_WHITELIST`` are dropped.
+    """
+    return {
+        key: _sanitize_raw(raw_item.get(key))
+        for key in _RAW_DATA_WHITELIST
+        if key in raw_item
+    }
+
+
+# ---------------------------------------------------------------------------
 # Match key — deterministic 8-hour bucket dedup
 # ---------------------------------------------------------------------------
+
+
+# H-1099: Per-exchange funding cadence. Binance has been progressively
+# moving newer pairs to a 4-hour funding cycle (BTCDOMUSDT etc.), and a
+# single pair can switch cadence mid-history. OKX and Bybit retain a
+# documented 8-hour cycle for all perps. Bucketing every event to 8h
+# silently collapsed half of Binance 4h-cycle events onto the same
+# match_key, where ON CONFLICT DO NOTHING dropped the second one. Use a
+# tighter bucket for exchanges that can run sub-8h cycles.
+_FUNDING_BUCKET_HOURS: dict[str, int] = {
+    "binance": 1,  # honour any cadence ≥ 1h Binance publishes
+    "okx": 8,
+    "bybit": 8,
+}
 
 
 def _bucket_8h(ts: datetime) -> str:
@@ -65,12 +165,25 @@ def _bucket_8h(ts: datetime) -> str:
 
     Windows: [00:00, 08:00), [08:00, 16:00), [16:00, 24:00) UTC.
     Returns an ISO-like string suitable for embedding in a match_key.
+
+    Kept for the OKX dedup path (archive + recent endpoints overlap on
+    the same event). For match_key construction prefer
+    :func:`_bucket_for_exchange`.
+    """
+    return _bucket_for_exchange(ts, hours=8)
+
+
+def _bucket_for_exchange(ts: datetime, hours: int) -> str:
+    """Round a UTC datetime down to a ``hours``-wide window start.
+
+    ``hours`` must be a divisor of 24 (1, 2, 3, 4, 6, 8, 12, 24); the
+    funding cadences in scope (1h/4h/8h) all satisfy this.
     """
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     else:
         ts = ts.astimezone(timezone.utc)
-    hour_bucket = (ts.hour // 8) * 8
+    hour_bucket = (ts.hour // hours) * hours
     bucketed = ts.replace(hour=hour_bucket, minute=0, second=0, microsecond=0)
     return bucketed.strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
@@ -78,7 +191,11 @@ def _bucket_8h(ts: datetime) -> str:
 def _build_match_key(
     strategy_id: str, exchange: str, symbol: str, ts: datetime
 ) -> str:
-    return f"{strategy_id}:{exchange}:{symbol}:{_bucket_8h(ts)}"
+    hours = _FUNDING_BUCKET_HOURS.get(exchange, 8)
+    return (
+        f"{strategy_id}:{exchange}:{symbol}:"
+        f"{_bucket_for_exchange(ts, hours=hours)}"
+    )
 
 
 def _normalize_funding_row(
@@ -89,11 +206,13 @@ def _normalize_funding_row(
     ts_raw: Any,
     currency: str,
     raw_item: dict,
-) -> "dict[str, Any] | None":
-    """Build a uniform funding_fees dict from raw exchange fields.
+) -> "FundingFeeRow | None":
+    """Build a uniform funding_fees row from raw exchange fields.
 
     Computes the match_key and handles Decimal conversion. Returns None on
-    parse failure (caller should continue/skip the row).
+    parse failure; callers MUST track the skipped row in
+    ``dropped_normalize`` so the worker can surface a data-quality flag
+    rather than silently UPSERTing partial coverage (M-0930).
     """
     if not symbol:
         return None
@@ -108,16 +227,16 @@ def _normalize_funding_row(
     if ts is None:
         return None
 
-    return {
-        "strategy_id": strategy_id,
-        "exchange": exchange,
-        "symbol": symbol,
-        "amount": amount,
-        "currency": currency or "USDT",
-        "timestamp": ts,
-        "match_key": _build_match_key(strategy_id, exchange, symbol, ts),
-        "raw_data": dict(raw_item),
-    }
+    return FundingFeeRow(
+        strategy_id=strategy_id,
+        exchange=exchange,
+        symbol=symbol,
+        amount=amount,
+        currency=currency or "USDT",
+        timestamp=ts,
+        match_key=_build_match_key(strategy_id, exchange, symbol, ts),
+        raw_data=_extract_raw_data(raw_item),
+    )
 
 
 def _parse_ts_ms(value: Any) -> "datetime | None":
@@ -177,10 +296,15 @@ async def fetch_funding_binance(
         try:
             data = await exchange.fapiPrivate_get_income(params)
         except Exception as exc:
-            logger.warning(
-                "Binance funding fetch failed page %d: %s", page_idx, exc
+            # C-0322 / H-1103: page-N failure silently truncated results and
+            # the worker reported DONE with partial rows. Promote to error
+            # log + re-raise so run_sync_funding_job classifies the job as
+            # transient-failed and retries (Sentry catches the trace).
+            logger.error(
+                "Binance funding fetch failed page %d for strategy %s: %s",
+                page_idx, strategy_id, exc,
             )
-            break
+            raise
 
         if not data:
             break
@@ -246,7 +370,15 @@ async def fetch_funding_okx(
     async def _paginate(endpoint_name: str) -> None:
         endpoint = getattr(exchange, endpoint_name, None)
         if endpoint is None:
-            return
+            # M-0925 / M-0926 / M-0927: silent return on missing endpoint
+            # made ccxt version drift invisible — strategies with >90d
+            # history silently lost their archive coverage. Raise so the
+            # worker classifies as failed and on-call sees a Sentry trace.
+            raise RuntimeError(
+                f"OKX endpoint {endpoint_name} missing on ccxt "
+                f"{getattr(ccxt, '__version__', 'unknown')} — funding "
+                f"ingestion would be incomplete"
+            )
         after_id = ""
         for page_idx in range(MAX_PAGES):
             params: dict[str, str] = {
@@ -261,16 +393,39 @@ async def fetch_funding_okx(
             try:
                 result = await endpoint(params)
             except Exception as exc:
-                logger.warning(
-                    "OKX %s funding fetch failed page %d: %s",
-                    endpoint_name, page_idx, exc,
+                # C-0322 / H-1103: re-raise instead of silently returning
+                # so partial pagination becomes a retryable job failure.
+                logger.error(
+                    "OKX %s funding fetch failed page %d for strategy %s: %s",
+                    endpoint_name, page_idx, strategy_id, exc,
                 )
-                return
+                raise
 
             if not isinstance(result, dict):
-                return
+                # M-0928: shape mismatch was a silent return; surface it
+                # as a searchable error so we know when OKX changes the
+                # response envelope (vs. the legit empty-data path below).
+                logger.error(
+                    "OKX %s returned unexpected shape for strategy %s: "
+                    "type=%s",
+                    endpoint_name, strategy_id, type(result).__name__,
+                )
+                raise RuntimeError(
+                    f"OKX {endpoint_name} returned non-dict response: "
+                    f"{type(result).__name__}"
+                )
             data = result.get("data", [])
-            if not data or not isinstance(data, list):
+            if not isinstance(data, list):
+                logger.error(
+                    "OKX %s 'data' field is non-list for strategy %s: "
+                    "type=%s",
+                    endpoint_name, strategy_id, type(data).__name__,
+                )
+                raise RuntimeError(
+                    f"OKX {endpoint_name} returned non-list 'data': "
+                    f"{type(data).__name__}"
+                )
+            if not data:
                 return
 
             for item in data:
@@ -331,57 +486,90 @@ async def fetch_funding_bybit(
     Uses cursor-based pagination.
     """
     rows: list[dict[str, Any]] = []
-    cursor = ""
 
-    for page_idx in range(MAX_PAGES):
-        params: dict[str, str] = {
-            "category": "linear",
-            "type": "SETTLEMENT",
-            "limit": str(BYBIT_PAGE_SIZE),
-        }
-        if since_ms is not None and not cursor:
-            params["startTime"] = str(since_ms)
-        if cursor:
-            params["cursor"] = cursor
+    # M-0921: Bybit perpetuals split into 'linear' (USDT-quoted) and
+    # 'inverse' (coin-margined like BTCUSD). The v5 API requires a
+    # separate call per category — hard-coding 'linear' silently dropped
+    # all funding for inverse-perp strategies. Iterate both.
+    for category in ("linear", "inverse"):
+        cursor = ""
+        for page_idx in range(MAX_PAGES):
+            params: dict[str, str] = {
+                "category": category,
+                "type": "SETTLEMENT",
+                "limit": str(BYBIT_PAGE_SIZE),
+            }
+            if since_ms is not None and not cursor:
+                params["startTime"] = str(since_ms)
+            if cursor:
+                params["cursor"] = cursor
 
-        try:
-            result = await exchange.private_get_v5_account_transaction_log(
-                params
-            )
-        except Exception as exc:
-            logger.warning(
-                "Bybit funding fetch failed page %d: %s", page_idx, exc
-            )
-            break
+            try:
+                result = await exchange.private_get_v5_account_transaction_log(
+                    params
+                )
+            except Exception as exc:
+                # C-0322 / H-1103: was warn+break (partial truncation).
+                # Re-raise so the worker classifies as transient-failed.
+                logger.error(
+                    "Bybit funding fetch failed page %d category=%s "
+                    "for strategy %s: %s",
+                    page_idx, category, strategy_id, exc,
+                )
+                raise
 
-        items = result.get("result", {}).get("list", [])
-        if not items:
-            break
+            items = result.get("result", {}).get("list", [])
+            if not items:
+                break
 
-        for item in items:
-            funding_raw = (
-                item.get("funding")
-                or item.get("change")
-                or item.get("cashFlow")
-                or "0"
-            )
-            row = _normalize_funding_row(
-                strategy_id=strategy_id,
-                exchange="bybit",
-                symbol=item.get("symbol", "") or "",
-                amount_raw=funding_raw,
-                ts_raw=item.get("transactionTime") or item.get("created_time"),
-                currency=item.get("currency", "USDT") or "USDT",
-                raw_item=item,
-            )
-            if row is None:
-                continue
-            rows.append(row)
+            for item in items:
+                # H-1098 / M-0922: previous chain was
+                # ``item.get('funding') or item.get('change') or item.get(
+                # 'cashFlow') or '0'`` which (1) silently inserted a zero
+                # placeholder when ALL three fields were missing
+                # (poison-pill vs. the ON CONFLICT match_key dedup) and
+                # (2) treated a legitimate numeric 0 as "missing" and
+                # fell through to the next field. Use an explicit None
+                # check so we distinguish "field missing entirely" from
+                # "field present but zero".
+                funding_raw: Any = None
+                for key in ("funding", "change", "cashFlow"):
+                    val = item.get(key)
+                    if val is not None:
+                        funding_raw = val
+                        break
+                if funding_raw is None:
+                    # All three amount fields absent → skip rather than
+                    # emit a zero placeholder that would block a future
+                    # corrected row.
+                    logger.warning(
+                        "Bybit transaction-log row has no funding/change/"
+                        "cashFlow field for strategy %s; skipping. "
+                        "symbol=%s id=%s",
+                        strategy_id,
+                        item.get("symbol"),
+                        item.get("id"),
+                    )
+                    continue
+                row = _normalize_funding_row(
+                    strategy_id=strategy_id,
+                    exchange="bybit",
+                    symbol=item.get("symbol", "") or "",
+                    amount_raw=funding_raw,
+                    ts_raw=(
+                        item.get("transactionTime") or item.get("created_time")
+                    ),
+                    currency=item.get("currency", "USDT") or "USDT",
+                    raw_item=item,
+                )
+                if row is None:
+                    continue
+                rows.append(row)
 
-        next_cursor = result.get("result", {}).get("nextPageCursor", "")
-        if not next_cursor:
-            break
-        cursor = next_cursor
+            next_cursor = result.get("result", {}).get("nextPageCursor", "")
+            if not next_cursor:
+                break
+            cursor = next_cursor
 
     logger.info(
         "bybit funding_fetch: %d rows for strategy %s", len(rows), strategy_id
