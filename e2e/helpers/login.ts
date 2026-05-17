@@ -18,8 +18,9 @@ export const LOGIN_REDIRECT_TIMEOUT_MS = 15000;
  * Log in via the /login form and wait for the post-login redirect.
  *
  * Selectors mirror the StrategyFilters / discovery-prefs-isolation
- * baseline. Redirect regex matches the three known post-login landing
- * routes (`/discovery`, `/strategies`, `/dashboard`).
+ * baseline. Redirect matching is pathname-anchored (see below) so a
+ * failed-login bounce to `/login?next=/discovery/...` does NOT satisfy
+ * the wait.
  */
 export async function loginAs(
   page: Page,
@@ -35,7 +36,17 @@ export async function loginAs(
   );
   await page.fill('input[type="password"]', password);
   await page.click('button:has-text("Sign in")');
-  await page.waitForURL(/\/(discovery|strategies|dashboard)/, {
-    timeout,
-  });
+  // Red-team RT-J05 (MED conf 8): anchor the redirect match to PATHNAME
+  // only. The previous unanchored regex `/\/(discovery|strategies|dashboard)/`
+  // matched any URL containing those substrings, including the
+  // failed-login bounce `/login?next=/discovery/crypto-sma` (the query
+  // string contains '/discovery'). On wrong-password / MFA-challenge /
+  // account-locked outcomes the wait would silently pass and downstream
+  // assertions would hit confusing RLS "no rows" errors instead of a
+  // direct auth-failure signal. The predicate form receives a URL object
+  // (per Playwright docs) so we can test the pathname directly.
+  await page.waitForURL(
+    (url) => /^\/(discovery|strategies|dashboard)(\/|$)/.test(url.pathname),
+    { timeout },
+  );
 }
