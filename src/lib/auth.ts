@@ -96,9 +96,23 @@ export type GetUserRolesResult =
  * on real DB faults rather than 403.
  *
  * M-0501 (audit-2026-05-07): wrapped with React `cache()` so duplicate
- * calls inside the SAME request with the same `(supabase, userId)`
- * pair share one DB round-trip. The cache is REQUEST-SCOPED — does NOT
- * memoize across requests, Lambda invocations, or sessions.
+ * calls inside the same logical scope with the same `(supabase, userId)`
+ * pair share one DB round-trip.
+ *
+ * Scoping caveat (audit-2026-05-07 red-team, MED conf 8): React
+ * `cache()`'s storage is initialized by the renderer's per-request
+ * `AsyncLocalStorage`. Inside a Route Handler (Next 16) — which
+ * executes as a serverless function and is NOT rendered — the
+ * storage's request-scope guarantee depends on Next 16 wiring an
+ * equivalent ALS around the route invocation. As of this commit we
+ * do NOT have a regression test that pins the cache to a single
+ * request boundary in Route Handlers; the existing tests pin
+ * (i) same-instance dedup inside a SINGLE call frame and (ii)
+ * cross-instance NON-dedup (so cross-user contamination is impossible
+ * while distinct SupabaseClient instances are passed). The
+ * load-bearing safety property is therefore "per-SupabaseClient-instance
+ * dedup" — NOT a request-scope claim — until the Next 16 Route Handler
+ * cache-scope semantics are pinned by an integration test.
  *
  * React `cache()` keys on argument IDENTITY (===), so a cache hit
  * requires the caller to pass the SAME SupabaseClient instance. The
@@ -110,8 +124,22 @@ export type GetUserRolesResult =
  * return two distinct clients and bypass this cache. New call sites
  * outside `withRole` must reuse a single client per request or accept
  * the duplicate round-trip. Audit reference: audit-2026-05-07 security
- * S2 (MED conf 8). Cross-request caching (JWT custom claims, Edge
- * Config) is tracked as a Sprint 7 follow-up — see ADR-0005.
+ * S2 (MED conf 8).
+ *
+ * DANGER ZONE (audit-2026-05-07 red-team): if a future refactor wraps
+ * `createClient()` with React.cache() (S2 fix option (a)) AND Route
+ * Handlers do NOT receive a fresh ALS per request, two requests inside
+ * a warm Lambda could share both the SupabaseClient identity AND the
+ * resolved role set — cross-user contamination becomes possible. Before
+ * landing such a refactor, add an integration test that pins request-scope
+ * isolation in Next 16 Route Handlers (the cache-component RFC is the
+ * forcing function for that property). Cross-request caching (JWT custom
+ * claims, Edge Config) is tracked as a Sprint 7 follow-up — see ADR-0005.
+ *
+ * TODO(audit-2026-05-07): replace this docstring's "single logical
+ * scope" hedge with a hard "REQUEST-SCOPED" claim once the Next 16
+ * cache-component RFC lands and the route-handler ALS guarantee is
+ * codified in an integration test in this suite.
  */
 export const getUserRolesResult = cache(async function getUserRolesResult(
   supabase: SupabaseClient,

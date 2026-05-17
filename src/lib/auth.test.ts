@@ -283,6 +283,41 @@ describe("getUserRolesResult — M-0501 React cache() dedup contract", () => {
     expect(userRolesQueryMock).toHaveBeenCalledTimes(1);
   });
 
+  it("red-team: same-instance dedup persists outside a React render tree (vitest has no request scope)", async () => {
+    // audit-2026-05-07 red-team (MED conf 8): React `cache()` is
+    // documented as request-scoped when used inside the React render
+    // tree. Vitest has no React render context; if the cache observed
+    // dedup HERE, then the scope is NOT request-bounded in any
+    // vitest-observable sense — it is per-process / per-SupabaseClient
+    // instance. This test PROVES that property by issuing two calls
+    // from two separate synthetic "request" frames (two
+    // userRolesQueryMock resets in between) and asserting the second
+    // call still hits the cache, because the cache lives outside any
+    // simulated request boundary in this environment.
+    //
+    // Operational implication (documented in the JSDoc on
+    // getUserRolesResult): the load-bearing safety property in
+    // Route Handlers is per-SupabaseClient-instance identity reuse,
+    // NOT cache `cache()`-driven request-scoping. If S2's option (a)
+    // is ever taken (wrapping `createClient()` with React.cache) AND
+    // Route Handlers do not receive a fresh AsyncLocalStorage per
+    // request, two requests in the same warm Lambda could share an
+    // identity-cached SupabaseClient and the role cache would leak.
+    // The "distinct instances do NOT dedupe" test below is the
+    // production-side mitigation; this test surfaces the underlying
+    // surface so a future regression here gets reviewer eyeballs.
+    userRolesQueryMock.mockResolvedValue({
+      data: [{ role: "admin" }],
+      error: null,
+    });
+    const supabase = makeFromOnly();
+    await getUserRolesResult(supabase, "u-cache-no-react-scope");
+    // No request-boundary teardown — vitest cannot simulate one.
+    // A second call with the same arguments still hits the cache.
+    await getUserRolesResult(supabase, "u-cache-no-react-scope");
+    expect(userRolesQueryMock).toHaveBeenCalledTimes(1);
+  });
+
   it("does NOT dedupe across DISTINCT supabase client instances (cache keys on identity)", async () => {
     // S2 (security MED conf 8): the cache hits only when the caller reuses
     // a single SupabaseClient per request. `withRole` guarantees this;
