@@ -34,8 +34,9 @@ logger = logging.getLogger(__name__)
 
 # Mode identifier — typed at every signature so a typo (`'personlized'`) is
 # a mypy error rather than a silent fall-through to the screening branch.
-# DB column has CHECK (mode IN ('personalized', 'screening')) at
-# supabase/migrations/011_perfect_match.sql:3082 — the two must agree.
+# DB column has CHECK (mode IN ('personalized', 'screening')) on
+# match_batches.mode at supabase/migrations/20260407164606_perfect_match.sql:84
+# — the two must agree.
 Mode = Literal["personalized", "screening"]
 
 
