@@ -98,3 +98,44 @@ scope:
   `secrets.TEST_SUPABASE_URL` env binding rather than the exact step
   name string. Lower priority — current test still works, the refactor
   is biased toward future renames.
+
+## Rebase phase (post-#191/#195)
+
+**Date:** 2026-05-17
+**Outcome:** Rebased + force-with-lease pushed; CI green; PR mergeable=CLEAN.
+
+### Sequence
+
+1. **First rebase attempt** — onto `origin/main` @ `8c1d71cc` (v0.22.40.26 — types.ts tightening from PR #191). Expected conflicts on VERSION + package.json + CHANGELOG.md. Resolved to v0.22.40.27, force-with-lease pushed `7b74f29e`.
+
+2. **PR #195 landed in parallel** — while the first push was settling, PR #195 merged claiming patch slot v0.22.40.27 (`701fa883`). GitHub kept reporting `mergeable: false / mergeable_state: dirty` for PR #194; `git merge-tree origin/main HEAD` confirmed renewed conflicts on the same files plus FIX-REPORT.md.
+
+3. **Second rebase** — onto `origin/main` @ `701fa883` (v0.22.40.27 — PR #195 retro follow-up on PR #189). Re-resolved:
+   - **VERSION + package.json**: bumped to `0.22.40.28` (claims clean slot above PR #195's .27).
+   - **CHANGELOG.md**: re-headered this PR's entry under `[0.22.40.28] - 2026-05-17`; preserved PR #195's `[0.22.40.27]` section verbatim.
+   - **FIX-REPORT.md** (root-level): both PRs added a top-level FIX-REPORT.md. Took `--theirs` (incoming PR #194 content); the upstream PR #195 FIX-REPORT.md was a transient working file with no semantic dependency on this PR's content.
+   - The original "bump v0.22.40.22" commit was auto-dropped by `git rebase` as "patch contents already upstream" — now consolidated into the single `chore: re-bump version after rebase against main (v0.22.40.28)` commit (`b05cba0c`).
+
+4. **Force-with-lease pushed** `b05cba0c`. CI run `25977671615` triggered automatically.
+
+### Final state
+
+- Branch tip: `b05cba0c chore: re-bump version after rebase against main (v0.22.40.28)`
+- Version: `0.22.40.28` in VERSION + package.json; CHANGELOG entry `[0.22.40.28] - 2026-05-17`
+- CI run `25977671615`: ALL checks green (frontend-lint, frontend-policy, frontend-test 1/2/3, frontend-typecheck, frontend-build, sql-tests, secret-scan, python, e2e, docs-link-check, Vercel deployment).
+- PR state: `gh pr view 194 --json mergeable,mergeStateStatus` -> `{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}`.
+- DID NOT merge / DID NOT /land-and-deploy — handoff back to orchestrator per task spec.
+
+### Commits ahead of origin/main (9)
+
+```
+b05cba0c chore: re-bump version after rebase against main (v0.22.40.28)
+295f9260 docs: FIX-REPORT for PR #188 retro follow-up
+0a4c6422 docs: CHANGELOG v0.22.40.22 entry — PR #188 retro follow-up
+9ab1c5d4 docs(ci-retro): expand runbook with regression-gate matrix + enforcement gaps (closes follow-up F11)
+f77c897a fix(ci-retro): add dependabot config for github-actions ecosystem (closes follow-up F9)
+c2c8d31e fix(ci-retro): assert seed-gated rebuild inlined real env into .next/ (closes follow-up D4)
+e8b5821f fix(ci-retro): tighten playwright-report gate to fail-closed allow-list (closes follow-up F6)
+44ee6598 fix(ci-retro): add regression tests for PR #188 invariants (closes follow-up F2+F3+F4+F8+F10)
+8bf3ae80 fix(ci-retro): broaden frontend-build secret check + tighten env-block regex (closes follow-up F1+F5)
+```
