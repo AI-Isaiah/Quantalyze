@@ -18,10 +18,13 @@
  */
 import { vi, type Mock } from "vitest";
 
-export type FetchMock = Mock<Parameters<typeof fetch>, ReturnType<typeof fetch>>;
+// Vitest's Mock<T> takes a single function-type argument. We pin the call
+// signature to typeof fetch so callers get autocomplete on .mockResolvedValue
+// / .mockRejectedValue / .mock.calls without resorting to `any`.
+export type FetchMock = Mock<typeof fetch>;
 
 export function installFetchMock(): FetchMock {
-  const mock = vi.fn().mockResolvedValue({ ok: true } as Response) as FetchMock;
+  const mock = vi.fn().mockResolvedValue({ ok: true } as Response) as unknown as FetchMock;
   vi.stubGlobal("fetch", mock as unknown as typeof fetch);
   return mock;
 }

@@ -159,8 +159,9 @@ describe("StarToggle", () => {
     });
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe(`/api/watchlist/${STRATEGY_ID}`);
-    expect(init.method).toBe("PUT");
-    expect(JSON.parse(init.body as string)).toEqual({ action: "add" });
+    expect(init).toBeDefined();
+    expect(init!.method).toBe("PUT");
+    expect(JSON.parse(init!.body as string)).toEqual({ action: "add" });
   });
 
   it("issues a PUT with body { action: 'remove' } when toggling off", async () => {
@@ -175,14 +176,15 @@ describe("StarToggle", () => {
     fireEvent.click(screen.getByRole("button"));
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     const init = fetchMock.mock.calls[0][1];
-    expect(JSON.parse(init.body as string)).toEqual({ action: "remove" });
+    expect(init).toBeDefined();
+    expect(JSON.parse(init!.body as string)).toEqual({ action: "remove" });
   });
 
   it("button is disabled while the transition is pending then re-enables", async () => {
     // Hold the fetch promise open so isPending stays true.
-    let resolveFetch: ((v: unknown) => void) | undefined;
+    let resolveFetch: ((v: Response) => void) | undefined;
     fetchMock.mockImplementation(
-      () => new Promise((resolve) => { resolveFetch = resolve; }),
+      () => new Promise<Response>((resolve) => { resolveFetch = resolve; }),
     );
 
     render(
@@ -203,7 +205,7 @@ describe("StarToggle", () => {
 
     // Release the fetch and let the transition flush.
     await act(async () => {
-      resolveFetch?.({ ok: true });
+      resolveFetch?.({ ok: true } as Response);
     });
     await waitFor(() => {
       expect(btn.hasAttribute("disabled")).toBe(false);
