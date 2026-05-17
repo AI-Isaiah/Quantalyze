@@ -760,3 +760,150 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
     expect(consumeDashboardRecoveryFlag()).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// audit-2026-05-07 — per-tile runtime validation
+// (M-0130 / M-0127 / M-1076 / M-0131 c8-9)
+// ---------------------------------------------------------------------------
+//
+// `JSON.parse(raw) as DashboardConfig` is a structural lie — only
+// layoutVersion + Array.isArray(tiles) + looksLikeLegacyTile were checked
+// before. A hand-edited / corrupted blob carrying `{k:42, w:'huge'}` or
+// `{k:'kpi', w:NaN}` flowed straight into the CSS-grid render. The
+// validator drops shape-invalid tiles and clamps `w` to 1..4 at the load
+// boundary so the load and write paths converge on a single invariant.
+
+describe("audit-2026-05-07 — per-tile validation on load", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    store.clear();
+    sessionStore.clear();
+    vi.clearAllMocks();
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it("drops tiles whose `k` is not a non-empty string, keeps salvageable tiles", () => {
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: [
+          { k: "correlation-matrix", w: 2 },
+          { k: 42, w: 2 }, // non-string k → drop
+          { k: "", w: 2 }, // empty k → drop
+          { k: "kpi-strip", w: 4 },
+        ],
+        timeframe: "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      }),
+    );
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+
+    expect(result.current.config.tiles.length).toBe(2);
+    expect(
+      result.current.config.tiles.every((t) => typeof t.k === "string" && t.k.length > 0),
+    ).toBe(true);
+    // The drop is surfaced via console.warn (regression-test guard for
+    // M-0131 — silent-drop was a documented anti-pattern).
+    expect(
+      warnSpy.mock.calls.some(
+        (c: unknown[]) =>
+          typeof c[0] === "string" && c[0].includes("dropped malformed tile"),
+      ),
+    ).toBe(true);
+  });
+
+  it("clamps non-1|2|3|4 widths to a valid value at load time (M-1076)", () => {
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: [
+          { k: "correlation-matrix", w: 7 }, // out of range high → clamp to 4
+          { k: "kpi-strip", w: -3 }, // out of range low → clamp to 1
+          { k: "rolling-sharpe", w: "wide" }, // wrong type → clamp default 2
+          { k: "tail-risk", w: Number.NaN }, // NaN → clamp default 2
+        ],
+        timeframe: "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      }),
+    );
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+
+    // Every persisted w MUST be in {1,2,3,4} regardless of what the blob said.
+    for (const t of result.current.config.tiles) {
+      expect([1, 2, 3, 4]).toContain(t.w);
+    }
+    const byKey = new Map(result.current.config.tiles.map((t) => [t.k, t.w]));
+    expect(byKey.get("correlation-matrix")).toBe(4);
+    expect(byKey.get("kpi-strip")).toBe(1);
+    // 'wide' / NaN both fall through to clampWidth's default branch (2).
+    expect(byKey.get("rolling-sharpe")).toBe(2);
+    expect(byKey.get("tail-risk")).toBe(2);
+  });
+
+  it("when every tile is unusable, resets to defaults AND sets the parse_failed recovery flag", () => {
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: [
+          { k: 1, w: 2 }, // numeric k
+          { k: null, w: 2 }, // null k
+          { notK: "missing", w: 2 }, // missing k entirely
+        ],
+        timeframe: "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      }),
+    );
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+
+    // Falls back to DEFAULT_LAYOUT (normalized) and flags the recovery so
+    // the dashboard can surface a one-time toast.
+    expect(result.current.config.tiles).toEqual(expectedDefaultLayout);
+    expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("parse_failed");
+  });
+
+  it("drops a tile whose `config` is the wrong shape (array / scalar) but keeps the rest", () => {
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: [
+          { k: "correlation-matrix", w: 2, config: ["not", "an", "object"] },
+          { k: "kpi-strip", w: 4, config: { foo: "bar" } },
+        ],
+        timeframe: "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      }),
+    );
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+
+    expect(result.current.config.tiles.length).toBe(2);
+    // The array-config is stripped; the object-config is preserved.
+    const corr = result.current.config.tiles.find((t) => t.k === "correlation-matrix");
+    const kpi = result.current.config.tiles.find((t) => t.k === "kpi-strip");
+    expect(corr?.config).toBeUndefined();
+    expect(kpi?.config).toEqual({ foo: "bar" });
+  });
+
+  it("coerces a non-string `timeframe` to the 'YTD' default at load time (M-0127)", () => {
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: [{ k: "kpi-strip", w: 4 }],
+        timeframe: null, // non-string — was silently passed through pre-fix
+        layoutVersion: LAYOUT_VERSION,
+      }),
+    );
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+
+    expect(result.current.config.timeframe).toBe("YTD");
+  });
+});

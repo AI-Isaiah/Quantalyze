@@ -327,6 +327,40 @@ function looksLikeLegacyTile(tile: unknown): boolean {
 }
 
 /**
+ * audit-2026-05-07 (M-0130 / M-0127 / M-1076 / M-0131 c8-9): per-tile runtime
+ * validation at the JSON.parse boundary. `JSON.parse(raw) as DashboardConfig`
+ * is a structural lie — a hand-edited or partially-truncated localStorage
+ * blob can ship `{k:42, w:'huge'}` / `{k:'kpi', w:NaN}` straight through to
+ * the CSS-grid render where `gridColumn: span NaN` is a silent layout bomb.
+ *
+ * Returns a sanitized TileConfig when the input is salvageable, or `null`
+ * when the tile is unusable (caller drops it). `w` is clamped via the same
+ * `clampWidth` helper that gates addWidget writes, so the load and write
+ * paths converge on a single source of truth for the 1..4 invariant.
+ *
+ * `config` is allowed to pass through as `Record<string, unknown>` if
+ * present and shape-valid; anything else is stripped so corrupted nested
+ * data can't poison widget renderers.
+ */
+function validateAndNormalizeTile(tile: unknown): TileConfig | null {
+  if (!tile || typeof tile !== "object") return null;
+  const t = tile as Record<string, unknown>;
+  if (typeof t.k !== "string" || t.k.length === 0) return null;
+  const k = resolveWidgetId(t.k);
+  const w = clampWidth(t.w);
+  const result: TileConfig = { k, w };
+  if (
+    t.config !== undefined &&
+    t.config !== null &&
+    typeof t.config === "object" &&
+    !Array.isArray(t.config)
+  ) {
+    result.config = t.config as Record<string, unknown>;
+  }
+  return result;
+}
+
+/**
  * Phase 09.1 Plan 05 / D-19 — normalize DEFAULT_LAYOUT short keys to their
  * canonical WIDGET_REGISTRY ids at import time. The registered tile shape
  * post-normalization carries `k = resolveWidgetId(originalKey)`, so the
@@ -414,12 +448,49 @@ function loadV2Config(): DashboardConfig {
       // surfaces "Connect a strategy / add a widget" so the user has
       // an obvious recovery path without us overriding their state.
       if (parsed.tiles.length === 0) {
-        return { ...parsed, tiles: [] };
+        return {
+          tiles: [],
+          timeframe: typeof parsed.timeframe === "string" ? parsed.timeframe : "YTD",
+          layoutVersion: LAYOUT_VERSION,
+        };
       }
-      // Phase 09.1 Plan 05 / D-19 — normalize any persisted short keys to
-      // WIDGET_REGISTRY ids on read, so even a hand-edited localStorage
-      // blob can't slip designer short keys through to the render path.
-      return { ...parsed, tiles: normalizeTilesToRegistryIds(parsed.tiles) };
+      // audit-2026-05-07 (M-0130 / M-0127 / M-1076 / M-0131) — validate
+      // each tile at the JSON.parse boundary. Drops shape-invalid tiles
+      // (non-string k, missing k) and folds resolveWidgetId + clampWidth
+      // into a single pass so the load path matches the write path's
+      // invariants. If every tile is unusable we fall back to defaults
+      // and flag the recovery; partial corruption keeps the salvageable
+      // tiles to avoid wiping the user's whole layout for one bad entry.
+      const validatedTiles: TileConfig[] = [];
+      let droppedCount = 0;
+      for (const raw of parsed.tiles) {
+        const normalized = validateAndNormalizeTile(raw);
+        if (normalized) validatedTiles.push(normalized);
+        else droppedCount += 1;
+      }
+      if (validatedTiles.length === 0) {
+        // Everything was unusable — treat as parse_failed so the dashboard
+        // surfaces the recovery toast rather than silently destroying state.
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useDashboardConfigV2] all persisted tiles failed validation; falling back to defaults",
+            { droppedCount },
+          );
+        }
+        setRecoveryFlag("parse_failed");
+        return defaultV2Config();
+      }
+      if (droppedCount > 0 && typeof console !== "undefined") {
+        console.warn(
+          "[useDashboardConfigV2] dropped malformed tile(s) during load",
+          { droppedCount, kept: validatedTiles.length },
+        );
+      }
+      return {
+        tiles: validatedTiles,
+        timeframe: typeof parsed.timeframe === "string" ? parsed.timeframe : "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      };
     }
   } catch (err) {
     // Failure modes here include corrupt JSON (truncated quota write,
