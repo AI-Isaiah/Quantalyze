@@ -3,7 +3,7 @@ import ccxt.async_support as ccxt
 import logging
 import os
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, TypedDict
 
 from services.ingestion._timestamps import coerce_to_aware_utc
@@ -652,7 +652,6 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
     try:
         if exchange.id == "okx":
             # OKX: fetch account bills (P&L history) with pagination for full history
-            from datetime import datetime, timezone, timedelta
             all_bills: list[dict] = []
 
             # Fetch bills across all instrument types, paginate for full history
@@ -820,7 +819,6 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         })
                 for entry in daily_pnl:
                     if entry["timestamp"] and str(entry["timestamp"]).isdigit():
-                        from datetime import datetime, timezone
                         ts = int(entry["timestamp"]) / 1000
                         entry["timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
             except Exception as exc:  # noqa: BLE001
@@ -927,7 +925,6 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 # success, we extend daily_pnl with the converted rows. On
                 # mid-loop failure, the except clause runs without mutating
                 # daily_pnl (preserving caller-visible uniformity).
-                from datetime import datetime, timezone
                 converted_rows: list[dict[str, Any]] = []
                 for entry in bybit_rows:
                     new_entry = dict(entry)
@@ -1297,22 +1294,18 @@ async def _fetch_raw_trades_okx(
                 # log so contract violations are visible.
                 pos_side_raw = fill.get("posSide")
                 position_direction: Literal["long", "short"] | None = None
-                if pos_side_raw is None or pos_side_raw == "":
-                    position_direction = None
-                elif pos_side_raw in _OKX_VALID_POS_SIDES:
+                if pos_side_raw in _OKX_VALID_POS_SIDES:
                     # Preserve raw_data alignment with prior behavior.
                     raw_data["posSide"] = pos_side_raw
-                    if pos_side_raw == "net":
-                        # 'net' is one-way mode — direction is implied by
-                        # side, not a long/short hedge flag.
-                        position_direction = None
-                    else:
+                    # 'net' is one-way mode — direction is implied by side,
+                    # not a long/short hedge flag; leave position_direction
+                    # as None. "long"/"short" assign through directly.
+                    if pos_side_raw != "net":
                         position_direction = pos_side_raw  # "long" | "short"
-                else:
+                elif pos_side_raw not in (None, ""):
                     logger.warning(
                         "invalid posSide value=%s, using None", pos_side_raw
                     )
-                    position_direction = None
 
                 fills.append(_make_fill_dict(
                     exchange="okx",
@@ -1802,8 +1795,6 @@ async def fetch_mark_prices(
         # single-shot list of mark prices, so we still fan out one request
         # per symbol — but in parallel. return_exceptions=True keeps a
         # single failed symbol from torpedoing the whole batch.
-        import asyncio
-
         async def _fetch_one(sym: str):
             try:
                 resp = await exchange.public_get_public_mark_price(
