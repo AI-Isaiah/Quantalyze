@@ -7,6 +7,11 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.57] - 2026-05-17
+
+**fix(ci): Phase 19 stability cron no longer fails hourly when pre-flip.** Symptom: the "Phase 19 stability — no legacy writes" workflow has been red every hour because `scripts/verify-no-legacy-writes.sh` exits 2 when `.planning/phase-19/stability-log.md` still has `flag_flipped_at: TODO` (i.e. BACKBONE-04 commit (b) hasn't shipped). The workflow header docstring AND the script header BOTH say "until PR-B ships, the workflow is a no-op gate" — but the bare `run: bash scripts/verify-no-legacy-writes.sh` propagated exit 2 as a failed step, not a no-op. Fix: wrap the `run:` step to capture the exit code, treat exit 2 as success-with-skip-log, and let every other non-zero exit (1, 3, 4, 5) keep failing as designed. Script contract unchanged (local operators still see exit 2 as "pre-flip"). Remove the wrapper branch once PR-B ships and stability-log.md records a real ISO-8601 `flag_flipped_at`.
+
+
 ## [0.22.40.56] - 2026-05-17
 
 **fix(strategies/edit): CSV-uploaded strategies no longer show the irrelevant Exchange API Keys panel.** Symptom (UAT 2026-05-17): editing UC244 FXDaily (a CSV-uploaded strategy) showed an Exchange API Keys side panel with an "Add Key" button — the manager had never connected an exchange, so the panel was both confusing AND an invitation to mis-connect a key to a CSV strategy. Root cause: `src/app/(dashboard)/strategies/[id]/edit/page.tsx` rendered `<ApiKeyManager>`, `<KeyPermissionBadge>`, and `<CsvUpload>` unconditionally — no branch on `strategy.source`. Fix: branch on `strategy.source === 'csv'`. CSV-sourced strategies render only `<CsvUpload>`; every other source (`legacy`, `wizard`, `admin_import`, `allocator_connected`, `okx`, `binance`, `bybit`) renders `<ApiKeyManager>` (+ `<KeyPermissionBadge>` when `api_key_id` is set).

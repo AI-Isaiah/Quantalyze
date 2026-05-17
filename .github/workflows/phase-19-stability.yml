@@ -52,7 +52,35 @@ jobs:
         # (flag_flipped_at=TODO in stability-log.md) until PR-B ships, at
         # which point the script enforces the zero-row contract and the
         # workflow fails the run on any detected legacy write.
-        run: bash scripts/verify-no-legacy-writes.sh
+        #
+        # 2026-05-17 noop-handling fix: the script exits 2 when
+        # flag_flipped_at is still `TODO` (pre-flip). Per this workflow's
+        # header docstring that condition is meant to be a NO-OP GATE,
+        # not a failed run — the cron is supposed to silently pass until
+        # BACKBONE-04 commit (b) records the flip timestamp. Pre-fix the
+        # bare `run: bash ...` propagated exit 2 as a failed step and
+        # surfaced the workflow as red on every hourly tick. We capture
+        # the exit code, short-circuit on 2 with a `skipping` log line,
+        # and let every other non-zero exit (1, 3, 4, 5) keep failing
+        # the step as designed. Remove this branch once PR-B ships and
+        # stability-log.md records a real ISO-8601 flag_flipped_at.
+        #
+        # Injection-safety note: no `github.event.*` inputs are used in
+        # this run block. The only inputs are the SUPABASE_* secrets
+        # (which never reach a shell expansion since the script reads
+        # them from the process env directly) and the literal
+        # SUPABASE_PROJECT_ID. The wrapping bash block runs a tracked
+        # repo script and a fixed `echo` literal.
+        run: |
+          set +e
+          bash scripts/verify-no-legacy-writes.sh
+          rc=$?
+          set -e
+          if [ "$rc" = "2" ]; then
+            echo "Phase 19 not yet active (flag_flipped_at = TODO); skipping legacy-write check."
+            exit 0
+          fi
+          exit "$rc"
         env:
           SUPABASE_PROJECT_ID: qmnijlgmdhviwzwfyzlc
           SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
