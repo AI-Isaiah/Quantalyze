@@ -45,7 +45,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 import ccxt
 from cryptography.fernet import InvalidToken
@@ -60,6 +60,7 @@ from services.exchange import (
     fetch_all_trades,
     fetch_raw_trades,
     fetch_usdt_balance,
+    get_and_clear_last_dq_flags,
     parse_since_ms,
 )
 from services.positions import fetch_positions, persist_position_snapshots
@@ -683,12 +684,29 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         # used to be log-only.
         phase2_failed = False
         phase2_error_message: str | None = None
+        # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — DQ flags surfaced by
+        # ``fetch_raw_trades`` (partial-symbol failures, page-cap truncation,
+        # fee-currency mismatch) MUST be drained immediately after the
+        # await per the contract in ``services.exchange``. Otherwise the
+        # ContextVar buffer leaks into the next call on the same task AND
+        # the strategy_analytics stamp loop below cannot merge them into
+        # ``data_quality_flags`` — silently dropping the very signals
+        # that batch added.
+        exchange_dq_flags: dict[str, Any] = {}
         if _RAW_TRADE_INGESTION_ENABLED:
             try:
                 raw_fills = await fetch_raw_trades(
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
                 )
+                exchange_dq_flags = get_and_clear_last_dq_flags()
             except Exception as e:
+                # Drain even on failure so a partial accumulation does not
+                # leak into the next call on this asyncio task. The drained
+                # value is intentionally discarded — Phase 2 failed
+                # end-to-end, so the H-0691 ``phase2_*`` stamp below is the
+                # canonical signal; mixing partial truncation flags would
+                # mislead operators.
+                get_and_clear_last_dq_flags()
                 # Phase 2 failure should NOT fail Phase 1.
                 # G12.B.1 typed ColdStartSymbolDiscoveryError still lands
                 # here intentionally — for sync_trades a cold-start
@@ -953,6 +971,19 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
 
         flag_was_set = existing_flags.get("phase2_fill_ingestion_failed") is True
 
+        # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — merge the DQ flags
+        # drained from ``fetch_raw_trades`` (binance_partial_symbols,
+        # sync_truncated_okx/_pages, sync_truncated_bybit/_pages,
+        # fee_currency_mismatch, fee_currency_mismatch_samples) into the
+        # row payload so they actually land on ``strategy_analytics``. We
+        # do a shallow merge (last-write-wins per key) — analytics_runner
+        # owns a disjoint key namespace (benchmark_*, sibling_kinds_*) so
+        # cross-clobber is not a concern. ``exchange_dq_flags`` is {} on
+        # the clean path (most common) so this is a no-op then.
+        exchange_dq_flags_present = bool(exchange_dq_flags)
+        if exchange_dq_flags_present:
+            existing_flags.update(exchange_dq_flags)
+
         if phase2_failed:
             existing_flags["phase2_fill_ingestion_failed"] = True
             existing_flags["phase2_error"] = phase2_error_message or "unknown"
@@ -982,6 +1013,11 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 existing_flags["phase2_recovered_at"] = (
                     datetime.now(timezone.utc).isoformat()
                 )
+                write_needed = True
+            elif exchange_dq_flags_present:
+                # Phase 2 clean but ``fetch_raw_trades`` surfaced a DQ
+                # signal (e.g. binance_partial_symbols, sync_truncated_*).
+                # Persist so the admin health card can see it.
                 write_needed = True
             else:
                 write_needed = False
@@ -1522,8 +1558,19 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
         exchange_fills = await fetch_raw_trades(
             ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
         )
+        # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — drain the per-task
+        # DQ buffer per the contract in ``services.exchange``. Reconcile
+        # is an informational, read-only diff; it does not own a
+        # strategy_analytics row to stamp these into, so we discard the
+        # value. The drain is still required so the buffer is not left
+        # populated for the NEXT call on this asyncio task (worker pools
+        # reuse tasks).
+        get_and_clear_last_dq_flags()
     except ccxt.RateLimitExceeded:
         await _stamp_429(ctx.supabase, ctx.key_row)
+        # Drain so a rate-limit-truncated partial accumulation does not
+        # leak forward on this asyncio task.
+        get_and_clear_last_dq_flags()
         raise
     except ColdStartSymbolDiscoveryError as exc:
         # Cross-PR specialist finding: ColdStartSymbolDiscoveryError
@@ -1548,6 +1595,10 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
             strategy_id, exc,
         )
         exchange_fills = []
+        # ColdStart raised before the per-exchange branch could populate
+        # the DQ buffer with any meaningful data, but drain defensively
+        # in case the entry-seam reset+partial work left a residue.
+        get_and_clear_last_dq_flags()
     finally:
         try:
             await ctx.exchange.close()

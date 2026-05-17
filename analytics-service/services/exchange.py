@@ -29,14 +29,16 @@ _LAST_DQ_FLAGS: ContextVar[dict[str, Any]] = ContextVar(
 
 def get_and_clear_last_dq_flags() -> dict[str, Any]:
     """Return the data_quality_flags accumulated during the most recent
-    ``fetch_raw_trades`` call on this asyncio task, then reset to an empty
-    dict.
+    ``fetch_raw_trades`` / ``fetch_daily_pnl`` call on this asyncio task,
+    then reset to an empty dict.
 
-    The flags are populated transiently inside ``fetch_raw_trades`` and
-    its per-exchange helpers; callers (job_worker, reconcile) MUST invoke
-    this immediately after the await to drain the value, otherwise a
-    subsequent call from the same task would see stale flags. Empty dict
-    on no-issue paths (most common case).
+    The flags are populated transiently inside ``fetch_raw_trades``,
+    ``fetch_daily_pnl``, and their per-exchange helpers; callers
+    (``services.job_worker.run_sync_trades_job`` and
+    ``run_reconcile_strategy_job``) MUST invoke this immediately after
+    the await to drain the value, otherwise a subsequent call from the
+    same task would see stale flags. Empty dict on no-issue paths (most
+    common case).
 
     Closed audit findings: C-0225 (partial-symbol failures),
     M-0663 (sync_truncated), H-0670 (fee_currency_mismatch).
@@ -600,6 +602,16 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
     this fetches account-level P&L history directly. Much faster and gives us
     exactly what we need for analytics: daily profit/loss.
     """
+    # Audit-2026-05-07 C-0319 / maintainability — same entry-seam reset as
+    # ``fetch_raw_trades``. ``fetch_daily_pnl`` writes the
+    # ``bybit_daily_pnl_includes_funding`` flag (Bybit branch); if a caller
+    # invokes ``fetch_raw_trades`` and then ``fetch_daily_pnl`` on the same
+    # asyncio task without an intervening drain, stale flags from the
+    # trades-sync (e.g. ``binance_partial_symbols``) would otherwise leak
+    # into the daily-PnL caller's view. Resetting here mirrors the
+    # per-call isolation contract documented in ``_LAST_DQ_FLAGS``.
+    _LAST_DQ_FLAGS.set({})
+
     daily_pnl: list[dict[str, Any]] = []
 
     try:
