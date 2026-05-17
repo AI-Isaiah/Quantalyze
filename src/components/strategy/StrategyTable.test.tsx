@@ -18,7 +18,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import { StrategyTable } from "./StrategyTable";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
-import { installFetchMock, restoreFetchMock, type FetchMock } from "@/test/helpers/fetch";
+import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
@@ -106,24 +106,18 @@ vi.mock("@/components/discovery/SimulateImpactButton", () => ({
 }));
 
 // StarToggle's fetch path is exercised exhaustively in StarToggle.test.tsx.
-// Stub global fetch so any internal call here is a no-op resolved promise
-// — the tests assert on watchedSet wiring, not on network behaviour.
-//
-// Audit-2026-05-07 H-0404 + M-0470: route through installFetchMock helper
-// so we get a typed surface (no `@ts-expect-error`) plus automatic
-// vi.unstubAllGlobals restore in afterEach. The legacy direct mutation
-// `globalThis.fetch = fetchMock` had no restore — the mock could leak
-// across files in the same run if pool isolation ever changed.
-let fetchMock: FetchMock;
+// Stub global fetch via installFetchMock so any internal call here is a
+// no-op resolved promise (audit H-0404 + M-0470: typed surface + automatic
+// restore replaces the legacy `@ts-expect-error` globalThis.fetch mutation
+// that had no afterEach unstub). None of the watchedSet tests assert
+// on the mock — they assert on rendered DOM state — so we don't need to
+// hold the reference.
 beforeEach(() => {
-  fetchMock = installFetchMock();
+  installFetchMock();
 });
 afterEach(() => {
   restoreFetchMock();
 });
-// fetchMock is referenced by the helper signature; the bound name keeps
-// the existing call sites that assert no network was fired.
-void fetchMock;
 
 // --- Tests ---------------------------------------------------------------
 
