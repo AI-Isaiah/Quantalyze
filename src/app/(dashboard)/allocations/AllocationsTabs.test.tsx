@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReadonlyURLSearchParams } from "next/navigation";
 
@@ -300,5 +300,343 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
         expect(url).toContain(`tab=${expectedNext.toLowerCase()}`);
       }
     }
+  });
+});
+
+// --- audit-2026-05-07 cluster P regression tests ----------------------------
+
+import { within } from "@testing-library/react";
+
+describe("AllocationsTabs — audit-2026-05-07 cluster P count badges (H-1189 / M-1042)", () => {
+  beforeEach(() => {
+    mockReplace.mockReset();
+    mockRefresh.mockReset();
+    mockPush.mockReset();
+    vi.mocked(useRouter).mockReturnValue({
+      replace: mockReplace,
+      refresh: mockRefresh,
+      push: mockPush,
+      back: vi.fn(),
+      forward: vi.fn(),
+      prefetch: vi.fn(),
+    } as unknown as ReturnType<typeof useRouter>);
+  });
+
+  it("renders count badges on Holdings (8) and Outcomes (4) tabs when arrays are populated", () => {
+    setSearchParams("");
+    const holdings = Array.from({ length: 8 }).map((_, i) => ({ id: `h-${i}` }));
+    const outcomes = Array.from({ length: 4 }).map((_, i) => ({ id: `o-${i}` }));
+    render(
+      <AllocationsTabs
+        {...STUB_PROPS}
+        holdingsSummary={holdings as unknown as MyAllocationDashboardPayload["holdingsSummary"]}
+        outcomes={outcomes as unknown as MyAllocationDashboardPayload["outcomes"]}
+      />,
+    );
+
+    const holdingsTab = screen.getByRole("tab", { name: /Holdings/ });
+    expect(within(holdingsTab).getByText("8")).toBeInTheDocument();
+
+    const outcomesTab = screen.getByRole("tab", { name: /Outcomes/ });
+    expect(within(outcomesTab).getByText("4")).toBeInTheDocument();
+  });
+
+  it("hides the badge when count is 0 — no '0' chip", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const holdingsTab = screen.getByRole("tab", { name: /Holdings/ });
+    expect(within(holdingsTab).queryByText("0")).toBeNull();
+    const outcomesTab = screen.getByRole("tab", { name: /Outcomes/ });
+    expect(within(outcomesTab).queryByText("0")).toBeNull();
+  });
+
+  it("renders '1' badge correctly (pins the >0 gate, not >=2)", () => {
+    setSearchParams("");
+    render(
+      <AllocationsTabs
+        {...STUB_PROPS}
+        holdingsSummary={[{ id: "h-only" }] as unknown as MyAllocationDashboardPayload["holdingsSummary"]}
+      />,
+    );
+    const holdingsTab = screen.getByRole("tab", { name: /Holdings/ });
+    expect(within(holdingsTab).getByText("1")).toBeInTheDocument();
+  });
+
+  it("undefined holdingsSummary does not crash and no badge renders", () => {
+    setSearchParams("");
+    render(
+      <AllocationsTabs
+        {...STUB_PROPS}
+        holdingsSummary={
+          undefined as unknown as MyAllocationDashboardPayload["holdingsSummary"]
+        }
+      />,
+    );
+    const holdingsTab = screen.getByRole("tab", { name: /Holdings/ });
+    expect(within(holdingsTab).queryByText(/\d/)).toBeNull();
+  });
+});
+
+describe("AllocationsTabs — audit-2026-05-07 cluster P Export chip (M-1041 / M-1044)", () => {
+  beforeEach(() => {
+    mockReplace.mockReset();
+    mockRefresh.mockReset();
+    mockPush.mockReset();
+    vi.mocked(useRouter).mockReturnValue({
+      replace: mockReplace,
+      refresh: mockRefresh,
+      push: mockPush,
+      back: vi.fn(),
+      forward: vi.fn(),
+      prefetch: vi.fn(),
+    } as unknown as ReturnType<typeof useRouter>);
+  });
+
+  it("Export chip from Risk tab navigates to Holdings (M-1041 regression)", async () => {
+    setSearchParams("tab=risk");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const exportChip = screen.getByRole("button", { name: "Export" });
+    fireEvent.click(exportChip);
+    expect(mockReplace).toHaveBeenCalled();
+    const url = String(mockReplace.mock.calls[0][0]);
+    expect(url).toContain("tab=holdings");
+  });
+
+  it("Export chip announces redirect via aria-live region (M-1044 silent-failure fix)", () => {
+    setSearchParams("tab=risk");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const liveRegion = screen.getByTestId("allocations-tabs-live-region");
+    expect(liveRegion.textContent).toBe("");
+    const exportChip = screen.getByRole("button", { name: "Export" });
+    fireEvent.click(exportChip);
+    expect(liveRegion.textContent).toContain("Export");
+    expect(liveRegion.textContent).toContain("Holdings");
+    // aria-live wiring keeps the message a polite announcement.
+    expect(liveRegion.getAttribute("aria-live")).toBe("polite");
+    expect(liveRegion.getAttribute("role")).toBe("status");
+  });
+
+  it("Export chip clicked from Holdings does NOT re-announce (no surface change)", () => {
+    setSearchParams("tab=holdings");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const liveRegion = screen.getByTestId("allocations-tabs-live-region");
+    const exportChip = screen.getByRole("button", { name: "Export" });
+    fireEvent.click(exportChip);
+    expect(liveRegion.textContent).toBe("");
+  });
+});
+
+describe("AllocationsTabs — audit-2026-05-07 cluster P silent-failure breadcrumbs (M-1045 / M-1046)", () => {
+  beforeEach(() => {
+    mockReplace.mockReset();
+    mockRefresh.mockReset();
+    mockPush.mockReset();
+    vi.mocked(useRouter).mockReturnValue({
+      replace: mockReplace,
+      refresh: mockRefresh,
+      push: mockPush,
+      back: vi.fn(),
+      forward: vi.fn(),
+      prefetch: vi.fn(),
+    } as unknown as ReturnType<typeof useRouter>);
+  });
+
+  it("?tab=outcoms (typo) emits warnAudit invalid_tab_fallback breadcrumb (M-1045)", () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    setSearchParams("tab=outcoms");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+
+    expect(warnSpy).toHaveBeenCalled();
+    const matching = warnSpy.mock.calls.find(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("[AllocationsTabs]") &&
+        c[0].includes("invalid_tab_fallback"),
+    );
+    expect(matching).toBeDefined();
+    expect(matching![1]).toEqual({ raw: "outcoms" });
+    warnSpy.mockRestore();
+  });
+
+  it("?tab=performance (known legacy alias) does NOT emit invalid_tab breadcrumb (M-1045)", () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    setSearchParams("tab=performance");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+
+    const matching = warnSpy.mock.calls.find(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("invalid_tab_fallback"),
+    );
+    expect(matching).toBeUndefined();
+    warnSpy.mockRestore();
+  });
+
+  it("no tab param does NOT emit invalid_tab breadcrumb (M-1045)", () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const matching = warnSpy.mock.calls.find(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("invalid_tab_fallback"),
+    );
+    expect(matching).toBeUndefined();
+    warnSpy.mockRestore();
+  });
+
+  it("router.refresh throw is caught and breadcrumbed (M-1046)", () => {
+    vi.useFakeTimers();
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    mockRefresh.mockImplementation(() => {
+      throw new Error("simulated route-handler 5xx");
+    });
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+
+    // Polling interval is 30s — advance past one tick.
+    vi.advanceTimersByTime(31_000);
+
+    expect(mockRefresh).toHaveBeenCalled();
+    const matching = warnSpy.mock.calls.find(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("router_refresh_failed"),
+    );
+    expect(matching).toBeDefined();
+    expect(
+      (matching![1] as { reason: string }).reason,
+    ).toContain("simulated route-handler 5xx");
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+});
+
+describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / H-0060)", () => {
+  // Vitest's jsdom environment here exposes a localStorage backend that
+  // doesn't permit direct setItem/spyOn (see `--localstorage-file` warning).
+  // Override `window.localStorage` with a vanilla in-memory shim so the
+  // C-0336 / H-1188 paths are exercisable. `Object.defineProperty` is the
+  // only setter that works on the read-only window.localStorage descriptor.
+  type StorageShim = {
+    map: Map<string, string>;
+    getItem: (k: string) => string | null;
+    setItem: (k: string, v: string) => void;
+    removeItem: (k: string) => void;
+    clear: () => void;
+    key: (i: number) => string | null;
+    readonly length: number;
+  };
+  let storageShim: StorageShim;
+  let originalLocalStorage: Storage | undefined;
+
+  beforeEach(() => {
+    mockReplace.mockReset();
+    mockRefresh.mockReset();
+    mockPush.mockReset();
+    vi.mocked(useRouter).mockReturnValue({
+      replace: mockReplace,
+      refresh: mockRefresh,
+      push: mockPush,
+      back: vi.fn(),
+      forward: vi.fn(),
+      prefetch: vi.fn(),
+    } as unknown as ReturnType<typeof useRouter>);
+
+    originalLocalStorage = window.localStorage;
+    const map = new Map<string, string>();
+    storageShim = {
+      map,
+      getItem: (k: string) => (map.has(k) ? (map.get(k) as string) : null),
+      setItem: (k: string, v: string) => {
+        map.set(k, String(v));
+      },
+      removeItem: (k: string) => {
+        map.delete(k);
+      },
+      clear: () => map.clear(),
+      key: (i: number) => Array.from(map.keys())[i] ?? null,
+      get length() {
+        return map.size;
+      },
+    };
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: storageShim,
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: originalLocalStorage,
+    });
+  });
+
+  it("localStorage getItem throw emits loadUiV2Flag_failed breadcrumb (C-0336)", () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    storageShim.getItem = () => {
+      throw new Error("SecurityError: storage blocked");
+    };
+
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+
+    const matching = warnSpy.mock.calls.find(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("loadUiV2Flag_failed"),
+    );
+    expect(matching).toBeDefined();
+    expect(
+      (matching![1] as { reason: string }).reason,
+    ).toContain("SecurityError");
+    warnSpy.mockRestore();
+  });
+
+  it("explicit allocations.ui_v2=false emits ui_v2_rollback_scope_scenario_only breadcrumb (H-1188)", () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    storageShim.setItem("allocations.ui_v2", "false");
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+
+    const matching = warnSpy.mock.calls.find(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("ui_v2_rollback_scope_scenario_only"),
+    );
+    expect(matching).toBeDefined();
+    expect(
+      (matching![1] as { affected_surface: string }).affected_surface,
+    ).toBe("scenario");
+    warnSpy.mockRestore();
+  });
+
+  it("no allocations.ui_v2 (default branch) does NOT emit rollback breadcrumb (H-1188)", () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+
+    const matching = warnSpy.mock.calls.find(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("ui_v2_rollback_scope_scenario_only"),
+    );
+    expect(matching).toBeUndefined();
+    warnSpy.mockRestore();
   });
 });
