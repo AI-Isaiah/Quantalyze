@@ -7,6 +7,18 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.50] - 2026-05-17
+
+**audit-2026-05-07 — admin deletion-requests close-out (cluster-K).** Multi-phase review on the admin `/api/admin/deletion-requests/[id]/approve` + `/reject` routes + `_shared.ts` + admin-self CSRF + rate-limit grep regression test. Squashes 14 prior commits on `fix/deletion-requests-admin-critical-2026-05-17` into 10 substantive commits onto current main (base v0.22.40.49).
+
+- **Cluster-K close-out** — approve route rate-limit + CAS (compare-and-swap) + audit-after-jwt path; reject route symmetric hardening (rate-limit + CAS rejected_at + TOCTOU); `_shared.ts` 7-check preamble unit-tested; `rpcErr` regression test pinning.
+- **Red-team** — approve CAS `rejected_at` + TOCTOU on optimistic-locking branch; reject route symmetric hardening to mirror approve.
+- **Maintainability + Simplify** — dropped dead void-after-return in `_shared.ts`; minor simplify on CAS `rowsAffected` check; extended admin-self test mock for two-predicate CAS.
+- **Comment-analyzer (Phase 6)** — dropped stale line range; accurate CAS-shape contract + KNOWN-GAP flag for the optimistic-locking branch that requires Postgres `RETURNING` to detect.
+
+No production behavior regressions; 10 substantive cherry-picks onto current main, one VERSION-conflict resolved by keeping main's bump pipeline.
+
+
 ## [0.22.40.49] - 2026-05-17
 
 **audit-2026-05-07 — analytics-service `match_engine` close-out (cluster-N).** Multi-phase review on `analytics-service/services/match_engine.py` + `routers/match.py` + tests + golden fixture. Squashes 16 prior commits on `fix/match-engine-service-critical-2026-05-17` into 12 substantive commits onto current main (base v0.22.40.48).

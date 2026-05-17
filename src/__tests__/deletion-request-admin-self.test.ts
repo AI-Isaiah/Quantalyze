@@ -56,7 +56,7 @@ function makeUserClient() {
       if (table === "user_app_roles") {
         return {
           select: () => ({
-            eq: (col1: string, val1: string) => {
+            eq: (_col1: string, val1: string) => {
               const bare = userRolesQueryMock(val1);
               // Support the chained `.eq("user_id", id).eq("role",
               // 'admin').limit(1)` shape used by hasAdminRoleRow.
@@ -72,7 +72,6 @@ function makeUserClient() {
                   },
                 }),
               });
-              void col1;
             },
           }),
         };
@@ -111,9 +110,39 @@ function makeAdminClient() {
             maybeSingle: () => requestLoadMock(),
           }),
         }),
-        update: (patch: unknown) => ({
-          eq: (_col: string, id: string) => requestUpdateMock(id, patch),
-        }),
+        // audit-2026-05-07 (Cluster-K C-0033/H-0217 + red-team-CRITICAL
+        // `cas-misses-rejected-at`): BOTH approve AND reject now run a
+        // two-predicate CAS UPDATE — `.update(...).eq("id", ...)
+        // .is("completed_at", null).is("rejected_at", null).select("id")`.
+        // The first `.is()` closes the duplicate-attribution race; the
+        // second closes the approve-vs-reject race. The stub mirrors
+        // BOTH links so any post-load CAS path completes; tests that
+        // simulate "another admin won the race" can flip an error onto
+        // `requestUpdateMock` to short-circuit the success return.
+        update: (patch: unknown) => {
+          const recordSimple = (id: string) => requestUpdateMock(id, patch);
+          return {
+            eq: (_col: string, id: string) => {
+              const simple = recordSimple(id);
+              return Object.assign(simple, {
+                is: (_completedCol: string, _completedNull: unknown) => ({
+                  is: (_rejectedCol: string, _rejectedNull: unknown) => ({
+                    select: async (_cols: string) => {
+                      const res = await Promise.resolve(simple);
+                      if ((res as { error?: unknown }).error) {
+                        return {
+                          data: null,
+                          error: (res as { error: unknown }).error,
+                        };
+                      }
+                      return { data: [{ id }], error: null };
+                    },
+                  }),
+                }),
+              });
+            },
+          };
+        },
       };
     },
     rpc: (fn: string, args: unknown) => {
@@ -133,6 +162,16 @@ vi.mock("@/lib/supabase/admin", () => ({
 
 vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: (req: unknown) => assertSameOriginMock(req),
+}));
+
+// Cluster-K C-0032: approve route now calls checkLimit at entry.
+// Stub it as always-pass so the self-action tests stay focused on
+// auth/preamble semantics; rate-limit-specific behavior is covered
+// by the dedicated approve route test.
+vi.mock("@/lib/ratelimit", () => ({
+  adminActionLimiter: {} as unknown,
+  checkLimit: async () => ({ success: true }) as const,
+  isRateLimitMisconfigured: () => false,
 }));
 
 vi.mock("next/server", async (orig) => {
