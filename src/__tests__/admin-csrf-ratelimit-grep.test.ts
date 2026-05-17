@@ -78,8 +78,8 @@ const RATE_LIMIT_EXEMPTIONS: Record<string, string> = {
     "out-of-scope for Lane 5 (review-fix P-followup); CSRF via assertSameOrigin only. Covers BOTH POST and DELETE handlers. Follow-up sweep should add adminActionLimiter to both.",
   "src/app/api/admin/match/kill-switch/route.ts":
     "out-of-scope for Lane 5; CSRF via assertSameOrigin only. Follow-up sweep should add adminActionLimiter.",
-  "src/app/api/admin/match/send-intro/route.ts":
-    "out-of-scope for Lane 5; CSRF via assertSameOrigin only. Follow-up sweep should add adminActionLimiter.",
+  // send-intro: rate-limit added in audit-2026-05-07 cluster-E fix-loop
+  // (v0.22.40.37) — exemption removed; route now binds adminActionLimiter.
   "src/app/api/admin/match/preferences/[allocator_id]/route.ts":
     "out-of-scope for Lane 5 (review-fix P-followup, C3 discovery); PUT handler — CSRF via assertSameOrigin only. Follow-up sweep should add adminActionLimiter.",
   "src/app/api/admin/deletion-requests/[id]/approve/route.ts":

@@ -240,6 +240,12 @@ export type AuditAction =
   // --- 7.1a pilot -------------------------------------------------------
   | "api_key.decrypt"
   | "intro.send"
+  // audit-2026-05-07 red-team conf-8 (admin/match/send-intro): emitted on the
+  // RPC error path so a 500-storm in `record_admin_introduction` is not
+  // forensically invisible. Metadata mirrors the `intro.send` success shape
+  // minus `contact_request_id` / `match_decision_id` (no row was written),
+  // plus the RPC error code. See ADR-0023 for the full taxonomy.
+  | "intro.send_failed"
   | "deletion.request.create"
   // --- 7.2 RBAC --------------------------------------------------------
   | "role.grant"
