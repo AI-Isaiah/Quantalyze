@@ -316,4 +316,84 @@ describe("GET /api/factsheet/[id]/pdf — URL origin + Cache-Control (Cluster L 
     expect(cc).not.toContain("private");
     expect(cc).not.toMatch(/^max-age=/);
   });
+
+  it("Specialist pr-test-analyzer (F5.1): Content-Disposition filename uses sanitizeFilename and embeds strategy name", async () => {
+    // Closes a coverage gap: the inline path did not assert the
+    // Content-Disposition header carried the sanitized filename. A future
+    // regression that drops the sanitizer (e.g. moves to raw template
+    // interpolation) would re-open header-injection risk via newline/quote
+    // in strategy.name. The mock above sets strategy.name = "Momentum
+    // Strategy" — the response header MUST reflect that, lowercased
+    // through sanitizeFilename (which preserves alpha+space).
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    const req = new NextRequest(
+      "https://quantalyze.example.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      { method: "GET" },
+    );
+    const res = await GET(req, { params });
+    expect(res.status).toBe(200);
+    const cd = res.headers.get("Content-Disposition");
+    expect(cd).toBe('inline; filename="Momentum Strategy-factsheet.pdf"');
+    // Header-injection guard: no CR/LF allowed in the disposition value.
+    expect(cd).not.toMatch(/[\r\n]/);
+  });
+});
+
+/**
+ * Cluster L specialist coverage (pr-test-analyzer F5.2) — analytics not
+ * computed must short-circuit with 400 BEFORE any puppeteer / browser
+ * launch. Previously uncovered.
+ */
+describe("GET /api/factsheet/[id]/pdf — analytics gating (Cluster L specialist F5.2)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.mocked(checkLimit).mockReset();
+    vi.mocked(checkLimit).mockResolvedValue({ success: true, retryAfter: 0 } as never);
+    vi.mocked(createAdminClient).mockReset();
+  });
+
+  afterEach(() => {
+    process.env = { ...ENV_BACKUP };
+  });
+
+  it("analytics computation_status !== 'complete' returns 400 without launching puppeteer", async () => {
+    // Strategy exists + published, analytics row present but still
+    // computing. The route must reject with 400 — and crucially, must
+    // NOT have called acquirePdfSlot/launchBrowser. The latter is the
+    // expensive side-effect we are guarding against; a previous
+    // regression dropping the gate would silently leak Chromium launches.
+    const single = vi.fn().mockResolvedValue({
+      data: {
+        id: "00000000-0000-0000-0000-000000000001",
+        name: "Pending Strategy",
+        status: "published",
+        strategy_analytics: [{ computation_status: "running" }],
+      },
+      error: null,
+    });
+    const eq2 = vi.fn().mockReturnValue({ single });
+    const eq1 = vi.fn().mockReturnValue({ eq: eq2 });
+    const select = vi.fn().mockReturnValue({ eq: eq1 });
+    const from = vi.fn().mockReturnValue({ select });
+    vi.mocked(createAdminClient).mockReturnValue({ from } as never);
+
+    const puppeteer = await import("@/lib/puppeteer");
+    vi.mocked(puppeteer.acquirePdfSlot).mockReset();
+    vi.mocked(puppeteer.launchBrowser).mockReset();
+
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    const req = new NextRequest(
+      "https://quantalyze.example.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      { method: "GET" },
+    );
+    const res = await GET(req, { params });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Analytics not computed");
+    // Critical side-effect anti-assertion: no Chromium boot.
+    expect(puppeteer.acquirePdfSlot).not.toHaveBeenCalled();
+    expect(puppeteer.launchBrowser).not.toHaveBeenCalled();
+  });
 });
