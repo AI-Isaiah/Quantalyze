@@ -7,6 +7,20 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.52] - 2026-05-17
+
+**audit-2026-05-07 — analytics-service `funding_fetch.py` close-out.** Multi-phase review on `analytics-service/services/funding_fetch.py` + tests. Squashes 11 prior commits on `fix/funding-fetch-service-critical-2026-05-17` into 7 substantive commits onto current main (base v0.22.40.51).
+
+- **Cluster close-out** — raise on silent-failure paths (was returning empty list); new tests cover the formerly-silent branches.
+- **Specialist** — narrowed types; dropped counter that was overcounting on partial fetches.
+- **Testing** — closed 4 at-threshold coverage gaps.
+- **Red-team** — closed last silent-truncation paths on partial-page Bybit responses.
+- **Simplify** — stale comment + unused import cleanup; post-redteam comment polish.
+- **Comment-analyzer (Phase 6)** — accuracy fixes in `funding_fetch.py` docstrings (paginator semantics).
+
+No production behavior regressions; 7 substantive cherry-picks onto current main, conflict-free.
+
+
 ## [0.22.40.51] - 2026-05-17
 
 **audit-2026-05-07 — analytics-service `exchange.py` close-out (cluster-I).** Multi-phase review on `analytics-service/services/exchange.py` + `job_worker.py` + tests. Squashes 12 prior commits on `fix/exchange-py-critical-2026-05-17` into 8 substantive commits onto current main (base v0.22.40.50).
