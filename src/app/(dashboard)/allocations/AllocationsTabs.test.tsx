@@ -412,13 +412,18 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P Export chip (M-1041 / M
     expect(url).toContain("tab=holdings");
   });
 
-  it("Export chip announces redirect via aria-live region (M-1044 silent-failure fix)", () => {
+  it("Export chip announces redirect via aria-live region (M-1044 silent-failure fix)", async () => {
     setSearchParams("tab=risk");
     render(<AllocationsTabs {...STUB_PROPS} />);
     const liveRegion = screen.getByTestId("allocations-tabs-live-region");
     expect(liveRegion.textContent).toBe("");
     const exportChip = screen.getByRole("button", { name: "Export" });
     fireEvent.click(exportChip);
+    // audit-2026-05-07 Phase-4 red-team: microtask-clear pattern means the
+    // live region first commits "" (forces React re-render even on repeat
+    // clicks) and the microtask sets the message. Flush microtasks so the
+    // human-readable string lands.
+    await Promise.resolve();
     expect(liveRegion.textContent).toContain("Export");
     expect(liveRegion.textContent).toContain("Holdings");
     // aria-live wiring keeps the message a polite announcement.
@@ -426,12 +431,13 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P Export chip (M-1041 / M
     expect(liveRegion.getAttribute("role")).toBe("status");
   });
 
-  it("Export chip clicked from Holdings does NOT re-announce (no surface change)", () => {
+  it("Export chip clicked from Holdings does NOT re-announce (no surface change)", async () => {
     setSearchParams("tab=holdings");
     render(<AllocationsTabs {...STUB_PROPS} />);
     const liveRegion = screen.getByTestId("allocations-tabs-live-region");
     const exportChip = screen.getByRole("button", { name: "Export" });
     fireEvent.click(exportChip);
+    await Promise.resolve();
     expect(liveRegion.textContent).toBe("");
   });
 });
@@ -774,8 +780,18 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 dispatchWidgetPicker (HIG
     window.addEventListener("allocations:open-widget-picker", evtSpy);
 
     try {
-      render(<AllocationsTabs {...STUB_PROPS} />);
+      const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
       fireEvent.click(screen.getByRole("button", { name: "Add widget" }));
+
+      // Real `router.replace` would update searchParams to "" (Overview).
+      // Simulate that URL transition + rerender so `activeTabRef.current`
+      // flips to "overview" before the deferred fire callbacks read it.
+      // audit-2026-05-07 Phase-4 red-team (HIGH conf 8): the deferred fire
+      // callback is now gated on activeTabRef === "overview" so the
+      // listener-presence check passes only when the URL change has
+      // landed.
+      setSearchParams("");
+      rerender(<AllocationsTabs {...STUB_PROPS} />);
 
       // Microtask queue flush — queueMicrotask resolves on the next
       // microtask checkpoint, which vi.advanceTimersByTime(0) reaches via
@@ -798,6 +814,76 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 dispatchWidgetPicker (HIG
       });
     } finally {
       window.removeEventListener("allocations:open-widget-picker", evtSpy);
+      vi.useRealTimers();
+    }
+  });
+
+  // audit-2026-05-07 Phase-4 red-team regression (HIGH conf 8).
+  // Sequence: user on Risk → Widget chip → user clicks another tab
+  // (Holdings) BEFORE the 100ms safety-net fires. The deferred fire
+  // callback now sees `activeTabRef.current !== "overview"`,
+  // AllocationDashboardV2 is unmounted, and the listener is gone.
+  // Pre-fix telemetry sold 'deferred' success while the picker silently
+  // never opened. The fix emits a `widget_picker_dispatch_no_listener`
+  // warnAudit breadcrumb + a follow-up `widget_viewed` telemetry event
+  // with status 'no_listener'. Pin both outputs.
+  it("Widget chip from Risk → user navigates to Holdings before 100ms → no_listener breadcrumb + telemetry", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    setSearchParams("tab=risk");
+    const evtSpy = vi.fn();
+    window.addEventListener("allocations:open-widget-picker", evtSpy);
+
+    try {
+      const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
+      fireEvent.click(screen.getByRole("button", { name: "Add widget" }));
+
+      // User clicks Holdings before either deferred callback runs — the
+      // URL transitions to ?tab=holdings, activeTabRef.current flips to
+      // "holdings", and Overview / its listener stay unmounted.
+      setSearchParams("tab=holdings");
+      rerender(<AllocationsTabs {...STUB_PROPS} />);
+
+      // Flush microtask + 100ms safety-net. Both deferred callbacks see
+      // activeTabRef.current === "holdings" and skip the dispatch.
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(100);
+
+      // No dispatch landed on the (absent) listener.
+      expect(evtSpy).not.toHaveBeenCalled();
+
+      // Breadcrumb fired with the current tab + source.
+      const matching = warnSpy.mock.calls.find(
+        (c) =>
+          typeof c[0] === "string" &&
+          c[0].includes("widget_picker_dispatch_no_listener"),
+      );
+      expect(matching).toBeDefined();
+      expect(matching![1]).toMatchObject({
+        currentTab: "holdings",
+        source: "tab_row_chip",
+      });
+
+      // Telemetry: 'deferred' on click + 'no_listener' follow-up — both
+      // events fire so PostHog distinguishes "delivered + opened" from
+      // "delivered but user re-navigated". The follow-up fires AT MOST
+      // ONCE even though both microtask + 100ms timer ran.
+      const noListenerCalls = mockTrackUsageEventClient.mock.calls.filter(
+        (c) =>
+          (c[1] as { widget_picker_dispatch?: string })
+            .widget_picker_dispatch === "no_listener",
+      );
+      expect(noListenerCalls).toHaveLength(1);
+      expect(noListenerCalls[0][1]).toMatchObject({
+        widget_picker_dispatch: "no_listener",
+        source: "tab_row_chip",
+        wasAlreadyOnOverview: false,
+      });
+    } finally {
+      window.removeEventListener("allocations:open-widget-picker", evtSpy);
+      warnSpy.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -954,33 +1040,72 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
     expect(opts).toEqual({ scroll: false });
   });
 
-  it("Export chip clicked twice from Risk → re-announces (Object.is bail-out pinned)", () => {
-    // The maintainability specialist flagged that setExportAnnouncement
-    // with the SAME string skips React's re-render → aria-live=polite
-    // does not re-announce identical content. The seq-suffix fix
-    // guarantees each click produces a non-equal string. This test pins
-    // the new contract so a regression that drops the suffix breaks here.
+  it("Export chip clicked twice from Risk → re-announces (microtask-clear pinned)", async () => {
+    // audit-2026-05-07 Phase-4 red-team (MED conf 8) — replaced the
+    // unbounded ZWS-suffix counter with a microtask-clear pattern. Each
+    // click sets the live region to "" first (forcing React to commit an
+    // empty render), then a queued microtask sets the human-readable
+    // message. The empty render between announcements is what triggers
+    // aria-live=polite to re-announce identical text — the suffix is no
+    // longer needed and (importantly) does not leak into clipboard reads.
+    // This test pins both halves: textContent reverts to "" right after
+    // click, then reverts to the message after the microtask flush.
     setSearchParams("tab=risk");
     render(<AllocationsTabs {...STUB_PROPS} />);
     const liveRegion = screen.getByTestId("allocations-tabs-live-region");
     const exportChip = screen.getByRole("button", { name: "Export" });
 
     fireEvent.click(exportChip);
+    // Synchronous-after-click: setExportAnnouncement("") landed; React
+    // committed an empty render before the microtask fires.
+    expect(liveRegion.textContent).toBe("");
+    await Promise.resolve();
     const firstText = liveRegion.textContent ?? "";
     expect(firstText).toContain("Export");
     expect(firstText).toContain("Holdings");
 
-    // Simulate user navigating back to Risk and clicking Export again
-    // from the same tab. The URL change is mocked, so re-set the params.
+    // Second click from the same tab — the empty-render gap fires again,
+    // so aria-live=polite re-announces even though the final text is
+    // identical to the first announcement.
     setSearchParams("tab=risk");
     fireEvent.click(exportChip);
+    expect(liveRegion.textContent).toBe("");
+    await Promise.resolve();
     const secondText = liveRegion.textContent ?? "";
-
-    // String identities must differ so aria-live=polite re-announces.
-    // The visible portion ("Export lives in the Holdings tab…") is the
-    // same; the zero-width-space suffix makes the strings non-equal.
-    expect(secondText).not.toBe(firstText);
     expect(secondText).toContain("Export");
     expect(secondText).toContain("Holdings");
+  });
+
+  // audit-2026-05-07 Phase-4 red-team regression (MED conf 8).
+  // Pins the clipboard-safety contract: the live region textContent must
+  // equal the human-readable string exactly — no U+200B (zero-width-space)
+  // sentinel characters from the previous suffix-based re-render trick.
+  // A user copying the announcement into a support ticket or trade-note
+  // form should NOT paste invisible characters.
+  it("Export live region textContent equals the human-readable string (no ZWS leak)", async () => {
+    setSearchParams("tab=risk");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const liveRegion = screen.getByTestId("allocations-tabs-live-region");
+    const exportChip = screen.getByRole("button", { name: "Export" });
+
+    fireEvent.click(exportChip);
+    await Promise.resolve();
+    const text = liveRegion.textContent ?? "";
+    expect(text).toBe(
+      "Export lives in the Holdings tab — taking you there.",
+    );
+    expect(text).not.toMatch(/​/);
+
+    // Click again — even after multiple announcements, the textContent
+    // stays equal to the single human-readable string. Pre-fix the suffix
+    // would have grown to two ZWS characters here.
+    setSearchParams("tab=risk");
+    fireEvent.click(exportChip);
+    await Promise.resolve();
+    const text2 = liveRegion.textContent ?? "";
+    expect(text2).toBe(
+      "Export lives in the Holdings tab — taking you there.",
+    );
+    expect(text2).not.toMatch(/​/);
   });
 });
