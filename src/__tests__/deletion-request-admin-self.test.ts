@@ -115,38 +115,29 @@ function makeAdminClient() {
         // two-predicate CAS UPDATE — `.update(...).eq("id", ...)
         // .is("completed_at", null).is("rejected_at", null).select("id")`.
         // The first `.is()` closes the duplicate-attribution race; the
-        // second closes the approve-vs-reject race.
-        //
-        // KNOWN-GAP (flagged by comment-analyzer phase-6, 2026-05-17):
-        // the chained stub below only supports a SINGLE `.is(...)` link
-        // before `.select(...)`. The actual route chain has TWO `.is()`
-        // calls. Tests in this file that exercise the post-load CAS path
-        // (the "proceeds when admin targets a DIFFERENT user" + the two
-        // audit-emission specs) currently fail with `admin.from(...)
-        // .update(...).eq(...).is(...).is is not a function`. The
-        // self-guard 403 specs still pass because their early-return
-        // happens before `.update()` is ever called.
-        //
-        // This is a TEST-MOCK BUG, NOT a route bug. Closing it requires
-        // adding a second `.is()` link to the stub below; that fix is
-        // out of comment-analyzer scope.
+        // second closes the approve-vs-reject race. The stub mirrors
+        // BOTH links so any post-load CAS path completes; tests that
+        // simulate "another admin won the race" can flip an error onto
+        // `requestUpdateMock` to short-circuit the success return.
         update: (patch: unknown) => {
           const recordSimple = (id: string) => requestUpdateMock(id, patch);
           return {
             eq: (_col: string, id: string) => {
               const simple = recordSimple(id);
               return Object.assign(simple, {
-                is: (_completedCol: string, _nullSentinel: unknown) => ({
-                  select: async (_cols: string) => {
-                    const res = await Promise.resolve(simple);
-                    if ((res as { error?: unknown }).error) {
-                      return {
-                        data: null,
-                        error: (res as { error: unknown }).error,
-                      };
-                    }
-                    return { data: [{ id }], error: null };
-                  },
+                is: (_completedCol: string, _completedNull: unknown) => ({
+                  is: (_rejectedCol: string, _rejectedNull: unknown) => ({
+                    select: async (_cols: string) => {
+                      const res = await Promise.resolve(simple);
+                      if ((res as { error?: unknown }).error) {
+                        return {
+                          data: null,
+                          error: (res as { error: unknown }).error,
+                        };
+                      }
+                      return { data: [{ id }], error: null };
+                    },
+                  }),
                 }),
               });
             },
