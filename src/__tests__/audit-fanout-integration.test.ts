@@ -768,9 +768,14 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
 });
 
 // ─── admin partner-import (admin.partner_import) ─────────────────────
-// /review follow-up (T4-I2): novel rollup pattern with synthesized UUID.
+// /review follow-up (T4-I2): rollup pattern with a per-call random UUID.
+// Pre-C-0056 the id was a deterministic sha256 slice of (partner_tag,
+// Date.now()) hand-stamped to a v4 shape; post-C-0056 it is a real
+// `crypto.randomUUID()` (RFC 4122 v4). Tests assert the variant nybble
+// is one of [89ab] so a regression back to the hand-stamped form (which
+// pinned the variant to '8') would fail loud.
 describe("POST /api/admin/partner-import — admin.partner_import emission", () => {
-  it("emits a rollup event with a synthesized UUID entity_id", async () => {
+  it("emits a rollup event with a crypto.randomUUID() entity_id", async () => {
     vi.resetModules();
 
     vi.doMock("@/lib/csrf", () => ({
@@ -803,11 +808,26 @@ describe("POST /api/admin/partner-import — admin.partner_import emission", () 
         from: (table: string) => {
           if (table === "profiles") {
             return {
+              // Audit-2026-05-07 R-0003: pre-check existing profiles
+              // via `.select('email, partner_tag').in('email', emails)`
+              // to detect cross-tenant partner_tag conflicts before any
+              // upsert. Mock returns no existing rows so the happy-path
+              // test sees no conflict and falls through to the upserts.
+              select: () => ({
+                in: () => Promise.resolve({ data: [], error: null }),
+              }),
               upsert: async () => ({ data: null, error: null }),
             };
           }
           if (table === "strategies") {
             return {
+              // Audit-2026-05-07 C-0055: pre-check existing strategies
+              // via `.select('user_id, name').in('user_id', ids)` to
+              // skip duplicates on re-run. Mock returns no existing
+              // rows so all strategies in the test CSV land fresh.
+              select: () => ({
+                in: () => Promise.resolve({ data: [], error: null }),
+              }),
               insert: async () => ({ data: null, error: null }),
             };
           }
@@ -855,9 +875,11 @@ describe("POST /api/admin/partner-import — admin.partner_import emission", () 
     const audit = findAudit("admin.partner_import");
     expect(audit).toBeDefined();
     expect(audit!.args.p_entity_type).toBe("partner_import");
-    // Synthesized UUID: v4-shaped string but deterministic sha256 slice.
+    // Audit-2026-05-07 C-0056: entity_id is now a real RFC 4122 v4
+    // UUID via crypto.randomUUID() — variant nybble is one of [89ab],
+    // version nybble pinned to '4'.
     expect(audit!.args.p_entity_id).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
     const meta = audit!.args.p_metadata as Record<string, unknown>;
     expect(meta.partner_tag).toBe("acme-pilot");

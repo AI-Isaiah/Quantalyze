@@ -1,19 +1,85 @@
 import { NextRequest, NextResponse } from "next/server";
-import crypto from "crypto";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { isValidPartnerTag } from "@/lib/partner";
-import { parseCsvWithSchema } from "@/lib/csv";
+import { parseCsv, parseCsvWithSchema } from "@/lib/csv";
 import { ensureAuthUser } from "@/lib/supabase/admin-users";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
-import { logAuditEvent } from "@/lib/audit";
+import { capAuditMetadata, logAuditEvent } from "@/lib/audit";
 import {
   validateDisplayName,
   ProfileValidationError,
 } from "@/lib/profile-validation";
 import type { DisclosureTier } from "@/lib/types";
+
+/**
+ * Audit-2026-05-07 red-team R-0003 (HIGH c7): cross-tenant profile
+ * overwrite. The pre-fix phase-1 / phase-3 upserts unconditionally
+ * rebranded an existing user's profile (partner_tag, role, allocator_
+ * status, display_name) and allocator_preferences (mandate_archetype,
+ * target_ticket_size_usd). An admin pasting a CSV containing a real
+ * existing user (deliberately or by mistake) would silently take over
+ * the row. The trust boundary "admin pastes a CSV" is broader than
+ * "admin types a tenant model" — the CSV input must be validated
+ * against existing tenant ownership before mutating profiles.
+ *
+ * Thrown when an import row resolves to an existing profile whose
+ * partner_tag is set and differs from the import's partner_tag. The
+ * catch path maps it to a 400 with the conflicting rows enumerated.
+ */
+class PartnerTagConflictError extends Error {
+  readonly conflicts: Array<{
+    email: string;
+    existing_tag: string;
+    attempted_tag: string;
+  }>;
+  constructor(
+    conflicts: Array<{
+      email: string;
+      existing_tag: string;
+      attempted_tag: string;
+    }>,
+  ) {
+    super(
+      `partner_tag conflict on ${conflicts.length} row(s) — refusing to overwrite existing tenant ownership`,
+    );
+    this.name = "PartnerTagConflictError";
+    this.conflicts = conflicts;
+  }
+}
+
+/**
+ * Audit-2026-05-07 red-team R-0004 (MED c8): non-deterministic
+ * disclosure_tier conflict. When the same (manager_email, strategy_name)
+ * pair appears with conflicting tier values in a single CSV (Excel-paste
+ * mistake), exactly one row landed and which tier "won" depended on
+ * which concurrent worker picked it up first — institutional vs.
+ * exploratory differ on whether demo/match masks the row. Fail loud
+ * (rule 12) by enumerating the conflicts and returning a 400 with the
+ * row pairs surfaced so the admin can re-paste deterministically.
+ */
+class StrategyTierConflictError extends Error {
+  readonly conflicts: Array<{
+    manager_email: string;
+    strategy_name: string;
+    tiers: DisclosureTier[];
+  }>;
+  constructor(
+    conflicts: Array<{
+      manager_email: string;
+      strategy_name: string;
+      tiers: DisclosureTier[];
+    }>,
+  ) {
+    super(
+      `disclosure_tier conflict on ${conflicts.length} (manager,strategy) pair(s) — re-paste with consistent tiers per row`,
+    );
+    this.name = "StrategyTierConflictError";
+    this.conflicts = conflicts;
+  }
+}
 
 // POST /api/admin/partner-import
 //
@@ -43,8 +109,28 @@ interface AllocatorRow {
   ticket_size_usd: number;
 }
 
-function parseManagerRows(raw: string): ManagerRow[] {
-  return parseCsvWithSchema(
+/**
+ * Audit-2026-05-07 H-0239 (red-team c7): row-count surface.
+ *
+ * `parseCsv` splits on `\n` BEFORE quote-handling (see src/lib/csv.ts
+ * line 15), so a multi-line quoted strategy_name (copy-pasted from
+ * Excel) silently corrupts into two malformed rows that both fall
+ * through the `if (!row.manager_email) return null` filter. The
+ * operator sees N strategies imported when the CSV held N+1 — silent
+ * drop. We surface a raw-vs-parsed delta to the caller so the admin
+ * can spot the discrepancy and re-paste with quotes stripped.
+ *
+ * The helpers return both the parsed rows AND a raw-row count so the
+ * route can compute `raw_rows_skipped = raw_rows_parsed - mapped`.
+ */
+interface ParsedCsv<T> {
+  rows: T[];
+  raw_rows_parsed: number;
+}
+
+function parseManagerRows(raw: string): ParsedCsv<ManagerRow> {
+  const rawCount = countDataRows(raw);
+  const rows = parseCsvWithSchema(
     raw,
     ["manager_email", "strategy_name", "disclosure_tier"],
     (row) => {
@@ -59,10 +145,12 @@ function parseManagerRows(raw: string): ManagerRow[] {
       };
     },
   );
+  return { rows, raw_rows_parsed: rawCount };
 }
 
-function parseAllocatorRows(raw: string): AllocatorRow[] {
-  return parseCsvWithSchema(
+function parseAllocatorRows(raw: string): ParsedCsv<AllocatorRow> {
+  const rawCount = countDataRows(raw);
+  const rows = parseCsvWithSchema(
     raw,
     ["allocator_email", "mandate_archetype", "ticket_size_usd"],
     (row) => {
@@ -77,6 +165,30 @@ function parseAllocatorRows(raw: string): AllocatorRow[] {
       };
     },
   );
+  return { rows, raw_rows_parsed: rawCount };
+}
+
+/**
+ * Count the data-row lines in a raw CSV payload (header row excluded,
+ * trailing empty lines excluded). Used for the H-0239 raw-vs-parsed
+ * delta surface — the count uses the same `parseCsv` splitter the
+ * downstream parser uses so the delta reflects what the parser
+ * actually saw (any multi-line-quote silent split is included in the
+ * raw count and will surface as a parsed-vs-raw mismatch).
+ */
+function countDataRows(raw: string): number {
+  const rows = parseCsv(raw);
+  if (rows.length <= 1) return 0;
+  // Exclude header. Empty rows (length 0) are already dropped by
+  // parseCsvWithSchema; we mirror that here so the delta only reflects
+  // rows the schema mapper SAW and chose to drop, not raw blank lines.
+  let nonEmpty = 0;
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i].length > 0 && rows[i].some((cell) => cell.trim() !== "")) {
+      nonEmpty += 1;
+    }
+  }
+  return nonEmpty;
 }
 
 function displayNameFromEmail(email: string): string {
@@ -84,6 +196,44 @@ function displayNameFromEmail(email: string): string {
   return local
     .replace(/[._-]+/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Audit-2026-05-07 maintainability (Phase-2 fix): DRY the partner-import
+ * rollup-audit metadata between the catch path and the success path so a
+ * future field add/rename can't drift between forensic surfaces. Returns
+ * the shared shape; the caller flips `partial_completion` and optionally
+ * passes `error_message` on the catch side.
+ */
+interface PartnerImportMetadataInput {
+  partner_tag: string;
+  managers_created: number;
+  strategies_created: number;
+  strategies_skipped_existing: number;
+  allocators_created: number;
+  managers_rows_skipped: number;
+  allocators_rows_skipped: number;
+  partial_completion: boolean;
+  error_message?: string;
+}
+
+function buildPartnerImportMetadata(
+  input: PartnerImportMetadataInput,
+): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {
+    partner_tag: input.partner_tag,
+    managers_created: input.managers_created,
+    strategies_created: input.strategies_created,
+    strategies_skipped_existing: input.strategies_skipped_existing,
+    allocators_created: input.allocators_created,
+    managers_rows_skipped: input.managers_rows_skipped,
+    allocators_rows_skipped: input.allocators_rows_skipped,
+    partial_completion: input.partial_completion,
+  };
+  if (input.error_message !== undefined) {
+    metadata.error_message = input.error_message;
+  }
+  return metadata;
 }
 
 /**
@@ -196,9 +346,15 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   let managers: ManagerRow[];
   let allocators: AllocatorRow[];
+  let managersRawCount = 0;
+  let allocatorsRawCount = 0;
   try {
-    managers = parseManagerRows(managersCsv);
-    allocators = parseAllocatorRows(allocatorsCsv);
+    const managersParsed = parseManagerRows(managersCsv);
+    const allocatorsParsed = parseAllocatorRows(allocatorsCsv);
+    managers = managersParsed.rows;
+    allocators = allocatorsParsed.rows;
+    managersRawCount = managersParsed.raw_rows_parsed;
+    allocatorsRawCount = allocatorsParsed.raw_rows_parsed;
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Invalid CSV" },
@@ -212,6 +368,60 @@ export async function POST(request: Request): Promise<NextResponse> {
       { status: 400 },
     );
   }
+
+  // Audit-2026-05-07 red-team R-0004 (MED c8): reject CSVs that contain
+  // conflicting disclosure_tier values for the same (manager_email,
+  // strategy_name) pair BEFORE the import phases run. The downstream
+  // intra-batch dedup (existingStrategyKeys add-after-check) would land
+  // exactly one row but the surviving tier was non-deterministic — and
+  // the tier governs whether demo/match masks the row. Fail loud with
+  // the conflicting pairs enumerated so the admin can re-paste cleanly.
+  {
+    const tiersByKey = new Map<string, Set<DisclosureTier>>();
+    for (const row of managers) {
+      const key = `${row.manager_email}::${row.strategy_name}`;
+      const set = tiersByKey.get(key) ?? new Set<DisclosureTier>();
+      set.add(row.disclosure_tier);
+      tiersByKey.set(key, set);
+    }
+    const tierConflicts: Array<{
+      manager_email: string;
+      strategy_name: string;
+      tiers: DisclosureTier[];
+    }> = [];
+    for (const [key, tiers] of tiersByKey) {
+      if (tiers.size > 1) {
+        const [manager_email, strategy_name] = key.split("::");
+        tierConflicts.push({
+          manager_email,
+          strategy_name,
+          tiers: Array.from(tiers),
+        });
+      }
+    }
+    if (tierConflicts.length > 0) {
+      return NextResponse.json(
+        {
+          error: new StrategyTierConflictError(tierConflicts).message,
+          conflicts: tierConflicts,
+          code: "strategy_tier_conflict",
+        },
+        { status: 400 },
+      );
+    }
+  }
+
+  // Audit-2026-05-07 H-0239 (red-team c7): raw-vs-parsed row-count
+  // delta. parseCsv splits on `\n` BEFORE quote-handling so a multi-
+  // line quoted field (Excel copy-paste of a strategy name with an
+  // embedded newline) silently splits into two malformed rows that
+  // both fall through the schema validator. Surface the delta so the
+  // admin can spot the discrepancy and re-paste with newlines stripped.
+  const managersRowsSkipped = Math.max(0, managersRawCount - managers.length);
+  const allocatorsRowsSkipped = Math.max(
+    0,
+    allocatorsRawCount - allocators.length,
+  );
 
   const admin = createAdminClient();
   let managers_created = 0;
@@ -237,7 +447,73 @@ export async function POST(request: Request): Promise<NextResponse> {
   // down to ~4 batches of 5 concurrent RTTs.
   const IMPORT_CONCURRENCY = 5;
 
+  // Audit-2026-05-07 C-0056 (security c6): use crypto.randomUUID() for
+  // the import run identifier instead of a hand-stamped sha256(partner_tag
+  // + Date.now()) UUID-shaped hex. The pre-fix value was DETERMINISTIC
+  // (same partner_tag + same ms → same id), guessable, and not RFC 4122
+  // v4. The audit anchor only needs uniqueness, not content-addressability;
+  // the partner_tag + timestamp already ride in metadata where ops can grep
+  // them.
+  //
+  // Also audit-2026-05-07 C-0054 (red-team c6): allocating the importUuid
+  // BEFORE the import phases (not after) lets us emit an audit row on
+  // partial-completion paths — the catch branch below now references this
+  // same anchor.
+  const importUuid = crypto.randomUUID();
+
+  // Track skipped duplicate strategies for the response/audit (C-0055).
+  let strategies_skipped_existing = 0;
+
   try {
+    // Audit-2026-05-07 red-team R-0003 (HIGH c7): cross-tenant profile
+    // overwrite pre-check. Look up existing profiles by email BEFORE
+    // any phase-1 / phase-3 upsert. If a profile row already exists AND
+    // its partner_tag is set AND differs from the import's partner_tag,
+    // bail out with a 400 enumerating the conflicting rows so the admin
+    // sees the takeover attempt rather than silently rebranding real
+    // tenants. The check uses email (not user_id) because that's the
+    // input the operator types — and the existing profiles already have
+    // a 1-1 (id, email) mapping via auth.users.
+    const allEmails = Array.from(
+      new Set<string>([
+        ...uniqueManagerEmails.map((r) => r.manager_email),
+        ...dedupedAllocators.map((r) => r.allocator_email),
+      ]),
+    );
+    if (allEmails.length > 0) {
+      const { data: existingProfiles, error: profilesErr } = await admin
+        .from("profiles")
+        .select("email, partner_tag")
+        .in("email", allEmails);
+      if (profilesErr) throw profilesErr;
+      const partnerTagConflicts: Array<{
+        email: string;
+        existing_tag: string;
+        attempted_tag: string;
+      }> = [];
+      for (const existing of existingProfiles ?? []) {
+        const { partner_tag: existingTag, email: existingEmail } = existing as {
+          partner_tag?: string | null;
+          email?: string;
+        };
+        if (
+          typeof existingTag === "string" &&
+          existingTag.length > 0 &&
+          existingTag !== partner_tag &&
+          typeof existingEmail === "string"
+        ) {
+          partnerTagConflicts.push({
+            email: existingEmail,
+            existing_tag: existingTag,
+            attempted_tag: partner_tag,
+          });
+        }
+      }
+      if (partnerTagConflicts.length > 0) {
+        throw new PartnerTagConflictError(partnerTagConflicts);
+      }
+    }
+
     // Phase 1: one auth user + profile per distinct manager email.
     const managerIdByEmail = new Map<string, string>();
     await mapConcurrent(uniqueManagerEmails, IMPORT_CONCURRENCY, async (row) => {
@@ -273,6 +549,29 @@ export async function POST(request: Request): Promise<NextResponse> {
       managers_created += 1;
     });
 
+    // Audit-2026-05-07 C-0055 (red-team c9): no UNIQUE(user_id, name)
+    // constraint on strategies — a re-run of partner-import (network
+    // glitch, double-click, retry after partial fail) used to duplicate
+    // every strategy row. The comment promised idempotence; reality was
+    // duplication. Pre-fetch existing (user_id, name) pairs for the
+    // resolved manager set and skip rows that already exist. A
+    // separate migration adding UNIQUE(user_id, name) is the proper
+    // fix but is out-of-scope for this PR (it would require a partner-
+    // import data backfill to dedupe pre-existing rows first); the
+    // pre-check closes the demo-day re-run window in the meantime.
+    const managerUserIds = Array.from(new Set(managerIdByEmail.values()));
+    const existingStrategyKeys = new Set<string>();
+    if (managerUserIds.length > 0) {
+      const { data: existingStrategies, error: existingErr } = await admin
+        .from("strategies")
+        .select("user_id, name")
+        .in("user_id", managerUserIds);
+      if (existingErr) throw existingErr;
+      for (const row of existingStrategies ?? []) {
+        existingStrategyKeys.add(`${row.user_id}::${row.name}`);
+      }
+    }
+
     // Phase 2: insert EVERY strategy row, including multi-strategy managers.
     // Uses the pre-resolved user id map so there's no auth race.
     await mapConcurrent(managers, IMPORT_CONCURRENCY, async (row) => {
@@ -282,6 +581,15 @@ export async function POST(request: Request): Promise<NextResponse> {
           `partner-import: missing user id for manager ${row.manager_email} (phase 1 should have resolved it)`,
         );
       }
+      const key = `${userId}::${row.strategy_name}`;
+      if (existingStrategyKeys.has(key)) {
+        strategies_skipped_existing += 1;
+        return;
+      }
+      // Track the key so concurrent workers in this same batch don't
+      // also try to insert the same (user_id, name) pair (multi-strategy
+      // CSV with duplicated strategy_name rows for the same manager).
+      existingStrategyKeys.add(key);
       // @audit-skip: bulk-import row; rolled up into admin.partner_import.
       const { error: strategyErr } = await admin.from("strategies").insert({
         user_id: userId,
@@ -340,6 +648,86 @@ export async function POST(request: Request): Promise<NextResponse> {
     });
   } catch (err) {
     console.error("[api/admin/partner-import] failed:", err);
+
+    // Extract message from Error / Supabase PostgrestError-like objects
+    // / plain strings uniformly. Supabase's row-error shape is
+    // `{ message, code, details, hint }` — NOT an Error subclass — so
+    // `err instanceof Error` is false. Reading `.message` from the
+    // shape produces a useful audit metadata value rather than
+    // `[object Object]`.
+    const errorMessage =
+      err instanceof Error
+        ? err.message
+        : err && typeof err === "object" && "message" in err
+          ? String((err as { message: unknown }).message)
+          : String(err);
+
+    // Audit-2026-05-07 C-0053 / C-0054 (red-team c8 / c6): partial-
+    // completion auditing. The pre-fix audit emission lived AFTER the
+    // try block, so on partial completion (phase 1 succeeded, phase 2
+    // threw mid-batch) the audit_log was silent even though real Auth
+    // users + profiles were created. Emit a rollup audit row here with
+    // `partial_completion: true` and the failed-phase metadata so the
+    // forensic trail captures the actual DB state.
+    //
+    // Audit-2026-05-07 maintainability (Phase-2): derive partial_completion
+    // from observed state rather than emitting it unconditionally. A pure
+    // bad-input rejection (`ProfileValidationError` on the FIRST row, or
+    // a phase-1 throw before any counter advanced) leaves no persisted
+    // rows, so emitting `partial_completion: true` would conflate "input
+    // rejected" with "phase-2 partial persistence" and lose the C-0053 /
+    // C-0054 forensic signal. Skip the catch-path audit entirely when no
+    // counters advanced; the C-0053 / C-0054 anchor requires real
+    // persistence to fire.
+    const observedPartialCompletion =
+      managers_created > 0 ||
+      strategies_created > 0 ||
+      allocators_created > 0;
+    if (observedPartialCompletion) {
+      logAuditEvent(supabase, {
+        action: "admin.partner_import",
+        entity_type: "partner_import",
+        entity_id: importUuid,
+        metadata: capAuditMetadata(
+          buildPartnerImportMetadata({
+            partner_tag,
+            managers_created,
+            strategies_created,
+            strategies_skipped_existing,
+            allocators_created,
+            managers_rows_skipped: managersRowsSkipped,
+            allocators_rows_skipped: allocatorsRowsSkipped,
+            partial_completion: true,
+            error_message: errorMessage,
+          }),
+        ),
+      });
+    }
+
+    // Audit-2026-05-07 red-team R-0003 (HIGH c7): PartnerTagConflictError
+    // is a bad-input signal (the CSV would rebrand existing tenants), NOT
+    // a server fault. Return 400 with the enumerated conflicts so the
+    // admin UI can show "row X belongs to partner Y; remove or merge".
+    // The catch path is preferred over an early return so the audit-log
+    // signal lands automatically when (and only when) earlier phase
+    // counters advanced.
+    if (err instanceof PartnerTagConflictError) {
+      return NextResponse.json(
+        {
+          error: err.message,
+          conflicts: err.conflicts,
+          code: "partner_tag_conflict",
+          managers_created,
+          strategies_created,
+          strategies_skipped_existing,
+          allocators_created,
+          managers_rows_skipped: managersRowsSkipped,
+          allocators_rows_skipped: allocatorsRowsSkipped,
+        },
+        { status: 400 },
+      );
+    }
+
     // Audit-2026-05-07 P325: ProfileValidationError is a bad-input signal
     // (CSV row contained CR/LF/NUL or an over-long display_name), not a
     // server fault — return 400 with the structured field/reason so the
@@ -352,17 +740,23 @@ export async function POST(request: Request): Promise<NextResponse> {
           reason: err.reason,
           managers_created,
           strategies_created,
+          strategies_skipped_existing,
           allocators_created,
+          managers_rows_skipped: managersRowsSkipped,
+          allocators_rows_skipped: allocatorsRowsSkipped,
         },
         { status: 400 },
       );
     }
     return NextResponse.json(
       {
-        error: err instanceof Error ? err.message : "Import failed",
+        error: errorMessage || "Import failed",
         managers_created,
         strategies_created,
+        strategies_skipped_existing,
         allocators_created,
+        managers_rows_skipped: managersRowsSkipped,
+        allocators_rows_skipped: allocatorsRowsSkipped,
       },
       { status: 500 },
     );
@@ -372,46 +766,50 @@ export async function POST(request: Request): Promise<NextResponse> {
   // partner import. Per-row events would generate 10s-100s of audit
   // rows per import run with identical metadata; the summary is more
   // useful as a forensic anchor ("which admin imported partner X, when,
-  // and how many rows landed"). entity_id is a deterministic hash of
-  // partner_tag + timestamp so the event is traceable without needing
-  // a synthesized DB row.
-  const importRunId = crypto
-    .createHash("sha256")
-    .update(`${partner_tag}:${Date.now()}`)
-    .digest("hex");
-  // Collapse the 64-char hex to a UUID-shaped string so entity_id
-  // satisfies the audit_log.entity_id UUID column constraint.
+  // and how many rows landed").
   //
-  // NOTE (/review T4-M4): this is NOT a cryptographic v4 UUID — the
-  // variant+version nybbles are hand-stamped (`"4"` + `"8"`) so the
-  // string parses as a valid UUID shape, but the underlying payload is
-  // a deterministic sha256 slice, not 122 bits of randomness. The
-  // uniqueness guarantee is sha256 collision-resistance (2^128 level)
-  // rather than RFC 4122 v4 randomness. Fine for an audit anchor —
-  // we need a stable identifier the operator can grep against, not an
-  // unguessable token.
-  const importUuid = [
-    importRunId.slice(0, 8),
-    importRunId.slice(8, 12),
-    "4" + importRunId.slice(13, 16),
-    "8" + importRunId.slice(17, 20),
-    importRunId.slice(20, 32),
-  ].join("-");
+  // Audit-2026-05-07 C-0056 (security c6): entity_id is now
+  // crypto.randomUUID() (allocated up-front so the catch branch can
+  // reference the same anchor). The pre-fix value was a deterministic
+  // sha256 slice with hand-stamped version/variant nybbles — guessable,
+  // not RFC 4122. The audit anchor only needs uniqueness; partner_tag
+  // + timestamp still ride in metadata for grep-ability.
+  //
+  // Audit-2026-05-07 H-0238 (security c8): cap audit metadata via
+  // `capAuditMetadata` so attacker-influenced `partner_tag` cannot
+  // bloat audit_log.metadata or reflect a multi-MB payload back
+  // through /api/me/audit-log/export.
+  // Audit-2026-05-07 maintainability (Phase-2): rollup payload built via
+  // shared `buildPartnerImportMetadata` so the success-path surface stays
+  // in lockstep with the catch-path surface. H-0239 (red-team c7) raw-
+  // row count delta still rides through unchanged.
   logAuditEvent(supabase, {
     action: "admin.partner_import",
     entity_type: "partner_import",
     entity_id: importUuid,
-    metadata: {
-      partner_tag,
-      managers_created,
-      strategies_created,
-      allocators_created,
-    },
+    metadata: capAuditMetadata(
+      buildPartnerImportMetadata({
+        partner_tag,
+        managers_created,
+        strategies_created,
+        strategies_skipped_existing,
+        allocators_created,
+        managers_rows_skipped: managersRowsSkipped,
+        allocators_rows_skipped: allocatorsRowsSkipped,
+        partial_completion: false,
+      }),
+    ),
   });
 
   return NextResponse.json({
     managers_created,
     strategies_created,
+    strategies_skipped_existing,
     allocators_created,
+    // Audit-2026-05-07 H-0239: surface row-count delta on the response
+    // so the admin UI can warn the operator before they hit "Import
+    // run" again on a CSV with silent newline splits.
+    managers_rows_skipped: managersRowsSkipped,
+    allocators_rows_skipped: allocatorsRowsSkipped,
   });
 }

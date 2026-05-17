@@ -29,6 +29,9 @@ vi.mock("next/server", () => ({
 import {
   logAuditEvent,
   logAuditEventAsUser,
+  capAuditMetadata,
+  AUDIT_METADATA_VALUE_MAX_CHARS,
+  AUDIT_METADATA_MAX_DEPTH,
   type AuditEvent,
 } from "./audit";
 
@@ -211,5 +214,141 @@ describe("logAuditEventAsUser — service-role path with caller-supplied user_id
       p_entity_id: DUMMY_ENTITY,
       p_metadata: { source: "email" },
     });
+  });
+});
+
+/**
+ * Audit-2026-05-07 H-0238 (security c8): unbounded `metadata` strings
+ * sourced from request bodies bloat audit_log.metadata JSONB and can
+ * reflect attacker payloads through GDPR exports / audit-log CSVs.
+ * `capAuditMetadata` clamps every string leaf to a fixed length
+ * defensively. These tests pin the contract.
+ */
+describe("capAuditMetadata — H-0238 length cap on audit_log.metadata", () => {
+  it("returns short strings unchanged", () => {
+    expect(capAuditMetadata("hello")).toBe("hello");
+  });
+
+  it("truncates strings exceeding the cap and appends the original length", () => {
+    const long = "a".repeat(AUDIT_METADATA_VALUE_MAX_CHARS + 50);
+    const capped = capAuditMetadata(long);
+    expect(typeof capped).toBe("string");
+    expect((capped as string).length).toBeGreaterThan(
+      AUDIT_METADATA_VALUE_MAX_CHARS,
+    );
+    expect(capped).toMatch(/…\[truncated:\d+\]$/);
+    expect(capped).toContain(
+      `…[truncated:${AUDIT_METADATA_VALUE_MAX_CHARS + 50}]`,
+    );
+  });
+
+  it("walks nested objects and clamps string leaves only", () => {
+    const long = "x".repeat(AUDIT_METADATA_VALUE_MAX_CHARS + 1);
+    const out = capAuditMetadata({
+      short: "ok",
+      bignum: 42,
+      bigbool: true,
+      bignull: null,
+      huge: long,
+      nested: { again: long, n: 7 },
+    });
+    expect(out.short).toBe("ok");
+    expect(out.bignum).toBe(42);
+    expect(out.bigbool).toBe(true);
+    expect(out.bignull).toBeNull();
+    expect((out.huge as string).endsWith(`…[truncated:${long.length}]`)).toBe(
+      true,
+    );
+    expect(
+      ((out.nested as Record<string, unknown>).again as string).endsWith(
+        `…[truncated:${long.length}]`,
+      ),
+    ).toBe(true);
+    expect((out.nested as Record<string, unknown>).n).toBe(7);
+  });
+
+  it("walks arrays and clamps string elements", () => {
+    const long = "y".repeat(AUDIT_METADATA_VALUE_MAX_CHARS + 5);
+    const out = capAuditMetadata([long, "ok", 1, { huge: long }]);
+    expect((out[0] as string).endsWith(`…[truncated:${long.length}]`)).toBe(
+      true,
+    );
+    expect(out[1]).toBe("ok");
+    expect(out[2]).toBe(1);
+    expect(
+      ((out[3] as Record<string, unknown>).huge as string).endsWith(
+        `…[truncated:${long.length}]`,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not mutate the caller's object", () => {
+    const long = "z".repeat(AUDIT_METADATA_VALUE_MAX_CHARS + 1);
+    const input = { huge: long, nested: { huge: long } };
+    capAuditMetadata(input);
+    expect(input.huge).toBe(long);
+    expect(input.nested.huge).toBe(long);
+  });
+
+  /**
+   * Audit-2026-05-07 red-team R-0005 (MED c8): depth guard. Without it,
+   * an attacker-supplied 20k-deep payload through a future caller (e.g.,
+   * a debug handler dropping req.body into metadata) crashes the route
+   * with `Maximum call stack size exceeded`. The depth guard returns a
+   * sentinel object instead so the audit row still lands.
+   */
+  it("R-0005: deeply nested object truncates at AUDIT_METADATA_MAX_DEPTH with a sentinel", () => {
+    // Build a 50-deep nested object.
+    type Nested = { next?: Nested; leaf?: string };
+    const root: Nested = {};
+    let cur: Nested = root;
+    for (let i = 0; i < 50; i++) {
+      cur.next = {};
+      cur = cur.next;
+    }
+    cur.leaf = "deep-leaf";
+
+    const out = capAuditMetadata(root) as Record<string, unknown>;
+    // Walk to depth and assert the sentinel appears at-or-before the
+    // configured limit. The function returns the sentinel at depth
+    // > AUDIT_METADATA_MAX_DEPTH, so anywhere past that depth we expect
+    // `{ __audit_metadata_too_deep: true, depth: <n> }` instead of the
+    // user-supplied subtree.
+    let walker: unknown = out;
+    let depth = 0;
+    while (
+      walker !== undefined &&
+      walker !== null &&
+      typeof walker === "object" &&
+      !("__audit_metadata_too_deep" in (walker as Record<string, unknown>))
+    ) {
+      const next = (walker as Record<string, unknown>).next;
+      if (next === undefined) break;
+      walker = next;
+      depth += 1;
+      if (depth > 100) break; // safety
+    }
+    // The sentinel MUST appear at or just past AUDIT_METADATA_MAX_DEPTH.
+    expect(walker).toBeTruthy();
+    expect(typeof walker).toBe("object");
+    expect(
+      (walker as Record<string, unknown>).__audit_metadata_too_deep,
+    ).toBe(true);
+    // No stack overflow — the test reaching this line is the assertion.
+    expect(depth).toBeLessThanOrEqual(AUDIT_METADATA_MAX_DEPTH + 1);
+  });
+
+  it("R-0005: depth-32 payload (within limit) is preserved unchanged", () => {
+    // A legitimate audit payload at the cap depth must NOT be sentinel-
+    // replaced. 4 levels (the deepest current real metadata) is well
+    // within the 32-level cap.
+    const payload = { a: { b: { c: { d: "leaf" } } } };
+    const out = capAuditMetadata(payload) as Record<string, unknown>;
+    expect(
+      (
+        ((out.a as Record<string, unknown>).b as Record<string, unknown>)
+          .c as Record<string, unknown>
+      ).d,
+    ).toBe("leaf");
   });
 });

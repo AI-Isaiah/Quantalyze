@@ -1,14 +1,42 @@
+import crypto from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
-import { exportLimiter, checkLimit } from "@/lib/ratelimit";
+import {
+  exportLimiter,
+  checkLimit,
+  getClientIp,
+} from "@/lib/ratelimit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { logAuditEvent } from "@/lib/audit";
 import {
   collectUserExportBundle,
   encodeExportBundle,
   rowsForTable,
 } from "@/lib/gdpr-export";
+
+/**
+ * Audit-2026-05-07 C-0022 / C-0023 (red-team c8): sanitize-loop chain.
+ *
+ * Migration 055 sanitize_user PRESERVES the auth.users row and only
+ * anonymizes the profiles columns — it does NOT invalidate the user's
+ * session. A sanitized user can log back in (the JWT remains valid)
+ * and call POST /api/account/export, receiving a bundle containing
+ * their pre-sanitize audit_log history and cross-party rows (which
+ * sanitize_user preserves by design). GDPR Art. 17 "right to erasure"
+ * silently becomes "right to keep accessing your erased data via Art.
+ * 15". Defense: gate the export route on the post-sanitize sentinel
+ * (`profiles.display_name = '[deleted]'`); a sanitized user gets 403
+ * with a stable code so client + ops can recognise the state.
+ *
+ * The sentinel is set on the FIRST sanitize_user run (migration 055
+ * step 1 — see migrations/20260417110538_sanitize_user.sql). A
+ * subsequent sign-out hardening (separate from this PR) is the proper
+ * upstream fix; this gate is defense-in-depth for the window where a
+ * sanitized session token is still in circulation.
+ */
+const SANITIZED_DISPLAY_NAME_SENTINEL = "[deleted]";
 
 /**
  * POST /api/account/export
@@ -40,6 +68,90 @@ import {
 const SIGNED_URL_EXPIRY_SECONDS = 60 * 60; // 1 hour, per Task 7.3 spec.
 const EXPORTS_BUCKET = "gdpr-exports";
 
+/**
+ * Audit-2026-05-07 red-team R-0006 (MED c8): module-local counter of
+ * refund failures. Bumped on every refund no-op-in-production AND on
+ * every `resetUsedTokens` throw. Reset only by process restart. Exposed
+ * via {@link getExportRefundFailureCount} for /api/health (and tests).
+ *
+ * Mirrors the `auditEmitTransientFailures` shape in src/lib/audit.ts so
+ * a future /api/health implementation can compose both counters into
+ * the same canary surface.
+ */
+let exportRefundFailureCount = 0;
+
+function bumpRefundFailureCount(): void {
+  exportRefundFailureCount += 1;
+}
+
+/**
+ * Read the module-local refund-failure counter. Exposed for tests and
+ * future /api/health wiring.
+ */
+export function getExportRefundFailureCount(): number {
+  return exportRefundFailureCount;
+}
+
+/** Test-only reset hook. Not exported via barrel; tests import directly. */
+export function __resetExportRefundFailureCountForTests(): void {
+  exportRefundFailureCount = 0;
+}
+
+/**
+ * Audit-2026-05-07 red-team R-0008 (MED c8): refund-bucket-wipe race.
+ *
+ * Upstash sliding-window's `resetUsedTokens` clears the entire bucket
+ * for a key — not a single token. A user double-clicking the export
+ * button (or a slow-network retry) can land two concurrent in-flight
+ * POSTs. Request A: consumes the 1/day token, hits a refusal path
+ * (partial bundle, upload-fail, sign-fail), refunds → bucket cleared.
+ * Request B: was 429'd at the limiter (rl.success=false → 429); a
+ * third click (C) now succeeds because the refund wiped the window.
+ * Net: a deliberate concurrent-click attacker can drive the 1/day cap
+ * above its regulatory ceiling.
+ *
+ * Defense: in-process serialization. Track an in-flight Promise per
+ * user; the second concurrent request awaits the first's completion
+ * before consuming a token, so the limiter sees the calls
+ * sequentially and the refund-after-refusal lands on the correct
+ * bucket state. Same-lambda only — Vercel routes concurrent invocations
+ * to fresh isolates beyond a single warm container, so the protection
+ * is best-effort across cold-start frontiers. A second click hitting a
+ * cold isolate is the same risk as before; the same-warm-container
+ * race is the dominant abuse pattern (autoclickers, double-click UI
+ * bugs), and that's what this closes.
+ */
+const inFlightExportsByUser = new Map<string, Promise<unknown>>();
+
+/** Test-only inspection of in-flight tracking. Returns the count. */
+export function __getInFlightExportsCountForTests(): number {
+  return inFlightExportsByUser.size;
+}
+
+/** Test-only reset of the in-flight map. */
+export function __resetInFlightExportsForTests(): void {
+  inFlightExportsByUser.clear();
+}
+
+/**
+ * Audit-2026-05-07 H-0200 (code-reviewer c9): the audit row for an
+ * Art. 15 export must carry the requesting IP + UA so a leaked-JWT
+ * exfiltration can be reconstructed forensically. Uses the shared
+ * `getClientIp` helper from `@/lib/ratelimit` (already the canonical
+ * x-real-ip/x-forwarded-for parser used by rate-limit bucketing) for
+ * consistency. `null` is returned in place of "unknown" so the
+ * audit_log JSONB is explicit about the absence.
+ */
+function readRequestFingerprint(req: NextRequest): {
+  ip: string | null;
+  user_agent: string | null;
+} {
+  const rawIp = getClientIp(req.headers);
+  const ip = rawIp === "unknown" ? null : rawIp;
+  const user_agent = req.headers.get("user-agent") || null;
+  return { ip, user_agent };
+}
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // CSRF defense-in-depth: reject before touching Upstash or Supabase.
   const csrfError = assertSameOrigin(req);
@@ -50,7 +162,84 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // Audit-2026-05-07 red-team R-0008 (MED c8): serialize same-user
+  // concurrent POSTs through an in-process Promise queue. A second
+  // click within the same warm container awaits the first's full
+  // resolution (including refund) before consuming a token, closing
+  // the bucket-wipe race where a refund-after-refusal clears the entire
+  // sliding-window so a third click rides through. See the
+  // inFlightExportsByUser docstring for the threat model.
+  const pending = inFlightExportsByUser.get(user.id);
+  if (pending) {
+    try {
+      await pending;
+    } catch {
+      // The prior call's error is its own response; we only block on
+      // its completion to serialize the token consumption.
+    }
+  }
+  let resolveInFlight: (value: unknown) => void = () => {};
+  const inFlight = new Promise((resolve) => {
+    resolveInFlight = resolve;
+  });
+  inFlightExportsByUser.set(user.id, inFlight);
+  try {
+    return await handleExportRequest(req, supabase, user);
+  } finally {
+    resolveInFlight(undefined);
+    if (inFlightExportsByUser.get(user.id) === inFlight) {
+      inFlightExportsByUser.delete(user.id);
+    }
+  }
+}
+
+/**
+ * Audit-2026-05-07 red-team R-0008: inner handler that the serialized
+ * POST wrapper drives. Hoisted here so the per-user lock can wrap a
+ * single function call without indenting the original logic three
+ * levels deeper.
+ */
+async function handleExportRequest(
+  req: NextRequest,
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  user: { id: string },
+): Promise<NextResponse> {
+
+  // Audit-2026-05-07 C-0022 / C-0023 (red-team c8): sanitize-loop gate.
+  // A user whose profile has been anonymized via migration-055
+  // `sanitize_user` (display_name='[deleted]' sentinel) must NOT be
+  // able to re-mint a full PII bundle for themselves. See the
+  // SANITIZED_DISPLAY_NAME_SENTINEL doc above for rationale. This is
+  // defense-in-depth — the proper fix is sign-out on sanitize, but the
+  // 403 here closes the window for any sanitized session token still in
+  // circulation.
+  //
+  // We use the user-scoped supabase client (auth.uid()=caller) so the
+  // RLS policy on profiles (owner-can-read) gates correctly without
+  // requiring service-role privileges for the gate check.
+  const { data: callerProfile } = await supabase
+    .from("profiles")
+    .select("display_name")
+    .eq("id", user.id)
+    .maybeSingle();
+  if (
+    callerProfile &&
+    typeof callerProfile.display_name === "string" &&
+    callerProfile.display_name === SANITIZED_DISPLAY_NAME_SENTINEL
+  ) {
+    return NextResponse.json(
+      {
+        error: "Account sanitized — exports unavailable.",
+        code: "account_sanitized",
+      },
+      { status: 403, headers: NO_STORE_HEADERS },
+    );
   }
 
   // 1/day/user bucket. The Upstash sliding window covers a rolling 24h
@@ -63,10 +252,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { error: "Export limit reached — try again later." },
       {
         status: 429,
-        headers: { "Retry-After": String(rl.retryAfter) },
+        headers: {
+          ...NO_STORE_HEADERS,
+          "Retry-After": String(rl.retryAfter),
+        },
       },
     );
   }
+
+  // Audit-2026-05-07 H-0200 (code-reviewer c9): capture request
+  // fingerprint up-front so every audit-emit path (success / refusal /
+  // upload-fail / sign-fail) records identical context.
+  const fingerprint = readRequestFingerprint(req);
+
+  // Audit-2026-05-07 C-0021 (security c9): runtime assertion that the
+  // bundle helper receives the auth-derived user id and ONLY that id.
+  // The defense-in-depth concern is a future refactor (admin export
+  // wrapper, fan-out worker) that mistakenly reuses
+  // `collectUserExportBundle` against an attacker-supplied user id.
+  // Holding the binding here (`const exportSubjectId = user.id`) and
+  // never accepting a request-body alternative locks the helper's
+  // userId parameter to the actor for the lifetime of this route.
+  const exportSubjectId = user.id;
 
   const admin = createAdminClient();
 
@@ -80,11 +287,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // while making the refusal pathway non-lockout. The refund call is
   // best-effort: if it fails (Upstash blip) the user retries tomorrow
   // — same as today's worst case.
+  //
+  // Audit-2026-05-07 red-team R-0006 (MED c8): the null-guard
+  // silently no-ops in dev/preview. Surface that branch loudly in
+  // production (a null limiter means UPSTASH env vars are missing, which
+  // is a deploy misconfig the canary should detect) and bump the
+  // module-local counter on every refund failure so /api/health can
+  // expose it via getRefundFailureCount alongside the audit-emit
+  // counter. Without the counter, a network-blip throw is swallowed and
+  // a regression where the refund silently no-ops in prod would land
+  // green.
   const refundRateLimitToken = async (reason: string): Promise<void> => {
-    if (!exportLimiter) return;
+    if (!exportLimiter) {
+      if (process.env.VERCEL_ENV === "production") {
+        console.warn(
+          `[api/account/export] refund skipped (${reason}) — exportLimiter is null in production (UPSTASH misconfig).`,
+        );
+        bumpRefundFailureCount();
+      }
+      return;
+    }
     try {
       await exportLimiter.resetUsedTokens(rateLimitKey);
     } catch (err) {
+      bumpRefundFailureCount();
       console.error(
         `[api/account/export] rate-limit refund failed (${reason}):`,
         err instanceof Error ? err.message : err,
@@ -95,7 +321,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // Assemble the bundle across all user-owned tables. Uses the admin
   // client because the bundle spans tables with divergent RLS shapes
   // (owner-only, cross-party, service-role-only).
-  const bundle = await collectUserExportBundle(admin, user.id);
+  //
+  // C-0021 enforcement: pass `exportSubjectId` (the auth-derived id),
+  // NEVER a request-body or path-param value.
+  const bundle = await collectUserExportBundle(admin, exportSubjectId);
 
   // Audit 2026-05-07 (specialist apply): GDPR Art. 15 requires a
   // COMPLETE export. The route refuses to mint a signed URL whenever
@@ -185,7 +414,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     logAuditEvent(supabase, {
       action: "account.export_refused",
       entity_type: "user",
-      entity_id: user.id,
+      entity_id: exportSubjectId,
       metadata: {
         request_id: requestId,
         partial: bundle.partial,
@@ -197,6 +426,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         parent_id_truncated_table_count:
           bundle.parent_id_truncated_tables.length,
         failed_table_count: bundle.failed_tables.length,
+        // Audit-2026-05-07 H-0200 (code-reviewer c9): IP + UA on every
+        // emit path — a stolen-token export must be reconstructable
+        // even when it lands on the refusal branch.
+        ip: fingerprint.ip,
+        user_agent: fingerprint.user_agent,
       },
     });
     return NextResponse.json(
@@ -207,7 +441,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         code: bundle.partial ? "export_partial" : "export_truncated",
         request_id: requestId,
       },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -229,7 +463,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (profilesRows === null) {
     console.error(
       "[api/account/export] manifest drift detected — profiles missing from bundle:",
-      { user_id: user.id, table_count: bundle.tables.length },
+      { user_id: exportSubjectId, table_count: bundle.tables.length },
     );
     await refundRateLimitToken("manifest_drift");
     return NextResponse.json(
@@ -237,7 +471,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         error: "Export manifest drift — please contact support.",
         code: "export_manifest_drift",
       },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -263,8 +497,34 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // The true streaming refactor (pipe directly into Supabase Storage
   // multipart upload) remains queued for a follow-up sprint; the
   // single-pass encode keeps headroom within budget until then.
-  const objectKey = `${user.id}/${crypto.randomUUID()}.json`;
+  const objectKey = `${exportSubjectId}/${crypto.randomUUID()}.json`;
   const bundleBytes = encodeExportBundle(bundle);
+
+  // Audit-2026-05-07 H-0202 / H-0203 (red-team c8 / security c8):
+  // do NOT persist the raw `objectKey` (containing the user_id +
+  // unguessable UUID + bucket name) into audit_log.metadata. Storage
+  // bucket RLS is the single point of failure for this URL space — a
+  // future migration that types the foldername filter (or revokes the
+  // owner-read policy) turns the audit-log CSV stream into a
+  // treasure-map for an attacker enumerating historical bundle paths.
+  // We store a SHA-256 hash of the object key instead: ops can still
+  // reconcile a known objectKey against the audit row by hashing it
+  // (operator-supplied input), but reading the audit row alone yields
+  // an opaque hex that is useless without the bucket key.
+  const objectKeyHash = crypto
+    .createHash("sha256")
+    .update(objectKey)
+    .digest("hex");
+
+  // Audit-2026-05-07 H-0202 ops-reconcile note: the raw objectKey is
+  // server-only durable forensics (Vercel function logs). Ops with
+  // the user's user_id can recover the objectKey from these logs and
+  // rehash to find the matching audit row.
+  console.info("[api/account/export] objectKey assigned", {
+    user_id: exportSubjectId,
+    object_key: objectKey,
+    object_key_sha256: objectKeyHash,
+  });
 
   const { error: uploadErr } = await admin.storage
     .from(EXPORTS_BUCKET)
@@ -274,9 +534,34 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
   if (uploadErr) {
     console.error("[api/account/export] upload failed:", uploadErr.message);
+    // Audit-2026-05-07 red-team R8 (MED c8): refund the 1/day token on
+    // upload failure. Pre-fix, a transient storage blip consumed the
+    // user's 1/day budget — equivalent to the regulator-visible lockout
+    // path the original red-team #2 already documented for the refusal
+    // branches. Best-effort refund (same try/catch swallow as the
+    // refusal-path refund).
+    await refundRateLimitToken("upload_failed");
+    // Audit-2026-05-07 H-0201 (code-reviewer c8): emit a refused-audit
+    // even when the upload itself failed — the bundle WAS assembled
+    // (every user-owned table was SELECTed via service_role and held
+    // in memory). For a forensic question "did the controller ever
+    // decrypt/aggregate user X's data?" the answer must be discoverable
+    // from audit_log, not silently absorbed by the 500 response.
+    logAuditEvent(supabase, {
+      action: "account.export_refused",
+      entity_type: "user",
+      entity_id: exportSubjectId,
+      metadata: {
+        partial: bundle.partial,
+        truncated_at_size_cap: bundle.truncated_at_size_cap,
+        reason: "upload_failed",
+        ip: fingerprint.ip,
+        user_agent: fingerprint.user_agent,
+      },
+    });
     return NextResponse.json(
       { error: "Failed to upload export bundle" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -312,9 +597,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
       );
     }
+    // Audit-2026-05-07 red-team R8 (MED c8): refund the 1/day token on
+    // sign failure (same rationale as the upload-fail branch and the
+    // refusal-path refund — see H-0201's audit emission below).
+    await refundRateLimitToken("sign_failed");
+    // Audit-2026-05-07 H-0201 (code-reviewer c8): emit a refused-audit
+    // when sign-fail aborts the response — the bundle was uploaded to
+    // storage (and may have been briefly visible before the orphan
+    // cleanup landed). A future incident response asking "did we ever
+    // serialize/store user X's data?" must find the row in audit_log.
+    logAuditEvent(supabase, {
+      action: "account.export_refused",
+      entity_type: "user",
+      entity_id: exportSubjectId,
+      metadata: {
+        partial: bundle.partial,
+        truncated_at_size_cap: bundle.truncated_at_size_cap,
+        reason: "sign_failed",
+        // Hash, not raw path — see H-0202 rationale on the success
+        // branch below.
+        object_key_sha256: objectKeyHash,
+        ip: fingerprint.ip,
+        user_agent: fingerprint.user_agent,
+      },
+    });
     return NextResponse.json(
       { error: "Failed to sign export URL" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -332,9 +641,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   logAuditEvent(supabase, {
     action: "account.export",
     entity_type: "user",
-    entity_id: user.id,
+    entity_id: exportSubjectId,
     metadata: {
-      storage_path: objectKey,
+      // Audit-2026-05-07 H-0202 / H-0203: hash, not raw storage_path.
+      // The CSV audit-log export streams this metadata back to the
+      // caller; persisting the raw `${user_id}/${uuid}.json` value
+      // turns a future bucket-RLS regression into a treasure-map
+      // (every export ever taken, addressable by user_id). The hash
+      // preserves "ops can reconcile a known objectKey to a known
+      // audit row" without bundling the bucket location into the
+      // long-lived audit_log payload. Operators with the original
+      // objectKey (from server logs, also stored here under
+      // [api/account/export]) can rehash to verify.
+      object_key_sha256: objectKeyHash,
       expires_at: expiresAt,
       table_count: bundle.tables.length,
       total_row_count: bundle.total_row_count,
@@ -345,17 +664,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // built bundle (one subject = one profile row); a drift to 0 or
       // null would have failed the load-bearing check above.
       profiles_row_count: profilesRows.length,
+      // Audit-2026-05-07 H-0200 (code-reviewer c9): forensic
+      // fingerprint for the export call. A stolen-JWT export can be
+      // reconstructed from the IP + UA on the audit row even after
+      // the signed URL has expired and rolled off the response logs.
+      ip: fingerprint.ip,
+      user_agent: fingerprint.user_agent,
     },
   });
 
-  return NextResponse.json({
-    ok: true,
-    signed_url: signedData.signedUrl,
-    expires_at: expiresAt,
-    bytes: bundleBytes.byteLength,
-    table_count: bundle.tables.length,
-    total_row_count: bundle.total_row_count,
-    truncated_at_size_cap: bundle.truncated_at_size_cap,
-    incomplete_reasons: incompleteReasons,
-  });
+  return NextResponse.json(
+    {
+      ok: true,
+      signed_url: signedData.signedUrl,
+      expires_at: expiresAt,
+      bytes: bundleBytes.byteLength,
+      table_count: bundle.tables.length,
+      total_row_count: bundle.total_row_count,
+      truncated_at_size_cap: bundle.truncated_at_size_cap,
+      incomplete_reasons: incompleteReasons,
+    },
+    { headers: NO_STORE_HEADERS },
+  );
 }

@@ -44,6 +44,24 @@ export class ProfileValidationError extends Error {
 export const DISPLAY_NAME_MAX_LENGTH = 200;
 
 /**
+ * Audit-2026-05-07 red-team R-0007 (MED c8): reserved sentinels that
+ * MUST NOT be user-settable. `[deleted]` is the sanitize_user RPC's
+ * load-bearing marker — POST /api/account/export gates GDPR exports on
+ * exactly this value. A privacy-conscious user typing it manually
+ * locks themselves out of Art. 15 access, and the route returns the
+ * misleading "Account sanitized" message. Reject the value at the
+ * boundary; only the service-role sanitize_user RPC keeps writing it.
+ *
+ * Case-folded comparison so `[Deleted]` / `[DELETED]` are also rejected.
+ */
+const RESERVED_DISPLAY_NAMES: ReadonlyArray<string> = ["[deleted]"];
+
+function isReservedDisplayName(value: string): boolean {
+  const lower = value.toLowerCase();
+  return RESERVED_DISPLAY_NAMES.includes(lower);
+}
+
+/**
  * Validate and normalize a `display_name` value at the boundary BEFORE
  * any insert/upsert into `profiles`. See module-level comment for rules.
  *
@@ -75,6 +93,12 @@ export function validateDisplayName(input: string | null | undefined): string {
       "display_name",
       `exceeds_max_length_${DISPLAY_NAME_MAX_LENGTH}`,
     );
+  }
+  // Audit-2026-05-07 red-team R-0007: reject the GDPR sanitize sentinel
+  // on the user-controlled write path. The service-role sanitize_user
+  // RPC keeps writing `[deleted]` directly to bypass this validator.
+  if (isReservedDisplayName(trimmed)) {
+    throw new ProfileValidationError("display_name", "reserved_value");
   }
   return trimmed;
 }
