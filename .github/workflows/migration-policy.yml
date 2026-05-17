@@ -61,13 +61,26 @@ permissions:
 jobs:
   policy:
     runs-on: ubuntu-latest
-    # Pin to the same `Production` environment as supabase-migrate.yml
-    # so future required-reviewer protection (ADR-0009) applies
-    # uniformly. The check is read-only, but it consumes the same
-    # SUPABASE_ACCESS_TOKEN secret as the apply path — keeping the
-    # secret-consumption pattern aligned simplifies the access-control
-    # story.
-    environment: Production
+    # NO `environment: Production` here, by design (retro-PR193 H-1).
+    #
+    # This job is the AUTOMATED PR-gate. Its sole purpose is to block
+    # backdated-migration merges BEFORE a human reviewer hits the merge
+    # button. If it inherited the `Production` environment's future
+    # required-reviewer protection (ADR-0009), the gate would itself
+    # require a manual approval before running — converting an
+    # automated pre-merge check into a manually-gated post-merge
+    # afterthought. That defeats the architectural point of relocating
+    # the guard out of `supabase-migrate.yml`.
+    #
+    # Production-environment gating belongs on WRITE paths (the apply
+    # job in `supabase-migrate.yml` that runs `supabase db push`). This
+    # workflow only issues a read-only `db query` against
+    # schema_migrations to fetch the remote tip — no DB mutation, no
+    # write capability, no need to share the apply path's
+    # access-control surface.
+    #
+    # Repo-level secret access (SUPABASE_ACCESS_TOKEN /
+    # SUPABASE_DB_PASSWORD) is sufficient for this read-only check.
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
