@@ -77,7 +77,7 @@ const REPO_ROOT = resolve(__dirname, "..");
  * closure to STRING and TEMPLATE-LITERAL bypasses — the simple regex
  * variant could not distinguish `withRole("admin")` in a code call from
  * the same characters inside a string literal. The regex-pair also had a
- * second hazard: the line-comment regex `/\/\/[^\n]*/g` would destroy
+ * second hazard: the line-comment regex `/\/\/[^\n]*` (with g flag) would destroy
  * any text following `//` inside a string (e.g. `"https://docs/..."`),
  * which could MASK a real `isAdminUser(` call on the same line.
  *
