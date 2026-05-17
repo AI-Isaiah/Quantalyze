@@ -1076,24 +1076,28 @@ def _top_excluded(
         """Higher = closer to passing. Hard exclusions sort to the bottom."""
         reason = item["exclusion_reason"]
         cand = item["candidate"]
-        if reason in HARD_EXCLUSION_REASONS:
+        # Normalize through the enum so a literal-string typo in either
+        # this function or `_eligibility_check` is a NameError, not a
+        # silent fall-through to the 0.5 default.
+        try:
+            reason_enum = ExclusionReason(reason)
+        except ValueError:
+            return 0.5
+        if reason_enum.is_hard:
             return -1.0
-        if reason == "below_min_sharpe":
+        if reason_enum is ExclusionReason.BELOW_MIN_SHARPE:
             sharpe = cand.get("sharpe") or 0
             min_sharpe = preferences.get("min_sharpe") or 0
             return _clamp(sharpe / max(min_sharpe, 0.01), 0, 1)
-        if reason == "below_min_track_record":
+        if reason_enum is ExclusionReason.BELOW_MIN_TRACK_RECORD:
             track = cand.get("track_record_days") or 0
             min_track = preferences.get("min_track_record_days") or 1
             return _clamp(track / min_track, 0, 1)
-        if reason == "exceeds_max_dd":
+        if reason_enum is ExclusionReason.EXCEEDS_MAX_DD:
             max_dd = abs(cand.get("max_drawdown_pct") or 0)
             tol = preferences.get("max_drawdown_tolerance") or 1
             return _clamp(2 - max_dd / tol, 0, 1)
-        if reason == "style_excluded":
-            # Phase 3 / D-06: treat like off_mandate_type — neutral ~0.5 so
-            # excluded rows sort reasonably in TOP_N_EXCLUDED.
-            return 0.5
+        # STYLE_EXCLUDED / OFF_MANDATE_TYPE / anything else soft → neutral 0.5
         return 0.5
 
     excluded_sorted = sorted(excluded, key=_almost_passed_score, reverse=True)
