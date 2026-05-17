@@ -34,8 +34,9 @@ import { DEFAULT_LAYOUT, LAYOUT_VERSION } from "../lib/dashboard-defaults";
  * D-02 single-source-of-truth: `useDashboardConfig` and `useDashboardConfigV2`
  * read/write the same localStorage key. Each `loadConfig` resets to its OWN
  * default layout when `parsed.layoutVersion` doesn't match what the hook
- * expects (Voice-D8 accepted precedent — same as Phase 05 1→2 and Phase 08
- * 2→3 bumps), so neither hook clobbers the other's persisted blob.
+ * expects (Voice-D8 accepted precedent — see `dashboard-defaults.ts` for the
+ * running history of LAYOUT_VERSION bumps), so neither hook clobbers the
+ * other's persisted blob.
  */
 const STORAGE_KEY = "quantalyze-dashboard-config";
 
@@ -55,10 +56,11 @@ const RECOVERY_FLAG_KEY = "dashboard.config.recoveredFromCorruption";
 
 /**
  * The legacy hook's "what version it knows about". Hardcoded here (not
- * imported from dashboard-defaults.ts which now exports v4) so the dormant
- * legacy hook resets to v3 defaults when it sees a v4 blob. The legacy hook
- * itself is dormant post-v0.15.7.0 (no live callers); this constant +
- * LEGACY_DEFAULT_LAYOUT both go away in the follow-up legacy-tree cleanup.
+ * imported from dashboard-defaults.ts which has since bumped past it) so
+ * the dormant legacy hook resets to its own v3 defaults when it sees a
+ * blob written by the current V2 hook. The legacy hook itself is dormant
+ * post-v0.15.7.0 (no live callers); this constant + LEGACY_DEFAULT_LAYOUT
+ * both go away in the follow-up legacy-tree cleanup.
  */
 const LAYOUT_VERSION_LEGACY = 3;
 
@@ -106,8 +108,9 @@ function setRecoveryFlag(reason: DashboardRecoveryReason): void {
 
 /**
  * Legacy v3 default layout — frozen snapshot of what `dashboard-defaults.ts`
- * exported before the v4 bump. Retained while the legacy hook is dormant;
- * deleted alongside the hook in the follow-up legacy-tree cleanup PR.
+ * exported before it bumped to the current V2 `{k, w}` shape. Retained
+ * while the legacy hook is dormant; deleted alongside the hook in the
+ * follow-up legacy-tree cleanup PR.
  */
 const LEGACY_DEFAULT_LAYOUT: LegacyTileConfig[] = [
   { i: "equity-curve-1", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 },
@@ -294,14 +297,17 @@ export function useDashboardConfig(): UseDashboardConfigReturn {
 // ---------------------------------------------------------------------------
 //
 // Returns DashboardConfig (tiles as TileConfig[] = {k, w}). On load, parses
-// persisted JSON; if `parsed.layoutVersion !== LAYOUT_VERSION` (4) OR any
-// tile carries a legacy-shape field (`i` / `widgetId` / `x` / `y` / `h`),
-// resets to v4 DEFAULT_LAYOUT — Voice-D8 reset-on-mismatch precedent.
+// persisted JSON; if `parsed.layoutVersion !== LAYOUT_VERSION` OR any tile
+// carries a legacy-shape field (`i` / `widgetId` / `x` / `y` / `h`), resets
+// to DEFAULT_LAYOUT — Voice-D8 reset-on-mismatch precedent. (See
+// dashboard-defaults.ts for the LAYOUT_VERSION bump history.)
 
 /**
- * Clamp a registry-provided defaultW to the v4 grid's 1..4 range. Legacy
- * widget-registry values are 3/4/6/12; Plan 05 will rewrite them. Until
- * then this clamp keeps V2 addWidget paths producing valid tiles.
+ * Clamp a registry-provided defaultW to the V2 4-col grid's 1..4 range.
+ * Many WIDGET_REGISTRY entries still carry the legacy 3/4/6/12 values
+ * inherited from the pre-V2 12-col grid (see widget-registry.ts); this
+ * clamp is the gate that keeps V2 addWidget paths producing valid tiles
+ * regardless of which entries have been narrowed.
  *
  * audit-2026-05-07 (M-0128 c8) — surface non-finite / wrong-type inputs
  * via console.warn so a typo'd registry entry (`defaultW: '4'` as string,
@@ -450,7 +456,7 @@ function loadV2Config(): DashboardConfig {
       }
       // Reject legacy-shape tiles and non-array tile blobs. tiles:null is
       // tagged parse_failed (no user opts into a null tiles field); legacy
-      // shape leaking into a v4 blob gets the dedicated breadcrumb so the
+      // shape leaking into a V2 blob gets the dedicated breadcrumb so the
       // dashboard can route the toast copy accordingly. The empty-array
       // case is handled below — that's an intentional user state.
       //
@@ -642,7 +648,7 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
 
   // Phase A3 — same observe-without-write guard as the legacy hook. Mounting
   // V2 against a v3 (legacy-shape) blob must not overwrite the persisted
-  // legacy layout with v4 defaults; that pattern is what made flag toggles
+  // legacy layout with V2 defaults; that pattern is what made flag toggles
   // ping-pong customisations into the void. The persist effect skips its
   // first run; user-driven mutations (addWidget / resizeWidget / etc.)
   // flip the ref and write normally.
@@ -766,7 +772,7 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
       // short key (or even an unknown id) is collapsed onto the registry
       // namespace before the idempotent-add check runs.
       const resolved = resolveWidgetId(k);
-      // D-03 idempotent add — designer-bundle/app.jsx:42-44.
+      // D-03 idempotent add — designer-bundle/project/src/app.jsx:42-44.
       if (prev.tiles.some((t) => t.k === resolved)) return prev;
       const meta = WIDGET_REGISTRY[resolved];
       const w = clampWidth(meta?.defaultW);
