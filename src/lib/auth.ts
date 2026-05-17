@@ -1,4 +1,5 @@
 import "server-only";
+import { cache } from "react";
 import { NextRequest, NextResponse } from "next/server";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
@@ -85,6 +86,36 @@ export type GetUserRolesResult =
   | { ok: false; error: { code: string | null; message: string } };
 
 /**
+ * Per-request memoized inner implementation of {@link getUserRolesResult}.
+ *
+ * M-0501 (audit-2026-05-07): `requireRole` runs on every wrapped
+ * request, which hits Supabase Auth + a `user_app_roles` SELECT. Within
+ * a SINGLE request multiple guards may run (e.g., a nested call site
+ * or a parallel-route render that branches). React's `cache()` wraps
+ * the function so duplicate calls inside the same request return the
+ * cached result — one DB round-trip per (supabase-client, userId) pair
+ * per request.
+ *
+ * Limits (deliberately scoped): cache() is REQUEST-SCOPED. It does
+ * NOT memoize across requests, across Lambda invocations, or into a
+ * session. Cross-request caching (JWT custom claims, Edge Config)
+ * is tracked as a Sprint 7 follow-up — see ADR-0005.
+ *
+ * The cache key is the tuple `(supabase, userId)`. A new supabase
+ * client per request (which is the normal path through `createClient()`,
+ * itself wrapped with `cache()` in `src/lib/supabase/server.ts`) means
+ * the cache key is stable within a request and turns over between them.
+ */
+const getUserRolesResultCached = cache(
+  async (
+    supabase: SupabaseClient,
+    userId: string,
+  ): Promise<GetUserRolesResult> => {
+    return await getUserRolesResultRaw(supabase, userId);
+  },
+);
+
+/**
  * Fetch the role set for a specific user, returning an explicit
  * discriminated union. Returns `{ ok: true, roles: [] }` for the
  * expected "no roles visible" path (RLS denial or empty result),
@@ -93,8 +124,19 @@ export type GetUserRolesResult =
  * Use this when the caller needs to distinguish "no roles" from
  * "fetch failed" — typically inside a guard that wants to return 500
  * on real DB faults rather than 403.
+ *
+ * Per-request memoized via React `cache()` (M-0501). Multiple calls
+ * inside the same request with the same `(supabase, userId)` pair
+ * share a single DB round-trip.
  */
 export async function getUserRolesResult(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<GetUserRolesResult> {
+  return getUserRolesResultCached(supabase, userId);
+}
+
+async function getUserRolesResultRaw(
   supabase: SupabaseClient,
   userId: string,
 ): Promise<GetUserRolesResult> {
