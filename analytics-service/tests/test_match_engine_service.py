@@ -604,6 +604,69 @@ def test_inf_final_score_surfaces_score_error_flag(monkeypatch):
     assert result["candidates"][0]["score"] == 0.0
 
 
+def test_score_error_rows_sink_below_legitimate_zero_score_rows(monkeypatch):
+    """Red-team HIGH (score-error-ghost-ranking): a candidate whose math
+    produced NaN/Inf (score_error=True, score=0.0) must NEVER outrank a
+    legitimate zero-score candidate via the strategy_id tie-break.
+
+    Without the score_error term in the sort key, two rows with identical
+    score=0.0 tie-break by strategy_id and a broken row alphabetised first
+    would get rank=1 in the persisted top-N — i.e. corrupted math gets
+    blessed as a legitimate candidate row (the rank-IS-NOT-NULL CHECK
+    survives because rank is still assigned post-sort).
+
+    Forces a tie at score=0.0 by stubbing every scoring sub-function for
+    BOTH candidates ('aaa' alphabetises first) and then NaN-poisoning only
+    'aaa' so 'zzz' has score=0.0/score_error=False and 'aaa' has
+    score=0.0/score_error=True. Pre-fix sort key `(-score, sid)` would
+    promote 'aaa' to rank=1; post-fix key with score_error first sinks it."""
+    import services.match_engine as me
+
+    def _selective_nan(cand, prefs):
+        return float("nan") if cand["strategy_id"] == "aaa" else 0.0
+
+    # Stub the three OTHER sub-scores so the legitimate ('zzz') row also
+    # lands at final_score=0.0 — that's the only configuration where the
+    # tie-break-by-strategy_id bug bites.
+    monkeypatch.setattr(me, "_compute_preference_fit", _selective_nan)
+    monkeypatch.setattr(me, "_compute_track_record_score", lambda cand: 0.0)
+    monkeypatch.setattr(me, "_compute_capacity_fit", lambda cand, prefs: 0.0)
+    monkeypatch.setattr(
+        me,
+        "_compute_mandate_fit_score",
+        lambda cand, prefs, corr, add_weight, mode: (0.0, {}),
+    )
+
+    result = score_candidates(
+        allocator_id="a1",
+        preferences=None,
+        portfolio_strategies=[],
+        portfolio_returns={},
+        portfolio_weights={},
+        candidate_strategies=[
+            _candidate("aaa"),  # NaN-producing → score_error=True, score=0.0
+            _candidate("zzz"),  # legitimate zero → score_error=False, score=0.0
+        ],
+        candidate_returns={},
+    )
+
+    candidates = result["candidates"]
+    aaa = next(c for c in candidates if c["strategy_id"] == "aaa")
+    zzz = next(c for c in candidates if c["strategy_id"] == "zzz")
+
+    # The contract: score_error rows must sink BELOW legitimate rows even
+    # when both share score=0.0. Pre-fix, the (-score, sid) tie-break would
+    # have given 'aaa' rank=1.
+    assert aaa["score_error"] is True
+    assert zzz["score_error"] is False
+    assert aaa["score"] == 0.0
+    assert zzz["score"] == 0.0
+    assert zzz["rank"] < aaa["rank"], (
+        "score_error=True row outranked a legitimate row — the sort key "
+        "must include score_error so broken-math rows never claim rank=1"
+    )
+
+
 # ---------------------------------------------------------------------------
 # M-0675 — data_completeness sidecar covers personalized-mode ratios
 # ---------------------------------------------------------------------------

@@ -1063,8 +1063,15 @@ def score_candidates(
             "reasons": reasons,
         })
 
-    # Sort descending by score, tie-break by strategy_id (deterministic)
-    scored.sort(key=lambda x: (-x["score"], x["strategy_id"]))
+    # Sort descending by score, tie-break by strategy_id (deterministic).
+    # Red-team HIGH fix (audit-2026-05-07 score-error-ghost-ranking): rows
+    # with `score_error=True` (NaN/Inf math) must sink BELOW every legitimate
+    # row regardless of their coerced score=0.0, so a single broken sub-score
+    # cannot ride the strategy_id tie-break above a real low-score candidate
+    # and silently get assigned a non-null rank in the persisted top-N.
+    scored.sort(
+        key=lambda x: (x.get("score_error", False), -x["score"], x["strategy_id"])
+    )
 
     # Assign rank, take top N
     top = scored[:TOP_N_CANDIDATES]
