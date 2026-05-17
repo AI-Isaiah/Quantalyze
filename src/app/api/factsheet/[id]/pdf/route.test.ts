@@ -221,6 +221,11 @@ function singlePublishedComplete() {
 }
 
 describe("GET /api/factsheet/[id]/pdf — URL origin + Cache-Control (Cluster L / C-0086, M-0311)", () => {
+  // Describe-scoped goto spy — re-assigned per test in beforeEach. Replaces
+  // the prior globalThis.__pdfGoto backchannel (specialist:maintainability
+  // HIGH/7 — non-idiomatic vs vitest's standard describe-scoped pattern).
+  let goto: ReturnType<typeof vi.fn>;
+
   beforeEach(async () => {
     vi.resetModules();
     vi.mocked(checkLimit).mockReset();
@@ -231,7 +236,7 @@ describe("GET /api/factsheet/[id]/pdf — URL origin + Cache-Control (Cluster L 
     // Build a fresh puppeteer mock per test so we can spy on page.goto.
     const puppeteer = await import("@/lib/puppeteer");
     vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
-    const goto = vi.fn().mockResolvedValue(undefined);
+    goto = vi.fn().mockResolvedValue(undefined);
     const setDefaultNavigationTimeout = vi.fn();
     const setDefaultTimeout = vi.fn();
     const setViewport = vi.fn().mockResolvedValue(undefined);
@@ -247,13 +252,10 @@ describe("GET /api/factsheet/[id]/pdf — URL origin + Cache-Control (Cluster L 
     });
     const close = vi.fn().mockResolvedValue(undefined);
     vi.mocked(puppeteer.launchBrowser).mockResolvedValue({ newPage, close } as never);
-    // Expose goto so tests can read it.
-    (globalThis as unknown as { __pdfGoto: typeof goto }).__pdfGoto = goto;
   });
 
   afterEach(() => {
     process.env = { ...ENV_BACKUP };
-    delete (globalThis as unknown as { __pdfGoto?: unknown }).__pdfGoto;
   });
 
   it("Fix C-0086: puppeteer navigates to req.nextUrl.origin, NOT NEXT_PUBLIC_APP_URL or localhost", async () => {
@@ -269,7 +271,6 @@ describe("GET /api/factsheet/[id]/pdf — URL origin + Cache-Control (Cluster L 
     );
     const res = await GET(req, { params });
     expect(res.status).toBe(200);
-    const goto = (globalThis as unknown as { __pdfGoto: ReturnType<typeof vi.fn> }).__pdfGoto;
     expect(goto).toHaveBeenCalledTimes(1);
     expect(goto.mock.calls[0][0]).toBe(
       "https://quantalyze.example.com/factsheet/00000000-0000-0000-0000-000000000001",
@@ -290,7 +291,6 @@ describe("GET /api/factsheet/[id]/pdf — URL origin + Cache-Control (Cluster L 
     );
     const res = await GET(req, { params });
     expect(res.status).toBe(200);
-    const goto = (globalThis as unknown as { __pdfGoto: ReturnType<typeof vi.fn> }).__pdfGoto;
     expect(goto.mock.calls[0][0]).toBe(
       "https://correct-host.example.com/factsheet/00000000-0000-0000-0000-000000000001",
     );
