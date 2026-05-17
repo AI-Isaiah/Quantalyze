@@ -680,6 +680,41 @@ def test_renormalization_guard_fires_before_per_candidate_scoring(monkeypatch):
     )
 
 
+def test_empty_pf_components_missing_keys_do_not_keyerror_mid_loop(monkeypatch):
+    """Red-team MED (empty-pf-components-coupling): pre-fix, the raw_components
+    builder read four legacy keys (`sharpe_lift`, `corr_reduction`,
+    `dd_improvement`, `corr_with_portfolio`) via `pf_components[key]` —
+    non-defensive square-bracket reads. If a future contributor drops a
+    key from `_empty_pf_components` (the whole point of the DRY refactor
+    was to make that easy), the per-candidate loop KeyError'd and the
+    whole batch died on the first eligible candidate.
+
+    Post-fix all reads go through `.get()`, so a `{}` return from
+    `_empty_pf_components` completes cleanly with None sub-components."""
+    import services.match_engine as me
+
+    monkeypatch.setattr(me, "_empty_pf_components", lambda: {})
+
+    # Use screening mode (no portfolio strategies) so `_empty_pf_components`
+    # is the path taken in raw_components.
+    result = score_candidates(
+        allocator_id="a1",
+        preferences=None,
+        portfolio_strategies=[],
+        portfolio_returns={},
+        portfolio_weights={},
+        candidate_strategies=[_candidate("s1"), _candidate("s2")],
+        candidate_returns={},
+    )
+
+    # Both candidates must come through with a finite score and
+    # score_error=False — no mid-loop KeyError tear-down.
+    assert len(result["candidates"]) == 2
+    for cand in result["candidates"]:
+        assert cand["score_error"] is False
+        assert isinstance(cand["score"], (int, float))
+
+
 def test_renormalization_error_message_does_not_leak_scaled_dict(monkeypatch):
     """Red-team MED (renormalization-mid-loop): the ValueError message used
     to embed the full `scaled` dict (user-controlled overrides multiplied

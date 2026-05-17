@@ -913,12 +913,19 @@ def score_candidates(
             ticket / manager_aum if manager_aum > 0 else None
         )
 
+        # Red-team MED fix (audit-2026-05-07 empty-pf-components-coupling):
+        # all four legacy keys now read via `.get()` to match the
+        # data_completeness sidecar style. The TypedDict at line 116 marks
+        # keys total=False, so mypy never flagged the mixed-style reads; if
+        # a future contributor drops a key from `_empty_pf_components` to
+        # leverage the DRY helper, a `.get()` read returns None rather than
+        # KeyError-ing mid-loop and killing the entire match batch.
         raw_components.append({
             "candidate": cand,
-            "sharpe_lift": pf_components["sharpe_lift"],
-            "corr_reduction": pf_components["corr_reduction"],
-            "dd_improvement": pf_components["dd_improvement"],
-            "corr_with_portfolio": pf_components["corr_with_portfolio"],
+            "sharpe_lift": pf_components.get("sharpe_lift"),
+            "corr_reduction": pf_components.get("corr_reduction"),
+            "dd_improvement": pf_components.get("dd_improvement"),
+            "corr_with_portfolio": pf_components.get("corr_with_portfolio"),
             "data_completeness": pf_components.get("data_completeness"),
             "ticket_concentration": ticket_concentration,
         })
