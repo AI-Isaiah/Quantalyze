@@ -13,11 +13,88 @@ import { safeCompare } from "@/lib/timing-safe-compare";
 
 export const maxDuration = 30;
 
-// Phase 18 / round-2 (Claude adv conf 4) — function-form (vs module-load
-// const) so vi.resetModules() in tests can drop a stale value, mirroring the
-// cron route's appUrl()/vercelEnv() pattern. Vercel injects the env at
-// runtime so the cost of re-reading per request is negligible.
-function appUrl(): string {
+// Phase-4 red-team / audit-2026-05-07 — explicit allow-list for the
+// puppeteer goto host. Pre-fix, `appUrl(req)` blindly trusted
+// `req.nextUrl.origin` (derived from the inbound Host header), so any
+// caller able to spoof Host (custom proxy, `curl --resolve`, self-hosted
+// deploy, `vercel dev`) could drive the production puppeteer instance
+// to fetch attacker-controlled content with full network privileges.
+// Defense-in-depth: even with Vercel's edge host-validation, the route
+// MUST validate locally so the security contract holds on every
+// deployment shape (preview, prod, self-hosted, dev).
+const APP_URL_ALLOWED_HOSTS: ReadonlySet<string> = new Set([
+  "quantalyze-rho.vercel.app",
+  "quantalyze.com",
+  "www.quantalyze.com",
+]);
+
+/** Validates `host` against the production allowlist OR the current
+ *  deployment URL (`VERCEL_URL`) so preview deployments still work without
+ *  being open-ended. Returns false on production VERCEL_ENV when host is
+ *  outside the allowlist + VERCEL_URL pair. */
+function isHostAllowed(host: string): boolean {
+  if (APP_URL_ALLOWED_HOSTS.has(host)) return true;
+  // Vercel injects `VERCEL_URL` per deployment (e.g.
+  // `quantalyze-abc123-team.vercel.app`). Accepting the current
+  // deployment's own host lets preview branches render their own
+  // factsheets without manual allowlist edits.
+  const vercelUrl = process.env.VERCEL_URL;
+  if (typeof vercelUrl === "string" && vercelUrl.length > 0 && host === vercelUrl) {
+    return true;
+  }
+  return false;
+}
+
+// Cluster L / Fix C-0086 — resolve the inner factsheet URL from the request
+// origin first, falling back to NEXT_PUBLIC_APP_URL only when origin is
+// unavailable (e.g. unit tests that bypass NextRequest plumbing). The legacy
+// behavior — env fallback to `http://localhost:3000` — silently caused
+// production puppeteer to navigate to localhost (15s timeout → 500) if the
+// public env var was misconfigured. Preferring origin guarantees the inner
+// page render hits the SAME deployment serving this request, which is also
+// the only correct behavior for preview deployments.
+//
+// Why the `origin !== "null"` guard: per the WHATWG URL spec, opaque-origin
+// URLs (e.g. `file://`, sandboxed iframes, certain SSR contexts that
+// construct a NextRequest without a real host) serialize their origin as
+// the LITERAL string `"null"` — not the JS `null` value. Without this
+// guard, those callers would produce `page.goto("null/factsheet/<id>")`
+// and silently 500. The string-compare is deliberate (and load-bearing);
+// DO NOT remove or simplify to a truthy-check during refactors — fall
+// through to the env/localhost branch in that case instead.
+//
+// Audit-2026-05-07 red-team — origin is host-header-derived, so we MUST
+// validate it against an allowlist in production. The env fallback is
+// gated on non-production VERCEL_ENV: in production VERCEL_ENV the
+// fallback is unreachable by contract, and we return null so the caller
+// hard-fails (no fingerprintable side-channel via deleted env).
+//
+// Function-form (vs module-load const) preserved so vi.resetModules() in
+// tests can drop a stale value, mirroring the cron route's appUrl() pattern.
+function appUrl(req: NextRequest): string | null {
+  const origin = req.nextUrl.origin;
+  // origin !== "null" — literal string from opaque-origin URLs, see comment block above.
+  if (origin && origin !== "null") {
+    // Production: only accept origins whose host is in the allowlist
+    // (or matches the current deployment's VERCEL_URL). Other envs
+    // accept whatever the request brought in — preserving dev/test
+    // ergonomics (localhost:3000, custom test ports, etc.).
+    if (process.env.VERCEL_ENV === "production") {
+      try {
+        const host = new URL(origin).host;
+        if (!isHostAllowed(host)) return null;
+      } catch {
+        return null;
+      }
+    }
+    return origin;
+  }
+  // Origin opaque/missing. In production this is a contract violation —
+  // returning null causes the handler to 500 rather than silently
+  // falling through to env (which exposes a fingerprintable side-channel
+  // when NEXT_PUBLIC_APP_URL is varied). Non-production preserves the
+  // historical localhost fallback for `next dev` + unit tests.
+  if (process.env.VERCEL_ENV === "production") return null;
   return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 }
 
@@ -77,7 +154,13 @@ export async function GET(
   const admin = createAdminClient();
   const { data: strategy, error } = await admin
     .from("strategies")
-    .select("id, name, status, strategy_analytics (computation_status)")
+    // audit-2026-05-07 red-team HIGH#3 — `computed_at` is required for the
+    // ETag binding (id:computed_at). Pre-fix only `computation_status` was
+    // selected, so analytics.computed_at was always undefined and the ETag
+    // collapsed to `"<id>:"` — useless for revalidation.
+    .select(
+      "id, name, status, strategy_analytics (computation_status, computed_at)",
+    )
     .eq("id", id)
     .eq("status", "published")
     .single();
@@ -94,6 +177,48 @@ export async function GET(
     );
   }
 
+  // Audit-2026-05-07 red-team — resolve the puppeteer goto target BEFORE
+  // grabbing the queue slot / launching Chromium. A null return means the
+  // request origin failed allowlist validation (production) OR was opaque
+  // in production. Hard-fail with 500 so we never silently fall through
+  // to a localhost or attacker-controlled host.
+  const targetOrigin = appUrl(req);
+  if (targetOrigin === null) {
+    console.error(
+      "[pdf] Refused to render: request origin not allow-listed in production",
+    );
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 },
+    );
+  }
+
+  // Audit-2026-05-07 red-team (HIGH#3) — ETag bound to analytics.computed_at
+  // is the only safe cache-revalidation contract for this surface. The CDN
+  // s-maxage=3600 + stale-while-revalidate=86400 directives pin a PDF for
+  // up to 25h after generation. If a strategy gets re-imported / recomputed
+  // mid-window, the stale PDF (with old metrics) keeps serving. The
+  // computed_at timestamp moves on every recomputation, so it's the
+  // strongest cache key tied to actual content state.
+  //
+  // ETag is quoted strong-validator per RFC 7232. Format: id:computed_at
+  // — id alone is not enough (different strategies could share computed_at
+  // by coincidence, though unlikely), and computed_at alone collides
+  // across strategies.
+  const etag = `"${id}:${analytics.computed_at ?? ""}"`;
+  const ifNoneMatch = req.headers.get("if-none-match");
+  if (ifNoneMatch && ifNoneMatch === etag) {
+    return new NextResponse(null, {
+      status: 304,
+      headers: {
+        ETag: etag,
+        // Vary: Host — see CDN cache-key comment in the 200 branch.
+        Vary: "Host",
+        "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400",
+      },
+    });
+  }
+
   let browser: Browser | null = null;
   let release: (() => void) | null = null;
 
@@ -106,7 +231,7 @@ export async function GET(
     page.setDefaultTimeout(15_000);
     await page.setViewport({ width: 800, height: 1100 });
 
-    await page.goto(`${appUrl()}/factsheet/${id}`, {
+    await page.goto(`${targetOrigin}/factsheet/${id}`, {
       waitUntil: "networkidle0",
       timeout: 25000,
     });
@@ -127,9 +252,28 @@ export async function GET(
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${sanitizeFilename(strategy.name, "Strategy")}-factsheet.pdf"`,
-        // Auth-gated route — keep browser caching on for the same viewer but
-        // do not let the shared CDN hold onto it.
-        "Cache-Control": "private, max-age=86400",
+        // Cluster L / Fix M-0311 — `/api/factsheet` is in PUBLIC_ROUTES
+        // (src/proxy.ts) and this handler has no `auth.getUser()` gate; it
+        // only checks `status='published'` + IP rate-limit. The previous
+        // `private, max-age=86400` directive misrepresented the auth
+        // contract to caches and prevented Vercel's shared CDN from
+        // absorbing duplicate hits (e.g. social-card scrapers / a
+        // newsletter blast). Match the sibling tearsheet.pdf route which
+        // is also public and uses CDN s-maxage.
+        "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400",
+        // Audit-2026-05-07 red-team (HIGH#2) — PDF bytes are a function of
+        // the Host header at generation time (via `appUrl(req)` → puppeteer
+        // goto). Vercel routes preview deployments under multiple aliases
+        // (`*-git-<branch>-<team>.vercel.app`, the deployment URL, the
+        // production domain). Without `Vary: Host`, the shared CDN can serve
+        // a preview-aliased PDF in response to a production-aliased request
+        // (and vice-versa). Adding Vary forces the CDN to key per-host.
+        Vary: "Host",
+        // Audit-2026-05-07 red-team (HIGH#3) — ETag tied to
+        // analytics.computed_at lets clients (and the CDN's revalidation
+        // path) detect when the underlying analytics row has been
+        // recomputed, avoiding stale-PDF poisoning on the s-maxage window.
+        ETag: etag,
       },
     });
   } catch (err) {

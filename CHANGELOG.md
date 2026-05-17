@@ -7,6 +7,18 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.44] - 2026-05-17
+
+**audit-2026-05-07 — factsheet PDF routes (cluster-L) close-out + FIX-LIST runbook tuck-in.** Multi-phase review pipeline (cluster-L fix → maintainability → red-team → simplify → comment-analyzer) on the factsheet PDF route + sanitize-filename helpers. Squashes 11 prior commits on `fix/factsheet-pdf-routes-critical-2026-05-17` into 7 substantive commits onto current main.
+
+- **Cluster-L (factsheet PDF route)** — `src/app/api/factsheet/[id]/pdf/route.ts`: origin-preferred URL construction + public CDN cache + host-allowlist + `Vary: Host` + ETag for upstream-served PDFs. `appUrl()` documents the `origin !== "null"` opaque-origin guard. Internal-token-bypass + production-allowlist + cache-safety paths covered by new tests.
+- **Tests** — `src/app/api/factsheet/[id]/pdf/route.test.ts`: Content-Disposition + analytics-gate coverage (150 new lines), describe-scoped goto-spy replacing global `__pdfGoto` backchannel (maintainability), DRY — extracted `STRATEGY_ID` constant (was inlined 44×) + `mkParams()` helper (was reconstructed inline 21× across 4 describes). URL strings inside `NextRequest(...)` and fixture payloads stay inline per Phase-5 charter (23 such literals).
+- **Filename safety** — `src/lib/sanitize-filename.ts` + `src/lib/sanitize-filename.test.ts`: RFC 6266 parameter-pollution coverage.
+- **FIX-LIST runbook tuck-in** — `docs/runbooks/fix-list-reverify-2026-05-17.md` lifted from the closed PR #206 (stale v0.22.40.32, 11-version drift + DIRTY conflicts). Records the pre-compact FIX-LIST.md re-verification pass and 46 finding closures across PRs #169–#205. Doc-only, no behavior change.
+
+No production behavior regressions; all touched routes covered by tests verified during cherry-pick onto current main.
+
+
 ## [0.22.40.43] - 2026-05-17
 
 **audit-2026-05-07 — analytics-service `routers/portfolio.py` cluster-B close-out.** Multi-phase review pipeline (specialists → fix → red-team → red-team-fix → simplify → comment-analyzer) applied to the Python analytics-service portfolio router (`analytics-service/routers/portfolio.py`) and its schemas/test scaffolding. Squashes 17 prior commits on `fix/portfolio-cron-critical-2026-05-17`.
