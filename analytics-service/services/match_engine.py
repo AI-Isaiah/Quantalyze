@@ -936,6 +936,46 @@ def score_candidates(
         corr_reduction_norm = [0.0] * len(raw_components)
         dd_improvement_norm = [0.0] * len(raw_components)
 
+    # Phase 3 / D-08 — multiplicative scoring_weight_overrides on the four
+    # top-level weights (personalized mode only per D-09). Clamp each scale
+    # to [0.5, 1.5], then renormalize so sum == 1.0. Missing keys default
+    # to 1.0 (no scaling). Screening weights are NOT overridable.
+    #
+    # Red-team MED fix (audit-2026-05-07 renormalization-mid-loop): compute
+    # `effective` ONCE here, BEFORE the per-candidate loop. Pre-fix the
+    # renormalization (and its ValueError guard) ran inside the loop, so a
+    # bad weight config raised mid-loop and discarded every already-scored
+    # candidate when the function unwound. Now a bad config fails fast
+    # before any candidate work is done. The `scaled={scaled}` blob is
+    # also dropped from the exception message — overrides + allocator_id
+    # are sufficient to reconstruct it from inputs and it bloated the
+    # JSONB error trail with user-controlled content.
+    effective: Optional[dict[str, float]] = None
+    if mode == "personalized":
+        overrides = prefs.get("scoring_weight_overrides") or {}
+        scaled = {
+            "W_PORTFOLIO_FIT":  W_PORTFOLIO_FIT
+                * _clamp(overrides.get("W_PORTFOLIO_FIT", 1.0), 0.5, 1.5),
+            "W_PREFERENCE_FIT": W_PREFERENCE_FIT
+                * _clamp(overrides.get("W_PREFERENCE_FIT", 1.0), 0.5, 1.5),
+            "W_TRACK_RECORD":   W_TRACK_RECORD
+                * _clamp(overrides.get("W_TRACK_RECORD", 1.0), 0.5, 1.5),
+            "W_CAPACITY_FIT":   W_CAPACITY_FIT
+                * _clamp(overrides.get("W_CAPACITY_FIT", 1.0), 0.5, 1.5),
+        }
+        total = sum(scaled.values())
+        # C-0230 / H-0699 fix: bare `assert` is stripped under `python -O`
+        # (typical production container flag), which would let the next
+        # line silently divide by zero and propagate NaN through every
+        # candidate's score. Use an explicit raise so the guard survives
+        # bytecode optimization.
+        if total <= 0:
+            raise ValueError(
+                "scoring_weight_overrides renormalization produced "
+                f"non-positive sum (allocator_id={allocator_id})"
+            )
+        effective = {k: v / total for k, v in scaled.items()}
+
     # Final scoring
     scored: list[dict[str, Any]] = []
     for i, rc in enumerate(raw_components):
@@ -965,37 +1005,11 @@ def score_candidates(
         track_record = _compute_track_record_score(cand)
         capacity_fit = _compute_capacity_fit(cand, prefs)
 
-        if mode == "personalized":
-            # Phase 3 / D-08 — multiplicative scoring_weight_overrides on the
-            # four top-level weights (personalized mode only per D-09). Clamp
-            # each scale to [0.5, 1.5], then renormalize so sum == 1.0.
-            # Missing keys default to 1.0 (no scaling). Screening weights
-            # are NOT overridable.
-            overrides = prefs.get("scoring_weight_overrides") or {}
-            scaled = {
-                "W_PORTFOLIO_FIT":  W_PORTFOLIO_FIT
-                    * _clamp(overrides.get("W_PORTFOLIO_FIT", 1.0), 0.5, 1.5),
-                "W_PREFERENCE_FIT": W_PREFERENCE_FIT
-                    * _clamp(overrides.get("W_PREFERENCE_FIT", 1.0), 0.5, 1.5),
-                "W_TRACK_RECORD":   W_TRACK_RECORD
-                    * _clamp(overrides.get("W_TRACK_RECORD", 1.0), 0.5, 1.5),
-                "W_CAPACITY_FIT":   W_CAPACITY_FIT
-                    * _clamp(overrides.get("W_CAPACITY_FIT", 1.0), 0.5, 1.5),
-            }
-            total = sum(scaled.values())
-            # C-0230 / H-0699 fix: bare `assert` is stripped under `python -O`
-            # (typical production container flag), which would let the next
-            # line silently divide by zero and propagate NaN through every
-            # candidate's score. Use an explicit raise so the guard survives
-            # bytecode optimization.
-            if total <= 0:
-                raise ValueError(
-                    "scoring_weight_overrides renormalization produced "
-                    f"non-positive sum (allocator_id={allocator_id}, "
-                    f"scaled={scaled})"
-                )
-            effective = {k: v / total for k, v in scaled.items()}
-
+        if mode == "personalized" and effective is not None:
+            # `effective` was computed once above, before the loop — see the
+            # renormalization-mid-loop fix comment. `is not None` here is a
+            # type-narrow for mypy (the `mode == "personalized"` branch above
+            # always populates `effective`); under `python -O` it survives.
             final_score = 100 * (
                 effective["W_PORTFOLIO_FIT"]   * portfolio_fit
                 + effective["W_PREFERENCE_FIT"] * effective_preference_fit

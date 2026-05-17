@@ -622,6 +622,103 @@ def test_renormalization_raises_on_non_positive_total_weight(monkeypatch):
         )
 
 
+def test_renormalization_guard_fires_before_per_candidate_scoring(monkeypatch):
+    """Red-team MED (renormalization-mid-loop): the renormalization guard
+    must raise BEFORE any candidate is scored, so a bad weight config does
+    not discard already-scored candidates when the function unwinds.
+
+    Counts calls to `_compute_preference_fit` — if the guard fires before
+    the per-candidate loop, the count is 0 (no candidate was scored). A
+    regression that moves the guard back into the loop would score at
+    least one candidate before raising."""
+    import services.match_engine as me
+
+    calls: list[Any] = []
+
+    def _spy_pref_fit(cand, prefs):
+        calls.append(cand["strategy_id"])
+        return 0.5
+
+    monkeypatch.setattr(me, "_compute_preference_fit", _spy_pref_fit)
+    monkeypatch.setattr(me, "W_PORTFOLIO_FIT", -1.0)
+    monkeypatch.setattr(me, "W_PREFERENCE_FIT", -1.0)
+    monkeypatch.setattr(me, "W_TRACK_RECORD", -1.0)
+    monkeypatch.setattr(me, "W_CAPACITY_FIT", -1.0)
+
+    with pytest.raises(ValueError, match="non-positive sum"):
+        score_candidates(
+            allocator_id="a1",
+            preferences=None,
+            portfolio_strategies=[{"strategy_id": "owned1"}],
+            portfolio_returns={
+                "owned1": pd.Series(
+                    np.full(100, 0.001),
+                    index=pd.date_range("2024-01-01", periods=100, freq="D"),
+                )
+            },
+            portfolio_weights={"owned1": 1.0},
+            candidate_strategies=[
+                _candidate("s1"),
+                _candidate("s2"),
+                _candidate("s3"),
+            ],
+            candidate_returns={
+                "s1": pd.Series(
+                    np.full(100, 0.001),
+                    index=pd.date_range("2024-01-01", periods=100, freq="D"),
+                ),
+            },
+            portfolio_aum=1_000_000,
+        )
+
+    # The guard must have fired BEFORE the per-candidate scoring loop —
+    # no candidate-level work should have been done.
+    assert calls == [], (
+        "renormalization guard must raise BEFORE per-candidate scoring, "
+        f"but _compute_preference_fit was called {len(calls)} times "
+        f"(strategies={calls})"
+    )
+
+
+def test_renormalization_error_message_does_not_leak_scaled_dict(monkeypatch):
+    """Red-team MED (renormalization-mid-loop): the ValueError message used
+    to embed the full `scaled` dict (user-controlled overrides multiplied
+    by W_* constants), bloating JSONB error trails with reconstructable
+    state. Fix dropped the scaled blob — message must NOT contain it."""
+    import services.match_engine as me
+
+    monkeypatch.setattr(me, "W_PORTFOLIO_FIT", -1.0)
+    monkeypatch.setattr(me, "W_PREFERENCE_FIT", -1.0)
+    monkeypatch.setattr(me, "W_TRACK_RECORD", -1.0)
+    monkeypatch.setattr(me, "W_CAPACITY_FIT", -1.0)
+
+    with pytest.raises(ValueError) as excinfo:
+        score_candidates(
+            allocator_id="a1",
+            preferences=None,
+            portfolio_strategies=[{"strategy_id": "owned1"}],
+            portfolio_returns={
+                "owned1": pd.Series(
+                    np.full(100, 0.001),
+                    index=pd.date_range("2024-01-01", periods=100, freq="D"),
+                )
+            },
+            portfolio_weights={"owned1": 1.0},
+            candidate_strategies=[_candidate("s1")],
+            candidate_returns={},
+            portfolio_aum=1_000_000,
+        )
+
+    msg = str(excinfo.value)
+    assert "scaled=" not in msg, (
+        "ValueError message must not embed the scaled dict "
+        f"(user-controlled overrides reconstructable from inputs): {msg!r}"
+    )
+    assert "allocator_id=a1" in msg, (
+        "ValueError should still tag the allocator for ops correlation"
+    )
+
+
 # ---------------------------------------------------------------------------
 # H-0704 — NaN/Inf final_score must surface `score_error=True`
 # ---------------------------------------------------------------------------
