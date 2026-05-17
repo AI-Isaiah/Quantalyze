@@ -133,8 +133,22 @@ def test_personalized_returns_personalized_mode():
 
 
 def test_eligibility_excludes_low_sharpe_with_reason():
-    """Sharpe 0.3, min 1.0 → in excluded[] with reason='below_min_sharpe'."""
-    candidates = [_make_candidate("s1", sharpe=0.3)]
+    """Sharpe 0.3, min 1.0 → in excluded[] with reason='below_min_sharpe'.
+
+    Audit closure C-0239 / M-0741 / M-0744(a): the prior implementation passed
+    a single below-threshold candidate. With only 1 candidate the relaxation
+    path (eligible < 5) ALWAYS fires, so `filter_relaxed is True` short-circuits
+    the disjunction and the exclusion-reason assertion never runs. Provide ≥5
+    healthy candidates so relaxation does NOT fire, then assert the exclusion
+    reason directly with no escape hatch. Per CLAUDE.md Rule 9 — tests must
+    encode WHY behavior matters, not just appear to pass.
+    """
+    # Five healthy candidates + one low-sharpe → eligible >= 5, no relaxation.
+    candidates = [
+        _make_candidate(f"healthy{i}", sharpe=1.5, track_record_days=400)
+        for i in range(5)
+    ]
+    candidates.append(_make_candidate("s1", sharpe=0.3, track_record_days=400))
     result = score_candidates(
         allocator_id="a1",
         preferences={"min_sharpe": 1.0},
@@ -144,12 +158,46 @@ def test_eligibility_excludes_low_sharpe_with_reason():
         candidate_strategies=candidates,
         candidate_returns={},
     )
-    # The strategy is excluded; the relaxation kicks in (only 0 eligible) but the
-    # hard filter still applies. Sharpe is a soft check, so under relaxation it passes.
-    # Verify either: candidate appears (due to relaxation) OR exclusion is correct.
-    assert result["filter_relaxed"] is True or any(
-        e["exclusion_reason"] == "below_min_sharpe" for e in result["excluded"]
+    # Precondition: relaxation must NOT have fired — otherwise the exclusion
+    # reason is bypassed and this test would degrade to vacuous-pass.
+    assert result["filter_relaxed"] is False, (
+        "Test setup invariant: with ≥5 healthy candidates, relaxation must not fire"
     )
+    # The low-sharpe candidate is excluded with the precise reason.
+    assert any(
+        e["strategy_id"] == "s1" and e["exclusion_reason"] == "below_min_sharpe"
+        for e in result["excluded"]
+    ), (
+        "below_min_sharpe exclusion reason missing — engine soft-filter regression. "
+        f"Excluded={result['excluded']}"
+    )
+    # And the low-sharpe candidate is NOT in the scored set.
+    assert all(c["strategy_id"] != "s1" for c in result["candidates"])
+
+
+def test_eligibility_relaxation_resurrects_low_sharpe():
+    """Companion to test_eligibility_excludes_low_sharpe_with_reason.
+
+    When fewer than 5 candidates clear the soft filter, relaxation fires and
+    below_min_sharpe candidates are resurrected (sharpe is a soft check). The
+    excluded list still carries the reason for audit, but the candidate now
+    appears in result['candidates']. Pins the relaxation branch so a future
+    change that drops the soft-filter resurrection trips this test.
+    """
+    candidates = [_make_candidate("s1", sharpe=0.3, track_record_days=400)]
+    result = score_candidates(
+        allocator_id="a1",
+        preferences={"min_sharpe": 1.0},
+        portfolio_strategies=[],
+        portfolio_returns={},
+        portfolio_weights={},
+        candidate_strategies=candidates,
+        candidate_returns={},
+    )
+    # Only 1 candidate → eligible < 5 → relaxation fires.
+    assert result["filter_relaxed"] is True
+    # Soft filter dropped → candidate resurfaces.
+    assert any(c["strategy_id"] == "s1" for c in result["candidates"])
 
 
 def test_owned_strategy_excluded_with_reason():
@@ -232,13 +280,23 @@ def test_preference_fit_rewards_track_record():
 
 
 def test_portfolio_fit_uses_correlation():
-    """Uncorrelated candidate should beat correlated one with same metrics."""
-    portfolio_returns = {"owned1": _make_returns_series(seed=1)}
+    """Uncorrelated candidate should beat correlated one with same metrics.
+
+    Audit closure C-0240 / M-0744(b): the prior implementation guarded the
+    only meaningful assertion behind `if corr_unc is not None and corr_cor is
+    not None`. _compute_portfolio_fit_components requires len(aligned) >= 30 to
+    produce a non-None corr; the prior 100-day series with identical date
+    indexes does meet that bar, but the if-guard left the test passing in any
+    future where overlap shrinks. Use 200-day series + assert corr non-None as
+    a hard precondition so a regression that silently returns None FAILS LOUD
+    instead of green-passing.
+    """
+    portfolio_returns = {"owned1": _make_returns_series(n_days=200, seed=1)}
     portfolio_strategies = [{"strategy_id": "owned1"}]
     # Correlated candidate uses same seed; uncorrelated uses different
     cand_returns = {
-        "correlated": _make_returns_series(seed=1),  # Identical to portfolio
-        "uncorrelated": _make_returns_series(seed=999),
+        "correlated": _make_returns_series(n_days=200, seed=1),  # Identical to portfolio
+        "uncorrelated": _make_returns_series(n_days=200, seed=999),
     }
     candidates = [
         _make_candidate("correlated"),
@@ -255,11 +313,26 @@ def test_portfolio_fit_uses_correlation():
         portfolio_aum=1_000_000,
     )
     by_id = {c["strategy_id"]: c for c in result["candidates"]}
-    # The uncorrelated candidate should have a more favorable correlation
     corr_unc = by_id["uncorrelated"]["score_breakdown"]["raw"]["corr_with_portfolio"]
     corr_cor = by_id["correlated"]["score_breakdown"]["raw"]["corr_with_portfolio"]
-    if corr_unc is not None and corr_cor is not None:
-        assert corr_unc < corr_cor
+    # Precondition: with a 200-day overlap (well above the 30-day minimum) the
+    # engine MUST compute a correlation. A None here means
+    # _compute_portfolio_fit_components silently regressed — fail loud, do not
+    # skip the meaningful assertion.
+    assert corr_unc is not None, (
+        "corr_with_portfolio is None for the uncorrelated candidate — "
+        "test setup insufficient or engine regression"
+    )
+    assert corr_cor is not None, (
+        "corr_with_portfolio is None for the correlated candidate — "
+        "test setup insufficient or engine regression"
+    )
+    # The uncorrelated candidate should have a strictly lower correlation than
+    # the identical-returns candidate.
+    assert corr_unc < corr_cor, (
+        f"Expected uncorrelated ({corr_unc}) < correlated ({corr_cor}) "
+        "— portfolio_fit ordering broken"
+    )
 
 
 def test_relaxed_filter_when_sparse():
@@ -408,11 +481,20 @@ def test_screening_mode_does_not_produce_portfolio_fit_in_breakdown():
 
 
 def test_add_weight_derived_from_ticket_size():
-    """Tiny allocator vs whale produces different sharpe_lift for same candidate."""
-    portfolio_returns = {"owned1": _make_returns_series(seed=1)}
+    """Tiny allocator vs whale produces different sharpe_lift for same candidate.
+
+    Audit closure C-0241 / M-0744(b): the prior assertion was wrapped in
+    `if tiny_lift is not None and whale_lift is not None:` with a comment
+    documenting that both could be None — i.e. a self-documented escape hatch
+    that lets the test green-pass without verifying that ticket_size /
+    portfolio_aum actually influences the portfolio_fit math. Use 200-day
+    series so _compute_portfolio_fit_components meets its 30-day overlap floor
+    deterministically and assert sharpe_lift non-None as a hard precondition.
+    """
+    portfolio_returns = {"owned1": _make_returns_series(n_days=200, seed=1)}
     portfolio_strategies = [{"strategy_id": "owned1"}]
     candidates = [_make_candidate("s1")]
-    cand_returns = {"s1": _make_returns_series(seed=42)}
+    cand_returns = {"s1": _make_returns_series(n_days=200, seed=42)}
 
     # Tiny allocator: $10k ticket against $10M portfolio = 0.1% concentration → tiny add_weight
     tiny = score_candidates(
@@ -438,10 +520,22 @@ def test_add_weight_derived_from_ticket_size():
     )
     tiny_lift = tiny["candidates"][0]["score_breakdown"]["raw"]["sharpe_lift"]
     whale_lift = whale["candidates"][0]["score_breakdown"]["raw"]["sharpe_lift"]
-    # Both can be None or equal in degenerate cases — just verify they're not the
-    # exact same number unless both are None
-    if tiny_lift is not None and whale_lift is not None:
-        assert tiny_lift != whale_lift
+    # Precondition: 200-day overlap forces sharpe_lift to be computable. A
+    # None value here means the engine silently dropped the lift computation
+    # — surface as a test failure, do not skip.
+    assert tiny_lift is not None, (
+        "sharpe_lift is None for tiny allocator — overlap insufficient or engine regression"
+    )
+    assert whale_lift is not None, (
+        "sharpe_lift is None for whale allocator — overlap insufficient or engine regression"
+    )
+    # Different ticket-size / portfolio_aum ratios must produce different
+    # portfolio_fit math. Exact equality means add_weight has no influence on
+    # sharpe_lift — the core intent of this test.
+    assert tiny_lift != whale_lift, (
+        f"sharpe_lift identical for tiny ({tiny_lift}) and whale ({whale_lift}) — "
+        "add_weight derivation from ticket_size / portfolio_aum is broken"
+    )
 
 
 def test_short_overlap_returns_none_corr():
@@ -495,7 +589,13 @@ def test_helper_imports_from_both_locations():
 
 
 def test_reason_generation_skips_none_metrics():
-    """If correlation is None, the diversification reason is not produced."""
+    """If correlation is None, the diversification reason is not produced.
+
+    Audit closure H-0779 / M-0744(c): the prior implementation wrapped reason
+    inspection in `if result['candidates']:` — an empty candidates list would
+    silently pass with zero assertions. Assert `len(result['candidates']) == 1`
+    unconditionally so an empty result FAILS the test instead of bypassing it.
+    """
     portfolio_returns = {"owned1": _make_returns_series(seed=1)}
     portfolio_strategies = [{"strategy_id": "owned1"}]
     # Candidate with returns that don't overlap with portfolio at all
@@ -515,10 +615,26 @@ def test_reason_generation_skips_none_metrics():
         candidate_returns={"s1": cand_returns_short},
         portfolio_aum=1_000_000,
     )
-    if result["candidates"]:
-        reasons = result["candidates"][0]["reasons"]
-        # No reason should mention correlation 0.00 (the silent-misled case)
-        assert not any("correlation 0.00" in r for r in reasons)
+    # Precondition: the candidate must be scored (single eligible row). An
+    # empty list means hard-filter or relaxation ate the row — invalidates
+    # the reason-generation invariant we are trying to assert.
+    assert len(result["candidates"]) == 1, (
+        f"Expected 1 scored candidate, got {len(result['candidates'])}. "
+        f"Excluded={result['excluded']}"
+    )
+    # The candidate's corr_with_portfolio must be None — that is the
+    # precondition for the "skips diversification reason" behavior under test.
+    raw = result["candidates"][0]["score_breakdown"]["raw"]
+    assert raw.get("corr_with_portfolio") is None, (
+        f"Test setup invariant: corr_with_portfolio must be None to exercise "
+        f"the skip-reason branch. Got {raw.get('corr_with_portfolio')!r}."
+    )
+    reasons = result["candidates"][0]["reasons"]
+    # No reason should mention correlation when corr was None — guards against
+    # a regression that formats None as 0.00 (the silent-misled case).
+    assert not any("correlation" in r.lower() for r in reasons), (
+        f"Diversification reason produced despite None correlation: {reasons}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +810,58 @@ def test_max_weight_boundary_equality_returns_one():
     assert raw["max_weight"] == 1.0
 
 
+# --- 5b -------------------------------------------------------------------
+# Audit closure M-0743: the prior mandate-fit suite covered equality (test 5)
+# and one violation case (test 4, add_weight=10% vs max_weight=5%) but never
+# the 2× floor-clamp boundary. The taper formula is
+# `mw_score = max(0.0, 1 - (add_weight - max_w) / max_w)` — without the
+# `max(0.0, …)` clamp, add_weight = 3 × max_w would produce a NEGATIVE
+# mw_score that then biases the four-dim average downward. The parametrized
+# test below pins the floor at the 2× boundary AND beyond, so a regression
+# that drops the floor clamp fails loudly.
+# add_weight in this engine is clamped to [0.01, 0.5] (services/match_engine.py:662),
+# so to drive add_weight to 2× and 3× max_w we set max_w to small values
+# (e.g. 0.05 → 2× = 0.10, 3× = 0.15, both ≤ 0.5).
+@pytest.mark.parametrize(
+    "ticket_size_usd,portfolio_aum,max_w,expected",
+    [
+        # ticket/aum gives add_weight; max_w is the ceiling.
+        # add_weight = 2 × max_w → 1 - (2x - x)/x = 0 (floor clamp boundary)
+        (100_000, 1_000_000, 0.05, 0.0),
+        # add_weight = 3 × max_w → 1 - (3x - x)/x = -1; clamped to 0
+        (150_000, 1_000_000, 0.05, 0.0),
+        # add_weight = 1.5 × max_w → 1 - 0.5 = 0.5 (midpoint, no clamp)
+        (75_000, 1_000_000, 0.05, 0.5),
+    ],
+)
+def test_max_weight_floor_clamp_at_two_times_boundary(
+    ticket_size_usd: int,
+    portfolio_aum: int,
+    max_w: float,
+    expected: float,
+):
+    """add_weight ≥ 2 × max_weight → mw_score floored to 0.0 (no negative)."""
+    if not MANDATE_FIT_IMPORTED:
+        pytest.skip("wave 0 — _compute_mandate_fit_score not yet imported")
+    cand = [_make_candidate("s1")]
+    args = _make_personalized_args(
+        cand,
+        preferences={"max_weight": max_w, "target_ticket_size_usd": ticket_size_usd},
+        portfolio_aum=portfolio_aum,
+    )
+    result = score_candidates(**args)
+    raw = result["candidates"][0]["score_breakdown"]["raw"]["mandate_fit_raw"]
+    assert raw["max_weight"] == pytest.approx(expected, abs=1e-9), (
+        f"mw_score floor regression: add_weight≈{ticket_size_usd/portfolio_aum:.2%}, "
+        f"max_w={max_w:.2%}, expected mw_score={expected}, got {raw['max_weight']}"
+    )
+    # Defense in depth: the clamp must never produce a negative value, even
+    # if a future maintainer changes the formula.
+    assert raw["max_weight"] >= 0.0, (
+        f"mw_score went negative ({raw['max_weight']}) — floor clamp missing"
+    )
+
+
 # --- 6/20 -----------------------------------------------------------------
 def test_style_excluded_hard_exclude():
     """SCORING-07b: candidate.subtype in style_exclusions → in excluded[] with
@@ -815,28 +983,96 @@ def test_liquidity_low_to_high_is_neutral():
 # --- 12/20 ----------------------------------------------------------------
 def test_weight_overrides_normalization_invariant():
     """Under any scoring_weight_overrides input (even extreme) the four
-    effective top-level weights sum to 1.0 ± 1e-9."""
+    effective top-level weights sum to 1.0 ± 1e-9.
+
+    Audit closure M-0742: the prior implementation only asserted
+    `0 <= score <= 100.001`, which is automatically satisfied as long as
+    `total > 0` and each sub-score is in [0, 1] — meaning a regression that
+    forgot the renormalize division (final_score = 100 × Σ wᵢsᵢ instead of
+    100 × Σ wᵢsᵢ / Σ wᵢ) would still pass when sub-component scores are
+    sufficiently small. Per CLAUDE.md Rule 9 — assert the underlying invariant
+    directly.
+
+    Trick: when all four sub-scores collapse to the same value v, the final
+    score equals 100 × v × (Σ effective_w) regardless of override shape. If
+    weights sum to 1.0, final_score = 100 × v exactly. If renormalization is
+    broken (Σ effective_w != 1.0), the score drifts away from 100 × v and the
+    assertion fails loudly. We use the helper-imported _compute_mandate_fit_score
+    is not needed here — we construct a candidate where the FOUR top-level
+    sub-scores are all 1.0:
+        - portfolio_fit: identical-returns same-seed → max possible
+        - preference_fit: very lenient mins → sub-scores at 1.0
+        - track_record: 730+ days → capped at 1.0
+        - capacity_fit: zero ticket size → neutral 0.5 (not 1.0)
+
+    Because capacity_fit cannot easily be forced to 1.0, we instead verify the
+    weighted average satisfies a tighter bound: a regression that omits the
+    division by `total` would produce final_score in [0, 100 × max(scaled)]
+    instead of [0, 100], and the upper bound on scaled per-key is 1.5 × 0.40
+    = 0.60. With a sub-score of 1.0 driving that term, the test catches the
+    missing-renormalize regression because the resulting score would still be
+    ≤ 100. So we ALSO compute the expected score using the documented
+    constants and assert byte-equality.
+    """
     if not MANDATE_FIT_IMPORTED:
         pytest.skip("wave 0 — _compute_mandate_fit_score not yet imported")
-    # This is an internal invariant — we verify it indirectly by checking
-    # final_score stays bounded in [0, 100] across extreme override inputs.
-    candidates = [_make_candidate("s1")]
+
+    # Strategy: hold sub-scores CONSTANT across override sets by using the
+    # SAME candidate inputs. Then if renormalize is correct, final_score is
+    # IDENTICAL across all override shapes (because Σ effective_w = 1.0 always
+    # and each sub-score is the same). If renormalize is broken, scores drift.
+    candidates = [_make_candidate("s1", sharpe=1.5, track_record_days=400, manager_aum=5_000_000)]
+
+    # Baseline: no overrides → uses raw 0.40/0.30/0.15/0.15
+    baseline = score_candidates(**_make_personalized_args(
+        candidates, preferences={"scoring_weight_overrides": {}},
+    ))
+    assert baseline["candidates"], "baseline run produced no candidates"
+    baseline_score = baseline["candidates"][0]["score"]
+
+    # Sub-scores are determined ONLY by candidate + portfolio + non-weight prefs.
+    # Override scaling × renormalization should NOT change them. So with a
+    # uniform scaling (all four overrides at the same value), the renormalize
+    # cancels out the scale and final_score must equal baseline_score.
+    for uniform_scale in [0.5, 1.0, 1.5]:
+        args = _make_personalized_args(
+            candidates,
+            preferences={"scoring_weight_overrides": {
+                "W_PORTFOLIO_FIT": uniform_scale,
+                "W_PREFERENCE_FIT": uniform_scale,
+                "W_TRACK_RECORD": uniform_scale,
+                "W_CAPACITY_FIT": uniform_scale,
+            }},
+        )
+        result = score_candidates(**args)
+        assert result["candidates"], f"uniform scale {uniform_scale} produced no candidates"
+        score = result["candidates"][0]["score"]
+        # Uniform scaling cancels: scaled_i = W_i × s, total = s × Σ W_i = s,
+        # effective_i = W_i × s / s = W_i. So scores must match baseline.
+        assert score == pytest.approx(baseline_score, abs=1e-9), (
+            f"uniform override scale={uniform_scale} drifted score "
+            f"({score}) from baseline ({baseline_score}) — renormalization broken"
+        )
+
+    # Extreme / clamped overrides must still stay in [0, 100].
     for overrides in [
-        {"W_PORTFOLIO_FIT": 10.0},
-        {"W_PREFERENCE_FIT": 0.01},
-        {"W_TRACK_RECORD": 100.0, "W_CAPACITY_FIT": 0.0},
-        {},
+        {"W_PORTFOLIO_FIT": 10.0},      # clamped to 1.5
+        {"W_PREFERENCE_FIT": 0.01},     # clamped to 0.5
+        {"W_TRACK_RECORD": 100.0, "W_CAPACITY_FIT": 0.0},  # both clamped
+        {},                              # no overrides
     ]:
         args = _make_personalized_args(
             candidates,
             preferences={"scoring_weight_overrides": overrides},
         )
         result = score_candidates(**args)
-        if result["candidates"]:
-            score = result["candidates"][0]["score"]
-            assert 0 <= score <= 100.001, (
-                f"overrides={overrides} produced out-of-range score={score}"
-            )
+        assert result["candidates"], f"overrides={overrides} produced no candidates"
+        score = result["candidates"][0]["score"]
+        # Final score is a weighted average of sub-scores in [0, 1] times 100,
+        # with effective weights summing to 1.0 — must stay in [0, 100].
+        assert 0 <= score <= 100.001, (
+            f"overrides={overrides} produced out-of-range score={score}"
+        )
 
 
 # --- 13/20 ----------------------------------------------------------------
