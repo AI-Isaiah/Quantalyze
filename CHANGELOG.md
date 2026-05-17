@@ -7,6 +7,18 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.37] - 2026-05-17
+
+**Chore: Phase-5 simplify pass on `fix/match-engine-tests-critical-2026-05-17` (audit-2026-05-07).** Code-simplifier pass over the single in-scope source file (`analytics-service/tests/test_match_engine.py`) intentionally produced **zero simplification commits**. The branch is a test-only audit-closure landing (8 findings: C-0239, C-0240, C-0241, H-0779, M-0741, M-0742, M-0743, M-0744). Every "verbose" element in the diff — long precondition assertions, inline `# Precondition:` comments, docstrings citing audit IDs — is load-bearing per the simplify protocol's "leave alone" list. Specific candidates considered and deliberately not applied:
+
+- 14× repeated `if not MANDATE_FIT_IMPORTED: pytest.skip(...)` left as imperative skips (decorator form would silently fork a TDD-scaffold convention).
+- `_compute_mandate_fit_score = None` in the `except ImportError` branch left as a documented wave-0 / wave-1 import-gate marker.
+- `assert score == score` NaN idiom left in place (inline comment is unambiguous; rewriting to `math.isnan` is speculative).
+- Exclusion-reason assertion blocks left inline (each call site ≤3 lines, error messages carry audit-ID context; per Rule 5 "three similar lines beats premature abstraction").
+
+Trail: `.planning/audit-2026-05-07/PHASE-5-SIMPLIFY.md`. No code or test changes — VERSION / package.json / CHANGELOG only.
+
+
 ## [0.22.40.36] - 2026-05-17
 
 **Test hardening: close 4C+1H+3M silent-pass / tautology findings on `analytics-service/tests/test_match_engine.py` (audit-2026-05-07 cluster D).** Eight findings from `FIX-LIST.md` (C-0239, C-0240, C-0241, H-0779, M-0741, M-0742, M-0743, M-0744) flagged tests that green-passed without exercising their stated intent — four had `if`-guards or OR-disjunctions that let the core assertion be skipped when the guarded value was None / empty, two asserted only bounds the engine's own invariants already guaranteed (vacuous), and one mandate-fit boundary (max_weight floor clamp at 2× ceiling) had no coverage.
