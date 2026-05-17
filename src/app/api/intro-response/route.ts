@@ -5,7 +5,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyAllocatorIntroStatus } from "@/lib/email";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 
 /**
  * Audit-2026-05-07 C-0135 + C-0136 — manager-side intro response.
@@ -97,11 +97,46 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const strategy = request.strategies as unknown as
+  // Red-team 2026-05-17 (red-team:join-shape-cast-fragile, MED conf 8):
+  // The select uses an FK hint targeting a to-one relationship, so the
+  // runtime shape SHOULD be a single object. Guard against the supabase-js
+  // inference flipping to ARRAY on a future schema change / version bump
+  // — that would silently invert the ownership check (`strategy.user_id`
+  // is undefined on an array) and 403 every legitimate manager. Surface
+  // it as a 500 with a stable [api/intro-response] diagnostic instead.
+  const rawStrategy = request.strategies as unknown;
+  if (
+    rawStrategy !== null &&
+    (Array.isArray(rawStrategy) || typeof rawStrategy !== "object")
+  ) {
+    console.error(
+      "[api/intro-response] unexpected join shape on request.strategies",
+      { typeof: typeof rawStrategy, isArray: Array.isArray(rawStrategy) },
+    );
+    return NextResponse.json(
+      { error: "Unexpected join shape" },
+      { status: 500 },
+    );
+  }
+  const strategy = rawStrategy as
     | { user_id: string | null; name: string | null }
     | null;
   if (!strategy || strategy.user_id !== user.id) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // Red-team 2026-05-17 (red-team:notify-replay-amplification, HIGH conf
+  // 9): re-check the prior status from the user-scoped lookup BEFORE the
+  // admin update. If a replay/double-fire arrives after the row already
+  // transitioned to a terminal state, short-circuit with 409 so we don't
+  // re-write responded_at, re-emit an audit row, or re-fire the allocator
+  // notification email. This is the cheap belt; the .eq('status','pending')
+  // guard on the UPDATE below is the suspenders (TOCTOU close).
+  if (request.status !== "pending") {
+    return NextResponse.json(
+      { error: "Request already resolved" },
+      { status: 409 },
+    );
   }
 
   // Defense-in-depth: explicit column whitelist. The route only ever
@@ -109,6 +144,15 @@ export async function POST(req: NextRequest) {
   // allocation_amount, message, mandate_context, etc. This closes the
   // C-0136 application-layer surface even if RLS WITH CHECK is not yet
   // tightened.
+  //
+  // Red-team 2026-05-17 (red-team:toctou-status-overwrite, CRITICAL conf
+  // 9): the UPDATE WHERE clause MUST include `.eq('status','pending')`.
+  // Without it, a concurrent admin call to /api/admin/intro-request can
+  // transition the row to intro_made|completed between the L87 lookup and
+  // this write — the manager's `declined` would then clobber the admin's
+  // terminal state. With the guard, the second writer's update affects 0
+  // rows and we surface 409 (request already resolved) instead of
+  // overwriting + double-emitting + double-notifying.
   const admin = createAdminClient();
   const { data: updated, error: updateError } = await admin
     .from("contact_requests")
@@ -117,24 +161,42 @@ export async function POST(req: NextRequest) {
       responded_at: new Date().toISOString(),
     })
     .eq("id", id)
+    .eq("status", "pending")
     .select("id");
 
   if (updateError) {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
   if (!updated || updated.length === 0) {
-    // Should not happen given the ownership check above, but mirrors the
-    // PendingIntros defensive shape and prevents silent success.
+    // Red-team 2026-05-17: zero affected rows after the
+    // `.eq('status','pending')` guard means another writer (admin route
+    // or a parallel tab) already resolved the request. Return 409 with
+    // copy that tells the manager to refresh — NOT 500 — so the UI can
+    // distinguish "resolved elsewhere, refresh" from "DB error, retry".
     return NextResponse.json(
-      { error: "Update did not apply" },
-      { status: 500 },
+      {
+        error:
+          "Request already resolved. Refresh to see the latest status.",
+      },
+      { status: 409 },
     );
   }
 
   // Audit the manager-driven transition. Mirrors the admin route's audit
   // event shape (action="contact_request.status_change") so forensic
   // queries don't need to special-case manager vs admin actor.
-  logAuditEvent(supabase, {
+  //
+  // Red-team 2026-05-17 (red-team:audit-after-jwt-expiry, HIGH conf 8):
+  // emit via logAuditEventAsUser(admin, user.id, ...) — NOT logAuditEvent
+  // on the user-scoped client. The user-scoped client carries the
+  // caller's JWT, and after() runs the RPC AFTER the response flushes;
+  // the JWT may have expired by then (1h Supabase default), causing the
+  // RPC to raise permission_denied and the audit_log row to be silently
+  // dropped (re-thrown as unhandled rejection — see src/lib/audit.ts
+  // L486-500). logAuditEventAsUser routes through the service-role RPC
+  // log_audit_event_service with the user.id captured at request time,
+  // immune to JWT expiry.
+  logAuditEventAsUser(admin, user.id, {
     action: "contact_request.status_change",
     entity_type: "contact_request",
     entity_id: id,
@@ -148,8 +210,22 @@ export async function POST(req: NextRequest) {
   // Same notify call as the admin route, lifted from
   // src/app/api/admin/intro-request/route.ts. Fire-and-forget via after()
   // so the response isn't gated on the email round-trip.
+  //
+  // Red-team 2026-05-17 (red-team:null-allocator-id-silent-skip, MED conf
+  // 8): legacy rows may have allocator_id=null; supabase-js translates
+  // .eq('id', null) into 'id IS NULL' which silently returns nothing.
+  // Guard explicitly so the skip is logged with a stable [api/intro-
+  // response] prefix — otherwise the missing allocator notification has
+  // no audit signal at all.
   after(async () => {
     try {
+      if (!request.allocator_id) {
+        console.warn(
+          "[api/intro-response] skip notify — allocator_id is null on contact_request",
+          { contact_request_id: id },
+        );
+        return;
+      }
       const { data: allocator } = await admin
         .from("profiles")
         .select("email")

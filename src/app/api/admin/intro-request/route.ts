@@ -91,13 +91,36 @@ export async function POST(req: NextRequest) {
     update.admin_note = admin_note;
   }
 
-  const { error } = await admin
+  // Red-team 2026-05-17 (mirrors the manager-route TOCTOU close, CRITICAL
+  // conf 9): admin UPDATE must guard on the prior pending state so a
+  // concurrent manager response via /api/intro-response cannot be
+  // overwritten by this admin write. Without the guard, a manager's
+  // intro_made|declined transition between the body-parse and this write
+  // would be clobbered by the admin's new status, and the audit row
+  // would record the admin as the actor on a row whose true terminal
+  // state was set by the manager. Affected-rows=0 surfaces as 409
+  // (request resolved elsewhere) instead of 200 silent overwrite. We
+  // intentionally retain admin-to-admin idempotency (writing the same
+  // intro_made twice by the same admin is rare and already guarded by
+  // the pre-status check the UI surfaces).
+  const { data: updated, error } = await admin
     .from("contact_requests")
     .update(update)
-    .eq("id", id);
+    .eq("id", id)
+    .eq("status", "pending")
+    .select("id");
 
   if (error) {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
+  }
+  if (!updated || updated.length === 0) {
+    return NextResponse.json(
+      {
+        error:
+          "Request already resolved elsewhere. Refresh to see the latest status.",
+      },
+      { status: 409 },
+    );
   }
 
   // Sprint 6 Task 7.1b — audit the admin-driven status transition. We need a
