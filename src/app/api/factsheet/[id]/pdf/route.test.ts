@@ -203,13 +203,23 @@ describe("GET /api/factsheet/[id]/pdf — x-internal-token bypass (Phase 18 / Pl
  * in PUBLIC_ROUTES, not auth-gated). These tests drive the success path
  * through puppeteer mocks and assert on `page.goto` and response headers.
  */
-function singlePublishedComplete() {
+function singlePublishedComplete(
+  overrides: { computed_at?: string } = {},
+) {
   const single = vi.fn().mockResolvedValue({
     data: {
       id: "00000000-0000-0000-0000-000000000001",
       name: "Momentum Strategy",
       status: "published",
-      strategy_analytics: [{ computation_status: "complete" }],
+      strategy_analytics: [
+        {
+          computation_status: "complete",
+          // audit-2026-05-07 red-team HIGH#3 — ETag is bound to
+          // analytics.computed_at; fixture must provide a deterministic
+          // value so cache-revalidation assertions are stable.
+          computed_at: overrides.computed_at ?? "2026-05-17T00:00:00.000Z",
+        },
+      ],
     },
     error: null,
   });
@@ -346,11 +356,33 @@ describe("GET /api/factsheet/[id]/pdf — URL origin + Cache-Control (Cluster L 
  * launch. Previously uncovered.
  */
 describe("GET /api/factsheet/[id]/pdf — analytics gating (Cluster L specialist F5.2)", () => {
-  beforeEach(() => {
+  // Audit-2026-05-07 red-team MED#4 — describe-scoped puppeteer mocks. The
+  // prior shape relied on the previous describe block (URL origin + Cache-
+  // Control) having configured `acquirePdfSlot.mockResolvedValue(...)` in
+  // its own beforeEach. Vitest does not guarantee describe order; if F5.2
+  // ran first, puppeteer mocks were `vi.fn()` returning undefined, the
+  // route would throw inside try/catch and return 500. The anti-assertion
+  // `expect(launchBrowser).not.toHaveBeenCalled()` would still HOLD in
+  // that pathological case, masking a real test-shape bug. We now
+  // configure the puppeteer mocks explicitly in this describe's
+  // beforeEach so the test is hermetic regardless of run order.
+  beforeEach(async () => {
     vi.resetModules();
     vi.mocked(checkLimit).mockReset();
     vi.mocked(checkLimit).mockResolvedValue({ success: true, retryAfter: 0 } as never);
     vi.mocked(createAdminClient).mockReset();
+    const puppeteer = await import("@/lib/puppeteer");
+    vi.mocked(puppeteer.acquirePdfSlot).mockReset();
+    vi.mocked(puppeteer.launchBrowser).mockReset();
+    // Defensive default: if the route ever fell through to puppeteer
+    // (which it must NOT in this describe block), launchBrowser would
+    // resolve and the not-called anti-assertion would fail loud — surfacing
+    // the gating regression instead of silently masking it.
+    vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
+    vi.mocked(puppeteer.launchBrowser).mockResolvedValue({
+      newPage: vi.fn(),
+      close: vi.fn(),
+    } as never);
   });
 
   afterEach(() => {
@@ -378,10 +410,6 @@ describe("GET /api/factsheet/[id]/pdf — analytics gating (Cluster L specialist
     const from = vi.fn().mockReturnValue({ select });
     vi.mocked(createAdminClient).mockReturnValue({ from } as never);
 
-    const puppeteer = await import("@/lib/puppeteer");
-    vi.mocked(puppeteer.acquirePdfSlot).mockReset();
-    vi.mocked(puppeteer.launchBrowser).mockReset();
-
     const { GET } = await import("./route");
     const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
     const req = new NextRequest(
@@ -389,11 +417,217 @@ describe("GET /api/factsheet/[id]/pdf — analytics gating (Cluster L specialist
       { method: "GET" },
     );
     const res = await GET(req, { params });
+    // Audit-2026-05-07 red-team MED#4 — assert status + body PRECONDITION
+    // before the anti-assertions. If the route fell through to puppeteer
+    // and returned 500, the 400 check fails LOUD here rather than the
+    // not-called assertions passing for the wrong reason later.
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("Analytics not computed");
     // Critical side-effect anti-assertion: no Chromium boot.
+    const puppeteer = await import("@/lib/puppeteer");
     expect(puppeteer.acquirePdfSlot).not.toHaveBeenCalled();
     expect(puppeteer.launchBrowser).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Audit-2026-05-07 Phase-4 red-team — production host-allowlist (HIGH#1),
+ * CDN cross-alias bleed mitigation via `Vary: Host` (HIGH#2), stale-PDF
+ * revalidation via ETag tied to `analytics.computed_at` (HIGH#3), and the
+ * opaque-origin production hard-fail (MED#1).
+ */
+describe("GET /api/factsheet/[id]/pdf — production host allow-list + cache safety (audit-2026-05-07)", () => {
+  let goto: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.mocked(checkLimit).mockReset();
+    vi.mocked(checkLimit).mockResolvedValue({ success: true, retryAfter: 0 } as never);
+    vi.mocked(createAdminClient).mockReset();
+    singlePublishedComplete();
+
+    const puppeteer = await import("@/lib/puppeteer");
+    vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
+    goto = vi.fn().mockResolvedValue(undefined);
+    const newPage = vi.fn().mockResolvedValue({
+      goto,
+      setDefaultNavigationTimeout: vi.fn(),
+      setDefaultTimeout: vi.fn(),
+      setViewport: vi.fn().mockResolvedValue(undefined),
+      evaluate: vi.fn().mockResolvedValue(undefined),
+      pdf: vi.fn().mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46])),
+    });
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(puppeteer.launchBrowser).mockResolvedValue({ newPage, close } as never);
+  });
+
+  afterEach(() => {
+    process.env = { ...ENV_BACKUP };
+  });
+
+  it("HIGH#1: production VERCEL_ENV REJECTS a spoofed Host outside the allowlist (500, no puppeteer)", async () => {
+    // Attacker-controlled Host: a self-hosted deploy, `vercel dev`, or a
+    // proxy spoofing the `Host` header could otherwise drive puppeteer to
+    // navigate to `https://evil.example.com/factsheet/<id>` with the
+    // production deploy's full network privileges. Hard-fail prevents
+    // the puppeteer slot from being acquired at all.
+    process.env.VERCEL_ENV = "production";
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    const req = new NextRequest(
+      "https://evil.example.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      { method: "GET" },
+    );
+    const res = await GET(req, { params });
+    expect(res.status).toBe(500);
+    // Critical anti-assertion: the puppeteer queue MUST NOT have been
+    // acquired for a non-allowlisted host. Pre-fix, the route would
+    // happily render against the attacker host.
+    expect(goto).not.toHaveBeenCalled();
+  });
+
+  it("HIGH#1: production VERCEL_ENV accepts quantalyze-rho.vercel.app (allowlist positive control)", async () => {
+    process.env.VERCEL_ENV = "production";
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    const req = new NextRequest(
+      "https://quantalyze-rho.vercel.app/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      { method: "GET" },
+    );
+    const res = await GET(req, { params });
+    expect(res.status).toBe(200);
+    expect(goto).toHaveBeenCalledTimes(1);
+    expect(goto.mock.calls[0][0]).toBe(
+      "https://quantalyze-rho.vercel.app/factsheet/00000000-0000-0000-0000-000000000001",
+    );
+  });
+
+  it("HIGH#1: production VERCEL_ENV accepts the current deployment's VERCEL_URL (preview-branch allowance)", async () => {
+    // Preview deployments get ephemeral hosts like
+    // `quantalyze-abc123-team.vercel.app`. The allowlist would otherwise
+    // reject them. Accepting the request's own deployment URL keeps
+    // preview branches renderable without manual allowlist edits.
+    process.env.VERCEL_ENV = "production";
+    process.env.VERCEL_URL = "quantalyze-abc123-team.vercel.app";
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    const req = new NextRequest(
+      "https://quantalyze-abc123-team.vercel.app/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      { method: "GET" },
+    );
+    const res = await GET(req, { params });
+    expect(res.status).toBe(200);
+    expect(goto.mock.calls[0][0]).toBe(
+      "https://quantalyze-abc123-team.vercel.app/factsheet/00000000-0000-0000-0000-000000000001",
+    );
+  });
+
+  it("MED#1: production VERCEL_ENV + opaque origin returns 500 (no env fallback fingerprint)", async () => {
+    // Pre-fix, an opaque-origin request (Host stripped by an upstream
+    // proxy) fell through to `NEXT_PUBLIC_APP_URL` in production. By
+    // varying that env var to a sentinel host and observing 502 vs 200,
+    // an attacker could fingerprint internal env state. The production
+    // branch now hard-fails so the fallback is unreachable.
+    process.env.VERCEL_ENV = "production";
+    process.env.NEXT_PUBLIC_APP_URL = "https://sentinel.example.com";
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    // Construct a request whose nextUrl.origin serializes as the literal
+    // string "null" — matching the opaque-origin case the route guards.
+    const req = {
+      headers: new Headers(),
+      nextUrl: { origin: "null" } as URL,
+    } as unknown as NextRequest;
+    const res = await GET(req, { params });
+    expect(res.status).toBe(500);
+    expect(goto).not.toHaveBeenCalled();
+  });
+
+  it("HIGH#2: 200 response carries Vary: Host so CDN keys per-host (cross-alias bleed mitigation)", async () => {
+    process.env.VERCEL_ENV = "production";
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    const req = new NextRequest(
+      "https://quantalyze.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      { method: "GET" },
+    );
+    const res = await GET(req, { params });
+    expect(res.status).toBe(200);
+    // Vary: Host MUST be present — without it the shared CDN can serve
+    // a preview-alias-generated PDF to a production-alias request.
+    expect(res.headers.get("Vary")).toBe("Host");
+  });
+
+  it("HIGH#3: 200 response carries ETag bound to id:computed_at", async () => {
+    process.env.VERCEL_ENV = "production";
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    const req = new NextRequest(
+      "https://quantalyze.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      { method: "GET" },
+    );
+    const res = await GET(req, { params });
+    expect(res.status).toBe(200);
+    const etag = res.headers.get("ETag");
+    // Strong validator, quoted per RFC 7232. Format: id:computed_at.
+    expect(etag).toBe(
+      '"00000000-0000-0000-0000-000000000001:2026-05-17T00:00:00.000Z"',
+    );
+  });
+
+  it("HIGH#3: If-None-Match matching the current ETag returns 304 without launching puppeteer", async () => {
+    process.env.VERCEL_ENV = "production";
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    const req = new NextRequest(
+      "https://quantalyze.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      {
+        method: "GET",
+        headers: {
+          "If-None-Match":
+            '"00000000-0000-0000-0000-000000000001:2026-05-17T00:00:00.000Z"',
+        },
+      },
+    );
+    const res = await GET(req, { params });
+    expect(res.status).toBe(304);
+    // 304 must skip the expensive puppeteer render entirely — that's the
+    // whole point of cache revalidation.
+    expect(goto).not.toHaveBeenCalled();
+    // Vary + Cache-Control must still be present on the 304 for the CDN
+    // to use them on the revalidated entry.
+    expect(res.headers.get("Vary")).toBe("Host");
+    expect(res.headers.get("Cache-Control")).toBe(
+      "public, s-maxage=3600, stale-while-revalidate=86400",
+    );
+  });
+
+  it("HIGH#3: If-None-Match with stale ETag (computed_at advanced) does NOT 304 — renders fresh PDF", async () => {
+    // Strategy got recomputed → computed_at advances → ETag changes →
+    // client's cached ETag no longer matches → must render fresh PDF.
+    // Pre-fix, a stale PDF could pin in the CDN for up to 25h.
+    process.env.VERCEL_ENV = "production";
+    vi.mocked(createAdminClient).mockReset();
+    singlePublishedComplete({ computed_at: "2026-05-17T12:00:00.000Z" });
+    const { GET } = await import("./route");
+    const params = Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" });
+    const req = new NextRequest(
+      "https://quantalyze.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      {
+        method: "GET",
+        headers: {
+          // Stale ETag from a previous compute cycle.
+          "If-None-Match":
+            '"00000000-0000-0000-0000-000000000001:2026-05-17T00:00:00.000Z"',
+        },
+      },
+    );
+    const res = await GET(req, { params });
+    expect(res.status).toBe(200);
+    expect(goto).toHaveBeenCalledTimes(1);
+    expect(res.headers.get("ETag")).toBe(
+      '"00000000-0000-0000-0000-000000000001:2026-05-17T12:00:00.000Z"',
+    );
   });
 });

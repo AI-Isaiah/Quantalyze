@@ -42,4 +42,28 @@ describe("sanitizeFilename", () => {
   it("trims leading/trailing whitespace before length check", () => {
     expect(sanitizeFilename("  spaced  ")).toBe("spaced");
   });
+
+  // audit-2026-05-07 red-team MED#5 (cd-parameter-pollution) — RFC 6266
+  // parser pollution: a quoted filename value containing `; filename*=…`
+  // can be re-parsed by non-conforming clients as a SECOND parameter,
+  // overriding the intended download name. Stripping `;` and `=` makes
+  // the header unambiguous for every parser.
+  it("strips semicolons (Content-Disposition parameter pollution)", () => {
+    expect(
+      sanitizeFilename("strategy; filename*=UTF-8''attacker.exe"),
+    ).toBe("strategy filename*UTF-8''attacker.exe");
+  });
+
+  it("strips equals signs (Content-Disposition parameter pollution)", () => {
+    expect(sanitizeFilename("name=value")).toBe("namevalue");
+  });
+
+  it("strips combined ; and = injection payload entirely (regression)", () => {
+    // The exact payload shape called out in the red-team report. Resulting
+    // string must contain NO `;` or `=` so a buggy header parser cannot
+    // re-interpret it as a second RFC 6266 parameter.
+    const out = sanitizeFilename("a; filename*=UTF-8''b");
+    expect(out).not.toContain(";");
+    expect(out).not.toContain("=");
+  });
 });
