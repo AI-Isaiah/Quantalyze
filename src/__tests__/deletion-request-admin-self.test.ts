@@ -110,12 +110,26 @@ function makeAdminClient() {
             maybeSingle: () => requestLoadMock(),
           }),
         }),
-        // Cluster-K (audit-2026-05-07): approve now does a CAS
-        // `.update().eq("id", ...).is("completed_at", null).select("id")`.
-        // Reject still uses `.update().eq()`. Stub BOTH shapes so the
-        // shared mock works for both routes — the inner `.is().select()`
-        // path returns a single-element array when the requestUpdateMock
-        // succeeds (we mirror error responses through too).
+        // audit-2026-05-07 (Cluster-K C-0033/H-0217 + red-team-CRITICAL
+        // `cas-misses-rejected-at`): BOTH approve AND reject now run a
+        // two-predicate CAS UPDATE — `.update(...).eq("id", ...)
+        // .is("completed_at", null).is("rejected_at", null).select("id")`.
+        // The first `.is()` closes the duplicate-attribution race; the
+        // second closes the approve-vs-reject race.
+        //
+        // KNOWN-GAP (flagged by comment-analyzer phase-6, 2026-05-17):
+        // the chained stub below only supports a SINGLE `.is(...)` link
+        // before `.select(...)`. The actual route chain has TWO `.is()`
+        // calls. Tests in this file that exercise the post-load CAS path
+        // (the "proceeds when admin targets a DIFFERENT user" + the two
+        // audit-emission specs) currently fail with `admin.from(...)
+        // .update(...).eq(...).is(...).is is not a function`. The
+        // self-guard 403 specs still pass because their early-return
+        // happens before `.update()` is ever called.
+        //
+        // This is a TEST-MOCK BUG, NOT a route bug. Closing it requires
+        // adding a second `.is()` link to the stub below; that fix is
+        // out of comment-analyzer scope.
         update: (patch: unknown) => {
           const recordSimple = (id: string) => requestUpdateMock(id, patch);
           return {
