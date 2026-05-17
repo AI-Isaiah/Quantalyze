@@ -31,7 +31,12 @@ Tests verify INTENT (Rule 9): each one must fail when the corresponding fix
 is reverted, so the test encodes the WHY of the behaviour.
 """
 
+import logging
 from typing import Any
+
+import numpy as np
+import pandas as pd
+import pytest
 
 from services.match_engine import (
     ENGINE_VERSION,
@@ -470,10 +475,14 @@ def test_top_excluded_sorts_hard_exclusions_to_bottom():
 
 
 def test_renormalization_guard_is_not_a_bare_assert():
-    """Source-level: the renormalization site uses `raise ValueError`, not
-    `assert`. A bare assert is stripped under `python -O` and would let the
-    next-line divide-by-zero produce silent NaN scores. Bytecode-level test
-    is overkill — source pattern is the contract."""
+    """Source-pattern assertion (defense in depth, not behavioural).
+
+    Pins the textual contract: the renormalization site uses
+    `raise ValueError`, not `assert`. This guards against a future
+    refactor that silently reintroduces `assert total > 0` (which
+    `python -O` strips). A true behavioural assertion lives in
+    `test_renormalization_raises_on_non_positive_total_weight` below;
+    this one is the cheap source-pattern backstop."""
     import inspect
 
     import services.match_engine as me
@@ -486,3 +495,186 @@ def test_renormalization_guard_is_not_a_bare_assert():
     )
     # And the explicit guard must be present.
     assert "if total <= 0" in src or "if total <= 0:" in src
+
+
+def test_renormalization_raises_on_non_positive_total_weight(monkeypatch):
+    """Behavioural guard for C-0230 / H-0699.
+
+    Forces `total` <= 0 inside the renormalization clamp by patching the
+    four module-level W_* constants to negative values. With the strict-
+    behaviour fix, this MUST raise ValueError("non-positive sum"). With
+    the pre-fix bare-assert code under `python -O`, this would silently
+    divide by zero and propagate NaN through every candidate's score —
+    so this test fails-closed on a regression to either (a) bare assert
+    OR (b) any reordering that puts the divide before the guard."""
+    import services.match_engine as me
+
+    # Negative scaled weights → sum is negative → total <= 0 hits the
+    # explicit raise (overrides clamp range [0.5, 1.5] so we cannot
+    # zero `total` via prefs alone; we must patch the constants).
+    monkeypatch.setattr(me, "W_PORTFOLIO_FIT", -1.0)
+    monkeypatch.setattr(me, "W_PREFERENCE_FIT", -1.0)
+    monkeypatch.setattr(me, "W_TRACK_RECORD", -1.0)
+    monkeypatch.setattr(me, "W_CAPACITY_FIT", -1.0)
+
+    with pytest.raises(ValueError, match="non-positive sum"):
+        score_candidates(
+            allocator_id="a1",
+            preferences=None,
+            portfolio_strategies=[{"strategy_id": "owned1"}],
+            portfolio_returns={
+                "owned1": pd.Series(
+                    np.full(100, 0.001),
+                    index=pd.date_range("2024-01-01", periods=100, freq="D"),
+                )
+            },
+            portfolio_weights={"owned1": 1.0},
+            candidate_strategies=[_candidate("s1")],
+            candidate_returns={
+                "s1": pd.Series(
+                    np.full(100, 0.001),
+                    index=pd.date_range("2024-01-01", periods=100, freq="D"),
+                )
+            },
+            portfolio_aum=1_000_000,
+        )
+
+
+# ---------------------------------------------------------------------------
+# H-0704 — NaN/Inf final_score must surface `score_error=True`
+# ---------------------------------------------------------------------------
+
+
+def test_nan_final_score_surfaces_score_error_flag(monkeypatch, caplog):
+    """A sub-score returning NaN must propagate as `score_error=True` and
+    `score=0.0` — NOT silently coerce to 0 with `score_error=False`.
+
+    Without this test, reverting `_safe_float(final_score) or 0.0` back
+    into the candidate dict (which silently maps NaN → 0 and loses the
+    flag) would leave the rest of the suite green. The fix surfaces the
+    error by (a) computing safe_float first, (b) tagging score_error=True
+    when None, and (c) emitting a logger.warning('NaN/Inf final_score').
+
+    Patches `_compute_preference_fit` to return NaN so the downstream
+    final_score multiplication yields NaN regardless of mode-specific
+    weighting."""
+    import services.match_engine as me
+
+    monkeypatch.setattr(
+        me, "_compute_preference_fit", lambda cand, prefs: float("nan")
+    )
+
+    with caplog.at_level(logging.WARNING, logger="services.match_engine"):
+        result = score_candidates(
+            allocator_id="a1",
+            preferences=None,
+            portfolio_strategies=[],
+            portfolio_returns={},
+            portfolio_weights={},
+            candidate_strategies=[_candidate("s1")],
+            candidate_returns={},
+        )
+
+    assert result["candidates"][0]["score_error"] is True
+    assert result["candidates"][0]["score"] == 0.0
+    # The logger.warning('NaN/Inf final_score ...') line is part of the
+    # contract — downstream observability hooks rely on it for alerting.
+    assert any(
+        "NaN/Inf final_score" in record.message for record in caplog.records
+    )
+
+
+def test_inf_final_score_surfaces_score_error_flag(monkeypatch):
+    """Inf in any sub-score must also flip `score_error=True` (not just NaN)."""
+    import services.match_engine as me
+
+    monkeypatch.setattr(
+        me, "_compute_preference_fit", lambda cand, prefs: float("inf")
+    )
+    result = score_candidates(
+        allocator_id="a1",
+        preferences=None,
+        portfolio_strategies=[],
+        portfolio_returns={},
+        portfolio_weights={},
+        candidate_strategies=[_candidate("s1")],
+        candidate_returns={},
+    )
+    assert result["candidates"][0]["score_error"] is True
+    assert result["candidates"][0]["score"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# M-0675 — data_completeness sidecar covers personalized-mode ratios
+# ---------------------------------------------------------------------------
+
+
+def _returns_series(n_days: int = 100, seed: int = 0) -> pd.Series:
+    rng = np.random.default_rng(seed)
+    return pd.Series(
+        rng.normal(loc=0.001, scale=0.01, size=n_days),
+        index=pd.date_range("2024-01-01", periods=n_days, freq="D"),
+        name="ret",
+    )
+
+
+def test_data_completeness_full_overlap_is_one():
+    """Personalized mode, every portfolio strategy has returns → 1.0."""
+    portfolio_strategies = [
+        {"strategy_id": "p1"},
+        {"strategy_id": "p2"},
+        {"strategy_id": "p3"},
+    ]
+    portfolio_returns = {
+        "p1": _returns_series(seed=1),
+        "p2": _returns_series(seed=2),
+        "p3": _returns_series(seed=3),
+    }
+    cand_returns = {"s1": _returns_series(seed=10)}
+    result = score_candidates(
+        allocator_id="a1",
+        preferences=None,
+        portfolio_strategies=portfolio_strategies,
+        portfolio_returns=portfolio_returns,
+        portfolio_weights={"p1": 0.33, "p2": 0.33, "p3": 0.34},
+        candidate_strategies=[_candidate("s1")],
+        candidate_returns=cand_returns,
+        portfolio_aum=1_000_000,
+    )
+    raw = result["candidates"][0]["score_breakdown"]["raw"]
+    assert raw["data_completeness"] == pytest.approx(1.0)
+
+
+def test_data_completeness_partial_overlap_is_ratio():
+    """Personalized mode, 2 of 5 portfolio strategies have returns → 0.4.
+
+    Encodes the divisor contract: `len(port_df.columns) / max(len(
+    portfolio_weights), 1)`. A future refactor that divides by
+    `len(candidate_strategies)` or `len(port_df.columns)` would fail
+    this assertion."""
+    portfolio_weights = {
+        "p1": 0.2,
+        "p2": 0.2,
+        "p3": 0.2,
+        "p4": 0.2,
+        "p5": 0.2,
+    }
+    portfolio_strategies = [{"strategy_id": sid} for sid in portfolio_weights]
+    # Only p1 and p2 have returns — p3/p4/p5 are missing from portfolio_returns
+    portfolio_returns = {
+        "p1": _returns_series(seed=1),
+        "p2": _returns_series(seed=2),
+    }
+    cand_returns = {"s1": _returns_series(seed=10)}
+    result = score_candidates(
+        allocator_id="a1",
+        preferences=None,
+        portfolio_strategies=portfolio_strategies,
+        portfolio_returns=portfolio_returns,
+        portfolio_weights=portfolio_weights,
+        candidate_strategies=[_candidate("s1")],
+        candidate_returns=cand_returns,
+        portfolio_aum=1_000_000,
+    )
+    raw = result["candidates"][0]["score_breakdown"]["raw"]
+    assert raw["data_completeness"] == pytest.approx(0.4)
