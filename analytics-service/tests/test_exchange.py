@@ -3970,18 +3970,71 @@ class TestClusterIH0668SymbolNormalizationDocumented:
     ``BTCUSDTSWAP`` vs new ``BTCUSDT``) without a backfill migration.
     This test pins the current divergence so a future migration PR
     has a tripwire — when the divergence is closed, this assertion
-    must be flipped to assert equality."""
+    must be flipped to assert equality.
 
-    def test_okx_and_binance_currently_produce_different_canonical_forms(self) -> None:
-        # OKX path: instId.replace('-', '') → BTCUSDTSWAP.
-        okx_canonical = "BTC-USDT-SWAP".replace("-", "")
-        # Binance _normalize_fill path: strip slashes + :USDT.
-        binance_canonical = (
-            "BTC/USDT:USDT"
-            .replace("/", "")
-            .replace(":USDT", "")
-            .replace(":USD", "")
+    Testing-batch fix (2026-05-17): the prior implementation only
+    asserted properties of inline string transforms in the test itself
+    — it never invoked the production canonicalizer, so a regression
+    that changed ``_normalize_fill`` or ``_fetch_raw_trades_okx``
+    would NOT have failed this tripwire. Now we exercise the real
+    paths.
+    """
+
+    @pytest.mark.asyncio
+    async def test_okx_and_binance_currently_produce_different_canonical_forms(
+        self,
+    ) -> None:
+        from services.exchange import _fetch_raw_trades_okx, _normalize_fill
+
+        # OKX production path: invoke _fetch_raw_trades_okx against a
+        # single-fill mock so the assertion reflects whatever the OKX
+        # canonicalizer ACTUALLY produces today (currently
+        # ``instId.replace('-', '')`` on line 1227).
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = AsyncMock(
+            return_value={
+                "data": [
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "side": "buy",
+                        "fillPx": "60000",
+                        "fillSz": "0.001",
+                        "fee": "0",
+                        "feeCcy": "USDT",
+                        "ts": "1700000000000",
+                        "ordId": "ord-1",
+                        "tradeId": "trade-1",
+                        "execType": "T",
+                    }
+                ]
+            }
         )
+        okx_rows = await _fetch_raw_trades_okx(mock_exchange, since_ms=None)
+        assert len(okx_rows) == 1
+        okx_canonical = okx_rows[0]["symbol"]
+
+        # Binance production path: invoke _normalize_fill directly with
+        # a CCXT-unified trade dict. The function applies the
+        # slash/colon-suffix transform on lines 1575-1578.
+        binance_fill = _normalize_fill(
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "price": 60000.0,
+                "amount": 0.1,
+                "datetime": "2024-01-01T00:00:00Z",
+                "order": "ord-1",
+                "id": "fill-1",
+                "fee": {"cost": 0.6, "currency": "USDT"},
+                "takerOrMaker": "taker",
+                "info": {},
+            },
+            "binance",
+        )
+        assert binance_fill is not None
+        binance_canonical = binance_fill["symbol"]
+
         # PRE-fix state (documented). When a follow-up PR introduces a
         # cross-exchange canonicalizer + backfill migration, flip this
         # assert to ``==`` and remove the audit note in
@@ -3989,3 +4042,180 @@ class TestClusterIH0668SymbolNormalizationDocumented:
         assert okx_canonical != binance_canonical
         assert okx_canonical == "BTCUSDTSWAP"
         assert binance_canonical == "BTCUSDT"
+
+
+class TestClusterIDqFlagMergeSemantics:
+    """Audit-2026-05-07 testing batch — pin the merge semantics of
+    ``_record_dq_flag``. The docstring promises lists dedup-append,
+    booleans OR-merge, counters sum, but only the list and bool branches
+    had pinned tests. A regression that drops either guard (counter
+    branch, bool guard against True+True=2) would silently corrupt the
+    ``data_quality_flags`` JSONB across every truncated/partial sync.
+    """
+
+    def test_record_dq_flag_int_counter_sums(self) -> None:
+        """Two int writes to the same key MUST sum (not overwrite).
+        The page-count flags (sync_truncated_okx_pages,
+        sync_truncated_bybit_pages) rely on this for cumulative
+        cross-instrument-type totals.
+        """
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+        _record_dq_flag("sync_truncated_okx_pages", 100)
+        _record_dq_flag("sync_truncated_okx_pages", 50)
+        flags = get_and_clear_last_dq_flags()
+        assert flags["sync_truncated_okx_pages"] == 150
+
+    def test_record_dq_flag_bool_does_not_sum(self) -> None:
+        """The ``not isinstance(existing, bool)`` guard prevents True+True
+        from collapsing to 2 under the (int, float) sum branch. A
+        regression dropping the guard would turn a stable boolean
+        truncation signal into an unbounded integer.
+        """
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+        _record_dq_flag("sync_truncated_okx", True)
+        _record_dq_flag("sync_truncated_okx", True)
+        flags = get_and_clear_last_dq_flags()
+        assert flags["sync_truncated_okx"] is True
+
+
+class TestClusterIFeeCurrencyMismatchSampleCap:
+    """H-0670 — ``_FEE_CCY_MISMATCH_SAMPLE_CAP`` bounds the sample list
+    so a strategy with many distinct mismatching pairs can't grow the
+    JSONB row unboundedly. Pin the invariant so a future refactor that
+    drops the cap or flips ordering (last-N vs first-N) is caught.
+    """
+
+    def test_sample_cap_preserves_first_n_samples(self) -> None:
+        from services.exchange import (
+            _FEE_CCY_MISMATCH_SAMPLE_CAP,
+            _check_fee_currency_mismatch,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+        # 20 distinct symbols, all USDT-quoted, all paying fee in BNB.
+        for i in range(20):
+            _check_fee_currency_mismatch(
+                exchange="binance",
+                symbol=f"SYM{i:03d}USDT",
+                fee_currency="BNB",
+            )
+        flags = get_and_clear_last_dq_flags()
+        samples = flags["fee_currency_mismatch_samples"]
+        # Bounded by the cap (16 today).
+        assert len(samples) == _FEE_CCY_MISMATCH_SAMPLE_CAP
+        # First-N preservation contract — adding more mismatches after
+        # the cap is reached MUST NOT evict earlier samples. Operators
+        # otherwise lose representative early observations.
+        assert samples[0] == "binance:SYM000USDT:BNB"
+        assert samples[_FEE_CCY_MISMATCH_SAMPLE_CAP - 1] == (
+            f"binance:SYM{_FEE_CCY_MISMATCH_SAMPLE_CAP - 1:03d}USDT:BNB"
+        )
+
+    def test_unknown_quote_does_not_flag(self) -> None:
+        """Conservative branch in ``_check_fee_currency_mismatch``: when
+        ``_infer_quote_currency`` returns None (exotic pair we can't
+        confidently classify), the mismatch flag MUST NOT fire — else
+        every BTC-pair / exotic-quote strategy false-positives.
+        """
+        from services.exchange import (
+            _check_fee_currency_mismatch,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+        _check_fee_currency_mismatch(
+            exchange="binance", symbol="BTCETH", fee_currency="BNB",
+        )
+        flags = get_and_clear_last_dq_flags()
+        assert flags == {}
+
+
+class TestClusterIDqBufferDrainResetsState:
+    """Audit-2026-05-07 testing batch — pin the drain-and-reset side
+    effect of ``get_and_clear_last_dq_flags`` on a NON-empty buffer.
+    The empty-buffer case is already covered
+    (test_get_and_clear_returns_empty_on_no_flags); without this test,
+    a regression that drops the ``_LAST_DQ_FLAGS.set({})`` line in
+    ``get_and_clear_last_dq_flags`` would leak stale flags to the next
+    sync on the same asyncio task.
+    """
+
+    def test_get_and_clear_resets_after_nonempty_drain(self) -> None:
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        # Clean any residue from previous tests.
+        get_and_clear_last_dq_flags()
+        _record_dq_flag("binance_partial_symbols", ["BTCUSDT"])
+        # First drain returns the populated state.
+        first = get_and_clear_last_dq_flags()
+        assert first["binance_partial_symbols"] == ["BTCUSDT"]
+        # Second drain on the same task MUST return {}.
+        assert get_and_clear_last_dq_flags() == {}
+
+
+class TestClusterIBybitPageCapTruncationFlag:
+    """M-0663 — mirror ``TestClusterIPageCapTruncationFlag`` for the
+    Bybit branch. Bybit uses ``nextPageCursor`` cursor pagination
+    instead of OKX's after-id; the natural-stop logic is different so
+    the regression surface is different too. A regression that flips
+    the Bybit ``natural_break`` invariant would silently drop the
+    truncation signal for every Bybit perp strategy.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bybit_page_cap_records_dq_flag(self) -> None:
+        from services.exchange import (
+            _fetch_raw_trades_bybit,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+
+        # Return a full page (100 fills) AND a non-empty rotating
+        # nextPageCursor on every call so the loop never naturally
+        # breaks via the cursor sentinel. Distinct cursor per call so
+        # the stuck-cursor guard (G12.B.6) does not short-circuit.
+        call_state = {"n": 0}
+
+        async def _execution_list(params):
+            call_state["n"] += 1
+            return {
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "execPrice": "60000",
+                            "execQty": "0.001",
+                            "execFee": "0",
+                            "feeCurrency": "USDT",
+                            "execTime": "1700000000000",
+                            "orderId": f"ord-{call_state['n']}-{i}",
+                            "execId": f"exec-{call_state['n']}-{i}",
+                            "isMaker": "false",
+                        }
+                        for i in range(100)
+                    ],
+                    "nextPageCursor": f"cursor-{call_state['n']}",
+                }
+            }
+
+        mock_exchange.private_get_v5_execution_list = _execution_list
+
+        result = await _fetch_raw_trades_bybit(mock_exchange, since_ms=None)
+        # 100 pages × 100 fills.
+        assert len(result) == 100 * 100
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("sync_truncated_bybit") is True
+        assert flags.get("sync_truncated_bybit_pages") == 100
