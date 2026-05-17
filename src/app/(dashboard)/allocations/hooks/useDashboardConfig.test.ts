@@ -82,11 +82,12 @@ const RECOVERY_FLAG_KEY = "dashboard.config.recoveredFromCorruption";
 const LEGACY_LAYOUT_VERSION = 3;
 
 /**
- * Seed the mock localStorage with a v4-shape blob. Tests across this file
- * call `store.set(STORAGE_KEY, JSON.stringify({ tiles, timeframe, layoutVersion }))`
- * with the same defaults (`timeframe: "YTD"`, `layoutVersion: LAYOUT_VERSION`)
- * ~15 times; this helper centralises the boilerplate so version bumps and
- * shape tweaks land in one place.
+ * Seed the mock localStorage with a current-V2-shape blob. Tests across
+ * this file call `store.set(STORAGE_KEY, JSON.stringify({ tiles,
+ * timeframe, layoutVersion }))` with the same defaults
+ * (`timeframe: "YTD"`, `layoutVersion: LAYOUT_VERSION`) ~15 times; this
+ * helper centralises the boilerplate so version bumps and shape tweaks
+ * land in one place.
  */
 function seedV2Blob(
   tiles: ReadonlyArray<Record<string, unknown>>,
@@ -227,7 +228,7 @@ describe("useDashboardConfigV2", () => {
     vi.clearAllMocks();
   });
 
-  it("v3 reset: legacy-shape persisted blob (layoutVersion: 3) → V2 loads v4 DEFAULT_LAYOUT (normalized)", () => {
+  it("v3 reset: legacy-shape persisted blob (layoutVersion: 3) → V2 loads DEFAULT_LAYOUT (normalized)", () => {
     seedV2Blob(
       [{ i: "a", widgetId: "b", x: 0, y: 0, w: 12, h: 4 }],
       { layoutVersion: 3 },
@@ -242,7 +243,7 @@ describe("useDashboardConfigV2", () => {
     expect(result.current.config.timeframe).toBe("YTD");
   });
 
-  it("v4 preserve + normalize: persisted v4 blob with short-key tiles → V2 loads them with registry-id k", () => {
+  it("preserve + normalize: persisted current-version blob with short-key tiles → V2 loads them with registry-id k", () => {
     // D-19 belt-and-braces: even if a partially-migrated blob lands in
     // localStorage with designer short keys, the read path normalizes them
     // to registry ids before render. Widths are preserved verbatim.
@@ -253,8 +254,8 @@ describe("useDashboardConfigV2", () => {
       ] as const,
       timeframe: "1M",
       // Track LAYOUT_VERSION rather than hard-coding the literal: this
-      // test asserts a matching-version blob is preserved verbatim, so any
-      // future bump (PR1 5→6, etc.) keeps the assertion truthful.
+      // test asserts a matching-version blob is preserved verbatim, so
+      // any future bump keeps the assertion truthful.
       layoutVersion: LAYOUT_VERSION,
     };
     store.set(STORAGE_KEY, JSON.stringify(custom));
