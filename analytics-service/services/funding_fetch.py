@@ -244,9 +244,10 @@ def _normalize_funding_row(
     """Build a uniform funding_fees row from raw exchange fields.
 
     Computes the match_key and handles Decimal conversion. Returns None on
-    parse failure; callers MUST track the skipped row in
-    ``dropped_normalize`` so the worker can surface a data-quality flag
-    rather than silently UPSERTing partial coverage (M-0930).
+    parse failure; callers MUST increment their per-fetcher dropped-row
+    counter (``dropped`` in Binance/Bybit, ``nonlocal_dropped[0]`` in OKX)
+    and emit the M-0930 structured WARN so the worker can surface a
+    data-quality flag rather than silently UPSERTing partial coverage.
     """
     if not symbol:
         return None
@@ -306,10 +307,11 @@ async def fetch_funding_binance(
 ) -> list[FundingFeeRow]:
     """Fetch signed funding fees from Binance fapiPrivate_get_income.
 
-    Uses incomeType=FUNDING_FEE filter (Binance enforces a 30-day max
-    lookback window per-request — caller is expected to pass an
-    appropriate since_ms; the 90-day backfill script paginates by
-    rolling the time window forward).
+    Uses incomeType=FUNDING_FEE filter. Pagination walks forward in
+    BINANCE_PAGE_SIZE chunks by advancing startTime to ``last_seen_ts+1``
+    on each full page; the loop terminates on the first non-full or empty
+    response. A MAX_PAGES ceiling-hit on a still-full final page raises
+    :class:`FundingFetchCeilingExceeded` (audit-2026-05-07 red-team:289).
 
     Signed amount: Binance returns `income` as a signed string — negative
     = paid, positive = received. Preserved verbatim via Decimal to avoid
@@ -854,9 +856,12 @@ async def upsert_funding_rows(
     runs over the same time window are no-ops at the DB layer (idempotent
     by design — Bybit fill_id rotation makes dedup on raw IDs unsafe).
 
-    Returns {'inserted': N, 'skipped': 0, 'errors': []}.
+    Returns {'inserted': N, 'skipped': 0, 'errors': []}, where
+    ``inserted`` counts rows submitted in batches that did NOT raise.
+    Rows in batches that hit ``errors[]`` are excluded — pinned by
+    ``TestUpsertFundingRowsErrors.test_partial_batch_failure_records_error_continues``.
     The 'skipped' count is not observable at the Python layer (PostgreSQL
-    DO NOTHING is silent); callers should treat inserted as rows_attempted.
+    DO NOTHING is silent), so duplicates are folded into ``inserted``.
     """
     if not rows:
         return {"inserted": 0, "skipped": 0, "errors": []}
