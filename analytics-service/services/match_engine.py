@@ -1105,10 +1105,20 @@ def _top_excluded(
         # Normalize through the enum so a literal-string typo in either
         # this function or `_eligibility_check` is a NameError, not a
         # silent fall-through to the 0.5 default.
+        # Red-team HIGH fix (audit-2026-05-07 top-excluded-swallowed-corruption):
+        # ValueError formerly returned 0.5 (median) which sorted corrupted
+        # rows AHEAD of legitimate near-misses scoring < 0.5. Log + sink to
+        # -0.5 so corruption is observable AND sorts strictly below every
+        # recognized soft reason (which clamp to [0, 1]).
         try:
             reason_enum = ExclusionReason(reason)
         except ValueError:
-            return 0.5
+            logger.warning(
+                "match_engine._top_excluded: unknown exclusion_reason=%r "
+                "(strategy_id=%s) — sorting to bottom",
+                reason, item.get("strategy_id"),
+            )
+            return -0.5
         if reason_enum.is_hard:
             return -1.0
         if reason_enum is ExclusionReason.BELOW_MIN_SHARPE:
@@ -1123,7 +1133,18 @@ def _top_excluded(
             max_dd = abs(cand.get("max_drawdown_pct") or 0)
             tol = preferences.get("max_drawdown_tolerance") or 1
             return _clamp(2 - max_dd / tol, 0, 1)
-        # STYLE_EXCLUDED / OFF_MANDATE_TYPE / anything else soft → neutral 0.5
+        # Red-team MED fix (audit-2026-05-07 style-excluded-neutral-sort):
+        # STYLE_EXCLUDED / OFF_MANDATE_TYPE are CATEGORICAL denials
+        # ('unambiguously not allowed'), not 'almost passed'. Score 0.1 so
+        # they sort BELOW any genuine soft near-miss with sharpe/track/dd
+        # > 10% of threshold but still ABOVE corrupted unknown reasons
+        # (which sort to -0.5) and hard exclusions (-1.0).
+        if reason_enum in (
+            ExclusionReason.STYLE_EXCLUDED,
+            ExclusionReason.OFF_MANDATE_TYPE,
+        ):
+            return 0.1
+        # Future-added soft reasons that haven't been classified yet → neutral.
         return 0.5
 
     excluded_sorted = sorted(excluded, key=_almost_passed_score, reverse=True)

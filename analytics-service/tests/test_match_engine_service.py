@@ -469,6 +469,88 @@ def test_top_excluded_sorts_hard_exclusions_to_bottom():
     assert sorted_[-1]["strategy_id"] == "hard"
 
 
+def test_top_excluded_unknown_reason_sinks_below_soft_reasons_and_logs(caplog):
+    """Red-team HIGH (top-excluded-swallowed-corruption): a row with an
+    unrecognized exclusion_reason (e.g. legacy SQL value Python dropped, or
+    DB corruption) must sort BELOW every recognized soft reason AND emit a
+    logger.warning so observability picks up the drift.
+
+    Pre-fix the except-ValueError branch silently returned 0.5 (median),
+    sorting corrupted rows AHEAD of genuine near-misses scoring < 0.5 and
+    burying real near-misses behind unknowns under TOP_N_EXCLUDED
+    truncation."""
+    soft_low = {
+        "strategy_id": "soft-low",
+        "exclusion_reason": "below_min_sharpe",
+        "exclusion_provenance": "0.10",
+        "candidate": _candidate("soft-low", sharpe=0.1),  # score = 0.1
+    }
+    corrupted = {
+        "strategy_id": "corrupted",
+        "exclusion_reason": "bogus_unknown_value",
+        "exclusion_provenance": "?",
+        "candidate": _candidate("corrupted"),
+    }
+    with caplog.at_level(logging.WARNING, logger="services.match_engine"):
+        sorted_ = _top_excluded([corrupted, soft_low], {"min_sharpe": 1.0})
+
+    # The soft (recognized) reason must sort ABOVE the corrupted one.
+    assert sorted_[0]["strategy_id"] == "soft-low"
+    assert sorted_[-1]["strategy_id"] == "corrupted"
+    # And the warning must have been emitted (observability is part of the
+    # contract — silent laundering of corruption is the failure mode).
+    assert any(
+        "unknown exclusion_reason" in record.message
+        for record in caplog.records
+    ), "expected logger.warning when an unrecognized reason is encountered"
+
+
+def test_top_excluded_style_excluded_sorts_below_soft_near_misses():
+    """Red-team MED (style-excluded-neutral-sort): STYLE_EXCLUDED and
+    OFF_MANDATE_TYPE are CATEGORICAL denials, not 'almost passed'. They
+    must sort BELOW genuine soft near-misses (below_min_sharpe with
+    sharpe > 10% of min, etc.) so a real near-miss is not displaced from
+    the persisted TOP_N_EXCLUDED list by a categorical denial.
+
+    Pre-fix, both rows scored 0.5 (style_excluded) vs 0.4 (below_min_sharpe
+    with sharpe=0.4/min=1.0), so style_excluded incorrectly outranked a
+    real near-miss."""
+    near_miss = {
+        "strategy_id": "near-miss",
+        "exclusion_reason": "below_min_sharpe",
+        "exclusion_provenance": "0.40",
+        "candidate": _candidate("near-miss", sharpe=0.4),  # score = 0.4
+    }
+    style = {
+        "strategy_id": "style",
+        "exclusion_reason": "style_excluded",
+        "exclusion_provenance": "high_freq",
+        "candidate": _candidate("style"),
+    }
+    off_mandate = {
+        "strategy_id": "off",
+        "exclusion_reason": "off_mandate_type",
+        "exclusion_provenance": "mean_reversion",
+        "candidate": _candidate("off"),
+    }
+    sorted_ = _top_excluded(
+        [style, off_mandate, near_miss], {"min_sharpe": 1.0}
+    )
+    # The "closer to passing" near-miss must be at the top.
+    assert sorted_[0]["strategy_id"] == "near-miss"
+    # And the two categorical denials must sort below it (order between
+    # themselves is by stable sort — we only assert position vs near-miss).
+    categorical_positions = {
+        sorted_.index(style),
+        sorted_.index(off_mandate),
+    }
+    assert all(pos > 0 for pos in categorical_positions), (
+        "STYLE_EXCLUDED / OFF_MANDATE_TYPE are categorical denials and must "
+        "sort BELOW a real soft near-miss — the brief's 'closer to passing' "
+        "contract is violated if they ride above near-misses on the median."
+    )
+
+
 # ---------------------------------------------------------------------------
 # C-0230 / H-0699 — overrides renormalization guard survives `python -O`
 # ---------------------------------------------------------------------------
