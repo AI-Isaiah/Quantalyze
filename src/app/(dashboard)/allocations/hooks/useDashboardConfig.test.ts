@@ -1029,6 +1029,63 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
     }
   });
 
+  it("beforeunload flushes the pending debounced write before the tab closes (testing MED/8)", () => {
+    // audit-2026-05-07 (testing MED/8) — the V2 hook registers a
+    // `window.addEventListener('beforeunload', flush)` so a user who
+    // closes the tab mid-drag still gets their preference persisted.
+    // Pre-fix this listener had zero coverage; a regression that
+    // dropped the `beforeunload` registration (or attached it to the
+    // wrong target) would land green because only the unmount-flush
+    // branch was asserted.
+    vi.useFakeTimers();
+    try {
+      store.set(
+        STORAGE_KEY,
+        JSON.stringify({
+          tiles: [{ k: "kpi-strip", w: 1 }],
+          timeframe: "YTD",
+          layoutVersion: LAYOUT_VERSION,
+        }),
+      );
+
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
+      localStorageMock.setItem.mockClear();
+
+      act(() => {
+        result.current.resizeWidget("kpi-strip", 3);
+      });
+      // Debounce timer is pending — no write yet.
+      expect(localStorageMock.setItem).not.toHaveBeenCalled();
+
+      // Simulate the browser firing `beforeunload` (tab close / nav
+      // away) before the 150ms timer elapses. The flush handler MUST
+      // drain the pending mutation through to localStorage.
+      act(() => {
+        window.dispatchEvent(new Event("beforeunload"));
+      });
+
+      expect(localStorageMock.setItem).toHaveBeenCalledTimes(1);
+      const stored = JSON.parse(store.get(STORAGE_KEY)!);
+      const kpi = stored.tiles.find((t: { k: string }) => t.k === "kpi-strip");
+      expect(kpi.w).toBe(3);
+
+      // Listener must be removed on unmount. Re-fire after unmount and
+      // assert NO additional write — a leaked listener would persist a
+      // stale ref or double-fire.
+      localStorageMock.setItem.mockClear();
+      unmount();
+      // Allow the unmount cleanup to settle (it also fires `flush`, but
+      // the timer is already null — no setItem should happen).
+      localStorageMock.setItem.mockClear();
+      act(() => {
+        window.dispatchEvent(new Event("beforeunload"));
+      });
+      expect(localStorageMock.setItem).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("moveWidget logs a warning when fromK / toK do not match a tile (H-1214)", () => {
     const { result } = renderHook(() => useDashboardConfigV2());
     warnSpy.mockClear();
