@@ -120,9 +120,16 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
     page,
   }) => {
     const probe = await page.evaluate<SparklineStrokeProbe>(() => {
+      // Red-team RT-J01: scope to SVGs that actually have a stroked path.
+      // The row-level checkbox icon (StrategyTable.tsx line 434) renders
+      // an `<svg>` with `fill="currentColor"` and NO stroked path — it
+      // matches a bare `table svg` selector but contributes a stroke set
+      // of size 0, which silently passes the "no green+red" disjunction
+      // AND breaks the `size===1` tightening in the next test. Restricting
+      // to `svg:has(path[stroke])` selects ONLY actual sparkline SVGs.
       const svgs = Array.from(
         document.querySelectorAll(
-          "table svg, [data-testid='strategy-grid'] svg",
+          "table svg:has(path[stroke]), [data-testid='strategy-grid'] svg:has(path[stroke])",
         ),
       ) as SVGElement[];
       const distinctPerSvg = svgs.map((svg) => {
@@ -161,9 +168,12 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
     page,
   }) => {
     const probe = await page.evaluate<SparklineStrokeSizeProbe>(() => {
+      // Red-team RT-J01: same selector scoping as the previous test —
+      // exclude icon SVGs that have no stroked path. Otherwise the
+      // `toBe(1)` tightening would fail on the row-level checkbox SVG.
       const svgs = Array.from(
         document.querySelectorAll(
-          "table svg, [data-testid='strategy-grid'] svg",
+          "table svg:has(path[stroke]), [data-testid='strategy-grid'] svg:has(path[stroke])",
         ),
       ) as SVGElement[];
       const sizePerSvg = svgs.map((svg) => {
