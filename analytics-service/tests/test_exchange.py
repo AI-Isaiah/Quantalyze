@@ -2723,13 +2723,14 @@ class TestG12BOkxFundingRowContract:
     live in ``private_get_account_bills``. This test codifies the
     contract: a fills_history response is treated as trades. If OKX
     ever changes the endpoint shape to mix funding rows in, the
-    qty<=0 guard in services/position_reconstruction.py:533 would still
+    qty<=0 guard in services/position_reconstruction.py would still
     skip them — but the regression test below pins the current
     behavior so an accidental change in either layer is visible.
 
     The test treats a hypothetical funding-shaped row (fillSz='0',
     subType='8' — the OKX bill subType for funding fee) as a non-fill:
-    qty<=0 means it's filtered downstream and contributes 0 quantity.
+    qty<=0 means it's filtered downstream by the qty<=0 guard in
+    services/position_reconstruction.py and contributes 0 quantity.
     """
 
     @pytest.mark.asyncio
@@ -2789,7 +2790,7 @@ class TestG12BOkxFundingRowContract:
         assert normal["quantity"] == 0.1
         assert funding["quantity"] == 0.0, (
             "Funding-shaped row must carry quantity=0 so the qty<=0 "
-            "guard at services/position_reconstruction.py:533 filters "
+            "guard in services/position_reconstruction.py filters "
             "it out without inflating fill totals."
         )
 
@@ -3122,9 +3123,10 @@ class TestFetchMarkPricesFailLoud:
         )
 
 
-# Review-cluster gate (audit-2026-05-07): the Binance branch fix at
-# exchange.py:552-562 — pre-gate it had NO regression test. A /simplify
-# pass that drops the new WARNING would land silently.
+# Review-cluster gate (audit-2026-05-07): the Binance branch fix in
+# fetch_daily_pnl's `except Exception` arm — pre-gate it had NO
+# regression test. A /simplify pass that drops the new WARNING would
+# land silently.
 class TestFetchDailyPnlBinanceFailLoud:
     """Pre-sweep, the Binance futures-income failure path silently
     swallowed the exception and fell back to BTC spot trades with no
@@ -3151,9 +3153,10 @@ class TestFetchDailyPnlBinanceFailLoud:
             )
         )
         # The fallback returns one trade so we can verify the path was taken.
-        # Note: ccxt trade dicts use `datetime` as the ISO-string key (see
-        # exchange.py:572 — `t["datetime"]`), distinct from Python's
-        # datetime module. The fallback ALSO reads `t["symbol"]` /
+        # Note: ccxt trade dicts use `datetime` as the ISO-string key (the
+        # Binance fallback in fetch_daily_pnl reads `t["datetime"]`),
+        # distinct from Python's datetime module. The fallback ALSO reads
+        # `t["symbol"]` /
         # `t["side"]` / etc. via subscript (no .get default), so the
         # mock must populate every required key.
         mock_exchange.fetch_my_trades = AsyncMock(
@@ -3989,7 +3992,7 @@ class TestClusterIH0668SymbolNormalizationDocumented:
         # OKX production path: invoke _fetch_raw_trades_okx against a
         # single-fill mock so the assertion reflects whatever the OKX
         # canonicalizer ACTUALLY produces today (currently
-        # ``instId.replace('-', '')`` on line 1227).
+        # ``instId.replace('-', '')`` inside _fetch_raw_trades_okx).
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
         mock_exchange.private_get_trade_fills_history = AsyncMock(
@@ -4016,7 +4019,7 @@ class TestClusterIH0668SymbolNormalizationDocumented:
 
         # Binance production path: invoke _normalize_fill directly with
         # a CCXT-unified trade dict. The function applies the
-        # slash/colon-suffix transform on lines 1575-1578.
+        # slash/colon-suffix transform when building ``normalized_symbol``.
         binance_fill = _normalize_fill(
             {
                 "symbol": "BTC/USDT:USDT",

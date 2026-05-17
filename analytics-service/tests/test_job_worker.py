@@ -15,9 +15,8 @@ pinned in:
    services.job_worker.run_* so we verify the dispatcher is the routing
    surface, not the handlers themselves.
 
-3. dispatch timeout + stub paths — handlers that exceed their per-kind
-   timeout return DispatchResult(FAILED, transient). poll_positions is
-   a stub that returns DispatchResult(FAILED, permanent) until commit 3.
+3. dispatch timeout — handlers that exceed their per-kind timeout
+   return DispatchResult(FAILED, transient).
 
 All tests mock at the services.job_worker layer — no Supabase, no ccxt,
 no HTTPX, no real workload. Exchanges and DB are the outer boundary.
@@ -315,8 +314,8 @@ class TestDispatchRouting:
 
     @pytest.mark.asyncio
     async def test_dispatch_routes_poll_positions(self) -> None:
-        """Commit 3 wires the real poll_positions handler. Verify dispatch
-        routes kind='poll_positions' to run_poll_positions_job."""
+        """Verify dispatch routes kind='poll_positions' to
+        run_poll_positions_job."""
         job = {"id": "job-4", "kind": "poll_positions", "strategy_id": "strat-3"}
         with patch(
             "services.job_worker.run_poll_positions_job",
@@ -942,21 +941,21 @@ class TestSyncTradesEnqueuesComputeAnalytics:
 class TestSyncTradesEmptyResponsePreservesHistory:
     """audit-2026-05-07 G12.A.4 (HIGH conf=9) — regression gate.
 
-    Pre-fix history: `if trades:` (job_worker.py:571) means an empty list
-    skips the sync_trades RPC; a non-empty list with a single trade still
-    invokes sync_trades, but migration 110 scopes the DELETE to the JSONB
-    payload's [MIN,MAX] timestamp window so older rows survive. There was
-    no Python-level test asserting either property — these tests pin them
-    so a future refactor that drops the `if trades:` guard or unscopes the
-    DELETE fails loud.
+    Pre-fix history: the `if trades:` guard in run_sync_trades_job means
+    an empty list skips the sync_trades RPC; a non-empty list with a
+    single trade still invokes sync_trades, but migration 110 scopes the
+    DELETE to the JSONB payload's [MIN,MAX] timestamp window so older
+    rows survive. There was no Python-level test asserting either
+    property — these tests pin them so a future refactor that drops the
+    `if trades:` guard or unscopes the DELETE fails loud.
     """
 
     @pytest.mark.asyncio
     async def test_sync_trades_empty_response_preserves_existing(self) -> None:
         """Mock fetch_all_trades to return []. The sync_trades RPC must
-        NOT be called (the `if trades:` guard at job_worker.py:571 short-
-        circuits). Pre-existing daily_pnl rows in the DB therefore survive
-        untouched."""
+        NOT be called (the `if trades:` guard in run_sync_trades_job
+        short-circuits). Pre-existing daily_pnl rows in the DB therefore
+        survive untouched."""
         from services.job_worker import run_sync_trades_job
 
         mock_exchange = AsyncMock()
@@ -2093,7 +2092,8 @@ class TestRedTeamSyncTradesPreDrainPreservesBybitFundingFlag:
         mock_ctx.supabase.table.side_effect = _table
 
         # fetch_all_trades planting the C-0319 funding flag mirrors what
-        # the real Bybit branch in services/exchange.py does at line 863.
+        # the real Bybit branch in services/exchange.py does inside
+        # fetch_daily_pnl when items are returned by closed_pnl.
         async def _fake_fetch_all_trades(*args, **kwargs):
             _record_dq_flag("bybit_daily_pnl_includes_funding", True)
             return [{"test": "trade"}]
