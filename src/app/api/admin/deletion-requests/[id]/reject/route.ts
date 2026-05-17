@@ -14,7 +14,9 @@ import { loadDeletionRequestForAction } from "../_shared";
  * POST /api/admin/deletion-requests/[id]/reject
  *
  * Admin rejection of a GDPR Art. 17 deletion request. Wrapped by
- * `withRole("admin")` — the second pilot adopter of the Task 7.2 wrapper.
+ * `withRole("admin")` — sibling pilot adopter alongside `/approve`. The
+ * first pilot was `/api/admin/users/[id]/roles`; this pair was added
+ * together by Sprint 6 closeout Task 7.3.
  *
  * Sprint 6 closeout Task 7.3 + audit-2026-05-07 red-team
  * (reject-asymmetry-vs-approve-hardening, 2026-05-17). Flow MIRRORS the

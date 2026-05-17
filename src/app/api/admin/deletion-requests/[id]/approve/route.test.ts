@@ -617,8 +617,13 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", () => {
     };
 
     // Override the admin client mock so sanitize_user errors out. The
-    // route must short-circuit at the rpcErr branch (route.ts L128-137)
-    // BEFORE emitting any audit and BEFORE attempting the CAS UPDATE.
+    // route must short-circuit at the rpcErr branch (the `if (rpcErr)`
+    // block immediately after the sanitize_user RPC call) BEFORE
+    // emitting any audit and BEFORE attempting the CAS UPDATE. Avoid
+    // pinning a literal line range — the route docstring + red-team
+    // commits have re-flowed the line numbers; the structural anchor
+    // ("rpcErr early-return guarding the synchronous emit + CAS") is
+    // what this test pins.
     vi.resetModules();
     vi.doMock("@/lib/supabase/admin", () => ({
       createAdminClient: () => ({
