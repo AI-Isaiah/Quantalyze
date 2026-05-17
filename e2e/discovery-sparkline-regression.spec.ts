@@ -34,9 +34,10 @@
  * branch via synthetic data.
  */
 
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { cleanupTestAllocator } from "./helpers/cleanup-test-project";
+import { loginAs } from "./helpers/login";
 
 /** M-0867: typed page.evaluate return contracts (browser/node boundary). */
 interface SparklineStrokeProbe {
@@ -52,6 +53,16 @@ interface DrawdownStrokeProbe {
   strokes: (string | null)[];
 }
 
+/**
+ * audit-2026-05-07 maintainability finding
+ * (duplicate-evaluate-stroke-extraction): single source of truth for the
+ * sparkline-SVG selector used inside page.evaluate. Previously copy-pasted
+ * across two evaluate blocks where a selector edit in one and not the
+ * other would silently desynchronise the assertions.
+ */
+const SPARKLINE_SVG_SELECTOR =
+  "table svg:has(path[stroke]), [data-testid='strategy-grid'] svg:has(path[stroke])";
+
 const HAS_E2E_USER_ENV =
   !!process.env.E2E_USER_A_EMAIL && !!process.env.E2E_USER_A_PASSWORD;
 
@@ -60,23 +71,6 @@ const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
 
 const SHOULD_RUN = HAS_E2E_USER_ENV || HAS_SEED_ENV;
-
-async function loginAs(
-  page: Page,
-  email: string,
-  password: string,
-): Promise<void> {
-  await page.goto("/login");
-  await page.fill(
-    'input[name="email"], input[placeholder*="email" i]',
-    email,
-  );
-  await page.fill('input[type="password"]', password);
-  await page.click('button:has-text("Sign in")');
-  await page.waitForURL(/\/(discovery|strategies|dashboard)/, {
-    timeout: 15000,
-  });
-}
 
 test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () => {
   test.skip(
@@ -119,30 +113,31 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
   test("no sparkline SVG on /discovery/crypto-sma mixes positive (#15803D) and negative (#DC2626) strokes", async ({
     page,
   }) => {
-    const probe = await page.evaluate<SparklineStrokeProbe>(() => {
-      // Red-team RT-J01: scope to SVGs that actually have a stroked path.
-      // The row-level checkbox icon (StrategyTable.tsx line 434) renders
-      // an `<svg>` with `fill="currentColor"` and NO stroked path — it
-      // matches a bare `table svg` selector but contributes a stroke set
-      // of size 0, which silently passes the "no green+red" disjunction
-      // AND breaks the `size===1` tightening in the next test. Restricting
-      // to `svg:has(path[stroke])` selects ONLY actual sparkline SVGs.
-      const svgs = Array.from(
-        document.querySelectorAll(
-          "table svg:has(path[stroke]), [data-testid='strategy-grid'] svg:has(path[stroke])",
-        ),
-      ) as SVGElement[];
-      const distinctPerSvg = svgs.map((svg) => {
-        const strokes = new Set(
-          Array.from(svg.querySelectorAll("path[stroke]"))
-            .map((p) => (p as SVGPathElement).getAttribute("stroke") || "")
-            .filter((s) => s && s !== "none")
-            .map((s) => s.toLowerCase()),
-        );
-        return [...strokes];
-      });
-      return { distinctPerSvg };
-    });
+    const probe = await page.evaluate<SparklineStrokeProbe, string>(
+      (selector) => {
+        // Red-team RT-J01: scope to SVGs that actually have a stroked path.
+        // The row-level checkbox icon (StrategyTable.tsx line 434) renders
+        // an `<svg>` with `fill="currentColor"` and NO stroked path — it
+        // matches a bare `table svg` selector but contributes a stroke set
+        // of size 0, which silently passes the "no green+red" disjunction
+        // AND breaks the `size===1` tightening in the next test. Restricting
+        // to `svg:has(path[stroke])` selects ONLY actual sparkline SVGs.
+        const svgs = Array.from(
+          document.querySelectorAll(selector),
+        ) as SVGElement[];
+        const distinctPerSvg = svgs.map((svg) => {
+          const strokes = new Set(
+            Array.from(svg.querySelectorAll("path[stroke]"))
+              .map((p) => (p as SVGPathElement).getAttribute("stroke") || "")
+              .filter((s) => s && s !== "none")
+              .map((s) => s.toLowerCase()),
+          );
+          return [...strokes];
+        });
+        return { distinctPerSvg };
+      },
+      SPARKLINE_SVG_SELECTOR,
+    );
 
     expect(probe.distinctPerSvg.length).toBeGreaterThan(0);
 
@@ -167,25 +162,26 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
   test("each sparkline SVG owns exactly one stroke color (single-trace rule)", async ({
     page,
   }) => {
-    const probe = await page.evaluate<SparklineStrokeSizeProbe>(() => {
-      // Red-team RT-J01: same selector scoping as the previous test —
-      // exclude icon SVGs that have no stroked path. Otherwise the
-      // `toBe(1)` tightening would fail on the row-level checkbox SVG.
-      const svgs = Array.from(
-        document.querySelectorAll(
-          "table svg:has(path[stroke]), [data-testid='strategy-grid'] svg:has(path[stroke])",
-        ),
-      ) as SVGElement[];
-      const sizePerSvg = svgs.map((svg) => {
-        const strokes = new Set(
-          Array.from(svg.querySelectorAll("path[stroke]"))
-            .map((p) => (p as SVGPathElement).getAttribute("stroke") || "")
-            .filter((s) => s && s !== "none"),
-        );
-        return strokes.size;
-      });
-      return { sizePerSvg };
-    });
+    const probe = await page.evaluate<SparklineStrokeSizeProbe, string>(
+      (selector) => {
+        // Red-team RT-J01: same selector scoping as the previous test —
+        // exclude icon SVGs that have no stroked path. Otherwise the
+        // `toBe(1)` tightening would fail on the row-level checkbox SVG.
+        const svgs = Array.from(
+          document.querySelectorAll(selector),
+        ) as SVGElement[];
+        const sizePerSvg = svgs.map((svg) => {
+          const strokes = new Set(
+            Array.from(svg.querySelectorAll("path[stroke]"))
+              .map((p) => (p as SVGPathElement).getAttribute("stroke") || "")
+              .filter((s) => s && s !== "none"),
+          );
+          return strokes.size;
+        });
+        return { sizePerSvg };
+      },
+      SPARKLINE_SVG_SELECTOR,
+    );
 
     // H-1041 fix: explicit length floor — `size===0` (zero-stroke render
     // bug) used to silently pass with `toBeLessThanOrEqual(1)` on an
@@ -224,25 +220,24 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
     // annualizedReturn for all 8 STRATEGY_PROFILES, so the accent
     // branch MUST be exercised in the live DOM.
     //
-    // The returns sparkline is in EVERY row except the last sparkline
-    // cell (which is the drawdown sparkline rendered with
-    // var(--color-negative) per StrategyTable.tsx:479). To isolate the
-    // returns column we collect every non-last <svg> per row.
+    // audit-2026-05-07 testing finding M-discovery-sparkline:231 —
+    // bind to the explicit `data-testid='sparkline-returns'` attribute
+    // (added to the returns Sparkline at StrategyTable.tsx:471) rather
+    // than "every non-last SVG per row". The old loop would silently
+    // include any future row-level icon SVG (favorites star, sync
+    // indicator, etc.) and could pass on a non-sparkline element. The
+    // testid binds the assertion to the column the WHY actually cares
+    // about and survives column reordering.
     const probe = await page.evaluate<DrawdownStrokeProbe>(() => {
-      const rows = Array.from(document.querySelectorAll("table tbody tr"));
-      const strokes: (string | null)[] = [];
-      for (const row of rows) {
-        const svgs = row.querySelectorAll("svg");
-        // All SVGs except the last (drawdown) — the returns sparkline
-        // sits to the left of the drawdown cell.
-        for (let i = 0; i < svgs.length - 1; i++) {
-          const svg = svgs[i] as SVGElement;
-          const path = svg.querySelector(
-            "path[stroke]",
-          ) as SVGPathElement | null;
-          strokes.push(path?.getAttribute("stroke") ?? null);
-        }
-      }
+      const sparklines = Array.from(
+        document.querySelectorAll('svg[data-testid="sparkline-returns"]'),
+      ) as SVGElement[];
+      const strokes: (string | null)[] = sparklines.map((svg) => {
+        const path = svg.querySelector(
+          "path[stroke]",
+        ) as SVGPathElement | null;
+        return path?.getAttribute("stroke") ?? null;
+      });
       return { strokes };
     });
 

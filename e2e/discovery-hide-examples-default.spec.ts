@@ -35,10 +35,26 @@
 import { test, expect } from "@playwright/test";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { cleanupTestAllocator } from "./helpers/cleanup-test-project";
+import { loginAs } from "./helpers/login";
+import { STRATEGY_PROFILES } from "../scripts/seed-demo-data";
 
-/** Seed-strategy display names from scripts/seed-demo-data.ts STRATEGY_PROFILES. */
-const SEED_NAMES_REGEX =
-  /Stellar Neutral|Nebula Momentum|Aurora Basis|Vega Volatility|Helios L\/S|Orion Grid|Pulsar Trend|Quasar Mean Reversion/;
+/**
+ * Seed-strategy display names — derived from the single source of truth
+ * (scripts/seed-demo-data.ts STRATEGY_PROFILES) so a rename of any seed
+ * strategy automatically propagates to this regex. audit-2026-05-07
+ * testing finding M-discovery-hide-examples:134.
+ *
+ * Each profile name is escaped before being joined into the alternation
+ * so characters like `/` (e.g. "Helios L/S Stat Arb") don't break the
+ * regex. We match name prefixes (the renderer may truncate or wrap), so
+ * we escape the whole name and rely on the alternation engine.
+ */
+function escapeForRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+const SEED_NAMES_REGEX = new RegExp(
+  STRATEGY_PROFILES.map((p) => escapeForRegex(p.name)).join("|"),
+);
 
 const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_URL &&
@@ -77,19 +93,12 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     // localStorage is cleared separately after navigation (see below).
     await context.clearCookies();
 
-    // Sign in as the freshly seeded allocator. Login form selectors mirror
-    // discovery-prefs-isolation.spec.ts (Plan 13-02) — that spec is the
-    // canonical login fixture for /discovery routes.
-    await page.goto("/login");
-    await page.fill(
-      'input[name="email"], input[placeholder*="email" i]',
-      email,
-    );
-    await page.fill('input[type="password"]', password);
-    await page.click('button:has-text("Sign in")');
-    await page.waitForURL(/\/(discovery|strategies|dashboard)/, {
-      timeout: 15000,
-    });
+    // Sign in as the freshly seeded allocator. Uses the shared
+    // helpers/login.ts helper — single source of truth across
+    // discovery-prefs-isolation, discovery-sparkline-regression, and
+    // this spec. audit-2026-05-07 maintainability finding
+    // (duplicate-login-helper).
+    await loginAs(page, email, password);
 
     // Explicitly clear any inherited discovery_view_preferences:* entries
     // for the dashboard origin. The fresh allocator has never written any,

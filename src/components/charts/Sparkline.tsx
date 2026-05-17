@@ -5,6 +5,14 @@ interface SparklineProps {
   color?: string;
   fill?: boolean;
   className?: string;
+  /**
+   * audit-2026-05-07 testing finding M-discovery-sparkline:231 —
+   * E2E specs need a stable hook to disambiguate the returns
+   * sparkline from sibling icon SVGs that may be added to the
+   * StrategyTable row in the future. Optional so existing call
+   * sites that don't need it stay untouched.
+   */
+  "data-testid"?: string;
 }
 
 export function Sparkline({
@@ -14,6 +22,7 @@ export function Sparkline({
   color = "var(--color-chart-strategy)",
   fill = false,
   className = "",
+  "data-testid": dataTestId,
 }: SparklineProps) {
   if (!data || data.length < 2) return null;
 
@@ -37,6 +46,7 @@ export function Sparkline({
       height={height}
       viewBox={`0 0 ${width} ${height}`}
       className={className}
+      data-testid={dataTestId}
     >
       {fill && (
         <path
