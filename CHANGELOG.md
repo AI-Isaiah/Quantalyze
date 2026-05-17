@@ -7,6 +7,20 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.49] - 2026-05-17
+
+**audit-2026-05-07 — analytics-service `match_engine` close-out (cluster-N).** Multi-phase review on `analytics-service/services/match_engine.py` + `routers/match.py` + tests + golden fixture. Squashes 16 prior commits on `fix/match-engine-service-critical-2026-05-17` into 12 substantive commits onto current main (base v0.22.40.48).
+
+- **Cluster-N close-out** — 17 findings closed on `match_engine.py` (enum-discriminator handling, score-error sink, top-excluded log+sink, renormalize-once-before-clip, defensive `.get()` reads on optional ctx prefs).
+- **Specialist + red-team** — enum-discriminator pass; dropped `explicitly_excluded` row when also score-errored; renormalize-once before clip (was running twice in some branches).
+- **Testing** — behavioural NaN/Inf coverage; `routers/match` integration tests.
+- **Maintainability** — docstrings + DRY pass on `match_engine.py` helpers.
+- **Simplify** — DRY cron-recompute path in `routers/match.py`.
+- **Comment-analyzer (Phase 6)** — fixed stale migration ref; relocated ctx preferences normalization comment to its actual call site.
+
+No production behavior regressions; 12 substantive cherry-picks onto current main, conflict-free.
+
+
 ## [0.22.40.48] - 2026-05-17
 
 **audit-2026-05-07 — strategy components + intro-response API close-out.** Multi-phase review on `StrategyTable`, `StarToggle`, `PendingIntros`, the `/api/intro-response` route (admin + manager mirrors), and shared test helpers. Squashes 20 prior commits on `fix/strategy-component-tests-critical-2026-05-17` into 16 substantive commits onto current main (base v0.22.40.47).
