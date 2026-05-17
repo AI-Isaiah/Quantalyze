@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  memo,
   useEffect,
   useRef,
   useState,
@@ -33,17 +32,16 @@ function warnAudit(tag: string, detail: Record<string, unknown> = {}): void {
   console.warn(`[AllocationsTabs] ${tag}`, detail);
 }
 
-// audit-2026-05-07 cluster P (M-0043, M-1043 — performance c8) — wrap
-// AllocationDashboardV2 in React.memo so identity-equal payloads short-
-// circuit. Today `<AllocationDashboardV2 {...props} />` receives a fresh
-// props OBJECT every parent render (the 30s router.refresh ticks the
-// reference) — memo with React's default shallow compare doesn't help
-// because spreading creates new identities, but memo + a stable payload
-// reference DOES eliminate the cascade. We can't enforce stable identity
-// from inside this shell (the parent server component owns it) so the
-// memo here is a defensive baseline that costs nothing today and unlocks
-// the win the moment a parent stabilises the payload reference.
-const MemoAllocationDashboardV2 = memo(AllocationDashboardV2);
+// audit-2026-05-07 cluster P (M-0043 / M-1043 / maintainability MED) — the
+// previous `MemoAllocationDashboardV2 = memo(AllocationDashboardV2)` wrapper
+// was a no-op: the consumer below renders `<AllocationDashboardV2 {...props}/>`,
+// so React.memo's default shallow compare always saw a fresh props identity
+// and re-rendered. The wrapper added an indirection layer and a misleading
+// optimization signal for future readers without delivering any current
+// behavioral benefit. Removed per the audit's "no speculative abstractions
+// for single-use code" guidance. Re-introduce memo only AFTER the parent
+// server component stabilises the payload reference — at which point the
+// wrapper would actually short-circuit.
 
 // Phase A6 — Holdings / Outcomes / Mandate / Risk tab panels lazy-load via
 // next/dynamic with ssr: false. Together they pull in HoldingsTable +
@@ -153,33 +151,30 @@ const ScenarioComposer = dynamic(
 // or any value other than the literal string "false") yields V2.
 const UI_V2_STORAGE_KEY = "allocations.ui_v2";
 
-// audit-2026-05-07 H-0060 (type-design-analyzer c9) — return a discriminator
-// so callers can distinguish (a) "no value set" from (b) "explicit opt-out"
-// from (c) "storage threw". Today only the boolean `isUiV2` flag is consumed,
-// but the discriminator unblocks future work that wants to flip the default
-// while honouring an explicit opt-out without re-reading localStorage.
-type UiV2FlagState =
-  | { state: "default"; value: true }
-  | { state: "explicit"; value: boolean }
-  | { state: "ssr"; value: true }
-  | { state: "error"; value: true; reason: string };
+// audit-2026-05-07 maintainability MED — the only consumer (line ~318) reads
+// "is this an explicit opt-out?". Collapsed from a 4-variant discriminator
+// union to a 2-variant ("explicit-false" vs "default") so unused branches
+// don't accumulate without tests exercising them. C-0336 storage-error
+// breadcrumb is preserved; SSR and storage-error paths both collapse to
+// "default" since both yield V2 with no rollback. Re-introduce a richer
+// discriminator only when a second consumer needs it.
+type UiV2FlagState = "explicit-false" | "default";
 
 function readUiV2Flag(): UiV2FlagState {
   if (typeof window === "undefined") {
-    return { state: "ssr", value: true };
+    return "default";
   }
   try {
     const raw = window.localStorage.getItem(UI_V2_STORAGE_KEY);
-    if (raw === "true") return { state: "explicit", value: true };
-    if (raw === "false") return { state: "explicit", value: false };
-    return { state: "default", value: true };
+    if (raw === "false") return "explicit-false";
+    return "default";
   } catch (err) {
     // audit-2026-05-07 C-0336 (silent-failure-hunter c10) — log the
     // storage failure so a P1 "V1 users seeing V2" / "rollback not
     // honoured" issue is debuggable. Default-true behaviour is preserved.
     const reason = err instanceof Error ? err.message : String(err);
     warnAudit("loadUiV2Flag_failed", { reason });
-    return { state: "error", value: true, reason };
+    return "default";
   }
 }
 
@@ -315,7 +310,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     // is overkill for a one-shot post-mount read of a stable value.
     const result = readUiV2Flag();
     /* eslint-disable react-hooks/set-state-in-effect */
-    if (result.state === "explicit" && result.value === false) {
+    if (result === "explicit-false") {
       setUiV2Flag(false);
       // audit-2026-05-07 H-1188 (red-team c8) — the persisted flag's
       // SCOPE is Scenario only in current main; the Overview / Holdings /
@@ -474,7 +469,15 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // their tab change silently. Surface a polite aria-live announcement
   // explaining the redirect. Visually-hidden via DESIGN-bundle .sr-only
   // utility so the design contract is unchanged.
+  //
+  // audit-2026-05-07 maintainability MED — the announcement is paired with
+  // a monotonically-increasing token (`announcementSeq`). Each click bumps
+  // the seq and renders `${message} [#seq]`, guaranteeing a non-equal
+  // string even on a second Risk → Export click. Without this, React's
+  // Object.is bail-out skips the re-render and aria-live=polite does NOT
+  // re-announce identical content — a silent regression of the M-1044 fix.
   const [exportAnnouncement, setExportAnnouncement] = useState<string>("");
+  const exportAnnouncementSeqRef = useRef<number>(0);
 
   // PR1 QA — inline header row matching designer-bundle/project/src/app.jsx
   // (lines 460-510): "My Allocation" + entity name on the left, tab list +
@@ -603,10 +606,18 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
               // Holdings tab today. Route there until the global export
               // surface lands. audit-2026-05-07 M-1044 — announce the
               // navigation via the live region so screen-reader and
-              // keyboard users learn why the surface changed.
+              // keyboard users learn why the surface changed. The seq
+              // suffix is invisible whitespace (zero-width-space repeated
+              // N times) so the on-screen message is identical regardless
+              // of click count but the React string identity changes,
+              // triggering aria-live re-announcement on every click.
               if (activeTab !== "holdings") {
+                exportAnnouncementSeqRef.current += 1;
+                const invisibleSuffix = "​".repeat(
+                  exportAnnouncementSeqRef.current,
+                );
                 setExportAnnouncement(
-                  "Export lives in the Holdings tab — taking you there.",
+                  `Export lives in the Holdings tab — taking you there.${invisibleSuffix}`,
                 );
               }
               changeTab("holdings");
@@ -662,7 +673,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
         aria-labelledby="tab-overview"
         hidden={activeTab !== "overview"}
       >
-        {activeTab === "overview" && <MemoAllocationDashboardV2 {...props} />}
+        {activeTab === "overview" && <AllocationDashboardV2 {...props} />}
       </div>
       <div
         role="tabpanel"
