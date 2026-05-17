@@ -2,20 +2,21 @@
  * Phase 13 / Plan 13-05 / DISCO-05 — Fresh-allocator hide-examples-by-default.
  *
  * Proves the cross-plan invariant: with Plan 13-02's
- * `DEFAULTS.hide_examples = true` (src/lib/discovery-prefs.ts:42) AND
- * Plan 13-05's `is_example = true` backfill on the 8 seed strategy UUIDs
- * (supabase/migrations/20260429063138_seed_is_example_backfill.sql), a brand-new
- * allocator with no prior `discovery_view_preferences:*` localStorage
- * entries lands on `/discovery/[slug]` and sees ZERO example strategies.
+ * `DEFAULTS.hide_examples = true` (src/lib/discovery-prefs.ts `DEFAULTS`)
+ * AND Plan 13-05's `is_example = true` backfill on the 8 seed strategy
+ * UUIDs (supabase/migrations/20260429063138_seed_is_example_backfill.sql),
+ * a brand-new allocator with no prior `discovery_view_preferences:*`
+ * localStorage entries lands on `/discovery/[slug]` and sees ZERO example
+ * strategies.
  *
- * Then toggles "Hide examples" OFF via the inline filter checkbox
- * (StrategyFilters.tsx:343-351) and asserts the seed strategies become
- * visible — proving the toggle actually controls visibility (not just
- * the empty-state default).
+ * Then toggles "Hide examples" OFF via the inline filter checkbox in
+ * StrategyFilters.tsx (search: `Hide examples toggle`) and asserts the
+ * seed strategies become visible — proving the toggle actually controls
+ * visibility (not just the empty-state default).
  *
  * Env wiring (matches discovery-prefs-isolation.spec.ts pattern):
  *   The active path is the `seedTestAllocator()` helper from
- *   `e2e/helpers/seed-test-project.ts:60`. When `TEST_SUPABASE_URL` /
+ *   `e2e/helpers/seed-test-project.ts`. When `TEST_SUPABASE_URL` /
  *   `TEST_SUPABASE_SERVICE_ROLE_KEY` are not wired, the spec is
  *   `test.skip`'d so it is authored-but-not-CI-blocking.
  *
@@ -23,27 +24,53 @@
  * criterion 5 (REQUIREMENTS.md DISCO-05 line 21 + ROADMAP.md SC#5):
  * "a fresh allocator's first Discovery visit shows zero example
  * strategies".
+ *
+ * audit-2026-05-07 cluster J — REWRITTEN to remove the silent-pass gates
+ * documented in FIX-LIST entries C-0301, C-0302, H-1034, H-1035, H-1036,
+ * M-0859, M-0860, M-0861. Behavioral assertions are now strict and bind
+ * to the seed strategies actually inserted by seedTestAllocator(); no
+ * `if (rowCount > 0)` short-circuits, no `toBeGreaterThanOrEqual`
+ * tautologies, no `waitForTimeout` / `networkidle` flake patterns.
  */
 
 import { test, expect } from "@playwright/test";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { cleanupTestAllocator } from "./helpers/cleanup-test-project";
+import { loginAs } from "./helpers/login";
+// Red-team RT-J08 (MED conf 8): import from the data-only module
+// (no `@supabase/supabase-js` import, no module-load side effects)
+// so spec-load cannot accidentally trigger a seed-script side effect
+// if a future maintainer lifts any env-read to module scope in
+// `seed-demo-data.ts`. See `scripts/seed-demo-profiles.ts` rationale.
+import { STRATEGY_PROFILES } from "../scripts/seed-demo-profiles";
 
-/** Source of truth: scripts/seed-demo-data.ts:STRATEGY_UUIDS (lines 44-53). */
-const SEED_UUIDS = [
-  "cccccccc-0001-4000-8000-000000000001",
-  "cccccccc-0001-4000-8000-000000000002",
-  "cccccccc-0001-4000-8000-000000000003",
-  "cccccccc-0001-4000-8000-000000000004",
-  "cccccccc-0001-4000-8000-000000000005",
-  "cccccccc-0001-4000-8000-000000000006",
-  "cccccccc-0001-4000-8000-000000000007",
-  "cccccccc-0001-4000-8000-000000000008",
-] as const;
-
-/** Seed-strategy display names from scripts/seed-demo-data.ts STRATEGY_PROFILES. */
-const SEED_NAMES_REGEX =
-  /Stellar Neutral|Nebula Momentum|Aurora Basis|Vega Volatility|Helios L\/S|Orion Grid|Pulsar Trend|Quasar Mean Reversion/;
+/**
+ * Seed-strategy display names — derived from the single source of truth
+ * (scripts/seed-demo-data.ts STRATEGY_PROFILES) so a rename of any seed
+ * strategy automatically propagates to this regex. audit-2026-05-07
+ * testing finding M-discovery-hide-examples:134.
+ *
+ * Each profile name is escaped before being joined into the alternation
+ * so characters like `/` (e.g. "Helios L/S Stat Arb") don't break the
+ * regex. We match name prefixes (the renderer may truncate or wrap), so
+ * we escape the whole name and rely on the alternation engine.
+ */
+function escapeForRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+/**
+ * Red-team RT-J04 (HIGH conf 7): anchor each alternation with `\b` word
+ * boundaries so the regex matches whole tokens, not substrings of arbitrary
+ * row text. Without anchors, `tr.textContent` substring collisions (badge
+ * labels, AUM digits, SyncBadge timestamp, Verified tooltip, or a future
+ * user-created strategy named "Helios L/S Stat Arb v2") would falsely
+ * trigger the seed-name regex in BOTH directions — the pre-toggle "zero
+ * matches" assertion AND the post-toggle "any match" poll. Word-boundary
+ * anchoring closes both vectors while staying minimally invasive.
+ */
+const SEED_NAMES_REGEX = new RegExp(
+  STRATEGY_PROFILES.map((p) => `\\b${escapeForRegex(p.name)}\\b`).join("|"),
+);
 
 const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_URL &&
@@ -77,22 +104,17 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     page,
     context,
   }) => {
-    // Belt-and-braces: ensure no prior localStorage entries from another spec.
+    // Belt-and-braces: clear any inherited auth cookies from a prior spec
+    // so the fresh allocator login below is the only authenticated session.
+    // localStorage is cleared separately after navigation (see below).
     await context.clearCookies();
 
-    // Sign in as the freshly seeded allocator. Login form selectors mirror
-    // discovery-prefs-isolation.spec.ts (Plan 13-02) — that spec is the
-    // canonical login fixture for /discovery routes.
-    await page.goto("/login");
-    await page.fill(
-      'input[name="email"], input[placeholder*="email" i]',
-      email,
-    );
-    await page.fill('input[type="password"]', password);
-    await page.click('button:has-text("Sign in")');
-    await page.waitForURL(/\/(discovery|strategies|dashboard)/, {
-      timeout: 15000,
-    });
+    // Sign in as the freshly seeded allocator. Uses the shared
+    // helpers/login.ts helper — single source of truth across
+    // discovery-prefs-isolation, discovery-sparkline-regression, and
+    // this spec. audit-2026-05-07 maintainability finding
+    // (duplicate-login-helper).
+    await loginAs(page, email, password);
 
     // Explicitly clear any inherited discovery_view_preferences:* entries
     // for the dashboard origin. The fresh allocator has never written any,
@@ -106,49 +128,118 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     });
 
     await page.goto("/discovery/crypto-sma");
-    await page.waitForLoadState("networkidle");
 
-    // Read every visible row in the StrategyTable body.
-    const rowCount = await page.locator("table tbody tr").count();
+    // C-0301/M-0860 fix: replace flaky `waitForLoadState('networkidle')`
+    // with a deterministic wait for the StrategyTable to hydrate.
+    // The table renders <table> + tbody unconditionally; if data is still
+    // loading, tbody is empty but the table is mounted. We wait for
+    // either at least one row OR a documented empty-state marker, then
+    // assert against whichever the page produced. Matches the pattern in
+    // discovery-watchlist.spec.ts which already uses waitForSelector.
+    await page.waitForSelector("table", { timeout: 15000 });
+    const rowsLocator = page.locator("table tbody tr");
+    // Red-team RT-J07 (MED conf 8): the prior poll `rowsLocator.count() > 0`
+    // succeeded as soon as the empty-state tr was rendered (StrategyTable
+    // renders <table>+<tbody> unconditionally and shows a single "No
+    // strategies" tr while data is still in flight). On a slow Supabase
+    // cold start the poll captured the transient empty state, the hide-
+    // examples filter then evaluated against zero rows, and the downstream
+    // `hasEmptyStateRow` guard fired a false-positive "test DB lacks demo
+    // seed data" diagnostic. Wait specifically for a NON-empty-state row.
+    // If the DB really is empty, the poll will time out and the next
+    // guard's empty-state diagnostic fires with the correct
+    // `npm run seed:demo` message. Either way the failure mode is
+    // unambiguous.
+    await expect
+      .poll(
+        async () => {
+          const txts = await rowsLocator.allTextContents();
+          return txts.some((t) => !/no strategies/i.test(t));
+        },
+        {
+          timeout: 10000,
+          message:
+            "discovery table never produced a non-empty-state row in 10s — " +
+            "either the test DB lacks demo seed data (run " +
+            "`npm run seed:demo` against TEST_SUPABASE_URL) or the page " +
+            "is stuck in a transient loading state",
+        },
+      )
+      .toBe(true);
 
-    if (rowCount > 0) {
-      const rowsText = await page.locator("table tbody tr").allTextContents();
-      const hasNoStrategiesEmptyState = rowsText.some((t) =>
-        /no strategies/i.test(t),
-      );
-
-      if (!hasNoStrategiesEmptyState) {
-        // We have rows but NONE should be one of the 8 seed example
-        // strategies (their is_example=true + DEFAULTS.hide_examples=true
-        // means they MUST be filtered out on first paint).
-        for (const text of rowsText) {
-          expect(text).not.toMatch(SEED_NAMES_REGEX);
-        }
-      }
-    }
+    // C-0301/C-0302/H-1034 fix: no silent `if (rowCount > 0)` gate.
+    // The seeded allocator + the migration 091 backfill guarantee the
+    // seed strategies exist in the DB. The pre-toggle assertion now
+    // requires that the rendered rows contain ZERO seed-name matches —
+    // a strict contract. If the rows include any seed name on first
+    // paint, the DEFAULTS.hide_examples=true invariant has regressed.
+    //
+    // Specialist T-J03 (testing) — detect the documented "no strategies"
+    // empty-state row and fail with a fixture-diagnostic instead of
+    // vacuously passing. The seed strategies MUST be queryable to make
+    // the post-toggle assertion meaningful; if they aren't, the test DB
+    // is missing the demo seed data (run `npm run seed:demo` against
+    // TEST_SUPABASE_URL) and we want to surface that, not green-light
+    // a no-op test.
+    const preToggleRowsText = await rowsLocator.allTextContents();
+    const hasEmptyStateRow = preToggleRowsText.some((t) =>
+      /no strategies/i.test(t),
+    );
+    expect(
+      hasEmptyStateRow,
+      "discovery table must not render the 'no strategies' empty state " +
+        "for the fresh allocator BEFORE toggling Hide examples — this " +
+        "indicates the test DB lacks the demo seed data (run " +
+        "`npm run seed:demo` against TEST_SUPABASE_URL before re-running)",
+    ).toBe(false);
+    const preToggleSeedMatches = preToggleRowsText.filter((t) =>
+      SEED_NAMES_REGEX.test(t),
+    );
+    expect(
+      preToggleSeedMatches,
+      "fresh allocator must see zero example strategies on first paint " +
+        "(DEFAULTS.hide_examples=true must filter seed strategies out)",
+    ).toEqual([]);
 
     // Now toggle "Hide examples" OFF via the inline checkbox in
-    // StrategyFilters.tsx:342-351. The checkbox is checked={!showExamples}
-    // and clicking the surrounding <label> flips it.
+    // StrategyFilters.tsx (search: `Hide examples toggle`). The checkbox
+    // is `checked={!showExamples}` and clicking the surrounding <label>
+    // flips it.
+    //
+    // C-0301/H-1034 fix: no `if (hideExamplesLabel.count())` silent skip.
+    // The toggle must exist; a UI rename is a real regression we want to
+    // surface, not swallow.
     const hideExamplesLabel = page
       .locator('label:has-text("Hide examples")')
       .first();
-    if (await hideExamplesLabel.count()) {
-      await hideExamplesLabel.click();
+    await expect(
+      hideExamplesLabel,
+      "Hide examples toggle must be present (StrategyFilters.tsx)",
+    ).toBeVisible({ timeout: 5000 });
+    await hideExamplesLabel.click();
 
-      // After toggling OFF, the seed strategies should appear (assuming
-      // the test DB has been seeded with them). Allow a brief settle for
-      // the controlled-state re-render.
-      await page.waitForTimeout(500);
-      const newRowCount = await page.locator("table tbody tr").count();
-
-      // Pass either:
-      //   - more rows than before (toggle revealed examples), OR
-      //   - the test DB simply has no seed strategies (no-op DB, accept)
-      // Both are valid outcomes; what we MUST never see is the toggle
-      // having no effect when seeds DO exist (that would be a Plan 13-02
-      // controlled-state regression).
-      expect(newRowCount).toBeGreaterThanOrEqual(rowCount);
-    }
+    // C-0301/C-0302/H-1035/H-1036/M-0859/M-0861 fix: replace
+    // `waitForTimeout(500)` + `toBeGreaterThanOrEqual` with an explicit
+    // poll for at least one seed-strategy name to appear. The migration
+    // 091 backfill guarantees the seed names exist in the DB; toggling
+    // hide-examples OFF MUST surface them. If the toggle is broken
+    // (no-op), the assertion fails loudly with a useful diagnostic.
+    await expect
+      .poll(
+        async () => {
+          const rowsText = await rowsLocator.allTextContents();
+          return rowsText.some((t) => SEED_NAMES_REGEX.test(t));
+        },
+        {
+          timeout: 10000,
+          message:
+            "after toggling Hide examples OFF, at least one seed strategy " +
+            "(Stellar Neutral / Nebula Momentum / Aurora Basis / Vega " +
+            "Volatility / Helios L/S / Orion Grid / Pulsar Trend / Quasar " +
+            "Mean Reversion) MUST be visible — controlled-state regression " +
+            "if the toggle has no effect",
+        },
+      )
+      .toBe(true);
   });
 });

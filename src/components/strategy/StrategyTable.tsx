@@ -471,6 +471,7 @@ export function StrategyTable({
                       <Sparkline
                         data={s.analytics.sparkline_returns ?? []}
                         color={sparklineColor(s.analytics.sparkline_returns ?? [])}
+                        data-testid="sparkline-returns"
                       />
                     </td>
                     <td className="px-4 py-3">

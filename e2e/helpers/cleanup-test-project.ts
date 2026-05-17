@@ -46,14 +46,23 @@ function getAdmin(): SupabaseClient {
  * Delete the seeded allocator. Cascades remove every owned row through
  * the FK chain (profiles.id → strategies / api_keys / allocator_holdings
  * / match_decisions / bridge_outcomes / allocator_preferences).
+ *
+ * Red-team RT-J06 (HIGH conf 7): in CI, fail loud. Locally, a deleteUser
+ * failure is best-effort (re-run cleans up the next time). In CI a
+ * silent leak compounds across runs — `e2e-onboarding-${ts}@example.test`
+ * rows accumulate in TEST_SUPABASE auth.users with no signal. When
+ * `process.env.CI` is set, the warn becomes a thrown error so the spec
+ * fails and the leak surfaces immediately.
  */
 export async function cleanupTestAllocator(userId: string): Promise<void> {
   const admin = getAdmin();
   const { error } = await admin.auth.admin.deleteUser(userId);
   if (error) {
-    console.warn(
-      `[cleanup-test-project] deleteUser(${userId}) failed: ${error.message}`,
-    );
+    const message = `[cleanup-test-project] deleteUser(${userId}) failed: ${error.message}`;
+    if (process.env.CI) {
+      throw new Error(message);
+    }
+    console.warn(message);
   }
 }
 
