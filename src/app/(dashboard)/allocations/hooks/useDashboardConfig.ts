@@ -339,6 +339,19 @@ function looksLikeLegacyTile(tile: unknown): boolean {
 }
 
 /**
+ * audit-2026-05-07 (maintainability MED/8) — single source of truth for
+ * the timeframe fallback. `loadV2Config` previously open-coded the same
+ * `typeof parsed.timeframe === 'string' ? parsed.timeframe : 'YTD'`
+ * ternary at two return sites plus a literal `'YTD'` in `defaultV2Config`;
+ * a future change to the default had to be made in three places. Wrap the
+ * coercion + default in one helper so every site agrees.
+ */
+const DEFAULT_TIMEFRAME = "YTD";
+function coerceTimeframe(value: unknown): string {
+  return typeof value === "string" ? value : DEFAULT_TIMEFRAME;
+}
+
+/**
  * audit-2026-05-07 (M-0130 / M-0127 / M-1076 / M-0131 c8-9): per-tile runtime
  * validation at the JSON.parse boundary. `JSON.parse(raw) as DashboardConfig`
  * is a structural lie — a hand-edited or partially-truncated localStorage
@@ -393,7 +406,7 @@ function normalizeTilesToRegistryIds(tiles: readonly TileConfig[]): TileConfig[]
 function defaultV2Config(): DashboardConfig {
   return {
     tiles: normalizeTilesToRegistryIds(DEFAULT_LAYOUT),
-    timeframe: "YTD",
+    timeframe: DEFAULT_TIMEFRAME,
     layoutVersion: LAYOUT_VERSION,
   };
 }
@@ -419,11 +432,16 @@ function loadV2Config(): DashboardConfig {
       // shape leaking into a v4 blob gets the dedicated breadcrumb so the
       // dashboard can route the toast copy accordingly. The empty-array
       // case is handled below — that's an intentional user state.
-      if (
-        !Array.isArray(parsed.tiles) ||
-        parsed.tiles.some(looksLikeLegacyTile)
-      ) {
-        if (Array.isArray(parsed.tiles) && parsed.tiles.some(looksLikeLegacyTile)) {
+      //
+      // audit-2026-05-07 (maintainability MED/8) — evaluate the predicate
+      // ONCE and reuse it for both the gate and the branch disambiguation.
+      // The previous shape ran `parsed.tiles.some(looksLikeLegacyTile)` on
+      // line 219 and AGAIN inside the body to pick the recovery reason —
+      // duplicated logic plus a wasted O(n) scan on every load.
+      const tilesIsArray = Array.isArray(parsed.tiles);
+      const hasLegacyShape = tilesIsArray && parsed.tiles.some(looksLikeLegacyTile);
+      if (!tilesIsArray || hasLegacyShape) {
+        if (hasLegacyShape) {
           setRecoveryFlag("legacy_in_v2_blob");
         } else {
           // !Array.isArray(parsed.tiles)
@@ -443,7 +461,7 @@ function loadV2Config(): DashboardConfig {
       if (parsed.tiles.length === 0) {
         return {
           tiles: [],
-          timeframe: typeof parsed.timeframe === "string" ? parsed.timeframe : "YTD",
+          timeframe: coerceTimeframe(parsed.timeframe),
           layoutVersion: LAYOUT_VERSION,
         };
       }
@@ -481,7 +499,7 @@ function loadV2Config(): DashboardConfig {
       }
       return {
         tiles: validatedTiles,
-        timeframe: typeof parsed.timeframe === "string" ? parsed.timeframe : "YTD",
+        timeframe: coerceTimeframe(parsed.timeframe),
         layoutVersion: LAYOUT_VERSION,
       };
     }
