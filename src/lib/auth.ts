@@ -25,10 +25,15 @@ export { APP_ROLES, type AppRole };
  *     ('admin','allocator','quant_manager','analyst').
  *   - A user can hold multiple roles. Grants go through an admin UI
  *     and are audited (see src/lib/audit.ts).
- *   - Legacy `profiles.is_admin` remains the canonical admin gate for
- *     `withAdminAuth` + `isAdminUser()` until Sprint 7 fans `withRole`
- *     out across all admin routes. This file ships the new path; the
- *     old path keeps working in parallel.
+ *   - Post audit-2026-05-07 P459 the admin decision is a UNION across
+ *     three signals — `user_app_roles`.role='admin' OR
+ *     `profiles.is_admin = TRUE` OR `ADMIN_EMAIL` env-fallback — wired
+ *     through `isAdminUser()` in `src/lib/admin.ts`. Both `withRole`
+ *     here AND `withAdminAuth` consult that single helper, so a grant
+ *     in any one of the three sources lights up both wrappers. The
+ *     `profiles.is_admin` column stays as one signal in the union until
+ *     ADR-0005's convergence on `withRole` finishes fanning out across
+ *     all admin routes (tracked by `ADMIN_ROUTE_MANIFEST`).
  *
  * The exports below form the Task 7.2 public surface:
  *
