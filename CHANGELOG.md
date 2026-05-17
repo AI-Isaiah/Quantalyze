@@ -7,6 +7,20 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.48] - 2026-05-17
+
+**audit-2026-05-07 — strategy components + intro-response API close-out.** Multi-phase review on `StrategyTable`, `StarToggle`, `PendingIntros`, the `/api/intro-response` route (admin + manager mirrors), and shared test helpers. Squashes 20 prior commits on `fix/strategy-component-tests-critical-2026-05-17` into 16 substantive commits onto current main (base v0.22.40.47).
+
+- **Coverage closures** — `StarToggle` (C-0137, C-0138, H-0404, M-0469/470/471, L-0087); `StrategyTable` (C-0140, C-0141, H-0406, M-0474); `PendingIntros` (C-0135, C-0136 by routing manager intro responses through `/api/intro-response`).
+- **Test infra** — typed `FetchMock` helper for Vitest 4 (`Mock<typeof fetch>`); `data-testid` hooks for assertion binding; dropped unused `fetchMock` binding in `StrategyTable.test.tsx`.
+- **Testing** — 9 new negative-path tests for `/api/intro-response`; pinned 404 classification + declined `router.refresh` contract in `PendingIntros`.
+- **Red-team** — intro-response route TOCTOU/idempotency/audit-after-jwt + admin sibling mirror; PendingIntros double-click race + loading-flag ordering; csrf `NEXT_PUBLIC_ALLOWED_ORIGINS` for custom-domain rollouts.
+- **Simplify** — `CONTACT_REQUEST_ID` constant lifted (21 UUID literals → one) in route.test.ts; `PendingIntros` path constant lifted in critical-regressions C-0135/C-0136 block.
+- **Comment-analyzer (Phase 6)** — refreshed `PendingIntros.test.tsx` coverage preamble (stale 6-branch list); dropped stale L## refs + refreshed coverage preamble on `intro-response/route.test.ts`; dropped stale 'seven cases' + 'line ~464' refs in `StrategyTable.test.tsx`.
+
+No production behavior regressions; 16 substantive cherry-picks onto current main, conflict-free.
+
+
 ## [0.22.40.47] - 2026-05-17
 
 **audit-2026-05-07 — AllocationsTabs top-shell close-out (cluster-P).** Multi-phase review on `src/app/(dashboard)/allocations/AllocationsTabs.tsx` + its tests. Squashes 18 prior commits on `fix/allocations-top-shell-critical-2026-05-17` into 14 substantive commits onto current main (base v0.22.40.46).
