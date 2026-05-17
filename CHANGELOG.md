@@ -7,6 +7,25 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.39] - 2026-05-17
+
+**audit-2026-05-07 — Cluster C (E2E specs) close-out.** Multi-phase review pipeline (specialists → fix → red-team → red-team-fix → simplify → comment-analyzer) applied to `e2e/demo-public.spec.ts`, `e2e/discovery-watchlist.spec.ts`, `e2e/portfolio-pdf-demo.spec.ts`, `e2e/helpers/seed-test-project.ts`, and `src/lib/demo-pdf-token.ts`.
+
+Key closures:
+- CRITICAL `seed-strategy-missing-category` (red-team): `seedBridgeCandidate()` now resolves `category_id` so the seeded row renders on `/discovery/crypto-sma`. The DISCO-01 cross-stack PUT→reload→persist contract is actually exercised — previously the spec silently skipped via `tableRowCount === 0`.
+- HIGH `rsc-payload-false-positive`: XSS canary in `demo-public.spec.ts` now uses a DOM walk excluding `self.__next_f.push` RSC payload + inert JSON islands.
+- HIGH `hmac-branch-uncovered`: malformed-token case extended to reach `timingSafeEqual` comparison branch in `portfolio-pdf-demo.spec.ts`.
+- HIGH `csrf-precedes-auth`: explicit `Origin` header on unauthenticated PUT decouples 401 assertion from CSRF env wiring.
+- HIGH `rls-masked-by-explicit-filter`: direct RLS-bound query via anon key + user-B session does bare `SELECT user_favorites`.
+- MED `parallel-seed-burst`: serialised 3 seeds + appended `Math.random()` suffix to emails.
+- MED `503-tolerance-asymmetric`: `fetchPdfTolerant` wired into every negative-path test.
+- MED `signWithExp` shadow removed; `signDemoPdfToken` extended with optional `expSeconds` so expired-token test reuses canonical production code.
+
+Code-simplifier + comment-analyzer passes: 6 net simplifications (typed-cast cleanup, locator-lift, DRY `uniqueSuffix` helper) + stale-line-ref refresh in spec docstrings.
+
+can bump without ambiguity.
+
+
 ## [0.22.40.38] - 2026-05-17
 
 **Docs: Phase-6 comment-analyzer pass on `fix/match-engine-tests-critical-2026-05-17` (audit-2026-05-07).** Closed wave-0 / wave-1 forward-rot in `analytics-service/tests/test_match_engine.py`. Three comment blocks (module docstring, lazy-import preamble, mandate-fit section header) referenced a stale TDD-scaffold state — Wave 1 has shipped (`_compute_mandate_fit_score` exported, ENGINE_VERSION == v2.1.0), tests are green under the live build, and the suite IS being maintained (this audit added the 2× floor-clamp boundary case 5b). Rewrites:
