@@ -7,6 +7,20 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.46] - 2026-05-17
+
+**audit-2026-05-07 — useDashboardConfigV2 hook close-out (cluster-G).** Multi-phase review on `useDashboardConfigV2` hook + widget-registry + tests. Squashes 15 prior commits on `fix/useDashboardConfig-hook-critical-2026-05-17` into 12 substantive commits onto current main (base v0.22.40.45).
+
+- **Cluster-G fixes** — `src/app/(dashboard)/allocations/hooks/useDashboardConfig.ts` (+test): validate persisted tiles at `JSON.parse` boundary (no trust on stale localStorage), debounce V2 persist to coalesce drag writes, surface silent no-ops (instead of swallowing failed persists).
+- **Maintainability** — DRY `loadV2Config` legacy-shape gate + timeframe coercion; dropped committed dev scratchpad (`.scratch-cluster-G-useDashboardConfig.md`).
+- **Tests** — `useDashboardConfig.test.ts`: cover beforeunload-flush path; DRY repeated seed boilerplate.
+- **Red-team** — prototype pollution guard, mobile lifecycle (visibilitychange flush race), cross-tab sync via `storage` event, setState race on rapid drag→reload.
+- **Simplify** — dropped stale comments in hook + `widget-registry.ts`.
+- **Comment-analyzer (Phase 6)** — refreshed stale `v4` literals + designer-bundle path in hook (`LAYOUT_VERSION`-anchored); dropped stale widget counts + fixed Bridge section misnomer in `widget-registry.ts`; dropped stale `v4` anchors in test (seedV2Blob docstring, two test titles, one inline comment) — now describes current-V2-shape so future `LAYOUT_VERSION` bump leaves assertions truthful.
+
+No production behavior regressions; 12 substantive cherry-picks onto current main, one VERSION-conflict resolved by keeping main's bump pipeline.
+
+
 ## [0.22.40.45] - 2026-05-17
 
 **audit-2026-05-07 — discovery E2E batch (specialist + red-team + comment-analyzer close-out).** Multi-phase review on the `/discovery` E2E specs (hide-examples-default, sparkline-regression, prefs-isolation), shared E2E helpers (loginAs, cleanupTestAllocator), and the seed-data pipeline (`STRATEGY_PROFILES` extraction). Squashes 17 prior commits on `fix/discovery-e2e-batch-critical-2026-05-17` into 14 substantive commits onto current main (base v0.22.40.44).

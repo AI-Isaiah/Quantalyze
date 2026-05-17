@@ -34,8 +34,9 @@ import { DEFAULT_LAYOUT, LAYOUT_VERSION } from "../lib/dashboard-defaults";
  * D-02 single-source-of-truth: `useDashboardConfig` and `useDashboardConfigV2`
  * read/write the same localStorage key. Each `loadConfig` resets to its OWN
  * default layout when `parsed.layoutVersion` doesn't match what the hook
- * expects (Voice-D8 accepted precedent — same as Phase 05 1→2 and Phase 08
- * 2→3 bumps), so neither hook clobbers the other's persisted blob.
+ * expects (Voice-D8 accepted precedent — see `dashboard-defaults.ts` for the
+ * running history of LAYOUT_VERSION bumps), so neither hook clobbers the
+ * other's persisted blob.
  */
 const STORAGE_KEY = "quantalyze-dashboard-config";
 
@@ -55,18 +56,13 @@ const RECOVERY_FLAG_KEY = "dashboard.config.recoveredFromCorruption";
 
 /**
  * The legacy hook's "what version it knows about". Hardcoded here (not
- * imported from dashboard-defaults.ts which now exports v4) so the dormant
- * legacy hook resets to v3 defaults when it sees a v4 blob. The legacy hook
- * itself is dormant post-v0.15.7.0 (no live callers); this constant +
- * LEGACY_DEFAULT_LAYOUT both go away in the follow-up legacy-tree cleanup.
+ * imported from dashboard-defaults.ts which has since bumped past it) so
+ * the dormant legacy hook resets to its own v3 defaults when it sees a
+ * blob written by the current V2 hook. The legacy hook itself is dormant
+ * post-v0.15.7.0 (no live callers); this constant + LEGACY_DEFAULT_LAYOUT
+ * both go away in the follow-up legacy-tree cleanup.
  */
 const LAYOUT_VERSION_LEGACY = 3;
-
-/**
- * Legacy v3 default layout — frozen snapshot of what `dashboard-defaults.ts`
- * exported before the v4 bump. Retained while the legacy hook is dormant;
- * deleted alongside the hook in the follow-up legacy-tree cleanup PR.
- */
 
 // pr189-followup M12 (type-design-analyzer MED/8) — single source of
 // truth for the recovery-reason union. Previously the same closed
@@ -110,6 +106,12 @@ function setRecoveryFlag(reason: DashboardRecoveryReason): void {
   }
 }
 
+/**
+ * Legacy v3 default layout — frozen snapshot of what `dashboard-defaults.ts`
+ * exported before it bumped to the current V2 `{k, w}` shape. Retained
+ * while the legacy hook is dormant; deleted alongside the hook in the
+ * follow-up legacy-tree cleanup PR.
+ */
 const LEGACY_DEFAULT_LAYOUT: LegacyTileConfig[] = [
   { i: "equity-curve-1", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 },
   { i: "drawdown-chart-1", widgetId: "drawdown-chart", x: 0, y: 4, w: 12, h: 4 },
@@ -295,14 +297,23 @@ export function useDashboardConfig(): UseDashboardConfigReturn {
 // ---------------------------------------------------------------------------
 //
 // Returns DashboardConfig (tiles as TileConfig[] = {k, w}). On load, parses
-// persisted JSON; if `parsed.layoutVersion !== LAYOUT_VERSION` (4) OR any
-// tile carries a legacy-shape field (`i` / `widgetId` / `x` / `y` / `h`),
-// resets to v4 DEFAULT_LAYOUT — Voice-D8 reset-on-mismatch precedent.
+// persisted JSON; if `parsed.layoutVersion !== LAYOUT_VERSION` OR any tile
+// carries a legacy-shape field (`i` / `widgetId` / `x` / `y` / `h`), resets
+// to DEFAULT_LAYOUT — Voice-D8 reset-on-mismatch precedent. (See
+// dashboard-defaults.ts for the LAYOUT_VERSION bump history.)
 
 /**
- * Clamp a registry-provided defaultW to the v4 grid's 1..4 range. Legacy
- * widget-registry values are 3/4/6/12; Plan 05 will rewrite them. Until
- * then this clamp keeps V2 addWidget paths producing valid tiles.
+ * Clamp a registry-provided defaultW to the V2 4-col grid's 1..4 range.
+ * Many WIDGET_REGISTRY entries still carry the legacy 3/4/6/12 values
+ * inherited from the pre-V2 12-col grid (see widget-registry.ts); this
+ * clamp is the gate that keeps V2 addWidget paths producing valid tiles
+ * regardless of which entries have been narrowed.
+ *
+ * audit-2026-05-07 (M-0128 c8) — surface non-finite / wrong-type inputs
+ * via console.warn so a typo'd registry entry (`defaultW: '4'` as string,
+ * `defaultW: null`, etc.) doesn't silently render at width-2. The
+ * defaulted value is still returned so the persist path stays robust;
+ * the warning is the diagnostic, not a behavioral change.
  */
 function clampWidth(w: unknown): 1 | 2 | 3 | 4 {
   if (typeof w === "number" && Number.isFinite(w)) {
@@ -314,6 +325,12 @@ function clampWidth(w: unknown): 1 | 2 | 3 | 4 {
     if (rounded === 4) return 4;
     return 1;
   }
+  if (typeof console !== "undefined") {
+    console.warn(
+      "[useDashboardConfigV2] clampWidth: non-finite width input; defaulting to 2",
+      { received: w, type: typeof w },
+    );
+  }
   return 2;
 }
 
@@ -324,6 +341,75 @@ function looksLikeLegacyTile(tile: unknown): boolean {
   return (
     "i" in t || "widgetId" in t || "x" in t || "y" in t || "h" in t
   );
+}
+
+/**
+ * audit-2026-05-07 (maintainability MED/8) — single source of truth for
+ * the timeframe fallback. `loadV2Config` previously open-coded the same
+ * `typeof parsed.timeframe === 'string' ? parsed.timeframe : 'YTD'`
+ * ternary at two return sites plus a literal `'YTD'` in `defaultV2Config`;
+ * a future change to the default had to be made in three places. Wrap the
+ * coercion + default in one helper so every site agrees.
+ */
+const DEFAULT_TIMEFRAME = "YTD";
+function coerceTimeframe(value: unknown): string {
+  return typeof value === "string" ? value : DEFAULT_TIMEFRAME;
+}
+
+/**
+ * audit-2026-05-07 (M-0130 / M-0127 / M-1076 / M-0131 c8-9): per-tile runtime
+ * validation at the JSON.parse boundary. `JSON.parse(raw) as DashboardConfig`
+ * is a structural lie — a hand-edited or partially-truncated localStorage
+ * blob can ship `{k:42, w:'huge'}` / `{k:'kpi', w:NaN}` straight through to
+ * the CSS-grid render where `gridColumn: span NaN` is a silent layout bomb.
+ *
+ * Returns a sanitized TileConfig when the input is salvageable, or `null`
+ * when the tile is unusable (caller drops it). `w` is clamped via the same
+ * `clampWidth` helper that gates addWidget writes, so the load and write
+ * paths converge on a single source of truth for the 1..4 invariant.
+ *
+ * `config` is allowed to pass through as `Record<string, unknown>` if
+ * present and shape-valid; anything else is stripped so corrupted nested
+ * data can't poison widget renderers.
+ */
+// audit-2026-05-07 (red-team MED conf 8) — prototype-poison keys that
+// JSON.parse may surface as own properties of `tile.config` (e.g.
+// `{"__proto__":{...}, "valid":"ok"}` parses with `__proto__` as an own
+// key per ES2017). The validator is the natural moat — strip these so
+// any downstream consumer that does `Object.assign(target, tile.config)`
+// or `lodash.merge(defaults, tile.config)` can't be poisoned.
+const PROTO_POISON_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function validateAndNormalizeTile(tile: unknown): TileConfig | null {
+  if (!tile || typeof tile !== "object") return null;
+  const t = tile as Record<string, unknown>;
+  if (typeof t.k !== "string" || t.k.length === 0) return null;
+  const k = resolveWidgetId(t.k);
+  // audit-2026-05-07 (red-team HIGH conf 8) — belt-and-braces. Even after
+  // hardening resolveWidgetId to gate on hasOwnProperty, defend in depth:
+  // if the resolved id is not an OWN key of WIDGET_REGISTRY, drop the
+  // tile. A future contributor who reintroduces a prototype-walking
+  // lookup somewhere upstream of this validator still can't slip a
+  // poisoned `k` through to render.
+  if (!Object.prototype.hasOwnProperty.call(WIDGET_REGISTRY, k)) return null;
+  const w = clampWidth(t.w);
+  const result: TileConfig = { k, w };
+  if (
+    t.config !== undefined &&
+    t.config !== null &&
+    typeof t.config === "object" &&
+    !Array.isArray(t.config)
+  ) {
+    // Strip prototype-poison keys before adopting the config sub-object.
+    const rawConfig = t.config as Record<string, unknown>;
+    const cleanConfig: Record<string, unknown> = {};
+    for (const key of Object.keys(rawConfig)) {
+      if (PROTO_POISON_KEYS.has(key)) continue;
+      cleanConfig[key] = rawConfig[key];
+    }
+    result.config = cleanConfig;
+  }
+  return result;
 }
 
 /**
@@ -347,7 +433,7 @@ function normalizeTilesToRegistryIds(tiles: readonly TileConfig[]): TileConfig[]
 function defaultV2Config(): DashboardConfig {
   return {
     tiles: normalizeTilesToRegistryIds(DEFAULT_LAYOUT),
-    timeframe: "YTD",
+    timeframe: DEFAULT_TIMEFRAME,
     layoutVersion: LAYOUT_VERSION,
   };
 }
@@ -368,26 +454,21 @@ function loadV2Config(): DashboardConfig {
         setRecoveryFlag("version_reset");
         return defaultV2Config();
       }
-      // Defensive: never let legacy-shape tiles into the V2 config.
+      // Reject legacy-shape tiles and non-array tile blobs. tiles:null is
+      // tagged parse_failed (no user opts into a null tiles field); legacy
+      // shape leaking into a V2 blob gets the dedicated breadcrumb so the
+      // dashboard can route the toast copy accordingly. The empty-array
+      // case is handled below — that's an intentional user state.
       //
-      // retro audit (pr-test-analyzer L23 c7): the three sub-cases below
-      // (a) !Array.isArray(parsed.tiles) — e.g. tiles:null from a
-      //     hand-edit or a future bug that nulled the field;
-      // (b) parsed.tiles.length === 0 — user removed all widgets OR a
-      //     race where the persist was truncated;
-      // (c) legacy-shape tiles in a V2 blob — covered today.
-      //
-      // Pre-fix, only (c) emitted a recovery flag. (a) and (b) silently
-      // reset to defaults — exactly the silent-failure pattern the
-      // recovery breadcrumb infrastructure was designed to close. Tag (a)
-      // as parse_failed (no user opted into tiles:null) and (b) as a
-      // legitimate "user emptied the layout" — no flag, no warn — but
-      // log the corruption case so engineering sees the truncation.
-      if (
-        !Array.isArray(parsed.tiles) ||
-        parsed.tiles.some(looksLikeLegacyTile)
-      ) {
-        if (Array.isArray(parsed.tiles) && parsed.tiles.some(looksLikeLegacyTile)) {
+      // audit-2026-05-07 (maintainability MED/8) — evaluate the predicate
+      // ONCE and reuse it for both the gate and the branch disambiguation.
+      // The previous shape ran `parsed.tiles.some(looksLikeLegacyTile)` on
+      // line 219 and AGAIN inside the body to pick the recovery reason —
+      // duplicated logic plus a wasted O(n) scan on every load.
+      const tilesIsArray = Array.isArray(parsed.tiles);
+      const hasLegacyShape = tilesIsArray && parsed.tiles.some(looksLikeLegacyTile);
+      if (!tilesIsArray || hasLegacyShape) {
+        if (hasLegacyShape) {
           setRecoveryFlag("legacy_in_v2_blob");
         } else {
           // !Array.isArray(parsed.tiles)
@@ -401,25 +482,53 @@ function loadV2Config(): DashboardConfig {
         }
         return defaultV2Config();
       }
-      // pr189-followup H4 (silent-failure-hunter HIGH/8) — preserve the
-      // user's explicit empty-tiles state instead of silently replacing
-      // it with DEFAULT_LAYOUT on every reload. The previous code path
-      // claimed the empty-array case was "intentional state" but then
-      // overwrote it with defaults, so the user removed every widget,
-      // reloaded, and watched them all come back without warning. The
-      // worst of both worlds: no flag (so the user isn't told their
-      // choice was overridden) AND defaults reset (so the choice IS
-      // silently overridden). Return the parsed config with an empty
-      // tiles array — the dashboard's empty-grid callout already
-      // surfaces "Connect a strategy / add a widget" so the user has
-      // an obvious recovery path without us overriding their state.
+      // Preserve an intentionally empty layout — the dashboard's empty-grid
+      // callout already surfaces "Connect a strategy / add a widget" so we
+      // never override the user's "remove all widgets" choice with defaults.
       if (parsed.tiles.length === 0) {
-        return { ...parsed, tiles: [] };
+        return {
+          tiles: [],
+          timeframe: coerceTimeframe(parsed.timeframe),
+          layoutVersion: LAYOUT_VERSION,
+        };
       }
-      // Phase 09.1 Plan 05 / D-19 — normalize any persisted short keys to
-      // WIDGET_REGISTRY ids on read, so even a hand-edited localStorage
-      // blob can't slip designer short keys through to the render path.
-      return { ...parsed, tiles: normalizeTilesToRegistryIds(parsed.tiles) };
+      // audit-2026-05-07 (M-0130 / M-0127 / M-1076 / M-0131) — validate
+      // each tile at the JSON.parse boundary. Drops shape-invalid tiles
+      // (non-string k, missing k) and folds resolveWidgetId + clampWidth
+      // into a single pass so the load path matches the write path's
+      // invariants. If every tile is unusable we fall back to defaults
+      // and flag the recovery; partial corruption keeps the salvageable
+      // tiles to avoid wiping the user's whole layout for one bad entry.
+      const validatedTiles: TileConfig[] = [];
+      let droppedCount = 0;
+      for (const raw of parsed.tiles) {
+        const normalized = validateAndNormalizeTile(raw);
+        if (normalized) validatedTiles.push(normalized);
+        else droppedCount += 1;
+      }
+      if (validatedTiles.length === 0) {
+        // Everything was unusable — treat as parse_failed so the dashboard
+        // surfaces the recovery toast rather than silently destroying state.
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useDashboardConfigV2] all persisted tiles failed validation; falling back to defaults",
+            { droppedCount },
+          );
+        }
+        setRecoveryFlag("parse_failed");
+        return defaultV2Config();
+      }
+      if (droppedCount > 0 && typeof console !== "undefined") {
+        console.warn(
+          "[useDashboardConfigV2] dropped malformed tile(s) during load",
+          { droppedCount, kept: validatedTiles.length },
+        );
+      }
+      return {
+        tiles: validatedTiles,
+        timeframe: coerceTimeframe(parsed.timeframe),
+        layoutVersion: LAYOUT_VERSION,
+      };
     }
   } catch (err) {
     // Failure modes here include corrupt JSON (truncated quota write,
@@ -522,74 +631,208 @@ export interface UseDashboardConfigV2Return {
   resetToDefaults: () => void;
 }
 
+/**
+ * audit-2026-05-07 (M-0126 / M-0134 c8-9) — trailing-debounce delay for the
+ * V2 persist effect. Pre-fix every onLayoutChange / resize step / move /
+ * timeframe flip synchronously JSON.stringified the entire config and called
+ * localStorage.setItem on the main thread. Resize-drag pointer events fire
+ * dozens of times per second; coalescing them into a single write at idle
+ * (~150ms after the last mutation) cuts main-thread time without losing
+ * data on tab-close: the cleanup flushes pending writes via the unmount
+ * path AND a beforeunload handler.
+ */
+const PERSIST_DEBOUNCE_MS = 150;
+
 export function useDashboardConfigV2(): UseDashboardConfigV2Return {
   const [config, setConfig] = useState<DashboardConfig>(loadV2Config);
 
   // Phase A3 — same observe-without-write guard as the legacy hook. Mounting
   // V2 against a v3 (legacy-shape) blob must not overwrite the persisted
-  // legacy layout with v4 defaults; that pattern is what made flag toggles
+  // legacy layout with V2 defaults; that pattern is what made flag toggles
   // ping-pong customisations into the void. The persist effect skips its
   // first run; user-driven mutations (addWidget / resizeWidget / etc.)
   // flip the ref and write normally.
   const hasMutated = useRef(false);
+  // audit-2026-05-07 (M-0126 / M-0134) — `pendingConfigRef` always holds
+  // the latest config queued for persistence. The debounced setTimeout
+  // callback reads it (NOT a stale closure), and the unmount-flush /
+  // beforeunload-flush / pagehide-flush / storage-event paths also read
+  // it so a tab-close mid-debounce persists the user's freshest mutation.
+  //
+  // audit-2026-05-07 (red-team MED conf 8) — `pendingConfigRef` is updated
+  // SYNCHRONOUSLY inside each action callback (see `applyConfigUpdate`
+  // below) instead of being updated inside the `[config]` effect. The
+  // effect runs AFTER React commits the render, which opens a race:
+  // beforeunload (or a synchronous `window.location` nav) firing between
+  // setState and commit leaves pendingConfigRef stale and the flush a
+  // no-op. Updating the ref at mutation time makes the flush path
+  // race-free regardless of when the render commits.
+  const pendingConfigRef = useRef(config);
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Stable setState updater that ALSO syncs pendingConfigRef before
+  // scheduling the React update. Used by every action below. Keeps the
+  // "ref reflects latest user intent, even mid-render-commit" invariant.
+  //
+  // We compute `next` SYNCHRONOUSLY off the current ref (which mirrors
+  // the committed state), update the ref before calling setConfig, then
+  // pass the precomputed value to setConfig. This ensures a beforeunload
+  // / pagehide firing between this call and React's commit still sees
+  // the user's freshest mutation — the updater form of setConfig defers
+  // execution to render time, which would lose the race.
+  const applyConfigUpdate = useCallback(
+    (updater: (prev: DashboardConfig) => DashboardConfig) => {
+      const next = updater(pendingConfigRef.current);
+      pendingConfigRef.current = next;
+      setConfig(next);
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!hasMutated.current) {
       hasMutated.current = true;
       return;
     }
-    persistV2(config);
+    // pendingConfigRef is already synced by the action callback; the
+    // effect's job is purely to (re)schedule the debounced write.
+    if (persistTimerRef.current !== null) {
+      clearTimeout(persistTimerRef.current);
+    }
+    persistTimerRef.current = setTimeout(() => {
+      persistTimerRef.current = null;
+      persistV2(pendingConfigRef.current);
+    }, PERSIST_DEBOUNCE_MS);
   }, [config]);
 
+  // Final-flush effect: on unmount OR before the tab unloads, drain any
+  // pending debounced write so a user who closes the tab mid-drag still
+  // gets their preference persisted. Without this, a 150ms debounce could
+  // silently lose the last mutation.
+  //
+  // audit-2026-05-07 (red-team HIGH conf 8) — `beforeunload` is NOT fired
+  // reliably on iOS Safari, mobile Chrome, in-app webviews, or during
+  // bfcache eviction (Page Lifecycle API). Register `pagehide` alongside
+  // so the flush survives a swipe-close tab kill on mobile — the
+  // platform most likely to also hit the quota / private-mode errors the
+  // rest of this hook already hardens against. Same handler, same
+  // removeEventListener pair.
+  useEffect(() => {
+    function flush() {
+      if (persistTimerRef.current !== null) {
+        clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+        persistV2(pendingConfigRef.current);
+      }
+    }
+    if (typeof window !== "undefined") {
+      window.addEventListener("beforeunload", flush);
+      window.addEventListener("pagehide", flush);
+    }
+    return () => {
+      if (typeof window !== "undefined") {
+        window.removeEventListener("beforeunload", flush);
+        window.removeEventListener("pagehide", flush);
+      }
+      flush();
+    };
+  }, []);
+
+  // audit-2026-05-07 (red-team MED conf 8) — cross-tab sync. Without this
+  // listener, two tabs both mounted against the same storage key silently
+  // overwrite each other: Tab A adds a widget → debounced write; Tab B's
+  // in-memory `config` is stale (loaded at its mount); Tab B's next
+  // mutation overwrites Tab A's write. Reload from storage when another
+  // tab writes through to the same key. Compare against the in-memory
+  // serialization to avoid render thrash from no-op storage events.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    function onStorage(e: StorageEvent) {
+      if (e.key !== STORAGE_KEY) return;
+      if (e.newValue === null) return; // ignore clears
+      const reloaded = loadV2Config();
+      setConfig((prev) => {
+        if (JSON.stringify(prev) === JSON.stringify(reloaded)) return prev;
+        // Keep pendingConfigRef in sync — a cross-tab reload is the new
+        // baseline, not a queued local mutation.
+        pendingConfigRef.current = reloaded;
+        return reloaded;
+      });
+    }
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
   const addWidget = useCallback((k: string) => {
-    setConfig((prev) => {
+    applyConfigUpdate((prev) => {
       // Phase 09.1 Plan 05 / D-19 — normalize short keys to registry ids
       // at write time. After this point, prev.tiles[*].k IS guaranteed to
       // be a valid WIDGET_REGISTRY id; any caller passing a designer
       // short key (or even an unknown id) is collapsed onto the registry
       // namespace before the idempotent-add check runs.
       const resolved = resolveWidgetId(k);
-      // D-03 idempotent add — designer-bundle/app.jsx:42-44.
+      // D-03 idempotent add — designer-bundle/project/src/app.jsx:42-44.
       if (prev.tiles.some((t) => t.k === resolved)) return prev;
       const meta = WIDGET_REGISTRY[resolved];
       const w = clampWidth(meta?.defaultW);
       return { ...prev, tiles: [...prev.tiles, { k: resolved, w }] };
     });
-  }, []);
+  }, [applyConfigUpdate]);
 
   const removeWidget = useCallback((k: string) => {
-    setConfig((prev) => ({
+    applyConfigUpdate((prev) => ({
       ...prev,
       tiles: prev.tiles.filter((t) => t.k !== k),
     }));
-  }, []);
+  }, [applyConfigUpdate]);
 
   const resizeWidget = useCallback((k: string, w: 1 | 2 | 3 | 4) => {
-    setConfig((prev) => ({
+    applyConfigUpdate((prev) => ({
       ...prev,
       tiles: prev.tiles.map((t) => (t.k === k ? { ...t, w } : t)),
     }));
-  }, []);
+  }, [applyConfigUpdate]);
 
   const moveWidget = useCallback((fromK: string, toK: string) => {
     if (fromK === toK) return;
-    setConfig((prev) => {
+    applyConfigUpdate((prev) => {
       const fromIdx = prev.tiles.findIndex((t) => t.k === fromK);
       const toIdx = prev.tiles.findIndex((t) => t.k === toK);
-      if (fromIdx < 0 || toIdx < 0) return prev;
+      if (fromIdx < 0 || toIdx < 0) {
+        // audit-2026-05-07 (H-1214 c8) — surface the no-op so a keyboard
+        // reorder or DnD against a key that drifted out of tiles (race
+        // after a removal, stale closure) leaves a paper trail. The
+        // visual no-op was previously SILENT — the WidgetChrome
+        // aria-live region still announced "Moved X" because the
+        // announce() call doesn't gate on outcome. Logging here makes
+        // the divergence surfaceable in Sentry's capture-console and
+        // unblocks a follow-up boolean-return refactor (caller-side
+        // ARIA wiring is owned by AllocationDashboardV2 +
+        // WidgetChrome — cross-file changes are scoped to a separate
+        // PR).
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useDashboardConfigV2] moveWidget: tile not found; reorder ignored",
+            { fromK, toK, fromIdx, toIdx },
+          );
+        }
+        return prev;
+      }
       const next = prev.tiles.slice();
       const [moved] = next.splice(fromIdx, 1);
       next.splice(toIdx, 0, moved);
       return { ...prev, tiles: next };
     });
-  }, []);
+  }, [applyConfigUpdate]);
 
   const setTimeframe = useCallback((tf: string) => {
-    setConfig((prev) => ({ ...prev, timeframe: tf }));
-  }, []);
+    applyConfigUpdate((prev) => ({ ...prev, timeframe: tf }));
+  }, [applyConfigUpdate]);
 
   const resetToDefaults = useCallback(() => {
-    setConfig(defaultV2Config());
-  }, []);
+    applyConfigUpdate(() => defaultV2Config());
+  }, [applyConfigUpdate]);
 
   return {
     config,
@@ -602,6 +845,7 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
   };
 }
 
-// Suppress unused-import warning if a TileConfig consumer is not in this
-// file but is re-exported via type usage above.
+// Re-export so consumers importing `useDashboardConfigV2` can also pull
+// the TileConfig shape from the same module — keeps the hook + tile-shape
+// contract co-located at the import site.
 export type { TileConfig };

@@ -1,7 +1,7 @@
 import type { WidgetMeta } from "./types";
 
 // ---------------------------------------------------------------------------
-// Widget Registry — all 39 widgets for the My Allocation dashboard
+// Widget Registry — widgets available for the My Allocation dashboard
 // ---------------------------------------------------------------------------
 //
 // Phase 09.1 Plan 05 / D-08 — picker no longer surfaces "soon" badges for
@@ -22,7 +22,7 @@ import type { WidgetMeta } from "./types";
 // which is preferred over a misleading badge.
 
 export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
-  // ── Performance (10) ────────────────────────────────────────────────
+  // ── Performance ─────────────────────────────────────────────────────
   "equity-curve": {
     id: "equity-curve",
     name: "Equity Curve",
@@ -140,7 +140,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Risk (6) ────────────────────────────────────────────────────────
+  // ── Risk ────────────────────────────────────────────────────────────
   "correlation-matrix": {
     id: "correlation-matrix",
     name: "Correlation Matrix",
@@ -218,7 +218,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Allocation (6) ─────────────────────────────────────────────────
+  // ── Allocation ──────────────────────────────────────────────────────
   // PR1 QA — "allocation-by-style" is the V2 Overview default after the
   // dashboard-parity QA pass; DESIGNER_KEY_TO_WIDGET_ID["allocation"] points
   // here. Faithful port of designer-bundle/project/src/app.jsx
@@ -286,7 +286,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Attribution (3) ────────────────────────────────────────────────
+  // ── Attribution ─────────────────────────────────────────────────────
   "attribution-waterfall": {
     id: "attribution-waterfall",
     name: "Attribution Waterfall",
@@ -318,7 +318,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Positions (5+1 with PR1) ──────────────────────────────────────
+  // ── Positions ───────────────────────────────────────────────────────
   // Phase 09.1 PR1 (dashboard parity) — V2 Overview holdings tile.
   // Compact dashboard variant of components/HoldingsTable's NEW MODE.
   // Distinct from `positions-table` (kept) which is the wider detail
@@ -390,7 +390,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Monitoring (4) ─────────────────────────────────────────────────
+  // ── Monitoring ──────────────────────────────────────────────────────
   "portfolio-alerts": {
     id: "portfolio-alerts",
     name: "Portfolio Alerts",
@@ -432,7 +432,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Intelligence (3) ───────────────────────────────────────────────
+  // ── Intelligence ────────────────────────────────────────────────────
   "morning-briefing": {
     id: "morning-briefing",
     name: "Morning Briefing",
@@ -464,7 +464,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Meta (3) ───────────────────────────────────────────────────────
+  // ── Meta ────────────────────────────────────────────────────────────
   // Phase 09.1 PR1 (dashboard parity) — V2 Overview KPI strip. Distinct
   // from `custom-kpi-strip` (kept for picker/legacy callers): KpiStripWidget
   // renders the prototype's 5-cell vertical-bar-divided layout with
@@ -512,7 +512,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Outcomes (1) ─────────────────────────────────────────────────
+  // ── Outcomes ────────────────────────────────────────────────────────
   "outcomes-timeline": {
     id: "outcomes-timeline",
     name: "Bridge Outcomes",
@@ -524,12 +524,14 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Bridge (1) — Phase 09.1 Plan 09 / D-14 + D-15 ───────────────
+  // ── Bridge entry (category: intelligence) — Phase 09.1 Plan 09 / D-14 + D-15 ──
   // Hero Bridge widget: portfolio-level entry point with Review CTA that
   // opens BridgeDrawer (cross-holdings browse → confirm). Default Overview
   // tile per D-15. Per-row inline BridgeOutcomeBanner stays on Plan 08's
   // HoldingsTable (D-14 / S3 accepted) — no double-mount because this
   // widget renders a portfolio-level summary, not a per-holding banner.
+  // Lives in the "intelligence" picker category (no separate "bridge"
+  // category exists in WIDGET_CATEGORIES below).
   "bridge-hero": {
     id: "bridge-hero",
     name: "Bridge",
@@ -580,14 +582,10 @@ export const WIDGET_CATEGORIES = [
 //     Persisted layouts already carrying "equity-curve" continue to
 //     render the legacy widget; only newly-defaulted layouts pick up the
 //     SVG chart.
-//   - "mandate" currently routes to "mandate-compliance" — there is no
-//     widget for it yet, so the renderer falls back to a generic "Unknown
-//     widget" message until Plan 10 lands "mandate-snapshot" (which may
-//     also become the canonical mapping for "mandate").
-//   - "kpi" / "holdings" / "bridge" point to ids that don't yet exist in
-//     the registry. The picker only ever surfaces real registry ids, so
-//     these short keys CAN'T be re-introduced via addWidget; the
-//     mapping exists for the DEFAULT_LAYOUT import path only.
+//   - "mandate" routes to "mandate-snapshot" — PR1 flipped this from
+//     "mandate-compliance" (unregistered, rendered "Unknown widget"
+//     fallback). All seven default short keys now resolve to real
+//     registry ids.
 //
 // If a short key has no entry in this map AND is not already a valid
 // WIDGET_REGISTRY id, `resolveWidgetId` returns it unchanged (the
@@ -627,8 +625,25 @@ export const DESIGNER_KEY_TO_WIDGET_ID: Record<string, string> = {
  * id; map lookup when the input is a known short key. Unknown values
  * pass through unchanged so the renderer's "unknown widget" path can
  * make the mismatch visible.
+ *
+ * audit-2026-05-07 (red-team HIGH conf 8) — prototype-pollution hardening.
+ * The previous implementation gated on `k in WIDGET_REGISTRY` and looked
+ * up `DESIGNER_KEY_TO_WIDGET_ID[k]` via plain bracket access. Both forms
+ * walk the prototype chain, so `resolveWidgetId('constructor')`,
+ * `resolveWidgetId('toString')`, `resolveWidgetId('__proto__')`, etc.
+ * either returned the input unchanged (treating Object.prototype.* as a
+ * "valid" registry id) or returned an inherited function reference
+ * (DESIGNER_KEY_TO_WIDGET_ID.toString is `Function.prototype.toString`).
+ * A hand-edited / poisoned localStorage blob shaped like
+ * `{tiles:[{k:"constructor",w:2}], layoutVersion:4}` flowed through the
+ * load-time validator and landed in the render path. Gate both lookups
+ * on own-key membership so prototype keys are routed into the
+ * "unknown" branch and dropped by the caller.
  */
 export function resolveWidgetId(k: string): string {
-  if (k in WIDGET_REGISTRY) return k;
-  return DESIGNER_KEY_TO_WIDGET_ID[k] ?? k;
+  if (Object.prototype.hasOwnProperty.call(WIDGET_REGISTRY, k)) return k;
+  if (Object.prototype.hasOwnProperty.call(DESIGNER_KEY_TO_WIDGET_ID, k)) {
+    return DESIGNER_KEY_TO_WIDGET_ID[k];
+  }
+  return k;
 }
