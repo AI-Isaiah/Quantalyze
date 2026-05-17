@@ -1029,6 +1029,52 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
     }
   });
 
+  it("moveWidget logs a warning when fromK / toK do not match a tile (H-1214)", () => {
+    const { result } = renderHook(() => useDashboardConfigV2());
+    warnSpy.mockClear();
+
+    act(() => {
+      // Neither key is in the default layout — moveWidget must surface
+      // the no-op so the silent aria-live mismatch has a paper trail.
+      result.current.moveWidget("nonexistent-source", "nonexistent-target");
+    });
+
+    expect(
+      warnSpy.mock.calls.some(
+        (c: unknown[]) =>
+          typeof c[0] === "string" && c[0].includes("moveWidget: tile not found"),
+      ),
+    ).toBe(true);
+  });
+
+  it("clampWidth warns when the registry hands it a non-finite value (M-0128)", () => {
+    // Seed a v4 blob so the V2 hook loads cleanly, then call addWidget
+    // for an id whose WIDGET_REGISTRY entry has been mutated to a wrong
+    // type. We can't mutate the real registry in this test scope so we
+    // assert the warn surfaces via the load-path validator instead:
+    // clampWidth runs on every persisted tile's `w` field at load time
+    // (per the per-tile validation fix), so a string `w` trips the warn.
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: [{ k: "kpi-strip", w: "wide" }],
+        timeframe: "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      }),
+    );
+    warnSpy.mockClear();
+
+    renderHook(() => useDashboardConfigV2());
+
+    expect(
+      warnSpy.mock.calls.some(
+        (c: unknown[]) =>
+          typeof c[0] === "string" &&
+          c[0].includes("clampWidth: non-finite width input"),
+      ),
+    ).toBe(true);
+  });
+
   it("coerces a non-string `timeframe` to the 'YTD' default at load time (M-0127)", () => {
     store.set(
       STORAGE_KEY,

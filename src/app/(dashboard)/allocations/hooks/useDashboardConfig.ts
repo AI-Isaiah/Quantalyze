@@ -303,6 +303,12 @@ export function useDashboardConfig(): UseDashboardConfigReturn {
  * Clamp a registry-provided defaultW to the v4 grid's 1..4 range. Legacy
  * widget-registry values are 3/4/6/12; Plan 05 will rewrite them. Until
  * then this clamp keeps V2 addWidget paths producing valid tiles.
+ *
+ * audit-2026-05-07 (M-0128 c8) — surface non-finite / wrong-type inputs
+ * via console.warn so a typo'd registry entry (`defaultW: '4'` as string,
+ * `defaultW: null`, etc.) doesn't silently render at width-2. The
+ * defaulted value is still returned so the persist path stays robust;
+ * the warning is the diagnostic, not a behavioral change.
  */
 function clampWidth(w: unknown): 1 | 2 | 3 | 4 {
   if (typeof w === "number" && Number.isFinite(w)) {
@@ -313,6 +319,12 @@ function clampWidth(w: unknown): 1 | 2 | 3 | 4 {
     if (rounded === 3) return 3;
     if (rounded === 4) return 4;
     return 1;
+  }
+  if (typeof console !== "undefined") {
+    console.warn(
+      "[useDashboardConfigV2] clampWidth: non-finite width input; defaulting to 2",
+      { received: w, type: typeof w },
+    );
   }
   return 2;
 }
@@ -402,21 +414,11 @@ function loadV2Config(): DashboardConfig {
         setRecoveryFlag("version_reset");
         return defaultV2Config();
       }
-      // Defensive: never let legacy-shape tiles into the V2 config.
-      //
-      // retro audit (pr-test-analyzer L23 c7): the three sub-cases below
-      // (a) !Array.isArray(parsed.tiles) — e.g. tiles:null from a
-      //     hand-edit or a future bug that nulled the field;
-      // (b) parsed.tiles.length === 0 — user removed all widgets OR a
-      //     race where the persist was truncated;
-      // (c) legacy-shape tiles in a V2 blob — covered today.
-      //
-      // Pre-fix, only (c) emitted a recovery flag. (a) and (b) silently
-      // reset to defaults — exactly the silent-failure pattern the
-      // recovery breadcrumb infrastructure was designed to close. Tag (a)
-      // as parse_failed (no user opted into tiles:null) and (b) as a
-      // legitimate "user emptied the layout" — no flag, no warn — but
-      // log the corruption case so engineering sees the truncation.
+      // Reject legacy-shape tiles and non-array tile blobs. tiles:null is
+      // tagged parse_failed (no user opts into a null tiles field); legacy
+      // shape leaking into a v4 blob gets the dedicated breadcrumb so the
+      // dashboard can route the toast copy accordingly. The empty-array
+      // case is handled below — that's an intentional user state.
       if (
         !Array.isArray(parsed.tiles) ||
         parsed.tiles.some(looksLikeLegacyTile)
@@ -435,18 +437,9 @@ function loadV2Config(): DashboardConfig {
         }
         return defaultV2Config();
       }
-      // pr189-followup H4 (silent-failure-hunter HIGH/8) — preserve the
-      // user's explicit empty-tiles state instead of silently replacing
-      // it with DEFAULT_LAYOUT on every reload. The previous code path
-      // claimed the empty-array case was "intentional state" but then
-      // overwrote it with defaults, so the user removed every widget,
-      // reloaded, and watched them all come back without warning. The
-      // worst of both worlds: no flag (so the user isn't told their
-      // choice was overridden) AND defaults reset (so the choice IS
-      // silently overridden). Return the parsed config with an empty
-      // tiles array — the dashboard's empty-grid callout already
-      // surfaces "Connect a strategy / add a widget" so the user has
-      // an obvious recovery path without us overriding their state.
+      // Preserve an intentionally empty layout — the dashboard's empty-grid
+      // callout already surfaces "Connect a strategy / add a widget" so we
+      // never override the user's "remove all widgets" choice with defaults.
       if (parsed.tiles.length === 0) {
         return {
           tiles: [],
@@ -699,7 +692,26 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
     setConfig((prev) => {
       const fromIdx = prev.tiles.findIndex((t) => t.k === fromK);
       const toIdx = prev.tiles.findIndex((t) => t.k === toK);
-      if (fromIdx < 0 || toIdx < 0) return prev;
+      if (fromIdx < 0 || toIdx < 0) {
+        // audit-2026-05-07 (H-1214 c8) — surface the no-op so a keyboard
+        // reorder or DnD against a key that drifted out of tiles (race
+        // after a removal, stale closure) leaves a paper trail. The
+        // visual no-op was previously SILENT — the WidgetChrome
+        // aria-live region still announced "Moved X" because the
+        // announce() call doesn't gate on outcome. Logging here makes
+        // the divergence surfaceable in Sentry's capture-console and
+        // unblocks a follow-up boolean-return refactor (caller-side
+        // ARIA wiring is owned by AllocationDashboardV2 +
+        // WidgetChrome — cross-file changes are scoped to a separate
+        // PR).
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useDashboardConfigV2] moveWidget: tile not found; reorder ignored",
+            { fromK, toK, fromIdx, toIdx },
+          );
+        }
+        return prev;
+      }
       const next = prev.tiles.slice();
       const [moved] = next.splice(fromIdx, 1);
       next.splice(toIdx, 0, moved);
