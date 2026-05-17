@@ -24,6 +24,48 @@ const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
  *
  * Listed in `PUBLIC_ROUTES` via /api/factsheet in src/proxy.ts so a cap-intro
  * partner can open a tear sheet URL without a login redirect.
+ *
+ * SECURITY INVARIANT (audit-2026-05-07 C-0189 closure, red-team
+ * 2026-05-17 MED conf 8 hardening):
+ *
+ *   This route MUST NOT forward session cookies to the Puppeteer-launched
+ *   browser. The downstream HTML page redacts institutional manager
+ *   identity for unattested callers; a stateless Puppeteer (no cookies)
+ *   keeps every PDF in the unattested-redacted lane, which is the
+ *   invariant that lets us cache the response via `s-maxage=3600` below
+ *   without per-user cache keys.
+ *
+ *   The invariant is "stateless render", not just "no setCookie call".
+ *   Statelessness here has TWO load-bearing pieces — both must hold:
+ *
+ *     (a) DO NOT add `page.setCookie(...)` or `Cookie` in
+ *         `page.setExtraHTTPHeaders(...)`. Either would inject session
+ *         state into the rendered HTML directly.
+ *
+ *     (b) The `browser.close()` in the `finally` block IS load-bearing.
+ *         Puppeteer's cookie jar is BROWSER-scoped, not page-scoped.
+ *         If a deployer points NEXT_PUBLIC_APP_URL at a Vercel preview /
+ *         protected origin, the upstream HTML server (Next.js on the
+ *         same project) issues `Set-Cookie` via the supabase
+ *         `cookieStore.setAll` call inside getFactsheetDetail. Puppeteer
+ *         silently stores those cookies in the browser's jar. The first
+ *         render is anonymous and the PDF gets cached, but if a future
+ *         optimization hoists the `browser` instance to module scope or
+ *         to Vercel Fluid Compute warm-instance reuse, the jar leaks
+ *         across requests — the next render reuses the prior session's
+ *         cookies and the cached PDF goes institutional.
+ *
+ *         If you need to hoist the browser for cold-start cost, switch
+ *         to a per-request `BrowserContext`:
+ *             const context = await browser.createBrowserContext();
+ *             const page = await context.newPage();
+ *             ... finally { await context.close(); }
+ *         so the cookie jar is provably scoped to one render. Don't drop
+ *         the per-request close without that.
+ *
+ *   If you need per-user PDFs (you almost certainly don't), ALSO remove
+ *   the `s-maxage` Cache-Control header below or the CDN will serve one
+ *   user's PDF to the next.
  */
 export async function GET(
   req: NextRequest,

@@ -181,3 +181,233 @@ describe("proxy /api/cron bypass", () => {
     expect(vi.mocked(createServerClient)).toHaveBeenCalled();
   });
 });
+
+/**
+ * Public-route gating: substring-attack hardening + exact-match '/' guard.
+ *
+ * Audit 2026-05-07 findings:
+ *   - C-0186 (c8): No coverage for new public-route additions ('/demo',
+ *     '/api/demo'), no coverage for substring-attack hardening (the
+ *     `path === route || startsWith(route + '/')` shape was added to block
+ *     `/demonstration` from matching `/demo`).
+ *   - C-0187 (c7): The `path === '/'` exact-match branch is the load-bearing
+ *     piece that lets the public-route OR-chain not match every authenticated
+ *     path (every path starts with '/'). A regression that drops the `===`
+ *     guard would open the entire dashboard.
+ *
+ * Predicate under test (src/proxy.ts):
+ *     const isPublicRoute =
+ *       path === "/" ||
+ *       PUBLIC_ROUTES.some((route) => path === route || path.startsWith(route + "/"));
+ *
+ * With no session:
+ *   - public route       → `next()` (200, no redirect)
+ *   - non-public route   → 307 to /login
+ */
+describe("proxy public-route gating (anonymous session)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.NEXT_PUBLIC_SUPABASE_URL = "https://stub.supabase.co";
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "stub-anon-key";
+  });
+
+  // ---------- Allowed (public) — should NOT redirect ----------
+  describe("anonymous request to a public route falls through (no redirect)", () => {
+    it.each([
+      // C-0187: exact-match '/' is the home page; everything starts with '/',
+      // so this MUST be tested with an exact-equality predicate, not a
+      // prefix.
+      "/",
+      // New public-route additions added with the substring-hardening patch
+      // (C-0186).
+      "/demo",
+      "/demo/match/abc-123",
+      "/api/demo/match/abc-123",
+      // Pre-existing public routes — pin them so future PUBLIC_ROUTES edits
+      // don't silently drop one.
+      "/login",
+      "/signup",
+      "/legal/disclaimer",
+      "/browse",
+      "/browse/crypto-sma",
+      "/factsheet/abc-123",
+      "/api/factsheet/abc-123/pdf",
+      "/portfolio-pdf",
+      "/for-quants",
+      "/for-quants/about",
+      "/security",
+      "/security/contact",
+    ])("%s → next() (no redirect)", async (path) => {
+      const req = new NextRequest(`https://example.com${path}`, {
+        method: "GET",
+      });
+      const res = await proxy(req);
+      // next() resolves to a 200 response with no `location` header. A
+      // redirect would surface as 307 with a location.
+      expect(res.status).toBe(200);
+      expect(res.headers.get("location")).toBeNull();
+    });
+  });
+
+  // ---------- Blocked (private) — MUST redirect to /login ----------
+  describe("anonymous request to a non-public route redirects to /login", () => {
+    it.each([
+      // Authenticated dashboard surfaces.
+      "/dashboard",
+      "/dashboard/portfolio",
+      "/discovery/crypto-sma",
+      "/discovery/momentum/abc-123",
+      "/admin",
+      "/admin/strategies",
+      // C-0186 substring-attack guards. These MUST redirect: the public-route
+      // predicate uses `path === route || path.startsWith(route + "/")`, NOT
+      // bare `path.startsWith(route)`. A regression that swaps the predicate
+      // for the bare prefix would let any of these slip through.
+      "/demonstration", // looks like /demo but is a sibling path
+      "/demo-other", // hyphenated sibling, no separator
+      "/loginx", // sibling of /login, no separator
+      "/signupwizard", // sibling of /signup
+      "/api/demo-evil", // looks like /api/demo but is a sibling
+      "/api/factsheetx", // sibling of /api/factsheet
+      "/browseFAKE", // C-0187: sibling of /browse — must NOT match
+      "/legalese", // sibling of /legal
+      "/securityaudit", // sibling of /security
+      "/for-quants-eval", // sibling of /for-quants
+      // Authenticated API.
+      "/api/keys-management/rotate", // sibling of /api/keys
+      "/api/portfolios/list",
+    ])("%s → 307 redirect to /login", async (path) => {
+      const req = new NextRequest(`https://example.com${path}`, {
+        method: "GET",
+      });
+      const res = await proxy(req);
+      expect(res.status).toBe(307);
+      const location = res.headers.get("location");
+      expect(location).not.toBeNull();
+      // The redirect URL preserves the host; assert by URL path equality
+      // rather than full-string match so test stays resilient to host stub.
+      expect(new URL(location!).pathname).toBe("/login");
+    });
+  });
+
+  // ---------- Marketing-exempt branch (signed-in user on /demo, /for-quants, /security) ----------
+  describe("authenticated user on marketing-exempt routes stays on the page", () => {
+    // The session branch needs a session object — re-mock just for this
+    // sub-block. The existing top-level mock returns `session: null`; here
+    // we install a session with an authenticated user.
+    beforeEach(async () => {
+      const { createServerClient } = await import("@supabase/ssr");
+      vi.mocked(createServerClient).mockImplementation(
+        () =>
+          ({
+            auth: {
+              getSession: vi.fn().mockResolvedValue({
+                data: {
+                  session: {
+                    user: { id: "u1", email: "alice@example.com" },
+                  },
+                },
+              }),
+            },
+          }) as unknown as ReturnType<typeof createServerClient>,
+      );
+    });
+
+    it.each([
+      "/demo",
+      "/demo/match/abc-123",
+      "/for-quants",
+      "/for-quants/about",
+      "/security",
+      "/security/contact",
+    ])(
+      "%s with session does NOT redirect to dashboard",
+      async (path) => {
+        const req = new NextRequest(`https://example.com${path}`, {
+          method: "GET",
+        });
+        const res = await proxy(req);
+        // The marketing-exempt branch keeps the user on the page (200), even
+        // though `isPublicRoute && session` would otherwise redirect to the
+        // default authenticated route.
+        expect(res.status).toBe(200);
+        expect(res.headers.get("location")).toBeNull();
+      },
+    );
+
+    it("authenticated user on /login DOES redirect away (not marketing-exempt)", async () => {
+      // Sanity: prove the marketing-exempt branch is targeted, not a blanket
+      // public-route skip. /login is public but NOT marketing-exempt — an
+      // authenticated user bouncing back to /login must be redirected to
+      // the default authenticated route.
+      const req = new NextRequest(`https://example.com/login`, {
+        method: "GET",
+      });
+      const res = await proxy(req);
+      expect(res.status).toBe(307);
+      const location = res.headers.get("location");
+      expect(location).not.toBeNull();
+      // Default authenticated route per src/proxy.ts.
+      expect(new URL(location!).pathname).toBe("/discovery/crypto-sma");
+    });
+  });
+});
+
+/**
+ * Red-team invariant pins (audit-2026-05-07 RT4):
+ *
+ * 1. PUBLIC_ROUTES entries MUST NOT carry a trailing slash. The public-route
+ *    predicate is `path === route || path.startsWith(route + "/")`. A
+ *    typo-prone entry like `"/factsheet/"` (trailing slash) would make
+ *    `route + "/"` compute as `/factsheet//` — failing the canonical
+ *    `/factsheet/abc` match.
+ * 2. The `path === route` exact-match branch is load-bearing: without it,
+ *    `/factsheet` (no trailing component) would 307 to /login because
+ *    `path.startsWith("/factsheet/")` is false for the bare path.
+ *
+ * We assert behavior via proxy() rather than importing PUBLIC_ROUTES to
+ * avoid widening the export surface.
+ */
+describe("proxy public-route invariant (red-team RT4)", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // The marketing-exempt sub-block above replaced the createServerClient
+    // implementation with a session-returning shape. clearAllMocks() clears
+    // .mock.calls/.mock.results but NOT mockImplementation — so we must
+    // explicitly re-install the anonymous-session shape so the proxy sees
+    // session=null in this block.
+    const { createServerClient } = await import("@supabase/ssr");
+    vi.mocked(createServerClient).mockImplementation(
+      () =>
+        ({
+          auth: {
+            getSession: vi.fn().mockResolvedValue({ data: { session: null } }),
+          },
+        }) as unknown as ReturnType<typeof createServerClient>,
+    );
+    process.env.NEXT_PUBLIC_SUPABASE_URL = "https://stub.supabase.co";
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "stub-anon-key";
+  });
+
+  it("canonical /factsheet/:id stays public regardless of trailing slash drift", async () => {
+    const req = new NextRequest(`https://example.com/factsheet/abc-123`, {
+      method: "GET",
+    });
+    const res = await proxy(req);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it("exact /factsheet (no trailing component) stays public", async () => {
+    // Documents the `path === route` exact-match branch on the public-route
+    // predicate — without it, `/factsheet` (no suffix) would redirect to
+    // /login because `startsWith("/factsheet/")` requires the trailing
+    // slash and `/factsheet` doesn't have one.
+    const req = new NextRequest(`https://example.com/factsheet`, {
+      method: "GET",
+    });
+    const res = await proxy(req);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+  });
+});

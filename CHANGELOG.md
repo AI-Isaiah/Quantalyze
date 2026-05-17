@@ -7,6 +7,33 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.42] - 2026-05-17
+
+**audit-2026-05-07 — factsheet tearsheet C-0189 cluster-F close-out.** Multi-phase review pipeline (specialists → fix → red-team → red-team-fix → simplify → comment-analyzer) applied to the PUBLIC-route tearsheet surface (`/factsheet/[id]/tearsheet` page + `/api/factsheet/[id]/tearsheet.pdf` PDF wrapper + `ManagerIdentityPanel`). Squashes 12 prior commits on `fix/proxy-ts-critical-2026-05-17`.
+
+Closes C-0189 + 2 PR-test-analyzer CRITICALs + 1 specialist HIGH + 2 red-team conf-8/9 findings:
+
+- **C-0189 (CRITICAL red-team conf 9) — incomplete C-0189 closure → attestation-gated, not auth-gated.** The first-pass fix on `src/app/factsheet/[id]/tearsheet/page.tsx` gated institutional disclosure on `supabase.auth.getUser()` only — not on the accredited-investor attestation that `/discovery/*` enforces. Any logged-in-but-never-attested user (brand-new accounts, strategy managers logged into their own console, link recipients who skipped `/discovery`) bypassed the institutional disclosure wall. The comment claimed "attestation-gated" but the enforcement was auth-only. Closed by replicating the `/discovery/layout.tsx` predicate: require both `supabase.auth.getUser()` AND a row in `investor_attestations` with non-null `attested_at`. Admins are auto-attested via migration 20260408113028 backfill, so the founder still sees institutional identity during demos. Renamed the gate predicate `isAuthenticated` → `isAttested` so the gate name matches the gate. The PDF wrapper at `/api/factsheet/[id]/tearsheet.pdf` inherits the fix because Puppeteer fetches the page without session cookies — every cached PDF stays in the anonymous-redacted lane.
+
+- **HIGH (red-team conf 8) — stored XSS in `ManagerIdentityPanel` LinkedIn href.** `profiles.linkedin` is plain TEXT with no CHECK constraint; ProfileForm writes the raw free-text value straight through to Supabase, so a compromised or malicious manager account could store `javascript:fetch('/api/keys?exfil='+document.cookie)`. The C-0189 closure now renders the institutional panel for every attested viewer of a `PUBLIC_ROUTES` tearsheet URL, so the sink would fire on every attested allocator click — `rel="noopener noreferrer"` blocks `window.opener` leaks but NOT `javascript:` execution. Closed with `safeLinkedinHref`: WHATWG-URL parse, allow only `http:`/`https:`, return null (no anchor rendered, no `#` fallback) on anything else. Pattern mirrors the existing `escapeHref` in `src/lib/email.ts:418`.
+
+- **MEDIUM (red-team conf 8) — Puppeteer cache-safety invariant under-documented.** The `s-maxage=3600` on `/api/factsheet/[id]/tearsheet.pdf` is safe only because the Puppeteer browser is stateless per-request. The previous comment treated statelessness as "no `setCookie` call", but it's also load-bearing on the per-request `browser.close()` in the `finally` block — Puppeteer's cookie jar is BROWSER-scoped, so a future PR that hoists `browser` to module scope for cold-start cost (or Vercel Fluid warm-instance reuse) would inherit cookies across renders and serve one user's PDF to the next. Strengthened the SECURITY INVARIANT comment to call out both pieces explicitly and to point future contributors at `createBrowserContext()` per-request as the right hoisting pattern.
+
+- **Specialist:security S1 (conf 8) — fail-closed default on auth lookup.** Auth lookup is wrapped in try/catch with `isAttested=false` as the fail-closed default; an `error != null` response or a thrown error keeps the request in the anonymous-redacted lane. `force-dynamic` pinned so a future caching PR can't serve an authenticated-rendered HTML response to anonymous viewers.
+
+- **C-0186 (CRITICAL pr-test-analyzer conf 8) — proxy.test.ts public-route coverage gap.** `src/proxy.test.ts` had no coverage for new public-route additions (`/demo`, `/api/demo`) or substring-attack hardening (`/demonstration` vs `/demo`). Added 30-case test block covering all PUBLIC_ROUTES entries + sibling-substring guards (`/loginx`, `/signupwizard`, `/api/demo-evil`, `/api/factsheetx`, `/browseFAKE`, `/legalese`, `/securityaudit`, `/for-quants-eval`).
+
+- **C-0187 (CRITICAL pr-test-analyzer conf 7) — root-path exact-match coverage gap.** Exact-match `/` branch in the public-route predicate was untested. A regression that swapped `path === "/"` for `path.startsWith("/")` would open the entire dashboard. Added coverage proving `/` stays public, `/dashboard` 307s to /login, and the marketing-exempt branch keeps authenticated users on `/demo`/`/for-quants`/`/security` while still 307'ing them off `/login`.
+
+Test coverage: New `src/app/factsheet/[id]/tearsheet/page.test.tsx` (301 lines) pins authenticated+unattested → redacted, authenticated + attestation-row-error → fails closed, attested → institutional panel, anonymous → redacted, and the force-dynamic invariant. New `src/components/strategy/ManagerIdentityPanel.test.tsx` (143 lines) pins 8 `safeLinkedinHref` cases: `javascript:`, `data:`, `vbscript:`, malformed, empty, plus positive `https://` / `http://` / mixed-case. `src/proxy.test.ts` extends to 30+ cases covering all PUBLIC_ROUTES entries and sibling-substring attacks.
+
+Phase-5 simplify: dropped a redundant `?? undefined` on the `PercentileRankBadge categoryLabel` prop in `page.tsx` (`categorySlug` is already typed `string | undefined`).
+
+Phase-6 comment-analyzer: replaced the "Renamed the variable to `isAttested` …" historical narrative in `page.tsx`'s top docstring with a forward-looking invariant ("predicate MUST be named `isAttested`, not `isAuthenticated`") so the load-bearing signal — gate name must match gate enforcement — survives without the rename story. M-0594 (proxy admin gate uses email-only check) was pre-existing and recorded as already CLOSED in source FIX-LIST.md.
+
+Typecheck + vitest green on the touched scope.
+
+
 ## [0.22.40.41] - 2026-05-17
 
 **audit-2026-05-07 — `admin/match/send-intro` cluster-E close-out.** Multi-phase review pipeline (specialists → fix → red-team → red-team-fix → simplify → comment-analyzer) applied to the admin manual-introduction route `src/app/api/admin/match/send-intro/route.ts` and its scaffolding. Squashes 8 prior commits on `fix/admin-send-intro-critical-2026-05-17`.
