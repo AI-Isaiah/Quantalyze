@@ -23,6 +23,13 @@
  * criterion 5 (REQUIREMENTS.md DISCO-05 line 21 + ROADMAP.md SC#5):
  * "a fresh allocator's first Discovery visit shows zero example
  * strategies".
+ *
+ * audit-2026-05-07 cluster J — REWRITTEN to remove the silent-pass gates
+ * documented in FIX-LIST entries C-0301, C-0302, H-1034, H-1035, H-1036,
+ * M-0859, M-0860, M-0861. Behavioral assertions are now strict and bind
+ * to the seed strategies actually inserted by seedTestAllocator(); no
+ * `if (rowCount > 0)` short-circuits, no `toBeGreaterThanOrEqual`
+ * tautologies, no `waitForTimeout` / `networkidle` flake patterns.
  */
 
 import { test, expect } from "@playwright/test";
@@ -106,49 +113,92 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     });
 
     await page.goto("/discovery/crypto-sma");
-    await page.waitForLoadState("networkidle");
 
-    // Read every visible row in the StrategyTable body.
-    const rowCount = await page.locator("table tbody tr").count();
+    // C-0301/M-0860 fix: replace flaky `waitForLoadState('networkidle')`
+    // with a deterministic wait for the StrategyTable to hydrate.
+    // The table renders <table> + tbody unconditionally; if data is still
+    // loading, tbody is empty but the table is mounted. We wait for
+    // either at least one row OR a documented empty-state marker, then
+    // assert against whichever the page produced. Matches the pattern in
+    // discovery-watchlist.spec.ts which already uses waitForSelector.
+    await page.waitForSelector("table", { timeout: 15000 });
+    const rowsLocator = page.locator("table tbody tr");
+    await expect
+      .poll(() => rowsLocator.count(), { timeout: 10000 })
+      .toBeGreaterThan(0);
 
-    if (rowCount > 0) {
-      const rowsText = await page.locator("table tbody tr").allTextContents();
-      const hasNoStrategiesEmptyState = rowsText.some((t) =>
-        /no strategies/i.test(t),
-      );
-
-      if (!hasNoStrategiesEmptyState) {
-        // We have rows but NONE should be one of the 8 seed example
-        // strategies (their is_example=true + DEFAULTS.hide_examples=true
-        // means they MUST be filtered out on first paint).
-        for (const text of rowsText) {
-          expect(text).not.toMatch(SEED_NAMES_REGEX);
-        }
-      }
-    }
+    // C-0301/C-0302/H-1034 fix: no silent `if (rowCount > 0)` gate.
+    // The seeded allocator + the migration 091 backfill guarantee the
+    // seed strategies exist in the DB. The pre-toggle assertion now
+    // requires that the rendered rows contain ZERO seed-name matches —
+    // a strict contract. If the rows include any seed name on first
+    // paint, the DEFAULTS.hide_examples=true invariant has regressed.
+    const preToggleRowsText = await rowsLocator.allTextContents();
+    const preToggleSeedMatches = preToggleRowsText.filter((t) =>
+      SEED_NAMES_REGEX.test(t),
+    );
+    expect(
+      preToggleSeedMatches,
+      "fresh allocator must see zero example strategies on first paint " +
+        "(DEFAULTS.hide_examples=true must filter seed strategies out)",
+    ).toEqual([]);
 
     // Now toggle "Hide examples" OFF via the inline checkbox in
     // StrategyFilters.tsx:342-351. The checkbox is checked={!showExamples}
     // and clicking the surrounding <label> flips it.
+    //
+    // C-0301/H-1034 fix: no `if (hideExamplesLabel.count())` silent skip.
+    // The toggle must exist; a UI rename is a real regression we want to
+    // surface, not swallow.
     const hideExamplesLabel = page
       .locator('label:has-text("Hide examples")')
       .first();
-    if (await hideExamplesLabel.count()) {
-      await hideExamplesLabel.click();
+    await expect(
+      hideExamplesLabel,
+      "Hide examples toggle must be present (StrategyFilters.tsx)",
+    ).toBeVisible({ timeout: 5000 });
+    await hideExamplesLabel.click();
 
-      // After toggling OFF, the seed strategies should appear (assuming
-      // the test DB has been seeded with them). Allow a brief settle for
-      // the controlled-state re-render.
-      await page.waitForTimeout(500);
-      const newRowCount = await page.locator("table tbody tr").count();
+    // C-0301/C-0302/H-1035/H-1036/M-0859/M-0861 fix: replace
+    // `waitForTimeout(500)` + `toBeGreaterThanOrEqual` with an explicit
+    // poll for at least one seed-strategy name to appear. The migration
+    // 091 backfill guarantees the seed names exist in the DB; toggling
+    // hide-examples OFF MUST surface them. If the toggle is broken
+    // (no-op), the assertion fails loudly with a useful diagnostic.
+    await expect
+      .poll(
+        async () => {
+          const rowsText = await rowsLocator.allTextContents();
+          return rowsText.some((t) => SEED_NAMES_REGEX.test(t));
+        },
+        {
+          timeout: 10000,
+          message:
+            "after toggling Hide examples OFF, at least one seed strategy " +
+            "(Stellar Neutral / Nebula Momentum / Aurora Basis / Vega " +
+            "Volatility / Helios L/S / Orion Grid / Pulsar Trend / Quasar " +
+            "Mean Reversion) MUST be visible — controlled-state regression " +
+            "if the toggle has no effect",
+        },
+      )
+      .toBe(true);
 
-      // Pass either:
-      //   - more rows than before (toggle revealed examples), OR
-      //   - the test DB simply has no seed strategies (no-op DB, accept)
-      // Both are valid outcomes; what we MUST never see is the toggle
-      // having no effect when seeds DO exist (that would be a Plan 13-02
-      // controlled-state regression).
-      expect(newRowCount).toBeGreaterThanOrEqual(rowCount);
-    }
+    // Strict positive contract: count of seed-name matches post-toggle
+    // is strictly greater than the pre-toggle count (which was 0).
+    const postToggleRowsText = await rowsLocator.allTextContents();
+    const postToggleSeedMatches = postToggleRowsText.filter((t) =>
+      SEED_NAMES_REGEX.test(t),
+    );
+    expect(
+      postToggleSeedMatches.length,
+      "toggling Hide examples OFF must reveal MORE seed strategies than " +
+        "before (strict >; was 0 pre-toggle)",
+    ).toBeGreaterThan(0);
+
+    // Ensure the SEED_UUIDS array still aligns with the regex contract
+    // (defense-in-depth — drift would mean the spec is asserting against
+    // stale seed data). All 8 UUIDs must be present in the source-of-truth
+    // list; a typo here would silently weaken the assertion.
+    expect(SEED_UUIDS).toHaveLength(8);
   });
 });
