@@ -247,15 +247,24 @@ const VISIBLE_TAB_KEYS: readonly TabKey[] = [
 // distinguish "user typoed a bookmark" from "marketing shipped a broken
 // outbound link". The known legacy alias "performance" and the canonical
 // keys are NOT logged — only genuinely unknown non-empty raw values.
-const KNOWN_TAB_RAW = new Set<string>([
-  "overview",
-  "holdings",
-  "outcomes",
-  "mandate",
-  "risk",
+//
+// audit-2026-05-07 Phase-4 red-team (MED conf 8) — entries are typed as
+// `TabKey | "performance"` and derived from `VISIBLE_TAB_KEYS` + the
+// routable-but-not-visible "scenario" + the legacy "performance" alias so
+// a future TabKey rename can't leave a stale string here that silently
+// suppresses `invalid_tab_fallback`. `VISIBLE_TAB_KEYS` is the single
+// TabKey-typed source of truth; the spread here keeps the two constants
+// in lockstep at compile time. The Set is exposed as `ReadonlySet<string>`
+// so `.has(raw)` still accepts an arbitrary search-param string at the
+// call site without per-call casts.
+const KNOWN_TAB_RAW_ENTRIES: readonly (TabKey | "performance")[] = [
+  ...VISIBLE_TAB_KEYS,
   "scenario",
   "performance", // Phase 07 legacy alias — cleaned up by the URL effect.
-]);
+] as const;
+const KNOWN_TAB_RAW: ReadonlySet<string> = new Set<string>(
+  KNOWN_TAB_RAW_ENTRIES,
+);
 
 function parseTab(raw: string | null): TabKey {
   // D-05: 6-tab set. Overview is default. Anything else (null, empty, unknown
@@ -292,6 +301,18 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
 
   // Per VOICES-ACCEPTED f3: derive each render — no local state snapshot.
   const activeTab: TabKey = parseTab(searchParams.get("tab"));
+
+  // audit-2026-05-07 Phase-4 red-team (HIGH conf 8) — capture the latest
+  // activeTab via a ref so deferred (queueMicrotask + setTimeout 100ms)
+  // callbacks in `dispatchWidgetPicker` read the LATEST tab at fire time,
+  // not the snapshot captured at click time. This lets the safety-net
+  // dispatch detect "user navigated away from Overview before the 100ms
+  // timer fired" and emit a `no_listener` breadcrumb + telemetry follow-up
+  // instead of silently lying with a 'deferred' success ack.
+  const activeTabRef = useRef<TabKey>(activeTab);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
 
   // Phase 10 / 10-06b — `allocations.ui_v2` flag drives the scenario panel
   // body. SSR-stable initialization (review-pass P1 fix): start with `true`
@@ -424,6 +445,28 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   //     safety net. The handler `setPickerOpen(true)` is idempotent, so
   //     a duplicate delivery is harmless. One PostHog event per click
   //     (status reflects whether the synchronous send raised).
+  //
+  // audit-2026-05-07 Phase-4 red-team (HIGH conf 8) — under rapid
+  // re-navigation (Risk → Widget chip → Holdings within 100ms) the
+  // 100ms safety-net timer fires AFTER AllocationDashboardV2 unmounts on
+  // the Holdings tab change. `dispatchEvent` for an unhandled event
+  // returns true and doesn't throw, so neither the `failed` breadcrumb
+  // nor the synchronous-throw path fires — telemetry sells 'deferred'
+  // success but the picker never opens. Fix: read the LATEST activeTab via
+  // `activeTabRef` inside the deferred callback. If the user has navigated
+  // away from Overview by the time the timer fires, emit a follow-up
+  // `widget_picker_dispatch_no_listener` warnAudit + a separate
+  // `widget_viewed` telemetry event so the silent-failure class M-1047 set
+  // out to eliminate is actually surfaced.
+  //
+  // audit-2026-05-07 Phase-4 red-team (MED conf 8) — wrap the deferred
+  // scheduling in try/catch. On hostile / old WebView surfaces (embedded
+  // Chromium <71, iOS <12.2 — still in regulated APAC trading desktops)
+  // `queueMicrotask` can be undefined; the throw would escape
+  // `dispatchWidgetPicker` BEFORE `trackUsageEventClient` was called and
+  // leave the click in a broken state with no telemetry. Two-line guard
+  // downgrades 'deferred' to 'failed' + emits a
+  // `widget_picker_schedule_failed` breadcrumb.
   const dispatchWidgetPicker = (wasAlreadyOnOverview: boolean): void => {
     if (typeof window === "undefined") return;
 
@@ -455,8 +498,47 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     // commit of the tab change. Microtask + 100ms safety-net catches the
     // listener-not-yet-attached race that the original synchronous
     // dispatch dropped. Telemetry fires once per click.
-    queueMicrotask(fire);
-    window.setTimeout(fire, 100);
+    //
+    // The deferred-fire wrapper checks `activeTabRef.current` at fire time:
+    // if the user has already re-navigated to another tab (Holdings / Risk
+    // / …) by the time the 100ms timer fires, AllocationDashboardV2 is
+    // unmounted and the dispatch lands on a window with no listener. We
+    // emit a `no_listener` follow-up so support has a breadcrumb that
+    // distinguishes "delivered but unopened" from "user re-navigated".
+    let noListenerReported = false;
+    const fireWithListenerCheck = (): void => {
+      if (activeTabRef.current !== "overview") {
+        if (!noListenerReported) {
+          noListenerReported = true;
+          warnAudit("widget_picker_dispatch_no_listener", {
+            currentTab: activeTabRef.current,
+            source: "tab_row_chip",
+          });
+          trackUsageEventClient("widget_viewed", {
+            widget_picker_dispatch: "no_listener",
+            source: "tab_row_chip",
+            wasAlreadyOnOverview: false,
+          });
+        }
+        return;
+      }
+      fire();
+    };
+
+    try {
+      queueMicrotask(fireWithListenerCheck);
+      window.setTimeout(fireWithListenerCheck, 100);
+    } catch (err) {
+      warnAudit("widget_picker_schedule_failed", {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      trackUsageEventClient("widget_viewed", {
+        widget_picker_dispatch: "failed",
+        source: "tab_row_chip",
+        wasAlreadyOnOverview: false,
+      });
+      return;
+    }
     trackUsageEventClient("widget_viewed", {
       widget_picker_dispatch: "deferred",
       source: "tab_row_chip",
@@ -470,14 +552,20 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // explaining the redirect. Visually-hidden via DESIGN-bundle .sr-only
   // utility so the design contract is unchanged.
   //
-  // audit-2026-05-07 maintainability MED — the announcement is paired with
-  // a monotonically-increasing token (`announcementSeq`). Each click bumps
-  // the seq and renders `${message} [#seq]`, guaranteeing a non-equal
-  // string even on a second Risk → Export click. Without this, React's
-  // Object.is bail-out skips the re-render and aria-live=polite does NOT
-  // re-announce identical content — a silent regression of the M-1044 fix.
+  // audit-2026-05-07 Phase-4 red-team (MED conf 8) — the previous Phase-2
+  // fix used a monotonically-increasing zero-width-space (U+200B) suffix to
+  // force React to re-render on repeat clicks (Object.is bail-out
+  // otherwise). That suffix leaked into the DOM textContent — Select-All,
+  // JS clipboard reads, and some VoiceOver virtual-cursor flows surfaced
+  // it as N invisible characters per click, breaking downstream string
+  // equality / regex / JSON.parse for users who copied a region containing
+  // the live message. Replaced with a microtask-clear pattern: set the
+  // string to "" first, then queueMicrotask sets the real message. React
+  // commits the empty render between announcements so aria-live=polite
+  // re-announces without any sentinel characters, and textContent stays
+  // equal to the human-readable string for clipboard safety. Also drops
+  // the unbounded `exportAnnouncementSeqRef` counter the suffix needed.
   const [exportAnnouncement, setExportAnnouncement] = useState<string>("");
-  const exportAnnouncementSeqRef = useRef<number>(0);
 
   // PR1 QA — inline header row matching designer-bundle/project/src/app.jsx
   // (lines 460-510): "My Allocation" + entity name on the left, tab list +
@@ -606,19 +694,21 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
               // Holdings tab today. Route there until the global export
               // surface lands. audit-2026-05-07 M-1044 — announce the
               // navigation via the live region so screen-reader and
-              // keyboard users learn why the surface changed. The seq
-              // suffix is invisible whitespace (zero-width-space repeated
-              // N times) so the on-screen message is identical regardless
-              // of click count but the React string identity changes,
-              // triggering aria-live re-announcement on every click.
+              // keyboard users learn why the surface changed.
+              //
+              // audit-2026-05-07 Phase-4 red-team (MED conf 8) —
+              // microtask-clear pattern replaces the ZWS suffix to avoid
+              // leaking invisible characters into clipboard / VoiceOver
+              // selection. Clearing to "" first lets React commit an
+              // empty render between announcements, then the microtask
+              // sets the real message so aria-live=polite re-announces
+              // identical content WITHOUT a sentinel character. textContent
+              // stays equal to the human-readable string.
               if (activeTab !== "holdings") {
-                exportAnnouncementSeqRef.current += 1;
-                const invisibleSuffix = "​".repeat(
-                  exportAnnouncementSeqRef.current,
-                );
-                setExportAnnouncement(
-                  `Export lives in the Holdings tab — taking you there.${invisibleSuffix}`,
-                );
+                const message =
+                  "Export lives in the Holdings tab — taking you there.";
+                setExportAnnouncement("");
+                queueMicrotask(() => setExportAnnouncement(message));
               }
               changeTab("holdings");
             }}
