@@ -18,10 +18,21 @@
  * `src/lib/auth.ts` (which re-exports these types so existing
  * server-side imports keep resolving without a rewrite).
  *
- * Adding a new role still requires updates in THREE places, the same
- * as before — migration CHECK constraint, the `AppRole` union here, and
- * the ADR-0005 role table — but the two TS spots are now in one file
- * instead of two files that could silently drift.
+ * Adding a new role requires updates in FOUR places (audit-2026-05-07
+ * M-0500 — the previous "THREE places" claim missed the runtime array):
+ *
+ *   1. The migration 054 `user_app_roles_role_check` constraint.
+ *   2. The `AppRole` type union below.
+ *   3. The `APP_ROLES` runtime array below — the role-list value used
+ *      by admin UIs and by the regression test in `auth.test.ts` that
+ *      asserts the four expected roles in a stable order.
+ *   4. The ADR-0005 role table.
+ *
+ * `AppRole` and `APP_ROLES` live in the SAME file now, but they are
+ * still two distinct sources of truth — one type, one value — that the
+ * compiler does NOT cross-check (TS can't enforce that a runtime array
+ * exactly enumerates a union). The auth.test.ts regression guard is the
+ * only thing keeping them aligned.
  */
 
 /**

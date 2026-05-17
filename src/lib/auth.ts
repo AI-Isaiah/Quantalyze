@@ -122,8 +122,14 @@ export async function getUserRolesResult(
 
   if (!data) return { ok: true, roles: [] };
 
+  // H-0429 (audit-2026-05-07): the DB CHECK constraint on
+  // `user_app_roles.role` is the source-of-truth narrowing. The TS layer
+  // still treats Supabase's untyped `.from("user_app_roles").select(...)`
+  // shape as a heterogeneous row, so we use `APP_ROLES.includes` as the
+  // type predicate. `String(row.role)` (instead of `row.role as string`)
+  // coerces non-string DB values defensively rather than asserting them.
   const roles = data
-    .map((row) => row.role as string)
+    .map((row: { role: unknown }) => String(row.role))
     .filter((role): role is AppRole =>
       (APP_ROLES as readonly string[]).includes(role),
     );
@@ -188,14 +194,19 @@ export type RequireRoleResult =
  *   const { roles } = result; // caller's resolved roles
  *
  * If `user` is null (unauthenticated), returns a 401 — matches `withAuth`.
- * If `roles` is empty the caller is treated as "must be authenticated but
- * no specific role required" and the resolved role set is still fetched
- * (one round-trip, consistent with the documented contract).
+ *
+ * Type-level safety (audit-2026-05-07 H-0428): the variadic `roles`
+ * parameter is typed `[AppRole, ...AppRole[]]` — a non-empty tuple — so
+ * calling `requireRole(supabase, user)` with zero roles is a COMPILE
+ * error. Pre-fix the empty-args form silently fell through to an
+ * authenticated-only gate, which is a different security contract
+ * mistakenly accessible through the same function signature. Routes
+ * that need authenticated-only gating should use `withAuth` instead.
  */
 export async function requireRole(
   supabase: SupabaseClient,
   user: User | null,
-  ...roles: AppRole[]
+  ...roles: [AppRole, ...AppRole[]]
 ): Promise<RequireRoleResult> {
   if (!user) {
     return {
@@ -223,13 +234,11 @@ export async function requireRole(
   }
   const userRoles = rolesResult.roles;
 
-  if (roles.length === 0) {
-    // Caller passed no roles — treat as "must be authenticated but no
-    // specific role required". Return the resolved set so the caller
-    // can still branch on role membership without another round-trip.
-    return { roles: userRoles };
-  }
-
+  // H-0428 (audit-2026-05-07): the `roles` tuple is typed
+  // `[AppRole, ...AppRole[]]` so `roles.length >= 1` is enforced at the
+  // type layer. The previous zero-arg fall-through (auth-only branch)
+  // has been removed — callers wanting authenticated-only gating must
+  // use `withAuth` explicitly.
   const hasAny = roles.some((r) => userRoles.includes(r));
   if (!hasAny) {
     // audit-2026-05-07 P459 + P699 + P703: admin-gate consolidation.
@@ -317,14 +326,23 @@ export async function requireAdmin(
  *
  * - `user`: the authenticated caller (non-null once the wrapper passes).
  * - `roles`: the caller's full resolved role set (superset of the required roles).
+ *   SECURITY: this is the actor's COMPLETE role membership (e.g.
+ *   `['admin', 'allocator']`). Treat it as internal — do NOT log, echo
+ *   to clients, or include in error responses (audit-2026-05-07 H-0431
+ *   / M-0502). Use `roles.includes(...)` for routing decisions; never
+ *   serialize the array as-is.
  * - `supabase`: the user-scoped Supabase client the wrapper already created.
  *   Reuse this for DB reads/writes that should run under the caller's JWT
  *   (RLS-scoped queries, audit-event emission where `auth.uid()` matters).
  *   For cross-tenant admin writes, still use `createAdminClient()`.
  * - `params`: the resolved Next 16 dynamic-route params — generic over
- *   the route's param shape, defaults to `unknown`.
+ *   the route's param shape. Defaults to `Record<string, never>` so that
+ *   STATIC routes (no `[id]` segment) compile-error on any `params.foo`
+ *   access (audit-2026-05-07 H-0430 / M-0505). Dynamic routes must
+ *   declare the shape explicitly via the generic parameter, e.g.
+ *   `withRole<{ id: string }>("admin")`.
  */
-export type RoleContext<P = unknown> = {
+export type RoleContext<P = Record<string, never>> = {
   user: User;
   roles: AppRole[];
   supabase: SupabaseClient;
@@ -334,8 +352,12 @@ export type RoleContext<P = unknown> = {
 /** Handler signature for `withRole`. Mirrors `withAuth` (Next 16
  * `NextRequest` → `NextResponse`) plus a {@link RoleContext} so the
  * handler gets the user, resolved role set, user-scoped Supabase
- * client, and resolved dynamic-route params in one object. */
-export type RoleHandler<P = unknown> = (
+ * client, and resolved dynamic-route params in one object.
+ *
+ * Default `P = Record<string, never>` so static routes get a context
+ * whose `params` is the empty shape `{}` and any `params.foo` access is
+ * a compile error (audit-2026-05-07 H-0430). */
+export type RoleHandler<P = Record<string, never>> = (
   req: NextRequest,
   ctx: RoleContext<P>,
 ) => Promise<NextResponse>;
@@ -370,14 +392,43 @@ export type RoleHandler<P = unknown> = (
  * This wrapper is a PEER to `withAdminAuth`, not a replacement. See
  * ADR-0005 for the sprint-over-sprint migration plan.
  */
-export function withRole<P = unknown>(...roles: AppRole[]) {
+export function withRole<P = Record<string, never>>(
+  ...roles: [AppRole, ...AppRole[]]
+) {
   return function (handler: RoleHandler<P>) {
     return async (
       req: NextRequest,
+      // H-0430 (audit-2026-05-07): the default `{ params: Promise.resolve({}) }`
+      // is the STATIC-route shape — the cast lands on `Record<string, never>`
+      // (the default `P`) so any `params.foo` access in a wrapper invoked
+      // without a context is a compile error. Dynamic routes pass `P`
+      // explicitly via the wrapper's generic, e.g.
+      // `withRole<{ id: string }>("admin")`, and the runtime ALWAYS
+      // supplies `rawCtx` via Next 16's route invocation — so the default
+      // is only ever reached by static routes / tests, not by a
+      // type-asserted dynamic route missing its params at runtime.
       rawCtx: { params: Promise<P> } = {
         params: Promise.resolve({} as P),
       },
     ): Promise<NextResponse> => {
+      // M-0499 (audit-2026-05-07): auth check runs FIRST so the response
+      // shape for an unauthenticated caller does not depend on Origin
+      // header presence (eliminates the
+      // unauth-with-good-origin = 401 vs unauth-with-bad-origin = 403
+      // information disclosure). CSRF still runs for mutating methods,
+      // but only AFTER the caller is authenticated.
+      const supabase = await createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        return NextResponse.json(
+          { error: "Unauthorized" },
+          { status: 401 },
+        );
+      }
+
       // CSRF defense-in-depth on mutating requests. GET/HEAD/OPTIONS
       // are safe and skip the origin check.
       if (
@@ -389,19 +440,12 @@ export function withRole<P = unknown>(...roles: AppRole[]) {
         if (csrfError) return csrfError;
       }
 
-      const supabase = await createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
       const result = await requireRole(supabase, user, ...roles);
       if ("forbidden" in result) return result.forbidden;
 
-      // `user` is guaranteed non-null here — requireRole returns the 401
-      // branch above when user is null, which we already returned.
       const params = await rawCtx.params;
       return handler(req, {
-        user: user!,
+        user,
         roles: result.roles,
         supabase,
         params,
