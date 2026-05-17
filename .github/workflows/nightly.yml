@@ -74,7 +74,7 @@ jobs:
       # sed-redact -> rezip) lands in front of the upload action.
       - name: Open GitHub issue on failure
         if: failure()
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           RUN_ID: ${{ github.run_id }}
           REPO_NAME: ${{ github.repository }}
@@ -129,7 +129,7 @@ jobs:
         run: npm audit --audit-level=critical
       - name: Open GitHub issue on critical advisory
         if: failure()
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           RUN_ID: ${{ github.run_id }}
           REPO_NAME: ${{ github.repository }}
