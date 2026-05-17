@@ -11,13 +11,17 @@
  * StarToggle child fires fetch on click; we mock it here so the toggle
  * state under test is just StrategyTable's own watchedSet mutation.
  *
- * Plan reference: 13-01-PLAN.md Step 3c lists the seven cases below.
+ * Plan reference: 13-01-PLAN.md Step 3c (Watchlist surface cases). The
+ * suite has since grown to cover Save-preferences re-render (view-mode +
+ * hide-examples) and the DISCO-04 sparkline color rule branches; each
+ * test names its own anchor.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import { StrategyTable } from "./StrategyTable";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
+import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
@@ -105,13 +109,17 @@ vi.mock("@/components/discovery/SimulateImpactButton", () => ({
 }));
 
 // StarToggle's fetch path is exercised exhaustively in StarToggle.test.tsx.
-// Stub global fetch so any internal call here is a no-op resolved promise
-// — the tests assert on watchedSet wiring, not on network behaviour.
-let fetchMock: ReturnType<typeof vi.fn>;
+// Stub global fetch via installFetchMock so any internal call here is a
+// no-op resolved promise (audit H-0404 + M-0470: typed surface + automatic
+// restore replaces the legacy `@ts-expect-error` globalThis.fetch mutation
+// that had no afterEach unstub). None of the watchedSet tests assert
+// on the mock — they assert on rendered DOM state — so we don't need to
+// hold the reference.
 beforeEach(() => {
-  fetchMock = vi.fn().mockResolvedValue({ ok: true });
-  // @ts-expect-error — node test env exposes a mutable global.fetch
-  globalThis.fetch = fetchMock;
+  installFetchMock();
+});
+afterEach(() => {
+  restoreFetchMock();
 });
 
 // --- Tests ---------------------------------------------------------------
@@ -216,6 +224,10 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
   });
 
   it("Case 7: clicking a star updates watchedSet and increments the count badge", () => {
+    // C-0140: assert intent (count badge with the right number), not
+    // Tailwind class names. The legacy `.bg-accent.text-white` selector
+    // would silently break on a theme refactor — and the inverse (badge
+    // gone but classes remain on a dead element) would silently pass.
     render(
       <StrategyTable
         strategies={STRATEGIES}
@@ -225,28 +237,25 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
       />,
     );
 
-    // Initially the My Watchlist tab carries no badge digit. The badge
-    // is hidden when count === 0 (see WatchlistTabs.tsx); only "My
-    // Watchlist" text is present.
-    const watchTabBefore = screen.getByRole("tab", { name: /My Watchlist/ });
-    expect(
-      watchTabBefore.querySelector(".bg-accent.text-white"),
-    ).toBeNull();
+    // Initially the My Watchlist tab carries no badge — WatchlistTabs
+    // hides the count span when count === 0.
+    expect(screen.queryByTestId("watchlist-count-badge")).toBeNull();
 
     // Click the first row's star button. The optimistic flip mutates
-    // watchedSet.size from 0 → 1 synchronously; the network PUT (mocked
-    // fetch above) is fire-and-forget for this assertion.
+    // watchedSet.size from 0 → 1 synchronously; the network PUT is
+    // a no-op via the installFetchMock helper.
     const firstStar = screen.getAllByRole("button", {
       name: /Add .* to watchlist/,
     })[0];
     fireEvent.click(firstStar);
 
-    // After the click the My Watchlist tab now renders the count badge
-    // — a span with bg-accent text-white classes whose text reads "1".
+    // After the click the badge renders inside the My Watchlist tab
+    // with textContent === "1". Anchoring on data-testid pins the
+    // behavioural contract (badge visible AND scoped to the tab) without
+    // coupling to any utility-class names.
     const watchTabAfter = screen.getByRole("tab", { name: /My Watchlist/ });
-    const badge = watchTabAfter.querySelector(".bg-accent.text-white");
-    expect(badge).not.toBeNull();
-    expect(badge!.textContent).toBe("1");
+    const badge = within(watchTabAfter).getByTestId("watchlist-count-badge");
+    expect(badge.textContent).toBe("1");
   });
 
   it("Case 8 (back-compat sanity): renders all 3 strategies when userId is undefined", () => {
@@ -359,24 +368,22 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
 // e2e/discovery-sparkline-regression.spec.ts covers the live-DOM split-color
 // invariant on top of these.
 //
-// Helper: locate the returns sparkline cell (2nd-to-last sparkline cell) vs
-// the drawdown sparkline cell (last). The table renders 11 columns when
-// userId is undefined (no leading star); columns are: Strategy, Return %,
-// CAGR, Sharpe, MaxDD, Volatility, 6Month, AUM, Return spark, Underwater
-// spark, Actions. The Return spark is index 8, Underwater spark is index 9.
+// C-0141 + M-0474: the legacy hardcoded `RETURNS_SPARK_TD_INDEX = 8` /
+// `DRAWDOWN_SPARK_TD_INDEX = 9` magic numbers reached into the rendered
+// table column ordering. A future column reorder, add, or remove in
+// StrategyTable.tsx would silently shift the indices — the test would
+// read stroke from a non-sparkline cell (path[stroke] returns null) and
+// the diagnostic would blame the sparkline color rule instead of column
+// drift. We now anchor on data-testid="sparkline-cell-returns" and
+// data-testid="sparkline-cell-drawdown" emitted by StrategyTable.tsx so
+// the test pins INTENT (the returns sparkline cell), not LAYOUT (column
+// index #8). Adding a leading-star column for userId-mode users no
+// longer breaks the test either.
 
-const RETURNS_SPARK_TD_INDEX = 8; // 0-indexed when userId is undefined
-const DRAWDOWN_SPARK_TD_INDEX = 9;
-
-function getStrokeOnSparklineCell(
-  rowIndex: number,
-  cellIndex: number,
+function getStrokeOnSparkline(
+  testId: "sparkline-cell-returns" | "sparkline-cell-drawdown",
 ): string | null {
-  const rows = document.querySelectorAll("table tbody tr");
-  const row = rows[rowIndex];
-  if (!row) return null;
-  const cells = row.querySelectorAll("td");
-  const cell = cells[cellIndex];
+  const cell = screen.queryByTestId(testId);
   if (!cell) return null;
   // Sparkline renders a stroked <path> for the trace. Locate the first
   // path[stroke] under this cell.
@@ -389,7 +396,7 @@ describe("StrategyTable — DISCO-04 sparkline color rule (returns column only)"
     const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
     fixture.analytics.sparkline_returns = [0, 0.05, 0.1];
     render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
-    expect(getStrokeOnSparklineCell(0, RETURNS_SPARK_TD_INDEX)).toBe(
+    expect(getStrokeOnSparkline("sparkline-cell-returns")).toBe(
       "var(--color-accent)",
     );
   });
@@ -398,7 +405,7 @@ describe("StrategyTable — DISCO-04 sparkline color rule (returns column only)"
     const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
     fixture.analytics.sparkline_returns = [0, -0.02, -0.05];
     render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
-    expect(getStrokeOnSparklineCell(0, RETURNS_SPARK_TD_INDEX)).toBe(
+    expect(getStrokeOnSparkline("sparkline-cell-returns")).toBe(
       "var(--color-negative)",
     );
   });
@@ -407,28 +414,48 @@ describe("StrategyTable — DISCO-04 sparkline color rule (returns column only)"
     const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
     fixture.analytics.sparkline_returns = [0.01, -0.01, 0];
     render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
-    expect(getStrokeOnSparklineCell(0, RETURNS_SPARK_TD_INDEX)).toBe(
+    expect(getStrokeOnSparkline("sparkline-cell-returns")).toBe(
       "var(--color-chart-benchmark)",
     );
   });
 
   it("does NOT change the drawdown sparkline color (always var(--color-negative)) — Pitfall 7 invariant", () => {
     // Even when sparkline_returns ends positive (which would tint the
-    // returns sparkline accent-green), the drawdown sparkline cell at
-    // line ~464 of StrategyTable.tsx must still render with the static
-    // var(--color-negative) prop. This proves the new sign-driven rule
-    // does NOT bleed into the drawdown call site.
+    // returns sparkline accent-green), the drawdown sparkline cell
+    // (data-testid="sparkline-cell-drawdown") must still render with
+    // the static var(--color-negative) prop. This proves the new
+    // sign-driven rule does NOT bleed into the drawdown call site.
     const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
     fixture.analytics.sparkline_returns = [0, 0.05, 0.1]; // ends positive → accent
     fixture.analytics.sparkline_drawdown = [0, -0.1, -0.2, -0.05, 0];
     render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
     // Returns sparkline → accent (sign-driven)
-    expect(getStrokeOnSparklineCell(0, RETURNS_SPARK_TD_INDEX)).toBe(
+    expect(getStrokeOnSparkline("sparkline-cell-returns")).toBe(
       "var(--color-accent)",
     );
     // Drawdown sparkline → static var(--color-negative)
-    expect(getStrokeOnSparklineCell(0, DRAWDOWN_SPARK_TD_INDEX)).toBe(
+    expect(getStrokeOnSparkline("sparkline-cell-drawdown")).toBe(
       "var(--color-negative)",
+    );
+  });
+
+  it("sparkline cells stay locatable when the leading-star column is rendered (userId mode)", () => {
+    // C-0141 regression guard: adding the leading-star column (userId
+    // mode) shifts every subsequent <td> by +1. The legacy hardcoded
+    // RETURNS_SPARK_TD_INDEX=8 would read the wrong cell here. The
+    // data-testid lookup must continue to find the right sparkline.
+    const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    fixture.analytics.sparkline_returns = [0, 0.05, 0.1];
+    render(
+      <StrategyTable
+        strategies={[fixture]}
+        categorySlug="crypto-sma"
+        userId="u-1"
+        initialWatchedSet={new Set()}
+      />,
+    );
+    expect(getStrokeOnSparkline("sparkline-cell-returns")).toBe(
+      "var(--color-accent)",
     );
   });
 });

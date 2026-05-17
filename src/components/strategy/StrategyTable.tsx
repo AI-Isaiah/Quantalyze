@@ -467,14 +467,14 @@ export function StrategyTable({
                     <td className="px-4 py-3 text-right font-metric text-text-secondary">
                       {formatCurrency(s.aum)}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3" data-testid="sparkline-cell-returns">
                       <Sparkline
                         data={s.analytics.sparkline_returns ?? []}
                         color={sparklineColor(s.analytics.sparkline_returns ?? [])}
                         data-testid="sparkline-returns"
                       />
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3" data-testid="sparkline-cell-drawdown">
                       <Sparkline
                         data={s.analytics.sparkline_drawdown ?? []}
                         color="var(--color-negative)"

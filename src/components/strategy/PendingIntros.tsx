@@ -1,8 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -24,42 +23,78 @@ export function PendingIntros({ requests }: { requests: IntroRequest[] }) {
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmMessage, setConfirmMessage] = useState<string | null>(null);
+  // Red-team 2026-05-17 (red-team:double-click-race, HIGH conf 8): the
+  // `loading` state alone can't gate a double-fire because setState is
+  // async — two clicks within the same render tick both see loading=null
+  // and both fire fetch(). The useRef flag flips synchronously inside the
+  // click handler, blocking the second fire before React schedules the
+  // re-render. The server-side `.eq('status','pending')` guard is the
+  // backstop for cross-tab races; this ref is the client-tab close.
+  const inFlightRef = useRef<Set<string>>(new Set());
 
   if (requests.length === 0) return null;
 
+  // Audit-2026-05-07 C-0135 + C-0136: route manager responses through
+  // /api/intro-response so (a) notifyAllocatorIntroStatus fires on every
+  // transition (no more silent notification drop) and (b) the writeable
+  // column set is whitelisted server-side (no more direct manager UPDATE
+  // on admin_note / founder_notes / allocation_amount via Supabase
+  // browser client). The previous .select('id') / updated.length===0
+  // RLS-zero detection is no longer needed because the server route
+  // returns a proper 4xx on the manager-not-owner path.
   async function handleRespond(id: string, action: "accept" | "decline") {
+    // Red-team 2026-05-17: synchronous in-flight gate. A double-click
+    // within ~16ms (one frame) — or rapid Enter Enter on a focused
+    // button — would otherwise pass through React's async setState
+    // before the disabled bit flips. The ref check + add happens
+    // synchronously inside this event handler, so the second click's
+    // entry into handleRespond bails before fetch().
+    if (inFlightRef.current.has(id)) return;
+    inFlightRef.current.add(id);
+
     setLoading(id);
     setError(null);
     setConfirmMessage(null);
 
-    const supabase = createClient();
-    const newStatus = action === "accept" ? "intro_made" : "declined";
-
-    // Audit-2026-05-07 #44: Use `.select("id")` so we know how many rows
-    // PostgREST actually mutated. RLS may silently reduce the affected-row
-    // set to 0 if the policy filter doesn't match — without this, the UI
-    // would optimistically render "Accepted" while the DB still showed
-    // 'pending', and the founder dashboard would never see the change.
-    const { data: updated, error: updateError } = await supabase
-      .from("contact_requests")
-      .update({
-        status: newStatus,
-        responded_at: new Date().toISOString(),
-      })
-      .eq("id", id)
-      .select("id");
-
-    setLoading(null);
-
-    if (updateError) {
+    let res: Response;
+    try {
+      res = await fetch("/api/intro-response", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, action }),
+      });
+    } catch {
+      // Red-team 2026-05-17 (red-team:loading-flag-released-too-early):
+      // release the in-flight guard + loading state ONLY at the end of
+      // a branch that has finished rendering its error/success copy.
+      // The network-error branch is terminal — clear here.
+      inFlightRef.current.delete(id);
+      setLoading(null);
       setError("Failed to update request. Please try again.");
       return;
     }
 
-    if (!updated || updated.length === 0) {
-      setError(
-        "Update did not apply — your account may not have permission to respond to this request. Refresh and try again, or contact the team if the problem persists.",
-      );
+    if (!res.ok) {
+      // Red-team 2026-05-17 (red-team:loading-flag-released-too-early,
+      // MED conf 8): set the error copy BEFORE releasing the loading
+      // flag. The previous order called setLoading(null) before the
+      // error-banner setState, leaving a 100-200ms gap where the button
+      // was re-enabled with no error text rendered — a frustrated user
+      // could double-click into a still-pending error render and fire
+      // another fetch. Setting error first means the next render flushes
+      // the banner in the same paint as the button re-enable.
+      // The 409 branch is mapped to the same permission-style copy
+      // ("refresh and try again") because the server uses 409 to signal
+      // "request resolved elsewhere — refresh".
+      if (res.status === 401 || res.status === 403 || res.status === 409) {
+        setError(
+          "Your account may not have permission to respond to this request. Refresh and try again, or contact the team if the problem persists.",
+        );
+      } else {
+        setError("Failed to update request. Please try again.");
+      }
+      inFlightRef.current.delete(id);
+      setLoading(null);
       return;
     }
 
@@ -67,6 +102,8 @@ export function PendingIntros({ requests }: { requests: IntroRequest[] }) {
       setConfirmMessage("Our team will connect you within 48h.");
     }
 
+    inFlightRef.current.delete(id);
+    setLoading(null);
     router.refresh();
   }
 
