@@ -122,11 +122,18 @@ class VerifyStrategyResponse(BaseModel):
     status: str
     verification_id: str
     matched_strategy_id: Optional[str] = None
-    # The four known outcomes after the audit-2026-05-07 H-0582 split.
-    # Declared as Literal so the OpenAPI schema documents the enum and
-    # typed-SDK consumers can switch on it (review API-3).
+    # The four known outcomes after the audit-2026-05-07 H-0582 split,
+    # extended with `matching_partial` per audit-2026-05-07 red-team
+    # (CRITICAL conf 7). Pre-fix, when the catalog exceeded
+    # `_MATCH_CANDIDATE_LIMIT` and no peer was found within the
+    # bounded recency slice, `matching_status='no_match'` was a false
+    # negative — the user's actual peer might be just outside the
+    # window. `matching_partial` signals "we only compared the
+    # most-recent slice and didn't find one there". Declared as
+    # Literal so the OpenAPI schema documents the enum and typed-SDK
+    # consumers can switch on it (review API-3).
     matching_status: Optional[
-        Literal["matched", "no_match", "matching_unavailable"]
+        Literal["matched", "no_match", "matching_partial", "matching_unavailable"]
     ] = None
     # Set to True only when the response was served from the H-0592
     # idempotency cache on an Idempotency-Key retry (review API-5).

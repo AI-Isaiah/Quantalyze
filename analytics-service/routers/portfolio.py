@@ -106,7 +106,24 @@ _REBALANCE_DRIFT_THRESHOLD = 0.05        # min weight drift to fire a rebalance_
 _REBALANCE_DRIFT_HIGH_THRESHOLD = 0.10   # above this we mark the alert "high"
 
 # Strategy matching (verify_strategy endpoint).
-_MATCH_CANDIDATE_LIMIT = 100
+#
+# audit-2026-05-07 H-0594 — bounded payload. The pre-fix limit of 100
+# candidates × ~500-1000 daily {date,value} records per `returns_series`
+# materialised up to 100k JSON objects into Python memory per
+# verification call. Two-tier mitigation:
+#   1. `_MATCH_CANDIDATE_LIMIT` shortlists to the 30 most-recent
+#      published strategies (recency-ordered SELECT) before the heavy
+#      `returns_series` fetch. Recency is a coarse signal but is
+#      enough to bound a single call's memory while a follow-up
+#      schema-level fix (per-strategy fingerprint column or a
+#      lower-dimensional embedding) is sized.
+#   2. `_MATCH_RETURNS_SERIES_MAX_POINTS` caps each `returns_series`
+#      payload to its trailing N entries before the in-memory DataFrame
+#      is built. A bad upstream write that ballooned a single series
+#      to 10k+ records would otherwise still pin tens of MB per call
+#      even with the candidate count capped.
+_MATCH_CANDIDATE_LIMIT = 30
+_MATCH_RETURNS_SERIES_MAX_POINTS = 750  # ~3 years of daily returns
 _MATCH_CORRELATION_THRESHOLD = 0.95
 
 # How long an analytics row can sit in 'computing' before a watchdog is
@@ -130,34 +147,149 @@ _VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC = 3600  # 1 hour
 _VERIFY_STRATEGY_EMAIL_CACHE_MAX = 10_000
 _verify_strategy_email_attempts: dict[str, list[float]] = {}
 
+# Per-user sliding-window rate limit for portfolio-bridge.
+#
+# audit-2026-05-07 L-0045 — slowapi's @limiter.limit("10/hour") on the
+# bridge endpoint uses get_remote_address by default. Behind Next.js
+# Vercel-functions every request arrives from the same egress IP pool,
+# so the 10/hour ceiling collapses to a SINGLE bucket shared across
+# every authenticated user — a noisy or hostile user can starve the
+# bucket for everyone on the same IP. The Next.js per-user
+# `bridge:${user.id}` Upstash limiter (src/app/api/bridge/route.ts:20,
+# 5/min) is the only EFFECTIVE quota today; if that ever degrades
+# (Upstash outage) or is bypassed by a future caller, the Python tier
+# provides no per-user cap.
+#
+# In-process per-user limit is the defense-in-depth. Same cap+window
+# as the email limiter; bound on distinct users tracked to keep memory
+# safe; LRU-ish eviction via insertion-order re-insertion.
+_BRIDGE_USER_RATE_LIMIT = 30           # max per window (covers expected legit usage)
+_BRIDGE_USER_RATE_WINDOW_SEC = 3600    # 1 hour
+_BRIDGE_USER_CACHE_MAX = 10_000
+_bridge_user_attempts: dict[str, list[float]] = {}
+
+
+def _check_sliding_window_rate(
+    bucket_map: dict[str, list[float]],
+    key: str | None,
+    *,
+    limit: int,
+    window_sec: int,
+    cache_max: int,
+) -> bool:
+    """Sliding-window per-key rate-limit check with LRU-bounded cache.
+
+    Returns True if the key is under budget. Side-effects:
+      * prunes expired timestamps from the key's bucket,
+      * records the current attempt when under budget,
+      * re-inserts the key to preserve insertion-order LRU semantics
+        BOTH on the under-budget AND over-budget branches (audit
+        2026-05-07 red-team finding — see below),
+      * evicts oldest entries when `len(bucket_map) > cache_max`.
+
+    Empty/None keys are passed through as `True` — the trust-boundary
+    smell is handled by the caller's downstream filter (e.g. the
+    ownership SELECT will 404 a missing user_id; the verify_strategy
+    fast-path returns early on a missing email).
+
+    Pure (no I/O). Uses `time.time()` (wall clock) rather than the
+    process-local monotonic clock so a worker recycle / cold-start
+    does NOT silently invalidate every stored timestamp
+    (audit-2026-05-07 red-team L-0045: the monotonic clock restarts
+    at 0 on a new process, which pushes every stored `now` outside
+    the new cutoff window → all buckets prune to empty → free
+    30-call quota refill on every restart). Wall clock is
+    process-portable; the existing documented limitation (NOT
+    distributed-safe across workers) remains — see
+    `_check_bridge_user_rate` docstring.
+
+    NOTE: the regression test
+    `test_portfolio_bridge_rate_limit_uses_wall_clock_not_monotonic`
+    inspects this function's source and asserts the literal
+    `time`-dot-`monotonic` token is absent — keep references to the
+    rejected clock prose-only ("monotonic clock") so the contract
+    stays pinned without re-tripping the assertion.
+
+    Audit-2026-05-07 red-team (HIGH conf 8): an over-budget key used
+    to skip the `pop+reinsert` move-to-tail step (`bucket_map[key] =
+    bucket` on an existing key does NOT change dict insertion order
+    in CPython). With the key pinned at the dict head, a fresh
+    `_BRIDGE_USER_CACHE_MAX` distinct attackers (or legitimate
+    callers) would evict the rate-limited user's bucket via the
+    `next(iter(bucket_map))` LRU pop — letting them start a brand
+    new 30-call window. Both branches now refresh LRU position so
+    rejected buckets compete fairly for the cache slot.
+
+    Mirrors the prior duplicated `_check_bridge_user_rate` and
+    `_check_verify_strategy_email_rate` bookkeeping so future tuning
+    (e.g. switching to a deque or a distributed store) only touches
+    one site.
+    """
+    if not key:
+        return True
+    now = time.time()
+    cutoff = now - window_sec
+    bucket = bucket_map.get(key, [])
+    bucket = [t for t in bucket if t >= cutoff]
+    if len(bucket) >= limit:
+        # audit-2026-05-07 red-team HIGH — refresh LRU position even
+        # on reject so a rate-limited user can't be evicted by a
+        # wave of fresh callers and silently regain their quota.
+        bucket_map.pop(key, None)
+        bucket_map[key] = bucket
+        while len(bucket_map) > cache_max:
+            oldest = next(iter(bucket_map))
+            bucket_map.pop(oldest, None)
+        return False
+    bucket.append(now)
+    # Re-insert (move to dict-end) to preserve insertion-order LRU semantics.
+    bucket_map.pop(key, None)
+    bucket_map[key] = bucket
+    while len(bucket_map) > cache_max:
+        oldest = next(iter(bucket_map))
+        bucket_map.pop(oldest, None)
+    return True
+
+
+def _check_bridge_user_rate(user_id: str | None) -> bool:
+    """Return True if user_id is under the per-user bridge budget.
+
+    Thin wrapper over `_check_sliding_window_rate` so the rate-limit
+    bookkeeping stays in lockstep with the email limiter. Returning
+    False means the caller should reject with HTTP 429 even though the
+    slowapi IP-based limiter let the request through. Not
+    distributed-safe across workers; the IP-based slowapi limit +
+    Next.js per-user Upstash limit remain the authoritative bounds on
+    multi-worker abuse, but same-process abuse from a single IP pool
+    gets full per-user replay protection.
+
+    A missing user_id is itself a trust-boundary smell (see L-0047)
+    but we don't reject here — `.eq("user_id", req.user_id)` on the
+    portfolios SELECT will 404 the request immediately.
+    """
+    return _check_sliding_window_rate(
+        _bridge_user_attempts,
+        user_id,
+        limit=_BRIDGE_USER_RATE_LIMIT,
+        window_sec=_BRIDGE_USER_RATE_WINDOW_SEC,
+        cache_max=_BRIDGE_USER_CACHE_MAX,
+    )
+
 
 def _check_verify_strategy_email_rate(email: str) -> bool:
     """Return True if the email is under the per-email rate budget.
 
-    Side-effect: prunes expired timestamps and records the current attempt
-    when the check passes (failed attempts count too — abuse-prevention).
-    Returning False means the caller should reject with HTTP 429 even
-    though the IP-based limiter let the request through.
+    Thin wrapper over `_check_sliding_window_rate`. Returning False
+    means the caller should reject with HTTP 429 even though the
+    IP-based limiter let the request through.
     """
-    if not email:
-        return True
-    now = time.monotonic()
-    cutoff = now - _VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC
-    bucket = _verify_strategy_email_attempts.get(email, [])
-    # Prune expired
-    bucket = [t for t in bucket if t >= cutoff]
-    if len(bucket) >= _VERIFY_STRATEGY_EMAIL_RATE_LIMIT:
-        _verify_strategy_email_attempts[email] = bucket
-        return False
-    bucket.append(now)
-    # Re-insert (move to dict-end) to preserve insertion-order LRU semantics.
-    _verify_strategy_email_attempts.pop(email, None)
-    _verify_strategy_email_attempts[email] = bucket
-    # Evict oldest entries when over cap.
-    while len(_verify_strategy_email_attempts) > _VERIFY_STRATEGY_EMAIL_CACHE_MAX:
-        oldest = next(iter(_verify_strategy_email_attempts))
-        _verify_strategy_email_attempts.pop(oldest, None)
-    return True
+    return _check_sliding_window_rate(
+        _verify_strategy_email_attempts,
+        email,
+        limit=_VERIFY_STRATEGY_EMAIL_RATE_LIMIT,
+        window_sec=_VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC,
+        cache_max=_VERIFY_STRATEGY_EMAIL_CACHE_MAX,
+    )
 
 
 # Audit H-0592 — in-process idempotency cache for verify_strategy. Keyed
@@ -256,6 +388,95 @@ def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
         return None
 
     return pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
+
+
+def _build_monthly_returns(
+    portfolio_returns_series: "pd.Series",
+) -> dict[str, dict[str, float]]:
+    """Build a {year: {month: period_return}} dict from a daily-returns series.
+
+    audit-2026-05-07 L-0046 — single-pass cumulative-product accumulate
+    followed by a dict-comprehension `(cum - 1.0)` finalize. Yields
+    period returns per (year, month). The previous form mutated the
+    same dict across two loops; a missed key in pass 2 would have left
+    a cumulative product masquerading as a period return.
+
+    audit-2026-05-07 red-team (MED conf 8) — input series may contain
+    DUPLICATE dates. `_records_to_series` does not dedupe; an upstream
+    `returns_series` JSONB with a repeated `date` key (or a future
+    reindex against a non-unique DatetimeIndex) would feed two
+    entries for the same calendar day into the cumprod, double-counting
+    that day's return in the bucket. We dedupe last-write-wins on the
+    raw `(date, value)` stream BEFORE the cumprod so the bucket math
+    is idempotent under unsorted / duplicated input. Callers SHOULD
+    still pass a series with unique dates — this is defense-in-depth
+    against the JSONB shape rather than a license to feed dirty data.
+
+    Extracted so both the router and the regression tests drive the
+    SAME code path (Rule 9 — tests verify intent, not a pasted copy
+    of the implementation).
+    """
+    # Defensive last-write-wins dedupe on (year, month, day) — protect
+    # against duplicate index entries upstream of the cumprod walk. Key
+    # by tuple rather than a parallel `(date_key → (year, month))` dict:
+    # the tuple IS the year+month carrier, so the cumprod walk reads
+    # year/month directly off the key without a second lookup.
+    # Stable tuple components (string year/month) sidestep pd.Timestamp
+    # hashing quirks (e.g. same-day-different-tz) at our daily resolution.
+    deduped: dict[tuple[str, str, str], float] = {}
+    for d, v in portfolio_returns_series.items():
+        if hasattr(d, "year"):
+            year_str = str(d.year)
+            month_str = str(d.month).zfill(2)
+            day_str = str(d.day).zfill(2) if hasattr(d, "day") else ""
+        else:
+            year_str = str(d)[:4]
+            month_str = str(d)[5:7]
+            day_str = str(d)[8:10]
+        deduped[(year_str, month_str, day_str)] = float(v)
+
+    monthly_cumprod: dict[str, dict[str, float]] = {}
+    for (year_str, month_str, _day), v in deduped.items():
+        monthly_cumprod.setdefault(year_str, {}).setdefault(month_str, 1.0)
+        monthly_cumprod[year_str][month_str] *= (1 + v)
+    return {
+        year_str: {month_str: cum - 1.0 for month_str, cum in months.items()}
+        for year_str, months in monthly_cumprod.items()
+    }
+
+
+def _trim_returns_series(raw_series: list | None, cap: int | None = None) -> list | None:
+    """Return the trailing `cap` entries of a JSONB returns_series list.
+
+    audit-2026-05-07 H-0594 — verify_strategy's per-candidate
+    `returns_series` payloads are trimmed to their trailing window
+    before deserialization. Older history dilutes the recent-regime
+    correlation signal verify_strategy is looking for, and trimming
+    bounds the in-memory pd.DataFrame footprint when an upstream
+    write ballooned a single series to 10k+ records.
+
+    audit-2026-05-07 red-team (MED conf 8) — ALWAYS returns a fresh
+    list when the input is a list. The pre-fix shape returned
+    `raw_series[-cap:]` (a new list) on the trim path but the SAME
+    reference on the no-trim path. Future enrichment loops that
+    `trimmed.append(...)` would otherwise silently mutate the
+    Supabase row's `returns_series` JSONB still held in
+    `sa_result.data` — a subtle aliasing bug. The defensive copy
+    eliminates the footgun. Non-list inputs (None / malformed JSONB)
+    still pass through unchanged.
+
+    Extracted so both the router and the regression test drive the
+    SAME helper (Rule 9). `cap` defaults to
+    `_MATCH_RETURNS_SERIES_MAX_POINTS`.
+    """
+    if cap is None:
+        cap = _MATCH_RETURNS_SERIES_MAX_POINTS
+    if not isinstance(raw_series, list):
+        return raw_series
+    if len(raw_series) > cap:
+        return raw_series[-cap:]
+    # Defensive copy on the no-trim path — see red-team finding above.
+    return list(raw_series)
 
 
 def _redact_credentials(message: str, req: "VerifyStrategyRequest") -> str:
@@ -636,18 +857,14 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         # Monthly returns are computed per-strategy in strategy_analytics; for the
         # portfolio-level narrative we build a weighted monthly return from the
         # daily portfolio returns series.
+        #
+        # audit-2026-05-07 L-0046 — algorithm + dedupe semantics live in
+        # `_build_monthly_returns`. Extracted so the router and the
+        # regression tests share a single source of truth (Rule 9).
         try:
-            monthly_returns: dict[str, dict[str, float]] = {}
-            for d, v in portfolio_returns_series.items():
-                year_str = str(d.year) if hasattr(d, "year") else str(d)[:4]
-                month_str = str(d.month).zfill(2) if hasattr(d, "month") else str(d)[5:7]
-                monthly_returns.setdefault(year_str, {}).setdefault(month_str, 1.0)
-                monthly_returns[year_str][month_str] *= (1 + float(v))
-            # Convert cumulative to period returns
-            for year_str in monthly_returns:
-                for month_str in monthly_returns[year_str]:
-                    monthly_returns[year_str][month_str] -= 1.0
-            analytics_payload["monthly_returns"] = monthly_returns
+            analytics_payload["monthly_returns"] = _build_monthly_returns(
+                portfolio_returns_series
+            )
         except (AttributeError, ValueError, TypeError, ZeroDivisionError) as exc:
             # Narrowed catch: only expected build errors. Unexpected exceptions
             # (e.g. KeyError on a renamed column) bubble up to the outer handler
@@ -1368,6 +1585,25 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     Uses REPLACE scoring: removes the incumbent, redistributes its weight,
     and scores each published candidate in that slot. Returns allocator-safe
     payload (no admin internals, no profile data).
+
+    Trust boundary (audit-2026-05-07 L-0047):
+      * req.user_id is supplied by the Next.js caller in the request
+        body, NOT verified by this service. The X-Service-Key middleware
+        authenticates the CALLER (Next.js), not the END USER.
+      * The .eq("user_id", req.user_id) filter on the portfolios SELECT
+        below is the ONLY defense — a mismatched user_id 404s the request
+        immediately because `.single()` on an empty result raises.
+      * If the service key ever leaks (committed in .env, captured from
+        CI logs) or if a future caller besides /api/bridge starts
+        calling this endpoint, the attacker can pass any user_id and
+        portfolio_id pair that line up in the DB. The trust assumption
+        is "the X-Service-Key holder is honest about user_id". An
+        eventual fix requires forwarding the user's Supabase JWT and
+        validating it in the FastAPI middleware before populating
+        req.user_id from the verified `sub` claim.
+      * test_routers_audit_2026_05_17.py
+        ::test_portfolio_bridge_rejects_mismatched_user_id pins the
+        404 promise so a refactor cannot silently drop the .eq filter.
     """
     from services.bridge_scoring import find_replacement_candidates
 
@@ -1377,11 +1613,37 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     # Defense-in-depth: Next.js layer already checks ownership, but the Python
     # service uses a service-role client that bypasses RLS. This closes the gap
     # if the service is ever reachable from another path.
+    #
+    # audit-2026-05-07 red-team (MED conf 8) — ownership SELECT MUST run
+    # BEFORE `_check_bridge_user_rate`. Pre-fix the rate-limit check ran
+    # first, so an attacker-supplied (forged or unauthenticated) user_id
+    # appended a fresh entry to `_bridge_user_attempts` PER REQUEST. With
+    # CACHE_MAX=10k, an attacker rotating uuids could fully turn over the
+    # dict and silently evict every legitimate user's bucket — combined
+    # with the LRU-eviction-bypass red-team finding above, this gave a
+    # vector to disable the per-user limiter entirely. Running the
+    # ownership SELECT first 404s any user_id that doesn't actually own a
+    # portfolio in this DB, so only DB-validated user_ids can ever reach
+    # the limiter and consume a cache slot.
     portfolio_result = supabase.table("portfolios").select("id").eq(
         "id", req.portfolio_id
     ).eq("user_id", req.user_id).single().execute()
     if not portfolio_result.data:
         raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    # audit-2026-05-07 L-0045 — per-user defense-in-depth rate limit.
+    # The slowapi IP-based limit collapses to a single bucket behind
+    # Next.js Vercel-functions (shared egress IPs). Without this
+    # per-user cap a single noisy or hostile user can exhaust the
+    # 10/hour quota for ALL users on the same IP pool. Composed with
+    # the slowapi IP budget, not a replacement. Runs AFTER the
+    # ownership SELECT (above) so an attacker cannot poison the
+    # bucket cache with forged user_ids.
+    if not _check_bridge_user_rate((req.user_id or "").strip()):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many bridge requests for this user. Try again later.",
+        )
 
     # Verify the underperformer is actually in this portfolio
     ps_result = supabase.table("portfolio_strategies").select(
@@ -1626,9 +1888,23 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
         _vol, _mean_ret, sharpe, _sharpe_status = _compute_sharpe_and_vol(returns)
 
         matched_strategy_id: str | None = None
-        # Distinguish three outcomes the previous code collapsed:
-        #   matched / no_match / matching_unavailable
-        # so the user / dashboard can tell "no peer found" from "matching unavailable".
+        # Distinguish FOUR outcomes the previous code collapsed:
+        #   matched / no_match / matching_partial / matching_unavailable
+        # so the user / dashboard can tell "no peer found" from "matching
+        # unavailable" AND from "we only looked at the most-recent
+        # _MATCH_CANDIDATE_LIMIT and didn't find one in that window".
+        #
+        # audit-2026-05-07 red-team (CRITICAL conf 7): when the catalog
+        # is larger than `_MATCH_CANDIDATE_LIMIT`, the bounded SELECT
+        # silently truncates — the user's actual peer strategy may be
+        # the (N+1)th-most-recent and would NEVER be compared. Pre-fix
+        # the endpoint returned `matching_status='no_match'` in that
+        # case, a FALSE NEGATIVE on a user-facing correctness promise.
+        # `matching_partial` surfaces the truncation so callers can
+        # render "we only looked at the most-recent 30 strategies" UI
+        # instead of "nobody else trades like you". The followup is the
+        # tracked fingerprint-based shortlist (audit H-0594 followup);
+        # this is the minimum-touch correctness fix.
         matching_status = "no_match"
         try:
             # Order by recency so the slice is deterministic when the catalog
@@ -1639,6 +1915,13 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
             ).order("created_at", desc=True).limit(_MATCH_CANDIDATE_LIMIT).execute()
             published_ids = [row["id"] for row in (published_result.data or [])]
 
+            # Detect the partial-coverage case before the matching loop
+            # so we can flip `matching_status` if no match is found in the
+            # bounded window. `>=` (not `==`) because Supabase's `.limit`
+            # is an upper bound — a degenerate post-LIMIT plan could in
+            # theory return fewer than the requested count, but never more.
+            hit_candidate_cap = len(published_ids) >= _MATCH_CANDIDATE_LIMIT
+
             if published_ids:
                 sa_result = supabase.table("strategy_analytics").select(
                     "strategy_id, returns_series"
@@ -1646,9 +1929,21 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
 
                 # Vectorized matching: build a DataFrame of all existing series and
                 # compute correlations in one call instead of per-strategy loop.
+                #
+                # audit-2026-05-07 H-0594 — trim each `returns_series`
+                # JSONB to its trailing _MATCH_RETURNS_SERIES_MAX_POINTS
+                # entries BEFORE deserializing into a pd.Series. Without
+                # this cap, a runaway upstream write that ballooned a
+                # single series to 10k+ records would still pin tens of
+                # MB per verify_strategy call even with the candidate
+                # count capped by _MATCH_CANDIDATE_LIMIT. The trailing
+                # slice is the relevant window for correlation matching
+                # anyway — older history dilutes the recent-regime
+                # signal verify_strategy is actually looking for.
                 existing: dict[str, pd.Series] = {}
                 for row in (sa_result.data or []):
-                    s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+                    raw_series = _trim_returns_series(row.get("returns_series"))
+                    s = _records_to_series(raw_series, name=row["strategy_id"])
                     if s is not None:
                         existing[row["strategy_id"]] = s
 
@@ -1666,6 +1961,13 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
                             if corrs_clean[best] > _MATCH_CORRELATION_THRESHOLD:
                                 matched_strategy_id = best
                                 matching_status = "matched"
+
+            # If no match was found AND the SELECT hit the candidate
+            # cap, surface that we only compared the most-recent slice.
+            # The truthful answer is "we did not find a peer in the
+            # bounded window we examined" — NOT "no peer exists".
+            if matching_status == "no_match" and hit_candidate_cap:
+                matching_status = "matching_partial"
         except Exception as exc:
             # Surface the real cause; flag the outcome so callers can tell
             # "we tried and didn't find" from "matching is down".
