@@ -9,6 +9,29 @@ interface ManagerIdentityPanelProps {
 }
 
 /**
+ * Allow only http(s) URLs through the LinkedIn anchor href. The
+ * `profiles.linkedin` column is plain TEXT with no CHECK constraint and
+ * `ProfileForm` writes the raw free-text value straight through to
+ * Supabase, so a manager (or anyone who phishes one) could store
+ * `javascript:fetch(...)` and exfiltrate the viewer's session on click.
+ * `rel="noopener noreferrer"` blocks `window.opener` leaks but NOT
+ * `javascript:` execution. Audit-2026-05-07 red-team finding (HIGH c8,
+ * fingerprint src/components/strategy/ManagerIdentityPanel.tsx:86:red-team)
+ * — see also `escapeHref` in src/lib/email.ts:418 for the same pattern in
+ * the email pipeline.
+ */
+function safeLinkedinHref(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Shown on strategy detail + factsheet + tear sheet. The content depends on
  * `disclosure_tier`:
  *
@@ -50,6 +73,7 @@ export function ManagerIdentityPanel({
   }
 
   const displayName = manager.display_name ?? manager.company ?? strategyCodename;
+  const linkedinHref = safeLinkedinHref(manager.linkedin);
   const detailLines: string[] = [];
   if (manager.years_trading) {
     detailLines.push(`${manager.years_trading}+ years trading`);
@@ -81,9 +105,9 @@ export function ManagerIdentityPanel({
               {manager.bio}
             </p>
           )}
-          {manager.linkedin && (
+          {linkedinHref && (
             <a
-              href={manager.linkedin}
+              href={linkedinHref}
               target="_blank"
               rel="noopener noreferrer"
               className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-accent hover:text-accent-hover"

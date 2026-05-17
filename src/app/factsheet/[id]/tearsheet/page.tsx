@@ -9,9 +9,20 @@ import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import { PercentileRankBadge } from "@/components/strategy/PercentileRankBadge";
 import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
 import { PrintButton } from "@/components/ui/PrintButton";
+import { createClient } from "@/lib/supabase/server";
 
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Pin to dynamic rendering. The disclosure-tier redaction depends on the
+// per-request authentication state (cookies → supabase.auth.getUser()).
+// A future caching PR or `use cache` wrapper that introduced
+// `revalidate > 0` here would be a fail-open vulnerability: an
+// authenticated-rendered HTML response (full institutional identity) could
+// be cached and served to anonymous visitors. force-dynamic mirrors the
+// /discovery/layout.tsx pin that gates the rest of the disclosure-tier
+// system on attestation.
+export const dynamic = "force-dynamic";
 
 export async function generateMetadata({
   params,
@@ -33,10 +44,44 @@ export async function generateMetadata({
  * The PDF wrapper at `/api/factsheet/[id]/tearsheet.pdf` renders this same
  * page with Puppeteer for an emailable version.
  *
- * Exploratory-tier strategies get a redacted manager panel; institutional-
- * tier strategies show full identity. Redaction is enforced server-side in
- * `getFactsheetDetail()` → we re-fetch manager identity here only if the
- * strategy is institutional.
+ * Two redaction layers cooperate to keep institutional identity off the
+ * exploratory-tier panel:
+ *
+ *   1. `getFactsheetDetail()` only loads manager identity when the
+ *      strategy's `disclosure_tier === 'institutional'`. Exploratory-tier
+ *      strategies always come back with `manager = null`.
+ *   2. This page (since audit-2026-05-07 C-0189) downgrades the effective
+ *      tier to `exploratory` for unauthenticated callers, so the
+ *      institutional identity loaded in (1) is never rendered to anonymous
+ *      traffic — see the SECURITY GATE block below.
+ *
+ * SECURITY GATE (audit-2026-05-07 C-0189, red-team closure 2026-05-17):
+ * The tearsheet route lives in `PUBLIC_ROUTES` (src/proxy.ts) so cap-intro
+ * partners can open a tearsheet link without a login redirect. That
+ * intentional public access means an unauthenticated visitor could
+ * otherwise harvest institutional bio / years_trading / aum_range /
+ * linkedin via this surface — bypassing the /discovery/* attestation gate
+ * that exists precisely to wall off institutional disclosure from
+ * anonymous traffic. To close the bypass without breaking the cap-intro
+ * flow, we downgrade the rendered tier to `exploratory` for any caller
+ * who is NOT both logged in AND has a row in `investor_attestations` —
+ * exactly the predicate enforced by /discovery/layout.tsx. Anonymous
+ * traffic, brand-new accounts, strategy managers logged into their own
+ * console, and link recipients who haven't signed the attestation all see
+ * the codename-only redacted block. Performance metrics stay public
+ * (they're also on the non-tearsheet factsheet). Admins are auto-attested
+ * via migration 20260408113028 backfill, so the founder sees institutional
+ * identity during demos. The PDF wrapper at
+ * /api/factsheet/[id]/tearsheet.pdf inherits this fix automatically
+ * because Puppeteer fetches this page without session cookies, putting
+ * every PDF in the anonymous-redacted lane.
+ *
+ * Variable naming invariant (red-team C-9, 2026-05-17): the gate predicate
+ * is named `isAttested`, NOT `isAuthenticated`. An auth-only gate is a
+ * half-closure — it blocks anonymous visitors but exposes institutional
+ * identity to any logged-in-but-never-attested user. Future edits MUST
+ * keep the variable name aligned with the enforcement (logged in AND row
+ * in `investor_attestations`) so the comment can't drift past the code.
  */
 export default async function TearSheetPage({
   params,
@@ -44,13 +89,56 @@ export default async function TearSheetPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+
   const result = await getFactsheetDetail(id);
 
   if (!result || !result.analytics) {
     return <div className="p-8 text-center text-text-muted">Strategy not found.</div>;
   }
 
+  // Authoritative gate — must match /discovery/layout.tsx (the other
+  // disclosure-tier wall) so the public tearsheet route can't be used to
+  // bypass the accredited-investor attestation that /discovery/* enforces.
+  //
+  //   1. getUser() validates the JWT server-side (unlike getSession()
+  //      which only reads the cookie). Anonymous callers → user == null.
+  //   2. If logged in, require a row in `investor_attestations` with a
+  //      non-null `attested_at`. Admins are backfilled by migration
+  //      20260408113028 so they pass implicitly.
+  //
+  // We tolerate ALL read errors as "not attested" (fail-closed default:
+  // a Supabase blip should redact, never leak). The try/catch + the
+  // explicit `isAttested = false` initialization are load-bearing — a
+  // future refactor that destructures differently (or a typo) must not
+  // silently open the leak again. Run AFTER getFactsheetDetail so the
+  // 404 path skips this lookup.
+  let isAttested = false;
+  try {
+    const supabase = await createClient();
+    const { data: userData, error: userError } = await supabase.auth.getUser();
+    if (!userError && userData?.user != null) {
+      const { data: attestation, error: attError } = await supabase
+        .from("investor_attestations")
+        .select("attested_at")
+        .eq("user_id", userData.user.id)
+        .maybeSingle();
+      if (!attError && attestation?.attested_at != null) {
+        isAttested = true;
+      }
+    }
+  } catch (err) {
+    console.error("[tearsheet] attestation lookup failed:", err);
+    // Stay redacted — the safer default.
+  }
+
   const { strategy, analytics, manager, disclosureTier } = result;
+  // For non-attested callers (anonymous OR logged-in-but-unattested), force
+  // the panel into the exploratory (redacted) lane regardless of the
+  // strategy's actual disclosure tier. This is the C-0189 closure:
+  // institutional identity is never rendered to anonymous or unattested
+  // traffic from the public tearsheet route — mirroring /discovery/*.
+  const effectiveDisclosureTier = isAttested ? disclosureTier : "exploratory";
+  const effectiveManager = isAttested ? manager : null;
   const displayName = displayStrategyName(strategy);
   const categorySlug: string | undefined =
     (strategy as { discovery_categories?: { slug?: string } | null }).discovery_categories?.slug ??
@@ -116,11 +204,11 @@ export default async function TearSheetPage({
         </div>
       </header>
 
-      {/* Manager identity */}
+      {/* Manager identity (non-attested callers see the redacted exploratory block — see SECURITY GATE comment above) */}
       <section className="mb-6">
         <ManagerIdentityPanel
-          disclosureTier={disclosureTier}
-          manager={manager}
+          disclosureTier={effectiveDisclosureTier}
+          manager={effectiveManager}
           strategyCodename={displayName}
         />
       </section>
@@ -170,7 +258,7 @@ export default async function TearSheetPage({
                   key={metric}
                   metric={metric}
                   percentile={percentiles[metric]}
-                  categoryLabel={categorySlug ?? undefined}
+                  categoryLabel={categorySlug}
                 />
               ),
             )}
