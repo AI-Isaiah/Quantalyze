@@ -133,7 +133,25 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     // requires that the rendered rows contain ZERO seed-name matches —
     // a strict contract. If the rows include any seed name on first
     // paint, the DEFAULTS.hide_examples=true invariant has regressed.
+    //
+    // Specialist T-J03 (testing) — detect the documented "no strategies"
+    // empty-state row and fail with a fixture-diagnostic instead of
+    // vacuously passing. The seed strategies MUST be queryable to make
+    // the post-toggle assertion meaningful; if they aren't, the test DB
+    // is missing the demo seed data (run `npm run seed:demo` against
+    // TEST_SUPABASE_URL) and we want to surface that, not green-light
+    // a no-op test.
     const preToggleRowsText = await rowsLocator.allTextContents();
+    const hasEmptyStateRow = preToggleRowsText.some((t) =>
+      /no strategies/i.test(t),
+    );
+    expect(
+      hasEmptyStateRow,
+      "discovery table must not render the 'no strategies' empty state " +
+        "for the fresh allocator BEFORE toggling Hide examples — this " +
+        "indicates the test DB lacks the demo seed data (run " +
+        "`npm run seed:demo` against TEST_SUPABASE_URL before re-running)",
+    ).toBe(false);
     const preToggleSeedMatches = preToggleRowsText.filter((t) =>
       SEED_NAMES_REGEX.test(t),
     );
