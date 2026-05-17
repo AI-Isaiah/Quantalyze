@@ -697,7 +697,28 @@ async def _score_one_allocator(
                 "exclusion_reason": None,
                 "exclusion_provenance": None,
             })
+        # Red-team CRITICAL fix (audit-2026-05-07): `explicitly_excluded` is a
+        # NEW ExclusionReason value introduced by H-0705 but the SQL CHECK on
+        # match_candidates.exclusion_reason (supabase/migrations/
+        # 20260407164606_perfect_match.sql:111-114) still allows only 7 values.
+        # Persisting `explicitly_excluded` here would trigger CHECK violation
+        # in the bulk insert below and tear down the entire match_batches
+        # parent via the rollback path. Per the audit's in-scope fix (option b:
+        # this worktree has no migrations), we drop these rows at the
+        # persistence boundary — they remain in the in-memory `excluded` list
+        # the caller receives, and `excluded_count` on match_batches already
+        # uses `excluded_total` so the row-count audit trail stays honest.
+        # TODO(audit-2026-05-07 follow-up PR): ship a migration that widens
+        # the CHECK to include 'explicitly_excluded', then remove this filter.
         for exc in result["excluded"]:
+            if exc["exclusion_reason"] == "explicitly_excluded":
+                logger.info(
+                    "match_engine: dropping explicitly_excluded row from "
+                    "match_candidates persistence (allocator=%s, strategy=%s) "
+                    "— pending SQL CHECK migration",
+                    allocator_id, exc["strategy_id"],
+                )
+                continue
             rows_to_insert.append({
                 "batch_id": batch_id,
                 "allocator_id": allocator_id,
