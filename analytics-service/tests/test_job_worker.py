@@ -15,9 +15,8 @@ pinned in:
    services.job_worker.run_* so we verify the dispatcher is the routing
    surface, not the handlers themselves.
 
-3. dispatch timeout + stub paths — handlers that exceed their per-kind
-   timeout return DispatchResult(FAILED, transient). poll_positions is
-   a stub that returns DispatchResult(FAILED, permanent) until commit 3.
+3. dispatch timeout — handlers that exceed their per-kind timeout
+   return DispatchResult(FAILED, transient).
 
 All tests mock at the services.job_worker layer — no Supabase, no ccxt,
 no HTTPX, no real workload. Exchanges and DB are the outer boundary.
@@ -315,8 +314,8 @@ class TestDispatchRouting:
 
     @pytest.mark.asyncio
     async def test_dispatch_routes_poll_positions(self) -> None:
-        """Commit 3 wires the real poll_positions handler. Verify dispatch
-        routes kind='poll_positions' to run_poll_positions_job."""
+        """Verify dispatch routes kind='poll_positions' to
+        run_poll_positions_job."""
         job = {"id": "job-4", "kind": "poll_positions", "strategy_id": "strat-3"}
         with patch(
             "services.job_worker.run_poll_positions_job",
@@ -942,21 +941,21 @@ class TestSyncTradesEnqueuesComputeAnalytics:
 class TestSyncTradesEmptyResponsePreservesHistory:
     """audit-2026-05-07 G12.A.4 (HIGH conf=9) — regression gate.
 
-    Pre-fix history: `if trades:` (job_worker.py:571) means an empty list
-    skips the sync_trades RPC; a non-empty list with a single trade still
-    invokes sync_trades, but migration 110 scopes the DELETE to the JSONB
-    payload's [MIN,MAX] timestamp window so older rows survive. There was
-    no Python-level test asserting either property — these tests pin them
-    so a future refactor that drops the `if trades:` guard or unscopes the
-    DELETE fails loud.
+    Pre-fix history: the `if trades:` guard in run_sync_trades_job means
+    an empty list skips the sync_trades RPC; a non-empty list with a
+    single trade still invokes sync_trades, but migration 110 scopes the
+    DELETE to the JSONB payload's [MIN,MAX] timestamp window so older
+    rows survive. There was no Python-level test asserting either
+    property — these tests pin them so a future refactor that drops the
+    `if trades:` guard or unscopes the DELETE fails loud.
     """
 
     @pytest.mark.asyncio
     async def test_sync_trades_empty_response_preserves_existing(self) -> None:
         """Mock fetch_all_trades to return []. The sync_trades RPC must
-        NOT be called (the `if trades:` guard at job_worker.py:571 short-
-        circuits). Pre-existing daily_pnl rows in the DB therefore survive
-        untouched."""
+        NOT be called (the `if trades:` guard in run_sync_trades_job
+        short-circuits). Pre-existing daily_pnl rows in the DB therefore
+        survive untouched."""
         from services.job_worker import run_sync_trades_job
 
         mock_exchange = AsyncMock()
@@ -2016,3 +2015,270 @@ class TestComputeIntroSnapshot:
         assert result.outcome == DispatchOutcome.FAILED
         assert result.error_kind == "permanent"
         assert "contact_request_id" in (result.error_message or "")
+
+
+class TestRedTeamSyncTradesPreDrainPreservesBybitFundingFlag:
+    """Audit-2026-05-07 red-team CRITICAL conf=9 — ``fetch_daily_pnl``
+    (via ``fetch_all_trades``) sets ``bybit_daily_pnl_includes_funding``
+    and the SUBSEQUENT ``fetch_raw_trades`` resets the DQ buffer at its
+    entry seam, wiping the flag. The fix: drain the per-task DQ buffer
+    BETWEEN the two calls and merge into ``exchange_dq_flags`` so the
+    funding flag survives to land on ``strategy_analytics``.
+
+    This test exercises the full ``run_sync_trades_job`` path: plants
+    the flag during the patched ``fetch_all_trades`` (mirroring how the
+    real Bybit branch behaves), then asserts the strategy_analytics
+    upsert call carries the flag.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bybit_funding_flag_lands_on_strategy_analytics(
+        self,
+    ) -> None:
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        from services.job_worker import run_sync_trades_job
+
+        # Clean any residue from prior tests on this asyncio task.
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-bybit", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "bybit",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        mock_rpc = MagicMock()
+        mock_rpc.execute.return_value = MagicMock(data=5)
+        mock_ctx.supabase.rpc.return_value = mock_rpc
+
+        # Capture the data_quality_flags payload from the upsert.
+        upsert_payloads: list[dict] = []
+
+        def _capture_upsert(payload, on_conflict=None, **kwargs):
+            upsert_payloads.append(payload)
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=[])
+            return stub
+
+        def _table(name):
+            t = MagicMock()
+            # update().eq().execute() chain.
+            mock_update = MagicMock()
+            mock_eq = MagicMock()
+            mock_eq.execute.return_value = MagicMock(data=[])
+            mock_update.eq.return_value = mock_eq
+            t.update.return_value = mock_update
+            # upsert capture for strategy_analytics.
+            t.upsert.side_effect = _capture_upsert
+            # select().eq().maybe_single().execute() returns no existing flags.
+            mock_sel = MagicMock()
+            mock_sel_eq = MagicMock()
+            mock_sel_maybe = MagicMock()
+            mock_sel_maybe.execute.return_value = MagicMock(data=None)
+            mock_sel_eq.maybe_single.return_value = mock_sel_maybe
+            mock_sel.eq.return_value = mock_sel_eq
+            t.select.return_value = mock_sel
+            return t
+
+        mock_ctx.supabase.table.side_effect = _table
+
+        # fetch_all_trades planting the C-0319 funding flag mirrors what
+        # the real Bybit branch in services/exchange.py does inside
+        # fetch_daily_pnl when items are returned by closed_pnl.
+        async def _fake_fetch_all_trades(*args, **kwargs):
+            _record_dq_flag("bybit_daily_pnl_includes_funding", True)
+            return [{"test": "trade"}]
+
+        # fetch_raw_trades's real implementation resets the buffer at
+        # entry; we faithfully reproduce that behaviour so the test
+        # would FAIL without the pre-drain fix in run_sync_trades_job.
+        async def _fake_fetch_raw_trades(*args, **kwargs):
+            from services.exchange import _LAST_DQ_FLAGS
+            _LAST_DQ_FLAGS.set({})  # entry-seam reset
+            return []
+
+        job = {
+            "id": "job-bybit-funding",
+            "kind": "sync_trades",
+            "strategy_id": "strat-bybit",
+        }
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(side_effect=_fake_fetch_all_trades),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch(
+            "services.job_worker.fetch_raw_trades",
+            new=AsyncMock(side_effect=_fake_fetch_raw_trades),
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
+        ):
+            result = await run_sync_trades_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        # The Bybit funding flag must have made it into the
+        # strategy_analytics upsert payload's data_quality_flags JSONB.
+        matched = [
+            p for p in upsert_payloads
+            if isinstance(p, dict)
+            and (p.get("data_quality_flags") or {}).get(
+                "bybit_daily_pnl_includes_funding"
+            )
+            is True
+        ]
+        assert matched, (
+            "C-0319 bybit_daily_pnl_includes_funding flag was not stamped "
+            "onto strategy_analytics — the worker-side pre-drain regressed. "
+            f"Upsert payloads: {upsert_payloads!r}"
+        )
+
+
+class TestRedTeamSyncTradesRateLimitDrainsDqBuffer:
+    """Audit-2026-05-07 red-team HIGH conf=8 — when
+    ``ccxt.RateLimitExceeded`` bubbles out of ``fetch_all_trades`` /
+    ``fetch_usdt_balance`` / ``fetch_raw_trades``, the per-task DQ
+    buffer can contain partial accumulations that would leak onto the
+    next compute_jobs task on the same asyncio task. The fix adds a
+    ``get_and_clear_last_dq_flags()`` to the
+    ``except ccxt.RateLimitExceeded`` arm before the re-raise.
+    """
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_in_fetch_all_trades_drains_buffer(self) -> None:
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        from services.job_worker import run_sync_trades_job
+
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-rl", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "bybit",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        async def _fetch_all_trades_429(*args, **kwargs):
+            # Plant a flag the way fetch_daily_pnl's Bybit branch would
+            # before the rate-limit hit on a later request.
+            _record_dq_flag("bybit_daily_pnl_includes_funding", True)
+            raise ccxt.RateLimitExceeded("429 too many requests")
+
+        async def _stamp_429(*args, **kwargs):
+            return None
+
+        job = {
+            "id": "job-rl",
+            "kind": "sync_trades",
+            "strategy_id": "strat-rl",
+        }
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(side_effect=_fetch_all_trades_429),
+        ), patch(
+            "services.job_worker._stamp_429",
+            new=AsyncMock(side_effect=_stamp_429),
+        ):
+            with pytest.raises(ccxt.RateLimitExceeded):
+                await run_sync_trades_job(job)
+
+        # The drain in the RateLimitExceeded arm must have left the
+        # buffer empty so the next task on this asyncio task sees a
+        # clean slate.
+        assert get_and_clear_last_dq_flags() == {}, (
+            "RateLimitExceeded arm leaked DQ flags forward — the bare "
+            "re-raise pattern is back."
+        )
+
+
+class TestRedTeamReconcileUntypedExceptionDrainsBuffer:
+    """Audit-2026-05-07 red-team HIGH conf=8 — ``run_reconcile_strategy_job``
+    only drained the per-task DQ buffer on three explicit exception
+    classes (success, RateLimitExceeded, ColdStartSymbolDiscoveryError).
+    Every other class — BinancePerSymbolFetchError, ccxt.NetworkError,
+    ccxt.ExchangeError, generic Exception — escaped without draining,
+    leaking partial accumulations onto the next task. The fix adds a
+    bare ``except Exception`` arm that drains + re-raises.
+    """
+
+    @pytest.mark.asyncio
+    async def test_untyped_exception_in_fetch_raw_trades_drains_buffer(
+        self,
+    ) -> None:
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        from services.job_worker import run_reconcile_strategy_job
+
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-rec", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "binance",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        async def _fetch_raw_partial_then_fail(*args, **kwargs):
+            # Mirror a Binance partial-symbol failure path: the helper
+            # would record partial-symbol failures via _record_dq_flag
+            # before raising a generic exception on a later branch.
+            _record_dq_flag("binance_partial_symbols", ["BTCUSDT", "ETHUSDT"])
+            raise ccxt.NetworkError("network blip mid-fetch")
+
+        job = {
+            "id": "job-rec",
+            "kind": "reconcile_strategy",
+            "strategy_id": "strat-rec",
+        }
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_raw_trades",
+            new=AsyncMock(side_effect=_fetch_raw_partial_then_fail),
+        ):
+            with pytest.raises(ccxt.NetworkError):
+                await run_reconcile_strategy_job(job)
+
+        # Bare-except drain must have cleaned the buffer so the next
+        # compute_jobs task on this asyncio task sees nothing leftover.
+        assert get_and_clear_last_dq_flags() == {}, (
+            "Reconcile untyped-exception arm leaked DQ flags forward — "
+            "the bare drain is missing."
+        )

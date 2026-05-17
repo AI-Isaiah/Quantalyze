@@ -45,7 +45,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 import ccxt
 from cryptography.fernet import InvalidToken
@@ -60,6 +60,7 @@ from services.exchange import (
     fetch_all_trades,
     fetch_raw_trades,
     fetch_usdt_balance,
+    get_and_clear_last_dq_flags,
     parse_since_ms,
 )
 from services.positions import fetch_positions, persist_position_snapshots
@@ -153,8 +154,7 @@ class DispatchOutcome(str, Enum):
                 calls mark_compute_job_failed(id, error, error_kind).
     DEFERRED  - handler itself already called defer_compute_job (e.g.
                 circuit-breaker cooldown). main_worker must NOT call
-                mark_* — the DB row was already transitioned. (Commit 4
-                path; commit 2 never returns this.)
+                mark_* — the DB row was already transitioned.
     """
 
     DONE = "done"
@@ -186,7 +186,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "sync_trades": 15 * 60,      # 15 minutes (supports 90-day raw fill backfill)
     "compute_analytics": 15 * 60,  # 15 minutes
     "compute_portfolio": 10 * 60,  # 10 minutes
-    "poll_positions": 3 * 60,    # 3 minutes (stub; real handler lands commit 3)
+    "poll_positions": 3 * 60,    # 3 minutes (services.positions.fetch_positions)
     "sync_funding": 3 * 60,      # 3 minutes (funding volume << trade volume)
     "reconcile_strategy": 5 * 60,  # 5 minutes (fetch_my_trades + DB scan + diff)
     "compute_intro_snapshot": 2 * 60,  # 2 minutes (pure DB; no exchange I/O)
@@ -668,8 +668,24 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     )
 
     raw_fills: list = []
+    # Audit-2026-05-07 red-team CRITICAL conf=9 — ``fetch_all_trades`` /
+    # ``fetch_daily_pnl`` writes ``bybit_daily_pnl_includes_funding`` (the
+    # C-0319 double-count signal) into the per-task DQ buffer. The next
+    # call (``fetch_raw_trades``) resets the buffer at its entry seam as
+    # defense-in-depth against cross-task leaks; that reset would wipe
+    # the funding flag before we can read it. Drain the buffer HERE so
+    # the daily-PnL flags are captured into ``exchange_dq_flags`` and
+    # survive the ``fetch_raw_trades`` reset for the strategy_analytics
+    # stamp below.
+    exchange_dq_flags: dict[str, Any] = {}
     try:
         trades = await fetch_all_trades(ctx.exchange, since_ms=since_ms)
+        # Drain BEFORE the next exchange call so the Bybit funding flag
+        # (and any other daily-PnL-set keys) does not get clobbered by
+        # ``fetch_raw_trades``' entry-seam reset on the same asyncio task.
+        daily_pnl_dq_flags = get_and_clear_last_dq_flags()
+        if daily_pnl_dq_flags:
+            exchange_dq_flags.update(daily_pnl_dq_flags)
         account_balance = await fetch_usdt_balance(ctx.exchange)
 
         # --- Phase 2: Raw fill ingestion (gated by feature flag) ---
@@ -683,12 +699,36 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         # used to be log-only.
         phase2_failed = False
         phase2_error_message: str | None = None
+        # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — DQ flags surfaced by
+        # ``fetch_raw_trades`` (partial-symbol failures, page-cap truncation,
+        # fee-currency mismatch) MUST be drained immediately after the
+        # await per the contract in ``services.exchange``. Otherwise the
+        # ContextVar buffer leaks into the next call on the same task AND
+        # the strategy_analytics stamp loop below cannot merge them into
+        # ``data_quality_flags`` — silently dropping the very signals
+        # that batch added.
         if _RAW_TRADE_INGESTION_ENABLED:
             try:
                 raw_fills = await fetch_raw_trades(
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
                 )
+                fetch_raw_dq_flags = get_and_clear_last_dq_flags()
+                if fetch_raw_dq_flags:
+                    # Shallow merge — last-write-wins per key. The daily-PnL
+                    # branch and the fetch_raw branch own disjoint key
+                    # namespaces in practice (daily PnL: bybit_daily_pnl_*;
+                    # fetch_raw: binance_partial_symbols, sync_truncated_*,
+                    # fee_currency_mismatch*), so this is effectively a
+                    # union.
+                    exchange_dq_flags.update(fetch_raw_dq_flags)
             except Exception as e:
+                # Drain even on failure so a partial accumulation does not
+                # leak into the next call on this asyncio task. The drained
+                # value is intentionally discarded — Phase 2 failed
+                # end-to-end, so the H-0691 ``phase2_*`` stamp below is the
+                # canonical signal; mixing partial truncation flags would
+                # mislead operators.
+                get_and_clear_last_dq_flags()
                 # Phase 2 failure should NOT fail Phase 1.
                 # G12.B.1 typed ColdStartSymbolDiscoveryError still lands
                 # here intentionally — for sync_trades a cold-start
@@ -716,6 +756,17 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 phase2_error_message = str(e)[:200]
     except ccxt.RateLimitExceeded:
         await _stamp_429(ctx.supabase, ctx.key_row)
+        # Audit-2026-05-07 red-team HIGH conf=8 — RateLimitExceeded can
+        # bubble out of ``fetch_all_trades`` / ``fetch_usdt_balance`` /
+        # ``fetch_raw_trades`` AFTER the daily-PnL branch has populated
+        # ``bybit_daily_pnl_includes_funding`` (or fetch_raw has
+        # accumulated partial truncation flags). Worker pools reuse
+        # asyncio tasks (see ``run_reconcile_strategy_job`` comment); a
+        # bare re-raise here would leak those flags onto the next
+        # compute_jobs task scheduled on the same asyncio task.
+        # Mirror the explicit drain in ``run_reconcile_strategy_job``'s
+        # RateLimitExceeded handler.
+        get_and_clear_last_dq_flags()
         raise
     finally:
         try:
@@ -917,8 +968,8 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # signal — including a successful fetch that returned ZERO new fills
     # (paused account, weekend, flat window). The earlier gate of
     # `phase2_complete` only flipped True when at least one batch was
-    # persisted (line 775's `if raw_fills:`), so a healthy strategy with
-    # no new fills would carry a stale phase2_fill_ingestion_failed=True
+    # persisted (gated by the `if raw_fills:` block above), so a healthy
+    # strategy with no new fills would carry a stale phase2_fill_ingestion_failed=True
     # flag forever (HIGH code-review finding). We skip the read entirely
     # only when Phase 2 was not run at all (_RAW_TRADE_INGESTION_ENABLED
     # is False).
@@ -953,6 +1004,19 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
 
         flag_was_set = existing_flags.get("phase2_fill_ingestion_failed") is True
 
+        # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — merge the DQ flags
+        # drained from ``fetch_raw_trades`` (binance_partial_symbols,
+        # sync_truncated_okx/_pages, sync_truncated_bybit/_pages,
+        # fee_currency_mismatch, fee_currency_mismatch_samples) into the
+        # row payload so they actually land on ``strategy_analytics``. We
+        # do a shallow merge (last-write-wins per key) — analytics_runner
+        # owns a disjoint key namespace (benchmark_*, sibling_kinds_*) so
+        # cross-clobber is not a concern. ``exchange_dq_flags`` is {} on
+        # the clean path (most common) so this is a no-op then.
+        exchange_dq_flags_present = bool(exchange_dq_flags)
+        if exchange_dq_flags_present:
+            existing_flags.update(exchange_dq_flags)
+
         if phase2_failed:
             existing_flags["phase2_fill_ingestion_failed"] = True
             existing_flags["phase2_error"] = phase2_error_message or "unknown"
@@ -982,6 +1046,11 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 existing_flags["phase2_recovered_at"] = (
                     datetime.now(timezone.utc).isoformat()
                 )
+                write_needed = True
+            elif exchange_dq_flags_present:
+                # Phase 2 clean but ``fetch_raw_trades`` surfaced a DQ
+                # signal (e.g. binance_partial_symbols, sync_truncated_*).
+                # Persist so the admin health card can see it.
                 write_needed = True
             else:
                 write_needed = False
@@ -1522,8 +1591,19 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
         exchange_fills = await fetch_raw_trades(
             ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
         )
+        # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — drain the per-task
+        # DQ buffer per the contract in ``services.exchange``. Reconcile
+        # is an informational, read-only diff; it does not own a
+        # strategy_analytics row to stamp these into, so we discard the
+        # value. The drain is still required so the buffer is not left
+        # populated for the NEXT call on this asyncio task (worker pools
+        # reuse tasks).
+        get_and_clear_last_dq_flags()
     except ccxt.RateLimitExceeded:
         await _stamp_429(ctx.supabase, ctx.key_row)
+        # Drain so a rate-limit-truncated partial accumulation does not
+        # leak forward on this asyncio task.
+        get_and_clear_last_dq_flags()
         raise
     except ColdStartSymbolDiscoveryError as exc:
         # Cross-PR specialist finding: ColdStartSymbolDiscoveryError
@@ -1548,6 +1628,23 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
             strategy_id, exc,
         )
         exchange_fills = []
+        # ColdStart raised before the per-exchange branch could populate
+        # the DQ buffer with any meaningful data, but drain defensively
+        # in case the entry-seam reset+partial work left a residue.
+        get_and_clear_last_dq_flags()
+    except Exception:
+        # Audit-2026-05-07 red-team HIGH conf=8 — every untyped exception
+        # path that escapes ``fetch_raw_trades`` (BinancePerSymbolFetchError,
+        # ccxt.NetworkError, ccxt.ExchangeError, generic Exception) used to
+        # propagate WITHOUT draining the per-task DQ buffer. Worker pools
+        # reuse asyncio tasks, so a partial accumulation (e.g. truncated
+        # binance_partial_symbols list or sync_truncated_okx=True) would
+        # leak forward and surface on an unrelated strategy's
+        # ``data_quality_flags`` row. The bare drain closes the gap left by
+        # the explicit per-class handlers; we re-raise unchanged so the
+        # outer dispatcher's classifier still sees the original exception.
+        get_and_clear_last_dq_flags()
+        raise
     finally:
         try:
             await ctx.exchange.close()

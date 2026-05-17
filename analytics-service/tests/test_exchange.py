@@ -2723,13 +2723,14 @@ class TestG12BOkxFundingRowContract:
     live in ``private_get_account_bills``. This test codifies the
     contract: a fills_history response is treated as trades. If OKX
     ever changes the endpoint shape to mix funding rows in, the
-    qty<=0 guard in services/position_reconstruction.py:533 would still
+    qty<=0 guard in services/position_reconstruction.py would still
     skip them — but the regression test below pins the current
     behavior so an accidental change in either layer is visible.
 
     The test treats a hypothetical funding-shaped row (fillSz='0',
     subType='8' — the OKX bill subType for funding fee) as a non-fill:
-    qty<=0 means it's filtered downstream and contributes 0 quantity.
+    qty<=0 means it's filtered downstream by the qty<=0 guard in
+    services/position_reconstruction.py and contributes 0 quantity.
     """
 
     @pytest.mark.asyncio
@@ -2789,7 +2790,7 @@ class TestG12BOkxFundingRowContract:
         assert normal["quantity"] == 0.1
         assert funding["quantity"] == 0.0, (
             "Funding-shaped row must carry quantity=0 so the qty<=0 "
-            "guard at services/position_reconstruction.py:533 filters "
+            "guard in services/position_reconstruction.py filters "
             "it out without inflating fill totals."
         )
 
@@ -3122,9 +3123,10 @@ class TestFetchMarkPricesFailLoud:
         )
 
 
-# Review-cluster gate (audit-2026-05-07): the Binance branch fix at
-# exchange.py:552-562 — pre-gate it had NO regression test. A /simplify
-# pass that drops the new WARNING would land silently.
+# Review-cluster gate (audit-2026-05-07): the Binance branch fix in
+# fetch_daily_pnl's `except Exception` arm — pre-gate it had NO
+# regression test. A /simplify pass that drops the new WARNING would
+# land silently.
 class TestFetchDailyPnlBinanceFailLoud:
     """Pre-sweep, the Binance futures-income failure path silently
     swallowed the exception and fell back to BTC spot trades with no
@@ -3151,9 +3153,10 @@ class TestFetchDailyPnlBinanceFailLoud:
             )
         )
         # The fallback returns one trade so we can verify the path was taken.
-        # Note: ccxt trade dicts use `datetime` as the ISO-string key (see
-        # exchange.py:572 — `t["datetime"]`), distinct from Python's
-        # datetime module. The fallback ALSO reads `t["symbol"]` /
+        # Note: ccxt trade dicts use `datetime` as the ISO-string key (the
+        # Binance fallback in fetch_daily_pnl reads `t["datetime"]`),
+        # distinct from Python's datetime module. The fallback ALSO reads
+        # `t["symbol"]` /
         # `t["side"]` / etc. via subscript (no .get default), so the
         # mock must populate every required key.
         mock_exchange.fetch_my_trades = AsyncMock(
@@ -3317,3 +3320,1055 @@ class TestFetchDailyPnlBinanceFailLoud:
             assert rec.exc_info is None, (
                 "Binance WARNING must not carry exc_info=True (HMAC-leak fix)"
             )
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 cluster-I regression tests
+# ---------------------------------------------------------------------------
+# Pins the new data-quality-flag surface, finite-value validation, fee-
+# currency mismatch detection, raw_data trimming, and OKX funding-bill
+# filter introduced by FIX-LIST-FIXED-cluster-I. Each test fails without
+# the corresponding fix.
+# ---------------------------------------------------------------------------
+
+
+class TestClusterIDqFlagBuffer:
+    """C-0225 / M-0663 / H-0670 — per-task DQ flag buffer for partial
+    failures, sync truncation, and fee-currency mismatches."""
+
+    def test_get_and_clear_returns_empty_on_no_flags(self) -> None:
+        """A clean call returns ``{}`` and leaves the buffer empty."""
+        from services.exchange import get_and_clear_last_dq_flags
+        # Drain whatever any previous test left behind.
+        get_and_clear_last_dq_flags()
+        assert get_and_clear_last_dq_flags() == {}
+
+    def test_record_dq_flag_merges_list_dedup(self) -> None:
+        """List values dedup-merge instead of replacing."""
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+        _record_dq_flag("binance_partial_symbols", ["BTCUSDT"])
+        _record_dq_flag(
+            "binance_partial_symbols", ["BTCUSDT", "ETHUSDT"],
+        )
+        flags = get_and_clear_last_dq_flags()
+        assert flags["binance_partial_symbols"] == ["BTCUSDT", "ETHUSDT"]
+        # Drain.
+        assert get_and_clear_last_dq_flags() == {}
+
+    def test_record_dq_flag_bool_or_merge(self) -> None:
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+        _record_dq_flag("sync_truncated_okx", False)
+        _record_dq_flag("sync_truncated_okx", True)
+        flags = get_and_clear_last_dq_flags()
+        assert flags["sync_truncated_okx"] is True
+
+
+class TestClusterIBinancePartialFailureSurface:
+    """C-0225 — partial-symbol Binance failures now surface to the DQ
+    buffer so the worker can stamp them into ``strategy_analytics``."""
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_records_failed_symbols(self) -> None:
+        import asyncio
+        from services.exchange import (
+            fetch_raw_trades,
+            get_and_clear_last_dq_flags,
+        )
+
+        # Drain any flags from previous tests.
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+
+        async def _fetch_my_trades(symbol, since=None, limit=None):
+            if "ETH" in symbol:
+                raise RuntimeError("simulated ETH 500")
+            return [
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "buy",
+                    "price": 60000.0,
+                    "amount": 0.1,
+                    "datetime": "2024-01-01T00:00:00Z",
+                    "order": "ord-1",
+                    "id": "fill-1",
+                    "fee": {"cost": 0.6, "currency": "USDT"},
+                    "takerOrMaker": "taker",
+                    "info": {},
+                },
+            ]
+
+        mock_exchange.fetch_my_trades = _fetch_my_trades
+
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            if name == "trades":
+                _attach_paginated_chain(
+                    mock_eq2,
+                    [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}],
+                )
+                mock_eq1.eq.return_value = mock_eq2
+            else:
+                _attach_paginated_chain(mock_eq1, [])
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+
+        flags = get_and_clear_last_dq_flags()
+        # Pre-fix: flags["binance_partial_symbols"] was never set, partial
+        # failures were log-only and the allocator dashboard rendered the
+        # successful subset as canonical. This is the load-bearing assert.
+        assert "binance_partial_symbols" in flags
+        assert "ETHUSDT" in flags["binance_partial_symbols"]
+        assert "BTCUSDT" not in flags["binance_partial_symbols"]
+
+    @pytest.mark.asyncio
+    async def test_full_success_leaves_dq_buffer_clean(self) -> None:
+        """A clean sync must NOT leak a stale flag into the buffer."""
+        import asyncio
+        from services.exchange import (
+            fetch_raw_trades,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+        mock_exchange.fetch_my_trades = AsyncMock(return_value=[
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "price": 60000.0,
+                "amount": 0.1,
+                "datetime": "2024-01-01T00:00:00Z",
+                "order": "ord-1",
+                "id": "fill-1",
+                "fee": {"cost": 0.6, "currency": "USDT"},
+                "takerOrMaker": "taker",
+                "info": {},
+            },
+        ])
+
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            if name == "trades":
+                _attach_paginated_chain(mock_eq2, [{"symbol": "BTCUSDT"}])
+                mock_eq1.eq.return_value = mock_eq2
+            else:
+                _attach_paginated_chain(mock_eq1, [])
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("binance_partial_symbols") is None
+
+
+class TestClusterIFeeCurrencyMismatch:
+    """H-0670 — fee_currency != quote-currency must surface a DQ flag."""
+
+    def test_infer_quote_currency_handles_common_shapes(self) -> None:
+        from services.exchange import _infer_quote_currency
+        assert _infer_quote_currency("BTC/USDT:USDT") == "USDT"
+        assert _infer_quote_currency("BTC/USDT") == "USDT"
+        assert _infer_quote_currency("BTCUSDT") == "USDT"
+        assert _infer_quote_currency("BTCUSDC") == "USDC"
+        assert _infer_quote_currency("BTCUSD") == "USD"
+        # No confident inference -> None (avoids false positives).
+        assert _infer_quote_currency("BTCETH") is None
+        assert _infer_quote_currency("") is None
+
+    def test_mismatch_sets_flag_and_sample(self) -> None:
+        from services.exchange import (
+            _check_fee_currency_mismatch,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+        _check_fee_currency_mismatch(
+            exchange="binance", symbol="BTCUSDT", fee_currency="BNB",
+        )
+        flags = get_and_clear_last_dq_flags()
+        # Pre-fix: silent. Post-fix: DQ flag with bounded sample list.
+        assert flags["fee_currency_mismatch"] is True
+        assert "binance:BTCUSDT:BNB" in flags["fee_currency_mismatch_samples"]
+
+    def test_match_does_not_set_flag(self) -> None:
+        from services.exchange import (
+            _check_fee_currency_mismatch,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+        _check_fee_currency_mismatch(
+            exchange="binance", symbol="BTCUSDT", fee_currency="USDT",
+        )
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("fee_currency_mismatch") is None
+
+
+class TestClusterIFiniteFloat:
+    """H-0661 (partial) — reject NaN/inf at the ingestion boundary so
+    they can't land in the typed numeric columns and silently corrupt
+    every downstream metric. Full pydantic validation is deferred."""
+
+    def test_finite_float_accepts_normal_values(self) -> None:
+        from services.exchange import _finite_float
+        assert _finite_float("60000.5", label="price") == 60000.5
+        assert _finite_float(60000, label="price") == 60000.0
+        assert _finite_float(0, label="fee") == 0.0
+        # Negative is fine — fee can be a maker rebate.
+        assert _finite_float(-0.6, label="fee") == -0.6
+
+    def test_finite_float_rejects_nan_inf(self) -> None:
+        from services.exchange import _finite_float
+        assert _finite_float(float("nan"), label="price") is None
+        assert _finite_float(float("inf"), label="price") is None
+        assert _finite_float(float("-inf"), label="price") is None
+        assert _finite_float("nan", label="price") is None
+        assert _finite_float("inf", label="price") is None
+
+    def test_finite_float_rejects_non_numeric(self) -> None:
+        from services.exchange import _finite_float
+        assert _finite_float("not-a-number", label="price") is None
+        assert _finite_float(None, label="price") is None
+        # Bool must NOT silently coerce (True is int subclass).
+        assert _finite_float(True, label="price") is None
+        assert _finite_float(False, label="price") is None
+
+
+class TestClusterIRawDataTrim:
+    """M-0665 — raw_data is trimmed to a whitelist of fields downstream
+    consumers actually read, so the JSONB column stays small. Set
+    EXCHANGE_STORE_RAW_DATA=1 in env to opt back into full storage."""
+
+    def test_trim_drops_unrelated_keys(self) -> None:
+        from services.exchange import _trim_raw_data
+        full = {
+            "posSide": "long",
+            "feeCcy": "USDT",
+            "marginMode": "cross",   # not in whitelist
+            "lever": "10",            # not in whitelist
+            "uTime": "1700000000000",  # not in whitelist
+        }
+        trimmed = _trim_raw_data(full)
+        assert trimmed == {"posSide": "long", "feeCcy": "USDT"}
+
+    def test_trim_returns_none_on_empty_after_trim(self) -> None:
+        """No whitelisted keys -> NULL JSONB (lowest storage)."""
+        from services.exchange import _trim_raw_data
+        assert _trim_raw_data({}) is None
+        assert _trim_raw_data({"marginMode": "cross"}) is None
+
+    def test_trim_passes_none_through(self) -> None:
+        from services.exchange import _trim_raw_data
+        assert _trim_raw_data(None) is None
+
+    def test_full_storage_env_opt_in(self, monkeypatch) -> None:
+        """When ``EXCHANGE_STORE_RAW_DATA=1``, no trimming occurs.
+
+        The module-level ``_STORE_FULL_RAW_DATA`` constant is captured
+        at import time, so we patch it directly for this test rather
+        than relying on env var re-reads.
+        """
+        from services import exchange as svc
+        monkeypatch.setattr(svc, "_STORE_FULL_RAW_DATA", True)
+        full = {"marginMode": "cross", "lever": "10"}
+        assert svc._trim_raw_data(full) == full
+
+    def test_make_fill_dict_trims_raw_data_by_default(self) -> None:
+        from services.exchange import _make_fill_dict
+        out = _make_fill_dict(
+            exchange="okx",
+            symbol="BTCUSDTSWAP",
+            side="buy",
+            price=60000.0,
+            quantity=0.1,
+            fee=-0.6,
+            fee_currency="USDT",
+            timestamp="2024-01-01T00:00:00+00:00",
+            exchange_order_id="ord-1",
+            exchange_fill_id="trade-1",
+            is_maker=False,
+            raw_data={
+                "posSide": "long",
+                "marginMode": "cross",  # trimmed away
+                "ordType": "market",     # trimmed away
+            },
+            position_direction="long",
+        )
+        rd = out["raw_data"]
+        # Whitelist survives, plus the canonical position_direction
+        # injected by the factory.
+        assert "posSide" in rd
+        assert rd["position_direction"] == "long"
+        # Unwhitelisted keys must NOT leak through.
+        assert "marginMode" not in rd
+        assert "ordType" not in rd
+
+
+class TestClusterIOkxFundingBillFilter:
+    """C-0319 — OKX fetch_daily_pnl must drop bills with type=='8'
+    (funding-fee) so daily_pnl does not double-count funding that is
+    ALSO ingested via services.funding_fetch. Mirrors the Binance
+    Sprint 5.6 ``incomeType`` filter cutover."""
+
+    @pytest.mark.asyncio
+    async def test_okx_funding_bills_excluded_from_daily_pnl(self) -> None:
+        """A bill with type='8' (funding) must NOT contribute to the
+        aggregated daily total. Pre-fix it was summed into
+        ``daily_pnl`` and rendered on the equity-curve while also
+        being attributed separately under positions.funding_pnl,
+        inflating perceived economic P&L by the funding amount."""
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+
+        # Two bills on the same day, identical magnitude. The funding
+        # bill (type=8) MUST be dropped, leaving only the trade-pnl
+        # bill (type=2). Pre-fix the aggregator would sum both.
+        page = {
+            "data": [
+                {
+                    "billId": "bill-trade",
+                    "type": "2",
+                    "pnl": "10",
+                    "fee": "0",
+                    "ts": "1700000000000",
+                    "instType": "SWAP",
+                    "billType": "trade",
+                },
+                {
+                    "billId": "bill-funding",
+                    "type": "8",
+                    "pnl": "10",
+                    "fee": "0",
+                    "ts": "1700000000000",
+                    "instType": "SWAP",
+                    "billType": "funding",
+                },
+            ]
+        }
+        empty = {"data": []}
+
+        call_state = {"n": 0}
+
+        async def _bills(params):
+            call_state["n"] += 1
+            return page if call_state["n"] == 1 else empty
+
+        mock_exchange.private_get_account_bills = _bills
+        mock_exchange.private_get_account_bills_archive = AsyncMock(
+            return_value={"data": []}
+        )
+
+        result = await fetch_daily_pnl(mock_exchange, since_ms=None)
+        # Exactly one daily-PnL row, equal to the trade bill only.
+        okx_rows = [r for r in result if r.get("exchange") == "okx"]
+        assert len(okx_rows) == 1
+        # Magnitude must equal the trade bill (10), NOT the sum (20).
+        assert okx_rows[0]["price"] == 10.0
+
+
+class TestClusterIBybitFundingFlag:
+    """C-0319 — Bybit's ``closedPnl`` is a COMBINED cashflow (realized
+    + funding) per the funding_fees migration preamble. Until a
+    non-funding endpoint cutover lands, surface a DQ flag so downstream
+    Sharpe / equity-curve math can warn."""
+
+    @pytest.mark.asyncio
+    async def test_bybit_daily_pnl_sets_funding_flag(self) -> None:
+        from services.exchange import (
+            fetch_daily_pnl,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "closedPnl": "12.34",
+                            "createdTime": "1700000000000",
+                        }
+                    ]
+                }
+            }
+        )
+
+        await fetch_daily_pnl(mock_exchange, since_ms=None)
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("bybit_daily_pnl_includes_funding") is True
+
+    @pytest.mark.asyncio
+    async def test_bybit_no_rows_no_flag(self) -> None:
+        """When Bybit returns no closed positions, the flag must NOT
+        fire (otherwise every clean Bybit sync would carry the
+        double-count warning forever)."""
+        from services.exchange import (
+            fetch_daily_pnl,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={"result": {"list": []}}
+        )
+
+        await fetch_daily_pnl(mock_exchange, since_ms=None)
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("bybit_daily_pnl_includes_funding") is None
+
+
+class TestClusterIOkxFiniteValidation:
+    """H-0661 (partial) — OKX fills with NaN/inf price or amount must
+    be dropped, not coerced into the typed numeric column."""
+
+    @pytest.mark.asyncio
+    async def test_okx_nan_fill_dropped(self) -> None:
+        from services.exchange import _fetch_raw_trades_okx
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = AsyncMock(
+            return_value={
+                "data": [
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "side": "buy",
+                        "fillPx": "nan",     # rejected by _finite_float
+                        "fillSz": "0.1",
+                        "fee": "0",
+                        "feeCcy": "USDT",
+                        "ts": "1700000000000",
+                        "ordId": "ord-1",
+                        "tradeId": "trade-1",
+                        "execType": "T",
+                    },
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "side": "sell",
+                        "fillPx": "60000",
+                        "fillSz": "inf",     # rejected
+                        "fee": "0",
+                        "feeCcy": "USDT",
+                        "ts": "1700001000000",
+                        "ordId": "ord-2",
+                        "tradeId": "trade-2",
+                        "execType": "T",
+                    },
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "side": "buy",
+                        "fillPx": "60000",
+                        "fillSz": "0.1",
+                        "fee": "0",
+                        "feeCcy": "USDT",
+                        "ts": "1700002000000",
+                        "ordId": "ord-3",
+                        "tradeId": "trade-3",
+                        "execType": "T",
+                    },
+                ]
+            }
+        )
+
+        result = await _fetch_raw_trades_okx(mock_exchange, None)
+        # Only the third (clean) fill survives.
+        assert len(result) == 1
+        assert result[0]["exchange_fill_id"] == "trade-3"
+
+
+class TestClusterIBybitFeeCurrencyMismatchFlag:
+    """H-0670 — Bybit fill paying fee in BNB on a USDT pair must
+    surface the mismatch flag."""
+
+    @pytest.mark.asyncio
+    async def test_bnb_fee_on_usdt_pair_flags_mismatch(self) -> None:
+        from services.exchange import (
+            _fetch_raw_trades_bybit,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_execution_list = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "execPrice": "60000",
+                            "execQty": "0.1",
+                            "execFee": "0.0001",
+                            "feeCurrency": "BNB",  # mismatch
+                            "execTime": "1700000000000",
+                            "orderId": "ord-1",
+                            "execId": "exec-1",
+                            "isMaker": "false",
+                        }
+                    ],
+                    "nextPageCursor": "",
+                }
+            }
+        )
+
+        await _fetch_raw_trades_bybit(mock_exchange, None)
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("fee_currency_mismatch") is True
+        samples = flags.get("fee_currency_mismatch_samples") or []
+        assert any("BNB" in s for s in samples)
+
+
+class TestClusterIPageCapTruncationFlag:
+    """M-0663 — hitting the 100-page pagination cap must surface a
+    DQ flag so the admin compute-jobs UI / health card can show
+    truncation. Pre-fix it was log-only."""
+
+    @pytest.mark.asyncio
+    async def test_okx_page_cap_records_dq_flag(self) -> None:
+        from services.exchange import (
+            _fetch_raw_trades_okx,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+
+        # Return a full page (100 fills) on every call so the loop never
+        # naturally breaks. The cursor advances each page.
+        call_state = {"n": 0}
+
+        def _fill(idx: int) -> dict:
+            return {
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.001",
+                "fee": "0",
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": f"ord-{idx}",
+                "tradeId": f"trade-{call_state['n']}-{idx}",
+                "execType": "T",
+            }
+
+        async def _history(params):
+            call_state["n"] += 1
+            return {
+                "data": [_fill(i) for i in range(100)],
+            }
+
+        mock_exchange.private_get_trade_fills_history = _history
+
+        result = await _fetch_raw_trades_okx(mock_exchange, since_ms=None)
+        # Page cap is 100 — every page contributes 100 fills.
+        assert len(result) == 100 * 100
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("sync_truncated_okx") is True
+        assert flags.get("sync_truncated_okx_pages") == 100
+
+
+class TestClusterIDqBufferResetOnEntry:
+    """Defense-in-depth: ``fetch_raw_trades`` resets the buffer at
+    entry so a stale flag from a prior call cannot leak into a clean
+    sync's reported flags."""
+
+    @pytest.mark.asyncio
+    async def test_entry_seam_clears_stale_flags(self) -> None:
+        import asyncio
+        from services.exchange import (
+            _record_dq_flag,
+            fetch_raw_trades,
+            get_and_clear_last_dq_flags,
+        )
+        # Plant a stale flag from a prior call.
+        get_and_clear_last_dq_flags()
+        _record_dq_flag("binance_partial_symbols", ["STALE_SYMBOL"])
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+        mock_exchange.fetch_my_trades = AsyncMock(return_value=[])
+
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            if name == "trades":
+                _attach_paginated_chain(mock_eq2, [{"symbol": "BTCUSDT"}])
+                mock_eq1.eq.return_value = mock_eq2
+            else:
+                _attach_paginated_chain(mock_eq1, [])
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+
+        flags = get_and_clear_last_dq_flags()
+        # Stale flag is gone.
+        assert "STALE_SYMBOL" not in (flags.get("binance_partial_symbols") or [])
+
+
+class TestClusterIH0668SymbolNormalizationDocumented:
+    """H-0668 — documents that OKX produces ``BTCUSDTSWAP`` while
+    Binance/Bybit produce ``BTCUSDT``. The fix calls for full
+    canonicalization across exchanges, but doing it silently at the
+    writer would split historical OKX positions (old rows
+    ``BTCUSDTSWAP`` vs new ``BTCUSDT``) without a backfill migration.
+    This test pins the current divergence so a future migration PR
+    has a tripwire — when the divergence is closed, this assertion
+    must be flipped to assert equality.
+
+    Testing-batch fix (2026-05-17): the prior implementation only
+    asserted properties of inline string transforms in the test itself
+    — it never invoked the production canonicalizer, so a regression
+    that changed ``_normalize_fill`` or ``_fetch_raw_trades_okx``
+    would NOT have failed this tripwire. Now we exercise the real
+    paths.
+    """
+
+    @pytest.mark.asyncio
+    async def test_okx_and_binance_currently_produce_different_canonical_forms(
+        self,
+    ) -> None:
+        from services.exchange import _fetch_raw_trades_okx, _normalize_fill
+
+        # OKX production path: invoke _fetch_raw_trades_okx against a
+        # single-fill mock so the assertion reflects whatever the OKX
+        # canonicalizer ACTUALLY produces today (currently
+        # ``instId.replace('-', '')`` inside _fetch_raw_trades_okx).
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = AsyncMock(
+            return_value={
+                "data": [
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "side": "buy",
+                        "fillPx": "60000",
+                        "fillSz": "0.001",
+                        "fee": "0",
+                        "feeCcy": "USDT",
+                        "ts": "1700000000000",
+                        "ordId": "ord-1",
+                        "tradeId": "trade-1",
+                        "execType": "T",
+                    }
+                ]
+            }
+        )
+        okx_rows = await _fetch_raw_trades_okx(mock_exchange, since_ms=None)
+        assert len(okx_rows) == 1
+        okx_canonical = okx_rows[0]["symbol"]
+
+        # Binance production path: invoke _normalize_fill directly with
+        # a CCXT-unified trade dict. The function applies the
+        # slash/colon-suffix transform when building ``normalized_symbol``.
+        binance_fill = _normalize_fill(
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "price": 60000.0,
+                "amount": 0.1,
+                "datetime": "2024-01-01T00:00:00Z",
+                "order": "ord-1",
+                "id": "fill-1",
+                "fee": {"cost": 0.6, "currency": "USDT"},
+                "takerOrMaker": "taker",
+                "info": {},
+            },
+            "binance",
+        )
+        assert binance_fill is not None
+        binance_canonical = binance_fill["symbol"]
+
+        # PRE-fix state (documented). When a follow-up PR introduces a
+        # cross-exchange canonicalizer + backfill migration, flip this
+        # assert to ``==`` and remove the audit note in
+        # FIX-LIST-FIXED-cluster-I.md.
+        assert okx_canonical != binance_canonical
+        assert okx_canonical == "BTCUSDTSWAP"
+        assert binance_canonical == "BTCUSDT"
+
+
+class TestClusterIDqFlagMergeSemantics:
+    """Audit-2026-05-07 testing batch — pin the merge semantics of
+    ``_record_dq_flag``. The docstring promises lists dedup-append,
+    booleans OR-merge, counters sum, but only the list and bool branches
+    had pinned tests. A regression that drops either guard (counter
+    branch, bool guard against True+True=2) would silently corrupt the
+    ``data_quality_flags`` JSONB across every truncated/partial sync.
+    """
+
+    def test_record_dq_flag_int_counter_sums(self) -> None:
+        """Two int writes to the same key MUST sum (not overwrite).
+        The page-count flags (sync_truncated_okx_pages,
+        sync_truncated_bybit_pages) rely on this for cumulative
+        cross-instrument-type totals.
+        """
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+        _record_dq_flag("sync_truncated_okx_pages", 100)
+        _record_dq_flag("sync_truncated_okx_pages", 50)
+        flags = get_and_clear_last_dq_flags()
+        assert flags["sync_truncated_okx_pages"] == 150
+
+    def test_record_dq_flag_bool_does_not_sum(self) -> None:
+        """The ``not isinstance(existing, bool)`` guard prevents True+True
+        from collapsing to 2 under the (int, float) sum branch. A
+        regression dropping the guard would turn a stable boolean
+        truncation signal into an unbounded integer.
+        """
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+        _record_dq_flag("sync_truncated_okx", True)
+        _record_dq_flag("sync_truncated_okx", True)
+        flags = get_and_clear_last_dq_flags()
+        assert flags["sync_truncated_okx"] is True
+
+
+class TestClusterIFeeCurrencyMismatchSampleCap:
+    """H-0670 — ``_FEE_CCY_MISMATCH_SAMPLE_CAP`` bounds the sample list
+    so a strategy with many distinct mismatching pairs can't grow the
+    JSONB row unboundedly. Pin the invariant so a future refactor that
+    drops the cap or flips ordering (last-N vs first-N) is caught.
+    """
+
+    def test_sample_cap_preserves_first_n_samples(self) -> None:
+        from services.exchange import (
+            _FEE_CCY_MISMATCH_SAMPLE_CAP,
+            _check_fee_currency_mismatch,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+        # 20 distinct symbols, all USDT-quoted, all paying fee in BNB.
+        for i in range(20):
+            _check_fee_currency_mismatch(
+                exchange="binance",
+                symbol=f"SYM{i:03d}USDT",
+                fee_currency="BNB",
+            )
+        flags = get_and_clear_last_dq_flags()
+        samples = flags["fee_currency_mismatch_samples"]
+        # Bounded by the cap (16 today).
+        assert len(samples) == _FEE_CCY_MISMATCH_SAMPLE_CAP
+        # First-N preservation contract — adding more mismatches after
+        # the cap is reached MUST NOT evict earlier samples. Operators
+        # otherwise lose representative early observations.
+        assert samples[0] == "binance:SYM000USDT:BNB"
+        assert samples[_FEE_CCY_MISMATCH_SAMPLE_CAP - 1] == (
+            f"binance:SYM{_FEE_CCY_MISMATCH_SAMPLE_CAP - 1:03d}USDT:BNB"
+        )
+
+    def test_unknown_quote_does_not_flag(self) -> None:
+        """Conservative branch in ``_check_fee_currency_mismatch``: when
+        ``_infer_quote_currency`` returns None (exotic pair we can't
+        confidently classify), the mismatch flag MUST NOT fire — else
+        every BTC-pair / exotic-quote strategy false-positives.
+        """
+        from services.exchange import (
+            _check_fee_currency_mismatch,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+        _check_fee_currency_mismatch(
+            exchange="binance", symbol="BTCETH", fee_currency="BNB",
+        )
+        flags = get_and_clear_last_dq_flags()
+        assert flags == {}
+
+
+class TestClusterIDqBufferDrainResetsState:
+    """Audit-2026-05-07 testing batch — pin the drain-and-reset side
+    effect of ``get_and_clear_last_dq_flags`` on a NON-empty buffer.
+    The empty-buffer case is already covered
+    (test_get_and_clear_returns_empty_on_no_flags); without this test,
+    a regression that drops the ``_LAST_DQ_FLAGS.set({})`` line in
+    ``get_and_clear_last_dq_flags`` would leak stale flags to the next
+    sync on the same asyncio task.
+    """
+
+    def test_get_and_clear_resets_after_nonempty_drain(self) -> None:
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        # Clean any residue from previous tests.
+        get_and_clear_last_dq_flags()
+        _record_dq_flag("binance_partial_symbols", ["BTCUSDT"])
+        # First drain returns the populated state.
+        first = get_and_clear_last_dq_flags()
+        assert first["binance_partial_symbols"] == ["BTCUSDT"]
+        # Second drain on the same task MUST return {}.
+        assert get_and_clear_last_dq_flags() == {}
+
+
+class TestClusterIBybitPageCapTruncationFlag:
+    """M-0663 — mirror ``TestClusterIPageCapTruncationFlag`` for the
+    Bybit branch. Bybit uses ``nextPageCursor`` cursor pagination
+    instead of OKX's after-id; the natural-stop logic is different so
+    the regression surface is different too. A regression that flips
+    the Bybit ``natural_break`` invariant would silently drop the
+    truncation signal for every Bybit perp strategy.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bybit_page_cap_records_dq_flag(self) -> None:
+        from services.exchange import (
+            _fetch_raw_trades_bybit,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+
+        # Return a full page (100 fills) AND a non-empty rotating
+        # nextPageCursor on every call so the loop never naturally
+        # breaks via the cursor sentinel. Distinct cursor per call so
+        # the stuck-cursor guard (G12.B.6) does not short-circuit.
+        call_state = {"n": 0}
+
+        async def _execution_list(params):
+            call_state["n"] += 1
+            return {
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "execPrice": "60000",
+                            "execQty": "0.001",
+                            "execFee": "0",
+                            "feeCurrency": "USDT",
+                            "execTime": "1700000000000",
+                            "orderId": f"ord-{call_state['n']}-{i}",
+                            "execId": f"exec-{call_state['n']}-{i}",
+                            "isMaker": "false",
+                        }
+                        for i in range(100)
+                    ],
+                    "nextPageCursor": f"cursor-{call_state['n']}",
+                }
+            }
+
+        mock_exchange.private_get_v5_execution_list = _execution_list
+
+        result = await _fetch_raw_trades_bybit(mock_exchange, since_ms=None)
+        # 100 pages × 100 fills.
+        assert len(result) == 100 * 100
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("sync_truncated_bybit") is True
+        assert flags.get("sync_truncated_bybit_pages") == 100
+
+
+class TestRedTeamPhase2RegressionEntrySeamClobbers:
+    """Audit-2026-05-07 red-team CRITICAL conf=9 — Phase-2 introduced a
+    silent-drop regression: ``fetch_daily_pnl`` sets
+    ``bybit_daily_pnl_includes_funding=True`` (the C-0319 double-count
+    flag) and ``fetch_raw_trades`` then resets the buffer at its entry
+    seam, wiping the flag before the worker can drain it. Pin the full
+    production sequence (fetch_daily_pnl -> fetch_raw_trades) so a
+    regression that drops the worker-side pre-drain is caught at CI.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bybit_funding_flag_survives_fetch_raw_trades_reset(
+        self,
+    ) -> None:
+        """The flag must be capturable by a drain placed BETWEEN
+        fetch_daily_pnl and fetch_raw_trades. This pins the contract
+        the C-0319 fix relies on: callers MUST drain between the two
+        exchange calls.
+        """
+        import asyncio
+        from services.exchange import (
+            fetch_daily_pnl,
+            fetch_raw_trades,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.markets = {}
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "closedPnl": "12.34",
+                            "createdTime": "1700000000000",
+                        }
+                    ]
+                }
+            }
+        )
+        # Bybit fetch_raw_trades reads from private_get_v5_execution_list.
+        mock_exchange.private_get_v5_execution_list = AsyncMock(
+            return_value={"result": {"list": [], "nextPageCursor": ""}}
+        )
+
+        mock_supabase = MagicMock()
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        # Step 1: fetch_daily_pnl (mirrors fetch_all_trades on Bybit).
+        await fetch_daily_pnl(mock_exchange, since_ms=None)
+        # Step 2: simulated worker-side drain — the fix's contract.
+        daily_flags = get_and_clear_last_dq_flags()
+        assert daily_flags.get("bybit_daily_pnl_includes_funding") is True, (
+            "fetch_daily_pnl must set the C-0319 funding flag"
+        )
+
+        # Step 3: fetch_raw_trades — its entry-seam reset must NOT see
+        # the flag (we already drained), so the reset is a no-op in
+        # terms of dropped signal.
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+        post_flags = get_and_clear_last_dq_flags()
+        # No leak: post-fetch_raw_trades drain is empty because Bybit
+        # returned no fills (the truncation flag is not set on a clean
+        # single-page response).
+        assert post_flags.get("bybit_daily_pnl_includes_funding") is None
+
+
+class TestRedTeamListMergeCap:
+    """Audit-2026-05-07 red-team MEDIUM conf=8 — ``_record_dq_flag``'s
+    list-merge branch had no cap. A Binance allocator whose 1500-symbol
+    cold-start sweep all 500-errors could land 1500 strings in the
+    JSONB row, blowing past TOAST inline threshold. Pin the cap at
+    ``_DQ_LIST_MERGE_CAP``.
+    """
+
+    def test_list_merge_caps_at_dq_list_merge_cap(self) -> None:
+        from services.exchange import (
+            _DQ_LIST_MERGE_CAP,
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        # Push more than the cap in one shot.
+        oversized = [f"SYM{i}" for i in range(_DQ_LIST_MERGE_CAP * 4)]
+        _record_dq_flag("binance_partial_symbols", oversized)
+        flags = get_and_clear_last_dq_flags()
+        merged = flags.get("binance_partial_symbols") or []
+        assert len(merged) <= _DQ_LIST_MERGE_CAP, (
+            f"list-merge cap breached: {len(merged)} > {_DQ_LIST_MERGE_CAP}"
+        )
+
+    def test_list_merge_cap_holds_across_appends(self) -> None:
+        """Two separate _record_dq_flag calls that each push 40 items
+        must still respect the global cap on the merged value.
+        """
+        from services.exchange import (
+            _DQ_LIST_MERGE_CAP,
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        _record_dq_flag(
+            "binance_partial_symbols",
+            [f"SYM_A_{i}" for i in range(40)],
+        )
+        _record_dq_flag(
+            "binance_partial_symbols",
+            [f"SYM_B_{i}" for i in range(40)],
+        )
+        flags = get_and_clear_last_dq_flags()
+        merged = flags.get("binance_partial_symbols") or []
+        assert len(merged) <= _DQ_LIST_MERGE_CAP
+
+
+class TestRedTeamContextVarSharedDefaultIsolation:
+    """Audit-2026-05-07 red-team MEDIUM conf=8 — the ContextVar default
+    ``{}`` is shared across every reader. ``get_and_clear_last_dq_flags``
+    must return a defensive copy so callers that mutate the return value
+    cannot mutate the shared module default and leak across tasks.
+    """
+
+    def test_get_and_clear_returns_defensive_copy(self) -> None:
+        from services.exchange import (
+            _record_dq_flag,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        _record_dq_flag("sync_truncated_okx", True)
+        drained = get_and_clear_last_dq_flags()
+        assert drained.get("sync_truncated_okx") is True
+
+        # Mutating the drained dict must NOT pollute the next drain.
+        drained["sync_truncated_okx"] = "POISONED"
+        drained["new_key"] = "leak"
+        next_drain = get_and_clear_last_dq_flags()
+        assert next_drain == {}, (
+            "get_and_clear must return a defensive copy; "
+            f"shared-default leak detected: {next_drain!r}"
+        )
