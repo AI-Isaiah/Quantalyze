@@ -87,8 +87,13 @@ const RATE_LIMIT_EXEMPTIONS: Record<string, string> = {
   // admin's user id now fires BEFORE the irreversible sanitize_user
   // RPC. The exemption was removed once the wrapper landed; if a future
   // refactor strips checkLimit out, this test will catch it.
-  "src/app/api/admin/deletion-requests/[id]/reject/route.ts":
-    "out-of-scope for Lane 5 (review-fix P-followup, I4 discovery); POST handler wrapped by withRole (CSRF only — withRole does NOT enforce rate-limit). Follow-up sweep should add adminActionLimiter at the route layer.",
+  //
+  // audit-2026-05-07 red-team-HIGH (reject-asymmetry-vs-approve-hardening,
+  // 2026-05-17) closed the sibling /reject route's rate-limit gap with
+  // the same `adminActionLimiter` keyed on `del-reject:${user.id}`. The
+  // /reject exemption was removed in the same PR — symmetric hardening
+  // so a stolen admin session cannot pivot to /reject as a back door
+  // for burst denial-of-deletion against pending Art. 17 requests.
 };
 
 /**
