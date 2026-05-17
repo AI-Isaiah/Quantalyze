@@ -1,12 +1,12 @@
 {
   "name": "quantalyze",
-  "version": "0.22.40.52",
+  "version": "0.22.40.53",
   "private": true,
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint --cache --cache-location node_modules/.cache/.eslintcache src/",
+    "lint": "eslint --cache --cache-location node_modules/.cache/.eslintcache src/ && tsx scripts/check-admin-route-manifest.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -14,6 +14,7 @@
     "test:e2e": "playwright test",
     "verify:phase18": "tsx scripts/verify-phase18-artifacts.ts",
     "check:founder-lp-readiness": "tsx scripts/check-founder-lp-readiness.ts",
+    "check:admin-route-manifest": "tsx scripts/check-admin-route-manifest.ts",
     "worker:dev": "cd analytics-service && .venv/bin/python main_worker.py"
   },
   "dependencies": {

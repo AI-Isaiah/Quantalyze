@@ -1,10 +1,11 @@
 import "server-only";
+import { cache } from "react";
 import { NextRequest, NextResponse } from "next/server";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { APP_ROLES, type AppRole } from "@/lib/auth-types";
-import { isAdminUser } from "@/lib/admin";
+import { isAdminUser, isAdminUserGivenUserAppRoles } from "@/lib/admin";
 
 // Re-export so existing server-side callers (routes, tests) keep
 // resolving `import { AppRole, APP_ROLES } from "@/lib/auth"` without a
@@ -24,10 +25,15 @@ export { APP_ROLES, type AppRole };
  *     ('admin','allocator','quant_manager','analyst').
  *   - A user can hold multiple roles. Grants go through an admin UI
  *     and are audited (see src/lib/audit.ts).
- *   - Legacy `profiles.is_admin` remains the canonical admin gate for
- *     `withAdminAuth` + `isAdminUser()` until Sprint 7 fans `withRole`
- *     out across all admin routes. This file ships the new path; the
- *     old path keeps working in parallel.
+ *   - Post audit-2026-05-07 P459 the admin decision is a UNION across
+ *     three signals — `user_app_roles`.role='admin' OR
+ *     `profiles.is_admin = TRUE` OR `ADMIN_EMAIL` env-fallback — wired
+ *     through `isAdminUser()` in `src/lib/admin.ts`. Both `withRole`
+ *     here AND `withAdminAuth` consult that single helper, so a grant
+ *     in any one of the three sources lights up both wrappers. The
+ *     `profiles.is_admin` column stays as one signal in the union until
+ *     ADR-0005's convergence on `withRole` finishes fanning out across
+ *     all admin routes (tracked by `ADMIN_ROUTE_MANIFEST`).
  *
  * The exports below form the Task 7.2 public surface:
  *
@@ -93,8 +99,54 @@ export type GetUserRolesResult =
  * Use this when the caller needs to distinguish "no roles" from
  * "fetch failed" — typically inside a guard that wants to return 500
  * on real DB faults rather than 403.
+ *
+ * M-0501 (audit-2026-05-07): wrapped with React `cache()` so duplicate
+ * calls inside the same logical scope with the same `(supabase, userId)`
+ * pair share one DB round-trip.
+ *
+ * Scoping caveat (audit-2026-05-07 red-team, MED conf 8): React
+ * `cache()`'s storage is initialized by the renderer's per-request
+ * `AsyncLocalStorage`. Inside a Route Handler (Next 16) — which
+ * executes as a serverless function and is NOT rendered — the
+ * storage's request-scope guarantee depends on Next 16 wiring an
+ * equivalent ALS around the route invocation. As of this commit we
+ * do NOT have a regression test that pins the cache to a single
+ * request boundary in Route Handlers; the existing tests pin
+ * (i) same-instance dedup inside a SINGLE call frame and (ii)
+ * cross-instance NON-dedup (so cross-user contamination is impossible
+ * while distinct SupabaseClient instances are passed). The
+ * load-bearing safety property is therefore "per-SupabaseClient-instance
+ * dedup" — NOT a request-scope claim — until the Next 16 Route Handler
+ * cache-scope semantics are pinned by an integration test.
+ *
+ * React `cache()` keys on argument IDENTITY (===), so a cache hit
+ * requires the caller to pass the SAME SupabaseClient instance. The
+ * `withRole` wrapper guarantees this — it builds ONE client via
+ * `createClient()` and reuses it for `getUser()` + `requireRole()` +
+ * the handler context — but `createClient()` itself (in
+ * `src/lib/supabase/server.ts`) is NOT `cache()`-wrapped, so two
+ * independent `await createClient()` calls within the same request
+ * return two distinct clients and bypass this cache. New call sites
+ * outside `withRole` must reuse a single client per request or accept
+ * the duplicate round-trip. Audit reference: audit-2026-05-07 security
+ * S2 (MED conf 8).
+ *
+ * DANGER ZONE (audit-2026-05-07 red-team): if a future refactor wraps
+ * `createClient()` with React.cache() (S2 fix option (a)) AND Route
+ * Handlers do NOT receive a fresh ALS per request, two requests inside
+ * a warm Lambda could share both the SupabaseClient identity AND the
+ * resolved role set — cross-user contamination becomes possible. Before
+ * landing such a refactor, add an integration test that pins request-scope
+ * isolation in Next 16 Route Handlers (the cache-component RFC is the
+ * forcing function for that property). Cross-request caching (JWT custom
+ * claims, Edge Config) is tracked as a Sprint 7 follow-up — see ADR-0005.
+ *
+ * TODO(audit-2026-05-07): replace this docstring's "single logical
+ * scope" hedge with a hard "REQUEST-SCOPED" claim once the Next 16
+ * cache-component RFC lands and the route-handler ALS guarantee is
+ * codified in an integration test in this suite.
  */
-export async function getUserRolesResult(
+export const getUserRolesResult = cache(async function getUserRolesResult(
   supabase: SupabaseClient,
   userId: string,
 ): Promise<GetUserRolesResult> {
@@ -122,13 +174,19 @@ export async function getUserRolesResult(
 
   if (!data) return { ok: true, roles: [] };
 
+  // H-0429 (audit-2026-05-07): the DB CHECK constraint on
+  // `user_app_roles.role` is the source-of-truth narrowing. The TS layer
+  // still treats Supabase's untyped `.from("user_app_roles").select(...)`
+  // shape as a heterogeneous row, so we use `APP_ROLES.includes` as the
+  // type predicate. `String(row.role)` (instead of `row.role as string`)
+  // coerces non-string DB values defensively rather than asserting them.
   const roles = data
-    .map((row) => row.role as string)
+    .map((row: { role: unknown }) => String(row.role))
     .filter((role): role is AppRole =>
       (APP_ROLES as readonly string[]).includes(role),
     );
   return { ok: true, roles };
-}
+});
 
 /**
  * Fetch the role set for a specific user. Returns an empty array if the
@@ -188,14 +246,19 @@ export type RequireRoleResult =
  *   const { roles } = result; // caller's resolved roles
  *
  * If `user` is null (unauthenticated), returns a 401 — matches `withAuth`.
- * If `roles` is empty the caller is treated as "must be authenticated but
- * no specific role required" and the resolved role set is still fetched
- * (one round-trip, consistent with the documented contract).
+ *
+ * Type-level safety (audit-2026-05-07 H-0428): the variadic `roles`
+ * parameter is typed `[AppRole, ...AppRole[]]` — a non-empty tuple — so
+ * calling `requireRole(supabase, user)` with zero roles is a COMPILE
+ * error. Pre-fix the empty-args form silently fell through to an
+ * authenticated-only gate, which is a different security contract
+ * mistakenly accessible through the same function signature. Routes
+ * that need authenticated-only gating should use `withAuth` instead.
  */
 export async function requireRole(
   supabase: SupabaseClient,
   user: User | null,
-  ...roles: AppRole[]
+  ...roles: [AppRole, ...AppRole[]]
 ): Promise<RequireRoleResult> {
   if (!user) {
     return {
@@ -223,13 +286,8 @@ export async function requireRole(
   }
   const userRoles = rolesResult.roles;
 
-  if (roles.length === 0) {
-    // Caller passed no roles — treat as "must be authenticated but no
-    // specific role required". Return the resolved set so the caller
-    // can still branch on role membership without another round-trip.
-    return { roles: userRoles };
-  }
-
+  // The non-empty tuple type on `roles` (H-0428) guarantees length >= 1
+  // here, so we never need a zero-role fall-through branch.
   const hasAny = roles.some((r) => userRoles.includes(r));
   if (!hasAny) {
     // audit-2026-05-07 P459 + P699 + P703: admin-gate consolidation.
@@ -246,8 +304,22 @@ export async function requireRole(
     // Non-admin role requests skip this branch — there is no fallback
     // signal for `allocator` / `quant_manager` / `analyst`, so the
     // user_app_roles check is authoritative for those.
+    //
+    // audit-2026-05-07 red-team (MED conf 8): use the
+    // `isAdminUserGivenUserAppRoles` variant which trusts the
+    // already-fetched `userRoles` as the user_app_roles signal instead
+    // of re-issuing `hasAdminRoleRow`. On the non-admin reject path
+    // this drops DB round-trips from 3 → 2 (and 'admin' is known to be
+    // absent from userRoles here, since `hasAny` evaluated false and
+    // the only admin role is 'admin' itself). The
+    // getUserRolesResult `cache()` still dedupes if a sibling caller
+    // asks for the role set again on the same request.
     if (roles.includes("admin")) {
-      const adminUnion = await isAdminUser(supabase, user);
+      const adminUnion = await isAdminUserGivenUserAppRoles(
+        supabase,
+        user,
+        userRoles,
+      );
       if (adminUnion) {
         // Synthesize the admin role into the resolved set so handlers
         // that read `roles` from the context see a consistent answer.
@@ -285,9 +357,10 @@ export async function requireRole(
  *   - a `NextResponse` — caller is no longer an admin (or never was);
  *     return this response immediately. Caller MUST NOT continue.
  *
- * Typical use:
+ * Typical use (inside a `withRole`-wrapped handler, which has already
+ * run the CSRF check — pass `req` anyway for defense-in-depth):
  *
- *   const guard = await requireAdmin(supabase, user);
+ *   const guard = await requireAdmin(supabase, user, req);
  *   if (guard) return guard;
  *   const { data } = await admin.rpc('sanitize_user', { p_user_id });
  *
@@ -297,13 +370,44 @@ export async function requireRole(
  * DB-side sentinel trigger inside `sanitize_user` (migration 120) is
  * the second half of the defense-in-depth: even if a race slips this
  * TS check, the RPC refuses to fire without an admin context.
+ *
+ * CSRF (audit-2026-05-07 red-team, MED conf 8): when `req` is
+ * supplied, mutating-method calls (POST/PUT/PATCH/DELETE) also pass
+ * through `assertSameOrigin` — closing the gap where a future caller
+ * uses `requireAdmin` STANDALONE inside a mutating route (without
+ * going through `withRole` / `withAdminAuth`) and inherits no CSRF
+ * defense. The `req` parameter is OPTIONAL only to keep the
+ * sub-resource TOCTOU-close call sites (which already ran CSRF in the
+ * outer wrapper) source-compatible; new mutating call sites MUST pass
+ * `req` so the CSRF gate fires.
+ *
+ * Defense-in-depth (call sites are encouraged to pass `req` even
+ * inside a withRole-wrapped handler): an attacker who somehow lands a
+ * mutating POST past the outer wrapper but bypasses CSRF still gets a
+ * second CSRF veto here. The cost is one Origin-header comparison
+ * (no I/O), which is negligible.
  */
 export async function requireAdmin(
   supabase: SupabaseClient,
   user: User | null,
+  req?: NextRequest,
 ): Promise<NextResponse | null> {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  // CSRF defense-in-depth on mutating requests. GET/HEAD/OPTIONS are
+  // safe methods and skip the origin check. We only run the check if
+  // a request object was supplied; older call sites that did not pass
+  // `req` remain compatible (they are all inside withRole/withAdminAuth
+  // wrappers that already ran CSRF). audit-2026-05-07 red-team MED.
+  if (
+    req &&
+    req.method !== "GET" &&
+    req.method !== "HEAD" &&
+    req.method !== "OPTIONS"
+  ) {
+    const csrfError = assertSameOrigin(req);
+    if (csrfError) return csrfError;
   }
   const ok = await isAdminUser(supabase, user);
   if (!ok) {
@@ -317,14 +421,23 @@ export async function requireAdmin(
  *
  * - `user`: the authenticated caller (non-null once the wrapper passes).
  * - `roles`: the caller's full resolved role set (superset of the required roles).
+ *   SECURITY: this is the actor's COMPLETE role membership (e.g.
+ *   `['admin', 'allocator']`). Treat it as internal — do NOT log, echo
+ *   to clients, or include in error responses (audit-2026-05-07 H-0431
+ *   / M-0502). Use `roles.includes(...)` for routing decisions; never
+ *   serialize the array as-is.
  * - `supabase`: the user-scoped Supabase client the wrapper already created.
  *   Reuse this for DB reads/writes that should run under the caller's JWT
  *   (RLS-scoped queries, audit-event emission where `auth.uid()` matters).
  *   For cross-tenant admin writes, still use `createAdminClient()`.
  * - `params`: the resolved Next 16 dynamic-route params — generic over
- *   the route's param shape, defaults to `unknown`.
+ *   the route's param shape. Defaults to `Record<string, never>` so that
+ *   STATIC routes (no `[id]` segment) compile-error on any `params.foo`
+ *   access (audit-2026-05-07 H-0430 / M-0505). Dynamic routes must
+ *   declare the shape explicitly via the generic parameter, e.g.
+ *   `withRole<{ id: string }>("admin")`.
  */
-export type RoleContext<P = unknown> = {
+export type RoleContext<P = Record<string, never>> = {
   user: User;
   roles: AppRole[];
   supabase: SupabaseClient;
@@ -334,8 +447,12 @@ export type RoleContext<P = unknown> = {
 /** Handler signature for `withRole`. Mirrors `withAuth` (Next 16
  * `NextRequest` → `NextResponse`) plus a {@link RoleContext} so the
  * handler gets the user, resolved role set, user-scoped Supabase
- * client, and resolved dynamic-route params in one object. */
-export type RoleHandler<P = unknown> = (
+ * client, and resolved dynamic-route params in one object.
+ *
+ * Default `P = Record<string, never>` so static routes get a context
+ * whose `params` is the empty shape `{}` and any `params.foo` access is
+ * a compile error (audit-2026-05-07 H-0430). */
+export type RoleHandler<P = Record<string, never>> = (
   req: NextRequest,
   ctx: RoleContext<P>,
 ) => Promise<NextResponse>;
@@ -370,14 +487,43 @@ export type RoleHandler<P = unknown> = (
  * This wrapper is a PEER to `withAdminAuth`, not a replacement. See
  * ADR-0005 for the sprint-over-sprint migration plan.
  */
-export function withRole<P = unknown>(...roles: AppRole[]) {
+export function withRole<P = Record<string, never>>(
+  ...roles: [AppRole, ...AppRole[]]
+) {
   return function (handler: RoleHandler<P>) {
     return async (
       req: NextRequest,
+      // H-0430 (audit-2026-05-07): the default `{ params: Promise.resolve({}) }`
+      // is the STATIC-route shape — the cast lands on `Record<string, never>`
+      // (the default `P`) so any `params.foo` access in a wrapper invoked
+      // without a context is a compile error. Dynamic routes pass `P`
+      // explicitly via the wrapper's generic, e.g.
+      // `withRole<{ id: string }>("admin")`, and the runtime ALWAYS
+      // supplies `rawCtx` via Next 16's route invocation — so the default
+      // is only ever reached by static routes / tests, not by a
+      // type-asserted dynamic route missing its params at runtime.
       rawCtx: { params: Promise<P> } = {
         params: Promise.resolve({} as P),
       },
     ): Promise<NextResponse> => {
+      // M-0499 (audit-2026-05-07): auth check runs FIRST so the response
+      // shape for an unauthenticated caller does not depend on Origin
+      // header presence (eliminates the
+      // unauth-with-good-origin = 401 vs unauth-with-bad-origin = 403
+      // information disclosure). CSRF still runs for mutating methods,
+      // but only AFTER the caller is authenticated.
+      const supabase = await createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        return NextResponse.json(
+          { error: "Unauthorized" },
+          { status: 401 },
+        );
+      }
+
       // CSRF defense-in-depth on mutating requests. GET/HEAD/OPTIONS
       // are safe and skip the origin check.
       if (
@@ -389,19 +535,12 @@ export function withRole<P = unknown>(...roles: AppRole[]) {
         if (csrfError) return csrfError;
       }
 
-      const supabase = await createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
       const result = await requireRole(supabase, user, ...roles);
       if ("forbidden" in result) return result.forbidden;
 
-      // `user` is guaranteed non-null here — requireRole returns the 401
-      // branch above when user is null, which we already returned.
       const params = await rawCtx.params;
       return handler(req, {
-        user: user!,
+        user,
         roles: result.roles,
         supabase,
         params,
