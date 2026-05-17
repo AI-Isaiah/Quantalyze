@@ -7,6 +7,15 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.56] - 2026-05-17
+
+**fix(strategies/edit): CSV-uploaded strategies no longer show the irrelevant Exchange API Keys panel.** Symptom (UAT 2026-05-17): editing UC244 FXDaily (a CSV-uploaded strategy) showed an Exchange API Keys side panel with an "Add Key" button — the manager had never connected an exchange, so the panel was both confusing AND an invitation to mis-connect a key to a CSV strategy. Root cause: `src/app/(dashboard)/strategies/[id]/edit/page.tsx` rendered `<ApiKeyManager>`, `<KeyPermissionBadge>`, and `<CsvUpload>` unconditionally — no branch on `strategy.source`. Fix: branch on `strategy.source === 'csv'`. CSV-sourced strategies render only `<CsvUpload>`; every other source (`legacy`, `wizard`, `admin_import`, `allocator_connected`, `okx`, `binance`, `bybit`) renders `<ApiKeyManager>` (+ `<KeyPermissionBadge>` when `api_key_id` is set).
+
+Defensive branch: a CSV strategy with a lingering `api_key_id` (e.g. migrated from API → CSV without clearing the column) still hides the ApiKey panels — pinned by regression test.
+
+10 new tests in `src/app/(dashboard)/strategies/[id]/edit/page.test.tsx`: 1 CSV happy path + 7 non-CSV sources (parametrized) + 1 non-CSV with api_key_id + 1 CSV with lingering api_key_id. All pass.
+
+
 ## [0.22.40.55] - 2026-05-17
 
 **fix(proxy): Factsheet/Strategy/Browse/Portfolio-PDF/Legal buttons no longer reroute authenticated users to the discovery overview.** Symptom: clicking "Factsheet" on a strategy detail page (e.g. `/discovery/crypto-sma/13f7bO7f`) bounced the signed-in allocator to `/discovery/crypto-sma` instead of opening the factsheet. Root cause: `src/proxy.ts` listed `/factsheet`, `/strategy`, `/browse`, `/portfolio-pdf`, and `/legal` in `PUBLIC_ROUTES` so unauthed share-link viewers could render them, but the proxy's auth-bounce branch (`session && isPublicRoute && !isApiRoute && !isMarketingExempt`) caught authenticated users on those same routes and redirected them to the dashboard. The `isMarketingExempt` carve-out only covered `/demo`, `/for-quants`, `/security` — not the shared-artifact routes. Renamed the carve-out to `isAuthBounceExempt` and added the five missing routes. `/login` and `/signup` remain non-exempt (authed users on those routes SHOULD bounce to the dashboard — pinned by the existing "authenticated user on /login DOES redirect away" test).
