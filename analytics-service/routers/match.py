@@ -578,8 +578,6 @@ async def _score_one_allocator(
     """Score a single allocator and persist the batch + candidates."""
     # Body-placed import keeps services.feedback_engine lazy — it should NOT
     # land in sys.modules at module load time, only when scoring runs.
-    # ctx["preferences"] can be None when the allocator has no
-    # allocator_preferences row; normalize to {} before merging overrides.
     from services.feedback_engine import compute_adjusted_weights
     async with _scoring_semaphore:
         start = time.monotonic()
@@ -587,6 +585,8 @@ async def _score_one_allocator(
         ctx = await asyncio.to_thread(_load_allocator_context, allocator_id)
 
         overrides = await asyncio.to_thread(compute_adjusted_weights, allocator_id)
+        # ctx["preferences"] can be None when the allocator has no
+        # allocator_preferences row; normalize to {} before merging overrides.
         if ctx["preferences"] is None:
             ctx["preferences"] = {}
         ctx["preferences"]["scoring_weight_overrides"] = overrides or None
