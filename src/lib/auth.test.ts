@@ -447,6 +447,34 @@ describe("requireRole", () => {
     }
   });
 
+  it("red-team: admin-union fallback issues at-most-one user_app_roles round-trip (no redundant hasAdminRoleRow)", async () => {
+    // audit-2026-05-07 red-team (MED conf 8): pre-fix the fallback path
+    // called `isAdminUser` → `hasAdminRoleRow`, which re-queries
+    // user_app_roles with a `.eq("role","admin").limit(1)` chain that
+    // React `cache()` cannot dedupe against the prior `getUserRolesResult`
+    // call (cache keys on argument identity, not result-equivalence).
+    // That gave the non-admin reject path THREE DB round-trips:
+    //   1. user_app_roles role-set fetch (getUserRolesResult — cached)
+    //   2. user_app_roles admin-row re-check (hasAdminRoleRow)
+    //   3. profiles.is_admin fetch (hasIsAdminFlag)
+    // Post-fix: the fallback uses `isAdminUserGivenUserAppRoles`, which
+    // trusts the already-fetched userRoles as the user_app_roles signal.
+    // Round-trips on the reject path drop to TWO: one user_app_roles
+    // query + one profiles query. This test pins that contract.
+    userRolesQueryMock.mockResolvedValue({ data: [], error: null });
+    profilesIsAdminQueryMock.mockResolvedValueOnce({
+      data: { is_admin: false },
+      error: null,
+    });
+    await requireRole(makeFromOnly(), mockUser, "admin");
+    // ONE user_app_roles round-trip — the redundant hasAdminRoleRow call
+    // is gone. If a future refactor re-introduces it, this assertion fails.
+    expect(userRolesQueryMock).toHaveBeenCalledTimes(1);
+    // profiles.is_admin still gets called — that signal can grant admin
+    // even when user_app_roles is empty.
+    expect(profilesIsAdminQueryMock).toHaveBeenCalledTimes(1);
+  });
+
   it("admin-union fallback is admin-scoped only: caller requesting non-admin role still gets 403 even when is_admin=true", async () => {
     // Belt-and-suspenders: a user who is only admin via the legacy union
     // does NOT silently acquire 'allocator' (or any other role). The

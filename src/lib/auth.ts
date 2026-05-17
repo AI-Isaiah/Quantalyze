@@ -5,7 +5,7 @@ import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { APP_ROLES, type AppRole } from "@/lib/auth-types";
-import { isAdminUser } from "@/lib/admin";
+import { isAdminUser, isAdminUserGivenUserAppRoles } from "@/lib/admin";
 
 // Re-export so existing server-side callers (routes, tests) keep
 // resolving `import { AppRole, APP_ROLES } from "@/lib/auth"` without a
@@ -271,8 +271,22 @@ export async function requireRole(
     // Non-admin role requests skip this branch — there is no fallback
     // signal for `allocator` / `quant_manager` / `analyst`, so the
     // user_app_roles check is authoritative for those.
+    //
+    // audit-2026-05-07 red-team (MED conf 8): use the
+    // `isAdminUserGivenUserAppRoles` variant which trusts the
+    // already-fetched `userRoles` as the user_app_roles signal instead
+    // of re-issuing `hasAdminRoleRow`. On the non-admin reject path
+    // this drops DB round-trips from 3 → 2 (and 'admin' is known to be
+    // absent from userRoles here, since `hasAny` evaluated false and
+    // the only admin role is 'admin' itself). The
+    // getUserRolesResult `cache()` still dedupes if a sibling caller
+    // asks for the role set again on the same request.
     if (roles.includes("admin")) {
-      const adminUnion = await isAdminUser(supabase, user);
+      const adminUnion = await isAdminUserGivenUserAppRoles(
+        supabase,
+        user,
+        userRoles,
+      );
       if (adminUnion) {
         // Synthesize the admin role into the resolved set so handlers
         // that read `roles` from the context see a consistent answer.

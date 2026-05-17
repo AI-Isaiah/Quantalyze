@@ -339,3 +339,61 @@ export async function isAdminUser(
 
   return false;
 }
+
+/**
+ * Same OR-union as {@link isAdminUser}, but the caller has ALREADY
+ * fetched the user's `user_app_roles` set and proven it does NOT
+ * contain 'admin'. Skips the redundant `hasAdminRoleRow` DB round-trip
+ * and starts from signal 2 (profiles.is_admin).
+ *
+ * Closes audit-2026-05-07 red-team finding (MED conf 8): pre-fix the
+ * `requireRole(admin)` fallback path issued THREE DB round-trips on
+ * every non-admin caller asking for `admin`:
+ *
+ *   1. getUserRolesResult — cached.
+ *   2. hasAdminRoleRow — different query shape, NOT deduped by the
+ *      cache (cache keys on argument identity, not query result).
+ *   3. hasIsAdminFlag — second round-trip on `profiles`.
+ *
+ * The 'admin' answer for user_app_roles was already in memory after
+ * step 1 — step 2 was throwing it away. This helper accepts the
+ * pre-fetched role set so the fallback can short-circuit user_app_roles
+ * lookup entirely. Net cost on the non-admin reject path: 1
+ * round-trip (cached getUserRolesResult) + 1 round-trip (profiles).
+ * Email fallback is local. Down from 3 to 2 — a 33% reduction on the
+ * exact path an attacker probes under credential stuffing or
+ * 403-rate-limit testing.
+ *
+ * Precondition (caller responsibility): `userAppRoles` MUST be the
+ * authoritative role set from `user_app_roles` for THIS user. Passing
+ * a stale or filtered set re-opens the drift surface this helper is
+ * trying to close. The intended caller is `requireRole` in
+ * `src/lib/auth.ts` — see the call site for the assert chain.
+ */
+export async function isAdminUserGivenUserAppRoles(
+  supabase: SupabaseClient,
+  user: { id: string; email?: string | null } | null | undefined,
+  userAppRoles: readonly string[],
+): Promise<boolean> {
+  if (!user) return false;
+
+  // Signal 1 — derived from the caller's pre-fetched set instead of a
+  // second DB round-trip. The cache from getUserRolesResult guarantees
+  // this is the same answer hasAdminRoleRow would have returned.
+  if (userAppRoles.includes("admin")) {
+    return true;
+  }
+
+  // Signal 2: profiles.is_admin (legacy column).
+  if (await hasIsAdminFlag(supabase, user.id)) {
+    return true;
+  }
+
+  // Signal 3: ADMIN_EMAIL env fallback (break-glass).
+  if (isAdmin(user.email)) {
+    void emitEnvEmailFallbackAudit(supabase, user);
+    return true;
+  }
+
+  return false;
+}
