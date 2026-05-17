@@ -36,7 +36,12 @@ import { test, expect } from "@playwright/test";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { cleanupTestAllocator } from "./helpers/cleanup-test-project";
 import { loginAs } from "./helpers/login";
-import { STRATEGY_PROFILES } from "../scripts/seed-demo-data";
+// Red-team RT-J08 (MED conf 8): import from the data-only module
+// (no `@supabase/supabase-js` import, no module-load side effects)
+// so spec-load cannot accidentally trigger a seed-script side effect
+// if a future maintainer lifts any env-read to module scope in
+// `seed-demo-data.ts`. See `scripts/seed-demo-profiles.ts` rationale.
+import { STRATEGY_PROFILES } from "../scripts/seed-demo-profiles";
 
 /**
  * Seed-strategy display names — derived from the single source of truth
