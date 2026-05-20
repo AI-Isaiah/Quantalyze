@@ -62,18 +62,16 @@ export function MandateSnapshotWidget({ data }: WidgetProps) {
       style={{
         background: "var(--color-surface)",
         border: "1px solid var(--color-border)",
-        borderRadius: "var(--radius-lg)",
-        boxShadow: "var(--shadow-card)",
+        borderRadius: "0.25rem",
         height: "100%",
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
       }}
     >
-      {/* Header — prototype app.jsx:491-497 */}
       <div
         style={{
-          padding: "14px 20px",
+          padding: "10px 14px 8px",
           borderBottom: "1px solid var(--color-border)",
           display: "flex",
           alignItems: "center",
@@ -81,14 +79,10 @@ export function MandateSnapshotWidget({ data }: WidgetProps) {
         }}
       >
         <div>
-          <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>Mandate</h3>
-          <div
-            style={{
-              fontSize: 12,
-              color: "var(--color-text-muted)",
-              marginTop: 2,
-            }}
-          >
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary" style={{ margin: 0 }}>
+            Mandate
+          </h3>
+          <div className="text-[11px] text-text-muted" style={{ marginTop: 2 }}>
             {hasMandate
               ? `Auto-saved · ${passing}/${total} gates pass`
               : "No mandate set yet"}

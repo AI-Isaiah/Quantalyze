@@ -149,9 +149,20 @@ function makeRequest({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `clearAllMocks` clears call history but NOT queued mockResolvedValueOnce
+  // entries. A test that calls `xMock.mockResolvedValueOnce(...)` but
+  // never consumes it (the code path it expected didn't fire) would leak
+  // the queued value into the NEXT test that calls the mock. mockReset()
+  // drops queued returns + impls; we then reapply the per-suite defaults
+  // below. See the line-514 admin-union test for the original leak that
+  // surfaced this.
+  profilesIsAdminQueryMock.mockReset();
+  userRolesQueryMock.mockReset();
+  assertSameOriginMock.mockReset();
   assertSameOriginMock.mockReturnValue(null);
   // Default: profiles.is_admin = false. Individual tests that need the
-  // unified admin-union to flip TRUE override this with mockResolvedValueOnce.
+  // unified admin-union to flip TRUE override this with mockImplementation
+  // (NOT mockResolvedValueOnce — see leak note above).
   profilesIsAdminQueryMock.mockImplementation(() =>
     Promise.resolve({ data: { is_admin: false }, error: null }),
   );
@@ -316,6 +327,52 @@ describe("getUserRolesResult — M-0501 React cache() dedup contract", () => {
     // No request-boundary teardown — vitest cannot simulate one.
     // A second call with the same arguments still hits the cache.
     await getUserRolesResult(supabase, "u-cache-no-react-scope");
+    expect(userRolesQueryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("evicts the cache entry when fetch returns { ok: false } so a transient DB fault is retried on the next call", async () => {
+    // The WeakMap dedup caches the in-flight Promise to share concurrent
+    // round-trips. A failure result (`{ ok: false }`) MUST evict so a
+    // transient DB blip doesn't poison the cache for the lifetime of the
+    // SupabaseClient — otherwise an admin who hits a stale 500 stays
+    // stuck on 500 until the client is GC'd.
+    const supabase = makeFromOnly();
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "57014", message: "statement timeout" },
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const first = await getUserRolesResult(supabase, "u-evict");
+    expect(first.ok).toBe(false);
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "admin" }],
+      error: null,
+    });
+    const second = await getUserRolesResult(supabase, "u-evict");
+    expect(second).toEqual({ ok: true, roles: ["admin"] });
+    // Two round-trips, NOT one — the failure must have evicted.
+    expect(userRolesQueryMock).toHaveBeenCalledTimes(2);
+    errSpy.mockRestore();
+  });
+
+  // Note: the `.catch` arm of the eviction chain is defense in depth —
+  // `fetchUserRolesResult` is shaped to convert every supabase error into
+  // `{ ok: false }` rather than reject, so the `.catch` only fires for
+  // a future refactor that lets a throw escape. We deliberately don't
+  // pin that path via an integration test (forcing the mock to reject
+  // produces a duplicated rejection subscription that races vitest's
+  // unhandled-rejection detector). The `{ ok: false }` eviction test
+  // above is the live path.
+
+  it("retains the cache entry for empty-but-OK results ({ ok: true, roles: [] })", async () => {
+    // The inverse pin: a non-error empty role set is still a SUCCESSFUL
+    // result, and MUST stay cached so the dedup contract holds for users
+    // who legitimately have no roles. A too-eager evictor would defeat
+    // this and re-issue a round-trip per call.
+    const supabase = makeFromOnly();
+    userRolesQueryMock.mockResolvedValue({ data: [], error: null });
+    await getUserRolesResult(supabase, "u-empty-ok");
+    await getUserRolesResult(supabase, "u-empty-ok");
     expect(userRolesQueryMock).toHaveBeenCalledTimes(1);
   });
 
@@ -517,10 +574,15 @@ describe("requireRole", () => {
     // fallback synthesizes 'admin' ONLY; non-admin role requests stay
     // gated by user_app_roles alone.
     userRolesQueryMock.mockResolvedValue({ data: [], error: null });
-    profilesIsAdminQueryMock.mockResolvedValueOnce({
-      data: { is_admin: true },
-      error: null,
-    });
+    // Use mockImplementation (NOT mockResolvedValueOnce). The admin-union
+    // fallback is admin-scoped, so this requireRole("allocator") call
+    // will NOT reach hasIsAdminFlag — a queued mockResolvedValueOnce
+    // would leak unconsumed into the next test that DOES enter the
+    // fallback, granting it spurious admin access. mockImplementation
+    // takes the default-impl seat instead of queueing.
+    profilesIsAdminQueryMock.mockImplementation(() =>
+      Promise.resolve({ data: { is_admin: true }, error: null }),
+    );
     const result = await requireRole(makeFromOnly(), mockUser, "allocator");
     expect("forbidden" in result).toBe(true);
     if ("forbidden" in result) {

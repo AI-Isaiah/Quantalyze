@@ -1,0 +1,713 @@
+"use client";
+
+import React, { type ReactNode } from "react";
+import dynamic from "next/dynamic";
+import type { FactsheetPayload } from "@/lib/factsheet/types";
+import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
+import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
+import { ComparatorPicker } from "./ComparatorPicker";
+import { TimeSeriesChart } from "./TimeSeriesChart";
+import { HistogramChart } from "./HistogramChart";
+import { MetricsColumn } from "./MetricsColumn";
+import { StyleDriftPanel, PeerPercentilePanel, AllocatorSection } from "./BatchDPanels";
+import { StreakDistributionPanel } from "./AnalyticalPanels";
+import { EndOfYearBarsPanel, QuantileBoxPlotPanel } from "./DistributionPanels";
+import { MasterBrush } from "./MasterBrush";
+import { StressWindowsPanel } from "./StressWindowsPanel";
+import { CollapsibleSection } from "./CollapsibleSection";
+import { LazyMount } from "./LazyMount";
+
+/**
+ * Code-split the three heaviest panels off the initial route bundle. These
+ * components are below-the-fold and already wrapped in LazyMount, but
+ * LazyMount only defers MOUNTING — the JS is still in the initial chunk.
+ * next/dynamic creates a separate chunk that the client only fetches when
+ * the component is about to render. Saves ~30-50KB gzip from first paint.
+ *
+ * ssr:false is safe because the entire factsheet view is "use client" —
+ * server-render of these panels is already a no-op via the parent context.
+ */
+const MonthlyReturnsHeatmap = dynamic(
+  () => import("./HeatmapPanels").then(m => ({ default: m.MonthlyReturnsHeatmap })),
+  { ssr: false, loading: () => <PanelSkeleton h={400} /> },
+);
+const DailyReturnsHeatmap = dynamic(
+  () => import("./HeatmapPanels").then(m => ({ default: m.DailyReturnsHeatmap })),
+  { ssr: false, loading: () => <PanelSkeleton h={600} /> },
+);
+const SignaturesSection = dynamic(
+  () => import("./SignaturePanels").then(m => ({ default: m.SignaturesSection })),
+  { ssr: false, loading: () => <PanelSkeleton h={500} /> },
+);
+const CrossSignaturesSection = dynamic(
+  () => import("./CrossSignaturePanels").then(m => ({ default: m.CrossSignaturesSection })),
+  { ssr: false, loading: () => <PanelSkeleton h={500} /> },
+);
+
+function PanelSkeleton({ h }: { h: number }) {
+  return (
+    <div
+      className="rounded-sm border border-border bg-surface-subtle animate-pulse"
+      style={{ height: h }}
+      aria-hidden
+    />
+  );
+}
+import { resolvePalette, paletteToCssVars } from "./palette";
+import { trackFactsheetEvent } from "./factsheet-analytics";
+import { CHART_CONFIGS } from "./chart-configs";
+
+/**
+ * Editorial layout — refined-minimalism inside the institutional/utilitarian
+ * direction set by DESIGN.md. Instrument Serif for the strategy name + section
+ * eyebrows, DM Sans for body and labels, Geist Mono tabular-nums for every
+ * numeric. No decoration, no shadows, only hairline dividers carrying the
+ * structure. Reference: FactSet quarterly factsheets.
+ */
+export function FactsheetView({ payload }: { payload: FactsheetPayload }) {
+  return (
+    <FactsheetProvider payload={payload}>
+      <FactsheetShell payload={payload} />
+    </FactsheetProvider>
+  );
+}
+
+/**
+ * Shell that reads the colorblind toggle from context and applies the FT
+ * Oxford Blue / Claret palette overrides via CSS custom property scoping on
+ * the article container. Lives inside the provider so it can subscribe.
+ */
+function FactsheetShell({ payload }: { payload: FactsheetPayload }) {
+  const { colorblind, darkMode } = useDisplay();
+
+  // One-shot view event when the page mounts so adoption of the new
+  // surface can be measured cleanly without folding into the v1 funnel.
+  React.useEffect(() => {
+    trackFactsheetEvent("factsheet_v2_view", {
+      strategy_id: payload.strategyId,
+      trust_tier: payload.trustTier ?? "none",
+      observations: payload.strategyMetrics.n,
+    });
+  }, [payload.strategyId, payload.trustTier, payload.strategyMetrics.n]);
+
+  // Print hardening: collapsed <details> sections are hidden by default
+  // browser behavior, so a print would lose any section the user closed.
+  // beforeprint forces every detail open; afterprint restores prior state.
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    let previous: WeakMap<HTMLDetailsElement, boolean> | null = null;
+    const beforeprint = () => {
+      previous = new WeakMap();
+      document.querySelectorAll<HTMLDetailsElement>("details").forEach(el => {
+        previous!.set(el, el.open);
+        el.open = true;
+      });
+    };
+    const afterprint = () => {
+      if (!previous) return;
+      document.querySelectorAll<HTMLDetailsElement>("details").forEach(el => {
+        const prior = previous!.get(el);
+        if (prior != null) el.open = prior;
+      });
+      previous = null;
+    };
+    window.addEventListener("beforeprint", beforeprint);
+    window.addEventListener("afterprint", afterprint);
+    return () => {
+      window.removeEventListener("beforeprint", beforeprint);
+      window.removeEventListener("afterprint", afterprint);
+    };
+  }, []);
+  return <FactsheetBody payload={payload} />;
+}
+
+export interface FactsheetBodyOptions {
+  /** Suppress the strategy-name header (caller already provides its own). */
+  hideHeader?: boolean;
+  /** Suppress the demo allocator-portfolio section (skip on allocator dashboards). */
+  hideAllocatorSection?: boolean;
+  /** Suppress the QSF footer + disclaimer (caller already provides closing chrome). */
+  hideFooter?: boolean;
+  /** Render an optional slot above the KpiStrip — used to inject a live
+   *  equity curve at the top of the allocator's Overview without
+   *  reordering the rest of the factsheet body. */
+  topSlot?: ReactNode;
+}
+
+/**
+ * Full factsheet article body — strategy header + KpiStrip + SectionNav +
+ * ControlBar + MasterBrush + all panel sections + MetricsColumn + (optional)
+ * AllocatorSection + Footer. Pure JSX with the palette + skip-link wrapper.
+ *
+ * Must be mounted inside a FactsheetProvider. `factsheet-context.tsx`
+ * exports both pieces.
+ */
+export function FactsheetBody({
+  payload,
+  hideHeader = false,
+  hideAllocatorSection = false,
+  hideFooter = false,
+  topSlot,
+}: { payload: FactsheetPayload } & FactsheetBodyOptions) {
+  const { colorblind, darkMode } = useDisplay();
+  // Centralised palette — resolve once, apply as CSS custom properties on
+  // the article container so descendants pick up the new tokens via var().
+  const resolved = resolvePalette({ darkMode, colorblind });
+  const shellStyle = paletteToCssVars(resolved, darkMode);
+  return (
+    <>
+      <a href="#factsheet-main" className="factsheet-v2-skip-link">
+        Skip to factsheet content
+      </a>
+      <article
+        id="factsheet-main"
+        tabIndex={-1}
+        data-theme={darkMode ? "dark" : "light"}
+        data-colorblind={colorblind ? "1" : "0"}
+        className="factsheet-v2-shell mx-auto max-w-[1440px] px-4 sm:px-6 lg:px-10 py-6 sm:py-10 lg:py-12"
+        style={{ background: "var(--color-page)", ...shellStyle }}
+      >
+        {!hideHeader && <FactsheetHeader payload={payload} />}
+        {topSlot}
+        <KpiStrip />
+        <SectionNav />
+        <ControlBar />
+
+        <div className="mt-6 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-x-12 gap-y-10">
+          <section className="flex flex-col gap-10 min-w-0">
+            <MasterBrush />
+            <CollapsibleSection
+              id="factsheet-perf"
+              title="Performance"
+              storageKey={`factsheet-collapse:${payload.strategyId}:perf`}
+              defaultOpen
+            >
+              {CHART_CONFIGS.map(cfg => (
+                <TimeSeriesChart key={cfg.key} config={cfg} />
+              ))}
+            </CollapsibleSection>
+            <CollapsibleSection
+              id="factsheet-dist"
+              title="Distribution"
+              storageKey={`factsheet-collapse:${payload.strategyId}:dist`}
+              defaultOpen
+            >
+              <HistogramChart />
+              <QuantileBoxPlotPanel />
+              <EndOfYearBarsPanel />
+            </CollapsibleSection>
+            <CollapsibleSection
+              id="factsheet-heatmaps"
+              title="Heatmaps"
+              storageKey={`factsheet-collapse:${payload.strategyId}:heatmaps`}
+              defaultOpen
+            >
+              <MonthlyReturnsHeatmap />
+              <DailyReturnsHeatmap />
+            </CollapsibleSection>
+            <CollapsibleSection
+              id="factsheet-stress"
+              title="Stress Windows"
+              storageKey={`factsheet-collapse:${payload.strategyId}:stress`}
+              defaultOpen
+            >
+              <StressWindowsPanel />
+            </CollapsibleSection>
+            <CollapsibleSection
+              id="factsheet-signatures"
+              title="Returns Signatures"
+              subtitle="event studies — heavy compute, defaults open"
+              storageKey={`factsheet-collapse:${payload.strategyId}:signatures`}
+              defaultOpen
+            >
+              <LazyMount minHeight={500}>
+                <SignaturesSection />
+              </LazyMount>
+              <LazyMount minHeight={500}>
+                <CrossSignaturesSection />
+              </LazyMount>
+            </CollapsibleSection>
+            <CollapsibleSection
+              id="factsheet-streak"
+              title="Streaks"
+              storageKey={`factsheet-collapse:${payload.strategyId}:streak`}
+              defaultOpen
+            >
+              <StreakDistributionPanel />
+            </CollapsibleSection>
+          </section>
+          <div id="factsheet-metrics" className="contents" />
+          <MetricsColumn />
+        </div>
+
+        {!hideAllocatorSection && (
+          <div id="factsheet-allocator" className="mt-12">
+            <LazyMount minHeight={400}>
+              <AllocatorSection />
+            </LazyMount>
+          </div>
+        )}
+
+        {!hideFooter && <FactsheetFooter payload={payload} />}
+      </article>
+    </>
+  );
+}
+
+function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
+  const exchanges = payload.supportedExchanges.length > 0 ? payload.supportedExchanges.join(", ") : null;
+  const leverage = payload.leverageRange;
+  // Lead chip line — types / markets / subtypes / exchanges / leverage. Drop
+  // empty members so the line stays tight when the registry row is sparse.
+  const chips: string[] = [];
+  if (payload.strategyTypes.length > 0) chips.push(payload.strategyTypes.join(", "));
+  if (payload.subtypes.length > 0) chips.push(payload.subtypes.map(s => s.replace(/_/g, " ")).join(", "));
+  if (payload.markets.length > 0) chips.push(payload.markets.join(" · "));
+  if (exchanges) chips.push(exchanges);
+  if (leverage) chips.push(`leverage ${leverage}`);
+
+  return (
+    <header className="border-b border-text pb-6">
+      <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
+        Institutional Factsheet · Quantalyze
+      </p>
+      <div className="mt-2 flex flex-col sm:flex-row sm:flex-wrap sm:items-end sm:justify-between gap-4">
+        <div className="max-w-3xl">
+          <h1 className="font-serif text-[28px] sm:text-[36px] lg:text-[44px] leading-tight sm:leading-none text-text-primary">
+            {payload.strategyName}
+          </h1>
+          <div className="mt-3 flex flex-wrap items-center gap-2 sm:gap-3">
+            <TrustTierLabel trustTier={payload.trustTier} />
+            <span className="text-[12px] text-text-secondary">{chips.length > 0 ? chips.join(" · ") : "—"}</span>
+          </div>
+          {payload.description && (
+            <p className="mt-3 sm:mt-4 text-[13px] sm:text-[14px] leading-relaxed text-text-2 italic font-serif">
+              {payload.description}
+            </p>
+          )}
+        </div>
+        <div className="text-left sm:text-right flex flex-row sm:flex-col items-start sm:items-end gap-6 sm:gap-3 flex-wrap">
+          <FreshnessChip computedAt={payload.computedAt} />
+          {payload.aum != null && (
+            <CapacityChip aum={payload.aum} maxCapacity={payload.maxCapacity} />
+          )}
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function formatUsdCompact(v: number): string {
+  if (!Number.isFinite(v)) return "—";
+  if (v >= 1e9) return `$${(v / 1e9).toFixed(1)}B`;
+  if (v >= 1e6) return `$${(v / 1e6).toFixed(0)}M`;
+  if (v >= 1e3) return `$${(v / 1e3).toFixed(0)}K`;
+  return `$${v.toFixed(0)}`;
+}
+
+/**
+ * Data freshness — institutional buyers reject stale reports.
+ * Green ≤ 3d, amber 3-7d, red >7d. Date below.
+ */
+function FreshnessChip({ computedAt }: { computedAt: string }) {
+  const d = new Date(computedAt);
+  const days = (Date.now() - d.getTime()) / 86_400_000;
+  const tone =
+    !Number.isFinite(days) ? "neutral" : days <= 3 ? "fresh" : days <= 7 ? "stale" : "old";
+  const toneColor =
+    tone === "fresh" ? "var(--color-positive)" :
+    tone === "stale" ? "var(--color-warning, #B45309)" :
+    tone === "old" ? "var(--color-negative)" : "var(--color-text-muted)";
+  const label =
+    tone === "fresh" ? "fresh" : tone === "stale" ? "stale" : tone === "old" ? "old" : "—";
+  return (
+    <div>
+      <div className="flex items-center justify-end gap-1.5 text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
+        <span aria-hidden className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: toneColor }} />
+        Computed · {label}
+      </div>
+      <p className="mt-1 text-[13px] font-mono tabular-nums text-text-secondary">
+        {formatIsoDate(computedAt)}
+        {Number.isFinite(days) && <span className="ml-1 text-text-muted">({Math.round(days)}d)</span>}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * AUM + capacity utilization bar. Falls back to AUM-only when max_capacity
+ * is not declared. Bar fills accent for healthy utilization, warning above 80%.
+ */
+function CapacityChip({ aum, maxCapacity }: { aum: number; maxCapacity: number | null }) {
+  const utilization = maxCapacity && maxCapacity > 0 ? Math.min(1, aum / maxCapacity) : null;
+  const tone =
+    utilization == null ? "var(--color-accent)" :
+    utilization > 0.9 ? "var(--color-negative)" :
+    utilization > 0.7 ? "var(--color-warning, #B45309)" :
+    "var(--color-accent)";
+  return (
+    <div className="min-w-[160px]">
+      <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">AUM</p>
+      <p className="mt-1 text-[13px] font-mono tabular-nums text-text-secondary">
+        {formatUsdCompact(aum)}
+        {maxCapacity != null && (
+          <span className="ml-1 text-text-muted">/ {formatUsdCompact(maxCapacity)}</span>
+        )}
+      </p>
+      {utilization != null && (
+        <div className="mt-1.5 h-1 w-full bg-track rounded-sm overflow-hidden" aria-label={`Capacity utilization ${Math.round(utilization * 100)}%`}>
+          <div
+            className="h-full rounded-sm transition-all"
+            style={{ width: `${utilization * 100}%`, background: tone }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KpiStrip() {
+  const payload = usePayload();
+  const { block: cmp, key: cmpKey } = useActiveComparator();
+  const m = payload.strategyMetrics;
+  const j = cmp.joint;
+  const cn = cmp.shortName;
+
+  // 9 cells when a comparator is active (mockup contract). When NONE, the
+  // α + IR slots collapse — render 7 cells instead of leaving empty space.
+  const items: Array<{ label: string; value: string; tone?: "positive" | "negative" }> = [
+    { label: "Cum. Return", value: pctSigned(m.cum_ret, 1), tone: m.cum_ret >= 0 ? "positive" : "negative" },
+    { label: "CAGR", value: pctSigned(m.cagr, 1), tone: m.cagr >= 0 ? "positive" : "negative" },
+    { label: "Sharpe", value: num(m.sharpe) },
+    { label: "Sortino", value: num(m.sortino) },
+    { label: "Calmar", value: num(m.calmar) },
+    { label: "Max DD", value: pct(m.max_dd, 1), tone: "negative" },
+    { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
+  ];
+  if (j && cmpKey !== "none") {
+    items.push({
+      label: `α vs ${cn}`,
+      value: pctSigned(j.alpha, 1),
+      tone: j.alpha >= 0 ? "positive" : "negative",
+    });
+    items.push({
+      label: `IR vs ${cn}`,
+      value: num(j.info_ratio),
+      tone: j.info_ratio >= 0 ? "positive" : "negative",
+    });
+  }
+  // Responsive grid: 9 cells need narrower cells on lg. Use grid-cols-9 only
+  // when we actually have 9 to render; otherwise let 7 cells breathe at lg-7.
+  // Mobile uses grid-cols-3 with smaller cells so 9 KPIs fit in 3 rows of 3.
+  const lgCols = items.length === 9 ? "lg:grid-cols-9" : "lg:grid-cols-7";
+  return (
+    <section
+      className="mt-6 overflow-hidden"
+      style={{
+        backgroundColor: "var(--color-surface)",
+        border: "1px solid var(--color-border)",
+      }}
+    >
+      <div className={`grid grid-cols-3 sm:grid-cols-3 md:grid-cols-3 ${lgCols} md:divide-y-0`} style={{ }}>
+        {items.map(it => (
+          <div
+            key={it.label}
+            className="px-3 py-3 sm:px-4 sm:py-4"
+            style={{ borderRight: "1px solid var(--color-border)", borderTop: "1px solid var(--color-border)" }}
+          >
+            <p
+              className="text-[9px] sm:text-[10px] font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis"
+              style={{ color: "var(--color-text-muted)" }}
+            >
+              {it.label}
+            </p>
+            <p
+              className="mt-1.5 sm:mt-2 font-mono tabular-nums text-[15px] sm:text-[20px] lg:text-[22px] leading-none whitespace-nowrap overflow-hidden text-ellipsis"
+              style={{
+                color:
+                  it.tone === "positive"
+                    ? "var(--color-positive)"
+                    : it.tone === "negative"
+                      ? "var(--color-negative)"
+                      : "var(--color-text-primary)",
+              }}
+            >
+              {it.value}
+            </p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Section TOC — sticky compact nav with anchor links to each major section.
+ * Tracks the currently visible section via IntersectionObserver and marks it
+ * with aria-current="location" + an active visual style.
+ *
+ * Each link uses fragment-id anchor jump. Hidden on print and overflow-scrolls
+ * on narrow widths.
+ */
+function SectionNav() {
+  const sections: { id: string; label: string }[] = React.useMemo(() => [
+    { id: "factsheet-perf", label: "Performance" },
+    { id: "factsheet-dist", label: "Distribution" },
+    { id: "factsheet-heatmaps", label: "Heatmaps" },
+    { id: "factsheet-stress", label: "Stress" },
+    { id: "factsheet-signatures", label: "Signatures" },
+    { id: "factsheet-streak", label: "Streaks" },
+    { id: "factsheet-allocator", label: "Allocator" },
+    { id: "factsheet-metrics", label: "Metrics" },
+  ], []);
+  const [active, setActive] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    // Pick the topmost intersecting section as active. rootMargin offset
+    // accounts for the sticky nav so the section becomes "active" when its
+    // top crosses just below the nav, not when it just barely enters view.
+    const elements = sections
+      .map(s => ({ id: s.id, el: document.getElementById(s.id) }))
+      .filter((s): s is { id: string; el: HTMLElement } => s.el != null);
+    if (elements.length === 0) return;
+    const visibility = new Map<string, number>();
+    const obs = new IntersectionObserver(
+      entries => {
+        for (const e of entries) {
+          visibility.set(e.target.id, e.isIntersecting ? e.intersectionRatio : 0);
+        }
+        // Pick the entry with greatest intersection ratio.
+        let bestId: string | null = null;
+        let bestRatio = 0;
+        visibility.forEach((r, id) => {
+          if (r > bestRatio) { bestRatio = r; bestId = id; }
+        });
+        if (bestId) setActive(bestId);
+      },
+      { rootMargin: "-80px 0px -60% 0px", threshold: [0, 0.1, 0.5, 1] },
+    );
+    elements.forEach(({ el }) => obs.observe(el));
+    return () => obs.disconnect();
+  }, [sections]);
+
+  return (
+    <nav
+      aria-label="Factsheet sections"
+      className="factsheet-v2-no-print mt-4 -mx-1 overflow-x-auto"
+    >
+      <ul className="flex items-center gap-1 px-1 text-[10px] font-mono uppercase tracking-[0.18em]">
+        {sections.map(s => {
+          const isActive = active === s.id;
+          return (
+            <li key={s.id}>
+              <a
+                href={`#${s.id}`}
+                aria-current={isActive ? "location" : undefined}
+                className={
+                  // pointer-coarse: bump tap target to 44px min-height per WCAG 2.5.5.
+                  "inline-flex items-center px-2 py-1 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent pointer-coarse:min-h-[44px] pointer-coarse:px-3 " +
+                  (isActive
+                    ? "text-text-primary border-b-2 border-accent"
+                    : "text-text-muted hover:bg-surface-subtle hover:text-text-primary")
+                }
+              >
+                {s.label}
+              </a>
+            </li>
+          );
+        })}
+      </ul>
+    </nav>
+  );
+}
+
+function ControlBar() {
+  const payload = usePayload();
+  const { resetXRange } = useXRange();
+  const { setComparator } = useComparator();
+  const resetView = () => {
+    resetXRange();
+    setComparator(payload.activeComparator);
+    trackFactsheetEvent("factsheet_v2_reset_view", { strategy_id: payload.strategyId });
+  };
+  return (
+    <section className="factsheet-v2-no-print mt-6 flex flex-wrap items-center justify-start lg:justify-end gap-x-3 sm:gap-x-6 gap-y-3 border-b border-border pb-3">
+      <DisplayMenu />
+      <button
+        type="button"
+        onClick={resetView}
+        title="Reset comparator + visible window to defaults (toggles, persisted layout stay)"
+        className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+      >
+        Reset view
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          if (typeof window === "undefined") return;
+          trackFactsheetEvent("factsheet_v2_pdf_print", { strategy_id: payload.strategyId });
+          window.print();
+        }}
+        title="Download a PDF via your browser's print dialog (Cmd/Ctrl-P)"
+        className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+      >
+        Download PDF
+      </button>
+      <a
+        href={`/compare?ids=${payload.strategyId}`}
+        onClick={() => trackFactsheetEvent("factsheet_v2_compare_click", { strategy_id: payload.strategyId })}
+        title="Compare this strategy against another (multi-strategy overlay)"
+        className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
+      >
+        Compare strategies
+      </a>
+      <ComparatorPicker />
+    </section>
+  );
+}
+
+/**
+ * Display-preferences disclosure — bundles Dark / Colorblind / Regimes
+ * toggles behind a single dropdown so the ControlBar isn't a wall of pills
+ * on mobile. Native <details> + <summary> for keyboard + screen-reader
+ * accessibility and zero JS dependency.
+ */
+function DisplayMenu() {
+  const { colorblind, setColorblind, regimes, setRegimes, darkMode, setDarkMode } = useToggles();
+  const activeCount = (darkMode ? 1 : 0) + (colorblind ? 1 : 0) + (regimes ? 1 : 0);
+  return (
+    <details className="relative">
+      <summary className="list-none cursor-pointer px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center gap-1">
+        Display
+        {activeCount > 0 && (
+          <span
+            className="inline-block px-1 rounded-sm text-[9px]"
+            // Light: white on Oxford-green = 12:1. Dark: white on bright teal
+            // = 1.5:1 (unreadable). Use page bg (dark slate) on teal in dark.
+            style={{ background: "var(--color-accent)", color: "var(--color-page)" }}
+          >
+            {activeCount}
+          </span>
+        )}
+      </summary>
+      <div className="absolute right-0 lg:right-auto lg:left-0 top-full z-10 mt-1 min-w-[200px] bg-surface border border-border rounded-sm shadow-sm py-1">
+        <DisplayItem
+          label="Dark mode"
+          on={darkMode}
+          onToggle={() => {
+            setDarkMode(!darkMode);
+            trackFactsheetEvent("factsheet_v2_toggle_dark", { on: !darkMode });
+          }}
+          hint="Slate palette for low-light viewing"
+        />
+        <DisplayItem
+          label="Colorblind palette"
+          on={colorblind}
+          onToggle={() => {
+            setColorblind(!colorblind);
+            trackFactsheetEvent("factsheet_v2_toggle_colorblind", { on: !colorblind });
+          }}
+          hint="FT Oxford Blue / Claret"
+        />
+        <DisplayItem
+          label="Regimes overlay"
+          on={regimes}
+          onToggle={() => {
+            setRegimes(!regimes);
+            trackFactsheetEvent("factsheet_v2_toggle_regimes", { on: !regimes });
+          }}
+          hint="Bull/bear bands from comparator rolling Sharpe"
+        />
+      </div>
+    </details>
+  );
+}
+
+function DisplayItem({
+  label,
+  on,
+  onToggle,
+  hint,
+}: {
+  label: string;
+  on: boolean;
+  onToggle: () => void;
+  hint: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-pressed={on}
+      className="w-full text-left px-3 py-2 pointer-coarse:py-3 hover:bg-surface-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent rounded-sm"
+    >
+      <div className="flex items-center gap-2">
+        <span
+          aria-hidden
+          className="inline-block w-3 h-3 rounded-sm border"
+          style={{
+            background: on ? "var(--color-accent)" : "transparent",
+            borderColor: on ? "var(--color-accent)" : "var(--color-border)",
+          }}
+        />
+        <span className="text-[12px] font-medium text-text-primary">{label}</span>
+      </div>
+      <p className="ml-5 mt-0.5 text-[10px] text-text-muted">{hint}</p>
+    </button>
+  );
+}
+
+
+function FactsheetFooter({ payload }: { payload: FactsheetPayload }) {
+  const stamp = `QSF · ${payload.strategyId.slice(0, 8).toUpperCase()} · ${isoToYmd(payload.computedAt)}`;
+  return (
+    <footer className="mt-16 border-t border-text pt-6 flex flex-wrap items-start justify-between gap-6">
+      <p className="max-w-3xl text-[11px] italic leading-relaxed text-text-muted">
+        Returns computed from the strategy&apos;s daily series. Benchmarks are daily
+        closes (forward-filled to the strategy&apos;s observation dates). Risk-free
+        rate set to 0%. Past performance is not indicative of future results.
+        Demo cohorts and demo portfolios are flagged inline; production replaces them
+        with platform data.
+      </p>
+      <div className="text-right">
+        <p className="font-mono text-[10px] tracking-[0.18em] text-text-primary">{stamp}</p>
+        <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em] text-text-muted">
+          Page 1 / 1
+        </p>
+      </div>
+    </footer>
+  );
+}
+
+function pct(v: number, dp = 2): string {
+  if (!Number.isFinite(v)) return "—";
+  return `${(v * 100).toFixed(dp)}%`;
+}
+
+function pctSigned(v: number, dp = 2): string {
+  if (!Number.isFinite(v)) return "—";
+  return (v >= 0 ? "+" : "") + (v * 100).toFixed(dp) + "%";
+}
+
+function num(v: number): string {
+  if (!Number.isFinite(v)) return "—";
+  return v.toFixed(2);
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+function formatIsoDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+}
+
+function isoToYmd(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}.${m}.${day}`;
+}

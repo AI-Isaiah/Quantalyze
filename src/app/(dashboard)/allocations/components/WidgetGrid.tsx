@@ -223,7 +223,8 @@ function WidgetCell({
       className="widget-cell"
       style={{
         gridColumn: `span ${w}`,
-        minHeight: 140,
+        // Per-widget minHeights are set by the widget itself (charts pin
+        // h-[260px], etc.); the grid auto-rows to content.
         minWidth: 0,
         position: "relative",
         transition: "box-shadow 120ms ease, opacity 120ms ease",

@@ -42,36 +42,21 @@ function buildNavSections(
     });
   }
 
-  // v0.4.0 pivot: allocator workspace and manager/crypto-team workspace
-  // are distinct now.
-  //
-  // Allocators see: My Allocation → Scenarios → Recommendations. No
-  // Strategies (that's the manager surface), no Test Portfolios (Scenarios
-  // replaces the what-if concept), no Exchanges (inline API key management
-  // lives on My Allocation now).
-  //
-  // Managers / crypto teams see: Strategies, Portfolios (the legacy
-  // collection view). They're the ones publishing strategies for
-  // allocators to discover.
+  // Admins see BOTH allocator AND manager surfaces (triage / demo).
+  // Allocators see only the allocator surface. Managers (non-allocators)
+  // see only the manager surface.
+  const showsAllocatorWorkspace = isAllocator || isAdmin;
+  const showsManagerWorkspace = !isAllocator || isAdmin;
   const workspaceItems: NavItem[] = [];
-  if (isAllocator && !isAdmin) {
-    workspaceItems.push(
-      {
-        label: "My Allocation",
-        href: "/allocations",
-        icon: PortfolioIcon,
-        badge: flaggedCount,
-      },
-      { label: "Scenarios", href: "/scenarios", icon: BarChartIcon },
-      {
-        label: "Recommendations",
-        href: "/recommendations",
-        icon: RecommendIcon,
-      },
-    );
-  } else {
-    // Non-allocator view (managers + admins): Strategies is their
-    // publishing surface, Portfolios is their collection view.
+  if (showsAllocatorWorkspace) {
+    workspaceItems.push({
+      label: "My Allocation",
+      href: "/allocations",
+      icon: PortfolioIcon,
+      badge: flaggedCount,
+    });
+  }
+  if (showsManagerWorkspace) {
     workspaceItems.push(
       { label: "Strategies", href: "/strategies", icon: BarChartIcon },
       { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
@@ -295,14 +280,6 @@ function MatchIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H9zM9 9h4v4H9z" />
       <path d="M7 5h2M7 11h2M5 7v2M11 7v2" />
-    </svg>
-  );
-}
-
-function RecommendIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M8 1l1.8 4.2 4.7.4-3.6 3 1.1 4.6L8 10.8 3.9 13.2l1.1-4.6-3.6-3 4.7-.4L8 1z" />
     </svg>
   );
 }

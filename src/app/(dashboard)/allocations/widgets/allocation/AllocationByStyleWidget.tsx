@@ -85,33 +85,20 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
       style={{
         background: "var(--color-surface)",
         border: "1px solid var(--color-border)",
-        borderRadius: "var(--radius-lg, 8px)",
+        borderRadius: "0.25rem",
         overflow: "hidden",
       }}
     >
       <div
         style={{
-          padding: "14px 20px",
+          padding: "10px 14px 8px",
           borderBottom: "1px solid var(--color-border)",
         }}
       >
-        <h3
-          style={{
-            margin: 0,
-            fontSize: 14,
-            fontWeight: 600,
-            color: "var(--color-text-primary)",
-          }}
-        >
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary" style={{ margin: 0 }}>
           Allocation by style
         </h3>
-        <div
-          style={{
-            fontSize: 12,
-            color: "var(--color-text-muted)",
-            marginTop: 2,
-          }}
-        >
+        <div className="text-[11px] text-text-muted" style={{ marginTop: 2 }}>
           {entries.length === 0 ? "No active allocations" : subtitle}
         </div>
       </div>
@@ -140,18 +127,17 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
               />
             ))}
           </div>
-          {/* Legend list — matches the prototype's per-style row */}
+          {/* Legend list — factsheet hairline-divider rows. Tag label uses
+              text-text-2 (secondary tier, AAA contrast), percent uses
+              text-text-primary for emphasis. */}
           <div style={{ marginTop: 14 }}>
-            {entries.map(([tag, w]) => (
+            {entries.map(([tag, w], idx, arr) => (
               <div
                 key={tag}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "var(--space-grid-gap)",
-                  padding: "6px 0",
-                  borderBottom: "1px solid var(--color-border)",
-                }}
+                className={
+                  "flex items-center gap-3 py-1.5 " +
+                  (idx < arr.length - 1 ? "border-b border-border/30" : "")
+                }
               >
                 <span
                   aria-hidden
@@ -163,15 +149,8 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
                     flexShrink: 0,
                   }}
                 />
-                <span style={{ flex: 1, fontSize: 13 }}>{tag}</span>
-                <span
-                  style={{
-                    fontSize: 13,
-                    color: "var(--color-text-secondary)",
-                    fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
+                <span className="flex-1 text-[13px] text-text-2">{tag}</span>
+                <span className="font-mono tabular-nums text-[13px] text-text-primary">
                   {(w * 100).toFixed(1)}%
                 </span>
               </div>

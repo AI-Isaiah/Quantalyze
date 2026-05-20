@@ -424,7 +424,7 @@ export function StrategyTable({
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1.5">
                         <Link
-                          href={`${basePath}/${categorySlug}/${s.id}`}
+                          href={`/factsheet/${s.id}`}
                           className="font-medium text-text-primary hover:text-accent transition-colors"
                         >
                           {s.name}

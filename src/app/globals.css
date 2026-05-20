@@ -347,3 +347,142 @@ body[data-display-font="sans"] .font-display {
   outline: 2px solid var(--color-accent);
   outline-offset: 1px;
 }
+
+/* ============================================================
+   Factsheet v2 — print stylesheet + skip-link + sr-only
+   ============================================================ */
+
+.factsheet-v2-skip-link {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+.factsheet-v2-skip-link:focus {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  width: auto;
+  height: auto;
+  padding: 8px 12px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-accent);
+  color: var(--color-accent);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  text-decoration: none;
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* Print: collapse interactive chrome, single-column body, ensure SVGs print at
+   their intrinsic size, force light backgrounds, never split a chart panel. */
+@media print {
+  .factsheet-v2-no-print { display: none !important; }
+  .factsheet-v2-shell {
+    max-width: none !important;
+    padding: 0 !important;
+    background: white !important;
+    color: black !important;
+    font-size: 10pt;
+  }
+  .factsheet-v2-shell figure,
+  .factsheet-v2-shell section,
+  .factsheet-v2-shell table {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .factsheet-v2-shell .grid {
+    display: block !important;
+  }
+  .factsheet-v2-shell aside {
+    margin-top: 24px;
+  }
+  /* SVG charts: stretch within print column, retain aspect via viewBox. */
+  .factsheet-v2-shell svg {
+    max-width: 100%;
+    height: auto !important;
+    page-break-inside: avoid;
+  }
+  /* Footer pagination is browser-driven; hide the in-page footer stamp so it
+     doesn't double-print at the bottom. */
+  a[href]::after { content: "" !important; }
+}
+
+/* ============================================================
+   Factsheet v2 — dark + colorblind palette overrides (scoped)
+   ============================================================
+   Tailwind v4 `@theme inline` inlines literal hex into utility
+   classes, so `bg-surface` / `text-text-primary` etc. can't be
+   runtime-flipped via CSS-variable overrides on a parent.
+   We therefore scope explicit utility overrides to the factsheet
+   v2 shell when data-theme="dark" (or data-colorblind="1") is set.
+   ============================================================ */
+
+.factsheet-v2-shell[data-theme="dark"] {
+  background-color: #0B0F1A;
+  color: #E6EAF2;
+}
+
+/* Backgrounds — Stripe/Bloomberg dark elevation ladder */
+.factsheet-v2-shell[data-theme="dark"] .bg-page { background-color: #0B0F1A !important; }
+.factsheet-v2-shell[data-theme="dark"] .bg-surface { background-color: #141A26 !important; }
+.factsheet-v2-shell[data-theme="dark"] .bg-surface-subtle { background-color: #191F2E !important; }
+.factsheet-v2-shell[data-theme="dark"] .bg-track { background-color: #1B2233 !important; }
+.factsheet-v2-shell[data-theme="dark"] .bg-accent { background-color: #5EEAD4 !important; color: #0B0F1A !important; }
+.factsheet-v2-shell[data-theme="dark"] .bg-accent-hover { background-color: #99F6E4 !important; color: #0B0F1A !important; }
+.factsheet-v2-shell[data-theme="dark"] .bg-border { background-color: #2A3144 !important; }
+.factsheet-v2-shell[data-theme="dark"] .hover\:bg-accent-hover:hover { background-color: #99F6E4 !important; color: #0B0F1A !important; }
+.factsheet-v2-shell[data-theme="dark"] .hover\:bg-surface:hover { background-color: #141A26 !important; }
+.factsheet-v2-shell[data-theme="dark"] .hover\:bg-surface-subtle:hover { background-color: #191F2E !important; }
+.factsheet-v2-shell[data-theme="dark"] .bg-negative\/5 { background-color: rgba(248, 113, 113, 0.08) !important; }
+.factsheet-v2-shell[data-theme="dark"] .bg-positive\/5 { background-color: rgba(74, 222, 128, 0.08) !important; }
+.factsheet-v2-shell[data-theme="dark"] .bg-warning-bg { background-color: #3F2A05 !important; }
+
+/* Text scale (2026-05-20 contrast bump) — all three tiers clear WCAG AAA
+   (≥7:1) on the surface elevation. Pre-bump the muted tier was #7783A0
+   at 4.6:1, only AA — too dim for small-uppercase KPI labels on
+   data-dense factsheets. Now:
+     primary  #E6EAF2 → 14.5:1
+     text-2   #BAC2D8 →  9.8:1
+     muted    #A0AAC2 →  7.5:1
+   Hierarchy preserved (each tier ~30% darker than the one above).
+   Stripe Dashboard's secondary text was the reference. */
+.factsheet-v2-shell[data-theme="dark"] .text-text-primary { color: #E6EAF2 !important; }
+.factsheet-v2-shell[data-theme="dark"] .text-text-secondary { color: #BAC2D8 !important; }
+.factsheet-v2-shell[data-theme="dark"] .text-text-2 { color: #BAC2D8 !important; }
+.factsheet-v2-shell[data-theme="dark"] .text-text-muted { color: #A0AAC2 !important; }
+.factsheet-v2-shell[data-theme="dark"] .text-accent { color: #5EEAD4 !important; }
+.factsheet-v2-shell[data-theme="dark"] .text-positive { color: #4ADE80 !important; }
+.factsheet-v2-shell[data-theme="dark"] .text-negative { color: #F87171 !important; }
+.factsheet-v2-shell[data-theme="dark"] .text-warning { color: #FBBF24 !important; }
+.factsheet-v2-shell[data-theme="dark"] .text-warning-700 { color: #FBBF24 !important; }
+
+/* Borders */
+.factsheet-v2-shell[data-theme="dark"] .border-border { border-color: #2A3144 !important; }
+.factsheet-v2-shell[data-theme="dark"] .border-text { border-color: #3D4661 !important; }
+.factsheet-v2-shell[data-theme="dark"] .border-accent { border-color: #5EEAD4 !important; }
+.factsheet-v2-shell[data-theme="dark"] .border-negative { border-color: #F87171 !important; }
+.factsheet-v2-shell[data-theme="dark"] .border-negative\/30 { border-color: rgba(248, 113, 113, 0.4) !important; }
+.factsheet-v2-shell[data-theme="dark"] .border-border\/30 { border-color: rgba(42, 49, 68, 0.5) !important; }
+.factsheet-v2-shell[data-theme="dark"] .border-border\/60 { border-color: rgba(42, 49, 68, 0.75) !important; }
+.factsheet-v2-shell[data-theme="dark"] .divide-border > * + * { border-color: #2A3144 !important; }
+
+/* Hover states retained where light-mode used the same surface */
+.factsheet-v2-shell[data-theme="dark"] .hover\:underline:hover { text-decoration: underline; }
+
+/* Colorblind override layered on top — strategy/positive shifts to muted
+   Oxford Blue (light) or sky-blue (dark); negative shifts to Claret. */
+.factsheet-v2-shell[data-theme="light"][data-colorblind="1"] .bg-accent {
+  background-color: #002554 !important;
+}
+.factsheet-v2-shell[data-theme="light"][data-colorblind="1"] .text-accent { color: #002554 !important; }
+.factsheet-v2-shell[data-theme="light"][data-colorblind="1"] .text-positive { color: #002554 !important; }
+.factsheet-v2-shell[data-theme="light"][data-colorblind="1"] .text-negative { color: #990019 !important; }
+.factsheet-v2-shell[data-theme="dark"][data-colorblind="1"] .bg-accent { background-color: #4A8FCC !important; color: #FFFFFF !important; }
+.factsheet-v2-shell[data-theme="dark"][data-colorblind="1"] .text-accent { color: #4A8FCC !important; }
+.factsheet-v2-shell[data-theme="dark"][data-colorblind="1"] .text-positive { color: #4A8FCC !important; }
+.factsheet-v2-shell[data-theme="dark"][data-colorblind="1"] .text-negative { color: #E26A77 !important; }
+
