@@ -5,6 +5,13 @@ import type { ReactNode } from "react";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 
 /**
+ * Broadcast on `window` to ask every CollapsibleSection in the tree to
+ * pop open. Used by the ControlBar's "Reset view" button — see
+ * FactsheetView.ControlBar.
+ */
+export const FACTSHEET_OPEN_ALL_EVENT = "factsheet-v2:open-all";
+
+/**
  * Collapsible section wrapper for the factsheet — native <details> at the
  * core so it's keyboard-accessible by default, works without JS, and prints
  * with the user's last open/closed state. Persists per (strategyId, sectionId)
@@ -50,6 +57,16 @@ export function CollapsibleSection({
       window.localStorage.setItem(storageKey, open ? "open" : "closed");
     } catch { /* private mode / quota */ }
   }, [open, storageKey, hydrated]);
+
+  // "Reset view" broadcasts FACTSHEET_OPEN_ALL_EVENT so every collapsed
+  // section pops back open. We listen here rather than in a parent so
+  // sections that were rendered conditionally still register cleanly.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = () => setOpen(true);
+    window.addEventListener(FACTSHEET_OPEN_ALL_EVENT, handler);
+    return () => window.removeEventListener(FACTSHEET_OPEN_ALL_EVENT, handler);
+  }, []);
 
   return (
     <details

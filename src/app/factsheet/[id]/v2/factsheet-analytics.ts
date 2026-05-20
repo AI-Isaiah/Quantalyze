@@ -24,7 +24,8 @@ export type FactsheetV2Event =
   | "factsheet_v2_comparator_swap"
   | "factsheet_v2_pdf_print"
   | "factsheet_v2_reset_view"
-  | "factsheet_v2_compare_click";
+  | "factsheet_v2_compare_click"
+  | "factsheet_v2_share_copy";
 
 export type FactsheetV2EventProps = Record<string, string | number | boolean | null | undefined>;
 

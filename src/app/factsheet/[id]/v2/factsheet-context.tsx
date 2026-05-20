@@ -151,11 +151,9 @@ export function FactsheetProvider({
     const darkRaw = get("dark");
     if (darkRaw === "1" || darkRaw === true) {
       setDarkMode(true);
-    } else if (darkRaw == null) {
-      try {
-        if (window.matchMedia?.("(prefers-color-scheme: dark)").matches) setDarkMode(true);
-      } catch { /* matchMedia unavailable */ }
     }
+    // Display defaults to "everything off" — no system-preference inference
+    // for dark mode. The user opts in explicitly via the Display popover.
   }, [payload.strategyId, payload.dates.length]);
 
   // Debounced write-back — only fires after hydration so we don't blow away

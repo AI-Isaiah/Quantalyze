@@ -107,13 +107,13 @@ export function TermsPanel() {
         Fees & Subscription
       </h4>
       <dl className="grid grid-cols-[140px_1fr] gap-y-1 text-[11px]">
-        <Term label="Management fee">— (not provided)</Term>
-        <Term label="Performance fee">— (not provided)</Term>
-        <Term label="High-water mark">— (not provided)</Term>
-        <Term label="Lockup">— (not provided)</Term>
-        <Term label="Subscription">— (not provided)</Term>
-        <Term label="Redemption">— (not provided)</Term>
-        <Term label="Notice period">— (not provided)</Term>
+        <Term label="Management fee">— on request</Term>
+        <Term label="Performance fee">— on request</Term>
+        <Term label="High-water mark">— on request</Term>
+        <Term label="Lockup">— on request</Term>
+        <Term label="Subscription">— on request</Term>
+        <Term label="Redemption">— on request</Term>
+        <Term label="Notice period">— on request</Term>
       </dl>
 
       <p className="mt-2 text-[10px] italic text-text-muted">

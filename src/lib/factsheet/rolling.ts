@@ -11,6 +11,40 @@
 
 export const ROLL_WINDOW_6MO = 126;
 export const ROLL_WINDOW_90D = 90;
+export const ROLL_WINDOW_30D = 30;
+
+/**
+ * Pick a rolling window starting from a preferred size, falling back to
+ * smaller windows when the series is too short to fill the preferred one.
+ *
+ * Threshold: need at least `window + 5` points so the rolling series has
+ * a small post-warmup tail to plot. Below the smallest window we return
+ * `enough: false` so the caller can render a "Not enough data" message
+ * instead of an empty chart.
+ *
+ * `tiers` is ordered preferred → fallback. The first tier whose threshold
+ * is met wins; otherwise the last tier is returned with `enough: false`.
+ */
+export interface RollWindowPick {
+  window: number;
+  label: string;
+  enough: boolean;
+}
+export function pickRollingWindow(
+  seriesLength: number,
+  tiers: Array<{ window: number; label: string }> = [
+    { window: ROLL_WINDOW_6MO, label: "6mo" },
+    { window: ROLL_WINDOW_30D, label: "30d" },
+  ],
+): RollWindowPick {
+  for (const t of tiers) {
+    if (seriesLength >= t.window + 5) {
+      return { ...t, enough: true };
+    }
+  }
+  const last = tiers[tiers.length - 1];
+  return { ...last, enough: false };
+}
 
 /**
  * Rolling regression beta of `strat` on `bench` over a sliding window.

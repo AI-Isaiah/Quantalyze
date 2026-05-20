@@ -18,10 +18,14 @@ import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel } from "./Mandate
  */
 export function MetricsColumn() {
   const payload = usePayload();
-  const { block: cmp } = useActiveComparator();
+  const { block: cmp, key: cmpKey } = useActiveComparator();
   const m = payload.strategyMetrics;
   const b = cmp.summary;
-  const bn = cmp.shortName;
+  // shortName is "—" when no comparator selected — Panel.benchHeader treats
+  // any non-empty string as a real comparator and renders "vs —" in the
+  // header. Pass undefined instead so the "vs" label disappears entirely
+  // when there's nothing to compare against.
+  const bn = cmpKey === "none" ? undefined : cmp.shortName;
 
   return (
     <aside className="flex flex-col gap-12">
@@ -53,15 +57,15 @@ export function MetricsColumn() {
             <Row label="Kurtosis" value={num(m.kurt)} bench="" />
           </Kpm>
         </Panel>
-        <Panel title="Returns">
+        <Panel title="Returns" benchHeader={bn}>
           <Kpm>
-            <Row label="Month-to-date" value={pct(m.mtd, true)} bench="" />
-            <Row label="Year-to-date" value={pct(m.ytd, true)} bench="" />
-            <Row label="3 Month" value={pct(m.p3m, true)} bench="" />
-            <Row label="6 Month" value={pct(m.p6m, true)} bench="" />
-            <Row label="1 Year" value={pct(m.p1y, true)} bench="" />
-            <Row label="Win Rate (days)" value={pct(m.win_rate)} bench="" />
-            <Row label="Profit Factor" value={num(m.profit_factor)} bench="" />
+            <Row label="Month-to-date" value={pct(m.mtd, true)} bench={pct(b?.mtd, true)} />
+            <Row label="Year-to-date" value={pct(m.ytd, true)} bench={pct(b?.ytd, true)} />
+            <Row label="3 Month" value={pct(m.p3m, true)} bench={pct(b?.p3m, true)} />
+            <Row label="6 Month" value={pct(m.p6m, true)} bench={pct(b?.p6m, true)} />
+            <Row label="1 Year" value={pct(m.p1y, true)} bench={pct(b?.p1y, true)} />
+            <Row label="Win Rate (days)" value={pct(m.win_rate)} bench={pct(b?.win_rate)} />
+            <Row label="Profit Factor" value={num(m.profit_factor)} bench={num(b?.profit_factor)} />
           </Kpm>
         </Panel>
         <EoyReturnsPanel />
@@ -280,7 +284,7 @@ function RollingMetricsPanel() {
   const sh = rollingStats(payload.strategyRollingSharpe);
   const so = rollingStats(payload.strategyRollingSortino);
   return (
-    <Panel title="Rolling Metrics (6mo)">
+    <Panel title={`Rolling Metrics (${payload.rollingWindow?.label ?? "6mo"})`}>
       <table className="w-full text-[12px]">
         <thead>
           <tr className="border-b border-border/60">
@@ -438,24 +442,24 @@ function WorstDrawdownsTablePanel() {
         <thead>
           <tr className="border-b border-border/60">
             <th className="py-1 pr-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">#</th>
-            <th className="py-1 px-1 text-left font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">Peak</th>
-            <th className="py-1 px-1 text-left font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">Trough</th>
-            <th className="py-1 px-1 text-left font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">Recov.</th>
-            <th className="py-1 px-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">Depth</th>
+            <th className="py-1 px-1 text-left font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap">Peak</th>
+            <th className="py-1 px-1 text-left font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap">Trough</th>
+            <th className="py-1 px-1 text-left font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap">Recov.</th>
+            <th className="py-1 px-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap">Depth</th>
             <th
-              className="py-1 px-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted"
+              className="py-1 px-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap"
               title="Days from peak to trough"
             >
               DD d
             </th>
             <th
-              className="py-1 px-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted"
+              className="py-1 px-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap"
               title="Days from trough to recovery"
             >
               Rec d
             </th>
             <th
-              className="py-1 pl-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted"
+              className="py-1 pl-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap"
               title="Total period peak to recovery"
             >
               Total

@@ -59,6 +59,10 @@ export type ChartConfig = {
    *  one vertical bar per observation from the baseline — canonical for daily
    *  returns where the series isn't truly continuous. */
   kind?: "line" | "bars";
+  /** When true, draw a horizontal reference line at mean(strategy series) — used
+   *  on the rolling vol/sharpe/sortino charts so the viewer can see at a glance
+   *  whether the current value is above or below the strategy's average. */
+  showStratAverage?: boolean;
 };
 
 export const CHART_CONFIGS: ChartConfig[] = [
@@ -123,6 +127,7 @@ export const CHART_CONFIGS: ChartConfig[] = [
     height: 200,
     stratField: "strategyRollingVol",
     comparatorField: "rollingVol",
+    showStratAverage: true,
   },
   {
     key: "rollingSharpe",
@@ -135,6 +140,7 @@ export const CHART_CONFIGS: ChartConfig[] = [
     height: 200,
     stratField: "strategyRollingSharpe",
     comparatorField: "rollingSharpe",
+    showStratAverage: true,
   },
   {
     key: "rollingSortino",
@@ -147,6 +153,7 @@ export const CHART_CONFIGS: ChartConfig[] = [
     height: 200,
     stratField: "strategyRollingSortino",
     comparatorField: "rollingSortino",
+    showStratAverage: true,
   },
   {
     key: "rollingBeta",

@@ -24,6 +24,8 @@ export function buildComparatorBlock(
   stratEquity: number[],
   dates: string[],
   stratAnnVol: number,
+  rollWindowDays: number,
+  rollBetaWindowDays: number,
 ): ComparatorBlock {
   const benchSummary = compute(benchReturns, dates);
   const joint = jointMetrics(stratReturns, benchReturns);
@@ -47,17 +49,24 @@ export function buildComparatorBlock(
       calmar: benchSummary.calmar,
       max_dd: benchSummary.max_dd,
       longest_dd: benchSummary.longest_dd,
+      mtd: benchSummary.mtd,
+      ytd: benchSummary.ytd,
+      p3m: benchSummary.p3m,
+      p6m: benchSummary.p6m,
+      p1y: benchSummary.p1y,
+      win_rate: benchSummary.win_rate,
+      profit_factor: benchSummary.profit_factor,
     },
     joint,
     cumulative: benchSummary.eq,
     cumVsBench,
     dailyReturns: benchReturns,
-    rollingVol: rollingVol(benchReturns),
-    rollingSharpe: rollingSharpe(benchReturns),
-    rollingSortino: rollingSortino(benchReturns),
+    rollingVol: rollingVol(benchReturns, rollWindowDays),
+    rollingSharpe: rollingSharpe(benchReturns, rollWindowDays),
+    rollingSortino: rollingSortino(benchReturns, rollWindowDays),
     volMatched,
     volMatchedLabel: `${short} × ${vmScale.toFixed(2)}`,
-    rollingBeta: rollingBeta(stratReturns, benchReturns),
+    rollingBeta: rollingBeta(stratReturns, benchReturns, rollBetaWindowDays),
   };
 }
 

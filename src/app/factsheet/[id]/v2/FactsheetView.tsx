@@ -14,7 +14,7 @@ import { StreakDistributionPanel } from "./AnalyticalPanels";
 import { EndOfYearBarsPanel, QuantileBoxPlotPanel } from "./DistributionPanels";
 import { MasterBrush } from "./MasterBrush";
 import { StressWindowsPanel } from "./StressWindowsPanel";
-import { CollapsibleSection } from "./CollapsibleSection";
+import { CollapsibleSection, FACTSHEET_OPEN_ALL_EVENT } from "./CollapsibleSection";
 import { LazyMount } from "./LazyMount";
 
 /**
@@ -156,9 +156,6 @@ export function FactsheetBody({
   const shellStyle = paletteToCssVars(resolved, darkMode);
   return (
     <>
-      <a href="#factsheet-main" className="factsheet-v2-skip-link">
-        Skip to factsheet content
-      </a>
       <article
         id="factsheet-main"
         tabIndex={-1}
@@ -182,9 +179,7 @@ export function FactsheetBody({
               storageKey={`factsheet-collapse:${payload.strategyId}:perf`}
               defaultOpen
             >
-              {CHART_CONFIGS.map(cfg => (
-                <TimeSeriesChart key={cfg.key} config={cfg} />
-              ))}
+              <PerformanceCharts />
             </CollapsibleSection>
             <CollapsibleSection
               id="factsheet-dist"
@@ -254,6 +249,76 @@ export function FactsheetBody({
   );
 }
 
+/**
+ * Performance charts — driven by CHART_CONFIGS, then specialized at runtime:
+ *
+ *   1. Comparator filter: two configs (`cumVsBench`, `rollingBeta`) have no
+ *      strategy series of their own — only `strategy ÷ comparator` content.
+ *      When no comparator is selected, rendering them gives an empty axis,
+ *      so drop them from the list.
+ *   2. Rolling-window relabel: when the data was too short for a 6mo window
+ *      and we fell back to 30d, the rolling-{vol,sharpe,sortino} titles must
+ *      reflect the real window. Also bump the warmup overlay's width to match
+ *      so it doesn't paint a 126-day band over a 30-day series.
+ */
+const ROLLING_CHART_KEYS = new Set(["rollingVol", "rollingSharpe", "rollingSortino"]);
+
+function PerformanceCharts() {
+  const payload = usePayload();
+  const { key: cmpKey } = useActiveComparator();
+  // unstable_cache may hold an older payload that predates the rolling-window
+  // field rollout. Default to "6mo enough" / "90d enough" so stale payloads
+  // don't crash the render — the warmup band will tell the user something is
+  // off if the window truly doesn't fit.
+  const { window: rollWindow, label: rollLabel } = payload.rollingWindow
+    ?? { window: 126, label: "6mo" };
+  const beta = payload.rollingBetaWindow
+    ?? { window: 90, label: "90d", enough: true };
+  const configs = React.useMemo(() => {
+    return CHART_CONFIGS
+      .filter(cfg => !(cmpKey === "none" && cfg.stratField === null && cfg.comparatorAsPrimary))
+      // Rolling β has its own (smaller) preferred window and an
+      // explicit "not enough data" state — when even the 30d tier can't
+      // be filled, drop the chart entirely. The placeholder below the
+      // chart strip would carry the message if we had a slot for it; for
+      // now, dropping is the least-confusing UX (the empty axis we used
+      // to render reads as broken).
+      .filter(cfg => !(cfg.key === "rollingBeta" && !beta.enough))
+      .map(cfg => {
+        if (ROLLING_CHART_KEYS.has(cfg.key)) {
+          // "Rolling Volatility (6mo)" → "Rolling Volatility (30d)" etc.
+          const title = cfg.title.replace(/\((6mo|30d|90d)\)/i, `(${rollLabel})`);
+          return { ...cfg, title, warmup: rollWindow };
+        }
+        if (cfg.key === "rollingBeta") {
+          // "Rolling β (90d) vs Comparator" → "Rolling β (30d) vs Comparator"
+          const title = cfg.title.replace(/\((6mo|30d|90d)\)/i, `(${beta.label})`);
+          return { ...cfg, title, warmup: beta.window };
+        }
+        return cfg;
+      });
+  }, [cmpKey, rollLabel, rollWindow, beta.enough, beta.label, beta.window]);
+  return (
+    <>
+      {configs.map(cfg => (
+        <TimeSeriesChart key={cfg.key} config={cfg} />
+      ))}
+      {!beta.enough && cmpKey !== "none" && (
+        <section className="border border-border bg-surface-subtle px-4 py-3">
+          <h3 className="text-[12px] font-semibold uppercase tracking-[0.18em] text-text-primary">
+            Rolling β — Not enough data
+          </h3>
+          <p className="mt-1 text-[11px] text-text-muted">
+            Strategy history is too short to compute even a 30-day rolling beta
+            against the comparator. Returns this panel once the strategy has at
+            least ~35 observations.
+          </p>
+        </section>
+      )}
+    </>
+  );
+}
+
 function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
   const exchanges = payload.supportedExchanges.length > 0 ? payload.supportedExchanges.join(", ") : null;
   const leverage = payload.leverageRange;
@@ -269,7 +334,8 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
   return (
     <header className="border-b border-text pb-6">
       <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
-        Institutional Factsheet · Quantalyze
+        Institutional Factsheet ·{" "}
+        <span className="font-semibold text-accent">Quantalyze</span>
       </p>
       <div className="mt-2 flex flex-col sm:flex-row sm:flex-wrap sm:items-end sm:justify-between gap-4">
         <div className="max-w-3xl">
@@ -522,13 +588,69 @@ function SectionNav() {
   );
 }
 
+/**
+ * "Share mode" hides every outbound link in the factsheet so a recipient
+ * landing on a shared URL can read the strategy but can't navigate further
+ * into Quantalyze. Activated by the `?share=1` query param — set by the
+ * Share-link button. Reads window.location directly (client-only) since
+ * App Router pushes us toward useSearchParams which forces Suspense.
+ */
+function useShareMode(): boolean {
+  const [shareMode, setShareMode] = React.useState(false);
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    setShareMode(new URLSearchParams(window.location.search).get("share") === "1");
+    const onPop = () =>
+      setShareMode(new URLSearchParams(window.location.search).get("share") === "1");
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+  return shareMode;
+}
+
+function ShareLinkButton({ strategyId }: { strategyId: string }) {
+  const [copied, setCopied] = React.useState(false);
+  const onClick = React.useCallback(() => {
+    if (typeof window === "undefined") return;
+    // Strip every query param except `share=1` so recipients don't inherit
+    // the sender's transient camera/comparator state.
+    const url = `${window.location.origin}${window.location.pathname}?share=1`;
+    void navigator.clipboard?.writeText(url).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      },
+      () => { /* clipboard denied — fall back silently */ },
+    );
+    trackFactsheetEvent("factsheet_v2_share_copy", { strategy_id: strategyId });
+  }, [strategyId]);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title="Copy a public, link-only factsheet URL — recipients see the same page with no outbound navigation"
+      className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+    >
+      {copied ? "Link copied" : "Copy share link"}
+    </button>
+  );
+}
+
 function ControlBar() {
   const payload = usePayload();
   const { resetXRange } = useXRange();
   const { setComparator } = useComparator();
+  const shareMode = useShareMode();
   const resetView = () => {
     resetXRange();
     setComparator(payload.activeComparator);
+    // Broadcast: every CollapsibleSection in the tree listens for this
+    // and pops back open. We don't re-set localStorage; the next toggle
+    // write will pick up the new state. "Reset view" means "show me
+    // everything," not just "reset the camera."
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event(FACTSHEET_OPEN_ALL_EVENT));
+    }
     trackFactsheetEvent("factsheet_v2_reset_view", { strategy_id: payload.strategyId });
   };
   return (
@@ -542,26 +664,17 @@ function ControlBar() {
       >
         Reset view
       </button>
-      <button
-        type="button"
-        onClick={() => {
-          if (typeof window === "undefined") return;
-          trackFactsheetEvent("factsheet_v2_pdf_print", { strategy_id: payload.strategyId });
-          window.print();
-        }}
-        title="Download a PDF via your browser's print dialog (Cmd/Ctrl-P)"
-        className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
-      >
-        Download PDF
-      </button>
-      <a
-        href={`/compare?ids=${payload.strategyId}`}
-        onClick={() => trackFactsheetEvent("factsheet_v2_compare_click", { strategy_id: payload.strategyId })}
-        title="Compare this strategy against another (multi-strategy overlay)"
-        className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
-      >
-        Compare strategies
-      </a>
+      <ShareLinkButton strategyId={payload.strategyId} />
+      {!shareMode && (
+        <a
+          href={`/compare?ids=${payload.strategyId}`}
+          onClick={() => trackFactsheetEvent("factsheet_v2_compare_click", { strategy_id: payload.strategyId })}
+          title="Compare this strategy against another (multi-strategy overlay)"
+          className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
+        >
+          Compare strategies
+        </a>
+      )}
       <ComparatorPicker />
     </section>
   );

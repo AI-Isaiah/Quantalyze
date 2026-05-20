@@ -102,7 +102,8 @@ export type ComparatorBlock = {
   name: string;
   shortName: string;
   summary: Pick<ComputeResult,
-    "cum_ret" | "cagr" | "ann_vol" | "sharpe" | "sortino" | "calmar" | "max_dd" | "longest_dd"> | null;
+    "cum_ret" | "cagr" | "ann_vol" | "sharpe" | "sortino" | "calmar" | "max_dd" | "longest_dd"
+    | "mtd" | "ytd" | "p3m" | "p6m" | "p1y" | "win_rate" | "profit_factor"> | null;
   joint: JointMetrics | null;
   /** Comparator's own cumulative equity (strategy line stays in payload.strategyEquity). */
   cumulative: number[] | null;
@@ -326,12 +327,28 @@ export type FactsheetPayload = {
   strategyReturns: number[];
   /** Strategy cumulative equity (running product of 1 + r), base 1.0. */
   strategyEquity: number[];
-  /** Strategy rolling 6mo annualized vol. Nulls during warmup. */
+  /** Strategy rolling annualized vol over `rollingWindow.window` days. Nulls during warmup. */
   strategyRollingVol: Array<number | null>;
-  /** Strategy rolling 6mo Sharpe. Nulls during warmup. */
+  /** Strategy rolling Sharpe over `rollingWindow.window` days. Nulls during warmup. */
   strategyRollingSharpe: Array<number | null>;
-  /** Strategy rolling 6mo Sortino. Nulls during warmup. */
+  /** Strategy rolling Sortino over `rollingWindow.window` days. Nulls during warmup. */
   strategyRollingSortino: Array<number | null>;
+  /**
+   * Effective rolling window used by `strategyRollingVol/Sharpe/Sortino`
+   * (and the comparator equivalents). `window` is the lookback in trading
+   * days, `label` is the display suffix appended to chart titles (e.g.
+   * "6mo" or "30d"). Picked by `pickRollingWindow` based on series length
+   * so short-history strategies fall back from 126d → 30d instead of
+   * rendering empty rolling charts.
+   */
+  rollingWindow: { window: number; label: string };
+  /**
+   * Same shape as `rollingWindow`, but for the Rolling β chart which has its
+   * own preferred window (90d → 30d fallback). `enough` is false when even
+   * the smallest tier can't be filled — the chart should render a
+   * "Not enough data" placeholder instead of a flat zero line.
+   */
+  rollingBetaWindow: { window: number; label: string; enough: boolean };
   /** Strategy drawdown from running peak (≤ 0). Drives the Underwater chart. */
   strategyDrawdowns: number[];
   /** Top-N worst drawdown periods, used by the Worst-DDs chart's shaded bands. */

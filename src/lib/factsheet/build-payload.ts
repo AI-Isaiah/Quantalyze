@@ -1,7 +1,7 @@
 import type { CorrelationRow, DailyReturn, FactsheetPayload, AllocatorPortfolioPayload, QuantilePayload, TrustTierKind } from "./types";
 import { alignReturns } from "./align";
 import { compute, cumEq, worstDrawdowns } from "./compute";
-import { rollingVol, rollingSharpe, rollingSortino } from "./rolling";
+import { rollingVol, rollingSharpe, rollingSortino, pickRollingWindow, ROLL_WINDOW_90D, ROLL_WINDOW_30D } from "./rolling";
 import { buildComparatorBlock, noneComparatorBlock } from "./comparator-block";
 import {
   BTC_DAILY,
@@ -87,6 +87,17 @@ export function buildFactsheetPayload(
   const dates = clipped.map(d => d.date);
   const stratRet = clipped.map(d => d.value);
 
+  // Strategies with < 126 trading days observed can't fill a 6-month rolling
+  // window — the chart would only show the warmup band. Pick the window once
+  // here and thread it through both the rolling computations and the payload
+  // so the chart title reflects the actual cadence. Rolling beta has its own
+  // (smaller) preferred window — 90d → 30d → not-enough-data.
+  const rollWindow = pickRollingWindow(stratRet.length);
+  const rollBetaWindow = pickRollingWindow(stratRet.length, [
+    { window: ROLL_WINDOW_90D, label: "90d" },
+    { window: ROLL_WINDOW_30D, label: "30d" },
+  ]);
+
   const fullMetrics = compute(stratRet, dates);
   // Strip eq/dd before serialization — already shipped as strategyEquity / strategyDrawdowns
   // at the top level; carrying them twice burns ~16 KB on a 1049-day series.
@@ -167,16 +178,18 @@ export function buildFactsheetPayload(
     dates,
     strategyReturns: stratRet,
     strategyEquity: stratEquity,
-    strategyRollingVol: rollingVol(stratRet),
-    strategyRollingSharpe: rollingSharpe(stratRet),
-    strategyRollingSortino: rollingSortino(stratRet),
+    strategyRollingVol: rollingVol(stratRet, rollWindow.window),
+    strategyRollingSharpe: rollingSharpe(stratRet, rollWindow.window),
+    strategyRollingSortino: rollingSortino(stratRet, rollWindow.window),
+    rollingWindow: rollWindow,
+    rollingBetaWindow: rollBetaWindow,
     strategyDrawdowns: stratDd,
     strategyWorst10: worstDrawdowns(stratDd, 10),
     strategyMetrics,
     activeComparator: "btc",
     comparators: {
-      btc: buildComparatorBlock("BTC-USD", "BTC", btcRet, stratRet, stratEquity, dates, strategyMetrics.ann_vol),
-      spx: buildComparatorBlock("S&P 500", "SPX", spxRet, stratRet, stratEquity, dates, strategyMetrics.ann_vol),
+      btc: buildComparatorBlock("BTC-USD", "BTC", btcRet, stratRet, stratEquity, dates, strategyMetrics.ann_vol, rollWindow.window, rollBetaWindow.window),
+      spx: buildComparatorBlock("S&P 500", "SPX", spxRet, stratRet, stratEquity, dates, strategyMetrics.ann_vol, rollWindow.window, rollBetaWindow.window),
       none: noneComparatorBlock,
     },
     styleDrift,

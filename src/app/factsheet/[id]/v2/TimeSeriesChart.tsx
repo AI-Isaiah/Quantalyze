@@ -612,29 +612,39 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
           );
         })}
 
-        {yTicks.map(t => (
-          <g key={`y-${t.value}`}>
-            <line
-              x1={PAD.left}
-              x2={PAD.left + plotW}
-              y1={Y(t.value)}
-              y2={Y(t.value)}
-              stroke="var(--color-border)"
-              strokeDasharray={t.value === config.baseline ? "4 2" : "2 3"}
-              strokeWidth={1}
-            />
-            <text
-              x={PAD.left - 6}
-              y={Y(t.value) + 3}
-              textAnchor="end"
-              fontSize={10}
-              fontFamily="var(--font-mono)"
-              fill="var(--color-text-muted)"
-            >
-              {t.label}
-            </text>
-          </g>
-        ))}
+        {yTicks.map(t => {
+          // The "natural zero" line (baseline = 0 for percent/ratio charts,
+          // 1 for growth charts) is the breakeven reference and deserves
+          // more visual weight than the other gridlines. Drawn as a solid
+          // line in the muted text colour rather than the lighter border
+          // hue, so the viewer can see at a glance whether the strategy is
+          // above or below zero/par without squinting.
+          const isBaseline = t.value === config.baseline;
+          return (
+            <g key={`y-${t.value}`}>
+              <line
+                x1={PAD.left}
+                x2={PAD.left + plotW}
+                y1={Y(t.value)}
+                y2={Y(t.value)}
+                stroke={isBaseline ? "var(--color-text-muted)" : "var(--color-border)"}
+                strokeDasharray={isBaseline ? undefined : "2 3"}
+                strokeOpacity={isBaseline ? 0.6 : 1}
+                strokeWidth={isBaseline ? 1.2 : 1}
+              />
+              <text
+                x={PAD.left - 6}
+                y={Y(t.value) + 3}
+                textAnchor="end"
+                fontSize={10}
+                fontFamily="var(--font-mono)"
+                fill="var(--color-text-muted)"
+              >
+                {t.label}
+              </text>
+            </g>
+          );
+        })}
 
         {xTicks.map(t => (
           <g key={`x-${t.idx}`}>
@@ -691,6 +701,49 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             </g>
           );
         })}
+
+        {/* Strategy-series average reference line — rolling vol/sharpe/sortino
+            charts opt in via cfg.showStratAverage. Drawn before clipping so it
+            spans the full plot width even when the data starts deep into the
+            warmup band. Drop when no strategy series, or when the mean isn't
+            finite (all-null window). */}
+        {config.showStratAverage && series[0] && (() => {
+          const values = series[0].values;
+          let sum = 0;
+          let count = 0;
+          for (const v of values) {
+            if (v != null && Number.isFinite(v)) { sum += v; count++; }
+          }
+          if (count === 0) return null;
+          const avg = sum / count;
+          const yAvg = Y(avg);
+          if (!Number.isFinite(yAvg)) return null;
+          return (
+            <g pointerEvents="none">
+              <line
+                x1={PAD.left}
+                x2={PAD.left + plotW}
+                y1={yAvg}
+                y2={yAvg}
+                stroke={series[0].color}
+                strokeOpacity={0.55}
+                strokeDasharray="4 3"
+                strokeWidth={1}
+              />
+              <text
+                x={PAD.left + plotW - 4}
+                y={yAvg - 3}
+                textAnchor="end"
+                fontSize={9}
+                fontFamily="var(--font-mono)"
+                fill={series[0].color}
+                fillOpacity={0.75}
+              >
+                avg {(config.valueFormat === "percent" ? (avg * 100).toFixed(1) + "%" : avg.toFixed(2))}
+              </text>
+            </g>
+          );
+        })()}
 
         {/* Clip series paths to the plot rect so off-Y-range points don't leak
             outside as visible vertical streaks. */}
