@@ -9,8 +9,8 @@ import { getStrategyDetail } from "@/lib/queries";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { createClient } from "@/lib/supabase/server";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
+import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { TrustTierKind } from "@/lib/factsheet/types";
-import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { notFound, redirect } from "next/navigation";
 
 export default async function StrategyDetailPage({
@@ -45,10 +45,17 @@ export default async function StrategyDetailPage({
     strategy.name ?? strategy.codename ?? breadcrumbName;
   const displayName = factsheetName;
 
-  // normalizeDailyReturns accepts the three real-world shapes the
-  // analytics service may have written: array of {date,value}, flat
-  // {date:value} dict, or nested {year:{MM-DD:value}} dict.
-  const dailyReturns = normalizeDailyReturns(analytics?.daily_returns);
+  // analytics-service-only strategies have daily_returns=null but the
+  // real cumprod equity curve in returns_series. resolveDailyReturnSeries
+  // handles both shapes + the three real-world daily_returns dict layouts.
+  const analyticsRow = analytics as
+    | { daily_returns?: unknown; returns_series?: unknown }
+    | null
+    | undefined;
+  const dailyReturns = resolveDailyReturnSeries(
+    analyticsRow?.daily_returns,
+    analyticsRow?.returns_series,
+  );
 
   const factsheetPayload = buildFactsheetPayload(
     {

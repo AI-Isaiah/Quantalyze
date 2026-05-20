@@ -5,8 +5,8 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
+import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
-import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { FactsheetView } from "./FactsheetView";
 
 /**
@@ -35,7 +35,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
       `id, name, codename, disclosure_tier, status, markets, strategy_types,
        description, subtypes, supported_exchanges, leverage_range, aum,
        max_capacity, avg_daily_turnover, start_date, benchmark,
-       strategy_analytics ( daily_returns, computed_at )`,
+       strategy_analytics ( daily_returns, returns_series, computed_at )`,
     )
     .eq("id", id)
     .eq("status", "published")
@@ -54,19 +54,21 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     ? strategy.strategy_analytics[0]
     : strategy.strategy_analytics;
   const dailyRaw = analytics?.daily_returns;
-  // normalizeDailyReturns handles all three real-world shapes the analytics
-  // service produces: array of {date,value}, flat {date:value} dict, and
-  // nested {year:{MM-DD:value}} dict. Lifting the Array.isArray() guard
-  // (which only accepted the first shape) here is the root cause of
-  // strategies showing "still computing" despite having scalar analytics.
-  const dailyReturns = normalizeDailyReturns(dailyRaw);
+  // resolveDailyReturnSeries handles two real-world realities at once:
+  //   (a) `daily_returns` may be in one of three shapes (array of
+  //       {date,value}, flat {date:value} dict, nested {year:{MM-DD:value}}).
+  //   (b) analytics-service-only strategies have `daily_returns=null`; the
+  //       real series lives in `returns_series` as a cumprod equity curve.
+  // Both gates have to fall before we render the "still computing"
+  // placeholder.
+  const dailyReturns = resolveDailyReturnSeries(dailyRaw, analytics?.returns_series);
   if (dailyReturns.length === 0) {
-    console.warn("[factsheet] fetchAndBuildPayload — daily_returns empty after normalization", {
+    console.warn("[factsheet] fetchAndBuildPayload — no usable return series after normalization + equity-curve fallback", {
       id,
       hasAnalytics: !!analytics,
       dailyType: typeof dailyRaw,
       isArray: Array.isArray(dailyRaw),
-      sample: Array.isArray(dailyRaw) ? dailyRaw[0] : dailyRaw,
+      returnsSeriesType: typeof analytics?.returns_series,
     });
     return null;
   }

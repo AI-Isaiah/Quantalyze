@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   buildAllocatorPortfolioFactsheetPayload,
   equityCurveToDailyReturns,
+  resolveDailyReturnSeries,
 } from "./allocator-portfolio-payload";
+import { buildFactsheetPayload } from "./build-payload";
 
 describe("equityCurveToDailyReturns", () => {
   it("returns an empty array when fewer than two valid points are supplied", () => {
@@ -81,5 +83,72 @@ describe("buildAllocatorPortfolioFactsheetPayload", () => {
       allocatorId: "alloc-default-name",
     });
     expect(payload?.strategyName).toBe("My Portfolio");
+  });
+});
+
+describe("resolveDailyReturnSeries — analytics column-drift fallback", () => {
+  // Regression: analytics-service writes the cumprod equity curve to
+  // `returns_series`; the `daily_returns` column is only populated by
+  // CSV ingest. Strategies computed only by analytics-service (e.g.
+  // Phoenix Protocol on 2026-05-20) leave `daily_returns=null`, so the
+  // factsheet route used to render the "still computing" placeholder
+  // even though the real wealth curve already existed in `returns_series`.
+  // Pin the resolver so the route's fallback chain can't silently regress.
+  // Found by /qa on 2026-05-20.
+  it("returns the daily_returns array verbatim when populated", () => {
+    const got = resolveDailyReturnSeries(
+      [
+        { date: "2025-01-01", value: 0.01 },
+        { date: "2025-01-02", value: -0.005 },
+      ],
+      null,
+    );
+    expect(got).toHaveLength(2);
+    expect(got[0]).toEqual({ date: "2025-01-01", value: 0.01 });
+  });
+
+  it("derives daily returns from the cumprod equity curve when daily_returns is null", () => {
+    const wealthSeries = Array.from({ length: 80 }).map((_, i) => {
+      const day = String((i % 28) + 1).padStart(2, "0");
+      const month = String(((i / 28) | 0) + 1).padStart(2, "0");
+      return {
+        date: `2024-${month}-${day}`,
+        value: 1 + Math.sin(i / 7) * 0.01,
+      };
+    });
+    const got = resolveDailyReturnSeries(null, wealthSeries);
+    expect(got.length).toBeGreaterThanOrEqual(2);
+    expect(Math.abs(got[0].value)).toBeLessThan(0.05);
+  });
+
+  it("yields a non-null FactsheetPayload end-to-end for a Phoenix-shaped strategy", () => {
+    const wealthSeries = Array.from({ length: 80 }).map((_, i) => {
+      const day = String((i % 28) + 1).padStart(2, "0");
+      const month = String(((i / 28) | 0) + 1).padStart(2, "0");
+      return {
+        date: `2024-${month}-${day}`,
+        value: 1 + Math.sin(i / 7) * 0.01,
+      };
+    });
+    const dailyReturns = resolveDailyReturnSeries(null, wealthSeries);
+    const payload = buildFactsheetPayload(
+      {
+        id: "phoenix-protocol-fake",
+        name: "Phoenix Protocol",
+        types: ["long_short"],
+        markets: ["crypto"],
+        computedAt: "2026-05-20T04:01:05.469Z",
+        trustTier: null,
+      },
+      dailyReturns,
+    );
+    expect(payload).not.toBeNull();
+    expect(payload!.strategyName).toBe("Phoenix Protocol");
+    expect(payload!.dates.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("returns an empty array when neither column has data", () => {
+    expect(resolveDailyReturnSeries(null, null)).toEqual([]);
+    expect(resolveDailyReturnSeries(undefined, undefined)).toEqual([]);
   });
 });
