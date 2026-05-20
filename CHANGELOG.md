@@ -7,6 +7,20 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.23.1.0] - 2026-05-20
+
+**fix(allocations): split spot holdings from futures positions in the dashboard.**
+
+### Fixed
+- Allocator dashboard Holdings tab no longer mixes spot holdings and futures positions in the same table. A leveraged perpetual position used to appear as a "holding" row alongside spot USDT, with its CCXT notional `size_usd` displayed as its value — swamping the weight denominator and inflating apparent allocation. The Python equity-curve calculation was always correct; this was a UI conflation only.
+
+### Added
+- New **Open Positions** section under Holdings shows derivative rows separately, with Venue / Symbol, Side (long/short), Quantity, Entry, Mark, Exposure (notional, clearly labelled), and Unrealized P&L columns. A footer totals unrealized P&L and explicit copy clarifies that notional is exposure, not equity contribution.
+- `allocator_holdings.side`, `entry_price`, and `unrealized_pnl_usd` are now projected from the dashboard query (columns already existed in the schema).
+
+### Changed
+- `HoldingsTabPanel` and the Overview `HoldingsTableWidget` partition `holdingsSummary` into `spotHoldings` and `derivativeHoldings` before rendering: spot rows flow through the existing `HoldingsTable`, derivatives flow through the new `OpenPositionsTable`. Weight calculations are now grounded only in spot value.
+
 ## [0.23.0.0] - 2026-05-20
 
 **feat(factsheet/v2): institutional factsheet route, embedded allocations overview, full UX polish pass.**
