@@ -155,6 +155,15 @@ export function FactsheetBody({
   // the article container so descendants pick up the new tokens via var().
   const resolved = resolvePalette({ darkMode, colorblind });
   const shellStyle = paletteToCssVars(resolved, darkMode);
+  // 2026-05-20: gate event-study panels on having a comparator. The
+  // Win/Loss-Event signature panels render "of —" with empty bands when
+  // no benchmark is selected because they aggregate the BENCHMARK
+  // trajectory around strategy events. Same for the cross-signatures
+  // section (strategy events × benchmark). Without a comparator both
+  // sections show 0 wins · 0 losses · blank bands, which reads as
+  // broken; hide the entire Returns Signatures collapsible instead.
+  const { key: cmpKey } = useActiveComparator();
+  const hasComparator = cmpKey !== "none";
   return (
     <>
       <article
@@ -209,20 +218,22 @@ export function FactsheetBody({
             >
               <StressWindowsPanel />
             </CollapsibleSection>
-            <CollapsibleSection
-              id="factsheet-signatures"
-              title="Returns Signatures"
-              subtitle="event studies — heavy compute, defaults open"
-              storageKey={`factsheet-collapse:${payload.strategyId}:signatures`}
-              defaultOpen
-            >
-              <LazyMount minHeight={500}>
-                <SignaturesSection />
-              </LazyMount>
-              <LazyMount minHeight={500}>
-                <CrossSignaturesSection />
-              </LazyMount>
-            </CollapsibleSection>
+            {hasComparator && (
+              <CollapsibleSection
+                id="factsheet-signatures"
+                title="Returns Signatures"
+                subtitle="event studies — heavy compute, defaults open"
+                storageKey={`factsheet-collapse:${payload.strategyId}:signatures`}
+                defaultOpen
+              >
+                <LazyMount minHeight={500}>
+                  <SignaturesSection />
+                </LazyMount>
+                <LazyMount minHeight={500}>
+                  <CrossSignaturesSection />
+                </LazyMount>
+              </CollapsibleSection>
+            )}
             <CollapsibleSection
               id="factsheet-streak"
               title="Streaks"
@@ -287,6 +298,12 @@ function PerformanceCharts() {
   const configs = React.useMemo(() => {
     return CHART_CONFIGS
       .filter(cfg => !(cmpKey === "none" && cfg.stratField === null && cfg.comparatorAsPrimary))
+      // 2026-05-20: drop volMatched too when no comparator. Without one the
+      // "Cumulative Returns — Volatility Matched" panel renders just the raw
+      // strategy line (the comparator is what gets vol-scaled), which is
+      // visually identical to the Equity Curve panel above it. Show it only
+      // when there's an actual comparator to scale.
+      .filter(cfg => !(cmpKey === "none" && cfg.key === "volMatched"))
       .filter(cfg => !(cfg.key === "rollingBeta" && !beta.enough))
       .filter(cfg => !(ROLLING_CHART_KEYS.has(cfg.key) && !roll.enough))
       .map(cfg => {

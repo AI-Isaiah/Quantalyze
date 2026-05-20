@@ -111,7 +111,25 @@ def _record_dq_flag(key: str, value: Any) -> None:
             else:
                 current[key] = value
         else:
-            current[key] = value
+            # CI-flake fix 2026-05-20: the merge-into-existing branch above
+            # caps lists at _DQ_LIST_MERGE_CAP, but this initial-set branch
+            # used to write the value verbatim — so a single
+            # _record_dq_flag('binance_partial_symbols', list_of_1500)
+            # bypassed the TOAST guard entirely. The red-team regression
+            # test (TestRedTeamListMergeCap) was failing in CI because of
+            # exactly this hole. Apply the same cap on first insert; dedup
+            # too so the invariant "lists in _LAST_DQ_FLAGS are ≤ cap and
+            # unique" holds globally, not just on the merge path.
+            if isinstance(value, list):
+                dedup: list = []
+                for item in value:
+                    if len(dedup) >= _DQ_LIST_MERGE_CAP:
+                        break
+                    if item not in dedup:
+                        dedup.append(item)
+                current[key] = dedup
+            else:
+                current[key] = value
         _LAST_DQ_FLAGS.set(current)
     except Exception:  # pragma: no cover - defensive
         logger.exception(

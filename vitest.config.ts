@@ -1,11 +1,27 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import { resolve } from "path";
+import os from "os";
+
+// CI-flake mitigation (2026-05-20, per HANDOVER-CI-FLAKES-2026-05-20.md).
+// GitHub Actions runners have 4 logical cores; Vitest's default worker
+// pool oversubscribes them under heavy RTL renders, so individual tests
+// hit the 5s default timeout — outcomes.test.tsx (200-row truncation),
+// ScenarioCommitDrawer focus chain, StrategyTable sparkline stroke-attr,
+// deletion-requests retry-after assertions. All pass in isolation;
+// failures rotate across shards as worker contention shifts. Capping
+// maxThreads to (cpus - 1) leaves headroom for the test orchestrator
+// and removes the contention floor without losing parallelism on bigger
+// dev machines.
+const MAX_THREADS = Math.max(1, os.cpus().length - 1);
 
 export default defineConfig({
   plugins: [react()],
   test: {
     environment: "jsdom",
+    // Vitest 4.x: maxWorkers is the top-level cap on parallel workers
+    // (replaces the 3.x `poolOptions.threads.maxThreads` shape).
+    maxWorkers: MAX_THREADS,
     include: [
       "src/**/*.test.{ts,tsx}",
       "tests/a11y/**/*.test.ts",
