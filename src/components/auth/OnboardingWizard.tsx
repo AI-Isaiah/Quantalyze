@@ -1,22 +1,54 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { cn } from "@/lib/utils";
-import { ROLES, type Role } from "@/lib/types";
+import type { Role } from "@/lib/types";
 
+/**
+ * Onboarding wizard — collects optional contact info AFTER signup. The
+ * role choice was already made at signup (see SignupForm), so this
+ * wizard no longer asks for it. The role is loaded from the profile so
+ * the post-onboarding routing (allocator → /discovery/crypto-sma,
+ * everyone else → /strategies) keeps working.
+ *
+ * The profile UPDATE here intentionally does NOT include the `role`
+ * field. Database trigger `prevent_profile_role_change` blocks the
+ * mutation server-side too, but we omit the field client-side as
+ * defense-in-depth.
+ */
 export function OnboardingWizard() {
-  const [step, setStep] = useState<1 | 2>(1);
-  const [role, setRole] = useState<Role>("manager");
+  const [role, setRole] = useState<Role | null>(null);
   const [company, setCompany] = useState("");
   const [telegram, setTelegram] = useState("");
   const [website, setWebsite] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", user.id)
+        .maybeSingle();
+      if (!cancelled && profile?.role) {
+        setRole(profile.role as Role);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function handleComplete() {
     setError(null);
@@ -36,7 +68,7 @@ export function OnboardingWizard() {
     const { error, data: updated } = await supabase
       .from("profiles")
       .update({
-        role,
+        // Role intentionally omitted — set at signup, immutable from client.
         company: company || null,
         telegram: telegram || null,
         website: website || null,
@@ -57,86 +89,35 @@ export function OnboardingWizard() {
     }
 
     const destination =
-      role === "allocator"
-        ? "/discovery/crypto-sma"
-        : "/strategies";
+      role === "allocator" ? "/discovery/crypto-sma" : "/strategies";
     router.push(destination);
     router.refresh();
   }
 
   return (
     <div className="space-y-6">
-      {step === 1 && (
-        <>
-          <div className="space-y-3">
-            {ROLES.map((r) => (
-              <button
-                key={r.value}
-                type="button"
-                onClick={() => setRole(r.value)}
-                className={cn(
-                  "w-full rounded-lg border p-4 text-left transition-colors",
-                  role === r.value
-                    ? "border-accent bg-accent/5"
-                    : "border-border hover:border-accent/50"
-                )}
-              >
-                <p className="text-sm font-medium text-text-primary">
-                  {r.label}
-                </p>
-                <p className="mt-0.5 text-xs text-text-muted">
-                  {r.description}
-                </p>
-              </button>
-            ))}
-          </div>
-          <Button onClick={() => setStep(2)} className="w-full">
-            Continue
-          </Button>
-        </>
-      )}
-
-      {step === 2 && (
-        <>
-          <Input
-            label="Company"
-            value={company}
-            onChange={(e) => setCompany(e.target.value)}
-            placeholder="Your company name (optional)"
-          />
-          <Input
-            label="Telegram"
-            value={telegram}
-            onChange={(e) => setTelegram(e.target.value)}
-            placeholder="@username (optional)"
-          />
-          <Input
-            label="Website"
-            value={website}
-            onChange={(e) => setWebsite(e.target.value)}
-            placeholder="https://... (optional)"
-          />
-          {error && (
-            <p className="text-sm text-negative">{error}</p>
-          )}
-          <div className="flex gap-3">
-            <Button
-              variant="secondary"
-              onClick={() => setStep(1)}
-              className="flex-1"
-            >
-              Back
-            </Button>
-            <Button
-              onClick={handleComplete}
-              disabled={loading}
-              className="flex-1"
-            >
-              {loading ? "Saving..." : "Get started"}
-            </Button>
-          </div>
-        </>
-      )}
+      <Input
+        label="Company"
+        value={company}
+        onChange={(e) => setCompany(e.target.value)}
+        placeholder="Your company name (optional)"
+      />
+      <Input
+        label="Telegram"
+        value={telegram}
+        onChange={(e) => setTelegram(e.target.value)}
+        placeholder="@username (optional)"
+      />
+      <Input
+        label="Website"
+        value={website}
+        onChange={(e) => setWebsite(e.target.value)}
+        placeholder="https://... (optional)"
+      />
+      {error && <p className="text-sm text-negative">{error}</p>}
+      <Button onClick={handleComplete} disabled={loading} className="w-full">
+        {loading ? "Saving..." : "Get started"}
+      </Button>
     </div>
   );
 }
