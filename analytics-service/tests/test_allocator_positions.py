@@ -553,3 +553,227 @@ async def test_run_poll_allocator_positions_job_auth_error_sets_revoked(
     assert kwargs["entity_id"] == API_KEY_ID
     assert kwargs["metadata"]["error_kind"] == "permanent"
     assert "sanitized_message" in kwargs["metadata"]
+
+
+# ---------------------------------------------------------------------------
+# Regression — 2026-05-20: Bybit Unified Trading Account collateral surfaces
+# as a spot holding even when CCXT's parsed `total` is empty.
+#
+# Background: a user with active Bybit perpetual positions saw zero Bybit
+# spot rows in the Holdings panel — only OKX spot appeared. Bybit V5 sets
+# `coin[*].availableToWithdraw: ""` when funds are locked as derivative
+# collateral; CCXT's parseBalance maps the empty string to 0 in the
+# parsed `total` dict, so the worker emitted zero spot rows for Bybit
+# even though the unified account was fully funded. Fix reads
+# `walletBalance` per coin directly from `info["result"]["list"][*]["coin"]`
+# and merges it over CCXT's parsed totals when CCXT returns 0/missing.
+# ---------------------------------------------------------------------------
+
+
+def _bybit_uta_info(coin_balances: list[dict]) -> dict:
+    """Build a realistic Bybit V5 fetch-balance `info` payload for tests.
+
+    `coin_balances` is a list of dicts shaped like the rows under
+    `info["result"]["list"][0]["coin"]`. Helper keeps the test bodies
+    focused on the assertions rather than the V5 envelope shape.
+    """
+    return {
+        "retCode": 0,
+        "retMsg": "OK",
+        "result": {
+            "list": [
+                {
+                    "accountType": "UNIFIED",
+                    "totalEquity": "195591.49",
+                    "totalWalletBalance": "192540.04",
+                    "coin": coin_balances,
+                }
+            ]
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_bybit_uta_locked_collateral_surfaces_as_spot_row(monkeypatch):
+    """Regression for 2026-05-20: a Bybit UTA user with all funds locked
+    as derivative collateral has `availableToWithdraw: ""` per coin,
+    which CCXT's parseBalance can map to 0 in `total`. The worker must
+    fall back to the raw `walletBalance` so the collateral surfaces as
+    a spot row instead of silently disappearing from Holdings."""
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "bybit"
+    # CCXT's parsed `total` is empty/zero — the failure shape we're guarding.
+    mock_exchange.fetch_balance = AsyncMock(return_value={
+        "total": {"USDT": 0.0},
+        "info": _bybit_uta_info([
+            {
+                "coin": "USDT",
+                "equity": "195619.27",
+                "walletBalance": "192567.39",  # ← the real number, locked
+                "availableToWithdraw": "",
+                "locked": "0",
+                "usdValue": "195591.49",
+                "unrealisedPnl": "3051.88",
+            }
+        ]),
+    })
+    mock_exchange.fetch_tickers = AsyncMock(return_value={})
+
+    from services import allocator_positions as ap
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    rows, warning = await fetch_allocator_holdings("bybit", mock_exchange)
+    assert warning is None
+
+    spot_rows = [r for r in rows if r["holding_type"] == "spot"]
+    assert len(spot_rows) == 1, (
+        f"Expected one Bybit USDT spot row from walletBalance; got {spot_rows!r}"
+    )
+    row = spot_rows[0]
+    assert row["venue"] == "bybit"
+    assert row["symbol"] == "USDT"
+    assert row["quantity"] == pytest.approx(192567.39)
+    # USDT stablecoin shortcut → mark_price = 1.0, value_usd ≈ quantity.
+    assert row["mark_price"] == 1.0
+    assert row["value_usd"] == pytest.approx(192567.39)
+
+
+@pytest.mark.asyncio
+async def test_bybit_uta_multi_coin_walletbalance_extraction(monkeypatch):
+    """A Bybit UTA can hold multiple coins simultaneously (USDT + BTC).
+    Both must surface, and the non-stablecoin (BTC) gets priced via
+    fetch_tickers — the existing pricing path is unchanged."""
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "bybit"
+    mock_exchange.fetch_balance = AsyncMock(return_value={
+        # CCXT parses USDT to 0 (locked), but BTC to its real number.
+        "total": {"USDT": 0.0, "BTC": 0.25},
+        "info": _bybit_uta_info([
+            {
+                "coin": "USDT",
+                "walletBalance": "50000.0",
+                "availableToWithdraw": "",
+            },
+            {
+                "coin": "BTC",
+                "walletBalance": "0.25",
+                "availableToWithdraw": "0.25",
+            },
+        ]),
+    })
+    mock_exchange.fetch_tickers = AsyncMock(return_value={
+        "BTC/USDT": {"last": 60000.0},
+    })
+
+    from services import allocator_positions as ap
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    rows, _ = await fetch_allocator_holdings("bybit", mock_exchange)
+    symbols = {r["symbol"]: r for r in rows if r["holding_type"] == "spot"}
+    assert set(symbols) == {"USDT", "BTC"}, f"expected USDT+BTC, got {set(symbols)}"
+    # USDT: walletBalance fallback (CCXT total was 0)
+    assert symbols["USDT"]["quantity"] == pytest.approx(50000.0)
+    # BTC: CCXT's non-zero total wins (defensive against double-counting)
+    assert symbols["BTC"]["quantity"] == pytest.approx(0.25)
+    assert symbols["BTC"]["value_usd"] == pytest.approx(0.25 * 60000.0)
+
+
+@pytest.mark.asyncio
+async def test_bybit_walletbalance_never_drops_nonzero_ccxt_total(monkeypatch):
+    """Belt-and-suspenders: if CCXT's parsed total IS correct (non-zero)
+    AND walletBalance is also present, the merge must NOT double-count
+    or replace the CCXT value. CCXT's non-zero total wins; walletBalance
+    only fills the 0/missing case."""
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "bybit"
+    mock_exchange.fetch_balance = AsyncMock(return_value={
+        "total": {"USDT": 100000.0},  # CCXT already correct here
+        "info": _bybit_uta_info([
+            {
+                "coin": "USDT",
+                "walletBalance": "999999.0",  # discrepant — must NOT win
+                "availableToWithdraw": "100000.0",
+            },
+        ]),
+    })
+    mock_exchange.fetch_tickers = AsyncMock(return_value={})
+
+    from services import allocator_positions as ap
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    rows, _ = await fetch_allocator_holdings("bybit", mock_exchange)
+    spot = [r for r in rows if r["holding_type"] == "spot"]
+    assert len(spot) == 1
+    assert spot[0]["quantity"] == pytest.approx(100000.0), (
+        "CCXT's non-zero parsed total must win over raw walletBalance"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bybit_walletbalance_extraction_does_not_break_other_exchanges(monkeypatch):
+    """The Bybit-specific fallback must NOT run for OKX, Binance, etc.
+    Their existing fetch_balance contracts continue to be honoured."""
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.fetch_balance = AsyncMock(return_value={
+        "total": {"USDT": 12345.0},
+        # info shaped like Bybit's payload would be ignored for non-Bybit.
+        "info": _bybit_uta_info([
+            {"coin": "USDT", "walletBalance": "999999.0", "availableToWithdraw": ""}
+        ]),
+    })
+    mock_exchange.fetch_tickers = AsyncMock(return_value={})
+
+    from services import allocator_positions as ap
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    rows, _ = await fetch_allocator_holdings("okx", mock_exchange)
+    spot = [r for r in rows if r["holding_type"] == "spot"]
+    assert len(spot) == 1
+    assert spot[0]["symbol"] == "USDT"
+    # The OKX path used CCXT's parsed total verbatim — no Bybit fallback applied.
+    assert spot[0]["quantity"] == pytest.approx(12345.0)
+
+
+@pytest.mark.asyncio
+async def test_bybit_malformed_info_falls_back_to_ccxt_total(monkeypatch):
+    """A garbled `info` payload (missing keys, wrong types) must not
+    crash the sync — the extractor returns `{}` and the existing
+    CCXT-parsed `total` path is used as-is. Belt-and-suspenders against
+    Bybit V5 shape drift."""
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "bybit"
+    mock_exchange.fetch_balance = AsyncMock(return_value={
+        "total": {"USDT": 7777.0},
+        "info": {"retCode": 0, "result": "this should be a dict, not a string"},
+    })
+    mock_exchange.fetch_tickers = AsyncMock(return_value={})
+
+    from services import allocator_positions as ap
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    rows, _ = await fetch_allocator_holdings("bybit", mock_exchange)
+    spot = [r for r in rows if r["holding_type"] == "spot"]
+    assert len(spot) == 1
+    # Existing CCXT total path used — no crash on the malformed info.
+    assert spot[0]["quantity"] == pytest.approx(7777.0)

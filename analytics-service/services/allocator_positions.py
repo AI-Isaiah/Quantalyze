@@ -48,6 +48,57 @@ STABLECOINS: set[str] = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "USD"}
 RAW_PAYLOAD_CAP_BYTES: int = 4096  # D-02 / ~4KB JSONB cap
 
 
+def _extract_bybit_unified_walletbalances(info: dict) -> dict[str, float]:
+    """Extract per-coin `walletBalance` from a Bybit V5 unified-account
+    `info` payload.
+
+    Bybit Unified Trading Account (UTA) quirk: when an allocator has
+    funds locked as derivative collateral, the raw V5 response sets
+    `availableToWithdraw: ""` (empty string) on each coin. CCXT's
+    `parseBalance` for Bybit can map that empty string to 0 in the
+    parsed `total` / `free` dicts — so a user with a $200k USDT margin
+    backing their Bybit perp positions sees a zero spot balance after
+    CCXT parsing, which silently drops their Bybit collateral from the
+    Holdings panel even though the unified account is fully funded.
+
+    The raw V5 payload at
+    `info["result"]["list"][N]["coin"][*]["walletBalance"]` is the
+    truthful number we want — it's the asset balance the allocator
+    actually holds, before unrealised PnL. We extract it directly and
+    let the existing pricing path (stablecoin shortcut + fetch_tickers
+    for non-stables) value it.
+
+    Returns `{}` on any parse failure (missing keys, non-iterable
+    payload, unparseable floats) so the caller can fall through to
+    CCXT's parsed `total` dict without crashing the whole sync.
+    """
+    try:
+        accounts = info.get("result", {}).get("list", []) or []
+        if not accounts:
+            return {}
+        # Prefer the UNIFIED account row when multiple are present
+        # (sub-account API keys can surface CONTRACT / FUND rows too).
+        unified = next(
+            (row for row in accounts if row.get("accountType") == "UNIFIED"),
+            accounts[0],
+        )
+        out: dict[str, float] = {}
+        for c in unified.get("coin", []) or []:
+            symbol = c.get("coin")
+            raw_wb = c.get("walletBalance")
+            if not symbol or raw_wb in (None, ""):
+                continue
+            try:
+                qty = float(raw_wb)
+            except (TypeError, ValueError):
+                continue
+            if qty > 0:
+                out[symbol] = qty
+        return out
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 class DeribitNotSupportedError(ccxt.NotSupported):
     """f3 Path B: raised when the allocator worker is asked to fetch spot from Deribit.
 
@@ -110,6 +161,29 @@ async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict]:
 
     balance = await exchange.fetch_balance()
     totals = balance.get("total") or {}
+
+    # Bybit Unified Trading Account fallback (2026-05-20): for UTA users
+    # whose funds are locked as derivative collateral, CCXT's parsed
+    # `total` dict can be empty/zero because the V5 payload sets
+    # `availableToWithdraw: ""`. Read the raw `walletBalance` per coin
+    # from `info` and merge it OVER CCXT's parsed totals so the actual
+    # collateral surfaces as a spot holding. Without this, an allocator
+    # with $200k USDT backing their Bybit perp positions sees zero
+    # Bybit spot rows in the Holdings panel even though the unified
+    # account is fully funded.
+    if getattr(exchange, "id", None) == "bybit":
+        raw_wbs = _extract_bybit_unified_walletbalances(balance.get("info") or {})
+        if raw_wbs:
+            # Merge: raw walletBalance wins when CCXT's parsed total is
+            # 0 / missing, but never drops a non-zero CCXT total (defensive
+            # against shape drift in either direction).
+            merged = dict(totals)
+            for asset, qty in raw_wbs.items():
+                existing = merged.get(asset)
+                if existing is None or float(existing or 0) <= 0:
+                    merged[asset] = qty
+            totals = merged
+
     non_zero = {
         asset: float(qty)
         for asset, qty in totals.items()
