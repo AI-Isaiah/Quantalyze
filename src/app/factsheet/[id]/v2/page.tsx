@@ -136,7 +136,12 @@ export async function generateMetadata({
     .eq("id", id)
     .eq("status", "published")
     .maybeSingle();
-  const name = data ? displayStrategyName(data) : "Strategy";
+  // Factsheet is a full-identity context: prefer the real name in the
+  // <title> tag too, not just the H1. displayStrategyName redacts
+  // exploratory-tier names to "Strategy #<hex>", which is correct for
+  // Match Queue surfaces but wrong here — and it diverges from the H1
+  // the user already sees on the page.
+  const name = data?.name ?? data?.codename ?? (data ? displayStrategyName(data) : "Strategy");
   const description = (data?.description ?? "Institutional strategy factsheet on Quantalyze.").slice(0, 200);
   const title = `${name} — Quantalyze Factsheet`;
   // Dynamic OG image — uses the strategy-id-derived endpoint so social shares
