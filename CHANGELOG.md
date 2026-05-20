@@ -9,11 +9,20 @@ can bump without ambiguity.
 
 ## [0.23.4.0] - 2026-05-20
 
-**fix(factsheet/v2): hide comparator-only panels when no benchmark is selected.**
+**fix(factsheet/v2 + CI): hide comparator-only panels; close CI flakes documented in HANDOVER-CI-FLAKES-2026-05-20.md.**
 
-### Fixed
+### Fixed (factsheet)
 - "Cumulative Returns — Volatility Matched" panel now hides when no comparator is selected. Without one, the chart rendered just the raw strategy line (the comparator is what gets vol-scaled), which was visually identical to the Equity Curve panel above it. Same filter shape as `cumVsBench` and `rollingBeta` — drop configs whose meaning collapses without a comparator.
 - "Returns Signatures" section (Win Event / Loss Event panels + cross-signatures) now hides entirely when no comparator is selected. The panels were rendering "of —" with empty bands and "0 wins · 0 losses" because they aggregate the BENCHMARK trajectory around strategy events. With no benchmark to aggregate, the entire collapsible section is suppressed instead of showing blank panels.
+
+### Fixed (CI flake #1: vitest worker oversubscription)
+- `vitest.config.ts` now caps `maxWorkers` at `max(1, cpus - 1)`. GitHub Actions runners have 4 logical cores; Vitest's default worker pool oversubscribed them under heavy RTL renders, causing individual tests to hit the 5s default timeout — `outcomes.test.tsx` (200-row truncation), `ScenarioCommitDrawer.test.tsx` focus chain, `StrategyTable.test.tsx` sparkline stroke-attr, `deletion-requests/approve/route.test.ts` retry-after assertions. All passed in isolation; failures rotated across shards as worker contention shifted. The cap removes the contention floor without losing parallelism on bigger dev machines.
+
+### Fixed (CI flake #2: list-merge cap bypassed on first insert)
+- `analytics-service/services/exchange.py::_record_dq_flag` now caps lists at `_DQ_LIST_MERGE_CAP` (64) on the **initial-set** branch too. The merge-into-existing path already capped, but the first-insert path wrote the value verbatim — so a single `_record_dq_flag('binance_partial_symbols', list_of_1500)` bypassed the TOAST guard entirely. Test `TestRedTeamListMergeCap::test_list_merge_caps_at_dq_list_merge_cap` was failing in CI because of exactly this hole. Initial inserts also dedup now, so the invariant "lists in `_LAST_DQ_FLAGS` are ≤ cap and unique" holds globally.
+
+### Operations
+- `NEXT_PUBLIC_ALLOWED_ORIGINS=https://quantalyze.xyz` added to Vercel production + preview env. Closes the "Origin not allowed" 403 on POSTs from the quantalyze.xyz custom domain (was hitting `src/lib/csrf.ts:99` because the allowlist only contained `quantalyze-rho.vercel.app` via `NEXT_PUBLIC_SITE_URL`).
 
 ## [0.23.3.0] - 2026-05-20
 
