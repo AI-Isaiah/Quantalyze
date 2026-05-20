@@ -6,8 +6,7 @@ import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Card } from "@/components/ui/Card";
-import { cn } from "@/lib/utils";
-import { ROLES, type Profile, type Role } from "@/lib/types";
+import { ROLES, type Profile } from "@/lib/types";
 import { Textarea } from "@/components/ui/Textarea";
 
 export function ProfileForm({ profile }: { profile: Profile }) {
@@ -17,11 +16,15 @@ export function ProfileForm({ profile }: { profile: Profile }) {
   const [telegram, setTelegram] = useState(profile.telegram ?? "");
   const [website, setWebsite] = useState(profile.website ?? "");
   const [linkedin, setLinkedin] = useState(profile.linkedin ?? "");
-  const [role, setRole] = useState<Role>(profile.role);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+
+  // Role is set at signup and immutable from the client (see
+  // `prevent_profile_role_change` trigger). Render it read-only.
+  const roleLabel =
+    ROLES.find((r) => r.value === profile.role)?.label ?? profile.role;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -39,7 +42,7 @@ export function ProfileForm({ profile }: { profile: Profile }) {
         telegram: telegram || null,
         website: website || null,
         linkedin: linkedin || null,
-        role,
+        // `role` intentionally omitted — see comment above.
       })
       .eq("id", profile.id);
 
@@ -102,22 +105,16 @@ export function ProfileForm({ profile }: { profile: Profile }) {
 
       <Card>
         <h2 className="text-lg font-semibold text-text-primary mb-4">Role</h2>
-        <div className="flex gap-3">
-          {ROLES.map((r) => (
-            <button
-              key={r.value}
-              type="button"
-              onClick={() => setRole(r.value)}
-              className={cn(
-                "flex-1 rounded-lg border px-4 py-3 text-sm font-medium transition-colors",
-                role === r.value
-                  ? "border-accent bg-accent/5 text-accent"
-                  : "border-border text-text-secondary hover:border-accent/50"
-              )}
-            >
-              {r.label}
-            </button>
-          ))}
+        <div
+          className="flex items-center gap-3 rounded-lg border border-border bg-surface-muted px-4 py-3"
+          data-testid="profile-role-readonly"
+        >
+          <span className="text-sm font-medium text-text-primary">
+            {roleLabel}
+          </span>
+          <span className="text-xs text-text-muted">
+            Set at signup. Contact support to change it.
+          </span>
         </div>
       </Card>
 

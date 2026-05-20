@@ -43,6 +43,18 @@ vi.mock("@/lib/supabase/client", () => ({
     from: (table: string) => {
       fromCalls.push(table);
       return {
+        // OnboardingWizard.useEffect loads the signup-time role via
+        // `select("role").eq("id", ...).maybeSingle()` so the routing
+        // decision uses the seeded value. Mock the chain shape here.
+        select: (_cols: string) => ({
+          eq: (_col: string, _val: unknown) => ({
+            maybeSingle: () =>
+              Promise.resolve({
+                data: { role: "allocator" as const },
+                error: null,
+              }),
+          }),
+        }),
         update: (payload: unknown) => {
           updateCalls.push({ table, payload });
           return {
@@ -89,12 +101,10 @@ vi.mock("next/navigation", () => ({
 async function renderAndCompleteWizard(): Promise<void> {
   render(<OnboardingWizard />);
 
-  // Step 1 → Step 2 via "Continue" button.
-  await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
-  });
-
-  // Step 2 → trigger handleComplete via "Get started" button.
+  // 2026-05-20 role-lock: the wizard is single-step now (role is set at
+  // signup), so the previous "Continue" → "Get started" two-step flow
+  // collapses to a single click on "Get started". The useEffect that
+  // loads the signup-time role for routing fires on mount.
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: /get started/i }));
   });

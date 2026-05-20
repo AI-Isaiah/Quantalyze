@@ -7,6 +7,24 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.23.3.0] - 2026-05-20
+
+**feat(auth): lock allocator-vs-manager role selection at signup.**
+
+### Changed
+- Signup now asks "I am an Allocator / Quant team" upfront and threads the choice into `supabase.auth.signUp` as `options.data.role`. The `handle_new_user` DB trigger reads it from `auth.users.raw_user_meta_data` and seeds the new `profiles` row directly with the correct role. Previously, role defaulted to `'manager'` at signup and was picked later in onboarding, which let users (and admins by accident) flip between allocator and manager surfaces freely.
+- Onboarding wizard collapses to a single step (company / Telegram / website). Role is no longer asked here; the wizard loads the signup-time role from the profile for routing purposes only.
+- `/profile` page renders role as a read-only badge with the copy "Set at signup. Contact support to change it." The role-switcher card is gone.
+
+### Added
+- Migration `20260520222848_lock_profile_role_at_signup.sql`:
+  - Updates `handle_new_user` to read `role` from `auth.users.raw_user_meta_data`, validating against the schema's allowed values and falling back to `'manager'` for legacy callers that don't supply it.
+  - Adds `prevent_profile_role_change` BEFORE UPDATE OF role trigger on `profiles`. Blocks role mutation unless the session role is `postgres`, `service_role`, or `supabase_admin` (so admin support paths keep working). No-op UPDATEs (same role value) pass through, so stale UI payloads don't error.
+- 8 new regression tests across `SignupForm.role-lock.test.tsx` (4) and `ProfileForm.role-lock.test.tsx` (3), covering: signup refuses to submit without a role pick, role threads into `auth.signUp.options.data`, no `'both'` option at signup, profile renders role read-only, profile UPDATE omits `role`, each role value renders the correct human label.
+
+### Note
+- `profiles.role` schema still accepts `'both'` for historical / admin-set rows. The signup UI intentionally does NOT expose that option — first-time identity should be one or the other; admin support can switch via service_role.
+
 ## [0.23.2.0] - 2026-05-20
 
 **fix(allocations): surface Bybit Unified Trading Account collateral as a spot holding.**
