@@ -32,6 +32,10 @@ import {
 } from "../../lib/holdings-adapter";
 import { buildHoldingRef } from "../../lib/holding-outcome-adapter";
 import { HoldingsTable } from "../../components/HoldingsTable";
+import {
+  OpenPositionsTable,
+  type OpenPositionRow,
+} from "../../components/OpenPositionsTable";
 import { WidgetState } from "../../components/WidgetState";
 import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 
@@ -42,6 +46,19 @@ export function HoldingsTableWidget({ data }: WidgetProps) {
   const matchDecisionsByHoldingRef = payload.matchDecisionsByHoldingRef ?? {};
   const apiKeys = payload.apiKeys ?? [];
   const strategies = payload.strategies ?? [];
+
+  // Bug-fix (2026-05-20): mirror HoldingsTabPanel — partition into spot-only
+  // for the Holdings table and derivatives-only for Open Positions. See the
+  // HoldingsTabPanel comment for the full rationale (value_usd semantics
+  // differ between row types and conflating them inflates equity).
+  const spotHoldings = useMemo(
+    () => holdingsSummary.filter((h) => h.holding_type === "spot"),
+    [holdingsSummary],
+  );
+  const derivativeHoldings = useMemo(
+    () => holdingsSummary.filter((h) => h.holding_type === "derivative"),
+    [holdingsSummary],
+  );
 
   // api_key.id → sync_status. Defensive 'unknown' when the FK doesn't
   // resolve (RESTRICT FK should prevent this in practice). Same fallback
@@ -126,7 +143,8 @@ export function HoldingsTableWidget({ data }: WidgetProps) {
   const rows = useMemo(
     () =>
       toDesignHoldings({
-        holdingsSummary: holdingsSummary.map((h) => ({
+        // Spot-only — derivatives render in OpenPositionsTable below.
+        holdingsSummary: spotHoldings.map((h) => ({
           venue: h.venue,
           symbol: h.symbol,
           holding_type: h.holding_type,
@@ -145,11 +163,36 @@ export function HoldingsTableWidget({ data }: WidgetProps) {
         holdingToStrategyId: {},
       }),
     [
-      holdingsSummary,
+      spotHoldings,
       adapterFlagged,
       matchDecisionsByHoldingRef,
       adapterStrategies,
     ],
+  );
+
+  const openPositionRows = useMemo<OpenPositionRow[]>(
+    () =>
+      derivativeHoldings.map((h) => {
+        const ref = buildHoldingRef({
+          venue: h.venue,
+          symbol: h.symbol,
+          holding_type: h.holding_type,
+        });
+        return {
+          id: ref,
+          venue: h.venue,
+          symbol: h.symbol,
+          side: h.side ?? "flat",
+          quantity: h.quantity,
+          notional_usd: h.value_usd,
+          entry_price: h.entry_price ?? null,
+          mark_price: h.mark_price_usd,
+          unrealized_pnl_usd: h.unrealized_pnl_usd ?? null,
+          api_key_id: h.api_key_id,
+          source_key_sync_status: revokedStatusByHoldingId[ref] ?? "unknown",
+        };
+      }),
+    [derivativeHoldings, revokedStatusByHoldingId],
   );
 
   // Phase 11 / UI-BLOCK-01 — wire WidgetState v2 behind the feature flag.
@@ -162,11 +205,14 @@ export function HoldingsTableWidget({ data }: WidgetProps) {
   // visual output is byte-identical.
   const v2 = isWidgetStateV2Enabled();
   const table = (
-    <HoldingsTable
-      rows={rows}
-      revokedStatusByHoldingId={revokedStatusByHoldingId}
-      flaggedHoldingsByRef={flaggedHoldingsByRef}
-    />
+    <>
+      <HoldingsTable
+        rows={rows}
+        revokedStatusByHoldingId={revokedStatusByHoldingId}
+        flaggedHoldingsByRef={flaggedHoldingsByRef}
+      />
+      <OpenPositionsTable rows={openPositionRows} />
+    </>
   );
   if (v2) {
     return <WidgetState mode="success">{table}</WidgetState>;

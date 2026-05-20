@@ -822,3 +822,13 @@ Fix path: add a Postgres migration `UNIQUE INDEX portfolio_analytics_one_computi
 
 Blast radius if it bites: two duplicate `portfolio_analytics` history rows for the same portfolio, two competing computes hitting Supabase, alert fan-out triggering twice. Hasn't been observed in prod, but the architectural seam is real.
 
+### P2: holdingsSummary symbol-only dedup loses spot+perp rows for the same symbol (Grok adversarial 2026-05-20)
+
+**Priority:** P2 — pre-existing structural bug surfaced during the spot/futures split (v0.23.1.0). Not introduced by that PR; not worsened by it either.
+
+`src/lib/queries.ts:1779` builds `holdingsMap = new Map<string, ...>()` keyed by `r.symbol` only and does `holdingsMap.set(r.symbol, r)` for the latest-asof-per-symbol collapse. If an allocator holds BOTH spot BTC and a BTC perpetual position on the same or different venues, the two rows share `symbol = "BTC"` and the second-processed wins — the first row is silently dropped from `holdingsSummary`. After the v0.23.1.0 spot/derivative partition, this manifests as one of the two surfaces being empty for that symbol (spot section missing OR Open Positions section missing, depending on row ordering).
+
+Fix path: key the map by `(venue, symbol, holding_type)` instead of `symbol`. The unique-index anchor on `allocator_holdings` is `(allocator_id, venue, symbol, asof)`, but the IN-RAM collapse predates the spot/derivative split and never accounted for the multi-row-per-symbol case. Single-file change, no migration needed.
+
+Blast radius if it bites: an allocator with leveraged BTC perp + spot BTC sees only one of the two rows on the dashboard. Equity curve is still correct (computed server-side from full `allocator_equity_snapshots`).
+
