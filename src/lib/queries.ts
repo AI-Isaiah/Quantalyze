@@ -1284,6 +1284,19 @@ export interface MyAllocationDashboardPayload {
     venue: string;
     holding_type: "spot" | "derivative";
     api_key_id: string;
+    // Derivative-only fields. Spot rows leave these absent or null.
+    // Fields are optional in the TS type so legacy test fixtures (created
+    // before the 2026-05-20 split) continue to compile — the dashboard
+    // query selects them unconditionally, so production payloads always
+    // populate them.
+    //   - `side`: 'long'/'short' for derivatives, 'flat' for spot.
+    //   - `entry_price`: CCXT entryPrice for derivatives; NULL for spot.
+    //   - `unrealized_pnl_usd`: CCXT unrealizedPnl for derivatives; NULL
+    //     for spot. THIS is the equity contribution for a derivative
+    //     position — NOT `value_usd`, which is the notional contract size.
+    side?: "long" | "short" | "flat";
+    entry_price?: number | null;
+    unrealized_pnl_usd?: number | null;
   }>;
   /** Row count in allocator_equity_snapshots for this allocator — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
   snapshotCount: number;
@@ -1712,6 +1725,9 @@ function derivePhase07Fields(
     holding_type: "spot" | "derivative";
     asof: string;
     api_key_id: string;
+    side: "long" | "short" | "flat";
+    entry_price: number | null;
+    unrealized_pnl_usd: number | null;
   }>,
 ): Pick<
   MyAllocationDashboardPayload,
@@ -1777,6 +1793,9 @@ function derivePhase07Fields(
     venue: r.venue,
     holding_type: r.holding_type,
     api_key_id: r.api_key_id,
+    side: r.side,
+    entry_price: r.entry_price,
+    unrealized_pnl_usd: r.unrealized_pnl_usd,
   }));
 
   return {
@@ -1911,7 +1930,13 @@ export const getMyAllocationDashboard = cache(
           // Phase 08 Plan 02 — api_key_id projected so HoldingsTable can
           // resolve source_key_sync_status via the shared `apiKeys` array
           // (avoids a nested PostgREST join).
-          "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id",
+          //
+          // `side`, `entry_price`, `unrealized_pnl_usd` projected so the
+          // dashboard can render derivative rows in a separate Open
+          // Positions section without conflating notional `value_usd`
+          // with equity contribution (only `unrealized_pnl_usd` counts
+          // toward the equity curve for derivatives).
+          "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd",
         )
         .eq("allocator_id", userId)
         .order("asof", { ascending: false }),
@@ -2114,6 +2139,9 @@ export const getMyAllocationDashboard = cache(
       holding_type: "spot" | "derivative";
       asof: string;
       api_key_id: string;
+      side: "long" | "short" | "flat";
+      entry_price: number | null;
+      unrealized_pnl_usd: number | null;
     }>;
 
     const phase07 = derivePhase07Fields(

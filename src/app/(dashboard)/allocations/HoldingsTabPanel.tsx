@@ -33,6 +33,10 @@ import {
 } from "./lib/holdings-adapter";
 import { buildHoldingRef } from "./lib/holding-outcome-adapter";
 import { HoldingsTable } from "./components/HoldingsTable";
+import {
+  OpenPositionsTable,
+  type OpenPositionRow,
+} from "./components/OpenPositionsTable";
 
 export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
   const holdingsSummary = props.holdingsSummary ?? [];
@@ -40,6 +44,24 @@ export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
   const matchDecisionsByHoldingRef = props.matchDecisionsByHoldingRef ?? {};
   const apiKeys = props.apiKeys ?? [];
   const strategies = props.strategies ?? [];
+
+  // Bug-fix (2026-05-20): spot rows and derivative rows must NOT share the
+  // Holdings table. Their `value_usd` semantics are different — for spot
+  // it's the marked value (equity contribution), for derivatives it's the
+  // CCXT notional `size_usd` (exposure, NOT equity contribution; the
+  // equity contribution is `unrealized_pnl_usd`). Sharing the same table
+  // would inflate weight denominators and make a leveraged perp appear as
+  // a multi-million-dollar "holding" alongside spot cash. Partition here
+  // so the Holdings tile renders ONLY spot rows; Open Positions renders
+  // derivatives with notional + unrealized P&L surfaced explicitly.
+  const spotHoldings = useMemo(
+    () => holdingsSummary.filter((h) => h.holding_type === "spot"),
+    [holdingsSummary],
+  );
+  const derivativeHoldings = useMemo(
+    () => holdingsSummary.filter((h) => h.holding_type === "derivative"),
+    [holdingsSummary],
+  );
 
   // ── Map api_key.id → sync_status. Defensive default 'unknown' when the FK
   //    doesn't resolve (RESTRICT FK should prevent this in practice).
@@ -52,7 +74,9 @@ export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
   }, [apiKeys]);
 
   // ── revokedStatusByHoldingId — key by buildHoldingRef so the new
-  //    HoldingsTable can look it up against DesignHoldingRow.id.
+  //    HoldingsTable can look it up against DesignHoldingRow.id. Covers
+  //    BOTH spot and derivative rows so OpenPositionsTable can join the
+  //    same sync_status map (its rows use buildHoldingRef as id too).
   const revokedStatusByHoldingId = useMemo<Record<string, string>>(() => {
     const out: Record<string, string> = {};
     for (const h of holdingsSummary) {
@@ -137,7 +161,9 @@ export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
   const rows = useMemo(
     () =>
       toDesignHoldings({
-        holdingsSummary: holdingsSummary.map((h) => ({
+        // Spot-only — derivative rows render in OpenPositionsTable below.
+        // See the partition comment at the top of the component.
+        holdingsSummary: spotHoldings.map((h) => ({
           venue: h.venue,
           symbol: h.symbol,
           holding_type: h.holding_type,
@@ -154,12 +180,37 @@ export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
         holdingToStrategyId,
       }),
     [
-      holdingsSummary,
+      spotHoldings,
       adapterFlagged,
       matchDecisionsByHoldingRef,
       adapterStrategies,
       holdingToStrategyId,
     ],
+  );
+
+  const openPositionRows = useMemo<OpenPositionRow[]>(
+    () =>
+      derivativeHoldings.map((h) => {
+        const ref = buildHoldingRef({
+          venue: h.venue,
+          symbol: h.symbol,
+          holding_type: h.holding_type,
+        });
+        return {
+          id: ref,
+          venue: h.venue,
+          symbol: h.symbol,
+          side: h.side ?? "flat",
+          quantity: h.quantity,
+          notional_usd: h.value_usd,
+          entry_price: h.entry_price ?? null,
+          mark_price: h.mark_price_usd,
+          unrealized_pnl_usd: h.unrealized_pnl_usd ?? null,
+          api_key_id: h.api_key_id,
+          source_key_sync_status: revokedStatusByHoldingId[ref] ?? "unknown",
+        };
+      }),
+    [derivativeHoldings, revokedStatusByHoldingId],
   );
 
   return (
@@ -169,6 +220,7 @@ export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
         revokedStatusByHoldingId={revokedStatusByHoldingId}
         flaggedHoldingsByRef={flaggedHoldingsByRef}
       />
+      <OpenPositionsTable rows={openPositionRows} />
     </div>
   );
 }
