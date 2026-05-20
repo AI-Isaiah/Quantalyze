@@ -42,12 +42,11 @@ export function equityCurveToDailyReturns(
  *
  * The analytics-service writes the cumprod equity curve to
  * `strategy_analytics.returns_series`; the `daily_returns` column is only
- * populated by CSV ingest. For analytics-only strategies (e.g. Phoenix
- * Protocol on 2026-05-20) `daily_returns` is null, so reading it alone
- * leaves the factsheet stuck in the "still computing" placeholder even
- * though the real data exists in `returns_series`. Try the daily-return
- * column first (cheaper / no derivation), then fall back to deriving from
- * the wealth curve.
+ * populated by CSV ingest. Analytics-only strategies leave `daily_returns`
+ * null, so reading it alone strands the factsheet on the "still computing"
+ * placeholder even though the real series exists in `returns_series`. Try
+ * the daily-return column first (cheaper, no derivation), fall back to
+ * deriving from the wealth curve.
  */
 export function resolveDailyReturnSeries(
   dailyReturnsRaw: unknown,

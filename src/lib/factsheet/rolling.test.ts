@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { rollingVol, rollingSharpe, rollingSortino, ROLL_WINDOW_6MO } from "./rolling";
+import {
+  rollingVol,
+  rollingSharpe,
+  rollingSortino,
+  pickRollingWindow,
+  ROLL_WINDOW_6MO,
+  ROLL_WINDOW_90D,
+  ROLL_WINDOW_30D,
+} from "./rolling";
 
 describe("rolling helpers", () => {
   const rets = Array.from({ length: 300 }, (_, i) => (i % 2 === 0 ? 0.01 : -0.005));
@@ -26,5 +34,60 @@ describe("rolling helpers", () => {
     const v = rollingVol(rets, 30);
     expect(v[28]).toBeNull();
     expect(v[29]).not.toBeNull();
+  });
+});
+
+describe("pickRollingWindow", () => {
+  // Regression: factsheet showed empty rolling charts for short-history
+  // strategies before pickRollingWindow added a 6mo → 30d fallback.
+  // Found by /qa on 2026-05-20.
+  it("picks 6mo at the lower boundary (length === 126 + 5)", () => {
+    expect(pickRollingWindow(ROLL_WINDOW_6MO + 5)).toEqual({
+      window: ROLL_WINDOW_6MO,
+      label: "6mo",
+      enough: true,
+    });
+  });
+
+  it("falls back to 30d one observation short of the 6mo threshold", () => {
+    expect(pickRollingWindow(ROLL_WINDOW_6MO + 4)).toEqual({
+      window: ROLL_WINDOW_30D,
+      label: "30d",
+      enough: true,
+    });
+  });
+
+  it("signals enough=false when even the smallest tier can't be filled", () => {
+    expect(pickRollingWindow(ROLL_WINDOW_30D + 4)).toEqual({
+      window: ROLL_WINDOW_30D,
+      label: "30d",
+      enough: false,
+    });
+  });
+
+  it("returns the last tier with enough=false for a degenerate length of 0", () => {
+    expect(pickRollingWindow(0)).toEqual({
+      window: ROLL_WINDOW_30D,
+      label: "30d",
+      enough: false,
+    });
+  });
+
+  it("honors custom tier ladders (rolling β uses 90d → 30d)", () => {
+    const tiers = [
+      { window: ROLL_WINDOW_90D, label: "90d" },
+      { window: ROLL_WINDOW_30D, label: "30d" },
+    ];
+    expect(pickRollingWindow(ROLL_WINDOW_90D + 5, tiers)).toMatchObject({
+      window: ROLL_WINDOW_90D,
+      enough: true,
+    });
+    expect(pickRollingWindow(ROLL_WINDOW_90D + 4, tiers)).toMatchObject({
+      window: ROLL_WINDOW_30D,
+      enough: true,
+    });
+    expect(pickRollingWindow(ROLL_WINDOW_30D + 4, tiers)).toMatchObject({
+      enough: false,
+    });
   });
 });

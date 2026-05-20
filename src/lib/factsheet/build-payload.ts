@@ -87,11 +87,11 @@ export function buildFactsheetPayload(
   const dates = clipped.map(d => d.date);
   const stratRet = clipped.map(d => d.value);
 
-  // Strategies with < 126 trading days observed can't fill a 6-month rolling
-  // window — the chart would only show the warmup band. Pick the window once
-  // here and thread it through both the rolling computations and the payload
-  // so the chart title reflects the actual cadence. Rolling beta has its own
-  // (smaller) preferred window — 90d → 30d → not-enough-data.
+  // Series shorter than ROLL_WINDOW_6MO + 5 can't fill the preferred 6-month
+  // rolling window — pickRollingWindow falls back to 30d so the chart isn't
+  // pure warmup band. Rolling β has its own (smaller) preferred window with
+  // a 90d → 30d → not-enough-data ladder. Both windows ride along on the
+  // payload so chart titles and the MetricsColumn header reflect reality.
   const rollWindow = pickRollingWindow(stratRet.length);
   const rollBetaWindow = pickRollingWindow(stratRet.length, [
     { window: ROLL_WINDOW_90D, label: "90d" },

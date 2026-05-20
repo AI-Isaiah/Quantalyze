@@ -349,33 +349,8 @@ body[data-display-font="sans"] .font-display {
 }
 
 /* ============================================================
-   Factsheet v2 — print stylesheet + skip-link + sr-only
+   Factsheet v2 — print stylesheet
    ============================================================ */
-
-.factsheet-v2-skip-link {
-  position: absolute;
-  left: -9999px;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-}
-.factsheet-v2-skip-link:focus {
-  position: fixed;
-  top: 8px;
-  left: 8px;
-  z-index: 100;
-  width: auto;
-  height: auto;
-  padding: 8px 12px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-accent);
-  color: var(--color-accent);
-  font-family: var(--font-sans);
-  font-size: 12px;
-  text-decoration: none;
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
-}
 
 /* Print: collapse interactive chrome, single-column body, ensure SVGs print at
    their intrinsic size, force light backgrounds, never split a chart panel. */

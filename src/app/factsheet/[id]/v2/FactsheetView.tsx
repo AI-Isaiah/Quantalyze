@@ -2,7 +2,8 @@
 
 import React, { type ReactNode } from "react";
 import dynamic from "next/dynamic";
-import type { FactsheetPayload } from "@/lib/factsheet/types";
+import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
+import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
 import { ComparatorPicker } from "./ComparatorPicker";
@@ -266,56 +267,72 @@ const ROLLING_CHART_KEYS = new Set(["rollingVol", "rollingSharpe", "rollingSorti
 function PerformanceCharts() {
   const payload = usePayload();
   const { key: cmpKey } = useActiveComparator();
-  // unstable_cache may hold an older payload that predates the rolling-window
-  // field rollout. Default to "6mo enough" / "90d enough" so stale payloads
-  // don't crash the render — the warmup band will tell the user something is
-  // off if the window truly doesn't fit.
-  const { window: rollWindow, label: rollLabel } = payload.rollingWindow
-    ?? { window: 126, label: "6mo" };
-  const beta = payload.rollingBetaWindow
-    ?? { window: 90, label: "90d", enough: true };
+  // Defensive fallbacks: a cache entry created before the rollingWindow
+  // fields were added would crash readers. The cache key was bumped in
+  // the same commit so this should only hit during the 1h TTL drain; if
+  // it ever fires steady-state, the warn below surfaces the schema drift.
+  const roll: RollWindowPick = payload.rollingWindow
+    ?? { window: ROLL_WINDOW_6MO, label: "6mo", enough: true };
+  const beta: RollWindowPick = payload.rollingBetaWindow
+    ?? { window: ROLL_WINDOW_90D, label: "90d", enough: true };
+  React.useEffect(() => {
+    if (!payload.rollingWindow || !payload.rollingBetaWindow) {
+      console.warn(
+        "[factsheet/v2] PerformanceCharts — payload missing rollingWindow/rollingBetaWindow; rendering with defaults. Bump factsheet-v2-payload cache key if this persists.",
+        { strategyId: payload.strategyId },
+      );
+    }
+  }, [payload.rollingWindow, payload.rollingBetaWindow, payload.strategyId]);
+
   const configs = React.useMemo(() => {
     return CHART_CONFIGS
       .filter(cfg => !(cmpKey === "none" && cfg.stratField === null && cfg.comparatorAsPrimary))
-      // Rolling β has its own (smaller) preferred window and an
-      // explicit "not enough data" state — when even the 30d tier can't
-      // be filled, drop the chart entirely. The placeholder below the
-      // chart strip would carry the message if we had a slot for it; for
-      // now, dropping is the least-confusing UX (the empty axis we used
-      // to render reads as broken).
       .filter(cfg => !(cfg.key === "rollingBeta" && !beta.enough))
+      .filter(cfg => !(ROLLING_CHART_KEYS.has(cfg.key) && !roll.enough))
       .map(cfg => {
         if (ROLLING_CHART_KEYS.has(cfg.key)) {
-          // "Rolling Volatility (6mo)" → "Rolling Volatility (30d)" etc.
-          const title = cfg.title.replace(/\((6mo|30d|90d)\)/i, `(${rollLabel})`);
-          return { ...cfg, title, warmup: rollWindow };
+          const title = cfg.title.replace(ROLL_LABEL_RE, `(${roll.label})`);
+          return { ...cfg, title, warmup: roll.window };
         }
         if (cfg.key === "rollingBeta") {
-          // "Rolling β (90d) vs Comparator" → "Rolling β (30d) vs Comparator"
-          const title = cfg.title.replace(/\((6mo|30d|90d)\)/i, `(${beta.label})`);
+          const title = cfg.title.replace(ROLL_LABEL_RE, `(${beta.label})`);
           return { ...cfg, title, warmup: beta.window };
         }
         return cfg;
       });
-  }, [cmpKey, rollLabel, rollWindow, beta.enough, beta.label, beta.window]);
+  }, [cmpKey, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window]);
+
   return (
     <>
       {configs.map(cfg => (
         <TimeSeriesChart key={cfg.key} config={cfg} />
       ))}
+      {!roll.enough && (
+        <NotEnoughDataPanel
+          title="Rolling Metrics — Not enough data"
+          body="Strategy history is too short to compute even a 30-day rolling volatility / Sharpe / Sortino. Rolling charts will appear once the strategy has at least ~35 observations."
+        />
+      )}
       {!beta.enough && cmpKey !== "none" && (
-        <section className="border border-border bg-surface-subtle px-4 py-3">
-          <h3 className="text-[12px] font-semibold uppercase tracking-[0.18em] text-text-primary">
-            Rolling β — Not enough data
-          </h3>
-          <p className="mt-1 text-[11px] text-text-muted">
-            Strategy history is too short to compute even a 30-day rolling beta
-            against the comparator. Returns this panel once the strategy has at
-            least ~35 observations.
-          </p>
-        </section>
+        <NotEnoughDataPanel
+          title="Rolling β — Not enough data"
+          body="Strategy history is too short to compute even a 30-day rolling beta against the comparator. This panel will appear once the strategy has at least ~35 observations."
+        />
       )}
     </>
+  );
+}
+
+const ROLL_LABEL_RE = /\((6mo|30d|90d)\)/i;
+
+function NotEnoughDataPanel({ title, body }: { title: string; body: string }) {
+  return (
+    <section className="border border-border bg-surface-subtle px-4 py-3">
+      <h3 className="text-[12px] font-semibold uppercase tracking-[0.18em] text-text-primary">
+        {title}
+      </h3>
+      <p className="mt-1 text-[11px] text-text-muted">{body}</p>
+    </section>
   );
 }
 
@@ -644,10 +661,9 @@ function ControlBar() {
   const resetView = () => {
     resetXRange();
     setComparator(payload.activeComparator);
-    // Broadcast: every CollapsibleSection in the tree listens for this
-    // and pops back open. We don't re-set localStorage; the next toggle
-    // write will pick up the new state. "Reset view" means "show me
-    // everything," not just "reset the camera."
+    // "Reset view" means "show everything" — broadcast FACTSHEET_OPEN_ALL_EVENT
+    // so every CollapsibleSection pops open. localStorage is left alone; the
+    // next user toggle will rewrite it.
     if (typeof window !== "undefined") {
       window.dispatchEvent(new Event(FACTSHEET_OPEN_ALL_EVENT));
     }

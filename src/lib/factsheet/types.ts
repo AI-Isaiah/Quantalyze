@@ -296,6 +296,21 @@ export type QuantilePayload = {
 /** Trust-tier from strategy_verifications — drives the verification badge. */
 export type TrustTierKind = "api_verified" | "csv_uploaded" | "self_reported";
 
+/**
+ * Result of picking a rolling-window tier for a given series length.
+ *
+ * `enough: false` means even the smallest tier in the candidate set
+ * couldn't be filled — consumers should render a "Not enough data"
+ * placeholder instead of an empty warmup band. `label` carries the
+ * display suffix ("6mo" / "30d" / "90d") so chart titles can render
+ * the actual window without re-deriving it from `window`.
+ */
+export type RollWindowPick = {
+  window: number;
+  label: string;
+  enough: boolean;
+};
+
 /** Top-level payload built server-side and passed to the client view. */
 export type FactsheetPayload = {
   strategyId: string;
@@ -336,19 +351,14 @@ export type FactsheetPayload = {
   /**
    * Effective rolling window used by `strategyRollingVol/Sharpe/Sortino`
    * (and the comparator equivalents). `window` is the lookback in trading
-   * days, `label` is the display suffix appended to chart titles (e.g.
-   * "6mo" or "30d"). Picked by `pickRollingWindow` based on series length
-   * so short-history strategies fall back from 126d → 30d instead of
-   * rendering empty rolling charts.
+   * days, `label` is the display suffix appended to chart titles.
+   * `enough` is false when even the smallest tier can't be filled — the
+   * chart should render a "Not enough data" placeholder instead of a
+   * flat warmup band.
    */
-  rollingWindow: { window: number; label: string };
-  /**
-   * Same shape as `rollingWindow`, but for the Rolling β chart which has its
-   * own preferred window (90d → 30d fallback). `enough` is false when even
-   * the smallest tier can't be filled — the chart should render a
-   * "Not enough data" placeholder instead of a flat zero line.
-   */
-  rollingBetaWindow: { window: number; label: string; enough: boolean };
+  rollingWindow: RollWindowPick;
+  /** Same shape as `rollingWindow`, but for the Rolling β chart (90d → 30d). */
+  rollingBetaWindow: RollWindowPick;
   /** Strategy drawdown from running peak (≤ 0). Drives the Underwater chart. */
   strategyDrawdowns: number[];
   /** Top-N worst drawdown periods, used by the Worst-DDs chart's shaded bands. */

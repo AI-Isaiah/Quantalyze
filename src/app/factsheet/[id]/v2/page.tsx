@@ -115,8 +115,10 @@ function buildFactsheetPayloadCached(
   // still wipe the whole surface with a single `revalidateTag` call.
   return unstable_cache(
     async () => fetchAndBuildPayload(id),
-    // v2: rolling-window + rollingBetaWindow added to payload shape; bumping
-    // the key so cached entries from the previous shape don't crash readers.
+    // Cache key carries a shape-version suffix. Bump it (e.g. -v2 → -v3)
+    // whenever FactsheetPayload adds non-optional fields, so unstable_cache
+    // entries from the previous shape don't crash readers expecting the new
+    // fields. The factsheet-v2:* tags below still revalidate old entries.
     ["factsheet-v2-payload-v2", id],
     {
       revalidate: 3600,

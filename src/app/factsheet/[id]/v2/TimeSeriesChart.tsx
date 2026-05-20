@@ -702,22 +702,22 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
           );
         })}
 
-        {/* Strategy-series average reference line — rolling vol/sharpe/sortino
-            charts opt in via cfg.showStratAverage. Drawn before clipping so it
-            spans the full plot width even when the data starts deep into the
-            warmup band. Drop when no strategy series, or when the mean isn't
-            finite (all-null window). */}
+        {/* Strategy-series average reference line — opt-in via cfg.showStratAverage
+            (rolling vol/sharpe/sortino). Computed over the visible xRange so the
+            "avg" the user reads matches what they're looking at. Suppressed
+            when off-axis so it doesn't bleed into the y-axis labels gutter. */}
         {config.showStratAverage && series[0] && (() => {
           const values = series[0].values;
           let sum = 0;
           let count = 0;
-          for (const v of values) {
+          for (let i = xStart; i <= xEnd; i++) {
+            const v = values[i];
             if (v != null && Number.isFinite(v)) { sum += v; count++; }
           }
           if (count === 0) return null;
           const avg = sum / count;
           const yAvg = Y(avg);
-          if (!Number.isFinite(yAvg)) return null;
+          if (!Number.isFinite(yAvg) || yAvg < PAD.top || yAvg > PAD.top + plotH) return null;
           return (
             <g pointerEvents="none">
               <line

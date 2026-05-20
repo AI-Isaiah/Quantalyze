@@ -9,6 +9,8 @@
  * samples are statistically noisy.
  */
 
+import type { RollWindowPick } from "./types";
+
 export const ROLL_WINDOW_6MO = 126;
 export const ROLL_WINDOW_90D = 90;
 export const ROLL_WINDOW_30D = 30;
@@ -25,11 +27,6 @@ export const ROLL_WINDOW_30D = 30;
  * `tiers` is ordered preferred → fallback. The first tier whose threshold
  * is met wins; otherwise the last tier is returned with `enough: false`.
  */
-export interface RollWindowPick {
-  window: number;
-  label: string;
-  enough: boolean;
-}
 export function pickRollingWindow(
   seriesLength: number,
   tiers: Array<{ window: number; label: string }> = [
