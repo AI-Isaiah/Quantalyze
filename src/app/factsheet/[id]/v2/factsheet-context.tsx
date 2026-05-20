@@ -119,6 +119,8 @@ export function FactsheetProvider({
   // URL + localStorage persistence — read once on mount (client-only so SSR
   // stays deterministic), then write back on every change (debounced 250ms).
   const hydrated = useRef(false);
+  // SSR-safe URL/localStorage hydration. setState in this effect is the
+  // standard hydration pattern — we can't read window state during render.
   useEffect(() => {
     if (typeof window === "undefined" || hydrated.current) return;
     hydrated.current = true;
@@ -137,19 +139,24 @@ export function FactsheetProvider({
     if (typeof rangeRaw === "string") {
       const [s, e] = rangeRaw.split("-").map(n => parseInt(n, 10));
       if (Number.isFinite(s) && Number.isFinite(e) && s >= 0 && e <= maxIdx && e - s >= MIN_VISIBLE_SAMPLES - 1) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setXRangeRaw([s, e] as const);
       }
     }
     const cmpRaw = get("cmp");
     if (cmpRaw === "btc" || cmpRaw === "spx" || cmpRaw === "none") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setComparator(cmpRaw);
     }
     const cbRaw = get("cb");
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (cbRaw === "1" || cbRaw === true) setColorblind(true);
     const regRaw = get("reg");
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (regRaw === "1" || regRaw === true) setRegimes(true);
     const darkRaw = get("dark");
     if (darkRaw === "1" || darkRaw === true) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDarkMode(true);
     }
     // Display defaults to "everything off" — no system-preference inference

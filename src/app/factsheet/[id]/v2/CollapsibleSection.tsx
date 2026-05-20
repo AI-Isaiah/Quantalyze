@@ -40,14 +40,23 @@ export function CollapsibleSection({
   const [hydrated, setHydrated] = useState(false);
 
   // Two-pass mount: SSR renders the default; on hydration we read the user's
-  // last choice from localStorage if a storageKey was provided.
+  // last choice from localStorage if a storageKey was provided. setState in
+  // this effect is intentional — we cannot read localStorage at SSR time, so
+  // the hydration sync runs once on mount.
   useEffect(() => {
-    if (!storageKey) { setHydrated(true); return; }
+    if (!storageKey) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setHydrated(true);
+      return;
+    }
     try {
       const raw = window.localStorage.getItem(storageKey);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       if (raw === "open") setOpen(true);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       else if (raw === "closed") setOpen(false);
     } catch { /* private mode / quota */ }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setHydrated(true);
   }, [storageKey]);
 

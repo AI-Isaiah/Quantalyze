@@ -394,7 +394,11 @@ function formatUsdCompact(v: number): string {
  */
 function FreshnessChip({ computedAt }: { computedAt: string }) {
   const d = new Date(computedAt);
-  const days = (Date.now() - d.getTime()) / 86_400_000;
+  // useState initializer runs once per mount so render stays pure — Date.now()
+  // would otherwise be flagged as impure-in-render. Hour resolution is fine
+  // for the "fresh / stale / old" bucketing.
+  const [nowMs] = React.useState(() => Date.now());
+  const days = (nowMs - d.getTime()) / 86_400_000;
   const tone =
     !Number.isFinite(days) ? "neutral" : days <= 3 ? "fresh" : days <= 7 ? "stale" : "old";
   const toneColor =

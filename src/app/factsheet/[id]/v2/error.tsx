@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import Link from "next/link";
 
 /**
  * Route-level error boundary. Any thrown error in the factsheet v2 subtree
@@ -43,12 +44,12 @@ export default function FactsheetV2Error({
         >
           Try again
         </button>
-        <a
+        <Link
           href="/discovery"
           className="px-4 py-2 text-sm rounded-md border border-border text-text-primary hover:bg-surface"
         >
           Back to discovery
-        </a>
+        </Link>
       </div>
     </article>
   );

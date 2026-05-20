@@ -73,7 +73,9 @@ export function HistogramChart() {
   }, [payload.strategyReturns, cmp.dailyReturns, xStart, xEnd]);
 
   // Reset local zoom whenever xRange changes — the previous zoom anchored
-  // against a different sample set is no longer meaningful.
+  // against a different sample set is no longer meaningful. setState here is
+  // a synchronization-with-external-state pattern (xRange comes from context).
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setZoom(null); }, [xStart, xEnd]);
 
   const lo = zoom?.lo ?? naturalLo;

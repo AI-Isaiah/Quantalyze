@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 /**
  * Strategy not published / unavailable / analytics not yet computed.
  */
@@ -20,12 +22,12 @@ export default function FactsheetV2NotFound() {
         row with daily returns.
       </p>
       <div className="mt-6 flex gap-3">
-        <a
+        <Link
           href="/discovery"
           className="px-4 py-2 text-sm rounded-md bg-accent text-white hover:bg-accent-hover"
         >
           Browse published strategies
-        </a>
+        </Link>
       </div>
     </article>
   );

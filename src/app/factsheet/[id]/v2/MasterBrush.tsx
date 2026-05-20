@@ -117,7 +117,7 @@ export function MasterBrush() {
         const span = xe - xs;
         const center = xToIdx(vbX);
         let s = Math.max(0, center - Math.floor(span / 2));
-        let eN = Math.min(n - 1, s + span);
+        const eN = Math.min(n - 1, s + span);
         if (eN === n - 1) s = Math.max(0, eN - span);
         setXRange([s, eN]);
         dragRef.current = { mode: "select", startVbX: vbX, startRange: [s, eN] as const };

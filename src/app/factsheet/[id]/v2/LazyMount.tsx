@@ -26,6 +26,9 @@ export function LazyMount({
   const [mounted, setMounted] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
 
+  // IntersectionObserver subscription — setState fires from the observer
+  // callback (external system event), which is the documented exception to
+  // the "no setState in effects" rule.
   useEffect(() => {
     if (mounted) return;
     const el = ref.current;
@@ -33,6 +36,7 @@ export function LazyMount({
     // SSR / no-IntersectionObserver fallback: mount immediately so the page
     // remains functional. We trade the perf win for correctness.
     if (typeof IntersectionObserver === "undefined") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setMounted(true);
       return;
     }
