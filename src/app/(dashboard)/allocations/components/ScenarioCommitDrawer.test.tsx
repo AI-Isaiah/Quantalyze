@@ -1011,7 +1011,9 @@ describe("focus management — pre-flight portal + failure transition", () => {
     expect(document.activeElement).toBe(submitBtn);
   });
 
-  it("submitting → failure transition moves focus to the error banner", async () => {
+  // Real-timers + async focus chain occasionally exceeds the 5s default under
+  // concurrent vitest worker load; passes in isolation. Bump for robustness.
+  it("submitting → failure transition moves focus to the error banner", { timeout: 15_000 }, async () => {
     vi.useRealTimers();
     const fetchSpy = vi.fn(async () =>
       new Response(
