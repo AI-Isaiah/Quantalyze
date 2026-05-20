@@ -7,6 +7,21 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.23.2.0] - 2026-05-20
+
+**fix(allocations): surface Bybit Unified Trading Account collateral as a spot holding.**
+
+### Fixed
+- Allocator dashboard Holdings panel was silently dropping Bybit collateral for users with active derivative positions. Bybit V5 sets `coin[*].availableToWithdraw: ""` when funds are locked as derivative margin; CCXT's `parseBalance` maps the empty string to 0 in the parsed `total` dict. A user with a six-figure USDT margin backing their Bybit perp positions saw zero Bybit spot rows even though the unified account was fully funded — only OKX spot appeared, despite the dashboard showing dozens of Bybit derivative positions that obviously had to be collateralised somewhere.
+- `_fetch_spot_rows` in `analytics-service/services/allocator_positions.py` now reads the raw `walletBalance` per coin from the V5 `info["result"]["list"][*]["coin"]` payload for Bybit and merges it over CCXT's parsed totals: CCXT's non-zero totals still win (defensive against double-counting), but a 0/missing CCXT total is replaced by the truthful `walletBalance`. Non-Bybit exchanges are untouched.
+
+### Added
+- `_extract_bybit_unified_walletbalances` helper in `allocator_positions.py` (pure function, no side effects). Handles UNIFIED account selection when multiple account rows are present (CONTRACT / FUND can co-exist on sub-account API keys) and returns `{}` on any parse failure so a malformed V5 payload can't crash the whole sync.
+- 5-test regression suite (`test_bybit_*` in `test_allocator_positions.py`) covering: locked-collateral fallback, multi-coin UTA, "non-zero CCXT total wins" invariant, non-Bybit exchanges untouched, and graceful fallback on malformed V5 payloads.
+
+### Known follow-up
+- The same CCXT parsing quirk affects `_fetch_current_equity` in `equity_reconstruction.py:1583` (advisory equity-curve anchor). The anchor is "advisory not load-bearing" per its docstring, but for consistency the same Bybit fallback should be applied. Logged for a follow-up.
+
 ## [0.23.1.0] - 2026-05-20
 
 **fix(allocations): split spot holdings from futures positions in the dashboard.**
