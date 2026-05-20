@@ -7,6 +7,14 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.23.4.0] - 2026-05-20
+
+**fix(factsheet/v2): hide comparator-only panels when no benchmark is selected.**
+
+### Fixed
+- "Cumulative Returns — Volatility Matched" panel now hides when no comparator is selected. Without one, the chart rendered just the raw strategy line (the comparator is what gets vol-scaled), which was visually identical to the Equity Curve panel above it. Same filter shape as `cumVsBench` and `rollingBeta` — drop configs whose meaning collapses without a comparator.
+- "Returns Signatures" section (Win Event / Loss Event panels + cross-signatures) now hides entirely when no comparator is selected. The panels were rendering "of —" with empty bands and "0 wins · 0 losses" because they aggregate the BENCHMARK trajectory around strategy events. With no benchmark to aggregate, the entire collapsible section is suppressed instead of showing blank panels.
+
 ## [0.23.3.0] - 2026-05-20
 
 **feat(auth): lock allocator-vs-manager role selection at signup.**
