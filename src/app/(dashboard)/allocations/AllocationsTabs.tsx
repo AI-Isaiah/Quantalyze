@@ -228,12 +228,19 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
  * <Suspense fallback={<div />}>.
  */
 
-type TabKey = "overview" | "holdings" | "outcomes" | "mandate" | "risk" | "scenario";
+type TabKey =
+  | "overview"
+  | "holdings"
+  | "outcomes"
+  | "mandate"
+  | "risk"
+  | "scenario";
 
-// PR3 (dashboard parity) — the truth design's tab strip is 5 tabs (no
-// Scenario). Scenario remains routable via ?tab=scenario so the
-// "+ Allocation" chip still works, and the panel still renders below,
-// but no button for it lives in the visible tablist.
+// Visible tab strip. Scenario remains routable via ?tab=scenario for the
+// "+ Allocation" chip, but no button for it lives in the visible tablist.
+// Overview is now the factsheet view (full equity curve + factsheet panel
+// layout aggregated across the allocator's strategies), so there is no
+// separate Analytics tab.
 const VISIBLE_TAB_KEYS: readonly TabKey[] = [
   "overview",
   "holdings",
@@ -268,9 +275,9 @@ const KNOWN_TAB_RAW: ReadonlySet<string> = new Set<string>(
 );
 
 function parseTab(raw: string | null): TabKey {
-  // D-05: 6-tab set. Overview is default. Anything else (null, empty, unknown
-  // values, the legacy "performance" alias) collapses to "overview" — silent
-  // fallback preserves D-04.
+  // Overview is default. Anything else (null, empty, unknown values, the
+  // legacy "performance" alias) collapses to "overview" — silent fallback
+  // preserves D-04.
   switch (raw) {
     case "holdings":
     case "outcomes":
@@ -318,19 +325,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // Per VOICES-ACCEPTED f3: derive each render — no local state snapshot.
   const activeTab: TabKey = parseTab(searchParams.get("tab"));
 
-  // audit-2026-05-07 Phase-4 red-team (HIGH conf 8) — capture the latest
-  // activeTab via a ref so deferred (queueMicrotask + setTimeout 100ms)
-  // callbacks in `dispatchWidgetPicker` read the LATEST tab at fire time,
-  // not the snapshot captured at click time. This lets the safety-net
-  // dispatch detect "user navigated away from Overview before the 100ms
-  // timer fired" and emit a `no_listener` breadcrumb + telemetry follow-up
-  // instead of silently lying with a 'deferred' success ack.
-  const activeTabRef = useRef<TabKey>(activeTab);
-  useEffect(() => {
-    activeTabRef.current = activeTab;
-  }, [activeTab]);
-
-  // Phase 10 / 10-06b — `allocations.ui_v2` flag drives the scenario panel
+// Phase 10 / 10-06b — `allocations.ui_v2` flag drives the scenario panel
   // body. SSR-stable initialization (review-pass P1 fix): start with `true`
   // (matches the SSR helper's server-side default) so the SSR HTML and the
   // first client render agree byte-for-byte; React hydration succeeds without
@@ -452,117 +447,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     outcomes: outcomesCount,
   };
 
-  // audit-2026-05-07 H-1187 / H-1190 / H-1191 / M-1047 — picker dispatch
-  // race + silent drop. The proper fix (lifting pickerOpen state into
-  // AllocationsTabs) requires editing AllocationDashboardV2, which is
-  // out-of-scope for this cluster's PR. In-scope mitigation:
-  //   - On Overview: dispatch synchronously (listener already mounted).
-  //   - From a non-Overview tab: queueMicrotask + a 100ms setTimeout
-  //     safety net. The handler `setPickerOpen(true)` is idempotent, so
-  //     a duplicate delivery is harmless. One PostHog event per click
-  //     (status reflects whether the synchronous send raised).
-  //
-  // audit-2026-05-07 Phase-4 red-team (HIGH conf 8) — under rapid
-  // re-navigation (Risk → Widget chip → Holdings within 100ms) the
-  // 100ms safety-net timer fires AFTER AllocationDashboardV2 unmounts on
-  // the Holdings tab change. `dispatchEvent` for an unhandled event
-  // returns true and doesn't throw, so neither the `failed` breadcrumb
-  // nor the synchronous-throw path fires — telemetry sells 'deferred'
-  // success but the picker never opens. Fix: read the LATEST activeTab via
-  // `activeTabRef` inside the deferred callback. If the user has navigated
-  // away from Overview by the time the timer fires, emit a follow-up
-  // `widget_picker_dispatch_no_listener` warnAudit + a separate
-  // `widget_viewed` telemetry event so the silent-failure class M-1047 set
-  // out to eliminate is actually surfaced.
-  //
-  // audit-2026-05-07 Phase-4 red-team (MED conf 8) — wrap the deferred
-  // scheduling in try/catch. On hostile / old WebView surfaces (embedded
-  // Chromium <71, iOS <12.2 — still in regulated APAC trading desktops)
-  // `queueMicrotask` can be undefined; the throw would escape
-  // `dispatchWidgetPicker` BEFORE `trackUsageEventClient` was called and
-  // leave the click in a broken state with no telemetry. Two-line guard
-  // downgrades 'deferred' to 'failed' + emits a
-  // `widget_picker_schedule_failed` breadcrumb.
-  const dispatchWidgetPicker = (wasAlreadyOnOverview: boolean): void => {
-    if (typeof window === "undefined") return;
-
-    const fire = (): boolean => {
-      try {
-        window.dispatchEvent(
-          new CustomEvent("allocations:open-widget-picker"),
-        );
-        return true;
-      } catch (err) {
-        warnAudit("widget_picker_dispatch_failed", {
-          reason: err instanceof Error ? err.message : String(err),
-        });
-        return false;
-      }
-    };
-
-    if (wasAlreadyOnOverview) {
-      const ok = fire();
-      trackUsageEventClient("widget_viewed", {
-        widget_picker_dispatch: ok ? "sync" : "failed",
-        source: "tab_row_chip",
-        wasAlreadyOnOverview: true,
-      });
-      return;
-    }
-
-    // Non-Overview source — AllocationDashboardV2's listener mounts on
-    // commit of the tab change. Microtask + 100ms safety-net catches the
-    // listener-not-yet-attached race that the original synchronous
-    // dispatch dropped. Telemetry fires once per click.
-    //
-    // The deferred-fire wrapper checks `activeTabRef.current` at fire time:
-    // if the user has already re-navigated to another tab (Holdings / Risk
-    // / …) by the time the 100ms timer fires, AllocationDashboardV2 is
-    // unmounted and the dispatch lands on a window with no listener. We
-    // emit a `no_listener` follow-up so support has a breadcrumb that
-    // distinguishes "delivered but unopened" from "user re-navigated".
-    let noListenerReported = false;
-    const fireWithListenerCheck = (): void => {
-      if (activeTabRef.current !== "overview") {
-        if (!noListenerReported) {
-          noListenerReported = true;
-          warnAudit("widget_picker_dispatch_no_listener", {
-            currentTab: activeTabRef.current,
-            source: "tab_row_chip",
-          });
-          trackUsageEventClient("widget_viewed", {
-            widget_picker_dispatch: "no_listener",
-            source: "tab_row_chip",
-            wasAlreadyOnOverview: false,
-          });
-        }
-        return;
-      }
-      fire();
-    };
-
-    try {
-      queueMicrotask(fireWithListenerCheck);
-      window.setTimeout(fireWithListenerCheck, 100);
-    } catch (err) {
-      warnAudit("widget_picker_schedule_failed", {
-        reason: err instanceof Error ? err.message : String(err),
-      });
-      trackUsageEventClient("widget_viewed", {
-        widget_picker_dispatch: "failed",
-        source: "tab_row_chip",
-        wasAlreadyOnOverview: false,
-      });
-      return;
-    }
-    trackUsageEventClient("widget_viewed", {
-      widget_picker_dispatch: "deferred",
-      source: "tab_row_chip",
-      wasAlreadyOnOverview: false,
-    });
-  };
-
-  // audit-2026-05-07 M-1044 (silent-failure-hunter c8) — Export chip
+// audit-2026-05-07 M-1044 (silent-failure-hunter c8) — Export chip
   // navigates to Holdings as a stub; users from Risk/Outcomes/Mandate see
   // their tab change silently. Surface a polite aria-live announcement
   // explaining the redirect. Visually-hidden via DESIGN-bundle .sr-only
@@ -618,16 +503,16 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
           )}
         </div>
       )}
-      <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-border pb-2.5">
-        <div className="flex items-baseline gap-2.5">
-          <h1 className="font-display text-[22px] leading-none tracking-tight text-text-primary">
+      <div className="mb-4 flex flex-wrap items-end gap-x-4 gap-y-3 border-b border-border pb-3">
+        <div className="flex flex-col gap-1">
+          {entityName ? (
+            <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
+              {entityName}
+            </p>
+          ) : null}
+          <h1 className="font-serif text-[28px] leading-none tracking-tight text-text-primary">
             My Allocation
           </h1>
-          {entityName ? (
-            <span className="text-[11px] uppercase tracking-[0.06em] text-text-muted">
-              {entityName}
-            </span>
-          ) : null}
         </div>
         <div
           role="tablist"
@@ -671,34 +556,6 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
             );
           })}
           <span aria-hidden className="mx-2 h-4 w-px bg-border" />
-          {/* PR3 (dashboard parity) — Widget + Export chip buttons match
-              the truth screenshot's tab-row chip group. Widget opens the
-              widget picker (currently scoped to Overview only — clicking
-              elsewhere returns the user to Overview where the picker
-              lives). Export is a stub for the next polish iteration. */}
-          <button
-            type="button"
-            onClick={() => {
-              // Route to Overview where the widget picker is mounted, then
-              // dispatch via the helper. The helper handles the microtask /
-              // 100ms safety-net race that audit-2026-05-07 H-1187 / H-1190
-              // / H-1191 flagged: AllocationDashboardV2's listener mounts
-              // on the commit of the tab change, not before.
-              const wasAlreadyOnOverview = activeTab === "overview";
-              changeTab("overview");
-              dispatchWidgetPicker(wasAlreadyOnOverview);
-            }}
-            className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-            aria-label="Add widget"
-          >
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
-              <rect x="2" y="2" width="5" height="5" rx="0.5" />
-              <rect x="9" y="2" width="5" height="5" rx="0.5" />
-              <rect x="2" y="9" width="5" height="5" rx="0.5" />
-              <rect x="9" y="9" width="5" height="5" rx="0.5" />
-            </svg>
-            <span>Widget</span>
-          </button>
           <button
             type="button"
             onClick={() => {

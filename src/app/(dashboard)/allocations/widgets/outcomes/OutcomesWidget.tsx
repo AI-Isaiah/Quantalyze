@@ -129,20 +129,14 @@ function formatDelta(
  */
 function WidgetHeader({ pendingCount }: { pendingCount: number }) {
   return (
-    <div className="flex items-start justify-between border-b border-[var(--color-border)] px-5 py-3.5">
+    <div className="flex items-start justify-between border-b border-[var(--color-border)] px-4 py-2.5">
       <div>
-        <h3
-          className="m-0 flex items-center gap-2 text-[16px] font-semibold"
-          style={{
-            fontFamily: "var(--font-serif)",
-            color: "var(--color-text-primary)",
-          }}
-        >
+        <h3 className="m-0 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-text-primary">
           Bridge outcomes
           <span
-            className="inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider"
+            className="inline-flex items-center rounded-sm px-1.5 py-0.5 text-[9px] font-mono font-medium uppercase tracking-wider"
             style={{
-              backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)",
+              backgroundColor: "color-mix(in srgb, var(--color-accent) 12%, transparent)",
               color: "var(--color-accent)",
             }}
           >
@@ -178,18 +172,15 @@ function WidgetHeader({ pendingCount }: { pendingCount: number }) {
  *
  * KPI numbers come from computeOutcomeKPIs (Phase 5 contract preserved).
  */
+type OutcomeCounts = { settled: number; pendingCycle: number };
+
 function KpiStrip({
   kpis,
-  outcomes,
+  counts,
 }: {
   kpis: OutcomeKPIs;
-  outcomes: OutcomeRow[];
+  counts: OutcomeCounts;
 }) {
-  const settledCount = outcomes.filter((o) => o.delta_90d != null).length;
-  const pendingCycle = outcomes.filter(
-    (o) => o.kind === "allocated" && o.delta_90d == null,
-  ).length;
-
   return (
     <div className="grid grid-cols-3 border-b border-[var(--color-border)]">
       <KpiCell
@@ -199,7 +190,7 @@ function KpiStrip({
             ? "—"
             : `${Math.round(kpis.winRate * 100)}%`
         }
-        sub={`${settledCount} settled`}
+        sub={`${counts.settled} settled`}
       />
       <KpiCell
         label="Avg realized α (90d)"
@@ -220,7 +211,7 @@ function KpiStrip({
       <KpiCell
         label="Total outcomes"
         value={String(kpis.totalOutcomes)}
-        sub={`${pendingCycle} pending cycle`}
+        sub={`${counts.pendingCycle} pending cycle`}
         divider
       />
     </div>
@@ -798,6 +789,16 @@ export default function OutcomesWidget({ data }: WidgetProps) {
     [outcomes],
   );
 
+  const outcomeCounts = useMemo<OutcomeCounts>(() => {
+    let settled = 0;
+    let pendingCycle = 0;
+    for (const o of outcomes ?? []) {
+      if (o.delta_90d != null) settled++;
+      if (o.kind === "allocated" && o.delta_90d == null) pendingCycle++;
+    }
+    return { settled, pendingCycle };
+  }, [outcomes]);
+
   // Phase 11 / UI-BLOCK-01 — wire WidgetState v2 behind the feature flag.
   // OutcomesWidget has 4 real branches (error / loading / empty /
   // populated). Per the UI-BLOCK-01 contract we wire as many of those
@@ -904,7 +905,7 @@ export default function OutcomesWidget({ data }: WidgetProps) {
   const populated = (
     <div className="flex h-full flex-col">
       <WidgetHeader pendingCount={kpis.pendingCount} />
-      <KpiStrip kpis={kpis} outcomes={outcomes} />
+      <KpiStrip kpis={kpis} counts={outcomeCounts} />
       <div className="flex-1 overflow-auto">
         <table className="w-full border-collapse text-[13px]">
           <thead>

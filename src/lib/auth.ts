@@ -1,5 +1,4 @@
 import "server-only";
-import { cache } from "react";
 import { NextRequest, NextResponse } from "next/server";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
@@ -7,53 +6,27 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { APP_ROLES, type AppRole } from "@/lib/auth-types";
 import { isAdminUser, isAdminUserGivenUserAppRoles } from "@/lib/admin";
 
-// Re-export so existing server-side callers (routes, tests) keep
-// resolving `import { AppRole, APP_ROLES } from "@/lib/auth"` without a
-// rewrite. The /review follow-up (T2-I2) extracted the raw types into a
-// client-importable module; this file now owns the server-only surface
-// (Supabase client, NextResponse, etc.) while keeping the single-import
-// ergonomics for existing server-side consumers.
+// Re-exported here so server-side callers can keep using
+// `import { AppRole, APP_ROLES } from "@/lib/auth"`. The raw types live
+// in a client-importable module; this file owns the server-only surface.
 export { APP_ROLES, type AppRole };
 
 /**
- * Role-Based Access Control (RBAC) helpers.
+ * Role-Based Access Control (RBAC) helpers. `user_app_roles` is the
+ * primary `(user_id, role)` join table; roles ∈
+ * ('admin','allocator','quant_manager','analyst'); a user may hold
+ * multiple roles.
  *
- * Sprint 6 closeout Task 7.2. See migration 054 (user_app_roles) and
- * ADR-0005 (admin-authorization) for the full rationale. TL;DR:
+ * The admin decision is a UNION across three signals —
+ * `user_app_roles.role='admin'` OR `profiles.is_admin = TRUE` OR the
+ * `ADMIN_EMAIL` env fallback — wired through `isAdminUser()` in
+ * `src/lib/admin.ts`. `withRole` and the legacy `withAdminAuth` both
+ * consult that same helper, so a grant in any one signal lights up both
+ * wrappers.
  *
- *   - `user_app_roles` is a join table: (user_id, role) with role in
- *     ('admin','allocator','quant_manager','analyst').
- *   - A user can hold multiple roles. Grants go through an admin UI
- *     and are audited (see src/lib/audit.ts).
- *   - Post audit-2026-05-07 P459 the admin decision is a UNION across
- *     three signals — `user_app_roles`.role='admin' OR
- *     `profiles.is_admin = TRUE` OR `ADMIN_EMAIL` env-fallback — wired
- *     through `isAdminUser()` in `src/lib/admin.ts`. Both `withRole`
- *     here AND `withAdminAuth` consult that single helper, so a grant
- *     in any one of the three sources lights up both wrappers. The
- *     `profiles.is_admin` column stays as one signal in the union until
- *     ADR-0005's convergence on `withRole` finishes fanning out across
- *     all admin routes (tracked by `ADMIN_ROUTE_MANIFEST`).
- *
- * The exports below form the Task 7.2 public surface:
- *
- *   - `AppRole`          — the closed TS union of role strings.
- *   - `RoleContext<P>`   — the context a `withRole` handler receives.
- *   - `RoleHandler<P>`   — the handler signature `withRole` expects.
- *   - `getUserRoles(id)` — DB fetch of a specific user's role set.
- *   - `requireRole(...)` — server-side guard returning EITHER a 401/403
- *                          NextResponse OR the caller's resolved role set.
- *   - `withRole(role)`   — route wrapper alongside `withAdminAuth` for
- *                          routes that need role-gated access. Threads
- *                          the Next 16 `{ params }` context through to
- *                          the handler alongside the resolved user /
- *                          role set / user-scoped supabase client.
- *
- * The SQL helper `current_user_has_app_role(TEXT[])` (migration 054) is
- * the counterpart of `requireRole` at the Postgres layer. Both consult
- * `user_app_roles`. Defense in depth: new routes should use BOTH — the
- * route wrapper (so the response is 403 before touching the DB) AND the
- * RLS policy on the target table (so a bypassed route can't widen access).
+ * Defense in depth: new routes should use BOTH the route wrapper (so the
+ * response is 403 before touching the DB) AND the RLS policy on the
+ * target table (so a bypassed route can't widen access).
  */
 
 /**
@@ -100,53 +73,70 @@ export type GetUserRolesResult =
  * "fetch failed" — typically inside a guard that wants to return 500
  * on real DB faults rather than 403.
  *
- * M-0501 (audit-2026-05-07): wrapped with React `cache()` so duplicate
- * calls inside the same logical scope with the same `(supabase, userId)`
- * pair share one DB round-trip.
+ * M-0501 (audit-2026-05-07): memoized so duplicate calls inside the same
+ * logical scope with the same `(supabase, userId)` pair share one DB
+ * round-trip.
  *
- * Scoping caveat (audit-2026-05-07 red-team, MED conf 8): React
- * `cache()`'s storage is initialized by the renderer's per-request
- * `AsyncLocalStorage`. Inside a Route Handler (Next 16) — which
- * executes as a serverless function and is NOT rendered — the
- * storage's request-scope guarantee depends on Next 16 wiring an
- * equivalent ALS around the route invocation. As of this commit we
- * do NOT have a regression test that pins the cache to a single
- * request boundary in Route Handlers; the existing tests pin
- * (i) same-instance dedup inside a SINGLE call frame and (ii)
- * cross-instance NON-dedup (so cross-user contamination is impossible
- * while distinct SupabaseClient instances are passed). The
- * load-bearing safety property is therefore "per-SupabaseClient-instance
- * dedup" — NOT a request-scope claim — until the Next 16 Route Handler
- * cache-scope semantics are pinned by an integration test.
+ * Implementation note: originally wrapped with React `cache()` for
+ * RSC-render-scope dedup, but `cache()` in React 19 is ONLY active inside
+ * the renderer's per-request AsyncLocalStorage — Route Handlers and any
+ * non-RSC execution path get NO dedup. Vitest also cannot observe the
+ * dedup, so the contract test (auth.test.ts:272) was unprovable. We now
+ * use a WeakMap keyed on the SupabaseClient instance, with an inner Map
+ * of `userId → Promise<GetUserRolesResult>`. This makes the dedup
+ * deterministic in every environment (RSC, Route Handler, Edge, vitest)
+ * while preserving the existing safety property: distinct SupabaseClient
+ * instances do NOT share cache entries, so a fresh client per request
+ * (the standard `await createClient()` pattern) gets fresh roles. The
+ * outer WeakMap lets the entire role map garbage-collect when the client
+ * is released, so there is no cross-request leak.
  *
- * React `cache()` keys on argument IDENTITY (===), so a cache hit
- * requires the caller to pass the SAME SupabaseClient instance. The
- * `withRole` wrapper guarantees this — it builds ONE client via
- * `createClient()` and reuses it for `getUser()` + `requireRole()` +
- * the handler context — but `createClient()` itself (in
- * `src/lib/supabase/server.ts`) is NOT `cache()`-wrapped, so two
- * independent `await createClient()` calls within the same request
+ * Cross-user contamination is impossible while distinct SupabaseClient
+ * instances are passed. The `withRole` wrapper guarantees this — it
+ * builds ONE client via `createClient()` and reuses it for `getUser()` +
+ * `requireRole()` + the handler context. `createClient()` itself is NOT
+ * memoized, so two `await createClient()` calls in the same request
  * return two distinct clients and bypass this cache. New call sites
  * outside `withRole` must reuse a single client per request or accept
- * the duplicate round-trip. Audit reference: audit-2026-05-07 security
- * S2 (MED conf 8).
+ * the duplicate round-trip.
  *
- * DANGER ZONE (audit-2026-05-07 red-team): if a future refactor wraps
- * `createClient()` with React.cache() (S2 fix option (a)) AND Route
- * Handlers do NOT receive a fresh ALS per request, two requests inside
- * a warm Lambda could share both the SupabaseClient identity AND the
- * resolved role set — cross-user contamination becomes possible. Before
- * landing such a refactor, add an integration test that pins request-scope
- * isolation in Next 16 Route Handlers (the cache-component RFC is the
- * forcing function for that property). Cross-request caching (JWT custom
- * claims, Edge Config) is tracked as a Sprint 7 follow-up — see ADR-0005.
- *
- * TODO(audit-2026-05-07): replace this docstring's "single logical
- * scope" hedge with a hard "REQUEST-SCOPED" claim once the Next 16
- * cache-component RFC lands and the route-handler ALS guarantee is
- * codified in an integration test in this suite.
+ * DANGER ZONE: if a future refactor wraps `createClient()` with a cache
+ * that yields the SAME instance for two requests inside a warm Lambda,
+ * two requests could share both the SupabaseClient identity AND the
+ * resolved role set — cross-user contamination becomes possible. Pin
+ * fresh-per-request before landing such a refactor. Cross-request
+ * caching (JWT custom claims, Edge Config) is tracked as a Sprint 7
+ * follow-up — see ADR-0005.
  */
-export const getUserRolesResult = cache(async function getUserRolesResult(
+const rolesByClient = new WeakMap<SupabaseClient, Map<string, Promise<GetUserRolesResult>>>();
+
+export async function getUserRolesResult(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<GetUserRolesResult> {
+  let perUser = rolesByClient.get(supabase);
+  if (!perUser) {
+    perUser = new Map();
+    rolesByClient.set(supabase, perUser);
+  }
+  const cached = perUser.get(userId);
+  if (cached) return cached;
+  // Cache the PROMISE (not the resolved value) so concurrent callers share
+  // the in-flight round-trip rather than racing to start a second one.
+  const promise = fetchUserRolesResult(supabase, userId);
+  perUser.set(userId, promise);
+  // Evict on failure so a transient DB blip doesn't poison the cache for the
+  // remaining lifetime of this SupabaseClient. Successful results (including
+  // `{ ok: true, roles: [] }`) stay cached — that IS the dedup contract.
+  promise
+    .then((result) => {
+      if (!result.ok) perUser?.delete(userId);
+    })
+    .catch(() => perUser?.delete(userId));
+  return promise;
+}
+
+async function fetchUserRolesResult(
   supabase: SupabaseClient,
   userId: string,
 ): Promise<GetUserRolesResult> {
@@ -186,7 +176,7 @@ export const getUserRolesResult = cache(async function getUserRolesResult(
       (APP_ROLES as readonly string[]).includes(role),
     );
   return { ok: true, roles };
-});
+}
 
 /**
  * Fetch the role set for a specific user. Returns an empty array if the
@@ -305,15 +295,12 @@ export async function requireRole(
     // signal for `allocator` / `quant_manager` / `analyst`, so the
     // user_app_roles check is authoritative for those.
     //
-    // audit-2026-05-07 red-team (MED conf 8): use the
-    // `isAdminUserGivenUserAppRoles` variant which trusts the
+    // Use the `isAdminUserGivenUserAppRoles` variant which trusts the
     // already-fetched `userRoles` as the user_app_roles signal instead
     // of re-issuing `hasAdminRoleRow`. On the non-admin reject path
-    // this drops DB round-trips from 3 → 2 (and 'admin' is known to be
-    // absent from userRoles here, since `hasAny` evaluated false and
-    // the only admin role is 'admin' itself). The
-    // getUserRolesResult `cache()` still dedupes if a sibling caller
-    // asks for the role set again on the same request.
+    // this drops DB round-trips from 3 → 2. The WeakMap dedup in
+    // getUserRolesResult still serves sibling callers asking for the
+    // same role set within this request.
     if (roles.includes("admin")) {
       const adminUnion = await isAdminUserGivenUserAppRoles(
         supabase,

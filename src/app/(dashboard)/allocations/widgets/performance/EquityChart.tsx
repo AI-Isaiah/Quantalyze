@@ -1404,27 +1404,33 @@ export default function EquityChartWidget({ data }: WidgetProps) {
   const lastSyncAt = d.lastSyncAt ?? null;
   const hasBenchmark = !!benchmark && benchmark.length > 0;
 
-  // ADVERSARIAL-EQ-6 — relative-time stamp for the card-header sync
-  // affordance. When `lastSyncAt` is present we surface "Updated 2h
-  // ago" / "Last sync 2h ago"; absent or pre-sync state falls back to
-  // the previous "sync just now" / "data stale" copy. The
-  // formatRelativeTime helper is the project-canonical formatter
-  // (used by MandateSaveStatus, ComputeJobsTable, AdminTabs) — same
-  // bucket idiom keeps the strings consistent across the app.
-  // `now` is null on first render to keep SSR/CSR output identical
-  // (matches `useSharedMinuteClock` in ForQuantsLeadsTable); the
-  // effect ticks once on mount and every minute thereafter.
+  // `now` is null on first render to keep SSR/CSR output identical. The
+  // minute tick gates on label change: when the resolved relative-time
+  // bucket ("2h ago") would be unchanged, return the previous value so
+  // React skips the re-render. Without this gate, mounting EquityChart
+  // per strategy in an aggregate-across-strategies view fires N
+  // chart-subtree re-renders every minute with no visible change.
   const [now, setNow] = useState<number | null>(null);
   useEffect(() => {
-    // Deferred via setTimeout(0) to satisfy react-hooks/set-state-in-effect
-    // (same idiom as useSharedMinuteClock in ForQuantsLeadsTable).
-    const tick = setTimeout(() => setNow(Date.now()), 0);
-    const interval = setInterval(() => setNow(Date.now()), 60_000);
+    function advance() {
+      setNow((prev) => {
+        const next = Date.now();
+        if (!lastSyncAt || prev === null) return next;
+        return formatRelativeTime(lastSyncAt, prev) ===
+          formatRelativeTime(lastSyncAt, next)
+          ? prev
+          : next;
+      });
+    }
+    // setTimeout(0) defers the first set out of the render commit phase
+    // (satisfies react-hooks/set-state-in-effect).
+    const tick = setTimeout(advance, 0);
+    const interval = setInterval(advance, 60_000);
     return () => {
       clearTimeout(tick);
       clearInterval(interval);
     };
-  }, []);
+  }, [lastSyncAt]);
   const syncStampCopy = (() => {
     if (!lastSyncAt || now === null) {
       return stale ? "data stale" : "sync just now";
@@ -1437,38 +1443,37 @@ export default function EquityChartWidget({ data }: WidgetProps) {
   const [customRange, setCustomRange] = useState<CustomRange | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
 
+  const anchored = useMemo(
+    () => anchorFromFirstPositive(equityDailyPoints),
+    [equityDailyPoints],
+  );
+
   // CustomRangePicker `min` — first f7-anchored date so the picker can't
   // resolve into the leading-zero warmup window.
-  const minDate = useMemo(() => {
-    const anchored = anchorFromFirstPositive(equityDailyPoints);
-    return anchored.length > 0
-      ? new Date(parseISO(anchored[0].date))
-      : new Date();
-  }, [equityDailyPoints]);
+  const minDate = useMemo(
+    () =>
+      anchored.length > 0
+        ? new Date(parseISO(anchored[0].date))
+        : new Date(),
+    [anchored],
+  );
 
-  // ADVERSARIAL-EQ-5 — period total return for the always-visible
-  // summary chip in the card header. Mirrors the inner EquityChart's
-  // computation so the wrapper's chip and the inner chart's last
-  // y-coordinate report the same number. NULL when there's not
-  // enough data to draw a window (the chip simply doesn't render).
+  // Period total return for the always-visible summary chip in the
+  // card header. NULL when there's not enough data to draw a window
+  // (the chip simply doesn't render). The `Number.isFinite(last)`
+  // guard catches a corrupt trailing point that the f7 anchor's
+  // `value > 0` predicate doesn't strip — without it the chip would
+  // render 'NaN%' to the allocator.
   const periodReturn = useMemo<number | null>(() => {
-    const anchored = anchorFromFirstPositive(equityDailyPoints);
     if (anchored.length === 0) return null;
     const window = sliceByPeriod(anchored, period, customRange);
     if (window.length === 0) return null;
     const base = window[0].value;
     const last = window[window.length - 1].value;
     if (!Number.isFinite(base) || base <= 0) return null;
-    // pr189-followup M18 (red-team MED/8) — defend the OUTER summary chip
-    // against the same NaN class the M-1065 push-time filter closes on
-    // the inner chart. If a corrupt trailing point slips through (e.g.
-    // a non-finite `value` that the f7 anchor doesn't strip — anchored
-    // only checks `value > 0`, NOT `Number.isFinite(value)`), `last`
-    // can be NaN; `last / base - 1` is NaN; the chip renders 'NaN%' to
-    // the allocator. Mirror the existing base guard.
     if (!Number.isFinite(last)) return null;
     return last / base - 1;
-  }, [equityDailyPoints, period, customRange]);
+  }, [anchored, period, customRange]);
 
   const handlePeriodClick = (p: Period) => {
     if (p === "CUSTOM") {
@@ -1501,53 +1506,43 @@ export default function EquityChartWidget({ data }: WidgetProps) {
       style={{
         background: "var(--color-surface)",
         border: "1px solid var(--color-border)",
-        borderRadius: "0.5rem",
-        boxShadow: "var(--shadow-card)",
+        borderRadius: "0.25rem",
         overflow: "hidden",
       }}
     >
-      {/* Single-row card header — title + legend chips + period toggle +
-          sync stamp inline, byte-aligned with the prototype's "equity"
-          card (designer-bundle/project/src/app.jsx:142-200). */}
       <div
         style={{
-          padding: "8px 14px",
+          padding: "10px 14px 8px",
           borderBottom: "1px solid var(--color-border)",
           display: "flex",
-          alignItems: "center",
+          alignItems: "flex-start",
           justifyContent: "space-between",
-          gap: "var(--space-grid-gap)",
+          gap: 12,
           flexWrap: "wrap",
         }}
       >
         <div
           style={{
             display: "flex",
-            alignItems: "center",
-            gap: 14,
-            flexWrap: "wrap",
+            flexDirection: "column",
+            gap: 4,
+            minWidth: 0,
           }}
         >
           <h3
-            className="font-display"
-            style={{
-              margin: 0,
-              fontSize: 14,
-              fontWeight: 500,
-              color: "var(--color-text-primary)",
-            }}
+            className="text-sm font-semibold uppercase tracking-wider text-text-primary"
+            style={{ margin: 0 }}
           >
             Equity curve
           </h3>
           <div
             aria-label="Series legend"
+            className="text-[11px] text-text-muted"
             style={{
               display: "flex",
               alignItems: "center",
               gap: 12,
-              fontSize: 12,
-              fontFamily: "var(--font-sans)",
-              color: "var(--color-text-secondary)",
+              flexWrap: "wrap",
             }}
           >
             <HeaderLegendSwatch
@@ -1569,20 +1564,21 @@ export default function EquityChartWidget({ data }: WidgetProps) {
               />
             ))}
           </div>
-          <div
-            aria-hidden
-            style={{
-              width: 1,
-              height: 14,
-              background: "var(--color-border)",
-            }}
-          />
+        </div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
           <div
             role="tablist"
             aria-label="Period"
             style={{
               display: "flex",
-              gap: 2,
+              gap: 4,
               position: "relative",
               alignItems: "center",
               flexWrap: "wrap",
@@ -1597,23 +1593,12 @@ export default function EquityChartWidget({ data }: WidgetProps) {
                   role="tab"
                   aria-selected={active}
                   onClick={() => handlePeriodClick(p)}
-                  style={{
-                    padding: "4px 10px",
-                    fontSize: 12,
-                    fontWeight: 500,
-                    fontFamily: "var(--font-mono), monospace",
-                    background: active
-                      ? "color-mix(in srgb, var(--color-accent) 10%, transparent)"
-                      : "transparent",
-                    color: active
-                      ? "var(--color-accent)"
-                      : "var(--color-text-secondary)",
-                    border: "none",
-                    borderRadius: 4,
-                    cursor: "pointer",
-                    fontVariantNumeric: "tabular-nums",
-                    letterSpacing: "0.04em",
-                  }}
+                  className={
+                    "cursor-pointer px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider rounded-sm border transition-colors tabular-nums " +
+                    (active
+                      ? "bg-accent text-white border-accent"
+                      : "bg-surface-subtle text-text-2 border-border hover:bg-surface")
+                  }
                 >
                   {p}
                 </button>
@@ -1648,29 +1633,14 @@ export default function EquityChartWidget({ data }: WidgetProps) {
           {periodReturn != null && (
             <div
               aria-label={`Return over ${period}`}
-              style={{
-                display: "flex",
-                alignItems: "baseline",
-                gap: 4,
-                fontFamily: "var(--font-mono), monospace",
-                fontVariantNumeric: "tabular-nums",
-              }}
+              className="flex items-baseline gap-1 font-mono tabular-nums"
             >
-              <span
-                style={{
-                  fontSize: 10,
-                  fontWeight: 500,
-                  letterSpacing: "0.06em",
-                  textTransform: "uppercase",
-                  color: "var(--color-text-muted)",
-                }}
-              >
+              <span className="text-[10px] font-mono uppercase tracking-[0.14em] text-text-muted">
                 {period}
               </span>
               <span
+                className="text-sm font-semibold tabular-nums"
                 style={{
-                  fontSize: 14,
-                  fontWeight: 600,
                   color:
                     periodReturn >= 0
                       ? "var(--color-positive)"
@@ -1682,11 +1652,7 @@ export default function EquityChartWidget({ data }: WidgetProps) {
             </div>
           )}
           <div
-            style={{
-              fontSize: 12,
-              color: "var(--color-text-muted)",
-              fontFamily: "var(--font-sans)",
-            }}
+            className="text-[10px] font-mono uppercase tracking-[0.14em] text-text-muted"
             title={
               lastSyncAt
                 ? new Date(lastSyncAt).toLocaleString()
@@ -1697,7 +1663,7 @@ export default function EquityChartWidget({ data }: WidgetProps) {
           </div>
         </div>
       </div>
-      <div style={{ padding: 10 }}>
+      <div style={{ padding: "10px 14px 14px" }}>
         <EquityChart
           equityDailyPoints={equityDailyPoints}
           benchmark={benchmark}

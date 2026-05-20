@@ -202,9 +202,9 @@ function LegacyHoldingsTable({
   const TOTAL_COLUMNS = 7;
 
   return (
-    <section className="mt-6 rounded-lg border border-border bg-surface">
+    <section className="mt-6 rounded-sm border border-border bg-surface">
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <h3 className="text-sm font-semibold text-text-primary">Holdings</h3>
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">Holdings</h3>
         <label className="flex cursor-pointer items-center gap-2 text-xs text-text-muted">
           <input
             type="checkbox"
@@ -421,9 +421,9 @@ function DesignHoldingsTable({
   }
 
   return (
-    <section className="rounded-lg border border-border bg-surface">
+    <section className="rounded-sm border border-border bg-surface">
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <h3 className="text-sm font-semibold text-text-primary">Holdings</h3>
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">Holdings</h3>
         {onShowRevokedChange ? (
           <label className="flex cursor-pointer items-center gap-2 text-xs text-text-muted">
             <input

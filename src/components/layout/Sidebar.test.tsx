@@ -5,15 +5,20 @@ import { Sidebar } from "./Sidebar";
 /**
  * Sidebar workspace-items regression tests.
  *
- * The v0.4.0 My Allocation pivot split allocator and
- * manager/crypto-team workspaces:
+ * 2026-05-20 simplification: the allocator workspace collapsed to a
+ * single entry "My Allocation". Scenarios and Recommendations used to
+ * be top-level routes but are now TABS inside the My Allocation page —
+ * a sidebar entry would duplicate navigation that already happens via
+ * AllocationsTabs.
  *
- *   Allocator view: My Allocation → Scenarios → Recommendations.
- *     No Strategies (that's the manager surface). No Test Portfolios
- *     (Scenarios replaces the what-if concept). No separate Exchanges
- *     entry (inline in My Allocation).
+ *   Allocator view: My Allocation. (Just that — Discovery + Account
+ *     handle the rest. No Strategies, no Portfolios, no Scenarios, no
+ *     Recommendations top-level entries.)
  *
  *   Manager / crypto-team view: Strategies → Portfolios.
+ *
+ *   Admin view: My Allocation + Strategies + Portfolios. Admins need
+ *     access to both surfaces for triage / demo / QA.
  *
  * If a future refactor collapses these back together or flips the
  * labels, these tests catch it.
@@ -39,11 +44,19 @@ describe("Sidebar workspace — allocator view", () => {
     expect(screen.queryByText("Connections")).toBeNull();
   });
 
-  it("renders 'Scenarios' (allocator-only what-if surface)", () => {
+  it("does NOT render 'Scenarios' as a top-level entry (it's a tab inside My Allocation)", () => {
+    // 2026-05-20: Scenarios used to be a top-level sidebar entry pointing
+    // at /scenarios, but the actual surface is a tab inside My Allocation
+    // (AllocationsTabs scenario panel). The top-level entry was duplication.
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    expect(screen.getByText("Scenarios")).toBeInTheDocument();
-    const link = screen.getByText("Scenarios").closest("a");
-    expect(link).toHaveAttribute("href", "/scenarios");
+    expect(screen.queryByText("Scenarios")).toBeNull();
+  });
+
+  it("does NOT render 'Recommendations' as a top-level entry (tab inside My Allocation)", () => {
+    // Same 2026-05-20 simplification — Recommendations lives as a tab/view
+    // inside the My Allocation surface, not a separate route.
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    expect(screen.queryByText("Recommendations")).toBeNull();
   });
 
   it("does NOT render 'Strategies' in the allocator workspace", () => {
@@ -83,25 +96,36 @@ describe("Sidebar workspace — manager / crypto-team view", () => {
   });
 });
 
-describe("Sidebar workspace order — allocator view", () => {
-  it("places 'My Allocation' before 'Scenarios'", () => {
-    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    const myAlloc = screen.getByText("My Allocation");
-    const scenarios = screen.getByText("Scenarios");
-    expect(
-      myAlloc.compareDocumentPosition(scenarios) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+describe("Sidebar workspace — admin view", () => {
+  it("renders 'My Allocation' AND the manager surfaces so admins can triage either", () => {
+    // Pre-fix the rule was `isAllocator && !isAdmin`, which hid My
+    // Allocation from admins (even admin-allocators). Admins now see
+    // both surfaces so they can navigate any user-facing route.
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} />);
+    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("Strategies")).toBeInTheDocument();
+    expect(screen.getByText("Portfolios")).toBeInTheDocument();
   });
 
-  it("places 'Scenarios' before 'Recommendations'", () => {
-    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    const scenarios = screen.getByText("Scenarios");
-    const recommendations = screen.getByText("Recommendations");
-    expect(
-      scenarios.compareDocumentPosition(recommendations) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+  it("dual-role (admin + allocator) sees both surfaces", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isAdmin={true} isAllocator={true} />,
+    );
+    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("Strategies")).toBeInTheDocument();
+    expect(screen.getByText("Portfolios")).toBeInTheDocument();
+  });
+});
+
+describe("Sidebar workspace — neither allocator nor admin (baseline)", () => {
+  it("renders the manager surface only (Strategies + Portfolios)", () => {
+    // Locks the `!isAllocator || isAdmin` predicate against a flip to
+    // `isAllocator && !isAdmin` — under that flipped form an undecorated
+    // user (both flags falsy) would lose Strategies / Portfolios silently.
+    render(<Sidebar populatedSlugs={[]} />);
+    expect(screen.queryByText("My Allocation")).toBeNull();
+    expect(screen.getByText("Strategies")).toBeInTheDocument();
+    expect(screen.getByText("Portfolios")).toBeInTheDocument();
   });
 });
 

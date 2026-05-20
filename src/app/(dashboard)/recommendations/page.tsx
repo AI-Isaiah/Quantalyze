@@ -270,9 +270,7 @@ function RecommendationCard({
       strategy.category_slug)
     : null;
 
-  const viewHref = strategy.category_slug
-    ? `/discovery/${strategy.category_slug}/${strategy.id}`
-    : `/strategy/${strategy.id}`;
+  const viewHref = `/factsheet/${strategy.id}`;
 
   return (
     <Card>

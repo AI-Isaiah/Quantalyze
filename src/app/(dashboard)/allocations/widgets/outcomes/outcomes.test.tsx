@@ -182,7 +182,9 @@ describe("OutcomesWidget", () => {
     ).toBeInTheDocument();
   });
 
-  it("Voice-D5 truncation: outcomes.length === 200 -> footer 'Showing most recent 200 — reach out if you need historical export' rendered", () => {
+  // Rendering 200 outcome rows can exceed the 5s default under concurrent
+  // vitest worker load (flaky in full-suite runs, passes in isolation).
+  it("Voice-D5 truncation: outcomes.length === 200 -> footer 'Showing most recent 200 — reach out if you need historical export' rendered", { timeout: 15_000 }, () => {
     const many = Array.from({ length: 200 }, (_, i) =>
       makeOutcome({ id: `o${i}` }),
     );

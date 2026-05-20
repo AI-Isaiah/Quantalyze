@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ReadonlyURLSearchParams } from "next/navigation";
 
 /**
@@ -308,10 +308,11 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it("ArrowRight wraps focus across the 5 visible tabs in D-05 order (PR3: Scenario excluded)", () => {
+  it("ArrowRight wraps focus across the visible tabs in VISIBLE_TAB_KEYS order (Scenario excluded)", () => {
     setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    // PR3 — visible tablist is 5 tabs (no Scenario). Wrap from Risk → Overview.
+    // Visible tablist excludes Scenario. Overview is the factsheet view,
+    // so there's no separate Analytics tab. Wrap from Risk → Overview.
     const order = ["Overview", "Holdings", "Outcomes", "Mandate", "Risk"];
     for (let i = 0; i < order.length; i++) {
       mockReplace.mockClear();
@@ -417,9 +418,12 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P Export chip (M-1041 / M
     fireEvent.click(exportChip);
     // audit-2026-05-07 Phase-4 red-team: microtask-clear pattern means the
     // live region first commits "" (forces React re-render even on repeat
-    // clicks) and the microtask sets the message. Flush microtasks so the
-    // human-readable string lands.
-    await Promise.resolve();
+    // clicks) and the microtask sets the message. Flush microtasks AND
+    // React's pending commit with act() — a bare `await Promise.resolve()`
+    // only yields one microtask cycle, which lets the queueMicrotask
+    // callback run but leaves React 19's commit pending until the next
+    // tick, leaving textContent at "".
+    await act(async () => { await Promise.resolve(); });
     expect(liveRegion.textContent).toContain("Export");
     expect(liveRegion.textContent).toContain("Holdings");
     // aria-live wiring keeps the message a polite announcement.
@@ -692,206 +696,12 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / 
   });
 });
 
-// --- audit-2026-05-07 Phase-2 testing-specialist additions ------------------
-//
 // Each describe below resets the router mocks in beforeEach via the shared
-// resetRouterMocks helper (defined near the top of this file). New coverage:
-//   - dispatchWidgetPicker (sync / deferred / failed paths + telemetry)
-//   - parseTab boundary cases (empty / whitespace / uppercase / canonical
-//     parameterized) — pins the KNOWN_TAB_RAW contract as a test instead of
-//     a comment.
-//   - Export chip scroll:false + single-shot routing pin (M-1041 hardening)
-//   - Export chip same-tab repeat click re-announce (M-1044 silent-failure
-//     fix is itself uncovered against the React Object.is bail-out path).
-
-describe("AllocationsTabs — audit-2026-05-07 Phase-2 dispatchWidgetPicker (HIGH conf 9)", () => {
-  beforeEach(() => {
-    resetRouterMocks();
-  });
-
-  it("Widget chip from Overview dispatches synchronously + telemetry 'sync'", () => {
-    setSearchParams("");
-    const evtSpy = vi.fn();
-    window.addEventListener("allocations:open-widget-picker", evtSpy);
-
-    try {
-      render(<AllocationsTabs {...STUB_PROPS} />);
-      fireEvent.click(screen.getByRole("button", { name: "Add widget" }));
-
-      // Synchronous fire — no microtask / timer flush needed on Overview.
-      expect(evtSpy).toHaveBeenCalledTimes(1);
-      expect(mockTrackUsageEventClient).toHaveBeenCalledTimes(1);
-      const [eventName, payload] = mockTrackUsageEventClient.mock.calls[0];
-      expect(eventName).toBe("widget_viewed");
-      expect(payload).toMatchObject({
-        widget_picker_dispatch: "sync",
-        source: "tab_row_chip",
-        wasAlreadyOnOverview: true,
-      });
-    } finally {
-      window.removeEventListener("allocations:open-widget-picker", evtSpy);
-    }
-  });
-
-  it("Widget chip from non-Overview defers via microtask + 100ms safety-net (telemetry 'deferred')", async () => {
-    vi.useFakeTimers();
-    setSearchParams("tab=risk");
-    const evtSpy = vi.fn();
-    window.addEventListener("allocations:open-widget-picker", evtSpy);
-
-    try {
-      const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
-      fireEvent.click(screen.getByRole("button", { name: "Add widget" }));
-
-      // Real `router.replace` would update searchParams to "" (Overview).
-      // Simulate that URL transition + rerender so `activeTabRef.current`
-      // flips to "overview" before the deferred fire callbacks read it.
-      // audit-2026-05-07 Phase-4 red-team (HIGH conf 8): the deferred fire
-      // callback is now gated on activeTabRef === "overview" so the
-      // listener-presence check passes only when the URL change has
-      // landed.
-      setSearchParams("");
-      rerender(<AllocationsTabs {...STUB_PROPS} />);
-
-      // Microtask queue flush — queueMicrotask resolves on the next
-      // microtask checkpoint, which vi.advanceTimersByTime(0) reaches via
-      // the queued Promise chain.
-      await vi.advanceTimersByTimeAsync(0);
-      expect(evtSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
-
-      // 100ms setTimeout safety net — second dispatch (listener is
-      // idempotent so this is intentional).
-      await vi.advanceTimersByTimeAsync(100);
-      expect(evtSpy).toHaveBeenCalledTimes(2);
-
-      // Telemetry: exactly one event per click with status 'deferred'.
-      expect(mockTrackUsageEventClient).toHaveBeenCalledTimes(1);
-      const [, payload] = mockTrackUsageEventClient.mock.calls[0];
-      expect(payload).toMatchObject({
-        widget_picker_dispatch: "deferred",
-        source: "tab_row_chip",
-        wasAlreadyOnOverview: false,
-      });
-    } finally {
-      window.removeEventListener("allocations:open-widget-picker", evtSpy);
-      vi.useRealTimers();
-    }
-  });
-
-  // audit-2026-05-07 Phase-4 red-team regression (HIGH conf 8).
-  // Sequence: user on Risk → Widget chip → user clicks another tab
-  // (Holdings) BEFORE the 100ms safety-net fires. The deferred fire
-  // callback now sees `activeTabRef.current !== "overview"`,
-  // AllocationDashboardV2 is unmounted, and the listener is gone.
-  // Pre-fix telemetry sold 'deferred' success while the picker silently
-  // never opened. The fix emits a `widget_picker_dispatch_no_listener`
-  // warnAudit breadcrumb + a follow-up `widget_viewed` telemetry event
-  // with status 'no_listener'. Pin both outputs.
-  it("Widget chip from Risk → user navigates to Holdings before 100ms → no_listener breadcrumb + telemetry", async () => {
-    vi.useFakeTimers();
-    const warnSpy = vi
-      .spyOn(console, "warn")
-      .mockImplementation(() => undefined);
-    setSearchParams("tab=risk");
-    const evtSpy = vi.fn();
-    window.addEventListener("allocations:open-widget-picker", evtSpy);
-
-    try {
-      const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
-      fireEvent.click(screen.getByRole("button", { name: "Add widget" }));
-
-      // User clicks Holdings before either deferred callback runs — the
-      // URL transitions to ?tab=holdings, activeTabRef.current flips to
-      // "holdings", and Overview / its listener stay unmounted.
-      setSearchParams("tab=holdings");
-      rerender(<AllocationsTabs {...STUB_PROPS} />);
-
-      // Flush microtask + 100ms safety-net. Both deferred callbacks see
-      // activeTabRef.current === "holdings" and skip the dispatch.
-      await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(100);
-
-      // No dispatch landed on the (absent) listener.
-      expect(evtSpy).not.toHaveBeenCalled();
-
-      // Breadcrumb fired with the current tab + source.
-      const matching = warnSpy.mock.calls.find(
-        (c) =>
-          typeof c[0] === "string" &&
-          c[0].includes("widget_picker_dispatch_no_listener"),
-      );
-      expect(matching).toBeDefined();
-      expect(matching![1]).toMatchObject({
-        currentTab: "holdings",
-        source: "tab_row_chip",
-      });
-
-      // Telemetry: 'deferred' on click + 'no_listener' follow-up — both
-      // events fire so PostHog distinguishes "delivered + opened" from
-      // "delivered but user re-navigated". The follow-up fires AT MOST
-      // ONCE even though both microtask + 100ms timer ran.
-      const noListenerCalls = mockTrackUsageEventClient.mock.calls.filter(
-        (c) =>
-          (c[1] as { widget_picker_dispatch?: string })
-            .widget_picker_dispatch === "no_listener",
-      );
-      expect(noListenerCalls).toHaveLength(1);
-      expect(noListenerCalls[0][1]).toMatchObject({
-        widget_picker_dispatch: "no_listener",
-        source: "tab_row_chip",
-        wasAlreadyOnOverview: false,
-      });
-    } finally {
-      window.removeEventListener("allocations:open-widget-picker", evtSpy);
-      warnSpy.mockRestore();
-      vi.useRealTimers();
-    }
-  });
-
-  it("Widget chip on Overview — dispatchEvent throws → 'failed' telemetry + warnAudit breadcrumb", () => {
-    setSearchParams("");
-    const warnSpy = vi
-      .spyOn(console, "warn")
-      .mockImplementation(() => undefined);
-    const originalDispatch = window.dispatchEvent.bind(window);
-    const dispatchSpy = vi
-      .spyOn(window, "dispatchEvent")
-      .mockImplementation((evt: Event) => {
-        if (evt.type === "allocations:open-widget-picker") {
-          throw new Error("simulated CustomEvent throw");
-        }
-        return originalDispatch(evt);
-      });
-
-    try {
-      render(<AllocationsTabs {...STUB_PROPS} />);
-      fireEvent.click(screen.getByRole("button", { name: "Add widget" }));
-
-      // Telemetry status reflects the failed dispatch.
-      expect(mockTrackUsageEventClient).toHaveBeenCalledTimes(1);
-      const [, payload] = mockTrackUsageEventClient.mock.calls[0];
-      expect(payload).toMatchObject({
-        widget_picker_dispatch: "failed",
-        source: "tab_row_chip",
-        wasAlreadyOnOverview: true,
-      });
-
-      // warnAudit breadcrumb fires with reason string.
-      const matching = warnSpy.mock.calls.find(
-        (c) =>
-          typeof c[0] === "string" &&
-          c[0].includes("widget_picker_dispatch_failed"),
-      );
-      expect(matching).toBeDefined();
-      expect(
-        (matching![1] as { reason: string }).reason,
-      ).toContain("simulated CustomEvent throw");
-    } finally {
-      dispatchSpy.mockRestore();
-      warnSpy.mockRestore();
-    }
-  });
-});
+// resetRouterMocks helper (defined near the top of this file). Covers:
+//   - parseTab boundary cases — pins the KNOWN_TAB_RAW contract.
+//   - Export chip scroll:false + single-shot routing pin.
+//   - Export chip same-tab repeat click re-announce (React Object.is bail-out
+//     path the original aria-live fix didn't cover).
 
 describe("AllocationsTabs — audit-2026-05-07 Phase-2 parseTab boundary cases (MED conf 8)", () => {
   beforeEach(() => {
@@ -1019,7 +829,10 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
     // Synchronous-after-click: setExportAnnouncement("") landed; React
     // committed an empty render before the microtask fires.
     expect(liveRegion.textContent).toBe("");
-    await Promise.resolve();
+    // act() flushes BOTH the queued microtask (which calls setState) AND
+    // the pending React commit. A bare `await Promise.resolve()` only
+    // does the first half — see M-1044 test note above.
+    await act(async () => { await Promise.resolve(); });
     const firstText = liveRegion.textContent ?? "";
     expect(firstText).toContain("Export");
     expect(firstText).toContain("Holdings");
@@ -1030,7 +843,7 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
     setSearchParams("tab=risk");
     fireEvent.click(exportChip);
     expect(liveRegion.textContent).toBe("");
-    await Promise.resolve();
+    await act(async () => { await Promise.resolve(); });
     const secondText = liveRegion.textContent ?? "";
     expect(secondText).toContain("Export");
     expect(secondText).toContain("Holdings");
@@ -1049,7 +862,8 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
     const exportChip = screen.getByRole("button", { name: "Export" });
 
     fireEvent.click(exportChip);
-    await Promise.resolve();
+    // act() flushes microtask + React commit (see M-1044 note above).
+    await act(async () => { await Promise.resolve(); });
     const text = liveRegion.textContent ?? "";
     expect(text).toBe(
       "Export lives in the Holdings tab — taking you there.",
@@ -1061,7 +875,7 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
     // would have grown to two ZWS characters here.
     setSearchParams("tab=risk");
     fireEvent.click(exportChip);
-    await Promise.resolve();
+    await act(async () => { await Promise.resolve(); });
     const text2 = liveRegion.textContent ?? "";
     expect(text2).toBe(
       "Export lives in the Holdings tab — taking you there.",

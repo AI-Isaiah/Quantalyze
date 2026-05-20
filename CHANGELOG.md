@@ -7,6 +7,40 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.23.0.0] - 2026-05-20
+
+**feat(factsheet/v2): institutional factsheet route, embedded allocations overview, full UX polish pass.**
+
+### Added
+- `/factsheet/[id]` (v2) renders the full institutional panel set: KPI strip, performance / distribution / heatmap / stress / signature / streak / allocator / metrics sections, comparator-reactive charts (BTC / SPX), per-strategy persistence of comparator + xRange + display toggles.
+- Allocations Overview now hosts the full factsheet body below the equity chart, weighted by ingested API keys per allocator. Holdings confined to its own tab.
+- New `src/lib/factsheet/` module (30+ files): payload builder, benchmark fixtures (BTC / SPX / ETH / GLD / IEF), rolling stats, comparator block, joint metrics, style drift, peer percentile, allocator blend, bootstrap CI, calmar by year, event signatures, stress windows, period buckets.
+- "Copy share link" button generates a public `?share=1` URL (terminal — no outbound nav links) for sharing factsheets externally.
+- Dynamic Open-Graph image route at `/api/og/factsheet/[id]` for richer social previews.
+
+### Changed
+- Clicking a strategy on `/discovery/[slug]` now lands the user directly on the full factsheet at `/factsheet/[id]`; the standalone "Factsheet" button is retired.
+- Comparator picker: explicit "None" radio dropped in favor of toggle-off semantics (clicking the active chip clears it). Benchmark-only charts (`cumVsBench`, `rollingBeta`) hide automatically when no comparator is selected.
+- Rolling vol / Sharpe / Sortino charts fall back from 6mo to 30d when strategy history is short; rolling β falls back from 90d to 30d. Chart titles and MetricsColumn header relabel dynamically; if even 30d can't fill, a "Not enough data" placeholder renders instead of an empty axis.
+- Zero / baseline gridline drawn in muted-text color so the breakeven reference reads at a glance; rolling charts overlay a dashed avg(strategy) reference line computed over the visible xRange.
+- Returns metrics panel gains a benchmark column (mtd / ytd / p3m / p6m / p1y / win rate / profit factor); the "vs —" header label disappears when no comparator is active.
+- Display panel toggles (dark mode / colorblind / regimes) default OFF; the prefers-color-scheme auto-detect is removed so initial paint is deterministic.
+- "Quantalyze" rendered in the brand accent color in the factsheet eyebrow.
+- Reset view now broadcasts to every CollapsibleSection — all sections pop back open so "Reset view" means "show everything", not just "reset the camera".
+- Worst-10 Drawdowns table headers get `whitespace-nowrap` so "DD d" / "Rec d" don't wrap.
+- Fees & Subscription fields show "— on request" instead of "— (not provided)".
+
+### Fixed
+- Factsheet now renders for analytics-only strategies (e.g. Phoenix Protocol) whose `daily_returns` column is null. New `resolveDailyReturnSeries()` helper falls back to converting the cumprod equity curve in `returns_series` to per-day returns. Pinned by regression tests in `allocator-portfolio-payload.test.ts`.
+- Factsheet `<title>` and OG metadata show the real strategy name (e.g. "Phoenix Protocol") instead of the redacted "Strategy #&lt;hex&gt;". `generateMetadata` and `fetchAndBuildPayload` now both prefer `name → codename → displayStrategyName`.
+- WeakMap-keyed RBAC lookup evicts on `{ok:false}` results and on rejected promises so a transient failure no longer poisons subsequent reads for the same user.
+
+### Maintenance
+- Unified `RollWindowPick` type across `rolling.ts` and `FactsheetPayload` so both `rollingWindow` and `rollingBetaWindow` share `{window, label, enough}`. Cache key bumped to `factsheet-v2-payload-v2` to invalidate the prior payload shape.
+- Added tests: `rolling.test.ts` boundary cases (6mo → 30d fallback, !enough tier, custom β ladder), `ComparatorPicker.test.tsx` toggle-off semantics, `allocator-portfolio-payload.test.ts` returns_series fallback chain.
+- Bumped two heavy RTL tests' timeout to 15s (`outcomes.test.tsx` 200-row truncation, `ScenarioCommitDrawer.test.tsx` async focus chain) to tame full-suite concurrent-worker flakes that previously timed out but passed in isolation.
+
+
 ## [0.22.40.57] - 2026-05-17
 
 **fix(ci): Phase 19 stability cron no longer fails hourly when pre-flip.** Symptom: the "Phase 19 stability — no legacy writes" workflow has been red every hour because `scripts/verify-no-legacy-writes.sh` exits 2 when `.planning/phase-19/stability-log.md` still has `flag_flipped_at: TODO` (i.e. BACKBONE-04 commit (b) hasn't shipped). The workflow header docstring AND the script header BOTH say "until PR-B ships, the workflow is a no-op gate" — but the bare `run: bash scripts/verify-no-legacy-writes.sh` propagated exit 2 as a failed step, not a no-op. Fix: wrap the `run:` step to capture the exit code, treat exit 2 as success-with-skip-log, and let every other non-zero exit (1, 3, 4, 5) keep failing as designed. Script contract unchanged (local operators still see exit 2 as "pre-flip"). Remove the wrapper branch once PR-B ships and stability-log.md records a real ISO-8601 `flag_flipped_at`.

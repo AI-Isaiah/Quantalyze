@@ -1,0 +1,531 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import { usePayload, useToggles } from "./factsheet-context";
+import { resolvePalette } from "./palette";
+import type { DailyHeatmapYear, MonthlyReturnsRow } from "@/lib/factsheet/types";
+
+/** Resolve the heatmap mixing trio from the central palette. */
+function useHeatmapBase(): { base: string; accent: string; negative: string } {
+  const { darkMode, colorblind } = useToggles();
+  const p = resolvePalette({ darkMode, colorblind });
+  return { base: p.base, accent: p.accent, negative: p.negative };
+}
+
+/**
+ * Two return-distribution heatmaps:
+ *
+ *   - MonthlyReturnsHeatmap: dense year × month grid with a YTD trailing column.
+ *     Color-coded cells with the percentage label inside. 9px Geist Mono, weight
+ *     500, tight padding — readable for screen + photographs-of-screen alike.
+ *
+ *   - DailyReturnsHeatmap: GitHub-contributions style 7-row × 53-col mini-calendar
+ *     per year, stacked vertically. Each cell colored by daily-return magnitude.
+ *     No text in cells — density is the message. Hover title for the raw value.
+ *
+ * Both share `tintFor()` for the diverging color scale (teal positives,
+ * negative-red negatives, neutral surface around zero). Magnitude clamps to the
+ * 5th/95th percentile so a single outlier day doesn't wash the scale.
+ */
+
+const MONTH_HEADERS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+/* -------------------- Monthly heatmap -------------------- */
+
+export function MonthlyReturnsHeatmap() {
+  const payload = usePayload();
+  const rows = payload.monthlyReturns;
+  const maxAbs = useMemo(() => percentileOfAbs(rows), [rows]);
+  const palette = useHeatmapBase();
+  if (rows.length === 0) return null;
+
+  return (
+    <figure
+      className="flex flex-col gap-2"
+      style={{ contentVisibility: "auto", containIntrinsicSize: `auto ${rows.length * 28 + 100}px` }}
+    >
+      <header>
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
+          Monthly Returns
+        </h3>
+        <p className="text-[11px] text-text-muted">
+          compounded monthly returns · YTD on the right · color scale clamped to ±{(maxAbs * 100).toFixed(0)}%
+        </p>
+      </header>
+
+      <div className="overflow-x-auto">
+        <table className="w-full border-separate" style={{ borderSpacing: 2, fontFamily: "var(--font-mono)" }}>
+          <colgroup>
+            <col style={{ width: 44 }} />
+            {MONTH_HEADERS.map(m => <col key={m} />)}
+            <col style={{ width: 56 }} />
+          </colgroup>
+          <thead>
+            <tr>
+              <th className="text-left py-1 px-1 text-[9px] uppercase tracking-[0.18em] font-medium text-text-muted">
+                Year
+              </th>
+              {MONTH_HEADERS.map(m => (
+                <th
+                  key={m}
+                  className="text-center py-1 text-[9px] uppercase tracking-[0.12em] font-medium text-text-muted"
+                >
+                  {m}
+                </th>
+              ))}
+              <th className="text-right py-1 px-1 text-[9px] uppercase tracking-[0.18em] font-medium text-text-muted">
+                YTD
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => <MonthlyRow key={r.year} row={r} maxAbs={maxAbs} palette={palette} />)}
+          </tbody>
+        </table>
+      </div>
+    </figure>
+  );
+}
+
+function MonthlyRow({ row, maxAbs, palette }: { row: MonthlyReturnsRow; maxAbs: number; palette: { base: string; accent: string; negative: string } }) {
+  return (
+    <tr>
+      <td className="text-left text-[11px] tabular-nums text-text-primary pr-1">{row.year}</td>
+      {row.byMonth.map((v, i) => {
+        if (v == null) {
+          return (
+            <td
+              key={i}
+              className="text-center text-[9px]"
+              style={{
+                background: "var(--color-surface-subtle, #FBFCFD)",
+                color: "var(--color-text-muted)",
+                height: 22,
+                fontWeight: 500,
+              }}
+              title={`${row.year}-${String(i + 1).padStart(2, "0")}: no data`}
+            >
+              ·
+            </td>
+          );
+        }
+        const tint = tintFor(v, maxAbs, palette);
+        return (
+          <td
+            key={i}
+            className="text-center text-[9px] tabular-nums"
+            style={{
+              background: tint.bg,
+              color: tint.fg,
+              height: 22,
+              fontWeight: 500,
+            }}
+            title={`${row.year}-${String(i + 1).padStart(2, "0")}: ${formatPct(v, 2)}`}
+          >
+            {formatPctShort(v)}
+          </td>
+        );
+      })}
+      <td
+        className="text-right text-[10px] tabular-nums pl-1 pr-1"
+        style={{
+          color: row.ytd >= 0 ? "var(--color-positive)" : "var(--color-negative)",
+          fontWeight: 600,
+        }}
+      >
+        {formatPct(row.ytd, 1)}
+      </td>
+    </tr>
+  );
+}
+
+/* -------------------- Daily heatmap -------------------- */
+
+const CELL = 12;
+const CELL_GAP = 2;
+const DAY_LABELS = ["M", "T", "W", "T", "F", "S", "S"] as const;
+const SHOW_DAY_LABEL = [true, false, true, false, true, false, false] as const;
+
+export function DailyReturnsHeatmap() {
+  const payload = usePayload();
+  const years = payload.dailyHeatmap;
+  const palette = useHeatmapBase();
+  const maxAbs = useMemo(() => {
+    const vals: number[] = [];
+    for (const y of years) for (const week of y.cells) for (const v of week) if (v != null && Number.isFinite(v)) vals.push(Math.abs(v));
+    if (vals.length === 0) return 0.01;
+    vals.sort((a, b) => a - b);
+    return Math.max(0.0001, vals[Math.floor(0.95 * vals.length)]);
+  }, [years]);
+  if (years.length === 0) return null;
+
+  return (
+    <figure
+      className="flex flex-col gap-3"
+      style={{ contentVisibility: "auto", containIntrinsicSize: `auto ${years.length * 200 + 100}px` }}
+    >
+      <header>
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
+          Daily Returns Calendar
+        </h3>
+        <p className="text-[11px] text-text-muted">
+          one cell per trading day · color scale clamped to ±{(maxAbs * 100).toFixed(1)}% · hover any cell for value
+        </p>
+      </header>
+
+      {/* overflow-x-auto on the year stack: on narrow viewports cells stay
+          legible (each row keeps its natural ≥530px width) and the user
+          horizontally scrolls. -webkit-overflow-scrolling for smooth iOS. */}
+      <div className="flex flex-col gap-4 -mx-2 px-2 overflow-x-auto" style={{ WebkitOverflowScrolling: "touch" }}>
+        {years.map(y => <YearCalendar key={y.year} year={y} maxAbs={maxAbs} palette={palette} />)}
+      </div>
+
+      <DailyHeatmapLegend maxAbs={maxAbs} palette={palette} />
+    </figure>
+  );
+}
+
+function YearCalendar({ year, maxAbs, palette }: { year: DailyHeatmapYear; maxAbs: number; palette: { base: string; accent: string; negative: string } }) {
+  const cols = year.cells.length;
+  const labelW = 14;
+  const monthLabelH = 14;
+  const w = labelW + cols * (CELL + CELL_GAP);
+  const h = monthLabelH + 7 * (CELL + CELL_GAP);
+
+  // Month labels — place each at the first column where that month appears.
+  const monthLabels = useMemo(() => {
+    const out: { col: number; label: string }[] = [];
+    let lastMonth = -1;
+    for (let w = 0; w < year.cells.length; w++) {
+      for (let d = 0; d < 7; d++) {
+        // Reverse-engineer the date from week+day+firstWeekOffset.
+        const doy = w * 7 + d - year.firstWeekOffset + 1;
+        if (doy < 1 || doy > 366) continue;
+        const dt = new Date(Date.UTC(parseInt(year.year, 10), 0, doy));
+        const m = dt.getUTCMonth();
+        if (m !== lastMonth) {
+          out.push({ col: w, label: MONTH_HEADERS[m] });
+          lastMonth = m;
+          break;
+        }
+      }
+    }
+    return out;
+  }, [year]);
+
+  return (
+    <YearCalendarCanvas
+      year={year}
+      maxAbs={maxAbs}
+      palette={palette}
+      w={w}
+      h={h}
+      labelW={labelW}
+      monthLabelH={monthLabelH}
+      monthLabels={monthLabels}
+    />
+  );
+}
+
+/**
+ * Canvas-rendered year calendar. Draws ~250 colored cells in a single
+ * 2D-context loop instead of mounting ~250 SVG <rect> nodes per year.
+ * Month + weekday labels stay as an SVG overlay so they get var-fonts +
+ * CSS-token colors for free.
+ *
+ * Hover handling: pointermove → compute (week, weekday) from x/y → set
+ * the React `hovered` state. A small floating div renders the tooltip
+ * positioned at the cell's pixel center. Native `<title>` tooltips don't
+ * exist on canvas so we own this surface.
+ */
+function YearCalendarCanvas({
+  year,
+  maxAbs,
+  palette,
+  w,
+  h,
+  labelW,
+  monthLabelH,
+  monthLabels,
+}: {
+  year: DailyHeatmapYear;
+  maxAbs: number;
+  palette: { base: string; accent: string; negative: string };
+  w: number;
+  h: number;
+  labelW: number;
+  monthLabelH: number;
+  monthLabels: { col: number; label: string }[];
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [scale, setScale] = useState(1); // CSS px per logical viewBox unit
+  const [hovered, setHovered] = useState<{ cx: number; cy: number; iso: string; v: number } | null>(null);
+
+  // Track wrapper width via ResizeObserver so the canvas scales responsively
+  // while keeping crisp pixels at any devicePixelRatio.
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined") return;
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        const cssW = entry.contentRect.width;
+        if (cssW > 0) setScale(cssW / w);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [w]);
+
+  // Pre-compute fillStyle per cell so the redraw effect on every resize
+  // doesn't run hex parse + RGB mix (tintFor) on ~378 × N years cells.
+  const tintGrid = useMemo(() => {
+    const grid: (string | null)[][] = [];
+    for (let wk = 0; wk < year.cells.length; wk++) {
+      const row: (string | null)[] = [];
+      for (let d = 0; d < 7; d++) {
+        const v = year.cells[wk][d];
+        row.push(v == null ? null : tintFor(v, maxAbs, palette).bg);
+      }
+      grid.push(row);
+    }
+    return grid;
+  }, [year, maxAbs, palette]);
+
+  // Draw whenever year data, palette, scale, or tintGrid change.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    const cssW = w * scale;
+    const cssH = h * scale;
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    canvas.style.width = `${cssW}px`;
+    canvas.style.height = `${cssH}px`;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr * scale, dpr * scale);
+    ctx.clearRect(0, 0, w, h);
+    const missingFill = palette.base === "#FFFFFF" ? "#FBFCFD" : "#243044";
+    const missingStroke = palette.base === "#FFFFFF" ? "#E2E8F0" : "#334155";
+    for (let wk = 0; wk < tintGrid.length; wk++) {
+      const row = tintGrid[wk];
+      for (let d = 0; d < 7; d++) {
+        const bg = row[d];
+        const x = labelW + wk * (CELL + CELL_GAP);
+        const y = monthLabelH + d * (CELL + CELL_GAP);
+        if (bg == null) {
+          ctx.fillStyle = missingFill;
+          ctx.fillRect(x, y, CELL, CELL);
+          ctx.strokeStyle = missingStroke;
+          ctx.lineWidth = 0.5;
+          ctx.strokeRect(x + 0.25, y + 0.25, CELL - 0.5, CELL - 0.5);
+          continue;
+        }
+        ctx.fillStyle = bg;
+        ctx.fillRect(x, y, CELL, CELL);
+      }
+    }
+  }, [tintGrid, palette, scale, w, h, labelW, monthLabelH]);
+
+  // Pointer hover → cell lookup.
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const xPx = (e.clientX - rect.left) / scale;
+    const yPx = (e.clientY - rect.top) / scale;
+    const wk = Math.floor((xPx - labelW) / (CELL + CELL_GAP));
+    const d = Math.floor((yPx - monthLabelH) / (CELL + CELL_GAP));
+    if (wk < 0 || wk >= year.cells.length || d < 0 || d >= 7) {
+      setHovered(null);
+      return;
+    }
+    const v = year.cells[wk]?.[d];
+    if (v == null) {
+      setHovered(null);
+      return;
+    }
+    const doy = wk * 7 + d - year.firstWeekOffset + 1;
+    const dt = new Date(Date.UTC(parseInt(year.year, 10), 0, doy));
+    if (Number.isNaN(dt.getTime())) {
+      setHovered(null);
+      return;
+    }
+    const iso = dt.toISOString().slice(0, 10);
+    const cx = (labelW + wk * (CELL + CELL_GAP) + CELL / 2) * scale;
+    const cy = (monthLabelH + d * (CELL + CELL_GAP) + CELL / 2) * scale;
+    setHovered({ cx, cy, iso, v });
+  };
+
+  const onPointerLeave = () => setHovered(null);
+
+  return (
+    <div className="flex items-start gap-3">
+      <div className="font-mono text-[11px] tabular-nums text-text-primary pt-[14px] flex-shrink-0" style={{ minWidth: 38 }}>
+        {year.year}
+      </div>
+      <div
+        ref={wrapRef}
+        // minWidth = w forces the canvas to render at natural size; the
+        // parent <div className="overflow-x-auto"> on the year stack lets the
+        // user pan when the viewport is too narrow. Floors cell size at the
+        // 12px design value instead of shrinking to ~6px on mobile.
+        className="flex-1 relative"
+        style={{ height: h * scale, minWidth: w }}
+        onPointerMove={onPointerMove}
+        onPointerLeave={onPointerLeave}
+        role="img"
+        aria-label={`Daily-return calendar for ${year.year}`}
+      >
+        <canvas ref={canvasRef} style={{ display: "block", position: "absolute", top: 0, left: 0 }} />
+        {/* SVG overlay for labels — light DOM (just text nodes), so var-fonts and tokens work. */}
+        <svg
+          viewBox={`0 0 ${w} ${h}`}
+          preserveAspectRatio="xMidYMid meet"
+          aria-hidden
+          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}
+        >
+          {monthLabels.map(ml => (
+            <text
+              key={`m-${ml.col}-${ml.label}`}
+              x={labelW + ml.col * (CELL + CELL_GAP)}
+              y={10}
+              fontSize={9}
+              fontFamily="var(--font-mono)"
+              fill="var(--color-text-muted)"
+            >
+              {ml.label}
+            </text>
+          ))}
+          {DAY_LABELS.map((d, i) => SHOW_DAY_LABEL[i] && (
+            <text
+              key={`d-${i}`}
+              x={0}
+              y={monthLabelH + i * (CELL + CELL_GAP) + 8}
+              fontSize={8}
+              fontFamily="var(--font-mono)"
+              fill="var(--color-text-muted)"
+            >
+              {d}
+            </text>
+          ))}
+        </svg>
+        {/* Hover tooltip — positioned in CSS px so it tracks the scaled canvas. */}
+        {hovered && (
+          <div
+            role="status"
+            className="pointer-events-none absolute z-10 px-2 py-1 text-[10px] font-mono tabular-nums rounded-sm border whitespace-nowrap"
+            style={{
+              left: hovered.cx + 8,
+              top: hovered.cy - 24,
+              background: "var(--color-surface)",
+              borderColor: "var(--color-border)",
+              color: "var(--color-text-primary)",
+              boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
+            }}
+          >
+            <span className="text-text-muted mr-1">{hovered.iso}</span>
+            <span style={{ color: hovered.v >= 0 ? "var(--color-positive)" : "var(--color-negative)", fontWeight: 600 }}>
+              {formatPct(hovered.v, 2)}
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DailyHeatmapLegend({ maxAbs, palette }: { maxAbs: number; palette: { base: string; accent: string; negative: string } }) {
+  const stops = [-1, -0.5, -0.25, 0, 0.25, 0.5, 1];
+  return (
+    <div className="mt-2 flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider text-text-muted">
+      <span>{formatPct(-maxAbs, 1)}</span>
+      <div className="flex">
+        {stops.map(s => {
+          const tint = tintFor(s * maxAbs, maxAbs, palette);
+          return <span key={s} className="inline-block" style={{ width: 14, height: 10, background: tint.bg }} />;
+        })}
+      </div>
+      <span>{formatPct(maxAbs, 1)}</span>
+    </div>
+  );
+}
+
+/* -------------------- Shared color/format helpers -------------------- */
+
+/**
+ * Diverging color scale: teal for positives, red for negatives, near-white at
+ * zero. `maxAbs` is the clamping magnitude (typically the 95th-percentile |v|
+ * of the dataset, so a single outlier doesn't wash everything else).
+ *
+ * Returns both background and a foreground hint — foreground darkens for high
+ * intensity cells so the label inside stays AA-legible.
+ */
+function tintFor(
+  v: number,
+  maxAbs: number,
+  palette: { base: string; accent: string; negative: string } = { base: "#FFFFFF", accent: "#1B6B5A", negative: "#DC2626" },
+): { bg: string; fg: string } {
+  if (maxAbs <= 0 || !Number.isFinite(v)) return { bg: "var(--color-surface-subtle, #FBFCFD)", fg: "var(--color-text-muted)" };
+  const t = Math.max(-1, Math.min(1, v / maxAbs));
+  // Foreground: text-primary for low-intensity cells (legible on near-base bg),
+  // base color (white in light, slate in dark) for high-intensity cells.
+  const isDark = palette.base !== "#FFFFFF";
+  const lowFg = isDark ? "#F1F5F9" : "#1A1A2E";
+  const highFg = palette.base === "#FFFFFF" ? "#FFFFFF" : "#0F172A";
+  if (t === 0) return { bg: palette.base, fg: "var(--color-text-muted)" };
+  if (t > 0) {
+    const a = Math.pow(t, 0.75);
+    const bg = mixHex(palette.base, palette.accent, a);
+    const fg = a > 0.55 ? highFg : lowFg;
+    return { bg, fg };
+  }
+  const a = Math.pow(-t, 0.75);
+  const bg = mixHex(palette.base, palette.negative, a);
+  const fg = a > 0.55 ? highFg : lowFg;
+  return { bg, fg };
+}
+
+function mixHex(a: string, b: string, t: number): string {
+  const pa = parseHex(a);
+  const pb = parseHex(b);
+  const r = Math.round(pa[0] + (pb[0] - pa[0]) * t);
+  const g = Math.round(pa[1] + (pb[1] - pa[1]) * t);
+  const bl = Math.round(pa[2] + (pb[2] - pa[2]) * t);
+  return `rgb(${r}, ${g}, ${bl})`;
+}
+
+function parseHex(hex: string): [number, number, number] {
+  const h = hex.replace("#", "");
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+function percentileOfAbs(rows: MonthlyReturnsRow[]): number {
+  const vals: number[] = [];
+  for (const r of rows) for (const v of r.byMonth) if (v != null && Number.isFinite(v)) vals.push(Math.abs(v));
+  if (vals.length === 0) return 0.05;
+  vals.sort((a, b) => a - b);
+  const p = vals[Math.floor(0.95 * vals.length)];
+  // Always at least 2% so a calm month doesn't show full saturation.
+  return Math.max(0.02, p);
+}
+
+function formatPct(v: number, dp: number): string {
+  if (!Number.isFinite(v)) return "—";
+  const x = v * 100;
+  const sign = x >= 0 ? "+" : "";
+  return `${sign}${x.toFixed(dp)}%`;
+}
+
+function formatPctShort(v: number): string {
+  if (!Number.isFinite(v)) return "—";
+  const x = v * 100;
+  const sign = x >= 0 ? "+" : "−";
+  const abs = Math.abs(x);
+  if (abs >= 10) return `${sign}${abs.toFixed(0)}`;
+  return `${sign}${abs.toFixed(1)}`;
+}

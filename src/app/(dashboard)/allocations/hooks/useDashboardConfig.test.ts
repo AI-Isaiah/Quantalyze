@@ -339,21 +339,20 @@ describe("useDashboardConfigV2", () => {
   it("moveWidget reorders one tile to another tile's position via splice", () => {
     const { result } = renderHook(() => useDashboardConfigV2());
 
-    // Default order is [bridge, kpi, equity, holdings, allocation, mandate,
-    // outcomes] — all normalized to their registry ids on load (D-19). PR1
-    // restored mandate at index 5 and moved outcomes to index 6 (was 5
-    // when mandate was dropped in v0.15.7.0).
-    expect(result.current.config.tiles[0].k).toBe(keyOf("bridge"));
+    // Default order: [kpi, bridge, equity, allocation, mandate, outcomes].
+    // Holdings lives on the Holdings tab, not Overview. All ids normalize
+    // to their registry ids on load.
+    expect(result.current.config.tiles[0].k).toBe(keyOf("kpi"));
     expect(result.current.config.tiles.at(-1)?.k).toBe(keyOf("outcomes"));
 
     act(() => {
-      result.current.moveWidget(keyOf("outcomes"), keyOf("bridge"));
+      result.current.moveWidget(keyOf("outcomes"), keyOf("kpi"));
     });
 
-    // outcomes moved into bridge's position (idx 0); bridge shifts right.
+    // outcomes moved into kpi's position (idx 0); kpi shifts right.
     expect(result.current.config.tiles[0].k).toBe(keyOf("outcomes"));
     expect(
-      result.current.config.tiles.findIndex((t) => t.k === keyOf("bridge")),
+      result.current.config.tiles.findIndex((t) => t.k === keyOf("kpi")),
     ).toBeGreaterThan(0);
   });
 

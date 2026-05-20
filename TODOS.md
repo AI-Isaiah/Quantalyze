@@ -61,6 +61,31 @@ historical record but its operator decision is overridden here for v1.0.0.
 
 ---
 
+## v0.23.0.0 — vitest concurrent-worker timeout flakes (deferred 2026-05-20)
+
+Full-suite vitest runs hit rotating timeouts on heavy RTL render tests
+(`outcomes.test.tsx` 200-row truncation, `ScenarioCommitDrawer.test.tsx`
+focus chain, `deletion-requests/[id]/approve/reject` rate-limit tests).
+Each individual test passes in isolation in ~1s. The 5s default timeout
+is borderline under concurrent worker CPU contention.
+
+**Workaround applied:** bumped two confirmed flakes to 15s timeout in
+`outcomes.test.tsx` and `ScenarioCommitDrawer.test.tsx`. Rotating set
+suggests systemic — likely vitest worker pool exceeds CPU cores.
+
+**P0 — Fix root cause**
+
+Audit `vitest.config.ts` pool settings. Suggested investigations:
+1. Cap `poolOptions.threads.maxThreads` to `Math.max(1, cpus - 1)` so
+   workers don't starve each other under heavy RTL renders.
+2. Move slow integration-style suites (deletion-requests, scenario
+   commit) to a separate vitest project with sequential execution.
+3. Profile a full-suite run to see which tests are actually contended.
+
+Acceptance: 3 consecutive full-suite runs pass without timeout flakes.
+
+---
+
 ## PR #149 (audit-2026-05-07 P97) — flaky live-DB fence tests (deferred 2026-05-13)
 
 Three of the twelve P97 fence regression tests in

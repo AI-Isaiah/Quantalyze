@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { revalidateTag } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
@@ -8,10 +9,8 @@ import { notifyManagerApproved } from "@/lib/email";
 import { checkStrategyGate } from "@/lib/strategyGate";
 import { logAuditEvent } from "@/lib/audit";
 
-// audit-2026-05-07 P198 + P200 — see intro-request/route.ts for the rationale.
-// v0.22.24.2 review-fix: handler body inlined to drop the withAdminAuth
-// indirection (avoids a second createClient + getUser + isAdminUser round-trip
-// per request — red-team HIGH conf 7).
+// Handler body inlined (rather than wrapped via withAdminAuth) so we run a
+// single createClient + getUser + isAdminUser round-trip per request.
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
@@ -24,7 +23,8 @@ export async function POST(req: NextRequest) {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  // P444 (audit-2026-05-07) — 403 body says "Forbidden", not "Unauthorized".
+  // 403 body says "Forbidden" (distinct from 401 "Unauthorized") so callers
+  // can branch on the failure mode.
   if (!(await isAdminUser(supabase, user))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -107,10 +107,30 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
 
-  // Sprint 6 Task 7.1b — audit the approve/reject decision. Use the user-scoped
-  // `supabase` client so log_audit_event resolves auth.uid() to the acting
-  // admin. /review follow-up (T4-M3): truncate review_note to 2000 chars to
-  // bound the audit row size.
+  // Bust just this strategy's v2 factsheet payload so a publish/unpublish
+  // flip reflects immediately rather than serving stale for up to the
+  // 3600s TTL. Per-id tag (rather than the global `factsheet-v2`) keeps
+  // unrelated strategies' cached payloads warm — important at scale where
+  // a batch of approvals would otherwise trigger a thundering-herd
+  // recomputation of every cached factsheet. Next 16 signature is
+  // `revalidateTag(tag, profile)`; "max" is the longest-lived cacheLife.
+  try {
+    revalidateTag(`factsheet-v2:${id as string}`, "max");
+  } catch (err) {
+    // revalidateTag throws if called outside a request context. Other
+    // exceptions (API drift, tag misconfiguration) shouldn't be swallowed
+    // silently — `console.error` so Vercel observability surfaces them
+    // (matches the precedent at the manager-notify catch below).
+    console.error(
+      "[admin/strategy-review] revalidateTag failed (non-fatal):",
+      err,
+    );
+  }
+
+  // Audit the approve/reject decision. Use the user-scoped `supabase` client
+  // so log_audit_event resolves auth.uid() to the acting admin (not the
+  // service-role admin client). review_note is truncated to bound the
+  // audit row size.
   const REVIEW_NOTE_AUDIT_CAP = 2000;
   const rawReviewNote = (review_note as string) || null;
   const reviewNoteForAudit =

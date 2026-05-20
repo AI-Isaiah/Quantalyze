@@ -104,39 +104,39 @@ export function BridgeWidget({
         ? "1 review on file"
         : `${outcomeCount} reviews on file`;
 
+    // Compact single-row layout when there are no recommendations — the
+    // expanded empty-state card has no actionable signal to surface.
     return (
       <div
         role="region"
         aria-label="Bridge status"
         data-testid="bridge-empty-state"
-        className="rounded-lg border p-6"
+        className="rounded-lg border px-4 py-3"
         style={{
           borderColor: "var(--color-bridge-border-100)",
           background:
             "linear-gradient(135deg, var(--color-bridge-bg-100) 0%, var(--color-bridge-bg-50) 100%)",
         }}
       >
-        <div
-          className="text-xs uppercase"
-          style={{ color: "var(--color-warning)", letterSpacing: "0.08em" }}
-        >
-          Bridge
-        </div>
-        <div
-          className="mt-2 text-xl font-semibold text-text-primary"
-          style={{
-            fontFamily: "var(--font-serif, Fraunces, Georgia, serif)",
-          }}
-        >
-          All clear
-        </div>
-        <div className="mt-1 text-sm text-text-secondary">
-          Your allocations are within mandate. Bridge will alert as soon as a
-          holding trips one of your gates.
-        </div>
-        {hasOutcomes && lastOutcome ? (
-          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-muted">
-            <span>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span
+            className="text-[10px] font-mono uppercase tracking-[0.14em]"
+            style={{ color: "var(--color-warning)" }}
+          >
+            Bridge
+          </span>
+          <span
+            className="text-base font-semibold text-text-primary"
+            style={{ fontFamily: "var(--font-serif, Fraunces, Georgia, serif)" }}
+          >
+            All clear
+          </span>
+          <span className="text-sm text-text-secondary">
+            Within mandate.
+          </span>
+          {hasOutcomes && lastOutcome ? (
+            <span className="text-xs text-text-muted">
+              <span aria-hidden className="mr-2">·</span>
               Last reviewed{" "}
               <span
                 className="text-text-secondary"
@@ -144,21 +144,22 @@ export function BridgeWidget({
               >
                 {formatRelativeDate(lastOutcome.created_at)}
               </span>
+              <span aria-hidden className="mx-2">·</span>
+              <span data-testid="bridge-empty-review-count">{reviewsLabel}</span>
             </span>
-            <span aria-hidden>·</span>
-            <span data-testid="bridge-empty-review-count">{reviewsLabel}</span>
-          </div>
-        ) : (
-          <div className="mt-3 text-xs text-text-muted">
-            No reviews recorded yet.
-          </div>
-        )}
-        <a
-          href="/allocations?tab=outcomes"
-          className="mt-4 inline-block text-sm font-medium text-accent hover:underline"
-        >
-          {hasOutcomes ? "View outcomes" : "Show last recommendation"} →
-        </a>
+          ) : (
+            <span className="text-xs text-text-muted">
+              <span aria-hidden className="mr-2">·</span>
+              No reviews recorded yet.
+            </span>
+          )}
+          <a
+            href="/allocations?tab=outcomes"
+            className="ml-auto text-sm font-medium text-accent hover:underline"
+          >
+            {hasOutcomes ? "View outcomes" : "Show last recommendation"} →
+          </a>
+        </div>
       </div>
     );
   }

@@ -1,19 +1,16 @@
 import { Breadcrumb } from "@/components/layout/Breadcrumb";
-import { StrategyHeader } from "@/components/strategy/StrategyHeader";
-import { MetadataCards } from "@/components/strategy/MetadataCards";
-import { PerformanceReport } from "@/components/strategy/PerformanceReport";
-import { ComputeStatus } from "@/components/strategy/ComputeStatus";
 import { RequestIntroButton } from "@/components/strategy/RequestIntroButton";
 import { BookIntroCall } from "@/components/strategy/BookIntroCall";
 import { ShareableLink } from "@/components/strategy/ShareableLink";
 import { AddToPortfolio } from "@/components/portfolio/AddToPortfolio";
-import { Disclaimer } from "@/components/ui/Disclaimer";
-import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
+import { FactsheetView } from "@/app/factsheet/[id]/v2/FactsheetView";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
-import { getStrategyDetail, getPercentiles } from "@/lib/queries";
+import { getStrategyDetail } from "@/lib/queries";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { createClient } from "@/lib/supabase/server";
-import { parsePositionRowsWithDiagnostics } from "@/lib/types";
+import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
+import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
+import type { TrustTierKind } from "@/lib/factsheet/types";
 import { notFound, redirect } from "next/navigation";
 
 export default async function StrategyDetailPage({
@@ -36,42 +33,50 @@ export default async function StrategyDetailPage({
   // mismatches at the SQL layer (returns null → not-found UI). Without
   // this, /discovery/<wrong-slug>/<strategyId> renders the full chart
   // suite + RSC payload for any published strategy.
-  const [result, percentileMap, positionsResult] = await Promise.all([
-    getStrategyDetail(strategyId, slug),
-    getPercentiles(slug),
-    supabase
-      .from("positions")
-      .select("id, strategy_id, symbol, side, status, entry_price_avg, exit_price_avg, size_base, size_peak, realized_pnl, fee_total, fill_count, opened_at, closed_at, duration_days, roi, funding_pnl")
-      .eq("strategy_id", strategyId)
-      .order("roi", { ascending: false })
-      .limit(20),
-  ]);
+  const result = await getStrategyDetail(strategyId, slug);
+  if (!result) notFound();
 
-  if (!result) {
-    notFound();
-  }
+  const { strategy, analytics, disclosureTier } = result;
+  // Breadcrumb still uses the pseudonym-safe label (it shows in the
+  // sidebar context above the factsheet). The factsheet body itself is a
+  // full-identity context and uses the real name when present.
+  const breadcrumbName = displayStrategyName(strategy);
+  const factsheetName =
+    strategy.name ?? strategy.codename ?? breadcrumbName;
+  const displayName = factsheetName;
 
-  // Audit 2026-05-07 G12.G.5: surface positions-fetch failures. The pre-
-  // audit code ignored `positionsResult.error` and let PositionsTab render
-  // its "No positions reconstructed yet" empty state — indistinguishable
-  // from a genuine no-positions strategy. Operators had no signal to
-  // investigate column-shape drift, RLS regressions, or transient DB
-  // failures. Now: log to the server console with the strategyId so the
-  // event is searchable, and pass an explicit `positionsError` flag to
-  // PerformanceReport so the UI can show a banner instead.
-  const positionsError = positionsResult?.error ?? null;
-  if (positionsError) {
-    console.error("[discovery] positions fetch failed", {
-      strategyId,
-      slug,
-      message: positionsError.message,
-      code: positionsError.code,
-    });
-  }
+  // analytics-service-only strategies have daily_returns=null but the
+  // real cumprod equity curve in returns_series. resolveDailyReturnSeries
+  // handles both shapes + the three real-world daily_returns dict layouts.
+  const analyticsRow = analytics as
+    | { daily_returns?: unknown; returns_series?: unknown }
+    | null
+    | undefined;
+  const dailyReturns = resolveDailyReturnSeries(
+    analyticsRow?.daily_returns,
+    analyticsRow?.returns_series,
+  );
 
-  const { strategy, analytics, manager, disclosureTier } = result;
-  const percentiles = percentileMap?.[strategyId] ?? null;
-  const displayName = displayStrategyName(strategy);
+  const factsheetPayload = buildFactsheetPayload(
+    {
+      id: strategy.id,
+      name: factsheetName,
+      types: strategy.strategy_types ?? [],
+      markets: strategy.markets ?? [],
+      computedAt: analytics?.computed_at ?? new Date().toISOString(),
+      trustTier: (strategy.trust_tier ?? null) as TrustTierKind | null,
+      description: strategy.description ?? null,
+      subtypes: strategy.subtypes ?? [],
+      supportedExchanges: strategy.supported_exchanges ?? [],
+      leverageRange: strategy.leverage_range ?? null,
+      aum: strategy.aum ?? null,
+      maxCapacity: strategy.max_capacity ?? null,
+      avgDailyTurnover: strategy.avg_daily_turnover ?? null,
+      startDate: strategy.start_date ?? null,
+      benchmark: strategy.benchmark ?? null,
+    },
+    dailyReturns,
+  );
 
   return (
     <>
@@ -79,99 +84,48 @@ export default async function StrategyDetailPage({
         items={[
           { label: "Discovery", href: "/discovery/crypto-sma" },
           { label: cat?.name ?? slug, href: `/discovery/${slug}` },
-          { label: displayName },
+          { label: breadcrumbName },
         ]}
       />
-      <div className="flex items-start justify-between mb-6">
-        <StrategyHeader strategy={strategy} computedAt={analytics.computed_at} />
-        <div className="flex items-center gap-3">
-          <ShareableLink strategyId={strategy.id} variant="primary" />
+      <div className="mb-4 flex flex-wrap items-center justify-end gap-3">
+        <ShareableLink strategyId={strategy.id} variant="primary" />
+        {disclosureTier === "institutional" && (
           <a
-            href={`/factsheet/${strategy.id}`}
+            href={`/factsheet/${strategy.id}/tearsheet`}
             target="_blank"
             className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-page transition-colors"
           >
-            Factsheet
+            Tear Sheet
           </a>
-          {disclosureTier === "institutional" && (
-            <a
-              href={`/factsheet/${strategy.id}/tearsheet`}
-              target="_blank"
-              className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-page transition-colors"
-            >
-              Tear Sheet
-            </a>
-          )}
-          <AddToPortfolio strategyId={strategy.id} />
-          <BookIntroCall strategyName={displayName} />
-          <RequestIntroButton strategyId={strategy.id} />
-        </div>
-      </div>
-      <MetadataCards strategy={strategy} />
-
-      <div className="mb-6">
-        <ManagerIdentityPanel
-          disclosureTier={disclosureTier}
-          manager={manager}
-          strategyCodename={displayName}
-        />
+        )}
+        <AddToPortfolio strategyId={strategy.id} />
+        <BookIntroCall strategyName={displayName} />
+        <RequestIntroButton strategyId={strategy.id} />
       </div>
 
-      <Disclaimer variant="custody" className="mb-6" />
-
-      {/* Verified vs Self-Reported */}
-      {strategy.api_key_id && (
-        <div className="flex gap-4 mb-6 text-xs">
-          <div className="flex-1 rounded-lg border border-positive/20 bg-positive/5 px-4 py-3">
-            <p className="font-semibold text-positive mb-1">Verified (Exchange API)</p>
-            <p className="text-text-secondary">Trade history, PnL, returns, all analytics metrics, equity curve</p>
-          </div>
-          <div className="flex-1 rounded-lg border border-border bg-page px-4 py-3">
-            <p className="font-semibold text-text-primary mb-1">Self-Reported</p>
-            <p className="text-text-secondary">Strategy description, AUM, capacity, leverage, strategy type</p>
-          </div>
-        </div>
+      {factsheetPayload ? (
+        <FactsheetView payload={factsheetPayload} />
+      ) : (
+        <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">
+          <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
+            Institutional Factsheet · Quantalyze
+          </p>
+          <h1 className="mt-2 font-serif text-[28px] sm:text-[36px] leading-tight text-text-primary">
+            {displayName}
+          </h1>
+          <p className="mt-6 text-[13px] text-text-secondary">
+            The detailed factsheet for this strategy is still computing.
+            Daily-return data hasn&apos;t been ingested yet — once the
+            analytics service finishes the first compute pass, the full
+            panel set will render here.
+          </p>
+        </article>
       )}
 
-      {analytics.computation_status !== "complete" && (
-        <div className="mb-6">
-          <ComputeStatus status={analytics.computation_status} error={analytics.computation_error} />
-        </div>
-      )}
-      {/* G12.E.1 (audit 2026-05-07): runtime-validate raw Supabase rows
-          before casting to Position[]. Preserves the null-vs-empty signal
-          the consumers branch on by mapping a missing `data` to null.
-          G12.G.5 (audit 2026-05-07): forward `positionsError` so a fetch
-          failure renders a banner instead of the silent empty state.
-          audit-2026-05-07 RT-0002 (red-team apply): consume diagnostics
-          from parsePositionRowsWithDiagnostics so 'all rows dropped by
-          schema' (shape drift) surfaces a server-log event rather than
-          rendering an indistinguishable empty positions table. */}
-      <PerformanceReport
-        analytics={analytics}
-        percentiles={percentiles}
-        positions={(() => {
-          if (!positionsResult?.data) return null;
-          const { data, diagnostics } = parsePositionRowsWithDiagnostics(
-            positionsResult.data,
-          );
-          if (diagnostics.dropped > 0) {
-            console.error("[discovery] parsePositionRows dropped rows", {
-              strategyId,
-              slug,
-              ...diagnostics,
-            });
-          }
-          return data;
-        })()}
-        positionsError={positionsError != null}
-      />
-      <Disclaimer variant="strategy" />
-
-      {/* Sticky Request Intro CTA */}
       <div className="fixed bottom-0 left-0 right-0 md:left-[260px] z-10 border-t border-border bg-white/95 backdrop-blur-sm px-6 py-3 flex items-center justify-between">
         <p className="text-sm text-text-secondary hidden sm:block">
-          Interested in <span className="font-medium text-text-primary">{displayName}</span>?
+          Interested in{" "}
+          <span className="font-medium text-text-primary">{displayName}</span>?
         </p>
         <RequestIntroButton strategyId={strategy.id} />
       </div>

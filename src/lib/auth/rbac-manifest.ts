@@ -125,6 +125,17 @@ export const ADMIN_ROUTE_MANIFEST: readonly AdminRouteEntry[] = [
       "v0.22.24.2 review-fix inlined the handler to drop withAdminAuth round-trip",
   },
   {
+    // `[allocator_id]` sorts before `allocators` under default localeCompare
+    // (brackets are punctuation, ignored at primary collation level so the
+    // letters that follow compare first — `a` of `allocator_id` < `a` of
+    // `allocators` via length tiebreak after stripping punctuation).
+    // rbac-manifest.test.ts:25 enforces this exact ordering.
+    route: "src/app/api/admin/match/[allocator_id]/route.ts",
+    current: "isAdminUser-inline",
+    target: "withRole",
+    notes: "",
+  },
+  {
     route: "src/app/api/admin/match/allocators/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
@@ -162,12 +173,6 @@ export const ADMIN_ROUTE_MANIFEST: readonly AdminRouteEntry[] = [
   },
   {
     route: "src/app/api/admin/match/send-intro/route.ts",
-    current: "isAdminUser-inline",
-    target: "withRole",
-    notes: "",
-  },
-  {
-    route: "src/app/api/admin/match/[allocator_id]/route.ts",
     current: "isAdminUser-inline",
     target: "withRole",
     notes: "",
