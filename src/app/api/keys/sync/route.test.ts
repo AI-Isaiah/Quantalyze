@@ -25,6 +25,7 @@ const {
   mockAfter,
   mockFetchTrades,
   mockComputeAnalytics,
+  mockLogAuditEvent,
   rateLimitResult,
   ownershipResult,
 } = vi.hoisted(() => ({
@@ -34,6 +35,8 @@ const {
   mockAfter: vi.fn(),
   mockFetchTrades: vi.fn(),
   mockComputeAnalytics: vi.fn(),
+  // C-0101: hoisted spy so we can assert action + metadata.path on each branch.
+  mockLogAuditEvent: vi.fn(),
   rateLimitResult: { success: true as boolean, retryAfter: 0 },
   ownershipResult: {
     data: null as Record<string, string> | null,
@@ -91,7 +94,7 @@ vi.mock("@/lib/csrf", () => ({
 // only cares about the compute-path logic — stub the emission out.
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/audit", () => ({
-  logAuditEvent: vi.fn(),
+  logAuditEvent: mockLogAuditEvent,
 }));
 
 // Stub the correlation-id helper so we can assert it propagates into
@@ -321,5 +324,70 @@ describe("POST /api/keys/sync", () => {
     const [rpcName, rpcArgs] = mockRpc.mock.calls[0] as [string, Record<string, unknown>];
     expect(rpcName).toBe("enqueue_compute_job");
     expect(rpcArgs.p_metadata).toEqual({ correlation_id: TEST_CORRELATION_ID });
+  });
+
+  // ── C-0101: sync.start audit emission shape ────────────────────────
+  // The route emits `sync.start` on BOTH branches (queue + legacy) with
+  // a metadata.path discriminator. A regression that hits the wrong
+  // branch silently corrupts the forensic signal — operators querying
+  // audit_log for "queue stalls vs legacy after() failures" would see
+  // the wrong attribution. These two tests pin the exact emission shape
+  // per branch (action, entity_type, entity_id, metadata.path).
+  it("[C-0101 queue branch] emits sync.start with metadata.path='queue' when USE_COMPUTE_JOBS_QUEUE=true", async () => {
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+    expect(res.status).toBe(202);
+
+    expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
+    const [, event] = mockLogAuditEvent.mock.calls[0] as [
+      unknown,
+      {
+        action: string;
+        entity_type: string;
+        entity_id: string;
+        metadata: Record<string, unknown>;
+      },
+    ];
+    expect(event.action).toBe("sync.start");
+    expect(event.entity_type).toBe("sync");
+    expect(event.entity_id).toBe(TEST_STRATEGY_ID);
+    expect(event.metadata).toEqual({ path: "queue" });
+  });
+
+  it("[C-0101 legacy branch] emits sync.start with metadata.path='legacy' when queue flag is OFF", async () => {
+    // Flag not set — default OFF.
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+    expect(res.status).toBe(202);
+
+    expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
+    const [, event] = mockLogAuditEvent.mock.calls[0] as [
+      unknown,
+      {
+        action: string;
+        entity_type: string;
+        entity_id: string;
+        metadata: Record<string, unknown>;
+      },
+    ];
+    expect(event.action).toBe("sync.start");
+    expect(event.entity_type).toBe("sync");
+    expect(event.entity_id).toBe(TEST_STRATEGY_ID);
+    expect(event.metadata).toEqual({ path: "legacy" });
+  });
+
+  it("[C-0101] does NOT emit sync.start on the 429 rate-limit branch", async () => {
+    rateLimitResult.success = false;
+    rateLimitResult.retryAfter = 7;
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+    expect(res.status).toBe(429);
+
+    // Nothing audit-worthy happened — the request never reached either
+    // sync branch.
+    expect(mockLogAuditEvent).not.toHaveBeenCalled();
   });
 });
