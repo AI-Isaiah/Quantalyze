@@ -31,6 +31,7 @@ export default async function DashboardLayout({
   } = await supabase.auth.getUser();
   let isAdmin = false;
   let isAllocator = false;
+  let isManager = false;
   if (user) {
     const { data: profile } = await supabase
       .from("profiles")
@@ -42,6 +43,7 @@ export default async function DashboardLayout({
     }
     isAdmin = profile?.is_admin === true;
     isAllocator = profile?.role === "allocator" || profile?.role === "both";
+    isManager = profile?.role === "manager" || profile?.role === "both";
   } else {
     // No session reaches the dashboard tree because every page already
     // calls supabase.auth.getUser() + redirect("/login") in its server
@@ -75,6 +77,7 @@ export default async function DashboardLayout({
       populatedSlugs={populatedSlugs}
       isAdmin={isAdmin}
       isAllocator={isAllocator}
+      isManager={isManager}
     >
       {children}
     </DashboardChrome>

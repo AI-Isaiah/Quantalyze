@@ -81,18 +81,56 @@ describe("Sidebar workspace — allocator view", () => {
 });
 
 describe("Sidebar workspace — manager / crypto-team view", () => {
-  it("renders Strategies + Portfolios for non-allocators", () => {
-    render(<Sidebar populatedSlugs={[]} isAllocator={false} />);
+  it("renders Strategies + Portfolios for managers", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isAllocator={false} isManager={true} />,
+    );
     expect(screen.getByText("Strategies")).toBeInTheDocument();
     expect(screen.getByText("Portfolios")).toBeInTheDocument();
   });
 
   it("does NOT render allocator-only items for managers", () => {
-    render(<Sidebar populatedSlugs={[]} isAllocator={false} />);
+    render(
+      <Sidebar populatedSlugs={[]} isAllocator={false} isManager={true} />,
+    );
     expect(screen.queryByText("My Allocation")).toBeNull();
     expect(screen.queryByText("Connections")).toBeNull();
     expect(screen.queryByText("Scenarios")).toBeNull();
     expect(screen.queryByText("Recommendations")).toBeNull();
+  });
+
+  it("does NOT render the Discovery rail for pure managers (allocator-only surface)", () => {
+    // Issue #8: managers were seeing the Discovery sub-groups. Discovery
+    // is the allocator's browse-investable-strategies surface; it is
+    // irrelevant to a strategy manager and was the most concrete instance
+    // of "options that don't apply" reported in dogfooding.
+    render(
+      <Sidebar
+        populatedSlugs={["crypto-sma", "cfd"]}
+        isAllocator={false}
+        isManager={true}
+      />,
+    );
+    expect(screen.queryByText("DISCOVERY")).toBeNull();
+  });
+});
+
+describe("Sidebar workspace — dual-role (manager + allocator)", () => {
+  it("renders BOTH workspaces when role='both' (issue #8)", () => {
+    // Pre-fix the predicate was `!isAllocator || isAdmin` for the manager
+    // rail, so an `isAllocator=true` user lost Strategies/Portfolios
+    // entirely — silently nuking the manager half of a role='both'
+    // signup. The explicit `isManager` flag isolates the two surfaces.
+    render(
+      <Sidebar
+        populatedSlugs={[]}
+        isAllocator={true}
+        isManager={true}
+      />,
+    );
+    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("Strategies")).toBeInTheDocument();
+    expect(screen.getByText("Portfolios")).toBeInTheDocument();
   });
 });
 
@@ -117,15 +155,18 @@ describe("Sidebar workspace — admin view", () => {
   });
 });
 
-describe("Sidebar workspace — neither allocator nor admin (baseline)", () => {
-  it("renders the manager surface only (Strategies + Portfolios)", () => {
-    // Locks the `!isAllocator || isAdmin` predicate against a flip to
-    // `isAllocator && !isAdmin` — under that flipped form an undecorated
-    // user (both flags falsy) would lose Strategies / Portfolios silently.
+describe("Sidebar workspace — no role flags (defense-in-depth)", () => {
+  it("renders NO workspace items when isAllocator + isManager + isAdmin are all unset", () => {
+    // Issue #8 follow-up: the workspace flags are now explicit. A user
+    // with no role flags (anonymous in tests, or a profile mid-bootstrap)
+    // gets an empty workspace section rather than a default "manager"
+    // assumption. The pre-fix `!isAllocator` short-circuit silently
+    // surfaced manager links to anyone whose isAllocator was falsy —
+    // including unauthenticated and pre-onboarding users.
     render(<Sidebar populatedSlugs={[]} />);
     expect(screen.queryByText("My Allocation")).toBeNull();
-    expect(screen.getByText("Strategies")).toBeInTheDocument();
-    expect(screen.getByText("Portfolios")).toBeInTheDocument();
+    expect(screen.queryByText("Strategies")).toBeNull();
+    expect(screen.queryByText("Portfolios")).toBeNull();
   });
 });
 

@@ -9,6 +9,7 @@ interface MobileSidebarDrawerProps {
   onClose: () => void;
   isAdmin?: boolean;
   isAllocator?: boolean;
+  isManager?: boolean;
   populatedSlugs?: string[];
   /** Ref to the hamburger button in MobileTopBar so focus returns to
    *  it when the drawer closes. Restoration is the a11y pattern that
@@ -41,6 +42,7 @@ export function MobileSidebarDrawer({
   onClose,
   isAdmin,
   isAllocator,
+  isManager,
   populatedSlugs,
   triggerRef,
   flaggedCount,
@@ -179,6 +181,7 @@ export function MobileSidebarDrawer({
           populatedSlugs={populatedSlugs}
           isAdmin={isAdmin}
           isAllocator={isAllocator}
+          isManager={isManager}
           variant="drawer"
           flaggedCount={flaggedCount}
         />
