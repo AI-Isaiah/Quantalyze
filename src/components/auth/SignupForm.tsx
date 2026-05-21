@@ -85,6 +85,18 @@ export function SignupForm() {
       return;
     }
 
+    // Supabase's enumeration-safe response for "email already registered":
+    // signUp returns 200 with data.user populated but data.user.identities = [].
+    // Without this branch the form falls through to "Check your email" — but no
+    // email is ever sent (the account already exists), so the user waits forever.
+    if (data.user && data.user.identities && data.user.identities.length === 0) {
+      setError(
+        "An account with this email already exists. Sign in instead, or use password reset if you forgot it.",
+      );
+      setLoading(false);
+      return;
+    }
+
     if (!data.session) {
       setError("Check your email to confirm your account, then sign in.");
       setLoading(false);
