@@ -41,7 +41,7 @@ jobs:
   frontend-typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -70,7 +70,7 @@ jobs:
   frontend-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -108,7 +108,7 @@ jobs:
       matrix:
         shard: [1, 2, 3]
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -141,7 +141,7 @@ jobs:
     # per-PR critical path adds 15-30s with no behavior signal.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -176,7 +176,7 @@ jobs:
     # FS — it is never uploaded as an artifact.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -328,7 +328,7 @@ jobs:
     runs-on: ubuntu-latest
     if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true'
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. The sql-tests job
@@ -440,7 +440,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
           # retro-PR179-M-persist-chain: actions/checkout defaults
@@ -467,7 +467,7 @@ jobs:
     # checked-out tree; the no-progress flag keeps CI logs quiet.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. lychee-action only
@@ -491,7 +491,7 @@ jobs:
       run:
         working-directory: analytics-service
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. The python/pytest job
@@ -565,7 +565,7 @@ jobs:
       - frontend-typecheck
       - frontend-test
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
