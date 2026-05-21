@@ -585,3 +585,179 @@ class TestWatchdogInvariant:
                 "otherwise the watchdog reclaims the still-running job "
                 "and any caller polling for terminal status hangs."
             )
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 C-0190 — missing-RPC fallback
+# ---------------------------------------------------------------------------
+# When the Supabase project hasn't applied migration 086 yet, PostgREST
+# returns SQLSTATE 42883 (undefined_function) for
+# `claim_compute_jobs_with_priority`. Pre-fix, the worker logged an opaque
+# error every tick and claimed zero jobs forever — a silent total-stall
+# failure mode. Post-fix, the worker catches 42883 specifically and falls
+# back to the legacy `claim_compute_jobs(p_batch_size, p_worker_id)` RPC.
+# ---------------------------------------------------------------------------
+
+
+class TestClaimRpcFallback:
+    """audit-2026-05-07 C-0190 — when migration 086 has not been applied,
+    the worker must catch SQLSTATE 42883 from claim_compute_jobs_with_priority
+    and fall back to the legacy claim_compute_jobs RPC."""
+
+    def setup_method(self) -> None:
+        # Reset the module-level latch so each test starts from "no
+        # fallback yet". Necessary because the latch is process-wide so a
+        # prior test that exercised the fallback would otherwise leak
+        # state into this test class.
+        import main_worker
+
+        main_worker._FALLBACK_CLAIM_RPC = False
+
+    @pytest.mark.asyncio
+    async def test_undefined_function_falls_back_to_legacy_rpc(self) -> None:
+        """If claim_compute_jobs_with_priority raises 42883 (function does
+        not exist), dispatch_tick must call claim_compute_jobs (legacy)
+        with the 2-arg pre-086 signature and process whatever it returns."""
+        from postgrest.exceptions import APIError
+
+        legacy_jobs = [
+            {"id": "j-legacy-1", "kind": "sync_trades", "strategy_id": "s-1"},
+        ]
+        mock_supabase = MagicMock()
+
+        priority_chain = MagicMock()
+        priority_chain.execute.side_effect = APIError(
+            {
+                "message": (
+                    "function public.claim_compute_jobs_with_priority"
+                    "(p_batch_size => integer, p_worker_id => text, "
+                    "p_unified_backbone_active => boolean) does not exist"
+                ),
+                "code": "42883",
+            }
+        )
+        legacy_chain = MagicMock()
+        legacy_chain.execute.return_value = MagicMock(data=legacy_jobs)
+        mark_chain = MagicMock()
+        mark_chain.execute.return_value = MagicMock(data=None)
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return priority_chain
+            if name == "claim_compute_jobs":
+                return legacy_chain
+            return mark_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ) as mock_dispatch:
+            await dispatch_tick("worker-fallback-1")
+
+        called_rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert "claim_compute_jobs_with_priority" in called_rpc_names, (
+            "priority RPC must be tried before the fallback fires"
+        )
+        assert "claim_compute_jobs" in called_rpc_names, (
+            "legacy claim_compute_jobs RPC must be called when 42883 surfaces "
+            f"on the priority RPC; got {called_rpc_names}"
+        )
+        # The legacy RPC takes only 2 args; passing the BACKBONE-05 flag
+        # would 42883 on the legacy function signature too.
+        legacy_calls = [
+            c for c in mock_supabase.rpc.call_args_list
+            if c.args[0] == "claim_compute_jobs"
+        ]
+        assert len(legacy_calls) == 1
+        params = legacy_calls[0].args[1]
+        assert params == {"p_batch_size": 5, "p_worker_id": "worker-fallback-1"}, (
+            f"legacy RPC must use 2-arg signature; got {params}"
+        )
+        # The job returned by the legacy RPC must still flow through
+        # dispatch + mark_done — falling back is not a no-op.
+        mock_dispatch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_undefined_function_latches_for_subsequent_ticks(self) -> None:
+        """Once 42883 has been observed once, the worker latches the
+        fallback choice — subsequent ticks must skip the priority RPC
+        entirely. Probing the missing function every 30s would only
+        pollute logs with identical errors."""
+        from postgrest.exceptions import APIError
+
+        mock_supabase = MagicMock()
+
+        priority_chain = MagicMock()
+        priority_chain.execute.side_effect = APIError(
+            {
+                "message": "function does not exist",
+                "code": "42883",
+            }
+        )
+        legacy_chain = MagicMock()
+        legacy_chain.execute.return_value = MagicMock(data=[])
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return priority_chain
+            return legacy_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock()):
+            # First tick: hits 42883, latches fallback.
+            await dispatch_tick("worker-latch-test")
+            mock_supabase.rpc.reset_mock()
+            # Second tick: must skip priority RPC entirely.
+            await dispatch_tick("worker-latch-test")
+
+        called_rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert "claim_compute_jobs_with_priority" not in called_rpc_names, (
+            "after 42883 latches the fallback, subsequent ticks must skip "
+            f"the priority RPC; got {called_rpc_names}"
+        )
+        assert "claim_compute_jobs" in called_rpc_names
+
+    @pytest.mark.asyncio
+    async def test_non_42883_error_propagates_no_fallback(self) -> None:
+        """Errors that are NOT 42883 must propagate to the loop wrapper —
+        we must not blanket-catch other APIErrors (rate-limit 429, 5xx,
+        auth 42501, etc.) and silently fall back."""
+        from postgrest.exceptions import APIError
+
+        mock_supabase = MagicMock()
+
+        priority_chain = MagicMock()
+        priority_chain.execute.side_effect = APIError(
+            {"message": "permission denied", "code": "42501"}
+        )
+        legacy_chain = MagicMock()
+        legacy_chain.execute.return_value = MagicMock(data=[])
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return priority_chain
+            return legacy_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock()):
+            with pytest.raises(APIError) as excinfo:
+                await dispatch_tick("worker-no-fallback")
+
+        assert excinfo.value.code == "42501"
+        called_rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert "claim_compute_jobs" not in called_rpc_names, (
+            "non-42883 errors must NOT trigger the legacy fallback; "
+            f"got {called_rpc_names}"
+        )
+        # Latch must stay False so the next dispatch_tick re-tries the
+        # priority RPC instead of permanently degrading on a transient error.
+        import main_worker
+
+        assert main_worker._FALLBACK_CLAIM_RPC is False
