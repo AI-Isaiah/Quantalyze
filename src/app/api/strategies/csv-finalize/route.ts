@@ -391,6 +391,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       strategy_name: trimmedName,
       userId: user.id,
       metadataRaw,
+      dailyReturnsSeries,
     });
   }
 
@@ -521,6 +522,7 @@ async function unifiedCsvFinalizeHandler(args: {
   strategy_name: string;
   userId: string;
   metadataRaw: unknown;
+  dailyReturnsSeries: CsvDailyReturnRow[];
 }): Promise<NextResponse> {
   // M-3: csv-finalize keeps a route-local INTERNAL_API_TOKEN check because
   // the 503 envelope must use CSV_FINALIZE_FAIL shape, not the generic
@@ -567,6 +569,39 @@ async function unifiedCsvFinalizeHandler(args: {
       args.userId,
       args.metadataRaw,
     );
+    // CSV → analytics pipeline Task 10: mirror the legacy-path persist so
+    // a PROCESS_KEY_UNIFIED_BACKBONE=true flip cannot silently drop series
+    // data. Same CSV_PERSIST_FAIL envelope, same hard-fail rationale.
+    if (args.dailyReturnsSeries.length > 0) {
+      const { error: persistError } = await (
+        supabase.rpc as unknown as (
+          fn: "persist_csv_daily_returns",
+          args: { p_user_id: string; p_strategy_id: string; p_rows: CsvDailyReturnRow[] },
+        ) => Promise<{ data: number | null; error: { code?: string; message?: string } | null }>
+      )("persist_csv_daily_returns", {
+        p_user_id: args.userId,
+        p_strategy_id: unifiedBody.strategy_id,
+        p_rows: args.dailyReturnsSeries,
+      });
+      if (persistError) {
+        console.error(
+          "[strategies/csv-finalize unified] persist_csv_daily_returns error:",
+          persistError.code,
+          persistError.message,
+        );
+        return NextResponse.json(
+          {
+            ok: false,
+            code: "CSV_PERSIST_FAIL",
+            human_message:
+              "Your strategy was created but the daily-return data could not be saved. Contact support@quantalyze.com with your strategy id so we can recover.",
+            debug_context: { strategy_id: unifiedBody.strategy_id },
+            correlation_id: null,
+          },
+          { status: 500 },
+        );
+      }
+    }
   }
   return NextResponse.json(result.body);
 }
