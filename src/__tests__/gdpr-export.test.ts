@@ -150,18 +150,19 @@ function makeMockClient(
 
 describe("collectUserExportBundle — mocked client", () => {
   it("visits every table in the manifest, wiring direct and indirect paths correctly", async () => {
+    const TEST_USER_ID = "11111111-1111-1111-1111-111111111111";
     const rowsByTable: Record<string, unknown[]> = {
-      profiles: [{ id: "u1", display_name: "Alice" }],
-      api_keys: [{ id: "k1", user_id: "u1" }],
-      strategies: [{ id: "s1", user_id: "u1" }, { id: "s2", user_id: "u1" }],
+      profiles: [{ id: TEST_USER_ID, display_name: "Alice" }],
+      api_keys: [{ id: "k1", user_id: TEST_USER_ID }],
+      strategies: [{ id: "s1", user_id: TEST_USER_ID }, { id: "s2", user_id: TEST_USER_ID }],
       trades: [{ id: "t1", strategy_id: "s1" }],
-      portfolios: [{ id: "p1", user_id: "u1" }],
+      portfolios: [{ id: "p1", user_id: TEST_USER_ID }],
       portfolio_strategies: [{ portfolio_id: "p1", strategy_id: "s1" }],
     };
     const mock = makeMockClient(rowsByTable);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u1");
+    const bundle = await collectUserExportBundle(mock as any, TEST_USER_ID);
 
     // Every manifest table should appear in the bundle.
     const bundleTables = bundle.tables.map((t) => t.table);
@@ -171,7 +172,7 @@ describe("collectUserExportBundle — mocked client", () => {
 
     // Schema shape
     expect(bundle.schema_version).toBe(1);
-    expect(bundle.user_id).toBe("u1");
+    expect(bundle.user_id).toBe(TEST_USER_ID);
     expect(bundle.truncated_at_size_cap).toBe(false);
     expect(typeof bundle.generated_at).toBe("string");
 
@@ -201,7 +202,7 @@ describe("collectUserExportBundle — mocked client", () => {
     };
     const mock = makeMockClient(rowsByTable);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u1");
+    const bundle = await collectUserExportBundle(mock as any, "11111111-1111-1111-1111-111111111111");
     expect(bundle.truncated_at_size_cap).toBe(true);
     // Total serialized UTF-8 byte size should remain under the cap.
     // We assert against TextEncoder byteLength (not JSON.stringify(...).length)
@@ -234,7 +235,7 @@ describe("collectUserExportBundle — mocked client", () => {
       allocator_preferences: tightlyPackableRows,
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u1");
+    const bundle = await collectUserExportBundle(mock as any, "11111111-1111-1111-1111-111111111111");
     expect(bundle.truncated_at_size_cap).toBe(true);
 
     const trimmedTable = bundle.tables.find(
@@ -256,7 +257,7 @@ describe("collectUserExportBundle — mocked client", () => {
   it("returns zero rows for a user with no data (happy empty path)", async () => {
     const mock = makeMockClient({});
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "empty-user");
+    const bundle = await collectUserExportBundle(mock as any, "22222222-2222-2222-2222-222222222222");
     expect(bundle.total_row_count).toBe(0);
     expect(bundle.truncated_at_size_cap).toBe(false);
     // Every manifest table is present with row_count=0
@@ -265,6 +266,45 @@ describe("collectUserExportBundle — mocked client", () => {
       expect(entry).toBeDefined();
       expect(entry!.row_count).toBe(0);
     }
+  });
+});
+
+describe("collectUserExportBundle — C-0021 ownership assertion (audit-2026-05-07 security c9)", () => {
+  /**
+   * Defense-in-depth: this helper runs as service_role and bypasses
+   * RLS. A future refactor (admin export wrapper, fan-out worker, CSV
+   * aggregator) that wires the helper to an attacker-influenced
+   * `userId` would silently exfil any user's full PII bundle. The
+   * assertion at function entry hard-refuses non-UUID inputs so the
+   * misuse surfaces at the call site rather than as a successful
+   * cross-tenant bundle.
+   */
+  it("throws on empty-string userId (no .eq() filter would scan every row)", async () => {
+    const mock = makeMockClient({});
+    await expect(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      collectUserExportBundle(mock as any, ""),
+    ).rejects.toThrow(/UUID auth\.users\.id/i);
+  });
+
+  it("throws on non-UUID userId (e.g., a request-body string or SQL fragment)", async () => {
+    const mock = makeMockClient({});
+    await expect(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      collectUserExportBundle(mock as any, "not-a-uuid"),
+    ).rejects.toThrow(/C-0021/);
+  });
+
+  it("accepts a valid UUID and proceeds to fetch (regression guard against over-strict regex)", async () => {
+    const mock = makeMockClient({});
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mock as any,
+      "12345678-1234-1234-1234-123456789abc",
+    );
+    expect(bundle.schema_version).toBe(1);
+    expect(bundle.user_id).toBe("12345678-1234-1234-1234-123456789abc");
   });
 });
 
@@ -305,7 +345,7 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
 
     const t0 = Date.now();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await collectUserExportBundle(mock as any, "u-parallel");
+    await collectUserExportBundle(mock as any, "33333333-3333-3333-3333-333333333333");
     const elapsedMs = Date.now() - t0;
 
     // Sequential floor: 28+ tables * 50ms = 1400+ ms.
@@ -342,7 +382,7 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u-resilient");
+    const bundle = await collectUserExportBundle(mock as any, "44444444-4444-4444-4444-444444444444");
 
     // Issue 5 (audit-2026-05-07 follow-up): the bundle survives, but the
     // failed table is now MARKED with a fetch_error string and the
@@ -391,7 +431,7 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u-pg-err");
+    const bundle = await collectUserExportBundle(mock as any, "55555555-5555-5555-5555-555555555555");
 
     const profilesEntry = bundle.tables.find((t) => t.table === "profiles");
     expect(profilesEntry).toBeDefined();
@@ -419,7 +459,7 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u-clean");
+    const bundle = await collectUserExportBundle(mock as any, "66666666-6666-6666-6666-666666666666");
 
     expect(bundle.partial).toBe(false);
     expect(bundle.failed_tables).toEqual([]);
@@ -481,7 +521,7 @@ describe("collectUserExportBundle — cumulative-size budget (P450 regression)",
     (JSON as any).stringify = spied;
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const bundle = await collectUserExportBundle(mock as any, "u-budget");
+      const bundle = await collectUserExportBundle(mock as any, "77777777-7777-7777-7777-777777777777");
       expect(bundle.truncated_at_size_cap).toBe(true);
     } finally {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -529,7 +569,7 @@ describe("collectUserExportBundle — M-0520 indirect parent error fails loud (n
       },
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u-parent-err");
+    const bundle = await collectUserExportBundle(mock as any, "88888888-8888-8888-8888-888888888888");
     expect(bundle.partial).toBe(true);
 
     // Every indirect child of strategies should carry a fetch_error.
@@ -595,7 +635,7 @@ describe("collectUserExportBundle — H-0453 parent_id_truncated regression", ()
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u-cap");
+    const bundle = await collectUserExportBundle(mock as any, "99999999-9999-9999-9999-999999999999");
 
     // The indirect children (trades, portfolio_strategies, etc.) should
     // all have parent_id_truncated=true.
@@ -634,7 +674,7 @@ describe("collectUserExportBundle — H-0453 parent_id_truncated regression", ()
       strategies: [{ id: "s1" }, { id: "s2" }],
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u-undercap");
+    const bundle = await collectUserExportBundle(mock as any, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
     for (const t of bundle.tables) {
       expect(t.parent_id_truncated).toBe(false);
     }
@@ -658,7 +698,7 @@ describe("collectUserExportBundle — H-0454 envelope reservation regression", (
       allocator_preferences: rows,
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u-envelope");
+    const bundle = await collectUserExportBundle(mock as any, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
     expect(bundle.truncated_at_size_cap).toBe(true);
     const actualBytes = new TextEncoder().encode(JSON.stringify(bundle))
       .byteLength;
@@ -705,7 +745,7 @@ describe("collectUserExportBundle — H-0456 ORDER BY determinism regression", (
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await collectUserExportBundle(mock as any, "u-order");
+    await collectUserExportBundle(mock as any, "cccccccc-cccc-cccc-cccc-cccccccccccc");
 
     // Every direct and projected entry should appear at least once.
     // Indirect entries appear TWICE (parent probe + child select),
@@ -766,7 +806,7 @@ describe("collectUserExportBundle — H-0456 getOrderColumn per-table column (sp
       },
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await collectUserExportBundle(mock as any, "u-h0456");
+    await collectUserExportBundle(mock as any, "dddddddd-dddd-dddd-dddd-dddddddddddd");
 
     // audit_log (the projected source for audit_log_for_user) sorts
     // by created_at — chronological packing of the size-cap tail.
@@ -1003,7 +1043,7 @@ describe("encodeExportBundle — direct unit tests (red-team #4)", () => {
       }),
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const cachedBundle = await collectUserExportBundle(mock as any, "u-cache");
+    const cachedBundle = await collectUserExportBundle(mock as any, "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
     const cachedBytes = encodeExportBundle(cachedBundle);
     const cachedText = new TextDecoder().decode(cachedBytes);
     // Sanity: cached path produces parseable JSON that round-trips.
@@ -1044,7 +1084,7 @@ describe("encodeExportBundle — direct unit tests (red-team #4)", () => {
       }),
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u-freeze");
+    const bundle = await collectUserExportBundle(mock as any, "ffffffff-ffff-ffff-ffff-ffffffffffff");
     const notes = bundle.tables.find((t) => t.table === "user_notes");
     expect(notes).toBeDefined();
     expect(notes!.rows.length).toBe(1);
@@ -1203,7 +1243,7 @@ describe("collectUserExportBundle — indirect null parent IDs are tolerated (re
       .spyOn(console, "warn")
       .mockImplementation(() => {});
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u-null-parent");
+    const bundle = await collectUserExportBundle(mock as any, "12121212-1212-1212-1212-121212121212");
     consoleWarnSpy.mockRestore();
 
     // The bundle is NOT marked partial; trades row was fetched OK.
@@ -1245,7 +1285,7 @@ describe("collectUserExportBundle — indirect null parent IDs are tolerated (re
       .spyOn(console, "error")
       .mockImplementation(() => {});
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u-bigint");
+    const bundle = await collectUserExportBundle(mock as any, "13131313-1313-1313-1313-131313131313");
     consoleErrSpy.mockRestore();
     const tradesEntry = bundle.tables.find((t) => t.table === "trades");
     expect(tradesEntry!.fetch_error).toBeTruthy();
@@ -1303,7 +1343,7 @@ describe("collectUserExportBundle — fetch_error suppresses parent_id_truncated
       .spyOn(console, "error")
       .mockImplementation(() => {});
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u-err-trunc");
+    const bundle = await collectUserExportBundle(mock as any, "14141414-1414-1414-1414-141414141414");
     consoleErrSpy.mockRestore();
     const tradesEntry = bundle.tables.find((t) => t.table === "trades");
     expect(tradesEntry).toBeDefined();
@@ -1373,7 +1413,7 @@ describe("collectUserExportBundle — chunked indirect IN under proxy limits (re
       },
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await collectUserExportBundle(mock as any, "u-chunked");
+    await collectUserExportBundle(mock as any, "15151515-1515-1515-1515-151515151515");
 
     // Verify chunking happened
     expect(inCalls.length).toBeGreaterThan(1);
@@ -1431,7 +1471,7 @@ describe("rowsForTable + projectedRowsForTable — wired into production (red-te
       }),
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "u-wired");
+    const bundle = await collectUserExportBundle(mock as any, "16161616-1616-1616-1616-161616161616");
     const profiles = rowsForTable(bundle, "profiles");
     expect(profiles).not.toBeNull();
     expect(Array.isArray(profiles)).toBe(true);
@@ -1497,9 +1537,9 @@ describe("collectUserExportBundle — concurrent same-user exports observe indep
 
     const [bundleA, bundleB] = await Promise.all([
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      collectUserExportBundle(mock as any, "u-concurrent-1"),
+      collectUserExportBundle(mock as any, "17171717-1717-1717-1717-171717171717"),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      collectUserExportBundle(mock as any, "u-concurrent-2"),
+      collectUserExportBundle(mock as any, "18181818-1818-1818-1818-181818181818"),
     ]);
 
     // The two bundles produce distinct ExportTablePayload object

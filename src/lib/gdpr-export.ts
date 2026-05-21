@@ -1,6 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/database.types";
+import { isUuid } from "@/lib/utils";
 
 /**
  * Closed keyset of every public-schema table name. Audit 2026-05-07
@@ -1070,6 +1071,27 @@ export async function collectUserExportBundle(
   admin: SupabaseClient,
   userId: string,
 ): Promise<ExportBundle> {
+  // Audit-2026-05-07 C-0021 (security c9): defense-in-depth ownership
+  // assertion. This helper runs as service_role and bypasses RLS on
+  // every read. Today's sole caller (POST /api/account/export) locks
+  // `userId` to `auth.getUser().id` and never accepts a request-body
+  // alternative, but a future refactor (admin export wrapper, fan-out
+  // worker, CSV-export aggregator) that wires this helper to an
+  // attacker-influenced id would silently exfil any user's full PII
+  // bundle. We hard-refuse here unless `userId` is a UUID — the natural
+  // shape of `auth.users.id`. Non-UUID values include:
+  //   - an empty string (caller forgot to .eq() a filter — every row),
+  //   - a request-body string (caller forgot to authz),
+  //   - a SQL-fragment attempt (PostgREST quotes it, but the cost is
+  //     still a full table scan).
+  // Throwing here surfaces the misuse at the call site instead of
+  // shipping a bundle the caller didn't intend. The route's outer
+  // try/catch turns this into a clean 500 with operator-visible logs.
+  if (!isUuid(userId)) {
+    throw new Error(
+      `[gdpr-export] collectUserExportBundle requires a UUID auth.users.id; refusing service-role read for non-UUID subject. C-0021 defense-in-depth.`,
+    );
+  }
   // Phase 1: parallel fetch across all USER_EXPORT_TABLES entries
   // (bounded concurrency).
   // Manifest order is preserved by storing into a positional array.
