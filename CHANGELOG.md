@@ -7,6 +7,26 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.6] - 2026-05-21
+
+**fix(audit-2026-05-07): close 7-CRITICAL cluster — RBAC + CI/workflows + e2e (C-0144 + C-0150 + C-0230 + C-0291 + C-0294 + C-0300 + C-0303).**
+
+Seven file-disjoint CRITICALs authored in parallel via subagents.
+
+### RBAC cluster — single source of truth (C-0144 + C-0150)
+- `src/lib/admin.ts` + `src/lib/auth.ts`: `isAdminUser` is now the canonical admin gate, with `profiles.is_admin` as the PRIMARY signal (matches RLS — 19 policy references vs 0 for the user_app_roles fallback in non-self-referential policies). `user_app_roles.role='admin'` remains as an additive SECONDARY signal during the Sprint 7 rollout. `ADMIN_EMAIL` is demoted to OBSERVATIONAL-ONLY (logs a warning if matched but both in-band signals say NO; no longer flips admin TRUE on email match).
+- Removed `ADMIN_EMAIL_FALLBACK_ENABLED` toggle, `emitEnvEmailFallbackAudit` audit emitter, and the env-fallback grant paths in both `isAdminUser` and `isAdminUserGivenUserAppRoles`.
+- 60+ callsites compile and behave identically for the non-ADMIN_EMAIL path. The only observable behavior change is the dead-admin case (email in ADMIN_EMAIL but profile.is_admin=false → 403), which is C-0150's intent.
+- New `src/lib/admin.test.ts` (16 tests) + extended `src/lib/auth.test.ts` (ghost-admin + dead-admin pin).
+
+### Other CRITICALs
+- `analytics-service/services/match_engine.py` + `tests/test_match_engine.py` (C-0230): renormalization guard already used `if total <= 0: raise ValueError(...)`, but no regression test pinned it. Added test that triggers the degenerate case via `monkeypatch` zeroing `W_PORTFOLIO_FIT`/`W_PREFERENCE_FIT`/`W_TRACK_RECORD`/`W_CAPACITY_FIT`. Verified `python -O -m pytest` still fires the guard (the audit's stripped-assert scenario).
+- `scripts/check-gdpr-export-coverage.ts` + new `.test.ts` + scoped vitest config (C-0291): CHAIN-8 fixes — removed unverifiable `addedIn` field from `EXCLUDED_TABLES` and `SANITIZE_PARITY_ALLOWLIST`; added stale-check that fails CI when an entry doesn't match any migration's CREATE TABLE (mirroring the existing sanitize-parity check). CREATE TABLE regex labeled BEST-EFFORT with named limitations. Real bug caught: `sync_checkpoints` was in EXCLUDED_TABLES but no migration declared it — removed.
+- `.github/workflows/nightly.yml` (C-0294): new `preflight` job — single source of truth for the `STAGING_BASE_URL` guard. Other jobs gated on `needs.preflight.outputs.staging_enabled`. Both issue-creator scripts now list existing open issues by stable label (`nightly-canary-failure:pdf-coldstart` / `:npm-audit`) and comment instead of creating duplicates. Preflight emits to `$GITHUB_STEP_SUMMARY` so a disabled canary is visible in the Actions tab.
+- `e2e/demo-screenshot.spec.ts` + `.github/workflows/ci.yml` (C-0300): added a "C-0300 sentinel" test that fs-checks for the three baseline PNGs. Sentinel runs in CI via a dedicated `--grep` invocation; the screenshot-comparison tests stay excluded until baselines land.
+- `e2e/discovery-prefs-isolation.spec.ts` (C-0303): rewrote the spec from fixture-layer (which couldn't detect a RLS regression) to real Supabase isolation contract. Two-allocator flow + bare-SELECT RLS proof. Gated on `TEST_SUPABASE_URL` / `TEST_SUPABASE_SERVICE_ROLE_KEY` / `TEST_SUPABASE_ANON_KEY`.
+
+
 ## [0.24.5.5] - 2026-05-21
 
 **fix(audit-2026-05-07): close 6-CRITICAL cluster (C-0025 + C-0043 + C-0052 + C-0060 + C-0126 + C-0158).**

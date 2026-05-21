@@ -1,99 +1,111 @@
 /**
- * Admin gate — unified source of truth (audit-2026-05-07 P459 + P699 + P700 + P703).
+ * Admin gate — SINGLE SOURCE OF TRUTH (audit-2026-05-07 C-0144 + C-0150).
  *
- * Prior to this consolidation there were THREE parallel admin-decision
- * mechanisms wired into routes / pages / middleware:
+ * Prior to this consolidation `withRole('admin')` (in `src/lib/auth.ts`) and
+ * `isAdminUser` here ran a three-signal OR-union:
  *
- *   1. `ADMIN_EMAIL` env-var fallback in this module — a single email
- *      string that, if set, granted superuser to that email WITHOUT any
- *      database row. Invisible to the audit trail (P700).
- *   2. `profiles.is_admin` boolean column (migration 011).
- *   3. `user_app_roles` join table with `role = 'admin'` (migration 054).
+ *   1. `user_app_roles.role='admin'` (migration 054).
+ *   2. `profiles.is_admin = TRUE` (migration 011).
+ *   3. `ADMIN_EMAIL` env-var fallback (legacy break-glass).
  *
- * Drift risk: a user added to `user_app_roles` but not `profiles.is_admin`
- * (or vice versa) could pass one gate and fail the other depending on
- * which call path executed. This file collapses the three runtime checks
- * into ONE internal helper — `isAdminUser` and `isAdmin` keep their
- * public signatures (so existing callers don't have to change) but now
- * both delegate to the same union check:
+ * The DB-side RLS policies that gate the actual rows still reference
+ * `profiles.is_admin = TRUE` almost universally (the user_app_roles
+ * substrate is mid-rollout — see ADR-0005). That means the OR-union in
+ * code was strictly LOOSER than what RLS actually enforced:
  *
- *     admin = (user_app_roles has 'admin')
- *           OR (profiles.is_admin = TRUE)
- *           OR (ADMIN_EMAIL env-fallback matches user.email)
+ *   - "Dead-admin": a user whose email matches `ADMIN_EMAIL` but whose
+ *     `profiles.is_admin = FALSE` passed the code gate yet hit RLS denial
+ *     on every privileged DB read. The route returned 200 / 403 mixed
+ *     responses depending on which check fired first — a confusing UX
+ *     and an audit-trail mess (the "admin" was attributed to an account
+ *     RLS treated as a normal user).
  *
- * The OR-union retains all three signals for back-compat (migrations are
- * still mid-rollout — see ADR-0005) but routes them through a single
- * decision so a grant in any one of the three places lights up the gate.
+ *   - "Ghost-admin": the inverse — `profiles.is_admin = TRUE` but no
+ *     `user_app_roles.role='admin'` row. The OR-union let this user
+ *     pass, RLS lets them write to admin-gated tables, and that's the
+ *     contract we want to preserve (profile flag wins).
  *
- * Break-glass intent for ADMIN_EMAIL
- * ----------------------------------
- * ADMIN_EMAIL is intentionally retained as a recovery mechanism for the
- * "all admins locked out of `user_app_roles`" disaster scenario. Setting
- * the env var on the deployed function grants the named email admin
- * access without requiring a DB write. Two operational safeguards:
+ * C-0144 / C-0150 collapse the three signals into ONE rule, aligned
+ * with the DB-side policy:
  *
- *   - Every successful fallback grant emits an audit_log row with
- *     action='admin.access.via_env_email_fallback' so the access is
- *     visible to forensic review (no more silent grants).
- *   - A startup-time warning is logged when ADMIN_EMAIL is set in
- *     production, nudging operators to migrate to `user_app_roles`.
+ *     admin = (profiles.is_admin = TRUE)
  *
- * If the dependency on the env-fallback is dropped in a future sprint,
- * `ADMIN_EMAIL_FALLBACK_ENABLED` can be flipped to `false` below without
- * touching call sites. The audit-log action stays in the taxonomy as a
- * forensic anchor for historical access.
+ * `user_app_roles.role='admin'` is still consulted as a SECONDARY signal
+ * during the migration period — a hit there still grants admin, because
+ * migration 054's backfill mirrored every legacy `is_admin=TRUE` profile
+ * into the join table and Sprint 7 will eventually flip the DB-side
+ * source of truth. Until then the join-table signal is additive, not
+ * subtractive, so the code gate stays at least as permissive as what an
+ * admin can see in the UI.
+ *
+ * `ADMIN_EMAIL` is downgraded to OBSERVATIONAL ONLY. If a caller's email
+ * matches the env var, we emit a Sentry-tagged log breadcrumb so an
+ * operator can see "this user would have been granted via the old
+ * fallback" — but we do NOT flip the gate to TRUE on that signal alone.
+ * Break-glass is now strictly out-of-band: an operator with DB access
+ * sets `profiles.is_admin = TRUE` on the locked-out user.
+ *
+ * `withRole('admin')` (src/lib/auth.ts) DELEGATES to `isAdminUser` for
+ * the admin role specifically. Non-admin roles still resolve through
+ * `user_app_roles` alone — there is no profile flag for `allocator` /
+ * `quant_manager` / `analyst`, so `user_app_roles` is authoritative for
+ * those.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+/**
+ * The legacy break-glass env var. Kept as a runtime read so an operator
+ * who set it on the function instance can still see the audit
+ * breadcrumb fire, but the value is NEVER used to grant access — it is
+ * read inside `logEnvEmailFallbackMatch` purely to compare against the
+ * caller's email for observational logging.
+ */
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL ?? "";
 
 /**
- * Master toggle for the ADMIN_EMAIL env fallback. Kept as a constant
- * (not a runtime env switch) so flipping the policy is a code review
- * with attribution rather than a silent ops change. See ADR-0005 for
- * the long-term plan to drop the fallback once user_app_roles has been
- * verified across all admin paths.
+ * Startup-time warning — emitted once on module load if `ADMIN_EMAIL`
+ * is set in a production environment. Operators see this in their
+ * function-init logs and can clean up the leftover env var. The variable
+ * no longer affects the gate; this nudge is so the misleading config
+ * doesn't sit on the deployment forever.
  */
-const ADMIN_EMAIL_FALLBACK_ENABLED = true;
-
-/**
- * Startup-time warning — emitted exactly once on module load if
- * ADMIN_EMAIL is set in a production environment. NODE_ENV gate keeps
- * dev / test logs quiet (where ADMIN_EMAIL is routinely set for
- * convenience). Operators see this in their Vercel function-init logs.
- */
-if (
-  ADMIN_EMAIL_FALLBACK_ENABLED &&
-  ADMIN_EMAIL &&
-  process.env.NODE_ENV === "production"
-) {
+if (ADMIN_EMAIL && process.env.NODE_ENV === "production") {
   console.warn(
-    `[SECURITY] ADMIN_EMAIL env fallback is active for ${ADMIN_EMAIL} — prefer user_app_roles. See src/lib/admin.ts and ADR-0005.`,
+    `[SECURITY] ADMIN_EMAIL env var is set (${ADMIN_EMAIL}) but is now OBSERVATIONAL ONLY — it no longer grants admin access. Set profiles.is_admin = TRUE via SQL to grant admin. See src/lib/admin.ts and ADR-0005.`,
   );
 }
 
 /**
- * Email-only check (legacy). Use isAdminUser() for the full check.
+ * Email match against ADMIN_EMAIL — preserved for `src/proxy.ts` which
+ * needs a synchronous pure check at the middleware layer (no Supabase
+ * round-trip available there).
  *
- * Preserved as a pure (no-DB) check for the rare middleware paths that
- * need a synchronous answer without a Supabase round-trip — notably
- * `src/proxy.ts` which gates the /admin/* path prefix. Page/route
- * handlers MUST use isAdminUser() instead so the union check covers
- * the user_app_roles + profiles.is_admin signals.
+ * IMPORTANT: a TRUE result here is NOT a grant. The proxy uses it as a
+ * fast-path FILTER to redirect non-admin emails away from `/admin/*`
+ * URLs without a DB call; the authoritative `isAdminUser` check still
+ * runs at the page / route handler layer and is what actually gates the
+ * privileged work. If `ADMIN_EMAIL` is unset, every caller fails this
+ * filter and the page-layer check decides — matching the prior behavior
+ * but without the silent grant.
+ *
+ * If `ADMIN_EMAIL` is unset, this returns FALSE for every caller — the
+ * proxy then redirects authenticated non-matching emails away from
+ * `/admin/*`. That over-redirect on a misconfigured deployment is the
+ * safe default (admins can still hit the admin pages from a directly
+ * navigated path if they bypass the redirect, since the authoritative
+ * check still runs server-side).
  */
 export function isAdmin(email: string | null | undefined): boolean {
-  if (!ADMIN_EMAIL_FALLBACK_ENABLED) return false;
   if (!ADMIN_EMAIL || !email) return false;
   return email.toLowerCase() === ADMIN_EMAIL.toLowerCase();
 }
 
 /**
  * Lazy Sentry reporter used by the narrowed error paths in
- * `hasAdminRoleRow` / `hasIsAdminFlag`. Mirrors the pattern in
- * `src/lib/audit.ts` — the lazy import avoids pulling Sentry into
- * middleware bundles that don't otherwise need it, and the inner
- * try/catch prevents a Sentry-transport failure from masking the
+ * `hasAdminRoleRow` / `hasIsAdminFlag`. The lazy import avoids pulling
+ * Sentry into middleware bundles that don't otherwise need it, and the
+ * inner try/catch prevents a Sentry-transport failure from masking the
  * caller's signal.
  */
 function reportNonRlsError(
@@ -137,20 +149,17 @@ function reportNonRlsError(
 /**
  * Internal: does `userId` have role='admin' in `user_app_roles`?
  *
- * Tolerates RLS rejections (returns false on error) — getUserRoles in
- * `src/lib/auth.ts` has the canonical version with the AppRole filter,
- * but this module purposely does not import from `auth.ts` to keep the
- * call surface narrow (admin.ts is imported by middleware / pages that
- * shouldn't bundle the full RBAC surface).
+ * Treated as an ADDITIVE signal during the user_app_roles rollout —
+ * Sprint 7 may flip this to authoritative once every RLS policy has
+ * been migrated off `profiles.is_admin`. Until then a hit here grants
+ * admin (matching migration 054's backfill, which mirrors every legacy
+ * is_admin=TRUE row into the join table) but a miss does NOT revoke —
+ * `hasIsAdminFlag` still gets a vote.
  *
- * Issue 4 (audit-2026-05-07 follow-up): narrow the error catch. Pre-fix
- * the unconditional `if (error) return false` masked schema drift,
- * statement timeouts, and connection errors as "no admin row" — a real
- * admin would silently get a 403 with no breadcrumb. We now ONLY swallow
- * 42501 (RLS denial, the genuinely expected failure mode); every other
- * error is logged + reported to Sentry while still returning false (the
- * OR-union with profiles.is_admin / ADMIN_EMAIL is preserved so a single
- * signal hiccup doesn't lock out admins).
+ * Tolerates RLS rejections (returns false on error). Non-RLS errors are
+ * logged + Sentry-reported but still return false so the
+ * `hasIsAdminFlag` signal continues to work — a single DB blip on one
+ * signal must not lock an admin out.
  */
 async function hasAdminRoleRow(
   supabase: SupabaseClient,
@@ -165,16 +174,8 @@ async function hasAdminRoleRow(
 
   if (error) {
     if (error.code === "42501") {
-      // RLS denial is the expected failure mode for a non-admin caller
-      // reading another user's roles. Treat as "no admin row" — the other
-      // signals (is_admin column, ADMIN_EMAIL fallback) still get a vote.
       return false;
     }
-    // Any other Postgres error: schema drift, statement timeout (57014),
-    // connection failure, etc. Don't silently mask — log + Sentry so the
-    // failure is visible. Still return false so the OR-union with the
-    // other signals continues to work; a real admin with profiles.is_admin
-    // = TRUE still passes the gate.
     console.error("[admin] hasAdminRoleRow non-RLS error:", {
       user_id: userId,
       code: error.code,
@@ -194,17 +195,10 @@ async function hasAdminRoleRow(
 /**
  * Internal: does `userId` have `profiles.is_admin = TRUE`?
  *
- * Kept for the migration period — Sprint 7 will drop the column once
- * every admin grant has been mirrored into user_app_roles. Per ADR-0005
- * we keep BOTH signals OR'd until the column is dropped so a partial
- * migration cannot silently revoke admin access.
- *
- * Issue 4 (audit-2026-05-07 follow-up): same narrowing as
- * `hasAdminRoleRow`. Only swallow 42501 (RLS denial); everything else
- * gets logged + Sentry-reported while still returning false so the
- * OR-union retains its fault tolerance. PGRST116 ("no rows found" from
- * .single()) is ALSO treated as a benign "no flag" — distinct from the
- * RLS path but equally non-actionable.
+ * This is the PRIMARY signal — aligned with the DB-side RLS policies
+ * which reference `profiles.is_admin = TRUE` directly. If this returns
+ * TRUE the user is admin; if FALSE the gate falls through to
+ * `hasAdminRoleRow` (the additive secondary).
  */
 async function hasIsAdminFlag(
   supabase: SupabaseClient,
@@ -217,8 +211,6 @@ async function hasIsAdminFlag(
     .single();
 
   if (error) {
-    // PGRST116 = "Results contain 0 rows" (PostgREST's .single() shape).
-    // 42501 = RLS denial. Both are benign "no admin flag for this user".
     if (error.code === "42501" || error.code === "PGRST116") {
       return false;
     }
@@ -240,67 +232,53 @@ async function hasIsAdminFlag(
 }
 
 /**
- * Fire-and-forget audit-log emission when the ADMIN_EMAIL env-fallback
- * grants admin access. Intentionally writes through the user-scoped
- * supabase client so `auth.uid()` inside log_audit_event resolves to
- * the acting user — the audit row attributes the grant to the user who
- * benefited from the fallback, not to a service identity.
+ * Observational logging when the legacy `ADMIN_EMAIL` env var matches
+ * the caller's email but `isAdminUser` has ALREADY returned FALSE.
+ * Emits a console breadcrumb so operators can see "this user would have
+ * been granted via the deprecated fallback" — useful when migrating
+ * away from the env-var-based break-glass to ensure no one was relying
+ * on it silently.
  *
- * Catches all failures internally; never re-throws. An audit-log RPC
- * failure must NOT propagate into a 500 on a user-facing request, and
- * MUST NOT block the admin from completing their action — the fallback
- * is a break-glass surface and a logging hiccup cannot lock everyone
- * out.
+ * Intentionally fire-and-forget; never throws. NOT a grant.
  */
-async function emitEnvEmailFallbackAudit(
-  supabase: SupabaseClient,
-  user: { id: string; email?: string | null },
-): Promise<void> {
+function logEnvEmailFallbackMatch(user: {
+  id: string;
+  email?: string | null;
+}): void {
+  if (!isAdmin(user.email)) return;
   try {
-    const { error } = await supabase.rpc("log_audit_event", {
-      p_action: "admin.access.via_env_email_fallback",
-      p_entity_type: "user",
-      p_entity_id: user.id,
-      p_metadata: {
-        admin_email: ADMIN_EMAIL,
-        matched_user_email: user.email ?? null,
-      },
-    });
-    if (error) {
-      console.error(
-        "[admin] audit emit for ADMIN_EMAIL fallback returned error:",
-        { code: error.code, message: error.message, user_id: user.id },
-      );
-    }
-  } catch (err) {
-    console.error(
-      "[admin] audit emit for ADMIN_EMAIL fallback threw:",
+    console.warn(
+      "[admin] ADMIN_EMAIL matched but is no longer a grant — user has profiles.is_admin = FALSE and no user_app_roles.admin row",
       {
-        message: err instanceof Error ? err.message : String(err),
         user_id: user.id,
+        matched_email: user.email ?? null,
       },
     );
+  } catch {
+    // Logger failure must not affect the gate's return value.
   }
 }
 
 /**
- * Full admin check — UNION across all three signals.
+ * Full admin check — SINGLE SOURCE OF TRUTH for every admin-decision
+ * path that has a Supabase client.
  *
- * Returns TRUE if ANY of:
- *   - The user has role='admin' in `user_app_roles` (migration 054).
- *   - The user has `profiles.is_admin = TRUE` (migration 011).
- *   - The user's email matches ADMIN_EMAIL (break-glass; audited).
+ * Returns TRUE if EITHER:
+ *   - `profiles.is_admin = TRUE` (primary — matches DB-side RLS), OR
+ *   - `user_app_roles.role='admin'` (secondary, additive during the
+ *     Sprint 7 user_app_roles rollout).
  *
- * Use this in EVERY admin-decision path that has a Supabase client.
- * The two parallel `withRole('admin')` and `withAdminAuth` wrappers
- * both consult this helper (transitively, via `getUserRoles` in the
- * RBAC path and directly in the legacy path) so a grant in any one of
- * the three sources lights up both gates — closing the P459 / P699 /
- * P703 drift surface.
+ * Returns FALSE for everything else — including a caller whose email
+ * matches `ADMIN_EMAIL` but who has no profile flag and no user_app_roles
+ * row. The env var only triggers an observational log breadcrumb.
+ *
+ * `withRole('admin')` in `src/lib/auth.ts` delegates here for the admin
+ * role specifically, so the route wrapper and direct `isAdminUser`
+ * callers share ONE decision.
  *
  * Returns Promise<boolean> — never throws to the caller. A failed DB
- * read on one signal does NOT short-circuit the other signals; the
- * caller still gets the OR of whatever signals succeeded.
+ * read on one signal does NOT short-circuit the other; the caller still
+ * gets the OR of whatever signals succeeded.
  */
 export async function isAdminUser(
   supabase: SupabaseClient,
@@ -308,67 +286,41 @@ export async function isAdminUser(
 ): Promise<boolean> {
   if (!user) return false;
 
-  // Signal 1: user_app_roles (new substrate, migration 054). Run first
-  // because it's the going-forward source of truth — a hit here means
-  // we don't need the other two round-trips.
-  if (await hasAdminRoleRow(supabase, user.id)) {
-    return true;
-  }
-
-  // Signal 2: profiles.is_admin (legacy column, migration 011). Backfill
-  // from migration 054 means every is_admin=TRUE row already has a
-  // matching user_app_roles row — but a manual `UPDATE profiles SET
-  // is_admin = TRUE` (no corresponding user_app_roles INSERT) still
-  // grants access through this path. Surface the divergence in logs
-  // so we can clean it up before dropping the column.
+  // Signal 1 (PRIMARY): profiles.is_admin — aligned with DB-side RLS.
   if (await hasIsAdminFlag(supabase, user.id)) {
     return true;
   }
 
-  // Signal 3: ADMIN_EMAIL env fallback (break-glass). Audited on every
-  // hit — see emitEnvEmailFallbackAudit above. Disabled if the toggle
-  // at the top of this file is flipped off.
-  if (isAdmin(user.email)) {
-    // Fire-and-forget audit emission. We do NOT await it — the admin
-    // gate decision must return as quickly as the other two signals,
-    // and emitEnvEmailFallbackAudit catches its own errors so a logging
-    // failure cannot leak into the gate's return value.
-    void emitEnvEmailFallbackAudit(supabase, user);
+  // Signal 2 (additive): user_app_roles.role='admin'. Migration 054's
+  // backfill kept these two signals in sync; a manual INSERT into
+  // user_app_roles without a corresponding profiles flip still grants
+  // admin here so the code gate stays at least as permissive as the
+  // join-table substrate.
+  if (await hasAdminRoleRow(supabase, user.id)) {
     return true;
   }
 
+  // ADMIN_EMAIL is no longer a grant — log if matched so operators can
+  // see who would have been granted under the old fallback, then return
+  // FALSE. This is the dead-admin fix (C-0150).
+  logEnvEmailFallbackMatch(user);
   return false;
 }
 
 /**
- * Same OR-union as {@link isAdminUser}, but the caller has ALREADY
- * fetched the user's `user_app_roles` set and proven it does NOT
- * contain 'admin'. Skips the redundant `hasAdminRoleRow` DB round-trip
- * and starts from signal 2 (profiles.is_admin).
+ * Same single-source-of-truth check as {@link isAdminUser}, but the
+ * caller has ALREADY fetched the user's `user_app_roles` set. Skips the
+ * redundant `hasAdminRoleRow` DB round-trip and consults the caller's
+ * pre-fetched set instead.
  *
- * Closes audit-2026-05-07 red-team finding (MED conf 8): pre-fix the
- * `requireRole(admin)` fallback path issued THREE DB round-trips on
- * every non-admin caller asking for `admin`:
+ * Intended caller: `requireRole` in `src/lib/auth.ts`, which already
+ * fetched `user_app_roles` via `getUserRolesResult` and would otherwise
+ * issue a duplicate query under the `withRole('admin')` admin-fallback
+ * path.
  *
- *   1. getUserRolesResult — cached.
- *   2. hasAdminRoleRow — different query shape, NOT deduped by the
- *      cache (cache keys on argument identity, not query result).
- *   3. hasIsAdminFlag — second round-trip on `profiles`.
- *
- * The 'admin' answer for user_app_roles was already in memory after
- * step 1 — step 2 was throwing it away. This helper accepts the
- * pre-fetched role set so the fallback can short-circuit user_app_roles
- * lookup entirely. Net cost on the non-admin reject path: 1
- * round-trip (cached getUserRolesResult) + 1 round-trip (profiles).
- * Email fallback is local. Down from 3 to 2 — a 33% reduction on the
- * exact path an attacker probes under credential stuffing or
- * 403-rate-limit testing.
- *
- * Precondition (caller responsibility): `userAppRoles` MUST be the
- * authoritative role set from `user_app_roles` for THIS user. Passing
- * a stale or filtered set re-opens the drift surface this helper is
- * trying to close. The intended caller is `requireRole` in
- * `src/lib/auth.ts` — see the call site for the assert chain.
+ * Precondition: `userAppRoles` MUST be the authoritative role set from
+ * `user_app_roles` for THIS user. Passing a stale or filtered set
+ * re-opens the drift surface this helper closes.
  */
 export async function isAdminUserGivenUserAppRoles(
   supabase: SupabaseClient,
@@ -377,23 +329,18 @@ export async function isAdminUserGivenUserAppRoles(
 ): Promise<boolean> {
   if (!user) return false;
 
-  // Signal 1 — derived from the caller's pre-fetched set instead of a
-  // second DB round-trip. The cache from getUserRolesResult guarantees
-  // this is the same answer hasAdminRoleRow would have returned.
-  if (userAppRoles.includes("admin")) {
-    return true;
-  }
-
-  // Signal 2: profiles.is_admin (legacy column).
+  // Signal 1 (PRIMARY): profiles.is_admin.
   if (await hasIsAdminFlag(supabase, user.id)) {
     return true;
   }
 
-  // Signal 3: ADMIN_EMAIL env fallback (break-glass).
-  if (isAdmin(user.email)) {
-    void emitEnvEmailFallbackAudit(supabase, user);
+  // Signal 2 (additive): user_app_roles — derived from caller's
+  // pre-fetched set, not a fresh round-trip.
+  if (userAppRoles.includes("admin")) {
     return true;
   }
 
+  // ADMIN_EMAIL: observational only.
+  logEnvEmailFallbackMatch(user);
   return false;
 }

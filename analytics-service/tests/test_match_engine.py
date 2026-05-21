@@ -1316,3 +1316,51 @@ def test_engine_version_phase09_bump():
         f"WEIGHTS_VERSION should remain 'v2.0.0', got '{WEIGHTS_VERSION}'. "
         "D-17 specifies WEIGHTS_VERSION is NOT bumped."
     )
+
+
+# --- C-0230: renormalization guard survives python -O -----------------------
+def test_C0230_renormalization_guard_raises_valueerror_not_assert(monkeypatch):
+    """C-0230 regression: the renormalization guard in `score_candidates`
+    must be a real `if ... raise ValueError(...)` so it survives stripping
+    under `python -O` (which removes bare `assert` statements).
+
+    Failure mode the audit caught: with a bare `assert total > 0`, running
+    production containers with `PYTHONOPTIMIZE=1` (or `python -O`) would
+    silently turn the guard into a no-op. The very next line
+    `effective = {k: v / total for ...}` then divides by zero, propagating
+    `inf`/NaN into every candidate score and corrupting ALL match decisions
+    without surfacing an exception — exactly the failure mode flagged in
+    the v0.17.1 KPI-17 retro ("silent zeros are the failure mode").
+
+    We can't trigger `total <= 0` through ordinary inputs because each scaled
+    weight is `W_X * _clamp(override, 0.5, 1.5)` and all four W_X constants
+    are positive, so total >= 0.5 * sum(W_X) = 0.5 > 0 always. The only way
+    to exercise the guard is to monkeypatch the weight constants to zero,
+    which mirrors the structural shape of the bug (some upstream change
+    setting a weight to 0/negative).
+    """
+    import pytest as _pytest
+
+    from services import match_engine
+
+    # Zero out the four top-level weight constants so scaled values become
+    # 0 regardless of any override → total == 0 → guard MUST fire.
+    monkeypatch.setattr(match_engine, "W_PORTFOLIO_FIT", 0.0)
+    monkeypatch.setattr(match_engine, "W_PREFERENCE_FIT", 0.0)
+    monkeypatch.setattr(match_engine, "W_TRACK_RECORD", 0.0)
+    monkeypatch.setattr(match_engine, "W_CAPACITY_FIT", 0.0)
+
+    candidates = [_make_candidate("s1")]
+    args = _make_personalized_args(candidates, preferences={})
+
+    # Must raise ValueError with a clear, allocator-tagged message. Under
+    # `python -O` this is the exact assertion that protects production:
+    # if someone reverts to `assert total > 0`, this test will NOT raise
+    # ValueError and the test fails — catching the regression at CI time.
+    with _pytest.raises(ValueError, match=r"renormalization produced.*non-positive sum"):
+        match_engine.score_candidates(**args)
+
+    # And the message MUST include the allocator_id so on-call can
+    # reconstruct the failing batch from a JSONB error trail.
+    with _pytest.raises(ValueError, match=r"allocator_id=a1"):
+        match_engine.score_candidates(**args)
