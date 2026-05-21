@@ -28,6 +28,26 @@ export default async function StrategiesPage() {
     .or("source.neq.wizard,status.neq.draft")
     .order("created_at", { ascending: false });
 
+  // Companion query for the wizard-draft Resume CTA.
+  //
+  // The `.or()` filter above intentionally hides wizard-in-progress rows
+  // from the list (they need a different "edit" target than the legacy
+  // StrategyForm). But pre-fix that hiding was total: a user who left
+  // the wizard mid-flow and came back to /strategies saw "No strategies
+  // yet" and lost their draft to the cleanup cron without realizing.
+  // This second query surfaces a Resume banner without re-rendering the
+  // hidden row inline — preserving the StrategyForm-routing safety
+  // invariant while closing the dogfood UX gap (2026-05-21).
+  const { data: wizardDraft } = await supabase
+    .from("strategies")
+    .select("id, name, created_at")
+    .eq("user_id", user.id)
+    .eq("source", "wizard")
+    .eq("status", "draft")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
   const strategyIds = strategies?.map((s) => s.id) ?? [];
 
   const { data: introRequests } = strategyIds.length > 0
@@ -53,12 +73,48 @@ export default async function StrategiesPage() {
         <PendingIntros requests={introRequests as Parameters<typeof PendingIntros>[0]["requests"]} />
       )}
 
+      {wizardDraft && (
+        <Card
+          data-testid="wizard-draft-resume-banner"
+          className="mb-3 border-accent/40 bg-accent/5"
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-text-primary">
+                You have an unfinished strategy draft.
+              </p>
+              <p className="mt-0.5 text-xs text-text-muted">
+                {wizardDraft.name
+                  ? `"${wizardDraft.name}" — started ${new Date(wizardDraft.created_at).toLocaleDateString()}. Drafts expire after 30 days.`
+                  : `Started ${new Date(wizardDraft.created_at).toLocaleDateString()}. Drafts expire after 30 days.`}
+              </p>
+            </div>
+            <Link href="/strategies/new/wizard">
+              <Button size="sm">Resume draft</Button>
+            </Link>
+          </div>
+        </Card>
+      )}
+
       {(!strategies || strategies.length === 0) ? (
         <Card className="text-center py-12">
-          <p className="text-text-muted mb-4">No strategies yet.</p>
-          <Link href="/strategies/new">
-            <Button>Create your first strategy</Button>
-          </Link>
+          {wizardDraft ? (
+            <>
+              <p className="text-text-muted mb-4">
+                No published strategies yet — but you have a draft in progress.
+              </p>
+              <Link href="/strategies/new/wizard">
+                <Button>Resume your draft</Button>
+              </Link>
+            </>
+          ) : (
+            <>
+              <p className="text-text-muted mb-4">No strategies yet.</p>
+              <Link href="/strategies/new">
+                <Button>Create your first strategy</Button>
+              </Link>
+            </>
+          )}
         </Card>
       ) : (
         <div className="space-y-3">
