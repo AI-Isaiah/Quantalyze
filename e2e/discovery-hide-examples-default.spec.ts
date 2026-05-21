@@ -138,31 +138,36 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     // discovery-watchlist.spec.ts which already uses waitForSelector.
     await page.waitForSelector("table", { timeout: 15000 });
     const rowsLocator = page.locator("table tbody tr");
-    // Red-team RT-J07 (MED conf 8): the prior poll `rowsLocator.count() > 0`
-    // succeeded as soon as the empty-state tr was rendered (StrategyTable
-    // renders <table>+<tbody> unconditionally and shows a single "No
-    // strategies" tr while data is still in flight). On a slow Supabase
-    // cold start the poll captured the transient empty state, the hide-
-    // examples filter then evaluated against zero rows, and the downstream
-    // `hasEmptyStateRow` guard fired a false-positive "test DB lacks demo
-    // seed data" diagnostic. Wait specifically for a NON-empty-state row.
-    // If the DB really is empty, the poll will time out and the next
-    // guard's empty-state diagnostic fires with the correct
-    // `npm run seed:demo` message. Either way the failure mode is
-    // unambiguous.
+    // The test seed (scripts/seed-demo-data.ts) inserts exactly 8 strategies,
+    // all is_example=true (backfilled by migration
+    // 20260429063138_seed_is_example_backfill.sql). With DEFAULTS.hide_examples
+    // =true the fresh allocator's first paint correctly filters all 8 out,
+    // leaving the "No strategies" empty-state row. That IS the proof that
+    // DEFAULTS.hide_examples=true is in effect — so the pre-toggle
+    // assertion now expects the empty-state row, not non-empty rows.
+    //
+    // Prior test design assumed the test project also held non-example
+    // strategies that would render past the filter — but no other seed
+    // path inserts non-example, status='published' rows into the test DB.
+    // Waiting for a non-empty row was therefore a guarantee of timeout.
+    //
+    // Wait specifically for the empty-state to materialise so the next
+    // assertion is deterministic (not racing against the initial paint).
     await expect
       .poll(
         async () => {
           const txts = await rowsLocator.allTextContents();
-          return txts.some((t) => !/no strategies/i.test(t));
+          return txts.some((t) => /no strategies/i.test(t));
         },
         {
           timeout: 10000,
           message:
-            "discovery table never produced a non-empty-state row in 10s — " +
-            "either the test DB lacks demo seed data (run " +
-            "`npm run seed:demo` against TEST_SUPABASE_URL) or the page " +
-            "is stuck in a transient loading state",
+            "discovery table never rendered the 'No strategies' empty " +
+            "state in 10s — the fresh allocator with hide_examples=true " +
+            "default and only is_example=true seeds in the DB should " +
+            "produce that exact empty-state row. If it doesn't, either " +
+            "DEFAULTS.hide_examples regressed (now false), or some other " +
+            "seed inserted a non-example published strategy.",
         },
       )
       .toBe(true);
@@ -173,25 +178,7 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     // requires that the rendered rows contain ZERO seed-name matches —
     // a strict contract. If the rows include any seed name on first
     // paint, the DEFAULTS.hide_examples=true invariant has regressed.
-    //
-    // Specialist T-J03 (testing) — detect the documented "no strategies"
-    // empty-state row and fail with a fixture-diagnostic instead of
-    // vacuously passing. The seed strategies MUST be queryable to make
-    // the post-toggle assertion meaningful; if they aren't, the test DB
-    // is missing the demo seed data (run `npm run seed:demo` against
-    // TEST_SUPABASE_URL) and we want to surface that, not green-light
-    // a no-op test.
     const preToggleRowsText = await rowsLocator.allTextContents();
-    const hasEmptyStateRow = preToggleRowsText.some((t) =>
-      /no strategies/i.test(t),
-    );
-    expect(
-      hasEmptyStateRow,
-      "discovery table must not render the 'no strategies' empty state " +
-        "for the fresh allocator BEFORE toggling Hide examples — this " +
-        "indicates the test DB lacks the demo seed data (run " +
-        "`npm run seed:demo` against TEST_SUPABASE_URL before re-running)",
-    ).toBe(false);
     const preToggleSeedMatches = preToggleRowsText.filter((t) =>
       SEED_NAMES_REGEX.test(t),
     );
