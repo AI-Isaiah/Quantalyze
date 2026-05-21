@@ -225,12 +225,60 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
             detail="Candidate has no returns history",
         )
 
-    result = simulate_add_candidate(
-        portfolio_returns=portfolio_returns,
-        candidate_id=req.candidate_strategy_id,
-        candidate_returns=candidate_series,
-        weights=weights,
-    )
+    # G15-007 (audit-2026-05-07) — wrap the math call in try/except so a
+    # numpy/pandas blow-up is observable (audit_log + structured log line
+    # tagged with the correlation_id) instead of escaping as a bare 500
+    # with no trail. Mirrors the portfolio-router exception handling
+    # pattern. Re-raised as HTTPException so the response carries the
+    # correlation_id in the detail object — operators can join the wire-
+    # level 500 to the analytics-service log by that id.
+    correlation_id = request.headers.get("x-correlation-id") or ""
+    try:
+        result = simulate_add_candidate(
+            portfolio_returns=portfolio_returns,
+            candidate_id=req.candidate_strategy_id,
+            candidate_returns=candidate_series,
+            weights=weights,
+        )
+    except Exception as exc:
+        logger.exception(
+            "simulate_add_candidate failed (portfolio_id=%s candidate=%s "
+            "correlation_id=%s): %s",
+            req.portfolio_id,
+            req.candidate_strategy_id,
+            correlation_id,
+            exc,
+        )
+        # Fire an audit row so operators can reconstruct WHO triggered
+        # the failure from audit_log alone (the structured log has the
+        # exception detail; the audit row has the user/entity context).
+        try:
+            log_audit_event(
+                user_id=req.user_id,
+                action="simulator.run.failed",
+                entity_type="simulator_run",
+                entity_id=req.portfolio_id,
+                metadata={
+                    "candidate_strategy_id": req.candidate_strategy_id,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:400],
+                    "correlation_id": correlation_id,
+                },
+            )
+        except Exception as audit_exc:
+            # Don't let an audit-emit failure mask the original error.
+            logger.error(
+                "simulator failure audit emit failed: %s",
+                audit_exc,
+                exc_info=True,
+            )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Portfolio impact simulation failed",
+                "correlation_id": correlation_id,
+            },
+        )
 
     # Hydrate the response with the human-readable candidate name so the
     # UI can render it without a second round-trip.

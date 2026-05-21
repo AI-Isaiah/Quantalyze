@@ -526,11 +526,12 @@ class TestAnalyticsComputationError:
     def test_simulate_add_candidate_raises_returns_500(
         self, client, supabase_mock, monkeypatch
     ):
-        """An exception inside ``simulate_add_candidate`` propagates as
-        the default FastAPI 500. We don't catch + remap because the
-        router has nothing actionable to add (the math layer logs its
-        own context); the platform-level 500 handler is the right
-        surface for operators."""
+        """An exception inside ``simulate_add_candidate`` surfaces as a
+        500. G15-007 (audit-2026-05-07) added a try/except wrapper that
+        logs + audits the failure and re-raises as HTTPException(500)
+        with a correlation_id in the detail. The wire-level status
+        remains 500 — see TestG15_007_ExceptionAuditAndCorrelationId
+        below for the audit_log + correlation_id contract assertions."""
         _table_router(
             supabase_mock,
             portfolio_data={"id": "p-1"},
@@ -770,3 +771,166 @@ class TestG15_005_RateLimitIsUserKeyed:
             "Pre-fix simulator used @limiter.limit('30/hour'); "
             "regression check."
         )
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 PR C regression tests (G15-007)
+# ---------------------------------------------------------------------------
+
+
+@_BODY_PARSER_SKIP
+class TestG15_007_ExceptionAuditAndCorrelationId:
+    """G15-007 — when ``simulate_add_candidate`` raises, the route MUST:
+      (a) return a 500 (preserved from pre-fix behaviour),
+      (b) emit an audit_log row with action='simulator.run.failed' and
+          metadata including error_type + error_message + correlation_id,
+      (c) include the correlation_id in the response body so operators
+          can join the wire-level 500 to the analytics-service log.
+
+    Pre-fix the call was bare — a numpy/pandas blow-up produced a
+    silent 500 with no audit row and no correlation surface.
+    """
+
+    def test_exception_returns_500_with_correlation_id_in_body(
+        self, supabase_mock, monkeypatch
+    ):
+        """An exception path returns 500 AND the body carries the
+        correlation_id forwarded via the X-Correlation-Id header."""
+        from routers import simulator as simulator_router
+
+        monkeypatch.setattr(
+            "routers.simulator.get_supabase", lambda: supabase_mock
+        )
+        audit_spy = MagicMock(return_value=None)
+        monkeypatch.setattr(
+            "routers.simulator.log_audit_event", audit_spy
+        )
+
+        _table_router(
+            supabase_mock,
+            portfolio_data={"id": "p-1"},
+            candidate_data={
+                "id": "c-1", "name": "Candidate Alpha", "status": "published",
+            },
+            portfolio_strategies_data=[
+                {"strategy_id": "s-1", "current_weight": 1.0},
+            ],
+            sa_portfolio_data=[
+                {
+                    "strategy_id": "s-1",
+                    "returns_series": _build_returns_records(60),
+                },
+            ],
+            sa_candidate_data={
+                "strategy_id": "c-1",
+                "returns_series": _build_returns_records(60),
+            },
+        )
+
+        def _boom(**kwargs):
+            raise ValueError("synthetic")
+
+        monkeypatch.setattr(
+            "routers.simulator.simulate_add_candidate", _boom
+        )
+
+        app = FastAPI()
+        app.state.limiter = simulator_router.limiter
+        app.include_router(simulator_router.router)
+        tc = TestClient(app, raise_server_exceptions=False)
+
+        cid = "test-corr-id-g15-007"
+        r = tc.post(
+            "/api/simulator",
+            headers={"X-Correlation-Id": cid},
+            json={
+                "portfolio_id": "p-1",
+                "candidate_strategy_id": "c-1",
+                "user_id": "u-1",
+            },
+        )
+
+        # (a) wire-level 500.
+        assert r.status_code == 500
+        # (c) correlation_id surfaces in the JSON body so operators can
+        # join the 500 to the structured log without grepping by
+        # timestamp.
+        body = r.json()
+        detail = body.get("detail")
+        # FastAPI nests HTTPException(detail=dict) under "detail".
+        assert isinstance(detail, dict), f"Expected dict detail, got: {body!r}"
+        assert detail.get("correlation_id") == cid
+        # (b) audit_log was called with the failure action AND the
+        # exception details. Pre-fix this assertion would fail — no
+        # audit row was emitted on the exception path.
+        assert audit_spy.called, "log_audit_event was not invoked on failure"
+        call_kwargs = audit_spy.call_args.kwargs
+        assert call_kwargs.get("action") == "simulator.run.failed"
+        metadata = call_kwargs.get("metadata") or {}
+        assert metadata.get("error_type") == "ValueError"
+        assert "synthetic" in (metadata.get("error_message") or "")
+        assert metadata.get("correlation_id") == cid
+
+    def test_exception_path_does_not_leak_when_audit_fails(
+        self, supabase_mock, monkeypatch
+    ):
+        """If the audit_log emit itself fails on the exception path,
+        the route still returns 500 — we don't mask the original error
+        with the audit-emit failure."""
+        from routers import simulator as simulator_router
+
+        monkeypatch.setattr(
+            "routers.simulator.get_supabase", lambda: supabase_mock
+        )
+
+        def _audit_boom(**kwargs):
+            raise RuntimeError("audit pipeline down")
+
+        monkeypatch.setattr(
+            "routers.simulator.log_audit_event", _audit_boom
+        )
+
+        _table_router(
+            supabase_mock,
+            portfolio_data={"id": "p-1"},
+            candidate_data={
+                "id": "c-1", "name": "Candidate Alpha", "status": "published",
+            },
+            portfolio_strategies_data=[
+                {"strategy_id": "s-1", "current_weight": 1.0},
+            ],
+            sa_portfolio_data=[
+                {
+                    "strategy_id": "s-1",
+                    "returns_series": _build_returns_records(60),
+                },
+            ],
+            sa_candidate_data={
+                "strategy_id": "c-1",
+                "returns_series": _build_returns_records(60),
+            },
+        )
+
+        def _boom(**kwargs):
+            raise ValueError("synthetic")
+
+        monkeypatch.setattr(
+            "routers.simulator.simulate_add_candidate", _boom
+        )
+
+        app = FastAPI()
+        app.state.limiter = simulator_router.limiter
+        app.include_router(simulator_router.router)
+        tc = TestClient(app, raise_server_exceptions=False)
+
+        r = tc.post(
+            "/api/simulator",
+            json={
+                "portfolio_id": "p-1",
+                "candidate_strategy_id": "c-1",
+                "user_id": "u-1",
+            },
+        )
+        # The original 500 is preserved; the audit-emit failure was
+        # logged but did not mask the synthetic ValueError.
+        assert r.status_code == 500
