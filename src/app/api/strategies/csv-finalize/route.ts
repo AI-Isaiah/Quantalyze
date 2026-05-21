@@ -70,6 +70,51 @@ const MAX_LEVERAGE_RANGE_CHARS = 80;
 const MAX_DOLLAR_VALUE = 1_000_000_000_000;
 const MAX_MONEY_STRING_CHARS = 32;
 
+// CSV → analytics pipeline Task 8.
+const MAX_SERIES_ROWS = 5000;
+
+interface CsvDailyReturnRow {
+  date: string;
+  daily_return: number;
+}
+
+function parseDailyReturnsSeries(
+  raw: unknown,
+): { ok: true; series: CsvDailyReturnRow[] } | { ok: false; message: string } {
+  if (raw == null) return { ok: true, series: [] };
+  if (!Array.isArray(raw)) {
+    return { ok: false, message: "daily_returns_series must be an array." };
+  }
+  if (raw.length > MAX_SERIES_ROWS) {
+    return {
+      ok: false,
+      message: `daily_returns_series exceeds 5000 rows (got ${raw.length}).`,
+    };
+  }
+  const out: CsvDailyReturnRow[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const row = raw[i];
+    if (!row || typeof row !== "object") {
+      return { ok: false, message: `daily_returns_series[${i}] must be an object.` };
+    }
+    const r = row as Record<string, unknown>;
+    if (typeof r.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(r.date)) {
+      return {
+        ok: false,
+        message: `daily_returns_series[${i}].date must be a YYYY-MM-DD string.`,
+      };
+    }
+    if (typeof r.daily_return !== "number" || !Number.isFinite(r.daily_return)) {
+      return {
+        ok: false,
+        message: `daily_returns_series[${i}].daily_return must be a finite number.`,
+      };
+    }
+    out.push({ date: r.date, daily_return: r.daily_return });
+  }
+  return { ok: true, series: out };
+}
+
 function parseCsvMetadata(raw: unknown): CsvMetadataPayload | null {
   if (raw == null || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
@@ -275,6 +320,22 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       { status: 400 },
     );
   }
+
+  const seriesParse = parseDailyReturnsSeries((body as Record<string, unknown>).daily_returns_series);
+  if (!seriesParse.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        human_message: seriesParse.message,
+        debug_context: {},
+        correlation_id: null,
+      },
+      { status: 400 },
+    );
+  }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const dailyReturnsSeries = seriesParse.series;
 
   // Cross-AI revision 2026-04-30: strategy_name is REQUIRED and validated
   // against the same 1–80 char range as the UI. Defense-in-depth: the RPC

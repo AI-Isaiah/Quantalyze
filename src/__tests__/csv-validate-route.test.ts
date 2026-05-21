@@ -483,4 +483,62 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
       expect(payload).not.toHaveProperty("is_example");
     });
   });
+
+  describe("ISSUE Task 8 — daily_returns_series body validation", () => {
+    it("accepts a valid series and forwards strategy_id", async () => {
+      rpcMock.mockResolvedValue({
+        data: "55555555-5555-4555-8555-555555555555",
+        error: null,
+      });
+      const req = makeJsonRequest({
+        wizard_session_id: VALID_SESSION,
+        fmt: "daily_returns",
+        strategy_name: "with series",
+        daily_returns_series: [
+          { date: "2024-01-01", daily_return: 0.005 },
+          { date: "2024-01-02", daily_return: -0.003 },
+        ],
+      });
+      const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+    });
+
+    it("rejects a series with > 5000 rows as CSV_INVALID_FORMAT", async () => {
+      const bigSeries = Array.from({ length: 5001 }, (_, i) => ({
+        date: `2024-01-${(i % 28) + 1}`,
+        daily_return: 0.001,
+      }));
+      const req = makeJsonRequest({
+        wizard_session_id: VALID_SESSION,
+        fmt: "daily_returns",
+        strategy_name: "too big",
+        daily_returns_series: bigSeries,
+      });
+      const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.code).toBe("CSV_INVALID_FORMAT");
+      expect(json.human_message).toMatch(/5000/);
+      expect(rpcMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects a row with non-finite daily_return", async () => {
+      const req = makeJsonRequest({
+        wizard_session_id: VALID_SESSION,
+        fmt: "daily_returns",
+        strategy_name: "bad row",
+        daily_returns_series: [
+          { date: "2024-01-01", daily_return: 0.005 },
+          { date: "2024-01-02", daily_return: "not-a-number" as unknown as number },
+        ],
+      });
+      const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.code).toBe("CSV_INVALID_FORMAT");
+    });
+  });
 });
