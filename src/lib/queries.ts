@@ -258,20 +258,45 @@ export async function getPublicStrategyDetail(strategyId: string): Promise<{
 } | null> {
   const supabase = await createClient();
 
+  // Phase 15 / CSV-03 + QA report 2026-05-21 ISSUE-007: also project
+  // strategy_verifications.trust_tier so the public-sheet Disclaimer
+  // can render the API-tier copy instead of falling back to
+  // 'self_reported'. Mirror getStrategyDetail's pattern — embed the
+  // most-recent verification row via PostgREST referencedTable
+  // order+limit. Locked decision D-04: trust_tier lives ONLY on
+  // strategy_verifications; no strategies.trust_tier column exists.
   const { data: strategy, error } = await supabase
     .from("strategies")
-    .select(`*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS})`)
+    .select(
+      `*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS}), strategy_verifications (trust_tier, status, created_at)`,
+    )
     .eq("id", strategyId)
     .eq("status", "published")
-    .single<Strategy & { strategy_analytics: { daily_returns?: unknown; computed_at: string | null; computation_status: string | null } | null }>();
+    .order("created_at", {
+      referencedTable: "strategy_verifications",
+      ascending: false,
+    })
+    .limit(1, { referencedTable: "strategy_verifications" })
+    .single<Strategy & {
+      strategy_analytics: { daily_returns?: unknown; computed_at: string | null; computation_status: string | null } | null;
+      strategy_verifications: { trust_tier: string; status: string; created_at: string }[] | null;
+    }>();
 
   if (error || !strategy) return null;
 
-  const disclosureTier = readDisclosureTier(strategy);
-  const manager = await loadManagerIdentity(strategy, disclosureTier);
+  const latestVerification = (strategy.strategy_verifications ?? [])
+    .slice()
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  const strategyWithTier: Strategy = {
+    ...strategy,
+    trust_tier: (latestVerification?.trust_tier ?? null) as Strategy["trust_tier"],
+  };
+
+  const disclosureTier = readDisclosureTier(strategyWithTier);
+  const manager = await loadManagerIdentity(strategyWithTier, disclosureTier);
 
   return {
-    strategy,
+    strategy: strategyWithTier,
     analytics: extractAnalytics(strategy.strategy_analytics),
     manager,
     disclosureTier,
