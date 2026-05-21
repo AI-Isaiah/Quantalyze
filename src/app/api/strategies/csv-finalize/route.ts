@@ -334,7 +334,6 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       { status: 400 },
     );
   }
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const dailyReturnsSeries = seriesParse.series;
 
   // Cross-AI revision 2026-04-30: strategy_name is REQUIRED and validated
@@ -464,6 +463,44 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // path uses the same code path (and we don't drift).
   if (newStrategyId) {
     await applyCsvMetadataUpdate(supabase, newStrategyId, user.id, metadataRaw);
+  }
+
+  // CSV → analytics pipeline Task 9: persist the daily-return series so
+  // the worker can compute analytics from it. Hard-fail on error because:
+  // (a) the strategy row IS created at this point, but without persisted
+  // series the worker will fail permanently with "Insufficient CSV history"
+  // and the user has no way to retry (wizard_session_id is unique-claimed
+  // by finalize_csv_strategy). A 500 here surfaces a CSV_PERSIST_FAIL
+  // envelope the user can see + contact support about.
+  if (newStrategyId && dailyReturnsSeries.length > 0) {
+    const { error: persistError } = await (
+      supabase.rpc as unknown as (
+        fn: "persist_csv_daily_returns",
+        args: { p_user_id: string; p_strategy_id: string; p_rows: CsvDailyReturnRow[] },
+      ) => Promise<{ data: number | null; error: { code?: string; message?: string } | null }>
+    )("persist_csv_daily_returns", {
+      p_user_id: user.id,
+      p_strategy_id: newStrategyId,
+      p_rows: dailyReturnsSeries,
+    });
+    if (persistError) {
+      console.error(
+        "[strategies/csv-finalize] persist_csv_daily_returns error:",
+        persistError.code,
+        persistError.message,
+      );
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "CSV_PERSIST_FAIL",
+          human_message:
+            "Your strategy was created but the daily-return data could not be saved. Contact support@quantalyze.com with your strategy id so we can recover.",
+          debug_context: { strategy_id: newStrategyId },
+          correlation_id: null,
+        },
+        { status: 500 },
+      );
+    }
   }
 
   return NextResponse.json({

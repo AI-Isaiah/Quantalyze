@@ -540,5 +540,74 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
       const json = await res.json();
       expect(json.code).toBe("CSV_INVALID_FORMAT");
     });
+
+    it("calls persist_csv_daily_returns with the user_id, strategy_id, and series", async () => {
+      rpcMock.mockImplementation((name: string) => {
+        if (name === "finalize_csv_strategy") {
+          return Promise.resolve({
+            data: "66666666-6666-4666-8666-666666666666",
+            error: null,
+          });
+        }
+        if (name === "persist_csv_daily_returns") {
+          return Promise.resolve({ data: 2, error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
+      });
+      const req = makeJsonRequest({
+        wizard_session_id: VALID_SESSION,
+        fmt: "daily_returns",
+        strategy_name: "persisting",
+        daily_returns_series: [
+          { date: "2024-01-01", daily_return: 0.005 },
+          { date: "2024-01-02", daily_return: -0.003 },
+        ],
+      });
+      const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+      const persistCalls = rpcMock.mock.calls.filter((c) => c[0] === "persist_csv_daily_returns");
+      expect(persistCalls).toHaveLength(1);
+      expect(persistCalls[0][1]).toMatchObject({
+        p_user_id: "00000000-0000-0000-0000-000000000abc",
+        p_strategy_id: "66666666-6666-4666-8666-666666666666",
+        p_rows: [
+          { date: "2024-01-01", daily_return: 0.005 },
+          { date: "2024-01-02", daily_return: -0.003 },
+        ],
+      });
+    });
+
+    it("returns 500 CSV_PERSIST_FAIL when persist_csv_daily_returns errors", async () => {
+      rpcMock.mockImplementation((name: string) => {
+        if (name === "finalize_csv_strategy") {
+          return Promise.resolve({
+            data: "77777777-7777-4777-8777-777777777777",
+            error: null,
+          });
+        }
+        if (name === "persist_csv_daily_returns") {
+          return Promise.resolve({
+            data: null,
+            error: { code: "42501", message: "owner mismatch" },
+          });
+        }
+        return Promise.resolve({ data: null, error: null });
+      });
+      const req = makeJsonRequest({
+        wizard_session_id: VALID_SESSION,
+        fmt: "daily_returns",
+        strategy_name: "persist fails",
+        daily_returns_series: [
+          { date: "2024-01-01", daily_return: 0.005 },
+          { date: "2024-01-02", daily_return: -0.003 },
+        ],
+      });
+      const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+      const res = await POST(req);
+      expect(res.status).toBe(500);
+      const json = await res.json();
+      expect(json.code).toBe("CSV_PERSIST_FAIL");
+    });
   });
 });
