@@ -23,16 +23,23 @@ import logging
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 from services.audit import log_audit_event
 from services.db import get_supabase
+from services.rate_limit import limiter
 from services.simulator_scoring import simulate_add_candidate
 
 router = APIRouter(prefix="/api", tags=["simulator"])
 logger = logging.getLogger("quantalyze.analytics")
-limiter = Limiter(key_func=get_remote_address)
+
+# G15-004 (audit-2026-05-07) — use the canonical process-wide Limiter
+# from services.rate_limit (NOT a local instance) so the route's storage
+# shares state with `app.state.limiter` registered in main.py. The
+# previous local `Limiter(key_func=get_remote_address)` broke the API-5
+# shared-storage invariant (per services/rate_limit.py module docstring):
+# slowapi resolves rate-limit storage via the DECORATOR's Limiter
+# instance, not app.state.limiter — so a future swap to Redis-backed
+# storage on the shared limiter would have silently skipped this route.
 
 
 class SimulatorRequest(BaseModel):

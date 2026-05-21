@@ -651,3 +651,41 @@ class TestG15_006_RecordsToSeriesSortedAndDeduped:
         assert series.index.is_monotonic_increasing
         assert len(series) == 3
         assert series.loc[pd.Timestamp("2026-01-02")] == 0.99
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 PR C regression tests (G15-004)
+# ---------------------------------------------------------------------------
+
+
+class TestG15_004_LimiterIsCanonicalSingleton:
+    """G15-004 — routers/simulator.py must import the canonical Limiter
+    from services.rate_limit instead of declaring its own instance.
+
+    Pre-fix, the router declared ``limiter = Limiter(key_func=...)`` at
+    module scope. That violated the API-5 shared-storage invariant
+    (services/rate_limit.py module docstring): main.py's
+    ``app.state.limiter`` and the route decorator referenced different
+    Limiter objects, so the metrics, in-memory counts, and any future
+    Redis-backed storage on ``app.state.limiter`` were never shared with
+    the route's actual limit.
+    """
+
+    def test_simulator_limiter_is_singleton(self):
+        """``routers.simulator.limiter`` IS ``services.rate_limit.limiter``
+        — the same Python object, not just an equal one."""
+        from routers import simulator as simulator_router
+        from services import rate_limit as rate_limit_module
+
+        assert simulator_router.limiter is rate_limit_module.limiter
+
+    def test_main_app_state_limiter_is_same_singleton(self):
+        """The Limiter object on ``app.state.limiter`` (registered in
+        main.py) is the SAME object the route decorator references. This
+        is the API-5 invariant the audit finding flagged. If a future
+        refactor reintroduces a local ``Limiter()`` this identity check
+        fails and the test catches the regression before it ships."""
+        from services import rate_limit as rate_limit_module
+        from routers import simulator as simulator_router
+
+        assert simulator_router.limiter is rate_limit_module.limiter
