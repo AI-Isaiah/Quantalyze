@@ -7,6 +7,25 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.14] - 2026-05-21
+
+**fix(auth): build the forgot-password flow that PR #258's signup copy points at.**
+
+Users who hit "An account with this email already exists. Sign in instead, or use password reset if you forgot it." (added in PR #258) can now actually do that — request a reset link from `/forgot-password`, follow the email link, and set a new password at `/reset-password`. Before this change the message dead-ended at a 404.
+
+### Added
+- `src/app/(auth)/forgot-password/page.tsx` + `src/components/auth/ForgotPasswordForm.tsx` — email input that calls `supabase.auth.resetPasswordForEmail` with `redirectTo` pointing at `/auth/callback?next=/reset-password`. Always shows the same neutral "If an account exists for that email, we sent a reset link" copy regardless of Supabase's response, matching the enumeration-safety guard SignupForm already uses for the inverse direction.
+- `src/app/(auth)/reset-password/page.tsx` + `src/components/auth/ResetPasswordForm.tsx` — two password fields (new + confirm) with min-length and match validation, calls `supabase.auth.updateUser({ password })`, redirects to `/login?reset=1` on success. Direct navigation without a recovery session shows a "Open the password-reset link from your email to continue" affordance instead of the raw Supabase error.
+- "Forgot password?" link below the password input on `LoginForm`, right-aligned, linking to `/forgot-password`.
+
+### Tests
+- `src/components/auth/ForgotPasswordForm.test.tsx` — 3 tests covering the `redirectTo` shape, neutral success copy, and identical copy on Supabase error (the enumeration-safety contract).
+- `src/components/auth/ResetPasswordForm.test.tsx` — 3 tests covering client-side mismatch rejection, success → `/login?reset=1` navigation, and surfacing of non-session Supabase errors.
+
+### Not touched
+- `/auth/callback` already handles `type=recovery` via `verifyOtp` (added in PR #254), so no route-handler work was needed. The reset email lands at `/auth/callback?token_hash=...&type=recovery&next=/reset-password`, the callback validates and issues a recovery session, and the user arrives at `/reset-password` ready to call `updateUser`.
+
+
 ## [0.24.5.13] - 2026-05-21
 
 **fix(wizard): remount WizardClient on `?source` change so client-side nav from API→CSV branch renders the right body.**
