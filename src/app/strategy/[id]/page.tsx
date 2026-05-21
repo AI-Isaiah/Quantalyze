@@ -206,7 +206,7 @@ export default async function PublicStrategyPage({
           </Link>
         </div>
 
-        <Disclaimer variant="strategy" />
+        <Disclaimer variant="strategy" trustTier={strategy.trust_tier} />
       </div>
     </div>
   );

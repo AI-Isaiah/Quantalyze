@@ -5,6 +5,7 @@ import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
+import { notifyUserSignupApproved } from "@/lib/email";
 
 /**
  * POST /api/admin/manager-approve — task #14 sibling of allocator-approve.
@@ -83,12 +84,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
 
-  logAuditEvent(supabase, {
+  // PR #266 red-team: `await` instead of fire-and-forget so a failed audit
+  // insert surfaces as a 500 rather than a silent drop.
+  await logAuditEvent(supabase, {
     action: "manager.approve",
     entity_type: "user",
     entity_id: id,
     metadata: { new_status: "verified" },
   });
+
+  // PR #266 red-team: notify the user their signup is approved. See
+  // allocator-approve/route.ts for rationale.
+  const { data: approvedProfile } = await admin
+    .from("profiles")
+    .select("role, email")
+    .eq("id", id)
+    .single();
+  if (approvedProfile?.email && approvedProfile.role) {
+    await notifyUserSignupApproved(
+      approvedProfile.email as string,
+      approvedProfile.role as "allocator" | "manager" | "both",
+    );
+  }
 
   return NextResponse.json({ success: true });
 }

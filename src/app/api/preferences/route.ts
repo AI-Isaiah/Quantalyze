@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
+import { assertProfileApproved } from "@/lib/api/approval-gate";
 import {
   pickSelfEditableFields,
   validateSelfEditableInput,
@@ -15,6 +16,12 @@ export async function GET(): Promise<NextResponse> {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // Approval gate (PR #266 follow-up): allocator mandate preferences are
+  // an allocator-only surface; a pending-approval user has no business
+  // here. Page-level gate already redirects browsers, but a curl-style
+  // API hit bypassed it before this check landed.
+  const denied = await assertProfileApproved(supabase, user.id);
+  if (denied) return denied;
 
   try {
     const prefs = await getOwnPreferences(supabase, user.id);
@@ -34,6 +41,9 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // Approval gate — see GET handler above for rationale.
+  const deniedPut = await assertProfileApproved(supabase, user.id);
+  if (deniedPut) return deniedPut;
 
   const rl = await checkLimit(mandateAutoSaveLimiter, `preferences:${user.id}`);
   if (!rl.success) {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
+import { assertProfileApproved } from "@/lib/api/approval-gate";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 
@@ -36,6 +37,10 @@ async function getAuthedUserIdOrError(
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // Approval gate (PR #266 follow-up): wizard drafts belong to the
+  // post-approval flow; pre-approval users cannot create or mutate one.
+  const denied = await assertProfileApproved(supabase, user.id);
+  if (denied) return denied;
   return { userId: user.id };
 }
 

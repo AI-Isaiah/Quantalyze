@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { assertProfileApproved } from "@/lib/api/approval-gate";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { bridgeOutcomeCurvesLimiter, checkLimit } from "@/lib/ratelimit";
 
@@ -42,6 +43,11 @@ async function getAuthedUserIdOrError(
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // Approval gate (PR #266 follow-up): bridge-outcome curves are
+  // allocator-dashboard data; pending-approval users have no business
+  // reading them.
+  const denied = await assertProfileApproved(supabase, user.id);
+  if (denied) return denied;
   return { userId: user.id };
 }
 

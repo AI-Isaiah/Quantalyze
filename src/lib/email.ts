@@ -21,7 +21,8 @@ export type NotificationType =
   | "founder_new_strategy"
   | "founder_intro_request"
   | "founder_generic"
-  | "alert_digest";
+  | "alert_digest"
+  | "signup_approved";
 
 const resend = process.env.RESEND_API_KEY
   ? new Resend(process.env.RESEND_API_KEY)
@@ -461,6 +462,63 @@ export async function notifyManagerApproved(
      <p><a href="${APP_URL}/factsheet/${strategyId}" style="color:${BRAND_COLOR};">View your factsheet</a></p>
      ${SIGNATURE}`,
     "manager_approved",
+  );
+}
+
+/**
+ * Sent when an admin approves a pending-approval signup (the
+ * `allocator_status` / `manager_status` flips to `'verified'` via the
+ * /api/admin/allocator-approve and /api/admin/manager-approve routes
+ * introduced in PR #266).
+ *
+ * The /pending-approval page promises "We'll email you as soon as it's
+ * approved" — before this helper landed, no email was actually sent, so
+ * users polled the page or re-signed-up. The dispatch is `await`ed by the
+ * approve routes so a Resend failure surfaces as a 500 instead of being
+ * silently dropped.
+ *
+ * `role` controls the next-step copy: an allocator lands on /allocations,
+ * a manager on /strategies, role='both' on /onboarding so they can pick
+ * the entry point.
+ */
+export async function notifyUserSignupApproved(
+  userEmail: string,
+  role: "allocator" | "manager" | "both",
+) {
+  const safeEmail = escapeHtml(userEmail);
+  const nextStep = (() => {
+    switch (role) {
+      case "allocator":
+        return {
+          path: "/allocations",
+          cta: "Open your allocation workspace",
+          intent: "browse exchange-verified strategies and build a portfolio",
+        };
+      case "manager":
+        return {
+          path: "/strategies",
+          cta: "List your first strategy",
+          intent:
+            "publish a verified track record and start receiving allocator intros",
+        };
+      case "both":
+        return {
+          path: "/onboarding",
+          cta: "Finish onboarding",
+          intent:
+            "pick whether you want to start as an allocator, a manager, or both",
+        };
+    }
+  })();
+  await send(
+    userEmail,
+    safeSubject(`Welcome to ${PLATFORM_NAME} — your account is approved`),
+    `<p>Hi,</p>
+     <p>Your ${PLATFORM_NAME} account (<code>${safeEmail}</code>) has been approved. You can now sign in and ${nextStep.intent}.</p>
+     <p><a href="${APP_URL}${nextStep.path}" style="color:${BRAND_COLOR};">${nextStep.cta}</a></p>
+     <p>If you weren't expecting this, you can safely ignore the email.</p>
+     ${SIGNATURE}`,
+    "signup_approved",
   );
 }
 

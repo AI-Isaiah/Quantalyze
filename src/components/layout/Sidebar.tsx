@@ -21,13 +21,27 @@ function buildNavSections(
   isAdmin?: boolean,
   isAllocator?: boolean,
   flaggedCount?: number,
+  isManager?: boolean,
 ): NavSection[] {
-  const categories = populatedSlugs
-    ? DISCOVERY_CATEGORIES.filter((cat) => populatedSlugs.includes(cat.slug))
-    : DISCOVERY_CATEGORIES;
+  // Admins see BOTH allocator AND manager surfaces (triage / demo).
+  // Allocators see the allocator workspace + the Discovery rail (their
+  // strategy-shopping surface). Managers see the manager workspace and
+  // the Discovery rail is HIDDEN — Discovery is the allocator's
+  // browse-investable-strategies surface, not the manager's. role="both"
+  // gets both workspaces; the manager flag is derived independently so
+  // it does not get nulled out the way the pre-fix `!isAllocator` short
+  // circuit did.
+  const showsAllocatorWorkspace = isAllocator || isAdmin;
+  const showsManagerWorkspace = isManager || isAdmin;
+  const showsDiscovery = isAllocator || isAdmin;
 
   // Bucket categories by `group` preserving first-seen order so the
   // Discovery section renders as stable sub-groups (Digital Assets → TradFi).
+  // Build the groups even when Discovery will be hidden so the data path
+  // stays simple; we gate the section emission below.
+  const categories = populatedSlugs
+    ? DISCOVERY_CATEGORIES.filter((cat) => populatedSlugs.includes(cat.slug))
+    : DISCOVERY_CATEGORIES;
   const discoveryGroups: NavSubGroup[] = [];
   for (const cat of categories) {
     let bucket = discoveryGroups.find((g) => g.label === cat.group);
@@ -41,12 +55,6 @@ function buildNavSections(
       icon: SearchIcon,
     });
   }
-
-  // Admins see BOTH allocator AND manager surfaces (triage / demo).
-  // Allocators see only the allocator surface. Managers (non-allocators)
-  // see only the manager surface.
-  const showsAllocatorWorkspace = isAllocator || isAdmin;
-  const showsManagerWorkspace = !isAllocator || isAdmin;
   const workspaceItems: NavItem[] = [];
   if (showsAllocatorWorkspace) {
     workspaceItems.push({
@@ -68,7 +76,7 @@ function buildNavSections(
       heading: "MY WORKSPACE",
       items: workspaceItems,
     },
-    ...(discoveryGroups.length > 0
+    ...(showsDiscovery && discoveryGroups.length > 0
       ? [{
           heading: "DISCOVERY",
           // Discovery renders via `subGroups`; keep `items` empty so
@@ -101,12 +109,18 @@ export function Sidebar({
   populatedSlugs,
   isAdmin,
   isAllocator,
+  isManager,
   variant = "desktop",
   flaggedCount,
 }: {
   populatedSlugs?: string[];
   isAdmin?: boolean;
   isAllocator?: boolean;
+  /** `profile.role === "manager" || profile.role === "both"`. Independent
+   * of `isAllocator` so role="both" lights up BOTH workspaces; the
+   * pre-fix `!isAllocator` short-circuit hid the manager rail from
+   * "both" users. */
+  isManager?: boolean;
   /** "desktop" (default) mounts as a fixed left rail — existing behavior.
    *  "drawer" mounts as a flow child of its parent so the same Sidebar
    *  component can live inside the MobileSidebarDrawer overlay without
@@ -119,8 +133,8 @@ export function Sidebar({
 } = {}) {
   const pathname = usePathname();
   const sections = useMemo(
-    () => buildNavSections(populatedSlugs, isAdmin, isAllocator, flaggedCount),
-    [populatedSlugs, isAdmin, isAllocator, flaggedCount],
+    () => buildNavSections(populatedSlugs, isAdmin, isAllocator, flaggedCount, isManager),
+    [populatedSlugs, isAdmin, isAllocator, flaggedCount, isManager],
   );
 
   return (

@@ -5,6 +5,7 @@ import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
+import { notifyUserSignupApproved } from "@/lib/email";
 
 // audit-2026-05-07 P199 + P200 — see intro-request/route.ts for the rationale.
 // v0.22.24.2 review-fix: handler body inlined to drop the withAdminAuth
@@ -73,13 +74,32 @@ export async function POST(req: NextRequest) {
 
   // Sprint 6 Task 7.1b — audit the allocator approval. Use the user-scoped
   // `supabase` client so log_audit_event resolves auth.uid() to the acting
-  // admin's id.
-  logAuditEvent(supabase, {
+  // admin's id. PR #266 red-team: `await` instead of fire-and-forget so a
+  // failed audit insert surfaces as a 500 rather than a silent drop —
+  // non-repudiation depends on the trail.
+  await logAuditEvent(supabase, {
     action: "allocator.approve",
     entity_type: "user",
     entity_id: id as string,
     metadata: { new_status: "verified" },
   });
+
+  // PR #266 red-team: notify the user their signup is approved. The
+  // /pending-approval page promises this email; previously no helper
+  // existed and the promise was silently broken. `await` so a Resend
+  // outage surfaces as a 500 — admins should see the failure rather
+  // than approving a user who never gets the email.
+  const { data: approvedProfile } = await admin
+    .from("profiles")
+    .select("role, email")
+    .eq("id", id as string)
+    .single();
+  if (approvedProfile?.email && approvedProfile.role) {
+    await notifyUserSignupApproved(
+      approvedProfile.email as string,
+      approvedProfile.role as "allocator" | "manager" | "both",
+    );
+  }
 
   return NextResponse.json({ success: true });
 }

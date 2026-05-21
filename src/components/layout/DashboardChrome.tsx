@@ -14,6 +14,7 @@ interface DashboardChromeProps {
   populatedSlugs?: string[];
   isAdmin?: boolean;
   isAllocator?: boolean;
+  isManager?: boolean;
   children: React.ReactNode;
 }
 
@@ -40,6 +41,7 @@ export function DashboardChrome({
   populatedSlugs,
   isAdmin,
   isAllocator,
+  isManager,
   children,
 }: DashboardChromeProps) {
   const pathname = usePathname();
@@ -80,6 +82,7 @@ export function DashboardChrome({
           onClose={() => setMenuOpen(false)}
           isAdmin={isAdmin}
           isAllocator={isAllocator}
+          isManager={isManager}
           populatedSlugs={populatedSlugs}
           triggerRef={hamburgerRef}
           flaggedCount={flaggedCount}
@@ -98,6 +101,7 @@ export function DashboardChrome({
           populatedSlugs={populatedSlugs}
           isAdmin={isAdmin}
           isAllocator={isAllocator}
+          isManager={isManager}
           flaggedCount={flaggedCount}
         />
       </div>

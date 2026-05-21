@@ -348,7 +348,13 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
       const res = await fetch(`/api/strategies/draft/${strategyId}`, {
         method: "DELETE",
       });
-      if (!res.ok) {
+      // 404 is the desired end-state: the draft is already gone (finalized,
+      // deleted in another tab, never created server-side, or owned by a
+      // different user — the route returns 404 for all of these). The local
+      // cleanup in the finally block satisfies the user intent regardless, so
+      // surfacing a console.error for 404 is misleading noise. Only log when
+      // the response is a genuine failure that the user might want to retry.
+      if (!res.ok && res.status !== 404) {
         console.error("[wizard] delete draft failed:", await res.text());
       }
     } catch (err) {

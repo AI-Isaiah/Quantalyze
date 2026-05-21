@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
+import { assertProfileApproved } from "@/lib/api/approval-gate";
 import { findReplacementCandidates } from "@/lib/analytics-client";
 import {
   userActionLimiter,
@@ -20,6 +21,11 @@ export async function POST(req: NextRequest) {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // Approval gate (PR #266 follow-up): bridge fires a Python round-trip
+  // to find replacement candidates; expensive enough to deny to
+  // pending-approval users.
+  const denied = await assertProfileApproved(supabase, user.id);
+  if (denied) return denied;
 
   const rl = await checkLimit(userActionLimiter, `bridge:${user.id}`);
   if (!rl.success) {

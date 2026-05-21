@@ -65,9 +65,17 @@ vi.mock("@/components/strategy/ApiKeyManager", () => ({
   ApiKeyManager: () =>
     React.createElement("div", { "data-testid": "api-key-manager" }),
 }));
-vi.mock("@/components/strategy/CsvUpload", () => ({
-  CsvUpload: () =>
-    React.createElement("div", { "data-testid": "csv-upload" }),
+// Issue #12 (v0.24.5.22): the legacy `CsvUpload` component was deleted —
+// it mislabeled `daily_return` as "PnL" and wrote synthetic trade rows
+// with enum values (`exchange='csv_import'`, `order_type='daily_pnl'`)
+// that don't exist in the trades schema, causing a PostgREST
+// schema-cache error on every upload attempt. CSV-source strategies now
+// render an informational `<CsvStrategyEditNote>` instead. The page's
+// source-branch contract (CSV → no `<ApiKeyManager>` / no
+// `<KeyPermissionBadge>`) is unchanged.
+vi.mock("@/components/strategy/CsvStrategyEditNote", () => ({
+  CsvStrategyEditNote: () =>
+    React.createElement("div", { "data-testid": "csv-edit-note" }),
 }));
 vi.mock("@/components/connect/KeyPermissionBadge", () => ({
   KeyPermissionBadge: () =>
@@ -95,7 +103,7 @@ async function renderEditPage() {
 }
 
 describe("EditStrategyPage source-conditional panels (UAT 2026-05-17)", () => {
-  it("CSV-sourced strategy renders <CsvUpload> and HIDES <ApiKeyManager> + <KeyPermissionBadge>", async () => {
+  it("CSV-sourced strategy renders <CsvStrategyEditNote> and HIDES <ApiKeyManager> + <KeyPermissionBadge>", async () => {
     strategyDataMock.mockResolvedValue({
       data: {
         id: STRATEGY_ID,
@@ -107,7 +115,7 @@ describe("EditStrategyPage source-conditional panels (UAT 2026-05-17)", () => {
     });
     await renderEditPage();
 
-    expect(screen.getByTestId("csv-upload")).toBeInTheDocument();
+    expect(screen.getByTestId("csv-edit-note")).toBeInTheDocument();
     expect(screen.queryByTestId("api-key-manager")).not.toBeInTheDocument();
     expect(
       screen.queryByTestId("key-permission-badge"),
@@ -137,7 +145,7 @@ describe("EditStrategyPage source-conditional panels (UAT 2026-05-17)", () => {
       await renderEditPage();
 
       expect(screen.getByTestId("api-key-manager")).toBeInTheDocument();
-      expect(screen.queryByTestId("csv-upload")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("csv-edit-note")).not.toBeInTheDocument();
     },
   );
 
@@ -155,7 +163,7 @@ describe("EditStrategyPage source-conditional panels (UAT 2026-05-17)", () => {
 
     expect(screen.getByTestId("api-key-manager")).toBeInTheDocument();
     expect(screen.getByTestId("key-permission-badge")).toBeInTheDocument();
-    expect(screen.queryByTestId("csv-upload")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("csv-edit-note")).not.toBeInTheDocument();
   });
 
   it("CSV-sourced strategy with a lingering api_key_id STILL hides ApiKeyManager + KeyPermissionBadge", async () => {
@@ -172,7 +180,7 @@ describe("EditStrategyPage source-conditional panels (UAT 2026-05-17)", () => {
     });
     await renderEditPage();
 
-    expect(screen.getByTestId("csv-upload")).toBeInTheDocument();
+    expect(screen.getByTestId("csv-edit-note")).toBeInTheDocument();
     expect(screen.queryByTestId("api-key-manager")).not.toBeInTheDocument();
     expect(
       screen.queryByTestId("key-permission-badge"),

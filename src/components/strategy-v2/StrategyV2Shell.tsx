@@ -139,7 +139,7 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
         />
 
         <div className="mt-8">
-          <Disclaimer variant="strategy" />
+          <Disclaimer variant="strategy" trustTier={strategy.trust_tier} />
         </div>
       </div>
     </main>

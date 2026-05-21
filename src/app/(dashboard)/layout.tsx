@@ -31,6 +31,7 @@ export default async function DashboardLayout({
   } = await supabase.auth.getUser();
   let isAdmin = false;
   let isAllocator = false;
+  let isManager = false;
   if (user) {
     const { data: profile } = await supabase
       .from("profiles")
@@ -42,6 +43,7 @@ export default async function DashboardLayout({
     }
     isAdmin = profile?.is_admin === true;
     isAllocator = profile?.role === "allocator" || profile?.role === "both";
+    isManager = profile?.role === "manager" || profile?.role === "both";
   } else {
     // No session reaches the dashboard tree because every page already
     // calls supabase.auth.getUser() + redirect("/login") in its server
@@ -50,15 +52,23 @@ export default async function DashboardLayout({
     // the page-level redirect is what fires, not the gate.
   }
 
-  // isAdminUser() runs a SECOND auth check against the admin claim set
-  // (matches the canonical admin gate used by every admin route). Keep
-  // the call so the chrome flag stays consistent even if a future
-  // profile.is_admin drift slips in between profile + claim sources.
-  if (user) {
+  // PR #266 red-team: the previous shape called `isAdminUser()` here
+  // unconditionally — which itself re-loads `profiles.is_admin` and
+  // optionally probes `user_app_roles` — even though we already SELECTed
+  // `is_admin` above. That doubled the DB cost on every dashboard render.
+  // Only fall back to the claim-set check when `profile.is_admin` is
+  // false, so a `user_app_roles`-only admin (no profile flag) still
+  // surfaces admin chrome via the canonical gate. If the claim check
+  // throws, keep the profile flag — never a silent admin downgrade.
+  if (user && !isAdmin) {
     try {
       isAdmin = await isAdminUser(supabase, user);
-    } catch {
-      // Fall back to profile.is_admin set above.
+    } catch (err) {
+      // PR #266 red-team: empty `catch {}` hides auth-claim drift
+      // (exactly the case `isAdminUser` was added to detect). Log so
+      // the failure mode is visible in Vercel/Sentry rather than only
+      // surfacing as a missing admin sidebar.
+      console.error("[dashboard/layout] isAdminUser failed:", err);
     }
   }
 
@@ -66,8 +76,13 @@ export default async function DashboardLayout({
   try {
     const result = await getPopulatedCategorySlugs();
     if (result.length > 0) populatedSlugs = result;
-  } catch {
-    // undefined falls back to showing all categories in Sidebar
+  } catch (err) {
+    // PR #266 red-team: same silent-catch class as the isAdminUser
+    // branch above. `populatedSlugs` is a UX hint, not a security
+    // boundary, but a silent failure here leaves Discovery showing
+    // EVERY category (DB-source mismatch) rather than the populated
+    // subset — worth logging.
+    console.error("[dashboard/layout] getPopulatedCategorySlugs failed:", err);
   }
 
   return (
@@ -75,6 +90,7 @@ export default async function DashboardLayout({
       populatedSlugs={populatedSlugs}
       isAdmin={isAdmin}
       isAllocator={isAllocator}
+      isManager={isManager}
     >
       {children}
     </DashboardChrome>

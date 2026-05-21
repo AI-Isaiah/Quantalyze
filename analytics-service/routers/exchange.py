@@ -134,6 +134,57 @@ async def fetch_trades(request: Request, req: FetchTradesRequest):
     exchange = create_exchange(key_data["exchange"], api_key, api_secret, passphrase)
     since_ms = parse_since_ms(key_data.get("last_sync_at"))
 
+    # PR #260 follow-up: if this strategy's existing trade history is below
+    # the gate threshold, ignore `since_ms` and force a full-lookback walk.
+    # A poisoned checkpoint scenario (e.g. v0.24.5.10's pre-fix Bybit code
+    # advanced `last_sync_at` after a truncated 7-day pull) leaves stale
+    # users in a state where every re-verify only walks `[last_sync_at..now]`
+    # and the trades table can never accumulate enough history to pass the
+    # gate. The data fix for known affected users went in directly; this
+    # guard prevents the same pattern recurring from any future truncation
+    # regression.
+    if since_ms is not None:
+        try:
+            span = (
+                supabase.table("trades")
+                .select("timestamp")
+                .eq("strategy_id", req.strategy_id)
+                .order("timestamp", desc=False)
+                .limit(1)
+                .execute()
+            )
+            span_max = (
+                supabase.table("trades")
+                .select("timestamp")
+                .eq("strategy_id", req.strategy_id)
+                .order("timestamp", desc=True)
+                .limit(1)
+                .execute()
+            )
+            earliest = span.data[0]["timestamp"] if span.data else None
+            latest = span_max.data[0]["timestamp"] if span_max.data else None
+            if earliest and latest:
+                from datetime import datetime as _dt
+
+                e = _dt.fromisoformat(earliest.replace("Z", "+00:00"))
+                lt = _dt.fromisoformat(latest.replace("Z", "+00:00"))
+                span_days = (lt - e).total_seconds() / 86400.0
+                STRATEGY_GATE_MIN_DAYS = 7
+                if span_days < STRATEGY_GATE_MIN_DAYS:
+                    logger.info(
+                        "fetch-trades: trade-span %.2fd < %dd for strategy %s; ignoring stale since_ms checkpoint to walk full lookback",
+                        span_days,
+                        STRATEGY_GATE_MIN_DAYS,
+                        req.strategy_id,
+                    )
+                    since_ms = None
+        except Exception as e:
+            # Best-effort guard. If the trade-table probe fails for any
+            # reason (RLS shift, schema drift, network blip) we fall
+            # through to the original since_ms — degrades to pre-guard
+            # behaviour, never worse.
+            logger.warning("fetch-trades clamp probe failed: %s", e)
+
     try:
         trades = await fetch_all_trades(exchange, since_ms=since_ms)
         account_balance = await fetch_usdt_balance(exchange)

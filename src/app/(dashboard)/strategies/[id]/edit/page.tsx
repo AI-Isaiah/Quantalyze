@@ -3,7 +3,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { StrategyForm } from "@/components/strategy/StrategyForm";
 import { ApiKeyManager } from "@/components/strategy/ApiKeyManager";
-import { CsvUpload } from "@/components/strategy/CsvUpload";
+import { CsvStrategyEditNote } from "@/components/strategy/CsvStrategyEditNote";
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import type { Strategy } from "@/lib/types";
 import { redirect } from "next/navigation";
@@ -65,7 +65,7 @@ export default async function EditStrategyPage({
             since it has no live badge when the column is null.
           */}
           {strategy.source === "csv" ? (
-            <CsvUpload strategyId={strategy.id} />
+            <CsvStrategyEditNote />
           ) : (
             <>
               <ApiKeyManager
