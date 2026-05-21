@@ -146,6 +146,7 @@ export function CustomizeDrawer({
         }`}
         onClick={onClose}
         aria-hidden="true"
+        data-testid="customize-backdrop"
       />
       <aside
         className={`relative z-10 w-full max-w-md bg-surface border-l border-border shadow-elevated overflow-y-auto transition-transform duration-300 ease-out motion-reduce:transition-none ${
