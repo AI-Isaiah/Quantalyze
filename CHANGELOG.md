@@ -7,6 +7,18 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.4.7] - 2026-05-21
+
+**fix(audit-2026-05-07): /fetch-trades must reject deactivated API keys — closes C-0202.**
+
+The `POST /api/fetch-trades` handler in `analytics-service/routers/exchange.py` looked up the strategy's connected api_key by id only, with no `is_active=True` filter. A key that the user had revoked (or that the sole-source purge / admin had marked inactive) would still serve trade fetches, turning the deactivation gate into a paper-only control. The strategy-vs-key user_id ownership check at line 115 caught the cross-tenant case but not the within-tenant "user revoked their own key" case.
+
+### Fixed
+- `analytics-service/routers/exchange.py:107-109` (C-0202): api_keys SELECT now chains `.eq("is_active", True)`. Deactivated keys produce no row from `.single()`, and the existing 404 "API key not found" envelope fires with an operator-safe message that does not disclose whether the key exists but is deactivated.
+
+### Added (regression test — fails without fix, passes with fix)
+- `analytics-service/tests/test_exchange_router_c0202.py` — two assertions: (1) deactivated key → 404 envelope, (2) structural assertion that the api_keys SELECT chain contains `.eq("is_active", True)`. The structural assertion catches any future refactor that drops the filter.
+
 ## [0.24.4.6] - 2026-05-21
 
 **fix(audit-2026-05-07): admin security cluster — closes C-0004 + C-0017 + C-0019.**
