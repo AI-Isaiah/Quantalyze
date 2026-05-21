@@ -9,10 +9,66 @@ import {
 import { extractAnalytics } from "@/lib/queries";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
+import { isUuid } from "@/lib/utils";
 
 export const maxDuration = 30;
 
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+// audit-2026-05-07 C-0092 — drop the module-level NEXT_PUBLIC_APP_URL
+// constant. Mirrors the sibling pdf/route.ts C-0086 fix: a misconfigured
+// env var (or one influenced via the deployment env surface) would
+// otherwise drive the puppeteer instance to fetch an attacker-controlled
+// URL via the `${APP_URL}/factsheet/${id}/tearsheet` interpolation. The
+// per-request `appUrl(req)` resolver below pulls origin from the request
+// and enforces a production allowlist + VERCEL_URL fallback for previews.
+const APP_URL_ALLOWED_HOSTS: ReadonlySet<string> = new Set([
+  "quantalyze-rho.vercel.app",
+  "quantalyze.com",
+  "www.quantalyze.com",
+]);
+
+function isHostAllowed(host: string): boolean {
+  if (APP_URL_ALLOWED_HOSTS.has(host)) return true;
+  const vercelUrl = process.env.VERCEL_URL;
+  if (typeof vercelUrl === "string" && vercelUrl.length > 0 && host === vercelUrl) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Resolves the puppeteer goto origin from the inbound request. Mirrors
+ * the C-0086 fix in pdf/route.ts:
+ *   - Prefer `req.nextUrl.origin` (the deployment serving this request).
+ *   - In production VERCEL_ENV, require the host to be in the allowlist
+ *     or equal to VERCEL_URL — otherwise return null and let the caller
+ *     hard-fail. This closes the SSRF attack surface where a spoofed Host
+ *     header (or misconfigured proxy) could redirect puppeteer to an
+ *     attacker-controlled origin.
+ *   - Outside production, fall back to NEXT_PUBLIC_APP_URL / localhost
+ *     so `next dev` and unit tests work unchanged.
+ *
+ * The `origin !== "null"` literal-string guard is load-bearing — opaque-
+ * origin URLs (sandboxed iframes, certain SSR contexts) serialize as the
+ * string "null" per WHATWG URL.
+ */
+function appUrl(req: NextRequest): string | null {
+  const origin = req.nextUrl.origin;
+  if (origin && origin !== "null") {
+    if (process.env.VERCEL_ENV === "production") {
+      try {
+        const host = new URL(origin).host;
+        if (!isHostAllowed(host)) return null;
+      } catch {
+        return null;
+      }
+    }
+    return origin;
+  }
+  // Opaque/missing origin: production hard-fails (no fingerprintable
+  // env-driven fallback); other envs preserve the legacy localhost path.
+  if (process.env.VERCEL_ENV === "production") return null;
+  return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+}
 
 /**
  * GET /api/factsheet/[id]/tearsheet.pdf
@@ -87,6 +143,32 @@ export async function GET(
 
   const { id } = await params;
 
+  // audit-2026-05-07 C-0092 — validate `id` is a UUID before any string
+  // interpolation. Pre-fix the un-validated id flowed straight into the
+  // puppeteer goto URL — combined with the APP_URL constant this was a
+  // bare SSRF primitive. Reject with 400 (NOT 404) so the contract maps
+  // 1:1 to the validation failure rather than masquerading as a missing
+  // strategy lookup.
+  if (!isUuid(id)) {
+    return NextResponse.json({ error: "Invalid strategy id" }, { status: 400 });
+  }
+
+  // audit-2026-05-07 C-0092 — resolve the puppeteer goto target BEFORE
+  // grabbing the queue slot / launching Chromium. A null return means
+  // production allowlist rejected the request origin or the origin was
+  // opaque; hard-fail so we never silently fall back to a localhost or
+  // attacker-controlled host.
+  const targetOrigin = appUrl(req);
+  if (targetOrigin === null) {
+    console.error(
+      "[tearsheet-pdf] Refused to render: request origin not allow-listed in production",
+    );
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 },
+    );
+  }
+
   const admin = createAdminClient();
   const { data: strategy, error } = await admin
     .from("strategies")
@@ -118,7 +200,7 @@ export async function GET(
     page.setDefaultTimeout(15_000);
     await page.setViewport({ width: 816, height: 1056 }); // 8.5 × 11 @ 96 DPI
 
-    await page.goto(`${APP_URL}/factsheet/${id}/tearsheet`, {
+    await page.goto(`${targetOrigin}/factsheet/${id}/tearsheet`, {
       waitUntil: "networkidle0",
       timeout: 25000,
     });
@@ -133,10 +215,38 @@ export async function GET(
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${sanitizeFilename(strategy.name, "Strategy")}-tearsheet.pdf"`,
-        // Public route (accessible to cap-intro partners without auth) — let
-        // Vercel's CDN cache hot tearsheets so a newsletter blast doesn't
-        // launch a fresh Chromium per click.
-        "Cache-Control": "s-maxage=3600, stale-while-revalidate=86400",
+        // audit-2026-05-07 C-0093 — Cache-Control + Vary contract.
+        //
+        // Pre-fix: `s-maxage=3600, stale-while-revalidate=86400` (public)
+        // with NO Vary header. Two failure modes:
+        //   1. CDN cross-alias bleed — Vercel routes preview deployments
+        //      under multiple aliases; without Vary, the shared CDN can
+        //      serve a preview-aliased PDF to a production-aliased
+        //      request. The PDF bytes are a function of the Host header
+        //      at generation time (via appUrl(req) → puppeteer goto), so
+        //      the CDN MUST key per-host.
+        //   2. Disclosure-tier staleness — when an admin moves a
+        //      strategy from institutional → exploratory, the
+        //      previously-rendered PDF (still showing institutional
+        //      identity) keeps serving from the CDN for up to 25 hours
+        //      (s-maxage 3600 + stale-while-revalidate 86400). Tighten
+        //      max-age to 5 minutes so disclosure-tier downgrades flush
+        //      within an acceptable window.
+        //
+        // FOLLOW-UP: a disclosure_tier change should ALSO trigger
+        // CDN invalidation explicitly (e.g. via revalidateTag once we
+        // adopt cache tags here). Tracked as a separate item in the
+        // tech-debt backlog — the conservative max-age=300 above bounds
+        // the worst-case staleness in the meantime.
+        //
+        // Vary: Cookie, Authorization — even though the route is
+        // currently stateless (no cookies forwarded to puppeteer; see
+        // the SECURITY INVARIANT block at module top), declaring Vary
+        // on auth-bearing headers prevents the CDN from serving a
+        // cached anonymous render to a future authenticated request if
+        // statelessness ever regresses.
+        "Cache-Control": "public, s-maxage=300, stale-while-revalidate=300",
+        Vary: "Cookie, Authorization, Host",
       },
     });
   } catch (err) {

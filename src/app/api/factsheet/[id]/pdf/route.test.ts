@@ -255,6 +255,7 @@ describe("GET /api/factsheet/[id]/pdf — URL origin + Cache-Control (Cluster L 
     const setDefaultNavigationTimeout = vi.fn();
     const setDefaultTimeout = vi.fn();
     const setViewport = vi.fn().mockResolvedValue(undefined);
+    const setUserAgent = vi.fn().mockResolvedValue(undefined);
     const evaluate = vi.fn().mockResolvedValue(undefined);
     const pdf = vi.fn().mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
     const newPage = vi.fn().mockResolvedValue({
@@ -262,6 +263,7 @@ describe("GET /api/factsheet/[id]/pdf — URL origin + Cache-Control (Cluster L 
       setDefaultNavigationTimeout,
       setDefaultTimeout,
       setViewport,
+      setUserAgent,
       evaluate,
       pdf,
     });
@@ -455,6 +457,7 @@ describe("GET /api/factsheet/[id]/pdf — production host allow-list + cache saf
       setDefaultNavigationTimeout: vi.fn(),
       setDefaultTimeout: vi.fn(),
       setViewport: vi.fn().mockResolvedValue(undefined),
+      setUserAgent: vi.fn().mockResolvedValue(undefined),
       evaluate: vi.fn().mockResolvedValue(undefined),
       pdf: vi.fn().mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46])),
     });
@@ -621,5 +624,107 @@ describe("GET /api/factsheet/[id]/pdf — production host allow-list + cache saf
     expect(res.headers.get("ETag")).toBe(
       '"00000000-0000-0000-0000-000000000001:2026-05-17T12:00:00.000Z"',
     );
+  });
+});
+
+/**
+ * audit-2026-05-07 C-0090 — self-recursion fence on the factsheet PDF
+ * route. The route launches a puppeteer that page.goto()'s the same
+ * deployment's HTML factsheet page. To make recursion provably
+ * impossible (and catch any future regression that introduces it), the
+ * puppeteer page carries a custom User-Agent, and the route refuses any
+ * inbound request whose UA matches that fingerprint.
+ *
+ * Two coverage points:
+ *   1. Inbound request with the renderer UA → 508 Loop Detected, no
+ *      rate-limit / DB / puppeteer touch.
+ *   2. Successful render path stamps the renderer UA on the puppeteer
+ *      page via setUserAgent BEFORE goto, so the inner request to
+ *      /factsheet/[id] carries the fingerprint.
+ */
+describe("GET /api/factsheet/[id]/pdf — self-recursion fence (audit-2026-05-07 C-0090)", () => {
+  let goto: ReturnType<typeof vi.fn>;
+  let setUserAgent: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.mocked(checkLimit).mockReset();
+    vi.mocked(checkLimit).mockResolvedValue({
+      success: true,
+      retryAfter: 0,
+    } as never);
+    vi.mocked(createAdminClient).mockReset();
+    singlePublishedComplete();
+
+    const puppeteer = await import("@/lib/puppeteer");
+    vi.mocked(puppeteer.acquirePdfSlot).mockReset();
+    vi.mocked(puppeteer.launchBrowser).mockReset();
+    vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
+    goto = vi.fn().mockResolvedValue(undefined);
+    setUserAgent = vi.fn().mockResolvedValue(undefined);
+    const newPage = vi.fn().mockResolvedValue({
+      goto,
+      setDefaultNavigationTimeout: vi.fn(),
+      setDefaultTimeout: vi.fn(),
+      setViewport: vi.fn().mockResolvedValue(undefined),
+      setUserAgent,
+      evaluate: vi.fn().mockResolvedValue(undefined),
+      pdf: vi
+        .fn()
+        .mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46])),
+    });
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(puppeteer.launchBrowser).mockResolvedValue({
+      newPage,
+      close,
+    } as never);
+  });
+
+  afterEach(() => {
+    process.env = { ...ENV_BACKUP };
+  });
+
+  it("C-0090: request carrying the renderer User-Agent is refused with 508 Loop Detected", async () => {
+    // Import to read the exported fingerprint — tests stay coupled to
+    // the source constant so a future rename surfaces here loudly.
+    const { GET, PDF_RENDERER_USER_AGENT } = await import("./route");
+    const req = new NextRequest(
+      `https://quantalyze.com/api/factsheet/${STRATEGY_ID}/pdf`,
+      {
+        method: "GET",
+        headers: { "user-agent": PDF_RENDERER_USER_AGENT },
+      },
+    );
+    const res = await GET(req, mkParams());
+    expect(res.status).toBe(508);
+    // Critical anti-assertions: the fence MUST short-circuit BEFORE
+    // touching the rate limiter, Supabase, or puppeteer. Otherwise a
+    // recursion would still burn the semaphore on every entry.
+    expect(checkLimit).not.toHaveBeenCalled();
+    expect(createAdminClient).not.toHaveBeenCalled();
+    expect(goto).not.toHaveBeenCalled();
+  });
+
+  it("C-0090: puppeteer page is stamped with the renderer User-Agent BEFORE goto", async () => {
+    // The setUserAgent call is the load-bearing piece: it propagates
+    // the fingerprint onto every outbound request from puppeteer,
+    // which lets the route reject re-entry at the fence above. If a
+    // refactor reorders setUserAgent AFTER goto, the first navigation
+    // would carry Chromium's default UA and the fence wouldn't catch
+    // an in-page recursive PDF fetch. Assert the call order explicitly.
+    const { GET, PDF_RENDERER_USER_AGENT } = await import("./route");
+    const req = new NextRequest(
+      `https://quantalyze.com/api/factsheet/${STRATEGY_ID}/pdf`,
+      { method: "GET" },
+    );
+    const res = await GET(req, mkParams());
+    expect(res.status).toBe(200);
+    expect(setUserAgent).toHaveBeenCalledTimes(1);
+    expect(setUserAgent).toHaveBeenCalledWith(PDF_RENDERER_USER_AGENT);
+    // Ordering guard: setUserAgent's invocation order must precede
+    // goto's. vi.fn tracks `.mock.invocationCallOrder` per fn.
+    const setUaOrder = setUserAgent.mock.invocationCallOrder[0];
+    const gotoOrder = goto.mock.invocationCallOrder[0];
+    expect(setUaOrder).toBeLessThan(gotoOrder);
   });
 });
