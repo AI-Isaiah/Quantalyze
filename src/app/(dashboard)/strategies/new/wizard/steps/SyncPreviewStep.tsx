@@ -28,6 +28,29 @@ import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
  */
 
 /**
+ * Pure helper: derive the detected-markets set from a sample of trade
+ * symbols. The Bybit + OKX ingest writes daily portfolio-level
+ * aggregates under the synthetic symbol "PORTFOLIO"
+ * (see analytics-service/services/exchange.py); those rows must NOT
+ * surface as a "market" in the factsheet preview hint or the metadata
+ * step. Pulled out of the polling callback so a regression test can pin
+ * the filter without mocking the entire Supabase client.
+ */
+export function deriveDetectedMarkets(
+  symbols: ReadonlyArray<string | null | undefined>,
+  limit = 6,
+): string[] {
+  const set = new Set<string>();
+  for (const raw of symbols) {
+    const symbol = raw ?? "";
+    if (symbol === "PORTFOLIO") continue;
+    const base = symbol.split(/[-/]/)[0]?.toUpperCase();
+    if (base) set.add(base);
+  }
+  return Array.from(set).slice(0, limit);
+}
+
+/**
  * Read the correlation_id from the <meta name="x-correlation-id"> tag the
  * root layout renders server-side (Plan 16-02 / OBSERV-09). Falls back to
  * a fresh UUID v4 when the meta tag is absent (e.g., during the parallel
@@ -222,12 +245,9 @@ export function SyncPreviewStep({
             : Promise.resolve({ data: null as { exchange?: string } | null }),
         ]);
 
-        const marketsSet = new Set<string>();
-        for (const trade of sample ?? []) {
-          const symbol = (trade as { symbol?: string }).symbol ?? "";
-          const base = symbol.split(/[-/]/)[0]?.toUpperCase();
-          if (base) marketsSet.add(base);
-        }
+        const detectedMarkets = deriveDetectedMarkets(
+          (sample ?? []).map((t) => (t as { symbol?: string }).symbol),
+        );
 
         const keyRow = keyRowResult.data;
 
@@ -282,7 +302,7 @@ export function SyncPreviewStep({
           tradeCount: tradeCount ?? 0,
           earliestTradeAt: earliest?.[0]?.timestamp ?? null,
           latestTradeAt: latest?.[0]?.timestamp ?? null,
-          detectedMarkets: Array.from(marketsSet).slice(0, 6),
+          detectedMarkets,
           exchange: keyRow?.exchange ?? null,
           metrics,
           sparkline: Array.isArray(analytics?.sparkline_returns)
