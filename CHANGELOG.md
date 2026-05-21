@@ -7,6 +7,23 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.4.2] - 2026-05-21
+
+**fix(audit-2026-05-07): Python analytics CRITICAL cluster — closes C-0190 + C-0231.**
+
+PR J (partial cluster, analytics-service): two Python analytics-service CRITICALs closed. C-0233 (transforms.py `min_balance` heuristic) was started but not completed in this PR — deferred to a follow-up since the test harness for that path proved more involved than budgeted.
+
+### Fixed
+- `analytics-service/main_worker.py` (C-0190): the worker calling `supabase.rpc("claim_compute_jobs_with_priority", ...)` now wraps the call in a try/except that detects PostgreSQL error code 42883 (function does not exist) and falls back to the legacy `claim_compute_jobs` RPC. A Supabase environment that hasn't applied the priority-claim migration would have hard-failed the worker loop pre-fix.
+- `analytics-service/services/match_eval.py` (C-0231): paginated SELECT on `match_batches` now bounds the fetch by `.lt("computed_at", max_intro_ts)` instead of fetching the entire allocator-batch history per call. The pre-fix in-memory sort at line 170-171 was quadratic in match_batches table size; the DB-side time-bound brings it back to linear in the relevant window.
+
+### Added (regression tests — fail without fix, pass with fix)
+- `analytics-service/tests/test_main_worker.py` (C-0190): asserts the 42883 fallback path calls the legacy RPC + that other error codes still propagate.
+- `analytics-service/tests/test_match_eval.py` (C-0231): asserts the SELECT chain includes `.lt("computed_at", ...)` AND that rows older than max_intro_ts are not fetched.
+
+### Deferred
+- C-0233 (transforms.py `min_balance` heuristic): the scale-with-max bug is still present; needs a follow-up PR with a test harness that mocks the daily_pnl + daily_agg dataframes more carefully. Tracked as P0 in the OPEN backlog.
+
 ## [0.24.4.1] - 2026-05-21
 
 **test(audit-2026-05-07): audit-emission contract test cluster — closes C-0073 + C-0094 + C-0096 + C-0101 + C-0104 + C-0110 + C-0121 + C-0143.**
