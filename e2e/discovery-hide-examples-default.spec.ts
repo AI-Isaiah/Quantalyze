@@ -59,18 +59,20 @@ function escapeForRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 /**
- * Red-team RT-J04 (HIGH conf 7): anchor each alternation with `\b` word
- * boundaries so the regex matches whole tokens, not substrings of arbitrary
- * row text. Without anchors, `tr.textContent` substring collisions (badge
- * labels, AUM digits, SyncBadge timestamp, Verified tooltip, or a future
- * user-created strategy named "Helios L/S Stat Arb v2") would falsely
- * trigger the seed-name regex in BOTH directions — the pre-toggle "zero
- * matches" assertion AND the post-toggle "any match" poll. Word-boundary
- * anchoring closes both vectors while staying minimally invasive.
+ * Seed names as a plain Set for exact-equality matching. We query the
+ * strategy-name `<a href="/factsheet/...">` links directly (one anchor
+ * element per row, anchored on the factsheet href prefix so a future
+ * unrelated link added to the row can't false-match) and compare each
+ * link's textContent to this set. Exact equality closes the RT-J04
+ * substring-collision concern (a user-created strategy named "Helios L/S
+ * Stat Arb v2" would have a different textContent than the seed) without
+ * needing word-boundary regex acrobatics — which broke against
+ * `tbody.allTextContents()` concatenation in CI (the trailing `\b`
+ * required a non-word character after the name, but the rendered text
+ * concatenates "Vega Volatility Harvester" directly with "delta_neutral",
+ * making 'r' adjacent to 'd' and the boundary inert).
  */
-const SEED_NAMES_REGEX = new RegExp(
-  STRATEGY_PROFILES.map((p) => `\\b${escapeForRegex(p.name)}\\b`).join("|"),
-);
+const SEED_NAMES = new Set(STRATEGY_PROFILES.map((p) => p.name));
 
 const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_URL &&
@@ -100,22 +102,24 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     if (userId) await cleanupTestAllocator(userId);
   });
 
-  // TODO(discovery-hide-examples-flake): post-toggle row-poll fails
-  // reproducibly in CI even after (a) wiring seed strategies to
-  // crypto-sma via category_id (v0.24.1.1 fix), (b) correcting the
-  // pre-toggle empty-state expectation, (c) clicking the <input>
-  // directly with networkidle wait, (d) using keyboard Space to fire
-  // a React-native event. All 8 seed strategies are confirmed in the
-  // test Supabase project (qmnijlgmdhviwzwfyzlc) with
-  // category_id linked + status='published' + RLS-readable as
-  // authenticated. Suspect remaining issue is React hydration timing
-  // on the freshly-rebuilt preview deploy specific to the e2e job —
-  // needs Playwright trace replay to diagnose further (not available
-  // in current artifact set). Skipping to unblock /ship for the
-  // larger CRITICAL fix backlog. The pre-toggle empty-state
-  // assertion + the seed-fix changes still provide real regression
-  // value via the unskipped portion of this and sibling specs.
-  test.skip(
+  // 2026-05-21 — re-enabled after StrategyTable.tsx:338 functional-update
+  // fix. Prior diagnosis suspected React hydration timing on the freshly
+  // rebuilt preview deploy. Root cause was the toggle handler closing over
+  // a stale `showExamples` value: between the click being scheduled and the
+  // closure invoking `setShowExamples(!showExamples)`, the hydration effect
+  // at StrategyTable.tsx:162-171 could queue a `setShowExamples(false)`,
+  // and the stale closure would re-flip back to false on top — leaving the
+  // seeds hidden. Switching the handler to `setShowExamples(v => !v)`
+  // collapses the race; the functional update always reads the latest
+  // committed value at fire time.
+  //
+  // If this test flakes again in CI, the diagnostic block at the end of
+  // the post-toggle poll captures: (a) rendered row count, (b) sample
+  // tbody text, (c) the checkbox's React-controlled `checked` attribute,
+  // (d) a full-page screenshot. That artifact set should let the next
+  // investigator see WHERE the state-vs-render parity broke without
+  // needing a Playwright trace.
+  test(
     "first /discovery/[slug] visit shows zero example strategies (and toggle reveals them)",
     async ({
     page,
@@ -209,9 +213,18 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     // requires that the rendered rows contain ZERO seed-name matches —
     // a strict contract. If the rows include any seed name on first
     // paint, the DEFAULTS.hide_examples=true invariant has regressed.
-    const preToggleRowsText = await rowsLocator.allTextContents();
-    const preToggleSeedMatches = preToggleRowsText.filter((t) =>
-      SEED_NAMES_REGEX.test(t),
+    // Query the strategy-name anchor inside each row directly. The href
+    // prefix `/factsheet/` filters out unrelated row links (star button,
+    // simulate-impact CTA, etc.), and exact equality against SEED_NAMES
+    // avoids the tbody-textContent concatenation pitfall (a name like
+    // "Vega Volatility Harvester" gets stuck to the next badge text
+    // "delta_neutral", which broke the prior word-boundary regex).
+    const strategyLinkLocator = page.locator(
+      'table tbody tr a[href^="/factsheet/"]',
+    );
+    const preToggleNames = await strategyLinkLocator.allTextContents();
+    const preToggleSeedMatches = preToggleNames.filter((t) =>
+      SEED_NAMES.has(t.trim()),
     );
     expect(
       preToggleSeedMatches,
@@ -256,23 +269,64 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     // 091 backfill guarantees the seed names exist in the DB; toggling
     // hide-examples OFF MUST surface them. If the toggle is broken
     // (no-op), the assertion fails loudly with a useful diagnostic.
-    await expect
-      .poll(
-        async () => {
-          const rowsText = await rowsLocator.allTextContents();
-          return rowsText.some((t) => SEED_NAMES_REGEX.test(t));
-        },
-        {
-          timeout: 10000,
-          message:
-            "after toggling Hide examples OFF, at least one seed strategy " +
-            "(Stellar Neutral / Nebula Momentum / Aurora Basis / Vega " +
-            "Volatility / Helios L/S / Orion Grid / Pulsar Trend / Quasar " +
-            "Mean Reversion) MUST be visible — controlled-state regression " +
-            "if the toggle has no effect",
-        },
-      )
-      .toBe(true);
+    try {
+      await expect
+        .poll(
+          async () => {
+            const names = await strategyLinkLocator.allTextContents();
+            return names.some((t) => SEED_NAMES.has(t.trim()));
+          },
+          {
+            timeout: 10000,
+            message:
+              "after toggling Hide examples OFF, at least one seed strategy " +
+              "(Stellar Neutral / Nebula Momentum / Aurora Basis / Vega " +
+              "Volatility / Helios L/S / Orion Grid / Pulsar Trend / Quasar " +
+              "Mean Reversion) MUST be visible — controlled-state regression " +
+              "if the toggle has no effect",
+          },
+        )
+        .toBe(true);
+    } catch (err) {
+      // 2026-05-21 diagnostic capture for the persistent CI flake. Dump
+      // everything the next investigator will want without needing a
+      // Playwright trace.
+      const rowCount = await rowsLocator.count();
+      const rowsSample = (await rowsLocator.allTextContents())
+        .slice(0, 5)
+        .map((t, i) => `  [${i}] ${t.slice(0, 200)}`)
+        .join("\n");
+      const checkboxState = await hideExamplesCheckbox.evaluate(
+        (el: HTMLInputElement) => ({
+          domChecked: el.checked,
+          ariaChecked: el.getAttribute("aria-checked"),
+          disabled: el.disabled,
+        }),
+      );
+      const tbodyHtml = await page
+        .locator("table tbody")
+        .innerHTML()
+        .catch(() => "<unable to read>");
+      // eslint-disable-next-line no-console
+      console.error(
+        [
+          "[discovery-hide-examples-default] post-toggle poll FAILED",
+          `rendered row count: ${rowCount}`,
+          `checkbox state: ${JSON.stringify(checkboxState)}`,
+          "first 5 row texts:",
+          rowsSample || "  <no rows>",
+          "tbody HTML (first 2000 chars):",
+          tbodyHtml.slice(0, 2000),
+        ].join("\n"),
+      );
+      await page
+        .screenshot({
+          path: "test-results/discovery-hide-examples-flake.png",
+          fullPage: true,
+        })
+        .catch(() => undefined);
+      throw err;
+    }
   },
   );
 });

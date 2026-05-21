@@ -335,7 +335,18 @@ export function StrategyTable({
         search={search}
         onSearchChange={(s) => { setSearch(s); setPage(0); }}
         showExamples={showExamples}
-        onToggleExamples={() => { setShowExamples(!showExamples); setPage(0); }}
+        onToggleExamples={() => {
+          // Functional update so the handler reads the current `showExamples`
+          // value at fire time, not the value captured when the click handler
+          // closure was created. Defends against a hydration race where the
+          // hydration effect at line 162-171 queues a `setShowExamples`
+          // between the click being scheduled and the closure invoking the
+          // setter — the stale closure would otherwise flip back to the
+          // pre-hydration value. Tied to the e2e flake documented in
+          // e2e/discovery-hide-examples-default.spec.ts:103-117.
+          setShowExamples((v) => !v);
+          setPage(0);
+        }}
         sortKey={sortKey}
         onSortKeyChange={handleSortKeyChange}
         sortDir={sortDir}
