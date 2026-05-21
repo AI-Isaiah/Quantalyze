@@ -7,6 +7,17 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.4.6] - 2026-05-21
+
+**fix(audit-2026-05-07): admin security cluster — closes C-0004 + C-0017 + C-0019.**
+
+PR L: three admin-side route + audit policy CRITICALs.
+
+### Fixed
+- `src/app/(dashboard)/scenarios/page.tsx` (C-0017): added allocator role gate. Any authenticated user could previously read institutional strategies (even with `is_example=true` filter, defense-in-depth was missing).
+- `src/app/api/account/deletion-request/route.ts` (C-0019): response envelope now includes typed `idempotent: boolean` so callers can discriminate "this request already existed" from "newly created" without URL-pattern sniffing.
+- `src/__tests__/audit-log-cold-archive.test.ts` (C-0004): replaced silent `if (insertErr || !insertData) { console.warn(...); return; }` patterns with explicit `expect()` assertions at all three sites. Setup failures now surface as test failures, not silent skips.
+
 ## [0.24.4.5] - 2026-05-21
 
 **fix(audit-2026-05-07): type/component refactor cluster (complete) — closes C-0142 + C-0133 + C-0123.**
