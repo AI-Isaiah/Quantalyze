@@ -7,6 +7,18 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.3.9] - 2026-05-21
+
+**fix(audit-2026-05-07): bump ATTESTATION_VERSION to mark `getClientIp` semantic swap — closes C-0078.**
+
+The unified `getClientIp` helper in `src/lib/ratelimit.ts` switched silently from leftmost-XFF (original client IP, from the perspective of the trust chain) to rightmost-XFF / `x-real-ip` (Vercel-verified TCP peer, which is the edge node behind a Vercel/Cloudflare topology). Behind a typical edge chain this means attestation rows after the switch store the EDGE IP rather than the original client IP — audit / compliance-relevant for accredited-investor records (MAS / FINRA discriminators read `ip_address` from the row), but the `metadata.version` constant was unchanged so downstream audit consumers could not correlate stored `ip_address` with the IP-semantic regime in force when that row was written.
+
+### Fixed
+- `src/app/api/attestation/route.ts:7` (C-0078): bumped `ATTESTATION_VERSION` from `"2026-04-07"` → `"2026-05-21"` with an in-source comment describing the IP-semantic boundary. The constant is read in two places (the upsert `version` column and the audit_log `metadata.version` field), so both stored row + audit emission carry the new version stamp for every attestation written after this version lands. Old rows (version=2026-04-07) → leftmost-XFF semantics. New rows (version=2026-05-21) → rightmost-XFF / x-real-ip semantics. Compliance consumers can now discriminate by reading `metadata.version` on each row.
+
+### Verified (no behavior change)
+- `src/app/api/attestation/route.test.ts` — 6 tests pass unchanged. The mock returns a hardcoded row to simulate the DB, so the route's outbound payload (which uses the bumped constant) and the mock's inbound payload (which simulates pre-existing rows from the old regime) are correctly decoupled — exactly the dual-version state the bump is meant to surface.
+
 ## [0.24.3.8] - 2026-05-21
 
 **fix(audit-2026-05-07): `ensureAuthUser` policy gate refuses real-user / cross-partner binding — closes C-0181.**

@@ -4,7 +4,24 @@ import { userActionLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { assertSameOrigin } from "@/lib/csrf";
 import { logAuditEvent } from "@/lib/audit";
 
-const ATTESTATION_VERSION = "2026-04-07";
+// ATTESTATION_VERSION is the schema/semantic version stamped on every
+// attestation row in metadata.version. Audit consumers correlate
+// stored `ip_address` semantics with this version.
+//
+// 2026-05-21 (C-0078, audit-2026-05-07): bumped to mark the
+// `getClientIp` IP-semantic swap. Prior to the unified getClientIp
+// helper, attestation rows stored the LEFTMOST `x-forwarded-for` entry
+// (the original client IP from the perspective of the trust chain).
+// The current `getClientIp` in src/lib/ratelimit.ts prefers
+// `x-real-ip` (Vercel-verified TCP peer) and falls back to the
+// RIGHTMOST `x-forwarded-for` entry (edge node). On a typical
+// Vercel/Cloudflare topology this means newer rows store the edge IP,
+// older rows store the original client IP. The version bump lets
+// downstream audit/compliance consumers (accredited-investor records,
+// MAS / FINRA disclosures) discriminate by reading the `metadata.version`
+// stamp on each row. Old rows: '2026-04-07' (leftmost-XFF semantics).
+// New rows: '2026-05-21' (rightmost-XFF / x-real-ip semantics).
+const ATTESTATION_VERSION = "2026-05-21";
 
 /**
  * POST /api/attestation
