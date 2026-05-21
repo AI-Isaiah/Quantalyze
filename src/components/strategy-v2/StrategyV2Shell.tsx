@@ -66,7 +66,7 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
             >
               {strategy.name}
             </h1>
-            <VerifiedBadge />
+            <VerifiedBadge trustTier={strategy.trust_tier} />
           </div>
           {strategy.start_date ? (
             <p className="mt-2 text-xs font-normal text-text-muted">
