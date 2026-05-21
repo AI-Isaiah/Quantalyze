@@ -10,6 +10,7 @@ import { WizardChrome, WIZARD_STEPS_CSV } from "./WizardChrome";
 import { ConnectKeyStep, type ConnectKeySuccess } from "./steps/ConnectKeyStep";
 import { SyncPreviewStep, type SyncPreviewSnapshot } from "./steps/SyncPreviewStep";
 import { MetadataStep, type MetadataDraft } from "./steps/MetadataStep";
+import { canonicalizeExchangeList } from "@/lib/constants";
 import { SubmitStep } from "./steps/SubmitStep";
 import { CsvUploadStep } from "./steps/CsvUploadStep";
 import { CsvPreviewStep } from "./steps/CsvPreviewStep";
@@ -131,7 +132,19 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
           strategyTypes: initialDraft.strategy_types ?? [],
           subtypes: initialDraft.subtypes ?? [],
           markets: initialDraft.markets ?? [],
-          supportedExchanges: initialDraft.supported_exchanges ?? [],
+          // QA report 2026-05-21 ISSUE-004: create_wizard_strategy seeds
+          // strategies.supported_exchanges from api_keys.exchange in
+          // lowercase ('bybit'/'okx'/'binance' for check-constraint
+          // compliance), but the MetadataStep chip group uses
+          // case-sensitive .includes() against EXCHANGES (canonical
+          // 'Bybit'/'OKX'/'Binance'). Without normalization the chip
+          // appears unselected on resume, the user clicks it, and the
+          // array grows to ['bybit', 'Bybit'] — persisted verbatim into
+          // strategies.supported_exchanges and surfaced as duplicated
+          // copy on the review and admin views.
+          supportedExchanges: canonicalizeExchangeList(
+            initialDraft.supported_exchanges ?? [],
+          ),
           leverageRange: initialDraft.leverage_range ?? "",
           aum: initialDraft.aum?.toString() ?? "",
           maxCapacity: initialDraft.max_capacity?.toString() ?? "",
