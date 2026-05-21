@@ -197,3 +197,188 @@ describe("Phase 16 / OBSERV-01 correlation_id propagation", () => {
     });
   });
 });
+
+/**
+ * G15-003 — AnalyticsUpstreamError forwarding contract.
+ *
+ * Pins the four invariants route handlers rely on when forwarding upstream
+ * errors instead of flattening every failure to 500:
+ *   - 4xx body is forwarded as 4xx (NOT 500)
+ *   - 5xx body is forwarded as 5xx (with the original status)
+ *   - JSON-body vs text-body fork (analyticsRequest reads .json() then
+ *     falls back to .text() when content-type is not application/json)
+ *   - statusCode (.status) and message (.body equivalent) round-trip
+ *   - Non-Error-shape throw inside fetch (network failure) bubbles up as
+ *     the wrapper's generic "not reachable" Error, NOT AnalyticsUpstreamError
+ */
+describe("AnalyticsUpstreamError", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function callInternal(
+    fetchMock: ReturnType<typeof vi.fn>,
+  ): Promise<unknown> {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchMock as unknown as typeof globalThis.fetch,
+    );
+    const mod = await import("./analytics-client");
+    type Internal = {
+      __INTERNAL_analyticsRequest: (
+        path: string,
+        body: Record<string, unknown> | null,
+      ) => Promise<unknown>;
+    };
+    return (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+      "/test",
+      { ping: 1 },
+    );
+  }
+
+  it("constructor preserves message and status round-trip", async () => {
+    const mod = await import("./analytics-client");
+    const err = new mod.AnalyticsUpstreamError("boom", 418);
+    expect(err.message).toBe("boom");
+    expect(err.status).toBe(418);
+    expect(err.name).toBe("AnalyticsUpstreamError");
+    expect(err).toBeInstanceOf(Error);
+  });
+
+  it("forwards 4xx JSON body as AnalyticsUpstreamError(status=400)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ detail: "already in portfolio" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await callInternal(fetchMock);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    const err = caught as InstanceType<typeof mod.AnalyticsUpstreamError>;
+    expect(err.status).toBe(400);
+    expect(err.message).toBe("already in portfolio");
+  });
+
+  it("forwards 404 JSON body as AnalyticsUpstreamError(status=404)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ detail: "portfolio not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await callInternal(fetchMock);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    const err = caught as InstanceType<typeof mod.AnalyticsUpstreamError>;
+    expect(err.status).toBe(404);
+    expect(err.message).toBe("portfolio not found");
+  });
+
+  it("forwards 5xx JSON body as AnalyticsUpstreamError(status=502)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ detail: "upstream blew up" }), {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await callInternal(fetchMock);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    const err = caught as InstanceType<typeof mod.AnalyticsUpstreamError>;
+    expect(err.status).toBe(502);
+    expect(err.message).toBe("upstream blew up");
+  });
+
+  it("falls back to .text() when error body is non-JSON (text body fork)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("Internal Server Error trace...", {
+        status: 500,
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await callInternal(fetchMock);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    const err = caught as InstanceType<typeof mod.AnalyticsUpstreamError>;
+    expect(err.status).toBe(500);
+    expect(err.message).toBe("Internal Server Error trace...");
+  });
+
+  it("uses res.statusText when JSON body has no detail field", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      // Response with no body but a JSON content-type → .json() resolves
+      // to {detail: statusText} via the safety catch in analytics-client.
+      new Response("", {
+        status: 503,
+        statusText: "Service Unavailable",
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await callInternal(fetchMock);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    const err = caught as InstanceType<typeof mod.AnalyticsUpstreamError>;
+    expect(err.status).toBe(503);
+    expect(err.message).toBe("Service Unavailable");
+  });
+
+  it("network failure bubbles up as generic Error, NOT AnalyticsUpstreamError", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(new TypeError("network down"));
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await callInternal(fetchMock);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect((caught as Error).message).toMatch(/not reachable/i);
+  });
+
+  it("timeout (AbortSignal.timeout DOMException) throws AnalyticsTimeoutError, not AnalyticsUpstreamError", async () => {
+    // DOMException with name='TimeoutError' is the AbortSignal.timeout shape.
+    const timeoutErr = new DOMException("aborted", "TimeoutError");
+    const fetchMock = vi.fn().mockRejectedValue(timeoutErr);
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await callInternal(fetchMock);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(mod.AnalyticsTimeoutError);
+    expect(caught).not.toBeInstanceOf(mod.AnalyticsUpstreamError);
+  });
+});
