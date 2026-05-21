@@ -723,6 +723,12 @@ export async function POST(request: Request): Promise<NextResponse> {
           allocators_created,
           managers_rows_skipped: managersRowsSkipped,
           allocators_rows_skipped: allocatorsRowsSkipped,
+          // Audit-2026-05-07 C-0053 (red-team c8): surface the partial-
+          // state flag on the response body so the admin UI / retry
+          // tooling can branch on it. PartnerTagConflictError is thrown
+          // BEFORE phase 1 runs, so counters are always zero here, but
+          // we include the flag uniformly for client parity.
+          partial_completion: observedPartialCompletion,
         },
         { status: 400 },
       );
@@ -744,10 +750,17 @@ export async function POST(request: Request): Promise<NextResponse> {
           allocators_created,
           managers_rows_skipped: managersRowsSkipped,
           allocators_rows_skipped: allocatorsRowsSkipped,
+          partial_completion: observedPartialCompletion,
         },
         { status: 400 },
       );
     }
+    // Audit-2026-05-07 C-0053 (red-team c8): the operator-facing 500
+    // response now mirrors the audit metadata by surfacing
+    // `partial_completion`. Pre-fix the catch path returned only counters
+    // — an operator could not tell from the response alone whether re-
+    // running the import would create duplicate auth users / profile rows,
+    // or whether nothing landed and a retry was safe.
     return NextResponse.json(
       {
         error: errorMessage || "Import failed",
@@ -757,6 +770,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         allocators_created,
         managers_rows_skipped: managersRowsSkipped,
         allocators_rows_skipped: allocatorsRowsSkipped,
+        partial_completion: observedPartialCompletion,
       },
       { status: 500 },
     );
@@ -811,5 +825,11 @@ export async function POST(request: Request): Promise<NextResponse> {
     // run" again on a CSV with silent newline splits.
     managers_rows_skipped: managersRowsSkipped,
     allocators_rows_skipped: allocatorsRowsSkipped,
+    // Audit-2026-05-07 C-0053 (red-team c8): emit `partial_completion`
+    // on every response (always `false` here on the success branch).
+    // The catch branch sets `true` when phase counters advanced before
+    // the throw. Clients can switch on this flag uniformly instead of
+    // inferring partial state from a 500 status code.
+    partial_completion: false,
   });
 }
