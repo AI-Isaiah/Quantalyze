@@ -14,6 +14,27 @@ const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
  * and emails the founder. Deletion is then handled manually within the
  * 30-day SLA documented in the privacy policy. This route does NOT destroy
  * any user data on its own.
+ *
+ * Response envelope (200):
+ *   {
+ *     ok: true,
+ *     request_id: string,        // uuid of the deletion-request row
+ *     requested_at: string,      // ISO timestamp of the row
+ *     idempotent: boolean,       // TRUE if an existing pending request was
+ *                                // returned (dedup short-circuit); FALSE
+ *                                // if a new row was just inserted. Clients
+ *                                // SHOULD branch on this flag rather than
+ *                                // the presence of `message` (legacy
+ *                                // discriminator kept for back-compat).
+ *     message?: string,          // optional human-readable note, present
+ *                                // only on the idempotent=true branch
+ *   }
+ *
+ * C-0019 (audit-2026-05-07): the `idempotent` flag was added because the
+ * legacy two-branch envelope (with `message` as the sole discriminator)
+ * forced callers to discriminate by URL or by the presence of an
+ * optional string field. Adding a typed boolean lets clients
+ * distinguish first-create from dedup-hit unambiguously.
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // CSRF defense-in-depth: reject before any auth/Upstash work so a bad
@@ -68,6 +89,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         ok: true,
         request_id: existing.id,
         requested_at: existing.requested_at,
+        idempotent: true,
         message: "Deletion request already pending",
       },
       { status: 200 },
@@ -135,5 +157,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     ok: true,
     request_id: inserted?.id,
     requested_at: inserted?.requested_at,
+    idempotent: false,
   });
 }

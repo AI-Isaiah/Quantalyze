@@ -187,6 +187,44 @@ describe("POST /api/account/deletion-request", () => {
     expect(supabaseState.rows).toHaveLength(1);
   });
 
+  // C-0019 (audit-2026-05-07): the response envelope now carries a typed
+  // `idempotent` boolean so clients can distinguish first-create from
+  // dedup-hit without sniffing the optional `message` field.
+  describe("C-0019 — typed idempotent flag on response envelope", () => {
+    it("first-create response carries idempotent:false (no message field)", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest());
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({
+        ok: true,
+        request_id: "req-1",
+        idempotent: false,
+      });
+      // The legacy discriminator `message` MUST be absent on first-create
+      // so clients that incorrectly branched on it observe the change.
+      expect(body.message).toBeUndefined();
+    });
+
+    it("dedup-hit response carries idempotent:true alongside the legacy message", async () => {
+      const { POST } = await import("./route");
+      const first = await POST(makeRequest());
+      expect(first.status).toBe(200);
+      const firstBody = await first.json();
+      expect(firstBody.idempotent).toBe(false);
+
+      const second = await POST(makeRequest());
+      expect(second.status).toBe(200);
+      const secondBody = await second.json();
+      expect(secondBody).toMatchObject({
+        ok: true,
+        request_id: "req-1", // same row, not a new insert
+        idempotent: true,
+        message: "Deletion request already pending",
+      });
+    });
+  });
+
   it("dedups a second POST within the 24h window without inserting again", async () => {
     const { POST } = await import("./route");
 
