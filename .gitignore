@@ -76,6 +76,11 @@ __pycache__/
 # screenshots and docs at repo root
 *.png
 *.docx
+# ...but commit Playwright snapshot baselines — they ARE the contract the
+# screenshot regression suite asserts against. C-0300 sentinel
+# (e2e/demo-screenshot.spec.ts:24) fails CI if any of these PNGs are
+# missing; without the allow rule below they were silently ignored.
+!e2e/**/*.png
 
 # typescript
 *.tsbuildinfo

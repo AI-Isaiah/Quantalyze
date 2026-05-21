@@ -7,6 +7,24 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.15] - 2026-05-21
+
+**fix(ci): commit the chromium-linux baseline PNGs that PR #256's C-0300 sentinel requires.**
+
+Unblocks Railway deploys. Every CI run on `main` since PR #256 merged ~2h earlier has been red because the sentinel test asserts three baseline PNGs exist on disk, but those PNGs were never generated. Railway gates on CI; 14+ commits queued without deploying as a result — most relevantly PR #260 (Bybit sync 7-day truncation fix).
+
+### Root cause
+PR #256 added `e2e/demo-screenshot.spec.ts:24` — a sentinel that runs unconditionally in CI via `--grep "C-0300 sentinel"` and fails if `e2e/demo-screenshot.spec.ts-snapshots/demo-{375,768,1280}-chromium-linux.png` are missing. The sentinel correctly caught its own missing artifacts, but no one ran the Recovery procedure documented at lines 63-82 of the spec to actually generate them.
+
+The placeholder.supabase.co `[demo] profile fetch failed` log lines visible in the failed e2e logs are unrelated stderr noise — the unconditional spec set (auth, smoke, demo-public, demo-founder-view, onboarding-banner-smoke) passes all 28 tests against the placeholder env. The console-error filter at `e2e/demo-public.spec.ts:266` already scopes `Failed to fetch` suppression to `/api/demo/match`.
+
+### Fixed
+- Generated the three baselines by running the spec's documented Recovery command (Playwright Linux Docker image, placeholder env, `--update-snapshots --grep-invert "C-0300 sentinel"`) and committed them under `e2e/demo-screenshot.spec.ts-snapshots/`. The captured render is the "Demo data is loading" empty state matching the spec's intended placeholder-CI profile (per lines 53-55).
+
+### Not touched
+- The screenshot regression suite (`Screenshot regression: /demo` describe block) remains excluded from CI's command list pending owner decision on whether to enable it now that baselines exist. The sentinel will continue to enforce that any future PR that deletes the baselines also re-runs the Recovery procedure.
+
+
 ## [0.24.5.14] - 2026-05-21
 
 **fix(auth): build the forgot-password flow that PR #258's signup copy points at.**
