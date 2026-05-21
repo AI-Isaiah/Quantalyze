@@ -1910,6 +1910,12 @@ export type Database = {
           closed_at: string | null
           created_at: string
           duration_days: number | null
+          // audit-2026-05-07 C-0156: BIGINT NULL added in migration 114
+          // (20260510182439_positions_schema_rls_g12d.sql). The numeric-
+          // precision contract (src/lib/supabase/numeric-precision.test.ts)
+          // resolves columns through Database['public']['Tables']['positions']['Row'],
+          // so the column was invisible to that gate until now.
+          duration_seconds: number | null
           entry_price_avg: number
           exit_price_avg: number | null
           fee_total: number | null
@@ -1932,6 +1938,7 @@ export type Database = {
           closed_at?: string | null
           created_at?: string
           duration_days?: number | null
+          duration_seconds?: number | null
           entry_price_avg: number
           exit_price_avg?: number | null
           fee_total?: number | null
@@ -1954,6 +1961,7 @@ export type Database = {
           closed_at?: string | null
           created_at?: string
           duration_days?: number | null
+          duration_seconds?: number | null
           entry_price_avg?: number
           exit_price_avg?: number | null
           fee_total?: number | null
