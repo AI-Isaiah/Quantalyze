@@ -936,9 +936,89 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
             # economic P&L. The ``bybit_daily_pnl_includes_funding`` DQ
             # flag is therefore retired.
             try:
-                params = {"category": "linear", "limit": 200}
-                result = await exchange.private_get_v5_position_closed_pnl(params)
-                items = result.get("result", {}).get("list", [])
+                # Audit-2026-05-21 Bybit dogfood report — the previous call
+                # was `{"category": "linear", "limit": 200}` with no startTime
+                # and no pagination cursor. Per Bybit V5 docs for
+                # /v5/position/closed-pnl: "If startTime is not passed, only
+                # return last 7 days data" AND "the maximum interval between
+                # startTime and endTime is 7 days". So the old shape ALWAYS
+                # truncated history to the last 7 calendar days, capping new
+                # strategies at the GATE_INSUFFICIENT_DAYS boundary regardless
+                # of how much history the account actually had. The fix:
+                #
+                # 1. If no checkpoint (since_ms=None), default to 365 days
+                #    back so a brand-new key on a 1-year-old account verifies.
+                #    Bybit supports queries up to 2 years; 365 days is a
+                #    pragmatic ceiling that bounds API calls (52 windows
+                #    instead of 104) while covering realistic strategy
+                #    histories.
+                # 2. Walk the [start, now] interval in 7-day windows
+                #    (Bybit's hard cap per request) and paginate each window
+                #    via nextPageCursor.
+                # 3. Surface the dropped 7-day records into the existing
+                #    bybit_daily_totals aggregator unchanged.
+                if since_ms is None:
+                    start_ms = int(
+                        (datetime.now(timezone.utc) - timedelta(days=365))
+                        .timestamp() * 1000
+                    )
+                else:
+                    start_ms = since_ms
+                now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                BYBIT_PNL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000  # 7-day max per request
+                BYBIT_PNL_PAGE_CAP = 50  # safety net per window
+
+                items: list[dict[str, Any]] = []
+                window_start = start_ms
+                while window_start < now_ms:
+                    window_end = min(window_start + BYBIT_PNL_WINDOW_MS, now_ms)
+                    cursor = ""
+                    for _page in range(BYBIT_PNL_PAGE_CAP):
+                        params: dict[str, Any] = {
+                            "category": "linear",
+                            "limit": 200,
+                            "startTime": str(window_start),
+                            "endTime": str(window_end),
+                        }
+                        if cursor:
+                            params["cursor"] = cursor
+                        page_result = await exchange.private_get_v5_position_closed_pnl(params)
+                        page_items = (
+                            page_result.get("result", {}).get("list", [])
+                        )
+                        if not page_items:
+                            break
+                        items.extend(page_items)
+                        next_cursor = (
+                            page_result.get("result", {}).get("nextPageCursor", "")
+                        )
+                        if not next_cursor or next_cursor == cursor:
+                            break
+                        cursor = next_cursor
+                    window_start = window_end + 1
+
+                # Defensive dedup: pagination boundaries can occasionally
+                # echo the same closure across two adjacent windows when
+                # createdTime lands on a window edge millisecond (Bybit's
+                # startTime/endTime use closed intervals on at least one
+                # side). Mirrors the OKX billId dedup pattern at line ~745.
+                # Key on (symbol, createdTime) — createdTime is in ms, so
+                # collisions are rare; a real collision would imply two
+                # closures of the same symbol within the same millisecond,
+                # which we drop one of in exchange for the much more
+                # common pagination-edge duplicate.
+                _seen_bybit_keys: set[tuple[str, str]] = set()
+                _deduped_items: list[dict[str, Any]] = []
+                for _item in items:
+                    _key = (
+                        str(_item.get("symbol", "")),
+                        str(_item.get("createdTime", "")),
+                    )
+                    if _key in _seen_bybit_keys:
+                        continue
+                    _seen_bybit_keys.add(_key)
+                    _deduped_items.append(_item)
+                items = _deduped_items
 
                 # Aggregate by UTC day, mirroring the OKX branch shape:
                 # daily_pnl is a list of one (exchange, day) row per day,

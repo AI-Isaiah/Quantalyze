@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import ccxt.async_support as ccxt_async
@@ -4610,4 +4610,136 @@ class TestRedTeamContextVarSharedDefaultIsolation:
         assert next_drain == {}, (
             "get_and_clear must return a defensive copy; "
             f"shared-default leak detected: {next_drain!r}"
+        )
+
+
+class TestBybitDailyPnlStartTimePagination:
+    """Regression — 2026-05-21 user dogfood report.
+
+    Pre-fix, ``fetch_daily_pnl`` for Bybit called the closed-pnl endpoint
+    with ``{"category": "linear", "limit": 200}`` — no ``startTime``, no
+    cursor pagination. Bybit V5's documented behaviour for
+    ``/v5/position/closed-pnl`` is: "If startTime is not passed, only
+    return last 7 days data" with a "maximum interval between startTime
+    and endTime is 7 days". So a long-history account (months or years
+    of closed positions) was being truncated to the trailing 7 calendar
+    days, capping every new strategy at ``GATE_INSUFFICIENT_DAYS`` even
+    though the user had ample data.
+
+    The fix walks the [since_ms, now] interval in 7-day windows and
+    paginates each window via ``nextPageCursor``. These tests pin:
+
+    1. ``startTime`` is always sent (never the default-7-days behaviour).
+    2. When ``since_ms=None``, the first window starts ~365 days back.
+    3. ``nextPageCursor`` is followed within a window.
+    """
+
+    @pytest.mark.asyncio
+    async def test_startTime_is_passed_when_since_ms_none(self):
+        """Without this assertion, Bybit would silently default to last
+        7 days and the truncation bug returns."""
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={"result": {"list": [], "nextPageCursor": ""}},
+        )
+
+        await fetch_daily_pnl(mock_exchange, since_ms=None)
+
+        # At least one call must have been made.
+        assert mock_exchange.private_get_v5_position_closed_pnl.call_count >= 1, (
+            "Bybit closed-pnl endpoint must be invoked at least once"
+        )
+        # Every call must include startTime — pre-fix this was absent.
+        for call in mock_exchange.private_get_v5_position_closed_pnl.call_args_list:
+            params = call.args[0] if call.args else call.kwargs
+            assert "startTime" in params, (
+                f"startTime missing from Bybit closed-pnl call params={params!r}; "
+                "without it Bybit defaults to last 7 days and truncates history"
+            )
+            assert "endTime" in params, (
+                f"endTime missing from Bybit closed-pnl call params={params!r}; "
+                "windowed pagination requires explicit endTime per Bybit's 7-day cap"
+            )
+
+    @pytest.mark.asyncio
+    async def test_default_lookback_at_least_60_days(self):
+        """For a brand-new key (no checkpoint), the very first window's
+        startTime must reach back well beyond the previous 7-day cap.
+        We pin 60 days as a conservative floor — the fix uses 365 days,
+        but the contract this test enforces is 'not just last 7 days'."""
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={"result": {"list": [], "nextPageCursor": ""}},
+        )
+
+        before_call_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        await fetch_daily_pnl(mock_exchange, since_ms=None)
+
+        # The earliest startTime across all calls must be >= 60 days back.
+        sixty_days_ago_ms = before_call_ms - 60 * 24 * 60 * 60 * 1000
+        all_start_times = [
+            int(c.args[0]["startTime"])
+            for c in mock_exchange.private_get_v5_position_closed_pnl.call_args_list
+        ]
+        earliest_start = min(all_start_times)
+        assert earliest_start <= sixty_days_ago_ms, (
+            f"Earliest startTime is {earliest_start}, expected <= {sixty_days_ago_ms}. "
+            "For a fresh sync the lookback must extend at least 60 days back, "
+            "otherwise long-history accounts hit GATE_INSUFFICIENT_DAYS unnecessarily."
+        )
+
+    @pytest.mark.asyncio
+    async def test_followsNextPageCursor_within_window(self):
+        """Within a 7-day window, the second call must include
+        ``cursor`` from the first call's ``nextPageCursor``. Without
+        this, only the first 200 records per window are pulled and a
+        busy account's history is silently truncated."""
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+
+        # First call returns a page with cursor; second returns empty
+        # to terminate the inner loop and move to the next window.
+        # We give just one item so the body parses cleanly.
+        valid_item = {
+            "symbol": "BTCUSDT",
+            "cumEntryValue": "1000",
+            "cumExitValue": "1010",
+            "openFee": "0.5",
+            "closeFee": "0.5",
+            "side": "Sell",
+            "createdTime": str(int(datetime.now(timezone.utc).timestamp() * 1000)),
+        }
+        response_page_1 = {
+            "result": {"list": [valid_item], "nextPageCursor": "cursor_abc"}
+        }
+        response_empty = {"result": {"list": [], "nextPageCursor": ""}}
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            side_effect=[response_page_1] + [response_empty] * 200,
+        )
+
+        await fetch_daily_pnl(mock_exchange, since_ms=None)
+
+        # Find the call that came AFTER the cursor-bearing one — must
+        # carry that cursor in its params.
+        calls = mock_exchange.private_get_v5_position_closed_pnl.call_args_list
+        assert len(calls) >= 2, (
+            f"Only {len(calls)} call(s) made; pagination must issue at least a "
+            "second call to consume the nextPageCursor"
+        )
+        # The call immediately after the cursor-bearing response must include cursor
+        cursor_followed = any(
+            call.args[0].get("cursor") == "cursor_abc" for call in calls[1:]
+        )
+        assert cursor_followed, (
+            "No subsequent call carried cursor='cursor_abc'; nextPageCursor was "
+            "not followed and the truncation bug persists at the page-level even "
+            "after the startTime fix"
         )

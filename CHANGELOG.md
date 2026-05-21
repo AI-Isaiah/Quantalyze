@@ -7,6 +7,34 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.10] - 2026-05-21
+
+**fix(analytics): Bybit fetch_daily_pnl was truncating closed-PnL history to the last 7 days on every sync.**
+
+Closes the production dogfood report "the timespan behind the API is much longer than 7 days". The wizard verify step kept rejecting long-history Bybit accounts at GATE_INSUFFICIENT_DAYS because the underlying sync was only ever pulling 7 calendar days from Bybit, no matter what the actual trading history was.
+
+### Root cause
+`analytics-service/services/exchange.py:938` invoked Bybit's `/v5/position/closed-pnl` with `{"category": "linear", "limit": 200}` — no `startTime`, no pagination cursor. Per Bybit V5 docs:
+- "If startTime is not passed, only return last 7 days data"
+- "Maximum interval between startTime and endTime is 7 days"
+- Cursor-based pagination via `nextPageCursor`
+
+So every sync truncated to the trailing 7 calendar days. The `since_ms` parameter the function accepts was completely ignored on the Bybit branch.
+
+### Fixed
+- `analytics-service/services/exchange.py`: Bybit branch of `fetch_daily_pnl` now walks the `[start, now]` interval in 7-day windows (Bybit's hard cap per request) and paginates each window via `nextPageCursor`.
+- Default lookback when `since_ms` is `None` (fresh sync, no checkpoint) is 365 days — enough for realistic strategy histories without flooding Bybit's API. Bybit supports up to 2 years; 365 days is a pragmatic ceiling.
+- Defensive dedup by `(symbol, createdTime)` mirrors the OKX `billId` dedup pattern — guards against pagination-edge duplicates.
+
+### Added (regression tests — fail without the fix)
+- `analytics-service/tests/test_exchange.py::TestBybitDailyPnlStartTimePagination` — 3 tests covering startTime presence, ≥60-day default lookback, and nextPageCursor following.
+- Verified 3/3 fail without the fix and pass with it.
+
+### Verified
+- All 29 Bybit tests pass (dedup defends naive mock-echo across windows).
+- Full `tests/test_exchange.py` + `tests/test_exchange_harness.py` suite: 156/156 passing.
+
+
 ## [0.24.5.9] - 2026-05-21
 
 **fix(wizard): floor-round insufficient-days span so a 6.97-day strategy never displays as "7.0 calendar day(s)".**
