@@ -7,6 +7,19 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.17] - 2026-05-21
+
+**fix(ci): allowlist localhost:3000 in CSRF guard for the seed-gated e2e server.**
+
+Third stop on the Railway-unblock train. v0.24.5.16 set the Origin header on the prefs-isolation PUT, but the next layer rejected it with `{"error":"Origin not allowed"}`. The seed-gated step runs the server in production mode (`npm run start`), so `src/lib/csrf.ts:67`'s `NODE_ENV !== "production"` localhost auto-allowlist never fires. The CSRF allowlist needs an explicit `NEXT_PUBLIC_ALLOWED_ORIGINS=http://localhost:3000` to accept the test request.
+
+### Why this is a CI-only change
+`NEXT_PUBLIC_ALLOWED_ORIGINS` is read by `buildAllowedHosts()` at server module-load. The env var is only set inside the seed-gated step's `env:` block in `.github/workflows/ci.yml:851-869`; production Vercel deploys never see it. The variable was added in PR #155 specifically for cases where allowlist drift in non-prod-NODE_ENV runs leaks into 403s — this is exactly its intended use case.
+
+### Fixed
+- `.github/workflows/ci.yml` seed-gated `Run seed-gated specs` step env: added `NEXT_PUBLIC_ALLOWED_ORIGINS: http://localhost:3000`.
+
+
 ## [0.24.5.16] - 2026-05-21
 
 **fix(e2e): set Origin header on `discovery-prefs-isolation` PUT so it clears the CSRF guard.**

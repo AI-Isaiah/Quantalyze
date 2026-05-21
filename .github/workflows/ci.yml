@@ -858,6 +858,16 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
+          # Seed-gated server runs in production mode (`npm run start`), so the
+          # localhost:3000 auto-allowlist in src/lib/csrf.ts:67 (NODE_ENV !==
+          # "production" branch) never fires. The discovery-prefs-isolation
+          # spec PUTs /api/preferences via page.request.put with an explicit
+          # Origin header; without an entry here, the CSRF guard 403s with
+          # "Origin not allowed". Adding the localhost origin to the runtime
+          # allowlist scopes the exception to this seed-gated step only.
+          # No production exposure: prod sets NEXT_PUBLIC_SITE_URL to the
+          # canonical Vercel host.
+          NEXT_PUBLIC_ALLOWED_ORIGINS: http://localhost:3000
       # retro-PR179-H1 / C-0293(c) extension: skip the playwright-report
       # upload on the SEED-GATED code path. When E2E_TEST_DB_CONFIGURED is
       # 'true', a failed run could be against the REAL-env rebuild (see
