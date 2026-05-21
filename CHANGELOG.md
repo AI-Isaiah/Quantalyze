@@ -7,6 +7,23 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.4.1] - 2026-05-21
+
+**test(audit-2026-05-07): audit-emission contract test cluster — closes C-0073 + C-0094 + C-0096 + C-0101 + C-0104 + C-0110 + C-0121 + C-0143.**
+
+PR H (clustered, test-only): eight audit-2026-05-07 CRITICAL test-coverage gaps closed across seven route test files plus the WatchlistTabs component test. Each route's `logAuditEvent` call shape (action, entity_type, entity_id, metadata branches) is now pinned with positive assertions instead of `vi.fn()` stubs that swallowed contract drift.
+
+### Added (positive-assertion regression tests)
+- `src/components/strategy/WatchlistTabs.test.tsx` (C-0143): refactor-safe `data-testid="watchlist-count-badge"` query replaces brittle `container.textContent.not.toMatch(/\b0\b/)` + Tailwind utility selector.
+- `src/app/api/alerts/[id]/acknowledge/route.test.ts` (C-0073): asserts `logAuditEvent` called with `action='alert.acknowledge'`, `entity_type='alert'`, `entity_id` matching URL param, `metadata.source='email_one_click_link'`.
+- `src/app/api/intro/route.test.ts` (C-0094 + C-0096): CSRF wrong-origin → 403 with no DB call; rate-limit denied → 429 with Retry-After header; 23505 duplicate-intro → 409 envelope; contact_requests insert error → 500; missing strategy_id → 400.
+- `src/app/api/keys/sync/route.test.ts` (C-0101): queue branch emits `logAuditEvent` with `action='sync.start'`, `metadata.path='queue'`; legacy branch emits same action with `metadata.path='legacy'`.
+- `src/app/api/portfolio-alerts/route.test.ts` (C-0104): PATCH ack on owned alert → 200 + `logAuditEvent` called with `action='alert.acknowledge'`, `metadata.source='in_app_list'`; non-owned → 403/404 + NO audit call.
+- `src/app/api/portfolio-strategies/alias/route.test.ts` (C-0110): happy-path PATCH → `logAuditEvent` called with `action='allocation.update'`, `entity_type='portfolio_strategy'`, metadata with before/after weight.
+- `src/app/api/trades/upload/route.test.ts` (C-0121): successful upload → exactly ONE rollup audit event with `action='trades.upload'` and `metadata.row_count` matching uploaded rows (NOT one event per row).
+
+These tests would have caught contract drift the existing `vi.fn()` mocks silently allowed; they're the kind of "fail-loud" assertions per Rule 12 in the project handbook.
+
 ## [0.24.4.0] - 2026-05-21
 
 **fix(audit-2026-05-07): PDF route hardening cluster — closes C-0090 + C-0092 + C-0093.**

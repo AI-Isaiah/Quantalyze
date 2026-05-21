@@ -121,7 +121,7 @@ vi.mock("@/lib/supabase/server", () => ({
  * is false so race tests can simulate "another admin already
  * approved OR rejected".
  */
-const { buildDefaultAdminMock, buildDefaultRateLimitMock } = vi.hoisted(
+const { buildDefaultAdminMock } = vi.hoisted(
   () => ({
     buildDefaultAdminMock: (
       s: {
@@ -173,16 +173,6 @@ const { buildDefaultAdminMock, buildDefaultRateLimitMock } = vi.hoisted(
         },
       }),
     }),
-    buildDefaultRateLimitMock: (
-      recorder: (identifier: string) => void,
-    ) => ({
-      adminActionLimiter: {} as unknown,
-      checkLimit: async (_limiter: unknown, identifier: string) => {
-        recorder(identifier);
-        return { success: true } as const;
-      },
-      isRateLimitMisconfigured: () => false,
-    }),
   }),
 );
 
@@ -205,12 +195,35 @@ vi.mock("@/lib/csrf", () => ({
 
 // audit-2026-05-07 red-team-HIGH (reject-asymmetry-vs-approve-hardening):
 // route now calls checkLimit(adminActionLimiter, ...) at entry, keyed
-// on `del-reject:${user.id}`. Mock always-success by default; per-test
-// overrides for denial / misconfig paths.
+// on `del-reject:${user.id}`. Use hoisted state so a single top-level
+// vi.mock() can serve all per-test branches (success / denied /
+// misconfigured) without the vi.resetModules + vi.doMock dance, which
+// flakes under sharded execution when sibling test files also mock
+// `@/lib/ratelimit`.
 const rateLimitRecorder = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/ratelimit", () =>
-  buildDefaultRateLimitMock(rateLimitRecorder),
-);
+const rateLimitState = vi.hoisted(() => ({
+  mode: "success" as "success" | "denied" | "misconfigured",
+  retryAfter: 60,
+}));
+vi.mock("@/lib/ratelimit", () => ({
+  adminActionLimiter: {} as unknown,
+  checkLimit: async (_limiter: unknown, identifier: string) => {
+    rateLimitRecorder(identifier);
+    if (rateLimitState.mode === "denied") {
+      return { success: false, retryAfter: rateLimitState.retryAfter } as const;
+    }
+    if (rateLimitState.mode === "misconfigured") {
+      return {
+        success: false,
+        retryAfter: rateLimitState.retryAfter,
+        reason: "ratelimit_misconfigured",
+      } as const;
+    }
+    return { success: true } as const;
+  },
+  isRateLimitMisconfigured: (r: { reason?: string }) =>
+    r?.reason === "ratelimit_misconfigured",
+}));
 
 function makeReq(body: Record<string, unknown> = {}): NextRequest {
   return new NextRequest(
@@ -234,9 +247,12 @@ function makeCtx() {
  * prior test is overridden cleanly.
  */
 function reapplyDefaultMocks() {
-  vi.doMock("@/lib/ratelimit", () =>
-    buildDefaultRateLimitMock(rateLimitRecorder),
-  );
+  // Admin mock still uses vi.doMock because the Supabase admin client
+  // chain depends on per-test deletionRow state. Rate-limit branches
+  // are now selected via rateLimitState (hoisted) so there is no
+  // need to re-register that module.
+  rateLimitState.mode = "success";
+  rateLimitState.retryAfter = 60;
   vi.doMock("@/lib/supabase/admin", () =>
     buildDefaultAdminMock(state, TEST_REQUEST_ID),
   );
@@ -354,15 +370,8 @@ describe("POST /api/admin/deletion-requests/[id]/reject (P453)", () => {
       rejected_at: null,
     };
 
-    vi.resetModules();
-    vi.doMock("@/lib/ratelimit", () => ({
-      adminActionLimiter: {} as unknown,
-      checkLimit: async (_l: unknown, identifier: string) => {
-        rateLimitRecorder(identifier);
-        return { success: false, retryAfter: 42 } as const;
-      },
-      isRateLimitMisconfigured: () => false,
-    }));
+    rateLimitState.mode = "denied";
+    rateLimitState.retryAfter = 42;
 
     const { POST } = await import("./route");
     const res = await POST(makeReq(), makeCtx());
@@ -397,17 +406,8 @@ describe("POST /api/admin/deletion-requests/[id]/reject (P453)", () => {
       rejected_at: null,
     };
 
-    vi.resetModules();
-    vi.doMock("@/lib/ratelimit", () => ({
-      adminActionLimiter: {} as unknown,
-      checkLimit: async () => ({
-        success: false,
-        retryAfter: 60,
-        reason: "ratelimit_misconfigured",
-      }) as const,
-      isRateLimitMisconfigured: (r: { reason?: string }) =>
-        r.reason === "ratelimit_misconfigured",
-    }));
+    rateLimitState.mode = "misconfigured";
+    rateLimitState.retryAfter = 60;
 
     const { POST } = await import("./route");
     const res = await POST(makeReq(), makeCtx());

@@ -43,12 +43,18 @@ const STATE = vi.hoisted(() => ({
   },
   profileRole: "allocator" as "allocator" | "manager" | "both",
   insertedRow: null as { id: string } | null,
+  // C-0096: hoisted insert-error toggle for the 23505 → 409 path and the
+  // generic insert-error → 500 path.
+  insertError: null as { code?: string; message?: string } | null,
   contactInsertPayload: null as Record<string, unknown> | null,
   rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   adminRpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   // Hoisted controllable snapshot mock so individual tests can opt into the
   // pending-timeout branch without disturbing the default ready path.
   snapshotImpl: null as null | (() => Promise<unknown>),
+  // C-0094: hoisted rate-limit toggle so tests can drive 429 without
+  // re-mocking the module.
+  rateLimitResult: { success: true as boolean, retryAfter: 0 },
 }));
 
 vi.mock("@/lib/supabase/server", () => {
@@ -84,8 +90,8 @@ vi.mock("@/lib/supabase/server", () => {
               return {
                 select: () => ({
                   single: async () => ({
-                    data: STATE.insertedRow,
-                    error: null,
+                    data: STATE.insertError ? null : STATE.insertedRow,
+                    error: STATE.insertError,
                   }),
                 }),
               };
@@ -125,7 +131,7 @@ vi.mock("@/lib/correlation-id", () => ({
 
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: null,
-  checkLimit: async () => ({ success: true, retryAfter: 0 }),
+  checkLimit: async () => STATE.rateLimitResult,
 }));
 
 vi.mock("@/lib/analytics/usage-events", () => ({
@@ -184,10 +190,12 @@ const REPLACEMENT_ID = "33333333-3333-4333-8333-333333333333";
 beforeEach(() => {
   STATE.profileRole = "allocator";
   STATE.insertedRow = { id: CONTACT_ROW_ID };
+  STATE.insertError = null;
   STATE.contactInsertPayload = null;
   STATE.rpcCalls = [];
   STATE.adminRpcCalls = [];
   STATE.snapshotImpl = null;
+  STATE.rateLimitResult = { success: true, retryAfter: 0 };
 });
 
 afterEach(() => {
@@ -304,6 +312,108 @@ describe("POST /api/intro — audit-log emission (Task 7.1a)", () => {
     // row we would audit doesn't come back), so the route now surfaces
     // a 500 rather than silently 200 without a forensic trail.
     expect(res.status).toBe(500);
+
+    await drainAuditMicrotasks();
+    expect(
+      STATE.rpcCalls.filter((c) => c.name === "log_audit_event"),
+    ).toHaveLength(0);
+  });
+});
+
+// ─── C-0094: CSRF + rate-limit upstream guards ─────────────────────────
+// The audit-emission tests above stub checkLimit to success and supply a
+// same-origin header. Two upstream guards fire before the audit emission
+// AND before the contact_requests insert:
+//   (1) assertSameOrigin rejects cross-origin POSTs with 403,
+//   (2) checkLimit's 429 path returns Retry-After.
+// A regression that drops either guard would silently let cross-origin
+// or unrate-limited traffic reach the contact_requests insert path.
+// These tests pin the contract — they fail without the guards in place.
+describe("POST /api/intro — C-0094 CSRF + rate-limit upstream guards", () => {
+  it("returns 403 with NO contact_requests insert when the Origin is cross-origin", async () => {
+    const { POST } = await import("./route");
+    const req = new NextRequest("http://localhost:3000/api/intro", {
+      method: "POST",
+      headers: {
+        origin: "https://evil.example.com",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ strategy_id: STRAT_ID }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(403);
+
+    await drainAuditMicrotasks();
+    // Insert never ran (guard fires before the from('contact_requests') call).
+    expect(STATE.contactInsertPayload).toBeNull();
+    // No audit row.
+    expect(
+      STATE.rpcCalls.filter((c) => c.name === "log_audit_event"),
+    ).toHaveLength(0);
+  });
+
+  it("returns 429 with Retry-After and no audit when rate-limited", async () => {
+    STATE.rateLimitResult = { success: false, retryAfter: 42 };
+
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ strategy_id: STRAT_ID }));
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("42");
+
+    await drainAuditMicrotasks();
+    // No insert, no audit on the rate-limited path.
+    expect(STATE.contactInsertPayload).toBeNull();
+    expect(
+      STATE.rpcCalls.filter((c) => c.name === "log_audit_event"),
+    ).toHaveLength(0);
+  });
+});
+
+// ─── C-0096: contact_requests error-envelope contract ──────────────────
+// The route emits three error envelopes on the contact_requests insert
+// path:
+//   - 23505 (unique-violation) → 409 "Already requested"
+//   - generic insert error     → 500 "Failed to create request"
+//   - Zod parse failure on missing strategy_id → 400 "Invalid request body"
+// Each must NOT emit the intro.send audit row (the row we would audit
+// either doesn't exist or wasn't supposed to be created).
+describe("POST /api/intro — C-0096 contact_requests error envelopes", () => {
+  it("maps Postgres 23505 (unique violation) to 409 with no audit", async () => {
+    STATE.insertError = { code: "23505", message: "duplicate key" };
+
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ strategy_id: STRAT_ID }));
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toMatch(/already requested/i);
+
+    await drainAuditMicrotasks();
+    expect(
+      STATE.rpcCalls.filter((c) => c.name === "log_audit_event"),
+    ).toHaveLength(0);
+  });
+
+  it("maps a generic insert error to 500 with no audit", async () => {
+    STATE.insertError = { code: "P0001", message: "internal db error" };
+
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ strategy_id: STRAT_ID }));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toMatch(/failed to create request/i);
+
+    await drainAuditMicrotasks();
+    expect(
+      STATE.rpcCalls.filter((c) => c.name === "log_audit_event"),
+    ).toHaveLength(0);
+  });
+
+  it("returns 400 when strategy_id is missing from the body", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({})); // no strategy_id
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/invalid request body/i);
 
     await drainAuditMicrotasks();
     expect(

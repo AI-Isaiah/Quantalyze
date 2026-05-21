@@ -50,15 +50,29 @@ describe("WatchlistTabs", () => {
   });
 
   it("does not render a count badge when count === 0", () => {
-    const { container } = render(
+    render(
       <WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />,
     );
-    // No '0' digit anywhere AND no element with the badge fill class. The
-    // text-content check is the strict assertion; the class check is a
-    // belt-and-braces guard against a renderer that happens to print 0.
-    expect(container.textContent).not.toMatch(/\b0\b/);
-    const badge = container.querySelector(".bg-accent.text-white");
-    expect(badge).toBeNull();
+    // C-0143 (audit-2026-05-07): refactor-safe assertion via data-testid.
+    //
+    // Pre-fix this asserted `container.textContent.not.toMatch(/\b0\b/)`
+    // (a global text-content regex) plus `querySelector(".bg-accent.text-white")`
+    // (Tailwind utility selector). Both were brittle anti-assertions:
+    //   - The regex passes today because nothing else in the render
+    //     contains a '0', but a future tooltip "Showing 0 of 8" or
+    //     aria-label "0 starred" would silently false-fail without a
+    //     real behavior regression.
+    //   - The class selector matches CSS utilities, not behavior — a
+    //     theme refactor that swaps `.bg-accent.text-white` for a
+    //     design-token variant would falsely pass even if the badge
+    //     re-appeared with the new class.
+    //   - Inverse direction: a regression rendering '00' or 'O' (capital
+    //     letter) would slip past `\b0\b` and ship.
+    //
+    // Behavioral assertion: the badge element carries
+    // `data-testid="watchlist-count-badge"` (WatchlistTabs.tsx:88). When
+    // count===0 the component must not render that element at all.
+    expect(screen.queryByTestId("watchlist-count-badge")).toBeNull();
   });
 
   it("ArrowRight on focused All tab moves focus to My Watchlist AND activates the scope (automatic activation)", () => {
