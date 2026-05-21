@@ -7,6 +7,21 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.3.8] - 2026-05-21
+
+**fix(audit-2026-05-07): `ensureAuthUser` policy gate refuses real-user / cross-partner binding — closes C-0181.**
+
+The shared `ensureAuthUser` helper (`src/lib/supabase/admin-users.ts`) resolved the existing `user_id` on 422 email_exists with a profiles-by-email lookup that had NO `partner_tag` filter. An attacker who could influence a partner-import CSV (`{manager_email: "victim@example.com", strategy_name: "Backdoor"}`) could rebind the victim's `user_id` under the attacker's `partner_tag` — the call site's profile upsert (`onConflict: "id"`) overwrites role / partner_tag / display_name from the import row. The existing route-level pre-check at `partner-import/route.ts:484-515` caught the explicit cross-partner case (existing_tag != attempted_tag) but missed the NULL case (real Quantalyze user with no partner_tag = "claim a real account" attack).
+
+### Fixed
+- `src/lib/supabase/admin-users.ts` (C-0181): `ensureAuthUser` now requires a `policy` param. Two modes:
+  - `create_only` — refuses to bind if the email already exists. For flows where the caller MUST be creating a fresh user.
+  - `create_or_resolve_pilot` — returns the existing `user_id` ONLY if the existing profile's `partner_tag` matches the caller's AND is non-null. Both the NULL case (real user) and the cross-partner case (different tag) throw with explicit messages.
+- `src/app/api/admin/partner-import/route.ts:520,617`: both `ensureAuthUser` call sites (manager phase + allocator phase) now pass `policy: { mode: "create_or_resolve_pilot", partnerTag: partner_tag }`. Defense-in-depth behind the existing route-level conflict pre-check.
+
+### Added (regression tests — fail without fix, pass with fix)
+- `src/lib/supabase/admin-users.test.ts`: 5 new tests under a `C-0181: policy gate` describe block. `create_only` refuses early without hitting profiles. `create_or_resolve_pilot` refuses NULL `partner_tag`, refuses empty-string `partner_tag`, refuses different `partner_tag`. Final test pins that the SELECT chain includes the `partner_tag` column so the gate has data to work with. 13 tests total pass.
+
 ## [0.24.3.7] - 2026-05-21
 
 **fix(audit-2026-05-07): sanitizeFilename accepts `string | null | undefined` safely — closes C-0180.**

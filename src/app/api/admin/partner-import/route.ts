@@ -517,7 +517,14 @@ export async function POST(request: Request): Promise<NextResponse> {
     // Phase 1: one auth user + profile per distinct manager email.
     const managerIdByEmail = new Map<string, string>();
     await mapConcurrent(uniqueManagerEmails, IMPORT_CONCURRENCY, async (row) => {
-      const userId = await ensureAuthUser(admin, { email: row.manager_email });
+      // C-0181 (audit-2026-05-07): pass policy=create_or_resolve_pilot
+      // with the import's partner_tag so the library refuses to bind to
+      // a real (untagged) user or a cross-partner pilot row. Defense-
+      // in-depth behind the route-level pre-check at lines 484-515.
+      const userId = await ensureAuthUser(admin, {
+        email: row.manager_email,
+        policy: { mode: "create_or_resolve_pilot", partnerTag: partner_tag },
+      });
 
       // @audit-skip: bulk-import row; rolled up into a single
       // admin.partner_import audit event after the whole import completes.
@@ -609,8 +616,11 @@ export async function POST(request: Request): Promise<NextResponse> {
     });
 
     await mapConcurrent(dedupedAllocators, IMPORT_CONCURRENCY, async (row) => {
+      // C-0181 (audit-2026-05-07): same policy as manager phase — refuse
+      // to bind to a real allocator account or a cross-partner pilot.
       const userId = await ensureAuthUser(admin, {
         email: row.allocator_email,
+        policy: { mode: "create_or_resolve_pilot", partnerTag: partner_tag },
       });
 
       // @audit-skip: bulk-import row; rolled up into admin.partner_import.
