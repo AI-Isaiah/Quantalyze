@@ -1,7 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 
 // GET /api/admin/match/allocators
 //
@@ -10,7 +11,16 @@ import { isAdminUser } from "@/lib/admin";
 //
 // Triage sort: "needs attention" first = (new candidates since last visit) OR
 // (no intro sent in 14 days). Then stale-batch, then zero decisions, then recency.
-export async function GET(): Promise<NextResponse> {
+//
+// Audit-2026-05-07 C-0041: response carries allocator PII (display_name, email,
+// company). Mirror the sibling admin/match POST/DELETE handlers and require a
+// same-origin Origin/Referer header — defense-in-depth on top of the admin
+// auth gate so a token-replay or stolen-session probe from an off-origin
+// context fails at the perimeter instead of fetching the PII payload.
+export async function GET(req: NextRequest): Promise<NextResponse> {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.

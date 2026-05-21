@@ -7,6 +7,20 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.1] - 2026-05-21
+
+**fix(audit-2026-05-07): add same-origin CSRF guard to admin/match GET handlers — closes C-0041.**
+
+`GET /api/admin/match/allocators` (allocator PII roster) and `GET /api/admin/match/eval` (match-quality metrics) were the only handlers under `/api/admin/match/` without `assertSameOrigin`. Sibling POST/DELETE handlers (decisions, kill-switch, send-intro, preferences, recompute) have run the same-origin check for some time; these two GETs were missed. A token-replay or stolen-session probe from an off-origin context could read the entire allocator roster or eval payload before hitting the admin-gate.
+
+### Fixed
+- `src/app/api/admin/match/allocators/route.ts` (C-0041): `assertSameOrigin(req)` runs before any DB work. Handler signature changed from `GET()` to `GET(req: NextRequest)`.
+- `src/app/api/admin/match/eval/route.ts` (C-0041 sibling): same guard, runs before auth.
+
+### Added (regression test — fails without the fix)
+- `src/app/api/admin/match/allocators/route.test.ts`: three cases — (1) missing Origin/Referer → 403, (2) off-origin Origin → 403, (3) allowed-host Origin → 200 sanity. Removing `assertSameOrigin(req)` makes cases (1)+(2) fail.
+
+
 ## [0.24.5.0] - 2026-05-21
 
 **fix(audit-2026-05-07): close withAdminAuth + database.types.ts CRITICALs (admin-auth cluster + NUMERIC precision drift).**
