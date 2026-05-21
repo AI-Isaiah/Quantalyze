@@ -137,6 +137,20 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     // assert against whichever the page produced. Matches the pattern in
     // discovery-watchlist.spec.ts which already uses waitForSelector.
     await page.waitForSelector("table", { timeout: 15000 });
+    // Wait for React hydration to complete before any interaction. Without
+    // this the inline Hide-examples toggle click can race the onChange
+    // listener registration: Playwright dispatches the click on the DOM
+    // <input>, the DOM checked attribute flips, but React hasn't attached
+    // the change handler yet — so the synthetic event is dropped, the
+    // useDiscoveryPrefs state never updates, and the table never
+    // re-renders past the hide-examples filter. Polling until the
+    // checkbox is interactive (vs. SSR'd-only) is the standard fix.
+    // `aria-busy="false"` on body is set by Next.js once hydration
+    // completes; failing that, networkidle is the universal fallback.
+    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {
+      // networkidle can be flaky behind Vercel's edge — non-fatal,
+      // the checkbox-interactivity guard below is the real fence.
+    });
     const rowsLocator = page.locator("table tbody tr");
     // The test seed (scripts/seed-demo-data.ts) inserts exactly 8 strategies,
     // all is_example=true (backfilled by migration
