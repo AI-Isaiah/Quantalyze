@@ -38,6 +38,17 @@ const authUser = vi.hoisted(() => ({
   id: "00000000-0000-0000-0000-000000000001",
 }));
 
+// C-0077 (audit-2026-05-07): hoisted spy so the happy-path test can
+// assert the `attestation.accept` audit emission shape. logAuditEvent
+// is fire-and-forget inside the route — we mock the module export so
+// the call is observable synchronously without going through the
+// `after()` / RPC tail.
+const mockLogAuditEvent = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/audit", () => ({
+  logAuditEvent: mockLogAuditEvent,
+}));
+
 // Track how many times the attestation POST has been called so we can
 // return different rows (same user_id, different timestamps) on the
 // second call — simulating the idempotent re-attestation.
@@ -75,6 +86,7 @@ vi.mock("@/lib/supabase/server", () => ({
 describe("POST /api/attestation", () => {
   beforeEach(() => {
     supabaseState.callCount = 0;
+    mockLogAuditEvent.mockClear();
   });
 
   it("returns 200 + attestation on first-time insert", async () => {
@@ -92,6 +104,22 @@ describe("POST /api/attestation", () => {
       expect.objectContaining({
         user_id: authUser.id,
         version: "2026-04-07",
+      }),
+    );
+
+    // C-0077 (audit-2026-05-07): the happy path must emit an
+    // `attestation.accept` audit row keyed to the attesting user.
+    // `investor_attestations` is keyed on user_id (see route.ts L112-118),
+    // so entity_id IS user.id — the comment in route.ts explicitly notes
+    // this. A regression here would silently break the GDPR Art. 15
+    // export and the accredited-investor compliance trail.
+    expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
+    expect(mockLogAuditEvent).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "attestation.accept",
+        entity_type: "investor_attestation",
+        entity_id: authUser.id,
       }),
     );
   });

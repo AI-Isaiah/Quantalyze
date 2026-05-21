@@ -184,6 +184,24 @@ jobs:
         #     EXACT command output before approving apply
         #   - At scale (>=10 active clients), add required-reviewer protection to the
         #     `Production` environment per ADR-0009 (TODO).
+        #
+        # C-0331 (audit-2026-05-07): `set -euo pipefail` ensures any sub-command
+        # failure aborts the step. After `db push`, we run `supabase migration
+        # list --linked` and fail the workflow if any row reports a "Reverted"
+        # status — the CLI can return exit 0 while a migration body is silently
+        # skipped (e.g. wrapped in a SQL exception the CLI swallows), and the
+        # post-apply list is the authoritative ground-truth we cross-check.
+        # All interpolations are repo-admin-controlled secrets/vars (not
+        # attacker-supplied event fields), and they flow through env: not
+        # inline ${{ }} expansion — no script-injection surface.
         run: |
+          set -euo pipefail
           supabase link --project-ref "$SUPABASE_PROJECT_REF"
           supabase db push --include-all
+          echo "::group::Post-apply migration list verification (C-0331)"
+          supabase migration list --linked | tee /tmp/migration-list.txt
+          if grep -Eiq '(^|[[:space:]|])reverted([[:space:]|]|$)' /tmp/migration-list.txt; then
+            echo "::error::Reverted migrations detected after db push — see list above (C-0331)"
+            exit 1
+          fi
+          echo "::endgroup::"

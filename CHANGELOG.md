@@ -20,6 +20,27 @@ can bump without ambiguity.
 ### Added (regression test — fails without the fix)
 - `src/app/api/admin/match/allocators/route.test.ts`: three cases — (1) missing Origin/Referer → 403, (2) off-origin Origin → 403, (3) allowed-host Origin → 200 sanity. Removing `assertSameOrigin(req)` makes cases (1)+(2) fail.
 
+## [0.24.5.2] - 2026-05-21
+
+**fix(audit-2026-05-07): close 9-CRITICAL cluster — admin route coverage, e2e env-creds, supabase-migrate verification, console-error gate.**
+
+Bundles 9 CRITICALs from `.planning/audit-2026-05-07/FIX-LIST.md`. All are file-disjoint and were closed in parallel; bundled into one PR because each is small (test-only or single-file).
+
+### Added (regression tests — fail without the corresponding source contract)
+- `src/app/api/admin/for-quants-leads/process/route.test.ts` (C-0037): 403 non-admin, 400 non-UUID id, 200 + `lead.process` audit emission.
+- `src/app/api/admin/match/kill-switch/route.test.ts` (C-0045): off-origin CSRF → 403, 403 non-admin, 200 + `admin.kill_switch` audit (entity_id=user.id, metadata.flag, metadata.new_value).
+- `src/app/api/admin/match/preferences/[allocator_id]/route.test.ts` (C-0046): CSRF, 401 unauth, 403 non-admin, 200 + `mandate_preference.admin_update` audit (self_edit=false, edited_by=user.id), 400 validation, 500 DB error.
+- `src/app/api/portfolio-documents/route.test.ts` (C-0105): GET 401/404, POST 401/400/404/200 + `portfolio_document.create` audit.
+- `src/app/api/strategies/draft/[id]/route.test.ts` (C-0115): GET 401/404 not-owned/200; DELETE wrong-origin 403, 401, 404 not-owned, 200 + `strategy.draft_delete` audit.
+
+### Extended (existing test grew an audit-shape assertion)
+- `src/app/api/attestation/route.test.ts` (C-0077): happy path now asserts `attestation.accept` audit with `entity_type='investor_attestation'`, `entity_id=user.id` (route keys on user_id per inline contract).
+
+### Fixed (non-test)
+- `e2e/demo-founder-view.spec.ts` (C-0295): `/api/demo/match` console-error exclusion is now gated on `isPlaceholderEnv` derived from `NEXT_PUBLIC_SUPABASE_URL.includes("placeholder")`. Real seeded-DB runs no longer mask 500s on the demo match path.
+- `e2e/full-flow.spec.ts` (C-0309): replaced hardcoded test credentials with `process.env.E2E_TEST_EMAIL` / `E2E_TEST_PASSWORD`; added `test.skip(!HAS_E2E_CREDS, ...)` so missing-env runs fail loudly instead of silently passing with undefined.
+- `.github/workflows/supabase-migrate.yml` (C-0331): added `set -euo pipefail` to the apply step and a post-`db push` verification that runs `supabase migration list --linked` and fails the workflow if any "Reverted" row appears. `supabase db push` returning 0 is no longer the only signal of success.
+
 
 ## [0.24.5.0] - 2026-05-21
 
