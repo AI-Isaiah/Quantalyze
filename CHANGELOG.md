@@ -7,6 +7,16 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.6.1] - 2026-05-21
+
+**fix(typecheck): add `csv_metadata` to `WIZARD_STEP_KEYS` exhaustiveness array.**
+
+CI typecheck on v0.24.6.0 failed at `src/app/api/for-quants-lead/route.ts:146` — the compile-time exhaustiveness guard at line 142 caught a new `WizardStepKey` variant that hadn't been propagated to the `WIZARD_STEP_KEYS` tuple. Working exactly as the red-team regression intended; the guard pinned drift between the union and the runtime array.
+
+### Fixed
+- `src/app/api/for-quants-lead/route.ts:124` — appended `"csv_metadata"` to the `WIZARD_STEP_KEYS` tuple so the `Exclude<WizardStepKey, (typeof WIZARD_STEP_KEYS)[number]>` evaluates to `never` and the assignment to `true` typechecks.
+
+
 ## [0.24.6.0] - 2026-05-21
 
 **fix(wizard): close the CSV-upload /qa fix-list — strategies now classify themselves, the badge tells the truth, the disclaimer matches, validators reject obvious garbage, and the wizard tells users what's actually broken when it rejects their file.**

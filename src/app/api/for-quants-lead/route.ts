@@ -128,6 +128,11 @@ const WIZARD_STEP_KEYS = [
   "submit",
   "csv_upload",
   "csv_preview",
+  // QA report 2026-05-21 ISSUE-010 — new CSV metadata step between
+  // Preview and Submit. The compile-time exhaustiveness check below
+  // caught the missing entry on the v0.24.6.0 PR — kudos to the red-
+  // team regression that pinned this drift class.
+  "csv_metadata",
   "csv_submit",
 ] as const satisfies readonly WizardStepKey[];
 
