@@ -144,6 +144,42 @@ body[data-density="loose"] {
   --density-pad: 20px;
 }
 
+/* Allocator dashboard density — apply the --density-pad / --row-h tokens
+   to the actual surfaces an allocator looks at, so the Tweaks density
+   knob produces a visible change instead of toggling unread CSS vars.
+   The selector targets the AllocationsTabs root (data-allocator-dashboard)
+   so the rule only fires on that surface — landing pages, settings, etc.
+   keep their fixed spacing. */
+body[data-density="tight"] [data-allocator-dashboard] {
+  --tab-gap-y: 12px;
+  --tab-pad-block: 8px;
+  --kpi-row-h: 36px;
+}
+body[data-density="loose"] [data-allocator-dashboard] {
+  --tab-gap-y: 24px;
+  --tab-pad-block: 18px;
+  --kpi-row-h: 52px;
+}
+[data-allocator-dashboard] {
+  --tab-gap-y: 16px;
+  --tab-pad-block: 12px;
+  --kpi-row-h: 44px;
+}
+[data-allocator-dashboard] [data-allocator-tabstrip] {
+  padding-block-end: var(--tab-pad-block);
+  margin-block-end: var(--tab-gap-y);
+}
+
+/* Tweaks → Outcomes-tile visibility. When the panel toggles the knob to
+   Hide, the body gains data-show-outcomes="false" (see TweaksContext)
+   and both the Outcomes tab button + tabpanel disappear. The selector
+   uses display:none so screen readers and tab-key navigation also skip
+   the hidden surface. */
+body[data-show-outcomes="false"] [data-tab-key="outcomes"],
+body[data-show-outcomes="false"] [data-allocator-panel="outcomes"] {
+  display: none;
+}
+
 /* Typography for the /legal/* routes — avoids a full @tailwindcss/typography
    dependency for three static pages. */
 .legal-article h1 {

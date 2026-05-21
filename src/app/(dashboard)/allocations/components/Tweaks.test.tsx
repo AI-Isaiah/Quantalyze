@@ -49,6 +49,8 @@ beforeEach(() => {
   localStorageMock.getItem.mockClear();
   localStorageMock.setItem.mockClear();
   document.body.removeAttribute("data-density");
+  document.body.removeAttribute("data-display-font");
+  document.body.removeAttribute("data-show-outcomes");
   document.documentElement.style.removeProperty("--color-accent");
   document.documentElement.style.removeProperty("--color-accent-hover");
   document.documentElement.style.removeProperty("--color-chart-strategy");
@@ -169,6 +171,32 @@ describe("Tweaks — segmented controls", () => {
     expect(parsed.chartStyle).toBe("line");
     expect(parsed.showBench).toBe(false);
     expect(parsed.showOutcomes).toBe(false);
+  });
+
+  it("sets body[data-show-outcomes='false'] when the Outcomes tab is hidden", () => {
+    render(<Harness />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /toggle tweaks panel/i }),
+    );
+    // Default Outcomes tab is "Show" — attribute absent.
+    expect(document.body.hasAttribute("data-show-outcomes")).toBe(false);
+    // Open the panel and toggle Outcomes tab to Hide.
+    fireEvent.click(screen.getByRole("button", { name: /^Hide$/i }));
+    expect(document.body.getAttribute("data-show-outcomes")).toBe("false");
+    // Flip back to Show — attribute removed (clean DOM in the common case).
+    fireEvent.click(screen.getByRole("button", { name: /^Show$/i }));
+    expect(document.body.hasAttribute("data-show-outcomes")).toBe(false);
+  });
+
+  it("sets body[data-display-font='sans'] when Display font flips to Sans", () => {
+    render(<Harness />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /toggle tweaks panel/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Sans$/i }));
+    expect(document.body.getAttribute("data-display-font")).toBe("sans");
+    fireEvent.click(screen.getByRole("button", { name: /^Serif$/i }));
+    expect(document.body.getAttribute("data-display-font")).toBe("serif");
   });
 
   it("Reset to defaults writes TWEAK_DEFAULTS back to localStorage", () => {

@@ -883,3 +883,139 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
     expect(text2).not.toMatch(/​/);
   });
 });
+
+describe("AllocationsTabs — Tweaks showOutcomes redirect guard", () => {
+  // Same localStorage shim pattern as the cluster-P describe above —
+  // jsdom's default Storage doesn't permit direct setItem here. The
+  // module-load descriptor is restored in afterEach.
+  type StorageShim = {
+    map: Map<string, string>;
+    getItem: (k: string) => string | null;
+    setItem: (k: string, v: string) => void;
+    removeItem: (k: string) => void;
+    clear: () => void;
+    key: (i: number) => string | null;
+    readonly length: number;
+  };
+  let storageShim: StorageShim;
+
+  beforeEach(() => {
+    resetRouterMocks();
+    const map = new Map<string, string>();
+    storageShim = {
+      map,
+      getItem: (k: string) => (map.has(k) ? (map.get(k) as string) : null),
+      setItem: (k: string, v: string) => {
+        map.set(k, String(v));
+      },
+      removeItem: (k: string) => {
+        map.delete(k);
+      },
+      clear: () => map.clear(),
+      key: (i: number) => Array.from(map.keys())[i] ?? null,
+      get length() {
+        return map.size;
+      },
+    };
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: storageShim,
+    });
+    document.body.removeAttribute("data-show-outcomes");
+  });
+  afterEach(() => {
+    if (ORIGINAL_LOCALSTORAGE_DESCRIPTOR) {
+      Object.defineProperty(
+        window,
+        "localStorage",
+        ORIGINAL_LOCALSTORAGE_DESCRIPTOR,
+      );
+    }
+    document.body.removeAttribute("data-show-outcomes");
+  });
+
+  it("bounces user off ?tab=outcomes when showOutcomes flips to false", async () => {
+    // Pre-seed the Tweaks panel with showOutcomes=false. The user is
+    // sitting on ?tab=outcomes. On mount the OutcomesTabRedirectGuard
+    // effect should call router.replace to remove the tab param (default
+    // overview).
+    window.localStorage.setItem(
+      "allocations.tweaks",
+      JSON.stringify({
+        density: "comfortable",
+        accentIntensity: "muted",
+        displayFont: "serif",
+        bridgeVariant: "full",
+        chartStyle: "area",
+        showBench: true,
+        showOutcomes: false,
+      }),
+    );
+    setSearchParams("tab=outcomes");
+    await act(async () => {
+      render(<AllocationsTabs {...STUB_PROPS} />);
+    });
+    // changeTab("overview") delegates to router.replace with the tab
+    // param stripped — that's how the redirect manifests.
+    expect(mockReplace).toHaveBeenCalled();
+    const lastCallArg = mockReplace.mock.calls[mockReplace.mock.calls.length - 1]?.[0];
+    expect(typeof lastCallArg).toBe("string");
+    expect(lastCallArg as string).not.toMatch(/tab=outcomes/);
+  });
+
+  it("does NOT redirect when showOutcomes is true (default) and user is on outcomes", async () => {
+    setSearchParams("tab=outcomes");
+    await act(async () => {
+      render(<AllocationsTabs {...STUB_PROPS} />);
+    });
+    // The guard's effect fires but the `if (!showOutcomes && ...)` branch
+    // doesn't trigger. router.replace should NOT have been called by the
+    // guard. (Other code paths may call it — assert no call mentions
+    // stripping ?tab=outcomes specifically.)
+    for (const call of mockReplace.mock.calls) {
+      const url = typeof call[0] === "string" ? call[0] : "";
+      if (url.includes("/allocations") && !url.includes("tab=")) {
+        // A call that strips the tab param shouldn't happen here.
+        throw new Error(
+          `Unexpected redirect-to-overview from guard with showOutcomes=true: ${url}`,
+        );
+      }
+    }
+  });
+
+  it("keyboard arrow-nav skips the hidden Outcomes tab (red-team fix)", async () => {
+    // Persist showOutcomes=false BEFORE mount so the provider hydrates
+    // into that state and its effect sets body[data-show-outcomes=false]
+    // (we can't just setAttribute manually — the provider's effect would
+    // clobber it on the default-true hydration tick).
+    window.localStorage.setItem(
+      "allocations.tweaks",
+      JSON.stringify({
+        density: "comfortable",
+        accentIntensity: "muted",
+        displayFont: "serif",
+        bridgeVariant: "full",
+        chartStyle: "area",
+        showBench: true,
+        showOutcomes: false,
+      }),
+    );
+    setSearchParams("");
+    await act(async () => {
+      render(<AllocationsTabs {...STUB_PROPS} />);
+    });
+    // Provider hydrated post-mount → confirm the attribute is in place
+    // before exercising the handler.
+    expect(document.body.getAttribute("data-show-outcomes")).toBe("false");
+    const holdings = screen.getByRole("tab", { name: "Holdings" });
+    holdings.focus();
+    mockReplace.mockClear();
+    // ArrowRight from Holdings should land on Mandate (not Outcomes).
+    fireEvent.keyDown(holdings, { key: "ArrowRight" });
+    const lastUrl = (
+      mockReplace.mock.calls[mockReplace.mock.calls.length - 1]?.[0] ?? ""
+    ) as string;
+    expect(lastUrl).toMatch(/tab=mandate/);
+    expect(lastUrl).not.toMatch(/tab=outcomes/);
+  });
+});
