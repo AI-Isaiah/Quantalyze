@@ -392,3 +392,51 @@ describe("PATCH /api/portfolio-strategies/alias — happy path + alias normaliza
     expect(psChain.payloadSpy).toHaveBeenCalledWith({ alias: null });
   });
 });
+
+// ─── C-0110: allocation.update audit emission ──────────────────────────
+// The alias rename PATCH emits allocation.update with entity_id=portfolioId
+// (the top-level ownership anchor; portfolio_strategies has no standalone
+// UUID — it's a composite PK). Pre-fix this contract was untested. A
+// regression that swapped entity_id to strategyId (or dropped the
+// before/after alias from metadata) would mis-attribute the audit row
+// without failing any test.
+describe("PATCH /api/portfolio-strategies/alias — C-0110 allocation.update audit emission", () => {
+  beforeEach(resetMocks);
+
+  it("emits allocation.update with entity_id=portfolio_id and metadata.{strategy_id, alias} on the happy path", async () => {
+    const psChain = portfolioStrategiesChain(1);
+    mockFrom.mockImplementation((table: string) => {
+      if (table === "portfolios") return portfoliosChain(true);
+      if (table === "portfolio_strategies") return psChain.chain;
+      throw new Error(`unexpected from(${table})`);
+    });
+
+    const { PATCH } = await import("./route");
+    const res = await PATCH(
+      makeReq({
+        portfolio_id: PORTFOLIO_ID,
+        strategy_id: STRATEGY_ID,
+        alias: "Helios alpha sleeve",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    // audit.ts calls supabase.rpc('log_audit_event', { p_action, p_entity_type, p_entity_id, p_metadata })
+    // and mockRpc is the supabase rpc surface. Find the audit call.
+    const auditCall = mockRpc.mock.calls.find(
+      (call) => call[0] === "log_audit_event",
+    );
+    expect(auditCall).toBeDefined();
+    const args = auditCall![1] as Record<string, unknown>;
+    expect(args.p_action).toBe("allocation.update");
+    expect(args.p_entity_type).toBe("allocation");
+    // entity_id pins to portfolio_id (the ownership anchor) — NOT
+    // strategy_id. A regression that flipped these would orphan the
+    // audit row from its parent portfolio.
+    expect(args.p_entity_id).toBe(PORTFOLIO_ID);
+    expect(args.p_metadata).toMatchObject({
+      strategy_id: STRATEGY_ID,
+      alias: "Helios alpha sleeve",
+    });
+  });
+});
