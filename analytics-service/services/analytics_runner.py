@@ -1548,6 +1548,10 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
             ).execute()
         try:
             await db_execute(_mark_unrecoverable)
-        except Exception:
-            pass
+        except Exception as mark_exc:  # noqa: BLE001
+            logger.warning(
+                "csv analytics: could not mark strategy %s unrecoverable: %s",
+                strategy_id,
+                mark_exc,
+            )
         raise HTTPException(status_code=500, detail="CSV analytics computation failed")
