@@ -59,6 +59,12 @@ vi.mock("@/lib/analytics-client", () => ({
 
 const rpcMock = vi.hoisted(() => vi.fn());
 
+// QA report 2026-05-21 ISSUE-010: csv-finalize now also runs an UPDATE
+// on `strategies` to persist classification metadata after the RPC
+// returns. The hoisted mock captures the table name, update payload,
+// and the chained .eq() filters so tests can assert on them.
+const updateMock = vi.hoisted(() => vi.fn());
+
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: {
@@ -69,6 +75,19 @@ vi.mock("@/lib/supabase/server", () => ({
       }),
     },
     rpc: (name: string, args: Record<string, unknown>) => rpcMock(name, args),
+    from: (table: string) => ({
+      update: (payload: Record<string, unknown>) => {
+        const eqChain = {
+          eq: (col1: string, val1: unknown) => ({
+            eq: (col2: string, val2: unknown) => {
+              updateMock(table, payload, { [col1]: val1, [col2]: val2 });
+              return Promise.resolve({ error: null });
+            },
+          }),
+        };
+        return eqChain;
+      },
+    }),
   }),
 }));
 
@@ -360,5 +379,108 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
     });
     // Make sure the trimmed name is forwarded verbatim (no leading/trailing whitespace).
     expect((args as Record<string, unknown>).p_strategy_name).not.toMatch(/^\s|\s$/);
+  });
+
+  // QA report 2026-05-21 ISSUE-010: classification metadata is now
+  // persisted via a follow-up UPDATE after the RPC returns. The wizard
+  // sends `metadata: {description, category_id, strategy_types, ...}`
+  // in the request body; the route projects only known fields onto the
+  // UPDATE payload and gates by user_id (defense-in-depth on top of RLS).
+  describe("ISSUE-010 — csv_metadata UPDATE after RPC returns", () => {
+    it("metadata in body → UPDATE strategies with the projected payload", async () => {
+      rpcMock.mockResolvedValue({
+        data: "22222222-2222-4222-8222-222222222222",
+        error: null,
+      });
+      const req = makeJsonRequest({
+        wizard_session_id: VALID_SESSION,
+        fmt: "daily_returns",
+        strategy_name: "MM Daily 0.5R",
+        metadata: {
+          description: "Daily PnL series exported from internal book.",
+          category_id: "ccccccc1-1111-4111-8111-111111111111",
+          strategy_types: ["Market Neutral"],
+          subtypes: ["Stat Arb"],
+          markets: ["Futures"],
+          supported_exchanges: ["Bybit"],
+          leverage_range: "1x-3x",
+          aum: "1500000",
+          max_capacity: "10000000",
+        },
+      });
+      const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+      expect(updateMock).toHaveBeenCalledTimes(1);
+      const [table, payload, filters] = updateMock.mock.calls[0];
+      expect(table).toBe("strategies");
+      expect(payload).toMatchObject({
+        description: "Daily PnL series exported from internal book.",
+        category_id: "ccccccc1-1111-4111-8111-111111111111",
+        strategy_types: ["Market Neutral"],
+        subtypes: ["Stat Arb"],
+        markets: ["Futures"],
+        supported_exchanges: ["Bybit"],
+        leverage_range: "1x-3x",
+        aum: 1500000,
+        max_capacity: 10000000,
+      });
+      // Ownership gate: must filter by both id AND user_id so a
+      // misrouted call cannot mutate the wrong row.
+      expect(filters).toMatchObject({
+        id: "22222222-2222-4222-8222-222222222222",
+        user_id: "00000000-0000-0000-0000-000000000abc",
+      });
+    });
+
+    it("no metadata in body → RPC runs, no UPDATE (back-compat)", async () => {
+      rpcMock.mockResolvedValue({
+        data: "33333333-3333-4333-8333-333333333333",
+        error: null,
+      });
+      const req = makeJsonRequest({
+        wizard_session_id: VALID_SESSION,
+        fmt: "daily_returns",
+        strategy_name: "Legacy CSV upload",
+        // No `metadata` field — pre-ISSUE-010 callers must still work.
+      });
+      const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+      expect(updateMock).not.toHaveBeenCalled();
+    });
+
+    it("metadata projection drops unknown fields (defense-in-depth)", async () => {
+      // A misbehaving client sending unexpected fields must not have
+      // them forwarded to the UPDATE — we only project known column
+      // names so a future PUT-shaped client can't write arbitrary
+      // columns through this route.
+      rpcMock.mockResolvedValue({
+        data: "44444444-4444-4444-8444-444444444444",
+        error: null,
+      });
+      const req = makeJsonRequest({
+        wizard_session_id: VALID_SESSION,
+        fmt: "daily_returns",
+        strategy_name: "Strict projection",
+        metadata: {
+          description: "ok",
+          // Hostile / unknown fields — must NOT reach the UPDATE.
+          status: "published",
+          source: "api",
+          user_id: "other-user-id",
+          is_example: true,
+        },
+      });
+      const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+      const [, payload] = updateMock.mock.calls[0];
+      expect(payload).toEqual({ description: "ok" });
+      expect(payload).not.toHaveProperty("status");
+      expect(payload).not.toHaveProperty("source");
+      expect(payload).not.toHaveProperty("user_id");
+      expect(payload).not.toHaveProperty("is_example");
+    });
   });
 });

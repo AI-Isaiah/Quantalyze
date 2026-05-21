@@ -53,6 +53,12 @@ export type WizardStepKey =
   | "submit"
   | "csv_upload"
   | "csv_preview"
+  // QA report 2026-05-21 ISSUE-010: the CSV branch wrote
+  // category_id=null + empty strategy_types/markets/aum/etc, leaving the
+  // strategy invisible to discovery and bare in lists. csv_metadata is
+  // the new step between preview and submit that collects classification
+  // metadata from the user (mirrors the API branch's MetadataStep).
+  | "csv_metadata"
   | "csv_submit";
 
 export interface WizardLocalState {
@@ -290,6 +296,7 @@ export async function loadWizardState(): Promise<WizardLocalState | null> {
       "submit",
       "csv_upload",
       "csv_preview",
+      "csv_metadata",
       "csv_submit",
     ];
     if (!validSteps.includes(obj.step as WizardStepKey)) {

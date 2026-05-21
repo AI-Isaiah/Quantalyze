@@ -17,11 +17,19 @@ const DEFAULT_STEPS: { key: WizardStepKey; label: string; number: string }[] = [
   { key: "submit", label: "Submit", number: "04" },
 ];
 
-/** Phase 15 / CSV-01..CSV-02 — 3-step CSV branch (locked decision D-03). */
+/**
+ * Phase 15 / CSV-01..CSV-02 originally shipped a 3-step CSV branch
+ * (D-03). QA report 2026-05-21 ISSUE-010 added a fourth step between
+ * Preview and Submit so the user can classify the strategy before
+ * persisting — without this step the CSV branch was writing
+ * category_id=null and empty type/market/exchange arrays, leaving the
+ * strategy invisible to discovery + bare in lists.
+ */
 const CSV_STEPS: { key: WizardStepKey; label: string; number: string }[] = [
   { key: "csv_upload", label: "Upload CSV", number: "01" },
   { key: "csv_preview", label: "Preview", number: "02" },
-  { key: "csv_submit", label: "Submit", number: "03" },
+  { key: "csv_metadata", label: "Strategy profile", number: "03" },
+  { key: "csv_submit", label: "Submit", number: "04" },
 ];
 
 /** Re-export of CSV_STEPS for the WizardClient ?source=csv branch. */

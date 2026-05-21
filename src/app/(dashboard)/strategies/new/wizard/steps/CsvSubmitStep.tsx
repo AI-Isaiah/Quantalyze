@@ -8,6 +8,7 @@ import {
   WIZARD_ERROR_COPY,
 } from "@/lib/wizardErrors";
 import { CsvValidationEnvelope } from "./CsvValidationEnvelope";
+import type { MetadataDraft } from "./MetadataStep";
 
 /**
  * Phase 15 / CSV-01..CSV-02 — sub-step 3 of the CSV branch.
@@ -48,6 +49,12 @@ export interface CsvSubmitStepProps {
   /** forwarded to finalize body as `strategy_name` (snake_case) */
   strategyName: string;
   preview: PreviewShape;
+  /**
+   * QA report 2026-05-21 ISSUE-010: classification metadata captured on
+   * the new csv_metadata step. Forwarded to /api/strategies/csv-finalize
+   * so the strategy can be discovered after admin approval.
+   */
+  metadata: MetadataDraft;
   onSubmitted: (strategyId: string) => void;
   onBack: () => void;
 }
@@ -66,6 +73,7 @@ export function CsvSubmitStep({
   fmt,
   strategyName,
   preview,
+  metadata,
   onSubmitted,
   onBack,
 }: CsvSubmitStepProps) {
@@ -85,6 +93,21 @@ export function CsvSubmitStep({
           wizard_session_id: wizardSessionId,
           fmt,
           strategy_name: strategyName, // Cross-AI revision 2026-04-30
+          // QA report 2026-05-21 ISSUE-010 — classification metadata.
+          // The route persists these via an authenticated UPDATE on
+          // strategies AFTER the SECURITY DEFINER finalize RPC returns
+          // the new id; RLS gates the write to the row's owner.
+          metadata: {
+            description: metadata.description,
+            category_id: metadata.categoryId,
+            strategy_types: metadata.strategyTypes,
+            subtypes: metadata.subtypes,
+            markets: metadata.markets,
+            supported_exchanges: metadata.supportedExchanges,
+            leverage_range: metadata.leverageRange,
+            aum: metadata.aum,
+            max_capacity: metadata.maxCapacity,
+          },
         }),
       });
 
@@ -162,7 +185,7 @@ export function CsvSubmitStep({
       });
       setSubmitting(false);
     }
-  }, [submitting, wizardSessionId, fmt, strategyName, onSubmitted]);
+  }, [submitting, wizardSessionId, fmt, strategyName, metadata, onSubmitted]);
 
   return (
     <section aria-labelledby="wizard-csv-submit-heading">
