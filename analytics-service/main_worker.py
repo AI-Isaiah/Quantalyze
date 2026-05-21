@@ -96,6 +96,7 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # `.planning/audit-2026-05-07/INVEST-P97.md`.
     "sync_trades": "30 minutes",       # handler timeout = 15 minutes (mig 117)
     "compute_analytics": "20 minutes", # handler timeout = 15 minutes
+    "compute_analytics_from_csv": "15 minutes", # handler timeout = 10 minutes — pure math, no exchange I/O
     "poll_positions": "5 minutes",     # handler timeout = 3 minutes
     "compute_portfolio": "15 minutes", # handler timeout = 10 minutes
     # Equity-history backfill is the longest-running kind in the system —
