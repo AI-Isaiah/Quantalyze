@@ -7,6 +7,25 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.8] - 2026-05-21
+
+**fix(signup): detect repeated-signup via `data.user.identities=[]` and steer users toward sign-in.**
+
+Closes the UX gap behind the production report "I still don't receive an email after signup". When a user signs up with an email that already exists, Supabase returns a 200 with `data.user.identities = []` (anti-enumeration), and no email is sent. The form was falling through to "Check your email to confirm your account" — users waited forever for an email that would never arrive.
+
+### Fixed
+- `src/components/auth/SignupForm.tsx`: detect Supabase's enumeration-safe repeated-signup payload (`data.user.identities.length === 0`) and surface "An account with this email already exists. Sign in instead, or use password reset if you forgot it." instead of the misleading "Check your email" message.
+
+### Added (regression tests — fail without the fix)
+- `src/components/auth/SignupForm.repeated-signup.test.tsx` — 3 tests covering the repeated-signup branch, genuine first-time signup with populated identities, and the auto-confirm path that returns a session immediately.
+
+### Operational (not in this diff — recorded for traceability)
+- Production Supabase auth config patched via Management API:
+  - `site_url` was `http://localhost:3000` → now `https://quantalyze-rho.vercel.app`
+  - `uri_allow_list` was empty → now `http://localhost:3000/**,https://quantalyze-rho.vercel.app/**,https://*-vercel.app/**`
+- Stale `auth.users` row for the founder account (left over from April pre-`/auth/callback` testing) deleted so the new signup flow can be exercised end-to-end.
+
+
 ## [0.24.5.7] - 2026-05-21
 
 **fix(audit-2026-05-07): close last 7 CRITICALs (C-0112 + C-0155 + C-0157 + C-0193 + C-0195 + C-0197 + C-0198 + C-0319) + 3 specialist-review HIGHs.**
