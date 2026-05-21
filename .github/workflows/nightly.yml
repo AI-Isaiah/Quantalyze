@@ -12,7 +12,44 @@ permissions:
   contents: read
 
 jobs:
+  # C-0294 fix: single source of truth for the STAGING_BASE_URL guard.
+  # Previously the same trim check existed both as a job-level `if:` and
+  # as a shell step inside the probe — drift risk. Now this job decides
+  # once, emits a workflow-summary warning when the canary is disabled
+  # (so silent disablement is visible in the Actions tab), and downstream
+  # jobs gate on `needs.preflight.outputs.staging_enabled == 'true'`.
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      staging_enabled: ${{ steps.guard.outputs.staging_enabled }}
+    steps:
+      - name: Evaluate canary enablement
+        id: guard
+        env:
+          STAGING_BASE_URL: ${{ vars.STAGING_BASE_URL }}
+        run: |
+          trimmed="$(echo "$STAGING_BASE_URL" | tr -d '[:space:]')"
+          if [ -z "$trimmed" ]; then
+            echo "staging_enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::STAGING_BASE_URL is empty/whitespace — demo-PDF canary is DISABLED."
+            {
+              echo "## Nightly canary status"
+              echo ""
+              echo "**demo-pdf-coldstart: DISABLED** — \`STAGING_BASE_URL\` is empty or whitespace."
+              echo ""
+              echo "Set \`STAGING_BASE_URL\` in repo variables to re-enable the canary."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "staging_enabled=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Nightly canary status"
+              echo ""
+              echo "**demo-pdf-coldstart: ENABLED**"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   demo-pdf-coldstart:
+    needs: preflight
     runs-on: ubuntu-latest
     # Per-job uplift: failure path uses actions/github-script to file an
     # auto-issue against this repo so the broken staging cold-start is
@@ -20,11 +57,8 @@ jobs:
     permissions:
       contents: read
       issues: write
-    # First-line guard on STAGING_BASE_URL: empty or single-space values
-    # are treated as unset. The shell step below applies a stricter trim
-    # check (belt + suspenders) since GH Actions expressions have no
-    # trim function and can't catch multi-character whitespace.
-    if: ${{ vars.STAGING_BASE_URL != '' && vars.STAGING_BASE_URL != ' ' }}
+    # C-0294 fix: guard logic lives in preflight job, not duplicated here.
+    if: ${{ needs.preflight.outputs.staging_enabled == 'true' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
@@ -53,13 +87,6 @@ jobs:
             echo "::warning::DEMO_PDF_SECRET not set — skipping PDF probe."
             exit 0
           fi
-          # Also bail if the base URL is whitespace-only (belt + suspenders
-          # to the `if:` guard above).
-          trimmed="$(echo "$PLAYWRIGHT_BASE_URL" | tr -d '[:space:]')"
-          if [ -z "$trimmed" ]; then
-            echo "::warning::STAGING_BASE_URL was whitespace-only — skipping PDF probe."
-            exit 0
-          fi
           npx playwright test e2e/portfolio-pdf-demo.spec.ts --grep @nightly
       # retro-PR179-H1 (twin) — REMOVED: the demo-PDF probe runs against
       # staging with DEMO_PDF_SECRET in the auth path. On failure, the
@@ -72,32 +99,54 @@ jobs:
       # secret already in their environment and capture a fresh trace.
       # Re-introduce this upload only after a scrub step (unzip ->
       # sed-redact -> rezip) lands in front of the upload action.
-      - name: Open GitHub issue on failure
+      - name: Open or update GitHub issue on failure
         if: failure()
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
         env:
           RUN_ID: ${{ github.run_id }}
           REPO_NAME: ${{ github.repository }}
         with:
+          # C-0294 fix: dedup via stable label. Previously every failed
+          # nightly opened a new issue. Now we search open issues
+          # labelled `nightly-canary-failure:pdf-coldstart` and comment
+          # on the existing one if found.
           script: |
             const { RUN_ID, REPO_NAME } = process.env;
             const today = new Date().toISOString().slice(0, 10);
+            const dedupLabel = "nightly-canary-failure:pdf-coldstart";
+            const runUrl = `https://github.com/${REPO_NAME}/actions/runs/${RUN_ID}`;
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: dedupLabel,
+              per_page: 1,
+            });
+            if (existing.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing[0].number,
+                body: `Nightly PDF probe failed again on ${today}. Workflow run: ${runUrl}`,
+              });
+              return;
+            }
             const title = `Nightly PDF probe failed on ${today}`;
             const body = [
               "The nightly demo-PDF cold-start probe failed. The forwarded /demo URL may be broken.",
               "",
-              `Workflow run: https://github.com/${REPO_NAME}/actions/runs/${RUN_ID}`,
+              `Workflow run: ${runUrl}`,
               "",
               "Likely causes: Puppeteer cold-start regression, Supabase connectivity, DEMO_PDF_SECRET rotation, token format drift.",
               "",
-              "Auto-filed by .github/workflows/nightly.yml.",
+              "Auto-filed by .github/workflows/nightly.yml. This issue is deduplicated by the `" + dedupLabel + "` label; subsequent failures will comment here until this issue is closed.",
             ].join("\n");
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
               body,
-              labels: ["nightly-probe", "p0"],
+              labels: ["nightly-probe", "p0", dedupLabel],
             });
 
   npm-audit:
@@ -127,30 +176,50 @@ jobs:
       - run: npm ci
       - name: npm audit (critical-severity gate)
         run: npm audit --audit-level=critical
-      - name: Open GitHub issue on critical advisory
+      - name: Open or update GitHub issue on critical advisory
         if: failure()
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
         env:
           RUN_ID: ${{ github.run_id }}
           REPO_NAME: ${{ github.repository }}
         with:
+          # C-0294 fix: dedup via stable label. See dedup rationale on
+          # the demo-pdf-coldstart job.
           script: |
             const { RUN_ID, REPO_NAME } = process.env;
             const today = new Date().toISOString().slice(0, 10);
+            const dedupLabel = "nightly-canary-failure:npm-audit";
+            const runUrl = `https://github.com/${REPO_NAME}/actions/runs/${RUN_ID}`;
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: dedupLabel,
+              per_page: 1,
+            });
+            if (existing.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing[0].number,
+                body: `Nightly npm audit failed again on ${today}. Workflow run: ${runUrl}`,
+              });
+              return;
+            }
             const title = `Nightly npm audit found a critical advisory (${today})`;
             const body = [
               "`npm audit --audit-level=critical` failed in the nightly workflow.",
               "",
-              `Workflow run: https://github.com/${REPO_NAME}/actions/runs/${RUN_ID}`,
+              `Workflow run: ${runUrl}`,
               "",
               "Run `npm audit` locally to see the advisory list.",
               "",
-              "Auto-filed by .github/workflows/nightly.yml.",
+              "Auto-filed by .github/workflows/nightly.yml. This issue is deduplicated by the `" + dedupLabel + "` label; subsequent failures will comment here until this issue is closed.",
             ].join("\n");
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
               body,
-              labels: ["nightly-probe", "security", "p1"],
+              labels: ["nightly-probe", "security", "p1", dedupLabel],
             });

@@ -179,9 +179,14 @@ describe("audit-2026-05-07 P459 — isAdminUser unified across all three signals
     expect(ok).toBe(false);
   });
 
-  it("only queries user_app_roles when that signal already grants (no wasted DB round-trips)", async () => {
-    userAppRolesQueryMock.mockResolvedValue({
-      data: [{ role: "admin" }],
+  it("short-circuits on profiles.is_admin (PRIMARY signal) and skips the user_app_roles query", async () => {
+    // audit-2026-05-07 C-0144 + C-0150 — contract inversion: profiles.is_admin
+    // is now the PRIMARY signal (matches RLS — 19 policy references vs 0 for
+    // user_app_roles in non-self-referential policies). When it grants, the
+    // additive SECONDARY signal (user_app_roles) is skipped — no wasted DB
+    // round-trip.
+    profilesIsAdminMock.mockResolvedValue({
+      data: { is_admin: true },
       error: null,
     });
 
@@ -190,9 +195,7 @@ describe("audit-2026-05-07 P459 — isAdminUser unified across all three signals
       { id: "u-4", email: "u4@test.com" },
     );
 
-    // The user_app_roles check fires first; profiles is NOT queried when
-    // the role is found there. (The mock is called from `hasAdminRoleRow`.)
-    expect(profilesIsAdminMock).not.toHaveBeenCalled();
+    expect(userAppRolesQueryMock).not.toHaveBeenCalled();
   });
 });
 

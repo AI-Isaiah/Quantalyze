@@ -1,35 +1,58 @@
 /**
- * Phase 13 / Plan 13-02 / DISCO-02 — Cross-account localStorage isolation.
+ * Phase 13 / Plan 13-02 / DISCO-02 — Allocator preferences isolation contract.
  *
- * Proves the structural isolation guarantee documented in 13-RESEARCH.md
- * Example 4 and threat-model T-13-02-01: login-as-A then login-as-B leaves
- * zero `discovery_view_preferences:{A.uid}:*` keys readable from session B.
+ * audit-2026-05-07 finding C-0303:
+ *   The previous version of this spec asserted ONLY client-side localStorage
+ *   key isolation (`discovery_view_preferences:{uid}:*`), which is a fixture-
+ *   layer property (the client never writes another user's uid into its own
+ *   localStorage, so the keys couldn't leak even with broken backend RLS).
+ *   That meant an RLS / session-bypass regression on the server-side
+ *   `allocator_preferences` row would have been UNDETECTABLE by this spec.
  *
- * Env wiring (TODOS.md Q4 RESOLVED 2026-04-28):
- *   E2E_USER_A_EMAIL / E2E_USER_A_PASSWORD / E2E_USER_B_EMAIL / E2E_USER_B_PASSWORD
- *   are NOT wired into CI today. The active path is the seed-helper fallback —
- *   `seedTestAllocator()` from `e2e/helpers/seed-test-project.ts` creates two
- *   fresh allocators per spec run.
+ *   This rewrite pivots the contract to the real isolation surface:
+ *     1. Sign in as user A, mutate prefs via PUT /api/preferences (sets
+ *        `excluded_exchanges=['bybit']` on A's row).
+ *     2. Sign out, sign in as user B.
+ *     3. GET /api/preferences as user B — assert B does NOT see A's
+ *        `excluded_exchanges=['bybit']`. The API derives `user.id` from the
+ *        session cookie (route.ts:14, route.ts:33), so this asserts the
+ *        cookie/session boundary AND the row scoping.
+ *     4. Direct PostgREST proof (no client-side filter): sign in as user B
+ *        against Supabase auth, issue a bare `SELECT * FROM
+ *        allocator_preferences` with user B's JWT, assert user A's row is
+ *        NOT visible. This pins the migration 057 RLS policy
+ *        `allocator_prefs_self_read USING (user_id = auth.uid())` —
+ *        the policy is the only thing that can scope this bare select.
  *
- * Behaviour: when the seed-helper service-role env (TEST_SUPABASE_*) is missing,
- * the spec is `test.skip`'d so it is authored-but-not-CI-blocking.
+ *   What CANNOT be tested at this layer:
+ *     - "Smuggle user A's user_id through the API as user B." The
+ *       /api/preferences route (src/app/api/preferences/route.ts) does NOT
+ *       accept a user_id param; identity is always derived from the session
+ *       cookie. There is no API path to smuggle another uid through.
+ *       Documented here so a future refactor that introduces such a param
+ *       gets a forced-rewrite signal at code-review time.
+ *
+ * Env wiring:
+ *   - Server-side path needs TEST_SUPABASE_URL + TEST_SUPABASE_SERVICE_ROLE_KEY
+ *     (used by seedTestAllocator / cleanupTestAllocator).
+ *   - Direct-PostgREST RLS proof additionally needs TEST_SUPABASE_ANON_KEY
+ *     (mirrors discovery-watchlist.spec.ts:368). When the anon key is
+ *     absent the RLS-proof step is skipped but the API-level isolation
+ *     step still runs.
+ *
+ * When seed env is missing the whole describe block is `test.skip`'d (the
+ * contract is at least PINNED for next CI cycle).
  */
 
 import { test, expect } from "@playwright/test";
+import { createClient } from "@supabase/supabase-js";
 import { seedTestAllocator } from "./helpers/seed-test-project";
+import { cleanupTestAllocator } from "./helpers/cleanup-test-project";
 import { loginAs } from "./helpers/login";
-
-const HAS_E2E_USER_ENV =
-  !!process.env.E2E_USER_A_EMAIL &&
-  !!process.env.E2E_USER_A_PASSWORD &&
-  !!process.env.E2E_USER_B_EMAIL &&
-  !!process.env.E2E_USER_B_PASSWORD;
 
 const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_URL &&
   !!process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
-
-const SHOULD_RUN = HAS_E2E_USER_ENV || HAS_SEED_ENV;
 
 async function signOut(page: import("@playwright/test").Page) {
   // Try the user-menu sign-out button first (TODOS.md Q3 — there is no
@@ -48,94 +71,162 @@ async function signOut(page: import("@playwright/test").Page) {
       return;
     }
   }
-  // Fallback per RESEARCH.md Pitfall 8 — clear sb-* localStorage + cookies.
-  // PR #108: also clear `discovery_view_preferences:*` to mirror what
-  // SignOutButton.tsx does on the production path. The user-menu path
-  // above already triggers SignOutButton; this fallback runs when the
-  // menu isn't visible (e.g., the seeded test user doesn't render the
-  // header) and must keep the same isolation contract.
+  // Fallback: clear sb-* localStorage + cookies. The user-menu path above
+  // already triggers SignOutButton; this fallback runs when the menu isn't
+  // visible (e.g., the seeded test user doesn't render the header).
   await page.evaluate(() => {
     Object.keys(localStorage)
-      .filter(
-        (k) =>
-          k.startsWith("sb-") ||
-          k.startsWith("discovery_view_preferences:"),
-      )
+      .filter((k) => k.startsWith("sb-"))
       .forEach((k) => localStorage.removeItem(k));
   });
   await page.context().clearCookies();
 }
 
-test.describe("DISCO-02 cross-account localStorage isolation", () => {
+test.describe("DISCO-02 allocator preferences isolation", () => {
   test.skip(
-    !SHOULD_RUN,
-    "discovery prefs isolation: cross-account env not wired " +
-      "(set E2E_USER_A_EMAIL/PASSWORD + E2E_USER_B_EMAIL/PASSWORD or " +
-      "TEST_SUPABASE_URL/TEST_SUPABASE_SERVICE_ROLE_KEY) — see TODOS.md Q4.",
+    !HAS_SEED_ENV,
+    "discovery prefs isolation: TEST_SUPABASE_URL / " +
+      "TEST_SUPABASE_SERVICE_ROLE_KEY not wired — spec authored but " +
+      "CI-skip per Plan 13-02 / 13-05 fallback. See " +
+      "e2e/helpers/seed-test-project.ts.",
   );
 
-  test("discovery prefs isolation: login-as-A then login-as-B leaves no A-keys readable from B", async ({
+  let userAId: string | undefined;
+  let userAEmail: string;
+  let userAPassword: string;
+  let userBId: string | undefined;
+  let userBEmail: string;
+  let userBPassword: string;
+
+  test.beforeAll(async () => {
+    // Serial seeding (matches discovery-watchlist.spec.ts:112 —
+    // parallel-seed-burst red-team finding: Supabase auth-admin rate
+    // limits createUser bursts).
+    const seedA = await seedTestAllocator();
+    const seedB = await seedTestAllocator();
+    userAId = seedA.userId;
+    userAEmail = seedA.email;
+    userAPassword = seedA.password;
+    userBId = seedB.userId;
+    userBEmail = seedB.email;
+    userBPassword = seedB.password;
+  });
+
+  test.afterAll(async () => {
+    // FK CASCADE on auth.users.id removes allocator_preferences rows when
+    // the user is deleted (migration 057 / perfect_match.sql). Best-effort.
+    if (userAId) await cleanupTestAllocator(userAId);
+    if (userBId) await cleanupTestAllocator(userBId);
+  });
+
+  test("user B cannot read user A's allocator_preferences (server-side RLS contract)", async ({
     page,
   }) => {
-    let userA: { email: string; password: string };
-    let userB: { email: string; password: string };
-    if (HAS_E2E_USER_ENV) {
-      userA = {
-        email: process.env.E2E_USER_A_EMAIL!,
-        password: process.env.E2E_USER_A_PASSWORD!,
-      };
-      userB = {
-        email: process.env.E2E_USER_B_EMAIL!,
-        password: process.env.E2E_USER_B_PASSWORD!,
-      };
-    } else {
-      const seededA = await seedTestAllocator();
-      const seededB = await seedTestAllocator();
-      userA = { email: seededA.email, password: seededA.password };
-      userB = { email: seededB.email, password: seededB.password };
+    // ---- Step 1: log in as A, write a distinguishing prefs row. ----
+    await loginAs(page, userAEmail, userAPassword);
+
+    // PUT /api/preferences derives user.id from the session cookie
+    // (src/app/api/preferences/route.ts:33) and routes the value through
+    // the `update_allocator_mandates` RPC. We use a distinguishing sentinel
+    // (`bybit`) so user B's later GET cannot pass by accident if both rows
+    // happen to be empty.
+    const putRes = await page.request.put("/api/preferences", {
+      data: { excluded_exchanges: ["bybit"] },
+      headers: { "content-type": "application/json" },
+    });
+    expect(
+      putRes.ok(),
+      `user-A PUT /api/preferences failed: ${putRes.status()} ${await putRes.text()}`,
+    ).toBe(true);
+
+    // Sanity check: A reading their own row sees the sentinel.
+    const getResA = await page.request.get("/api/preferences");
+    expect(getResA.ok()).toBe(true);
+    const aBody = await getResA.json();
+    expect(
+      aBody?.preferences?.excluded_exchanges,
+      "user-A's prefs row did not persist excluded_exchanges=['bybit'] — " +
+        "seed mutation failed; rest of the isolation contract is unverifiable",
+    ).toEqual(["bybit"]);
+
+    // ---- Step 2: sign out, sign in as user B in the same browser. ----
+    await signOut(page);
+    await loginAs(page, userBEmail, userBPassword);
+
+    // ---- Step 3: GET /api/preferences as user B. Must NOT see A's ----
+    // ---- sentinel. The route derives identity from the session       ----
+    // ---- cookie (src/app/api/preferences/route.ts:14), so a positive ----
+    // ---- match here means the cookie boundary collapsed (session    ----
+    // ---- mix-up, shared-cache leak, etc.). page.request inherits    ----
+    // ---- the browser context cookies so the GET rides B's session. ----
+    const getResB = await page.request.get("/api/preferences");
+    expect(getResB.ok()).toBe(true);
+    const bBody = await getResB.json();
+    // B's preferences row may not exist yet (null) OR may be empty/[] —
+    // both satisfy the contract. What's forbidden is seeing A's sentinel.
+    const bExcluded = bBody?.preferences?.excluded_exchanges ?? null;
+    expect(
+      bExcluded,
+      "user-B's GET /api/preferences returned user-A's " +
+        "excluded_exchanges=['bybit'] sentinel — SESSION/RLS LEAK on " +
+        "allocator_preferences (migration 057 self_read policy or the " +
+        "src/app/api/preferences/route.ts:33 user.id derivation)",
+    ).not.toEqual(["bybit"]);
+
+    // Belt-and-braces: the `user_id` in B's response (if any) must be B's
+    // own uid, never A's.
+    if (bBody?.preferences?.user_id) {
+      expect(
+        bBody.preferences.user_id,
+        "user-B's GET /api/preferences returned a row owned by user-A",
+      ).toBe(userBId);
+      expect(bBody.preferences.user_id).not.toBe(userAId);
     }
 
-    // Step 1 — Login as A and persist a non-default view via the cog drawer.
-    await loginAs(page, userA.email, userA.password);
-    await page.goto("/discovery/crypto-sma");
-    await page.waitForSelector("table, [role='tabpanel']", { timeout: 10000 });
-    await page.click('button[aria-label="Customize discovery view"]');
-
-    // Click the "Grid" view button inside the drawer (within the dialog scope).
-    const dialog = page.getByRole("dialog");
-    await dialog.locator('button:has-text("Grid")').click();
-    await page.click('button[aria-label="Save preferences"]');
-
-    // Step 2 — Capture A's localStorage keys.
-    const aKeys = await page.evaluate(() =>
-      Object.keys(localStorage).filter((k) =>
-        k.startsWith("discovery_view_preferences:"),
-      ),
+    // ---- Step 4: direct PostgREST RLS proof (no client-side filter). ----
+    // Sign in as user B against Supabase auth, then issue a BARE
+    // `SELECT user_id, excluded_exchanges FROM allocator_preferences`. The
+    // ONLY thing that can scope this query to "B's rows only" is the
+    // migration 057 RLS policy `allocator_prefs_self_read USING
+    // (user_id = auth.uid())`. If the policy regresses, A's seeded row
+    // will surface here even though the API layer above is intact.
+    //
+    // Mirrors discovery-watchlist.spec.ts:368-399 (the canonical RLS-leak
+    // detector pattern).
+    const anonKey = process.env.TEST_SUPABASE_ANON_KEY;
+    test.skip(
+      !anonKey,
+      "TEST_SUPABASE_ANON_KEY not wired — direct PostgREST RLS proof " +
+        "skipped (API-level isolation step above still ran). Set the env " +
+        "var to enable the bare-SELECT RLS proof.",
     );
-    expect(aKeys.length).toBeGreaterThanOrEqual(1);
-    const aUid = aKeys[0].split(":")[1];
-    expect(aUid).toBeTruthy();
-
-    // Step 3 — Sign out, sign in as B.
-    await signOut(page);
-    await loginAs(page, userB.email, userB.password);
-
-    // Step 4 — Navigate to discovery and read out B's localStorage.
-    await page.goto("/discovery/crypto-sma");
-    await page.waitForSelector("table, [role='tabpanel']", { timeout: 10000 });
-
-    const bKeysWithAUid = await page.evaluate((uid) => {
-      return Object.keys(localStorage).filter((k) =>
-        k.startsWith(`discovery_view_preferences:${uid}:`),
-      );
-    }, aUid);
-    // Per the threat-model T-13-02-01 mitigation: B's session must contain
-    // ZERO entries keyed under A's uid. Whether B has its own
-    // discovery_view_preferences:{B.uid}:* entries is fine — that's by design.
-    expect(bKeysWithAUid).toEqual([]);
-
-    // Step 5 — Confirm B sees the default table view (not A's grid).
-    // The default render is table mode, so a <table> is in the DOM.
-    await expect(page.locator("table")).toBeVisible();
+    const url = process.env.TEST_SUPABASE_URL!;
+    const userBClient = createClient(url, anonKey!, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
+    const { error: signInErr } = await userBClient.auth.signInWithPassword({
+      email: userBEmail,
+      password: userBPassword,
+    });
+    expect(
+      signInErr,
+      `user-B signInWithPassword failed: ${signInErr?.message}`,
+    ).toBeNull();
+    const { data: leakRows, error: leakErr } = await userBClient
+      .from("allocator_preferences")
+      .select("user_id, excluded_exchanges");
+    expect(
+      leakErr,
+      `user-B SELECT allocator_preferences failed: ${leakErr?.message}`,
+    ).toBeNull();
+    const aRowsVisibleToB = (leakRows ?? []).filter(
+      (r) => r.user_id === userAId,
+    );
+    expect(
+      aRowsVisibleToB,
+      `user-B's session sees ${aRowsVisibleToB.length} of user-A's ` +
+        `allocator_preferences rows — RLS LEAK on migration 057 ` +
+        `allocator_prefs_self_read policy`,
+    ).toHaveLength(0);
   });
 });

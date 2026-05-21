@@ -1,4 +1,49 @@
+import fs from "node:fs";
+import path from "node:path";
 import { test, expect } from "@playwright/test";
+
+/**
+ * C-0300 sentinel — fails CI if the chromium-linux baseline PNGs are
+ * not committed. The screenshot regression spec below is excluded from
+ * the unconditional CI command list (.github/workflows/ci.yml e2e job)
+ * because Playwright fails with "snapshot doesn't exist" until the
+ * Linux baselines are generated. Excluding the spec also means nothing
+ * forced the baselines to ever land — the spec could stay dormant
+ * forever and no signal would fire.
+ *
+ * This sentinel runs in CI via the e2e job's `--grep` invocation so the
+ * absence of baseline files is loud, not silent. It checks the
+ * filesystem only (no `page` fixture) so it costs ~ms and is unaffected
+ * by whether the dev server is up.
+ *
+ * Recovery: regenerate baselines via the Docker command in the file
+ * comment below, then commit the PNGs under
+ * `e2e/demo-screenshot.spec.ts-snapshots/`. Once baselines exist the
+ * full screenshot regression suite can be enabled in ci.yml.
+ */
+test("C-0300 sentinel: chromium-linux baselines committed", () => {
+  const snapshotDir = path.join(
+    __dirname,
+    "demo-screenshot.spec.ts-snapshots",
+  );
+  // Names must mirror the `file:` field of each entry in the
+  // `screenshots` array below. Playwright suffixes the platform
+  // (chromium-linux) to the file name on disk.
+  const required = [
+    "demo-375-chromium-linux.png",
+    "demo-768-chromium-linux.png",
+    "demo-1280-chromium-linux.png",
+  ];
+  const missing = required.filter(
+    (name) => !fs.existsSync(path.join(snapshotDir, name)),
+  );
+  expect(
+    missing,
+    `Missing baseline PNG(s) under ${snapshotDir}: ${missing.join(", ")}. ` +
+      `Regenerate via the Docker command in this file's header comment, ` +
+      `then commit the PNGs.`,
+  ).toEqual([]);
+});
 
 /**
  * Screenshot regression coverage for `/demo`.

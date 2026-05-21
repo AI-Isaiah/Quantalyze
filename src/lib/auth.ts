@@ -13,16 +13,22 @@ export { APP_ROLES, type AppRole };
 
 /**
  * Role-Based Access Control (RBAC) helpers. `user_app_roles` is the
- * primary `(user_id, role)` join table; roles ∈
+ * `(user_id, role)` join table; roles ∈
  * ('admin','allocator','quant_manager','analyst'); a user may hold
  * multiple roles.
  *
- * The admin decision is a UNION across three signals —
- * `user_app_roles.role='admin'` OR `profiles.is_admin = TRUE` OR the
- * `ADMIN_EMAIL` env fallback — wired through `isAdminUser()` in
- * `src/lib/admin.ts`. `withRole` and the legacy `withAdminAuth` both
- * consult that same helper, so a grant in any one signal lights up both
- * wrappers.
+ * The admin decision has a SINGLE SOURCE OF TRUTH (audit-2026-05-07
+ * C-0144 + C-0150): `isAdminUser()` in `src/lib/admin.ts`. The check is:
+ *
+ *     admin = (profiles.is_admin = TRUE)            -- primary (matches RLS)
+ *           OR (user_app_roles.role='admin')        -- additive (Sprint 7 rollout)
+ *
+ * `ADMIN_EMAIL` is OBSERVATIONAL ONLY — it no longer grants admin.
+ * `withRole('admin')` delegates to `isAdminUser` (via
+ * `isAdminUserGivenUserAppRoles`, which trusts the already-fetched
+ * user_app_roles set instead of issuing a redundant round-trip). Non-admin
+ * role requests resolve through `user_app_roles` alone — there is no
+ * profile-flag analogue for `allocator` / `quant_manager` / `analyst`.
  *
  * Defense in depth: new routes should use BOTH the route wrapper (so the
  * response is 403 before touching the DB) AND the RLS policy on the
@@ -280,27 +286,27 @@ export async function requireRole(
   // here, so we never need a zero-role fall-through branch.
   const hasAny = roles.some((r) => userRoles.includes(r));
   if (!hasAny) {
-    // audit-2026-05-07 P459 + P699 + P703: admin-gate consolidation.
+    // audit-2026-05-07 C-0144 + C-0150: admin-gate consolidation.
     //
-    // `withRole('admin')` and the legacy `isAdminUser` must agree on the
-    // SAME decision. If the caller is requesting the 'admin' role and
-    // user_app_roles does not return an admin row, fall back to the
-    // unified `isAdminUser` check (which OR's user_app_roles, the legacy
-    // `profiles.is_admin` column, and the audited ADMIN_EMAIL env
-    // fallback). A grant in any one of those three signals lights up
-    // BOTH the route wrapper and the legacy guard, closing the drift
-    // surface a parallel-RBAC reviewer flagged.
+    // `withRole('admin')` and `isAdminUser` share ONE decision — they
+    // are no longer parallel gates. If the caller is requesting the
+    // 'admin' role and user_app_roles does not return an admin row,
+    // delegate to the canonical `isAdminUser` check (which consults
+    // `profiles.is_admin` as the PRIMARY signal — matches DB-side RLS
+    // — and `user_app_roles.role='admin'` as the additive secondary).
+    // `ADMIN_EMAIL` is no longer a grant; it only emits an observational
+    // log. So:
+    //   - "Ghost-admin" (profile.is_admin=TRUE, no role enum) → admin ✓
+    //   - "Dead-admin"  (in ADMIN_EMAIL, profile.is_admin=FALSE) → NOT admin ✗
     //
     // Non-admin role requests skip this branch — there is no fallback
-    // signal for `allocator` / `quant_manager` / `analyst`, so the
-    // user_app_roles check is authoritative for those.
+    // signal for `allocator` / `quant_manager` / `analyst`, so
+    // `user_app_roles` is authoritative for those.
     //
     // Use the `isAdminUserGivenUserAppRoles` variant which trusts the
     // already-fetched `userRoles` as the user_app_roles signal instead
-    // of re-issuing `hasAdminRoleRow`. On the non-admin reject path
-    // this drops DB round-trips from 3 → 2. The WeakMap dedup in
-    // getUserRolesResult still serves sibling callers asking for the
-    // same role set within this request.
+    // of re-issuing the join-table query. On the non-admin reject path
+    // this drops DB round-trips from 3 → 2.
     if (roles.includes("admin")) {
       const adminUnion = await isAdminUserGivenUserAppRoles(
         supabase,

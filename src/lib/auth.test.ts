@@ -514,19 +514,22 @@ describe("requireRole", () => {
     }
   });
 
-  // audit-2026-05-07 P459/P699/P703 (testing T4, HIGH conf 7): the
-  // admin-union fallback inside requireRole. When user_app_roles returns
-  // no 'admin' row, the legacy `isAdminUser` union (profiles.is_admin OR
-  // ADMIN_EMAIL) gets a vote and the resolved set must include 'admin'.
-  // Without these tests, a future refactor that drops the synthesized
-  // 'admin' role from the resolved set — or accidentally returns 403 even
-  // when isAdminUser is true — fails no test.
-  it("admin-union fallback: profiles.is_admin=true + empty user_app_roles → { roles } with 'admin' synthesized", async () => {
+  // audit-2026-05-07 C-0144 / C-0150 (RBAC consolidation): the admin
+  // fallback inside requireRole. `isAdminUser` is now the single source
+  // of truth — `profiles.is_admin` is PRIMARY (matches DB-side RLS) and
+  // `user_app_roles.role='admin'` is the additive secondary signal during
+  // the Sprint 7 rollout. `ADMIN_EMAIL` is OBSERVATIONAL ONLY and no
+  // longer grants admin.
+  //
+  // Ghost-admin (profiles.is_admin=TRUE but no role enum) MUST still
+  // resolve to admin — the profile flag is the source of truth.
+  // Dead-admin (ADMIN_EMAIL matches but profiles.is_admin=FALSE) MUST
+  // resolve to NOT admin — closed by removing the env-var grant.
+  it("ghost-admin pin: profiles.is_admin=true + empty user_app_roles → { roles } with 'admin' synthesized", async () => {
     // Empty user_app_roles for both the primary lookup AND the
-    // hasAdminRoleRow re-check inside isAdminUser.
+    // hasAdminRoleRow secondary check inside isAdminUser.
     userRolesQueryMock.mockResolvedValue({ data: [], error: null });
-    // Flip the legacy is_admin signal TRUE — this is the only place the
-    // fallback fires.
+    // Flip profiles.is_admin TRUE — the new PRIMARY signal.
     profilesIsAdminQueryMock.mockResolvedValueOnce({
       data: { is_admin: true },
       error: null,
@@ -537,6 +540,30 @@ describe("requireRole", () => {
       // The synthesized 'admin' role must appear in the resolved set so
       // downstream handlers see a consistent answer.
       expect(result.roles).toContain("admin");
+    }
+  });
+
+  it("dead-admin pin: empty user_app_roles + profiles.is_admin=false → { forbidden: 403 } regardless of ADMIN_EMAIL", async () => {
+    // audit-2026-05-07 C-0150: a caller whose email might match
+    // ADMIN_EMAIL but who has no profile flag AND no user_app_roles row
+    // is NOT admin. Pre-fix the OR-union let ADMIN_EMAIL grant access
+    // via code while RLS denied it at the row level — a confusing
+    // mixed-response state and an audit-trail mess. Post-fix the env
+    // var only emits an observational log; it does not grant.
+    //
+    // The mock layer here does not stub ADMIN_EMAIL itself (it is
+    // captured at module load), but the contract is that NO code path
+    // inside `isAdminUser` returns TRUE based on email alone. Empty
+    // user_app_roles + is_admin=FALSE = 403, period.
+    userRolesQueryMock.mockResolvedValue({ data: [], error: null });
+    profilesIsAdminQueryMock.mockResolvedValueOnce({
+      data: { is_admin: false },
+      error: null,
+    });
+    const result = await requireRole(makeFromOnly(), mockUser, "admin");
+    expect("forbidden" in result).toBe(true);
+    if ("forbidden" in result) {
+      expect(result.forbidden.status).toBe(403);
     }
   });
 
