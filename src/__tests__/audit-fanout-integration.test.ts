@@ -704,8 +704,18 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
                   }),
                 }),
               }),
+              // C-0060: approve path chains .update().eq("id").eq("status","pending_review").select("id");
+              // reject path uses .update().eq("id"). Mock supports both shapes.
               update: () => ({
-                eq: async () => ({ data: null, error: null }),
+                eq: () => ({
+                  // approve path: second .eq() + .select() returns row-array
+                  eq: () => ({
+                    select: async () => ({ data: [{ id: "ok" }], error: null }),
+                  }),
+                  // reject path: awaitable directly on the first .eq()
+                  then: (resolve: (arg: unknown) => unknown) =>
+                    Promise.resolve(resolve({ data: null, error: null })),
+                }),
               }),
             };
           }

@@ -149,6 +149,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // @audit-skip: audit-event is emitted by the strategy.approve / strategy.reject
+    // logAuditEvent call further down in this same function (after the
+    // revalidateTag block) — covers BOTH the approve UPDATE here and the reject
+    // UPDATE in the else branch. The audit-coverage walker can't see across
+    // this if/else's closing brace, but the contract is intact.
     const { data: updated, error } = await admin
       .from("strategies")
       .update(update)
@@ -170,6 +175,8 @@ export async function POST(req: NextRequest) {
       );
     }
   } else {
+    // @audit-skip: same rationale as the approve UPDATE above — the
+    // strategy.reject audit fires at the logAuditEvent below this if/else.
     const { error } = await admin.from("strategies").update(update).eq("id", id);
 
     if (error) {

@@ -278,6 +278,10 @@ export type AuditAction =
   | "account.sanitize"
   | "account.export"
   | "account.export_refused"
+  // audit-2026-05-07 C-0025: distinct from `account.export` (fresh job) so
+  // forensics can tell when a GDPR bundle was re-signed (no new data) vs
+  // generated. Emitted by GET /api/account/export/latest.
+  | "account.export_resigned"
   | "deletion.request.approve"
   | "deletion.request.reject"
   // --- 7.1b TS fanout --------------------------------------------------
