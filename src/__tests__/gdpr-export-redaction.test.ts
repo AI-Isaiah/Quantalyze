@@ -357,7 +357,7 @@ describe("collectUserExportBundle — audit_log replaced by audit_log_for_user (
     const auditRowsRaw = [
       {
         id: "audit-1",
-        user_id: "subject",
+        user_id: "19191919-1919-1919-1919-191919191919",
         action: "intro.send",
         metadata: {
           partner_tag: "@evil-other-user",
@@ -403,7 +403,7 @@ describe("collectUserExportBundle — audit_log replaced by audit_log_for_user (
   it("emits audit_log_for_user with rows filtered+redacted; raw audit_log is absent", async () => {
     const mock = makeClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "subject");
+    const bundle = await collectUserExportBundle(mock as any, "19191919-1919-1919-1919-191919191919");
 
     const tableNames = bundle.tables.map((t) => t.table);
     expect(tableNames).not.toContain("audit_log");
@@ -442,7 +442,7 @@ describe("collectUserExportBundle — api_keys ciphertext stripped end-to-end (s
     const apiKeyRows = [
       {
         id: "k1",
-        user_id: "subject",
+        user_id: "19191919-1919-1919-1919-191919191919",
         exchange: "binance",
         label: "main",
         api_key_encrypted: "CT-KEY",
@@ -472,7 +472,7 @@ describe("collectUserExportBundle — api_keys ciphertext stripped end-to-end (s
       }),
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bundle = await collectUserExportBundle(mock as any, "subject");
+    const bundle = await collectUserExportBundle(mock as any, "19191919-1919-1919-1919-191919191919");
     const tbl = bundle.tables.find((t) => t.table === "api_keys");
     expect(tbl).toBeDefined();
     expect(tbl!.row_count).toBe(1);

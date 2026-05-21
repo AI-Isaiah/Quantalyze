@@ -63,6 +63,43 @@ const SANITIZED_DISPLAY_NAME_SENTINEL = "[deleted]";
  * bundle per call) and the CSRF same-origin helper is POST-biased. A
  * future GET wrapper that returns the most recent bundle without
  * regenerating is tracked as a convenience follow-up.
+ *
+ * Audit-2026-05-07 C-0025 (api-contract c9) — idempotency trade-off
+ * -----------------------------------------------------------------
+ * This route is NOT idempotent. Every POST mints a fresh
+ * `${user_id}/${randomUUID()}.json` object and bills a new signed URL
+ * even when called twice in the same session. Combined with the
+ * `exportLimiter` (1/day/user), this means a retry after a flaky
+ * download burns the daily allowance — regulator-visible but practically
+ * punitive.
+ *
+ * Trade-off documented (NOT a regression):
+ *
+ *   - Adding GET /api/account/export/latest that re-signs the most-
+ *     recent in-bucket object without minting a new bundle is the
+ *     proper convenience fix. It is intentionally OUT OF SCOPE for the
+ *     C-0021/C-0022/C-0023 security closure. The retry-burn problem is
+ *     real but does not violate GDPR Art. 15 (the user CAN re-export
+ *     tomorrow, which is what the regulator requires).
+ *
+ *   - The refusal-path refunds added by audit-2026-05-07 red-team #2
+ *     (size_cap_exceeded, per_table_row_cap_reached, upload_failed,
+ *     sign_failed, manifest_drift) already address the dominant lockout
+ *     mode: a deterministic failure on the user's data shape would
+ *     otherwise permanently consume the 1/day token because the data
+ *     shape doesn't change. Token refund on those branches keeps the
+ *     cadence intact while preventing the per-data-shape lockout.
+ *
+ *   - The remaining retry-burn surface is the happy-path "user
+ *     downloaded the bundle but the browser crashed before saving"
+ *     case. That is the GET-wrapper's job; it is on the follow-up
+ *     backlog. Until then, the documented operator action is: contact
+ *     support to reset the user's exportLimiter bucket out-of-band.
+ *
+ * This docstring is the load-bearing acknowledgement of the trade-off.
+ * A future contributor who refactors the route MUST either preserve
+ * this trade-off or ship the GET wrapper — they cannot silently change
+ * the contract because the contract is documented here.
  */
 
 const SIGNED_URL_EXPIRY_SECONDS = 60 * 60; // 1 hour, per Task 7.3 spec.

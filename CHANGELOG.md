@@ -7,6 +7,22 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.3.4] - 2026-05-21
+
+**fix(audit-2026-05-07): close /api/account/export GDPR/security CRITICALs (C-0021, C-0022, C-0023) + document C-0025 idempotency trade-off.**
+
+GDPR Art. 15/17/20 hardening on the account-export + deletion-approve pair. Three audit-2026-05-07 CRITICALs closed:
+
+### Fixed
+- `src/lib/gdpr-export.ts` (C-0021): `collectUserExportBundle` now hard-refuses non-UUID `userId` at function entry. The helper runs as service_role and bypasses RLS on every read — today's sole caller (POST /api/account/export) locks `userId` to `auth.getUser().id`, but a future refactor (admin export wrapper, fan-out worker, CSV aggregator) that wires the helper to an attacker-influenced id would silently exfil any user's full PII bundle. Three regression tests pin the contract: empty string, non-UUID string, and the happy-path UUID pass-through. Test fixtures updated to UUIDs across `gdpr-export.test.ts` + `gdpr-export-redaction.test.ts`.
+- `src/app/api/admin/deletion-requests/[id]/approve/route.ts` (C-0022 / C-0023): the approve handler now invokes `admin.auth.admin.signOut(user_id, "global")` immediately after the synchronous `account.sanitize` audit emit. `sanitize_user` (migration 055) preserves the auth.users row + audit_log and does NOT invalidate the user's JWT, so without an upstream sign-out a sanitized user could log back in and call POST /api/account/export to receive a bundle of their pre-sanitize audit_log + cross-party rows — turning GDPR Art. 17 "right to erasure" into "right to keep accessing your erased data via Art. 15". Best-effort: a signOut failure is logged and the response still returns 200. The `rpcErr` branch deliberately does NOT call signOut — no destruction means no unilateral token invalidation. Four new regression tests pin the contract.
+
+### Documented (no code change)
+- `src/app/api/account/export/route.ts` (C-0025): idempotency trade-off explicitly documented in the route docstring. The route is intentionally non-idempotent — every POST mints a fresh `{user_id}/{uuid}.json` and bills a new signed URL even on retry. The refusal-path token refunds added by audit-2026-05-07 red-team #2 already address the dominant lockout mode. The remaining retry-burn surface (happy-path browser crash) is the GET-wrapper's job and is on the follow-up backlog.
+
+### Verified (no code change — addressed in prior PRs)
+- C-0027 / C-0028 / H-0200 / H-0201 / H-0202 / H-0203 / M-0257 — already addressed; verified by existing tests.
+
 ## [0.24.3.2] - 2026-05-21
 
 **fix(discovery): unskip the hide-examples CI flake — root cause was a regex anchor, not React hydration.**
