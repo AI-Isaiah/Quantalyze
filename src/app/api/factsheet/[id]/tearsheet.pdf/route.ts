@@ -215,10 +215,38 @@ export async function GET(
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${sanitizeFilename(strategy.name, "Strategy")}-tearsheet.pdf"`,
-        // Public route (accessible to cap-intro partners without auth) — let
-        // Vercel's CDN cache hot tearsheets so a newsletter blast doesn't
-        // launch a fresh Chromium per click.
-        "Cache-Control": "s-maxage=3600, stale-while-revalidate=86400",
+        // audit-2026-05-07 C-0093 — Cache-Control + Vary contract.
+        //
+        // Pre-fix: `s-maxage=3600, stale-while-revalidate=86400` (public)
+        // with NO Vary header. Two failure modes:
+        //   1. CDN cross-alias bleed — Vercel routes preview deployments
+        //      under multiple aliases; without Vary, the shared CDN can
+        //      serve a preview-aliased PDF to a production-aliased
+        //      request. The PDF bytes are a function of the Host header
+        //      at generation time (via appUrl(req) → puppeteer goto), so
+        //      the CDN MUST key per-host.
+        //   2. Disclosure-tier staleness — when an admin moves a
+        //      strategy from institutional → exploratory, the
+        //      previously-rendered PDF (still showing institutional
+        //      identity) keeps serving from the CDN for up to 25 hours
+        //      (s-maxage 3600 + stale-while-revalidate 86400). Tighten
+        //      max-age to 5 minutes so disclosure-tier downgrades flush
+        //      within an acceptable window.
+        //
+        // FOLLOW-UP: a disclosure_tier change should ALSO trigger
+        // CDN invalidation explicitly (e.g. via revalidateTag once we
+        // adopt cache tags here). Tracked as a separate item in the
+        // tech-debt backlog — the conservative max-age=300 above bounds
+        // the worst-case staleness in the meantime.
+        //
+        // Vary: Cookie, Authorization — even though the route is
+        // currently stateless (no cookies forwarded to puppeteer; see
+        // the SECURITY INVARIANT block at module top), declaring Vary
+        // on auth-bearing headers prevents the CDN from serving a
+        // cached anonymous render to a future authenticated request if
+        // statelessness ever regresses.
+        "Cache-Control": "public, s-maxage=300, stale-while-revalidate=300",
+        Vary: "Cookie, Authorization, Host",
       },
     });
   } catch (err) {

@@ -205,3 +205,107 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — SSRF + UUID validation (C-00
     expect(goto.mock.calls[0][0]).not.toContain("attacker.example.com");
   });
 });
+
+describe("GET /api/factsheet/[id]/tearsheet.pdf — Cache-Control + Vary (C-0093)", () => {
+  let goto: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.mocked(checkLimit).mockReset();
+    vi.mocked(checkLimit).mockResolvedValue({
+      success: true,
+      retryAfter: 0,
+    } as never);
+    vi.mocked(createAdminClient).mockReset();
+    singlePublishedComplete();
+
+    const puppeteer = await import("@/lib/puppeteer");
+    vi.mocked(puppeteer.acquirePdfSlot).mockReset();
+    vi.mocked(puppeteer.launchBrowser).mockReset();
+    vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
+    goto = vi.fn().mockResolvedValue(undefined);
+    const newPage = vi.fn().mockResolvedValue({
+      goto,
+      setDefaultNavigationTimeout: vi.fn(),
+      setDefaultTimeout: vi.fn(),
+      setViewport: vi.fn().mockResolvedValue(undefined),
+      pdf: vi
+        .fn()
+        .mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46])),
+    });
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(puppeteer.launchBrowser).mockResolvedValue({
+      newPage,
+      close,
+    } as never);
+  });
+
+  afterEach(() => {
+    process.env = { ...ENV_BACKUP };
+  });
+
+  it("C-0093: Cache-Control max-age is tightened (<= 300s) so disclosure-tier downgrades flush quickly", async () => {
+    // Pre-fix: `s-maxage=3600, stale-while-revalidate=86400` pinned
+    // stale PDFs in the CDN for up to 25h after a disclosure_tier
+    // downgrade. The tightened window bounds the worst-case staleness
+    // to a few minutes.
+    const { GET } = await import("./route");
+    const req = new NextRequest(
+      `https://quantalyze.com/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
+      { method: "GET" },
+    );
+    const res = await GET(req, mkParams());
+    expect(res.status).toBe(200);
+    const cc = res.headers.get("Cache-Control");
+    expect(cc).not.toBeNull();
+    // s-maxage MUST be <= 300 (5 minutes). Anti-assertion against the
+    // pre-fix 3600s window.
+    const sMaxAge = cc!.match(/s-maxage=(\d+)/);
+    expect(sMaxAge).not.toBeNull();
+    expect(Number(sMaxAge![1])).toBeLessThanOrEqual(300);
+    // Explicit regression guard against the pre-fix directive byte-for-byte.
+    expect(cc).not.toBe("s-maxage=3600, stale-while-revalidate=86400");
+  });
+
+  it("C-0093: Vary header lists Cookie and Authorization so the CDN keys on auth state", async () => {
+    // Pre-fix: NO Vary header. If the route's statelessness ever
+    // regresses (cookies forwarded to puppeteer), an authenticated
+    // institutional render could pin in the CDN and be served to a
+    // future anonymous request. Declaring Vary on auth-bearing headers
+    // is the structural defense.
+    const { GET } = await import("./route");
+    const req = new NextRequest(
+      `https://quantalyze.com/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
+      { method: "GET" },
+    );
+    const res = await GET(req, mkParams());
+    expect(res.status).toBe(200);
+    const vary = res.headers.get("Vary");
+    expect(vary).not.toBeNull();
+    // Tokenize the Vary header (RFC 7231: comma-separated, case-insensitive).
+    const tokens = vary!
+      .split(",")
+      .map((t) => t.trim().toLowerCase());
+    expect(tokens).toContain("cookie");
+    expect(tokens).toContain("authorization");
+  });
+
+  it("C-0093: Vary also includes Host so the CDN cannot bleed across deployment aliases", async () => {
+    // Mirrors the HIGH#2 fix on the sibling pdf/route.ts: PDF bytes are
+    // a function of the Host header at generation time (via the
+    // puppeteer goto), so the shared CDN MUST key per-host or it will
+    // serve a preview-aliased PDF to a production-aliased request.
+    const { GET } = await import("./route");
+    const req = new NextRequest(
+      `https://quantalyze.com/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
+      { method: "GET" },
+    );
+    const res = await GET(req, mkParams());
+    expect(res.status).toBe(200);
+    const vary = res.headers.get("Vary");
+    const tokens = vary!
+      .split(",")
+      .map((t) => t.trim().toLowerCase());
+    expect(tokens).toContain("host");
+  });
+});
