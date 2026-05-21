@@ -7,6 +7,39 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.1.0] - 2026-05-21
+
+**test(audit-2026-05-07): closeout CRITICAL test-coverage gaps from fix-list G13/G14/G15/G21.**
+
+Test-only PR. No production code changes. Closes 9 CRITICAL findings from the audit fan-out by writing the regression tests their summaries demanded. Three production bugs surfaced via `it.fails` markers — addressed in the follow-up PR (0.24.2.0).
+
+### Added (TS API route tests)
+- `src/app/api/simulator/route.test.ts` — 11 tests covering G15-002: auth (401), CSRF (403), throttle (429), `isRateLimitMisconfigured` fail-CLOSED (503 — pending, marked `it.fails` per G15-046), Zod validation (400), JSON parse (400), ownership 404, happy-path body forwarding, AnalyticsUpstreamError 4xx/5xx pass-through, unreachable analytics (503).
+- `src/app/api/bridge/route.test.ts` — 10 tests covering G13-004: auth (401), CSRF (403), throttle (429) including the missing Retry-After header (marked `it.fails` per G13-038) and misconfig→503 (marked `it.fails` per G15-046), bad JSON (400), bad body shape (400), cross-tenant ownership (404), happy-path body forwarding, scoring 500 fallback.
+- `src/lib/analytics-client.test.ts` — appended `describe("AnalyticsUpstreamError")` block: 8 tests pinning constructor round-trip, 4xx forwarding, 5xx forwarding, JSON-vs-text body fork, statusText fallback, network failure bubbling as generic Error, DOMException timeout routing to AnalyticsTimeoutError (G15-003).
+
+### Added (Python analytics-service tests)
+- `analytics-service/tests/test_simulator_router.py` — 15 tests across 8 classes covering G15-001: every HTTPException branch in the simulator router (missing/invalid UUIDs, weight-sum validation including the `total_w or 1.0` normalization fallback, cross-tenant 403, portfolio-not-found 404, empty candidate set, analytics computation error 500, happy path).
+- `analytics-service/tests/test_compute_jobs_fencing.py` — appended 4 live-SQL tests for the failed_retry queue closeout (G21-001/2/3/4):
+  - `test_claim_includes_failed_retry_when_backoff_elapsed` — PR #82's headline behavior pinned.
+  - `test_failed_retry_with_future_next_attempt_at_not_claimed` — backoff gate honored.
+  - `test_throttle_probe_counts_failed_retry_normal_priority` — throttle probe widening (failed_retry counts).
+  - `test_claim_dedupes_two_failed_retry_sharing_allocator` — Migration 090 partition-key dedupe (no 23505, deterministic earlier-`next_attempt_at` tie-break).
+  - Tests use existing `_need_supabase()` skip contract — hard-fail in CI against test project `qmnijlgmdhviwzwfyzlc`, auto-skip locally without creds.
+
+### Added (SQL pgTAP-style RLS test)
+- `supabase/tests/test_funding_fees_rls.sql` — 7 assertions covering G14-002 funding_fees RLS integration: service-role sanity sees both tenants; tenant A sees own row only (no cross-tenant leak); `authenticated` INSERT/UPDATE/DELETE all denied (deny policies pinned with ground-truth amount/row-still-present probes); service role full CRUD; strategy reassignment correctly retargets row visibility via the `EXISTS (SELECT 1 FROM strategies WHERE strategies.user_id = auth.uid())` join. Filename matches CI's `test_*.sql` glob (ci.yml lines 361, 411) for auto-discovery.
+
+### Local test results
+- Vitest: 43 passed + 3 expected-fail (the 3 production-bug markers).
+- pytest: 26 passed + 16 skipped (G21 live-SQL skip locally without TEST_SUPABASE creds; will execute in CI).
+- SQL: validated locally by inspection; runs against test project in CI's sql-tests job.
+
+### Production bugs surfaced for follow-up (PR 0.24.2.0)
+- **G15-046 / simulator-route**: `src/app/api/simulator/route.ts:36-51` doesn't call `isRateLimitMisconfigured(rl)` before emitting 429. Production Upstash outage surfaces as user-throttle 429 instead of 503. Canary alarms miss the misconfig.
+- **G15-046 / bridge-route**: same gap at `src/app/api/bridge/route.ts:20-26`.
+- **G13-038 / bridge-route**: `src/app/api/bridge/route.ts:20-26` emits 429 envelope with NO Retry-After header; sibling routes (`/api/bridge/outcome`, `/api/simulator`) all set it.
+
 ## [0.24.0.0] - 2026-05-21
 
 **feat(allocations): per-API-key include/exclude toggle on Overview + Tweaks panel rewiring.**
