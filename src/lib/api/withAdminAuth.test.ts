@@ -98,9 +98,30 @@ describe("withAdminAuth", () => {
       const wrapped = withAdminAuth(handler as never);
       const res = await wrapped(makeRequest({ id: "abc" }));
 
+      // Audit-2026-05-07 C-0146: authenticated but not admin → 403 Forbidden
+      // (RFC 7231). Pre-fix this returned 403 with body "Unauthorized";
+      // the split now uses "Forbidden" so the body matches the status.
       expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: "Forbidden" });
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("Audit-2026-05-07 C-0146: returns 401 Unauthorized when caller has no JWT", async () => {
+      // Pre-fix bug: missing JWT was conflated with non-admin into a single
+      // 403 "Unauthorized" envelope. Sibling withAuth.ts and requireRole()
+      // already return 401 for null user; this wrapper now matches.
+      getUserMock.mockResolvedValueOnce({ data: { user: null } });
+
+      const handler = vi.fn();
+      const wrapped = withAdminAuth(handler as never);
+      const res = await wrapped(makeRequest({ id: "abc" }));
+
+      expect(res.status).toBe(401);
       expect(await res.json()).toEqual({ error: "Unauthorized" });
       expect(handler).not.toHaveBeenCalled();
+      // isAdminUser should NOT be probed once we've decided the caller
+      // is unauthenticated — short-circuit before the DB read.
+      expect(isAdminUserMock).not.toHaveBeenCalled();
     });
   });
 
