@@ -1,3 +1,52 @@
+/**
+ * GENERATED FILE — do not hand-edit.
+ *
+ * Produced by `npx supabase gen types typescript` (PostgrestVersion 14.5
+ * per __InternalSupabase below). To regenerate, run the linked CLI
+ * against the live remote schema; do not amend rows in this file
+ * directly because the next regeneration will silently overwrite them.
+ *
+ * Audit-2026-05-07 — NUMERIC precision drift (CRITICAL cluster on this file).
+ * --------------------------------------------------------------------------
+ * Supabase `gen types typescript` maps every Postgres `NUMERIC` column to
+ * TypeScript `number`. PostgREST returns NUMERIC values as JSON numbers
+ * by default, which JS parses as IEEE-754 doubles (~15.95 decimal digits
+ * of precision). For monetary, ratio, and PnL columns stored as NUMERIC
+ * (no precision/scale specified, i.e. arbitrary-precision in Postgres),
+ * this is a lossy round-trip:
+ *
+ *   - Values > ~9e15 lose integer precision.
+ *   - High-precision fractional values (e.g. funding-rate accruals with
+ *     >15 significant digits) get silently truncated.
+ *   - Round-tripping a NUMERIC string through `number` and back can
+ *     produce a value that does NOT round-trip equal in Postgres.
+ *
+ * Examples in this codebase: `positions.funding_pnl`,
+ * `positions.realized_pnl`, `positions.unrealized_pnl`, `positions.roi`,
+ * `allocation_events.amount`, `allocator_equity_snapshots.value_usd`,
+ * plus the analytics + portfolio NUMERIC columns.
+ *
+ * Mitigation: every read/write of a NUMERIC column on a path that needs
+ * full precision (accounting, billing, audit reconstruction, exact
+ * comparisons) MUST go through the helpers in
+ * `src/lib/supabase/numeric-precision.ts`, which:
+ *
+ *   - exports the canonical `KNOWN_NUMERIC_COLUMNS` list so static
+ *     analysis can flag direct `.from('positions').select('funding_pnl')`
+ *     reads that bypass the typed accessor,
+ *   - exports `parseNumericString` / `serializeNumeric` helpers that
+ *     preserve precision via string round-trip (PostgREST accepts string
+ *     inputs for NUMERIC), and
+ *   - exports a `NumericString` branded type used in the typed-accessor
+ *     wrappers.
+ *
+ * This invariant is enforced via a vitest contract test
+ * (`src/lib/supabase/numeric-precision.test.ts`) that imports the
+ * canonical list and asserts the cataloged columns still exist on the
+ * generated `Database` type — surfacing future regenerations that drop
+ * a column the helpers depend on.
+ */
+
 export type Json =
   | string
   | number
