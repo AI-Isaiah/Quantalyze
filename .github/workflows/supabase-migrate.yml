@@ -123,7 +123,7 @@ jobs:
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: supabase/setup-cli@b60b5899c73b63a2d2d651b1e90db8d4c9392f51  # v1.6.0
+      - uses: supabase/setup-cli@df56b21da46c98abb12a9804e4fb1f657773e333  # v2.0.0
         if: steps.check.outputs.configured == 'true'
         with:
           # Pinned to match the apply job's CLI version (see comment there).
@@ -154,7 +154,7 @@ jobs:
           # GITHUB_TOKEN cred from .git/config. The apply job uses
           # SUPABASE_ACCESS_TOKEN; no GITHUB_TOKEN-backed git ops.
           persist-credentials: false
-      - uses: supabase/setup-cli@b60b5899c73b63a2d2d651b1e90db8d4c9392f51  # v1.6.0
+      - uses: supabase/setup-cli@df56b21da46c98abb12a9804e4fb1f657773e333  # v2.0.0
         with:
           # Pinned: avoid `latest` so CLI-version drift cannot silently change
           # `db push --include-all` semantics between plan and apply jobs (or
