@@ -7,6 +7,19 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.3.2] - 2026-05-21
+
+**fix(discovery): unskip the hide-examples CI flake — root cause was a regex anchor, not React hydration.**
+
+Closes the e2e flake tracked in `e2e/discovery-hide-examples-default.spec.ts:103-117`. The first attempt (closure-race fix in `StrategyTable.tsx`) was a defensive improvement but did NOT fix the test. The diagnostic block I added on that attempt captured the real root cause from CI artifacts: 8 rows rendered correctly, checkbox state flipped correctly, all 8 seed strategy names appeared in the tbody — but the assertion regex couldn't match them.
+
+### Fixed
+- `e2e/discovery-hide-examples-default.spec.ts` — assertion now queries `table tbody tr a[href^="/factsheet/"]` and does exact-equality `SEED_NAMES.has(text.trim())` instead of regex-matching against `tbody.allTextContents()`. The prior regex used `\b{name}\b` word boundaries; in CI, `tbody.allTextContents()` returns one concatenated string per row where "Vega Volatility Harvester" runs straight into the next badge text "delta_neutral" — 'r' and 'd' are both word characters, so the trailing `\b` was inert and the regex never matched. Switching to anchor-element selection + exact equality fixes the assertion and also closes the RT-J04 substring-collision concern.
+- `src/components/strategy/StrategyTable.tsx:338` — `onToggleExamples` switched to functional `setShowExamples((v) => !v)`. Defensive coding that prevents any future hydration race; not the root cause of the flake (the toggle was working correctly per CI diagnostic), but worth keeping as a 1-line robustness improvement.
+
+### Test infrastructure
+- `e2e/discovery-hide-examples-default.spec.ts` — removed the inner `test.skip(...)` and kept the diagnostic block around the post-toggle poll (logs rendered row count, sample tbody text, checkbox DOM/ARIA state, first 2KB of tbody HTML, writes a full-page screenshot to `test-results/discovery-hide-examples-flake.png` on failure). That diagnostic block is what surfaced the real root cause from the CI logs on the first failed run.
+
 ## [0.24.3.1] - 2026-05-21
 
 **fix(audit-2026-05-07): close `/api/admin/partner-import` CRITICALs + `withAdminAuth` RFC 7235 401/403 split.**
