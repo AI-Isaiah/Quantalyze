@@ -579,3 +579,75 @@ class TestAnalyticsComputationError:
             },
         )
         assert r.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 PR C regression tests (G15-006)
+# ---------------------------------------------------------------------------
+
+
+class TestG15_006_RecordsToSeriesSortedAndDeduped:
+    """G15-006 — ``_records_to_series`` must sort by date and dedupe
+    same-date entries (keep='last'). Storage drift — duplicate-date
+    backfill writes or out-of-order imports — would otherwise silently
+    break the downstream ``cumprod()`` in simulator_scoring.py:634.
+    """
+
+    def test_out_of_order_records_are_sorted(self):
+        """Input records in reversed chronological order produce a
+        Series with a monotonically increasing DatetimeIndex."""
+        from routers.simulator import _records_to_series
+
+        raw = [
+            {"date": "2026-01-05", "value": 0.05},
+            {"date": "2026-01-01", "value": 0.01},
+            {"date": "2026-01-03", "value": 0.03},
+        ]
+        series = _records_to_series(raw, name="s-1")
+        assert series is not None
+        assert series.index.is_monotonic_increasing, (
+            "Series index must be sorted ascending; pre-fix left it in "
+            "input order, breaking path-dependent cumprod()."
+        )
+
+    def test_duplicate_dates_dedupe_keep_last(self):
+        """Two entries with the same date collapse to one; the LATER
+        record (by input order) wins. This matches the Series
+        construction semantics (last assignment to an index slot)."""
+        from routers.simulator import _records_to_series
+
+        raw = [
+            {"date": "2026-01-01", "value": 0.01},
+            {"date": "2026-01-02", "value": 0.02},
+            # Duplicate date — last value must win.
+            {"date": "2026-01-02", "value": 0.99},
+            {"date": "2026-01-03", "value": 0.03},
+        ]
+        series = _records_to_series(raw, name="s-1")
+        assert series is not None
+        # 3 unique dates in the deduped output.
+        assert len(series) == 3
+        # The dupe at 2026-01-02 collapsed to the LAST occurrence (0.99).
+        import pandas as pd
+        assert series.loc[pd.Timestamp("2026-01-02")] == 0.99
+
+    def test_out_of_order_with_duplicate_combined(self):
+        """The hardened version of the test: input is BOTH out-of-order
+        AND contains a duplicate. The output is sorted AND the dupe
+        collapses to the chronologically-later occurrence."""
+        from routers.simulator import _records_to_series
+        import pandas as pd
+
+        raw = [
+            {"date": "2026-01-03", "value": 0.30},
+            {"date": "2026-01-01", "value": 0.10},
+            # Two entries for 2026-01-02 in input — last (by input order
+            # after sort) must win.
+            {"date": "2026-01-02", "value": 0.20},
+            {"date": "2026-01-02", "value": 0.99},
+        ]
+        series = _records_to_series(raw, name="s-1")
+        assert series is not None
+        assert series.index.is_monotonic_increasing
+        assert len(series) == 3
+        assert series.loc[pd.Timestamp("2026-01-02")] == 0.99

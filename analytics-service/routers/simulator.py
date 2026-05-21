@@ -46,12 +46,28 @@ def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
 
     Duplicates `routers.portfolio._records_to_series` — kept local so the
     simulator router doesn't cross-import from another router.
+
+    G15-006 (audit-2026-05-07): the returned Series is `.sort_index()`-ed
+    and deduped (keep='last') so storage drift — duplicate-date backfill
+    writes or out-of-order imports — cannot silently break the downstream
+    `cumprod()` in `services/simulator_scoring.py:634`. cumprod is path-
+    dependent; an unsorted index produces a garbage equity curve, and a
+    duplicate index entry inflates the compounded factor for that date.
+    These guards exist for storage-drift safety, not for the happy-path.
     """
     if not isinstance(raw, list) or not raw:
         return None
     dates = [r["date"] for r in raw]
     vals = [r["value"] for r in raw]
-    return pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
+    series = pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
+    # G15-006 — sort then dedupe (keep='last'). Order matters: dedupe BEFORE
+    # sort would keep the last-by-input occurrence rather than the
+    # last-by-date occurrence; in practice the two coincide on a well-formed
+    # input but the contract is "last value on a given date wins" — which
+    # only holds after sort.
+    series = series.sort_index()
+    series = series[~series.index.duplicated(keep="last")]
+    return series
 
 
 @router.post("/simulator")
