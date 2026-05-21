@@ -7,18 +7,16 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
-## [0.24.4.3] - 2026-05-21
+## [0.24.4.5] - 2026-05-21
 
-**fix(audit-2026-05-07): type/component refactor cluster (partial) — closes C-0142 + C-0133.**
+**fix(audit-2026-05-07): type/component refactor cluster (complete) — closes C-0142 + C-0133 + C-0123.**
 
-PR K (partial cluster): two type-safety / refactor CRITICALs closed. C-0123 (demo-recommendations fallback threshold) was started but the subagent stalled on the test harness; deferred to a follow-up.
+PR K (full cluster): three type-safety / refactor CRITICALs closed.
 
 ### Fixed
 - `src/components/strategy/SyncProgress.tsx` (C-0142): replaced the hand-rolled `SyncStatus` string union with the canonical `ComputationStatus` type via a `toSyncStatus` mapping helper. Added `assertNever` exhaustive switch so any future status added at the source must be handled at every consumer.
 - `src/components/strategy/CustomizeDrawer.tsx` + `CustomizeDrawer.test.tsx` (C-0133): added `data-testid="customize-backdrop"` to the backdrop element. Test now queries by testid instead of the brittle `[aria-hidden="true"]` selector that matched icons + other a11y-hidden elements.
-
-### Deferred
-- C-0123 (`src/lib/demo-recommendations.ts` fallback threshold): the `latestRows.length > 0` → `>= 3 AND batch_status === 'complete'` fix is still pending. Subagent ran out of time on the test harness setup. Tracked as P0 in the OPEN backlog.
+- `src/lib/demo-recommendations.ts` (C-0123): fallback chain now requires `latestRows.length >= 3` AND `candidate_count >= 3` (or undefined-as-pass for legacy rows) before claiming `batches[0]`. The `match_batches` table has no `batch_status` column — the existing canonical success discriminator is `candidate_count` (already used by `MatchQueueIndex` and `recommendations/page.tsx`). Pre-fix any non-empty `latestRows` claimed the batch even mid-write or with sparse results; the threshold + discriminator close that race window. Final fall-through still renders sparse latest when no prior parachute exists. New constant `MIN_LATEST_RECOMMENDATIONS = 3` documents the threshold.
 
 ## [0.24.4.4] - 2026-05-21
 
