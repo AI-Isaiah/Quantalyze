@@ -9,6 +9,7 @@ import {
   CSV_SUBMIT_STEP_HEADINGS,
   formatCsvRuleCauseMulti,
   formatCsvRuleCauseSingle,
+  formatColumnInDataframeMessage,
   type WizardErrorCode,
 } from "./wizardErrors";
 
@@ -360,6 +361,51 @@ describe("wizardErrors", () => {
       expect(gateFailureToWizardError("ANALYTICS_MISSING")).toBe("UNKNOWN");
       expect(gateFailureToWizardError("ANALYTICS_PENDING")).toBe("UNKNOWN");
       expect(gateFailureToWizardError("ANALYTICS_COMPUTING")).toBe("UNKNOWN");
+    });
+  });
+
+  // Regression: /qa CSV report 2026-05-21 ISSUE-012. Before this fix the
+  // CSV validation envelope leaked panderas's raw rule-name text:
+  //   Top-line: "1 row failed validation"
+  //   Cause:    "Rule violated: column_in_dataframe"
+  //   Detail:   "Row 0: Column 'None' failed: daily_return"
+  // None of those tell the user what to actually do. The fix routes the
+  // raw rule name through CSV_RULE_LABELS for the cause line + rewrites
+  // the per-row message via formatColumnInDataframeMessage.
+  describe("ISSUE-012 — column_in_dataframe envelope rewrite", () => {
+    it("CSV_RULE_LABELS includes a human label for column_in_dataframe", () => {
+      expect(CSV_RULE_LABELS.column_in_dataframe).toBe(
+        "Your CSV is missing a required column",
+      );
+    });
+
+    it("rewrites the panderas Column 'None' failed message into an actionable sentence", () => {
+      const raw = "Column 'None' failed: daily_return";
+      const rewritten = formatColumnInDataframeMessage(raw);
+      expect(rewritten).toContain("daily_return");
+      expect(rewritten).toContain("missing from your file");
+      // Tells the user what to do, not just what failed.
+      expect(rewritten).toMatch(/rename|switch/i);
+      // Never leaks the rule-name 'Column \'None\'' bookkeeping back to the user.
+      expect(rewritten).not.toContain("Column 'None'");
+    });
+
+    it("returns the original message unchanged when the format does not match", () => {
+      // Defensive: if panderas changes its message shape we surface the
+      // original text rather than dropping information.
+      expect(formatColumnInDataframeMessage("something else entirely")).toBe(
+        "something else entirely",
+      );
+    });
+
+    it("handles missing required column for trade-list format", () => {
+      // The same pandera rule fires on any required column. Make sure
+      // the rewrite pulls out the actual column name (not hardcoded to
+      // daily_return).
+      const raw = "Column 'None' failed: trade_qty";
+      const rewritten = formatColumnInDataframeMessage(raw);
+      expect(rewritten).toContain("trade_qty");
+      expect(rewritten).not.toContain("daily_return");
     });
   });
 });

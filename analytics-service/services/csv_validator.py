@@ -35,6 +35,23 @@ logger = logging.getLogger("quantalyze.analytics")
 SHARPE_SENTINEL_DAILY = 10.0
 DEFAULT_RISK_FREE_DAILY = 0.0
 
+# QA report 2026-05-21 ISSUE-008: an uploaded series where the user
+# pasted raw dollar PnL into the `daily_return` column slipped through.
+# The values (-3.29, +1.71, …) sit well within the wide -100.0..+inf
+# per-row bound widened on 2026-05-07 for leveraged strategies, so no
+# per-row rule fires — but treated as decimal returns those numbers
+# imply -329% / +171% daily moves, which compound into nonsense CAGR /
+# Sharpe / Max DD downstream.
+#
+# A dataset-level "median absolute return > threshold" heuristic catches
+# the systematic case without re-narrowing the per-row bound (which would
+# re-break leveraged uploads). Median is robust to the occasional big
+# leverage day — a real decimal-return series's median abs is typically
+# well under 0.05; dollar-PnL uploads usually sit at 1.0+. Threshold
+# 0.5 = 50% daily return; well above the 99th-percentile leveraged
+# series and well below any plausible dollar-PnL median.
+DAILY_RETURN_DOLLAR_FORM_MEDIAN_ABS_THRESHOLD = 0.5
+
 # Phase 15 PII column-name pattern. Matches column NAMES (case-insensitive)
 # that historically carry user-identifying values in CSV exports. The
 # match is on the column name; values are masked to '***' regardless of
@@ -187,6 +204,40 @@ def _check_sharpe_sentinel(df: pd.DataFrame, fmt: str) -> list[dict[str, Any]]:
                     "message": (
                         f"Daily Sharpe {sharpe:.2f} exceeds sentinel "
                         f"{SHARPE_SENTINEL_DAILY:.0f}"
+                    ),
+                })
+    return errors
+
+
+def _check_dollar_form_sentinel(df: pd.DataFrame, fmt: str) -> list[dict[str, Any]]:
+    """QA report 2026-05-21 ISSUE-008. Detect a daily_return column that
+    looks like raw dollar PnL — median abs(daily_return) above the
+    threshold strongly suggests the column was renamed/repurposed
+    without converting to decimal returns. Surface a friendly,
+    actionable error rather than letting the obvious-garbage series
+    flow into the analytics pipeline.
+
+    Median is robust to outliers — a leveraged decimal-return series
+    can dip below -1.0 on bad days but its median abs is well under
+    0.5. A dollar-PnL series with daily $5/$50 moves on a modest
+    account has median abs >> 1.0.
+    """
+    errors: list[dict[str, Any]] = []
+    if fmt == "daily_returns" and "daily_return" in df.columns and len(df) >= 2:
+        r = df["daily_return"].dropna()
+        if len(r) >= 2:
+            median_abs = float(r.abs().median())
+            if median_abs > DAILY_RETURN_DOLLAR_FORM_MEDIAN_ABS_THRESHOLD:
+                errors.append({
+                    "rule": "daily_return_dollar_form_sentinel",
+                    "row": 0,
+                    "message": (
+                        f"Median |daily_return| = {median_abs:.2f} "
+                        f"looks like dollar PnL, not decimal returns "
+                        f"(expected median below "
+                        f"{DAILY_RETURN_DOLLAR_FORM_MEDIAN_ABS_THRESHOLD:.2f}). "
+                        f"Convert each row to a decimal return "
+                        f"(daily PnL / account size), or upload Daily NAV instead."
                     ),
                 })
     return errors
@@ -447,6 +498,7 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
         df_validated = df
 
     all_errors.extend(_check_sharpe_sentinel(df_validated, fmt))
+    all_errors.extend(_check_dollar_form_sentinel(df_validated, fmt))
     # _check_trading_window REMOVED 2026-04-30 (crypto trades 24/7)
 
     ok = len(all_errors) == 0

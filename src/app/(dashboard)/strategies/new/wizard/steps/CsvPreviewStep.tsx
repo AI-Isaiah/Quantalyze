@@ -54,6 +54,29 @@ function truncate(value: string, max: number): string {
   return `${value.slice(0, max)}…`;
 }
 
+/**
+ * QA report 2026-05-21 ISSUE-014: the `date_range` pill rendered the
+ * validator's ISO-normalized dates (`2025-04-03 → 2026-05-06`) while
+ * the sample-rows table rendered the raw cell string (`4/3/2025`).
+ * Picking ISO across the whole step — allocators are global, ISO is
+ * unambiguous, the pill is already ISO. Explicit-format-detection
+ * keeps the helper timezone-stable for date-only strings: a generic
+ * `new Date(raw).toISOString()` shifts U.S. dates back a day in
+ * non-UTC locales. Returns the original string when the format is
+ * unrecognized rather than silently coercing.
+ */
+export function formatPreviewCell(value: unknown, columnName: string): string {
+  const raw = String(value ?? "");
+  if (columnName !== "date" || !raw) return raw;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const usMatch = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (usMatch) {
+    const [, month, day, year] = usMatch;
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+  return raw;
+}
+
 export function CsvPreviewStep({
   preview,
   fmt,
@@ -122,7 +145,10 @@ export function CsvPreviewStep({
                     key={j}
                     className="px-2 py-1.5 text-text-secondary font-metric tabular-nums"
                   >
-                    {String((row as Record<string, unknown>)[c] ?? "")}
+                    {formatPreviewCell(
+                      (row as Record<string, unknown>)[c],
+                      c,
+                    )}
                   </td>
                 ))}
               </tr>

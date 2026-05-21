@@ -28,6 +28,45 @@ import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
  */
 
 /**
+ * How recent does a `complete` strategy_analytics row need to be for
+ * the wizard to skip the /api/keys/sync kickoff on resume? The
+ * analytics-service worker is already incremental (it uses
+ * `api_keys.last_fetched_trade_timestamp` as the `since_ms` cursor —
+ * see analytics-service/services/job_worker.py:_dispatch_sync_trades),
+ * so a re-sync only fetches the delta. But the round-trip still costs
+ * 30-60s of "Fetching trades..." UI latency for the user. Skipping the
+ * kickoff when the row is fresh gets them straight to the factsheet.
+ *
+ * 5 minutes balances "don't show stale numbers on a long session
+ * resume" against "don't re-fire a sync on every viewport remount."
+ * QA report 2026-05-21 ISSUE-005.
+ */
+const SYNC_FRESHNESS_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * Pure helper: derive the detected-markets set from a sample of trade
+ * symbols. The Bybit + OKX ingest writes daily portfolio-level
+ * aggregates under the synthetic symbol "PORTFOLIO"
+ * (see analytics-service/services/exchange.py); those rows must NOT
+ * surface as a "market" in the factsheet preview hint or the metadata
+ * step. Pulled out of the polling callback so a regression test can pin
+ * the filter without mocking the entire Supabase client.
+ */
+export function deriveDetectedMarkets(
+  symbols: ReadonlyArray<string | null | undefined>,
+  limit = 6,
+): string[] {
+  const set = new Set<string>();
+  for (const raw of symbols) {
+    const symbol = raw ?? "";
+    if (symbol === "PORTFOLIO") continue;
+    const base = symbol.split(/[-/]/)[0]?.toUpperCase();
+    if (base) set.add(base);
+  }
+  return Array.from(set).slice(0, limit);
+}
+
+/**
  * Read the correlation_id from the <meta name="x-correlation-id"> tag the
  * root layout renders server-side (Plan 16-02 / OBSERV-09). Falls back to
  * a fresh UUID v4 when the meta tag is absent (e.g., during the parallel
@@ -117,6 +156,34 @@ export function SyncPreviewStep({
     startedAtRef.current = Date.now();
     (async () => {
       try {
+        // QA report 2026-05-21 ISSUE-005 — skip the /api/keys/sync
+        // round-trip on resume when the analytics row is both COMPLETE
+        // and fresh (within SYNC_FRESHNESS_WINDOW_MS). The worker is
+        // already incremental via api_keys.last_fetched_trade_timestamp,
+        // so a re-sync only fetches the delta — but the user still
+        // sees ~30-60s of "Fetching trades..." while the round-trip
+        // unwinds. Skipping when fresh gets them straight to the
+        // factsheet polling tick, which then materializes the snapshot
+        // on the first poll. Stale rows still kick off as before so
+        // a long-paused session doesn't show outdated metrics.
+        const supabase = createClient();
+        const { data: existing } = await supabase
+          .from("strategy_analytics")
+          .select("computation_status, computed_at")
+          .eq("strategy_id", strategyId)
+          .maybeSingle();
+        const computedAtMs = existing?.computed_at
+          ? Date.parse(existing.computed_at)
+          : null;
+        const isFresh =
+          existing?.computation_status === "complete" &&
+          computedAtMs !== null &&
+          Number.isFinite(computedAtMs) &&
+          Date.now() - computedAtMs < SYNC_FRESHNESS_WINDOW_MS;
+        if (isFresh) {
+          if (mountedRef.current) setPhase("waiting_for_complete");
+          return;
+        }
         const res = await fetch("/api/keys/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -212,6 +279,14 @@ export function SyncPreviewStep({
             .from("trades")
             .select("symbol")
             .eq("strategy_id", strategyId)
+            // Bybit + OKX ingest writes daily portfolio aggregates under
+            // the synthetic symbol "PORTFOLIO". Bybit accounts can have
+            // hundreds of these clustered at the start of the table; an
+            // unordered limit(50) sample then comes back as 50× PORTFOLIO
+            // and the client-side filter leaves the detected-markets
+            // hint empty. Excluding the sentinel at the query layer keeps
+            // the sample biased toward real trading pairs.
+            .neq("symbol", "PORTFOLIO")
             .limit(50),
           apiKeyId
             ? supabase
@@ -222,12 +297,9 @@ export function SyncPreviewStep({
             : Promise.resolve({ data: null as { exchange?: string } | null }),
         ]);
 
-        const marketsSet = new Set<string>();
-        for (const trade of sample ?? []) {
-          const symbol = (trade as { symbol?: string }).symbol ?? "";
-          const base = symbol.split(/[-/]/)[0]?.toUpperCase();
-          if (base) marketsSet.add(base);
-        }
+        const detectedMarkets = deriveDetectedMarkets(
+          (sample ?? []).map((t) => (t as { symbol?: string }).symbol),
+        );
 
         const keyRow = keyRowResult.data;
 
@@ -282,7 +354,7 @@ export function SyncPreviewStep({
           tradeCount: tradeCount ?? 0,
           earliestTradeAt: earliest?.[0]?.timestamp ?? null,
           latestTradeAt: latest?.[0]?.timestamp ?? null,
-          detectedMarkets: Array.from(marketsSet).slice(0, 6),
+          detectedMarkets,
           exchange: keyRow?.exchange ?? null,
           metrics,
           sparkline: Array.isArray(analytics?.sparkline_returns)

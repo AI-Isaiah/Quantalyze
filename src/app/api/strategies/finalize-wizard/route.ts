@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
-import { STRATEGY_NAMES } from "@/lib/constants";
+import { STRATEGY_NAMES, canonicalizeExchangeList } from "@/lib/constants";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
@@ -271,7 +271,12 @@ function validatePayload(
       strategy_types: validateStringArray(strategy_types),
       subtypes: validateStringArray(subtypes),
       markets: validateStringArray(markets),
-      supported_exchanges: validateStringArray(supported_exchanges),
+      // QA report 2026-05-21 ISSUE-004 — canonicalize before persist
+      // so the row stores ['Bybit'] not ['bybit', 'Bybit'] even if a
+      // stale client (pre-WizardClient-canonicalize) sends mixed case.
+      supported_exchanges: canonicalizeExchangeList(
+        validateStringArray(supported_exchanges),
+      ),
       leverage_range:
         typeof leverage_range === "string" && leverage_range.length > 0
           ? leverage_range

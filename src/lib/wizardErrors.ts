@@ -716,6 +716,18 @@ export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
   daily_sharpe_sentinel: "Daily Sharpe > 10 looks unrealistic",
   currency_usd_or_blank: "Currency must be USD or left blank",
   qty_price_positive: "Quantity and price must be positive",
+  // QA report 2026-05-21 ISSUE-012: the underlying pandera rule key was
+  // `column_in_dataframe` and the envelope's per-rule label fell through
+  // to the raw key (e.g. "Rule violated: column_in_dataframe"). A
+  // user-friendly label here resolves the cause line; the per-row
+  // message is rewritten by `formatColumnInDataframeMessage()` below.
+  column_in_dataframe: "Your CSV is missing a required column",
+  // QA report 2026-05-21 ISSUE-008: the daily_return column carried raw
+  // dollar PnL (median |x| > 0.5) instead of decimal returns. The
+  // dataset-level sentinel in services/csv_validator.py fires; the
+  // friendly per-rule label here matches what the user sees.
+  daily_return_dollar_form_sentinel:
+    "Daily return values look like dollar PnL, not decimal returns",
 } as const;
 
 /**
@@ -743,4 +755,22 @@ export function formatCsvRuleCauseMulti(
  */
 export function formatCsvRuleCauseSingle(humanLabel: string): string {
   return `Rule violated: ${humanLabel}. Expand below for the row-level breakdown.`;
+}
+
+/**
+ * Rewrite a pandera `column_in_dataframe` per-row message to be
+ * actionable. The raw message is shaped like "Column 'None' failed:
+ * daily_return" — referencing the missing column by its rule name,
+ * not by anything the user can use. Pull out the expected column
+ * name and surface "The required column `daily_return` is missing
+ * from your file." instead. (QA report 2026-05-21 ISSUE-012.)
+ *
+ * The match is intentionally narrow — anything we cannot parse falls
+ * through to the original message so we don't drop information.
+ */
+export function formatColumnInDataframeMessage(raw: string): string {
+  const m = raw.match(/Column\s+'[^']*'\s+failed:\s+(\S+)/);
+  if (!m) return raw;
+  const missingColumn = m[1];
+  return `The required column \`${missingColumn}\` is missing from your file. Rename a column to \`${missingColumn}\` or switch formats on the upload step.`;
 }

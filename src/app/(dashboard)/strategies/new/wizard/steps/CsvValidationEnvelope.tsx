@@ -3,6 +3,7 @@
 import {
   CSV_RULE_LABELS,
   formatCsvRuleCauseSingle,
+  formatColumnInDataframeMessage,
 } from "@/lib/wizardErrors";
 
 /**
@@ -77,7 +78,9 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
           <ul className="mt-1 list-disc space-y-0.5 pl-5 text-text-muted">
             {list.map((e, i) => (
               <li key={i}>
-                Row {e.row}: {e.message}
+                {rule === "column_in_dataframe"
+                  ? formatColumnInDataframeMessage(e.message)
+                  : `Row ${e.row}: ${e.message}`}
               </li>
             ))}
           </ul>

@@ -7,6 +7,38 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.6.1] - 2026-05-21
+
+**fix(typecheck): add `csv_metadata` to `WIZARD_STEP_KEYS` exhaustiveness array.**
+
+CI typecheck on v0.24.6.0 failed at `src/app/api/for-quants-lead/route.ts:146` — the compile-time exhaustiveness guard at line 142 caught a new `WizardStepKey` variant that hadn't been propagated to the `WIZARD_STEP_KEYS` tuple. Working exactly as the red-team regression intended; the guard pinned drift between the union and the runtime array.
+
+### Fixed
+- `src/app/api/for-quants-lead/route.ts:124` — appended `"csv_metadata"` to the `WIZARD_STEP_KEYS` tuple so the `Exclude<WizardStepKey, (typeof WIZARD_STEP_KEYS)[number]>` evaluates to `never` and the assignment to `true` typechecks.
+
+
+## [0.24.6.0] - 2026-05-21
+
+**fix(wizard): close the CSV-upload /qa fix-list — strategies now classify themselves, the badge tells the truth, the disclaimer matches, validators reject obvious garbage, and the wizard tells users what's actually broken when it rejects their file.**
+
+Seven issues from the 2026-05-21 CSV /qa report. CSV-uploaded strategies were technically reaching the public sheet but were structurally broken downstream: invisible to discovery (no category), bare in lists (no chip badges), contradictory trust signals ("Verified" green badge sitting above a "not independently verified" disclaimer), forever-stuck on "analytics being computed", and the wizard rejected files with cryptic panderas-leaked error strings.
+
+### Added
+- **CSV wizard metadata step** (ISSUE-010) — between Preview and Submit. Allocators see strategy types, markets, supported exchanges, AUM, leverage range, and description — same fields the API path collects. CSV strategies now appear in `/discovery/[category]` with their classification badge instead of bare placeholder rows.
+- **Dollar-PnL sentinel in the Python validator** (ISSUE-008) — files where the `daily_return` column has median |value| > 0.5 are rejected with "looks like dollar PnL, not decimal returns. Convert by dividing by your account size, or upload Daily NAV instead." Catches the common case of pasting raw P&L into a daily-return template.
+- **Honest analytics-missing copy for CSV strategies** (ISSUE-009) — `/strategy/[id]` no longer claims "analytics are being computed" for csv_uploaded strategies. The CSV → analytics pipeline isn't built yet; the page now says so explicitly. A scoping doc for the full pipeline ships under `.planning/scope/csv-analytics-pipeline-scope.md`.
+
+### Fixed
+- **Verified badge respects trust_tier** (ISSUE-011) — csv_uploaded and self_reported strategies no longer render the green "Verified" chip. Undefined trust_tier now fails closed (renders nothing) instead of the old back-compat fallthrough, so a future caller that forgets the prop can't silently re-introduce the bug.
+- **`?source=csv` direct-URL navigation** (ISSUE-013) — `/strategies/new?source=csv` now forwards the param through to the wizard instead of stripping it via an unconditional redirect.
+- **Friendlier CSV column-missing error** (ISSUE-012) — the wizard surfaces "The required column `daily_return` is missing from your file. Rename a column or switch formats" instead of the panderas-leaked "Row 0: Column 'None' failed: daily_return".
+- **Preview step dates render in ISO** (ISSUE-014) — sample-row cells match the date-range pill format. No more "4/3/2025" rows under a "2025-04-03 → 2026-05-06" header.
+
+### Changed
+- **csv-finalize route** now persists classification metadata via an authenticated RLS-gated UPDATE after the SECURITY DEFINER RPC, with defense-in-depth UUID validation on `category_id`, `canonicalizeExchangeList()` on `supported_exchanges`, money-value upper bound (`1e12`), and shared helper that fires on both the legacy and unified-backbone code paths so a future feature-flag flip can't silently lose metadata.
+- **Wizard state machine** — CSV branch is now 4 steps (Upload → Preview → Strategy profile → Submit). Step localStorage validation covers the new `csv_metadata` step; the existing in-memory-only state pattern is preserved (metadata draft survives back-navigation, not tab close).
+
+
 ## [0.24.5.20] - 2026-05-21
 
 **fix(e2e): stamp seeded test users as `verified` so the v0.24.5.18 approval gate doesn't block them.**

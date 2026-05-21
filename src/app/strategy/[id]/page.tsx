@@ -7,6 +7,7 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Button } from "@/components/ui/Button";
 import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
+import { analyticsMissingMessage } from "./analyticsMissingMessage";
 // User-gated private note card on the factsheet, rendered between the
 // sparkline card and the CTA card.
 import { createClient } from "@/lib/supabase/server";
@@ -121,7 +122,7 @@ export default async function PublicStrategyPage({
             <h1 className="text-[32px] font-bold tracking-tight text-text-primary">
               {strategy.name}
             </h1>
-            <VerifiedBadge />
+            <VerifiedBadge trustTier={strategy.trust_tier} />
           </div>
           {strategy.start_date && (
             <p className="text-sm text-text-muted">
@@ -181,7 +182,9 @@ export default async function PublicStrategyPage({
           </>
         ) : (
           <div className="rounded-lg border border-border bg-card p-8 text-center mb-8">
-            <p className="text-text-muted">Analytics are being computed. Check back soon.</p>
+            <p className="text-text-muted">
+              {analyticsMissingMessage(strategy.trust_tier)}
+            </p>
           </div>
         )}
 

@@ -10,6 +10,7 @@ import { WizardChrome, WIZARD_STEPS_CSV } from "./WizardChrome";
 import { ConnectKeyStep, type ConnectKeySuccess } from "./steps/ConnectKeyStep";
 import { SyncPreviewStep, type SyncPreviewSnapshot } from "./steps/SyncPreviewStep";
 import { MetadataStep, type MetadataDraft } from "./steps/MetadataStep";
+import { canonicalizeExchangeList } from "@/lib/constants";
 import { SubmitStep } from "./steps/SubmitStep";
 import { CsvUploadStep } from "./steps/CsvUploadStep";
 import { CsvPreviewStep } from "./steps/CsvPreviewStep";
@@ -60,7 +61,11 @@ const STEP_INDEX: Record<WizardStepKey, 1 | 2 | 3 | 4> = {
   submit: 4,
   csv_upload: 1,
   csv_preview: 2,
-  csv_submit: 3,
+  // QA report 2026-05-21 ISSUE-010: CSV branch now has 4 steps
+  // (Upload → Preview → Profile → Submit). csv_metadata uses index 3
+  // and csv_submit shifts from 3 → 4 to match.
+  csv_metadata: 3,
+  csv_submit: 4,
 };
 
 /** Phase 15 / CSV-01..CSV-02 — preview shape returned by /api/strategies/csv-validate. */
@@ -131,7 +136,19 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
           strategyTypes: initialDraft.strategy_types ?? [],
           subtypes: initialDraft.subtypes ?? [],
           markets: initialDraft.markets ?? [],
-          supportedExchanges: initialDraft.supported_exchanges ?? [],
+          // QA report 2026-05-21 ISSUE-004: create_wizard_strategy seeds
+          // strategies.supported_exchanges from api_keys.exchange in
+          // lowercase ('bybit'/'okx'/'binance' for check-constraint
+          // compliance), but the MetadataStep chip group uses
+          // case-sensitive .includes() against EXCHANGES (canonical
+          // 'Bybit'/'OKX'/'Binance'). Without normalization the chip
+          // appears unselected on resume, the user clicks it, and the
+          // array grows to ['bybit', 'Bybit'] — persisted verbatim into
+          // strategies.supported_exchanges and surfaced as duplicated
+          // copy on the review and admin views.
+          supportedExchanges: canonicalizeExchangeList(
+            initialDraft.supported_exchanges ?? [],
+          ),
           leverageRange: initialDraft.leverage_range ?? "",
           aum: initialDraft.aum?.toString() ?? "",
           maxCapacity: initialDraft.max_capacity?.toString() ?? "",
@@ -161,6 +178,11 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
   const [csvPreview, setCsvPreview] = useState<CsvPreview | null>(null);
   const [csvValidationPassed, setCsvValidationPassed] = useState<boolean>(false);
   const [strategyName, setStrategyName] = useState<string>("");
+  // QA report 2026-05-21 ISSUE-010: classification metadata captured on
+  // the new csv_metadata step. Reused MetadataStep shape — same fields as
+  // the API branch's metadataDraft, but populated by the CSV-only user
+  // typing instead of detection from synced trades.
+  const [csvMetadataDraft, setCsvMetadataDraft] = useState<MetadataDraft | null>(null);
 
   // Single post-mount localStorage read. Computes resume overrides from
   // the LS payload (if any) and applies them via setState. `hydrated`
@@ -589,8 +611,36 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                   setToastKey((k) => k + 1);
                 }}
                 onContinue={() => {
-                  setStep("csv_submit");
+                  setStep("csv_metadata");
                   // P473: async HMAC envelope — fire-and-forget.
+                  void saveWizardState({
+                    strategyId: "",
+                    wizardSessionId,
+                    step: "csv_metadata",
+                    source: "csv",
+                    strategyName,
+                  });
+                  setSavedAt(Date.now());
+                  setToastKey((k) => k + 1);
+                }}
+              />
+            )}
+
+            {step === "csv_metadata" && csvFmt && csvPreview && (
+              // QA report 2026-05-21 ISSUE-010 — CSV strategies were
+              // persisting with category_id=null + empty arrays, breaking
+              // discovery. Reuses the API-branch MetadataStep with
+              // detectedMarkets=[] (no synced trades on the CSV path)
+              // and detectedExchange=null (CSV has no broker linkage).
+              <MetadataStep
+                strategyId=""
+                wizardSessionId={wizardSessionId}
+                initial={csvMetadataDraft}
+                detectedMarkets={[]}
+                detectedExchange={null}
+                onComplete={(draft) => {
+                  setCsvMetadataDraft(draft);
+                  setStep("csv_submit");
                   void saveWizardState({
                     strategyId: "",
                     wizardSessionId,
@@ -601,22 +651,35 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
                 }}
+                onBack={() => {
+                  setStep("csv_preview");
+                  void saveWizardState({
+                    strategyId: "",
+                    wizardSessionId,
+                    step: "csv_preview",
+                    source: "csv",
+                    strategyName,
+                  });
+                  setSavedAt(Date.now());
+                  setToastKey((k) => k + 1);
+                }}
               />
             )}
 
-            {step === "csv_submit" && csvFmt && csvPreview && (
+            {step === "csv_submit" && csvFmt && csvPreview && csvMetadataDraft && (
               <CsvSubmitStep
                 wizardSessionId={wizardSessionId}
                 fmt={csvFmt}
                 strategyName={strategyName}
                 preview={csvPreview}
+                metadata={csvMetadataDraft}
                 onBack={() => {
-                  setStep("csv_preview");
+                  setStep("csv_metadata");
                   // P473: async HMAC envelope — fire-and-forget.
                   void saveWizardState({
                     strategyId: "",
                     wizardSessionId,
-                    step: "csv_preview",
+                    step: "csv_metadata",
                     source: "csv",
                     strategyName,
                   });

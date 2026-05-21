@@ -12,6 +12,7 @@ import {
   SUBTYPES,
   MARKETS,
   EXCHANGES,
+  canonicalizeExchange,
 } from "@/lib/constants";
 
 /**
@@ -65,9 +66,16 @@ export function MetadataStep({
   );
   const [subtypes, setSubtypes] = useState<string[]>(initial?.subtypes ?? []);
   const [markets, setMarkets] = useState<string[]>(initial?.markets ?? []);
+  // QA report 2026-05-21 ISSUE-004: capitalize('okx') returned 'Okx',
+  // but EXCHANGES has 'OKX' — so on a first-visit submit the OKX chip
+  // appeared unselected even though detectedExchange === 'okx'. Same
+  // class of bug as the resume case fixed in WizardClient.tsx.
+  // canonicalizeExchange() maps the lowercase api_keys.exchange to its
+  // canonical EXCHANGES entry so the chip-group's case-sensitive
+  // .includes() check matches and the chip renders pre-selected.
   const [supportedExchanges, setSupportedExchanges] = useState<string[]>(
     initial?.supportedExchanges ??
-      (detectedExchange ? [capitalize(detectedExchange)] : []),
+      (detectedExchange ? [canonicalizeExchange(detectedExchange)] : []),
   );
   const [leverageRange, setLeverageRange] = useState<string>(
     initial?.leverageRange ?? "",
@@ -247,11 +255,6 @@ export function MetadataStep({
       </form>
     </section>
   );
-}
-
-function capitalize(s: string): string {
-  if (!s) return "";
-  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 interface InlineChipGroupProps {

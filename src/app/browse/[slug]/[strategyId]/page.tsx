@@ -64,7 +64,10 @@ export default async function PublicStrategyDetailPage({
               {displayName}
             </h1>
             {strategy.api_key_id && (
-              <VerifiedBadge className="text-accent" />
+              <VerifiedBadge
+                trustTier={strategy.trust_tier}
+                className="text-accent"
+              />
             )}
           </div>
           <div className="flex gap-1.5 mt-2">

@@ -119,7 +119,40 @@ describe("deriveWizardResumeOverrides — pure LS-derivation helper", () => {
   });
 
   describe("API branch", () => {
-    it("restores the LS step when strategyId matches the server draft", () => {
+    it("restores connect_key from LS when strategyId matches the server draft", () => {
+      const loaded: WizardLocalState = {
+        strategyId: "draft-uuid",
+        wizardSessionId: "ls-session-id",
+        step: "connect_key",
+        savedAt: 1_700_000_000_000,
+      };
+      const out = deriveWizardResumeOverrides(loaded, "api", "draft-uuid");
+      expect(out.step).toBe("connect_key");
+      expect(out.showResumeBanner).toBeUndefined();
+    });
+
+    it("restores sync_preview from LS when strategyId matches the server draft", () => {
+      const loaded: WizardLocalState = {
+        strategyId: "draft-uuid",
+        wizardSessionId: "ls-session-id",
+        step: "sync_preview",
+        savedAt: 1_700_000_000_000,
+      };
+      const out = deriveWizardResumeOverrides(loaded, "api", "draft-uuid");
+      expect(out.step).toBe("sync_preview");
+    });
+
+    // Regression: /qa 2026-05-21 — clicking "Review and submit" persisted
+    // step="submit" to LS, but syncSnapshot + metadataDraft are React-only
+    // state. On any resume (refresh, tab close, viewport change that
+    // remounts), the wizard restored step="submit" with both deps null,
+    // and the conditional `step==="submit" && strategyId && syncSnapshot
+    // && metadataDraft && <SubmitStep/>` rendered nothing — leaving the
+    // user staring at a blank wizard with no recovery affordance. Same
+    // class of bug as the CSV csv_preview/csv_submit traps above. The fix
+    // forces resume back to sync_preview so the poll rebuilds the
+    // snapshot from the server-side draft + worker output.
+    it("does NOT restore metadata step from LS (syncSnapshot is not persisted)", () => {
       const loaded: WizardLocalState = {
         strategyId: "draft-uuid",
         wizardSessionId: "ls-session-id",
@@ -127,15 +160,28 @@ describe("deriveWizardResumeOverrides — pure LS-derivation helper", () => {
         savedAt: 1_700_000_000_000,
       };
       const out = deriveWizardResumeOverrides(loaded, "api", "draft-uuid");
-      expect(out.step).toBe("metadata");
-      expect(out.showResumeBanner).toBeUndefined();
+      expect(out.step).toBeUndefined();
+      // wizardSessionId still carries so funnel correlation survives.
+      expect(out.wizardSessionId).toBe("ls-session-id");
+    });
+
+    it("does NOT restore submit step from LS (syncSnapshot + metadataDraft are not persisted)", () => {
+      const loaded: WizardLocalState = {
+        strategyId: "draft-uuid",
+        wizardSessionId: "ls-session-id",
+        step: "submit",
+        savedAt: 1_700_000_000_000,
+      };
+      const out = deriveWizardResumeOverrides(loaded, "api", "draft-uuid");
+      expect(out.step).toBeUndefined();
+      expect(out.wizardSessionId).toBe("ls-session-id");
     });
 
     it("surfaces the resume banner when strategyId mismatches the server draft", () => {
       const loaded: WizardLocalState = {
         strategyId: "stale-uuid",
         wizardSessionId: "ls-session-id",
-        step: "metadata",
+        step: "sync_preview",
         savedAt: 1_700_000_000_000,
       };
       const out = deriveWizardResumeOverrides(loaded, "api", "fresh-uuid");

@@ -63,6 +63,53 @@ export const MARKETS = ["Futures", "Spot"] as const;
 export const EXCHANGES = ["Binance", "OKX", "Bybit"] as const;
 
 /**
+ * Normalize an exchange name to its canonical-case form (matches the
+ * `EXCHANGES` constant exactly). The wizard pre-seeds
+ * `strategies.supported_exchanges` from `api_keys.exchange` (lowercase
+ * 'bybit' / 'okx' / 'binance' for check-constraint compliance), so the
+ * MetadataStep chip group's case-sensitive `selected.includes(...)`
+ * check failed to match an already-selected exchange on resume. The
+ * user would click the chip — adding 'Bybit' alongside the existing
+ * 'bybit' — and finalize-wizard would persist both, producing the
+ * "Supported exchanges: bybit, Bybit" display bug (QA report
+ * 2026-05-21 ISSUE-004).
+ *
+ * Behavior:
+ *  - Known exchange (case-insensitive match): canonical form
+ *    ('bybit' → 'Bybit', 'OKX' → 'OKX', 'BINANCE' → 'Binance').
+ *  - Unknown name: returned unchanged so a future exchange addition
+ *    doesn't silently drop entries before the constant is updated.
+ *  - Empty / nullish: returned unchanged (caller filters elsewhere).
+ */
+export function canonicalizeExchange(name: string): string {
+  if (!name) return name;
+  const lower = name.toLowerCase();
+  for (const canonical of EXCHANGES) {
+    if (canonical.toLowerCase() === lower) return canonical;
+  }
+  return name;
+}
+
+/**
+ * Normalize an array of exchange names, dedupe case-insensitively,
+ * preserving order. Use on both the load path (initialDraft from DB)
+ * and the save path (finalize-wizard payload) so a wizard resume never
+ * persists `['bybit', 'Bybit']`.
+ */
+export function canonicalizeExchangeList(names: ReadonlyArray<string>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const name of names) {
+    const canonical = canonicalizeExchange(name);
+    const key = canonical.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(canonical);
+  }
+  return out;
+}
+
+/**
  * The allowlist of `api_keys` columns that can be projected from a user-scoped
  * Supabase client after migration 027 (SEC-005).
  *
