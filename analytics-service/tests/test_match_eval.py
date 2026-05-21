@@ -659,6 +659,99 @@ def test_compute_hit_rate_issues_one_match_batches_query_per_call():
     )
 
 
+# ─── audit-2026-05-07 C-0231 — match_batches must be bounded by max intro ─
+
+
+def test_compute_hit_rate_bounds_match_batches_by_max_intro_ts():
+    """audit-2026-05-07 C-0231 regression — pre-fix the paginated
+    match_batches SELECT filtered ONLY by `.in_("allocator_id", ...)`,
+    pulling the ENTIRE allocator-batch history every call. For a long-
+    lived allocator with thousands of historical batches that's quadratic
+    memory growth as match_batches fills. The "latest batch before intro"
+    lookup only ever consults rows older than the newest intro in this
+    window, so the query MUST add `.lt("computed_at", max_intro_ts)` to
+    bound the fetch.
+
+    Lock the fix: capture every `.lt(column, value)` call on match_batches
+    and assert one of them filters `computed_at` by the max intro
+    timestamp."""
+    # Two intros at distinct timestamps so the max-intro bound is
+    # observable. The newest intro is at 2026-04-10T15:00:00Z.
+    intros = [
+        _make_intro("alloc-1", "strat-1", "2026-04-07T10:00:00Z"),
+        _make_intro("alloc-1", "strat-2", "2026-04-10T15:00:00Z"),
+    ]
+    batches = [_batch("batch-1", "alloc-1", "2026-04-06T00:00:00Z")]
+    candidates = [
+        _candidate("batch-1", "strat-1", rank=1),
+        _candidate("batch-1", "strat-2", rank=1),
+    ]
+
+    lt_filters: list[tuple[str, str]] = []
+
+    def _make_lt_recording_chain(final_data):
+        chain = MagicMock()
+        chain.select.return_value = chain
+        chain.eq.return_value = chain
+        chain.gte.return_value = chain
+        chain.in_.return_value = chain
+        chain.is_.return_value = chain
+        chain.limit.return_value = chain
+        chain.order.return_value = chain
+
+        def _lt_side_effect(column, value):
+            lt_filters.append((column, value))
+            return chain
+
+        chain.lt.side_effect = _lt_side_effect
+
+        def _range_side_effect(start, end):
+            sliced = MagicMock()
+            sliced.execute.return_value = MagicMock(data=final_data[start:end + 1])
+            return sliced
+
+        chain.range.side_effect = _range_side_effect
+        chain.execute.return_value = MagicMock(data=final_data)
+        return chain
+
+    chains = {
+        "match_decisions": _passthrough_chain(intros),
+        "match_batches": _make_lt_recording_chain(batches),
+        "match_candidates": _passthrough_chain(candidates),
+    }
+    sb = MagicMock()
+    sb.table.side_effect = lambda name: chains[name]
+
+    with patch("services.db.get_supabase", return_value=sb):
+        result = compute_hit_rate_metrics(lookback_days=28)
+
+    # Sanity: pipeline still works with the new bound — the batch at
+    # 2026-04-06 is strictly less than the max intro at 2026-04-10, so
+    # both intros resolve to that batch and hit at rank 1.
+    assert result["intros_shipped"] == 2
+    assert result["hits_top_3"] == 2
+
+    # The fix: at least one .lt(...) call on match_batches must filter
+    # `computed_at` by the newest intro timestamp in the window. Without
+    # the bound, lt_filters would be empty and the query would pull the
+    # entire allocator history.
+    computed_at_bounds = [
+        (col, val) for (col, val) in lt_filters if col == "computed_at"
+    ]
+    assert computed_at_bounds, (
+        "match_batches query must .lt('computed_at', max_intro_ts) to "
+        "bound the fetch — without this bound the fetch is O(historical "
+        f"batches per allocator), not O(window). Got lt filters: {lt_filters}"
+    )
+    # The bound must use the newest intro's timestamp (so no relevant
+    # row is excluded).
+    bound_values = [v for (_, v) in computed_at_bounds]
+    assert "2026-04-10T15:00:00Z" in bound_values, (
+        "the lt bound must be the max intro timestamp in the window "
+        f"(2026-04-10T15:00:00Z), got {bound_values}"
+    )
+
+
 def test_paginated_select_raises_on_hard_cap():
     """audit-2026-05-07 #52 regression — pre-fix the helper logged a
     warning and silently sliced. We now raise PaginatedSelectTruncated so
