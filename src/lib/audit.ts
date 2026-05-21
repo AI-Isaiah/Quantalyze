@@ -290,6 +290,7 @@ export type AuditAction =
   | "portfolio_document.create"
   | "alert.acknowledge"
   | "allocator.approve"
+  | "manager.approve"
   | "notification_preferences.update"
   | "attestation.accept"
   // --- Phase 08: multi-scope notes (user_note.*) — replaces portfolio_note.update

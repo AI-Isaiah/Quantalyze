@@ -33,16 +33,17 @@ const SOURCE_BADGE_LABEL: Record<StrategySource, string> = {
   bybit: "bybit",
 };
 
-const TABS = ["Intro Requests", "Strategy Review", "Allocators", "Compute Jobs"] as const;
+const TABS = ["Intro Requests", "Strategy Review", "Allocators", "Managers", "Compute Jobs"] as const;
 type Tab = (typeof TABS)[number];
 
 interface AdminTabsProps {
   introRequests: Array<Record<string, unknown>>;
   pendingStrategies: Array<Record<string, unknown>>;
   pendingAllocators: Array<Record<string, unknown>>;
+  pendingManagers?: Array<Record<string, unknown>>;
 }
 
-export function AdminTabs({ introRequests, pendingStrategies, pendingAllocators }: AdminTabsProps) {
+export function AdminTabs({ introRequests, pendingStrategies, pendingAllocators, pendingManagers = [] }: AdminTabsProps) {
   const [tab, setTab] = useState<Tab>("Intro Requests");
 
   const pendingIntroCount = introRequests.filter((r) => r.status === "pending").length;
@@ -50,6 +51,7 @@ export function AdminTabs({ introRequests, pendingStrategies, pendingAllocators 
     "Intro Requests": pendingIntroCount,
     "Strategy Review": pendingStrategies.length,
     "Allocators": pendingAllocators.length,
+    "Managers": pendingManagers.length,
   };
 
   return (
@@ -79,6 +81,7 @@ export function AdminTabs({ introRequests, pendingStrategies, pendingAllocators 
       {tab === "Intro Requests" && <IntroRequestsTab requests={introRequests} />}
       {tab === "Strategy Review" && <StrategyReviewTab strategies={pendingStrategies} />}
       {tab === "Allocators" && <AllocatorsTab allocators={pendingAllocators} />}
+      {tab === "Managers" && <ManagersTab managers={pendingManagers} />}
       {tab === "Compute Jobs" && <ComputeJobsTable />}
     </div>
   );
@@ -513,6 +516,54 @@ function AllocatorsTab({ allocators }: { allocators: Array<Record<string, unknow
               <p className="text-xs text-text-muted">{a.company as string ?? ""} {a.email ? `· ${a.email}` : ""}</p>
             </div>
             <Button size="sm" onClick={() => approve(a.id as string)} disabled={loading === a.id}>
+              Approve
+            </Button>
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+// task #14 (2026-05-21): manager-side queue. Mirrors AllocatorsTab exactly
+// except for the API endpoint and the empty-state copy. Kept as a separate
+// component (rather than parameterising AllocatorsTab) so a future role-
+// specific UI change on one side (extra metadata column, badge, etc.)
+// does not require a feature flag — just change the relevant component.
+function ManagersTab({ managers }: { managers: Array<Record<string, unknown>> }) {
+  const router = useRouter();
+  const [loading, setLoading] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function approve(id: string) {
+    setLoading(id);
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/manager-approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      if (!res.ok) { setError("Approval failed."); return; }
+      router.refresh();
+    } catch { setError("Network error."); } finally { setLoading(null); }
+  }
+
+  if (managers.length === 0) {
+    return <Card className="text-center py-8 text-text-muted">All caught up. No managers pending approval.</Card>;
+  }
+
+  return (
+    <div className="space-y-3">
+      {error && <p className="text-sm text-negative mb-3">{error}</p>}
+      {managers.map((m) => (
+        <Card key={m.id as string}>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-text-primary">{m.display_name as string}</p>
+              <p className="text-xs text-text-muted">{m.company as string ?? ""} {m.email ? `· ${m.email}` : ""}</p>
+            </div>
+            <Button size="sm" onClick={() => approve(m.id as string)} disabled={loading === m.id}>
               Approve
             </Button>
           </div>

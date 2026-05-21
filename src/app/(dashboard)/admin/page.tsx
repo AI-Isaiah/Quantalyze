@@ -13,7 +13,7 @@ export default async function AdminPage() {
 
   const admin = createAdminClient();
 
-  const [introRequests, pendingStrategies, pendingAllocators] = await Promise.all([
+  const [introRequests, pendingStrategies, pendingAllocators, pendingManagers] = await Promise.all([
     admin
       .from("contact_requests")
       .select("id, status, message, admin_note, created_at, allocator_id, strategy_id, profiles!contact_requests_allocator_id_fkey(display_name, company), strategies!contact_requests_strategy_id_fkey(id, name, codename, disclosure_tier)")
@@ -30,8 +30,21 @@ export default async function AdminPage() {
       .order("created_at", { ascending: false }),
     admin
       .from("profiles")
-      .select("id, display_name, company, email, allocator_status, created_at")
+      .select("id, display_name, company, email, role, allocator_status, created_at")
       .in("allocator_status", ["newbie", "pending"])
+      .in("role", ["allocator", "both"])
+      .order("created_at", { ascending: false }),
+    // task #14 (2026-05-21): symmetric pending-managers query so the
+    // universal-approval gate has a manager-side surface in the admin
+    // dashboard. role IN ('manager','both') filter mirrors the allocator
+    // query's role guard so the two lists stay disjoint for single-role
+    // users and overlap for role='both' (correct: a `both` profile must
+    // be approved on both sides before reaching the dashboard).
+    admin
+      .from("profiles")
+      .select("id, display_name, company, email, role, manager_status, created_at")
+      .in("manager_status", ["newbie", "pending"])
+      .in("role", ["manager", "both"])
       .order("created_at", { ascending: false }),
   ]);
 
@@ -42,6 +55,7 @@ export default async function AdminPage() {
         introRequests={introRequests.data ?? []}
         pendingStrategies={pendingStrategies.data ?? []}
         pendingAllocators={pendingAllocators.data ?? []}
+        pendingManagers={pendingManagers.data ?? []}
       />
     </>
   );
