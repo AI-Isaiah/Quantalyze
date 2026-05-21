@@ -7,6 +7,16 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.20] - 2026-05-21
+
+**fix(e2e): stamp seeded test users as `verified` so the v0.24.5.18 approval gate doesn't block them.**
+
+PR #266 (v0.24.5.18) landed via admin override because every seed-gated spec (discovery-axe, discovery-hide-examples-default, discovery-prefs-isolation, onboarding-funnel, strategy-v2-*) failed: the new approval gate in `(dashboard)/layout.tsx` redirected seeded test users to `/pending-approval` before any assertion could run. The fixture creates users with default `{allocator,manager}_status='newbie'`, which the gate now treats as pending.
+
+### Fixed
+- `e2e/helpers/seed-test-project.ts` — profile upsert now sets `allocator_status='verified'` and `manager_status='verified'`. Both are set even though only the role-matching field gates, defending against a future seed call that flips `role` to `'both'` (which requires BOTH sides verified per `isProfileApproved`'s truth table).
+
+
 ## [0.24.5.19] - 2026-05-21
 
 **fix(ship): CI follow-up to v0.24.5.18 — manifest entry + test redirect.**
