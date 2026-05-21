@@ -183,19 +183,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     }
 
     const supabase = await createClient();
-    // @audit-skip: wizard draft state — `create_wizard_strategy` writes
-    // strategies (status='draft', source='wizard') + api_keys rows that
-    // are NOT yet user-visible. The user-visible strategy creation is
-    // audited at finalize time in
-    // src/app/api/strategies/finalize-wizard/route.ts (intro.send /
-    // strategy.approve downstream). Adding a separate `strategy.draft`
-    // audit action would require an ADR-0023 taxonomy update, which is
-    // tracked as a follow-up to this P692 audit-coverage extension.
     // The generated types declare these RPC params as non-null strings, but
     // the underlying SQL function (per migration 031 + the envelope-encryption
     // contract above) accepts nulls for api_secret/passphrase/dek/nonce.
     // Cast the args object to satisfy the typed-client contract without
     // altering the values the DB receives.
+    // @audit-skip: wizard draft — create_wizard_strategy writes draft
+    // strategies + api_keys not yet user-visible. The user-visible
+    // creation is audited at finalize time in
+    // src/app/api/strategies/finalize-wizard/route.ts. Per audit-2026-05-07
+    // P692 + ADR-0023 (taxonomy follow-up tracked separately).
     const { data, error } = await supabase.rpc("create_wizard_strategy", {
       p_user_id: user.id,
       p_exchange: exchangeNormalized,

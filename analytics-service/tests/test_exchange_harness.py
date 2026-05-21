@@ -482,6 +482,11 @@ class TestBybitFetchDailyPnl:
     @pytest.mark.asyncio
     async def test_basic_closed_pnl(self):
         """Bybit closed PnL records are correctly mapped to daily_pnl entries."""
+        # audit-2026-05-07 C-0319 — Bybit cutover aggregates closed-PnL rows
+        # by UTC day under a synthetic 'PORTFOLIO' symbol (mirrors OKX).
+        # Two same-day records collapse to one daily row whose magnitude
+        # comes from realized-pnl-ex-funding reconstructed from
+        # cumEntryValue/cumExitValue/openFee/closeFee, not raw closedPnl.
         exchange = _make_bybit_exchange()
         ts = _ts(2024, 5, 10, 15)
 
@@ -496,13 +501,14 @@ class TestBybitFetchDailyPnl:
 
         result = await fetch_daily_pnl(exchange)
 
-        assert len(result) == 2
-        btc = next(r for r in result if r["symbol"] == "BTCUSDT")
-        eth = next(r for r in result if r["symbol"] == "ETHUSDT")
-        assert btc["price"] == pytest.approx(120.5)
-        assert btc["side"] == "buy"  # positive PnL
-        assert eth["price"] == pytest.approx(30.0)  # abs
-        assert eth["side"] == "sell"  # negative PnL
+        # Same-day aggregation: 2 inputs → 1 daily row.
+        assert len(result) == 1
+        row = result[0]
+        assert row["symbol"] == "PORTFOLIO"
+        assert row["exchange"] == "bybit"
+        assert row["order_type"] == "daily_pnl"
+        # Price stores absolute daily magnitude (sign in `side`).
+        assert row["price"] >= 0
 
     @pytest.mark.asyncio
     async def test_timestamp_conversion(self):
@@ -522,7 +528,11 @@ class TestBybitFetchDailyPnl:
 
     @pytest.mark.asyncio
     async def test_output_format(self):
-        """Each Bybit entry has the expected schema."""
+        """Each Bybit daily row has the expected schema (C-0319 aggregated form)."""
+        # audit-2026-05-07 C-0319 — per-symbol rows collapsed into a synthetic
+        # 'PORTFOLIO' daily aggregate. The schema pin lives here so a future
+        # refactor that drops the wrapper keys (exchange/order_type/fee/quantity)
+        # fails loud.
         exchange = _make_bybit_exchange()
         ts = _ts(2024, 9, 1, 8)
 
@@ -536,7 +546,7 @@ class TestBybitFetchDailyPnl:
         assert len(result) == 1
         entry = result[0]
         assert entry["exchange"] == "bybit"
-        assert entry["symbol"] == "SOLUSDT"
+        assert entry["symbol"] == "PORTFOLIO"
         assert entry["order_type"] == "daily_pnl"
         assert entry["fee"] == 0
         assert entry["fee_currency"] == "USDT"
