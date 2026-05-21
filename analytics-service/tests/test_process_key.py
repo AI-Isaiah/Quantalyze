@@ -1218,11 +1218,17 @@ def test_process_key_shares_main_limiter_instance():
     )
 
 
-def test_process_key_rate_limit_key_func_uses_token_and_user_id():
-    """API-5: per-tenant isolation — the limiter key must vary by
-    (Authorization, X-User-Id), NOT remote IP. Two requests from the
-    same Vercel egress IP but different tenants must land in different
-    buckets.
+def test_process_key_rate_limit_key_func_uses_token_only():
+    """PR #241 red-team — the limiter key must vary by Authorization
+    token ONLY. The earlier shape composed (token, X-User-Id) so each
+    tenant got isolated buckets — but X-User-Id is unsigned
+    client-controlled input, so a caller holding the bearer token
+    could set ``X-User-Id: <random-uuid-per-request>`` and allocate a
+    new bucket per request, bypassing the limiter entirely. Until a
+    signed identity surface lands (mTLS / JWT body bound to the
+    token), per-token bucketing is the strongest guarantee available.
+    Two requests from the same bearer token land in the SAME bucket
+    regardless of the X-User-Id value.
     """
     from unittest.mock import MagicMock
 
@@ -1239,7 +1245,9 @@ def test_process_key_rate_limit_key_func_uses_token_and_user_id():
     kb = key_func(req_b)
     kc = key_func(req_c)
 
-    assert ka != kb, "Same token, different user_id must produce different keys"
+    # PR #241 red-team contract: same token → same key regardless of
+    # X-User-Id (closes the per-request-uuid bypass).
+    assert ka == kb, "Same token must produce same key, regardless of X-User-Id"
     assert ka != kc, "Different token must produce different keys"
     # Bearer token must NEVER appear in plaintext (it shows up in slowapi
     # error logs).

@@ -721,30 +721,43 @@ class TestG15_005_RateLimitIsUserKeyed:
         # AND it must NOT be slowapi's default IP-based key_func.
         assert key_func is not get_remote_address
 
-    def test_user_keyed_function_isolates_users(self):
-        """The key_func returns a per-user bucket id when the
-        ``X-User-Id`` header is forwarded. Two distinct user_ids hash to
-        DIFFERENT buckets even when the remote IP is identical (the
-        shared-NAT scenario the audit flagged)."""
+    def test_key_function_ignores_spoofable_user_header(self):
+        """PR #241 red-team — the key_func MUST NOT read ``X-User-Id``.
+        That header is unsigned client input; an attacker holding the
+        SERVICE_KEY could set it to a fresh uuid per request and
+        allocate a brand-new 20/hour bucket each time, bypassing the
+        limiter entirely. Production traffic is already IP-keyed
+        because src/lib/analytics-client.ts never forwarded the
+        header, so removing the read closes the spoof surface
+        without regressing the legitimate-traffic shape.
+
+        Two requests from the same remote IP land in the SAME bucket
+        regardless of the X-User-Id value they claim."""
         from routers import simulator as simulator_router
 
         class _FakeRequest:
             def __init__(self, user_id=None, client_host="10.0.0.1"):
                 self.headers = {"X-User-Id": user_id} if user_id else {}
                 # slowapi's get_remote_address reads request.client.host;
-                # populate it so the fallback path is exercise-able.
+                # populate it so the same IP keys to the same bucket
+                # regardless of header content.
                 self.client = type("C", (), {"host": client_host})()
 
         key_func = simulator_router._simulator_rate_limit_key
         bucket_a = key_func(_FakeRequest(user_id="user-alice"))
         bucket_b = key_func(_FakeRequest(user_id="user-bob"))
-        assert bucket_a != bucket_b
-        # Sanity: same user_id → same bucket (the rate-limit window
-        # must be stable across calls for a single user).
-        assert key_func(_FakeRequest(user_id="user-alice")) == bucket_a
-        # And missing header → IP-based fallback, NOT a user bucket.
+        # PR #241 red-team contract: same IP → same bucket. The
+        # spoofable header MUST NOT carve out a separate window.
+        assert bucket_a == bucket_b
+        # Sanity: missing header still keys on IP (no user-bucket path
+        # exists any longer).
         bucket_ip = key_func(_FakeRequest(user_id=None))
         assert bucket_ip.startswith("simulator:ip:")
+        # Different IP → different bucket.
+        bucket_other_ip = key_func(
+            _FakeRequest(user_id="user-alice", client_host="10.0.0.99"),
+        )
+        assert bucket_other_ip != bucket_a
 
     def test_ceiling_matches_next_js_front_door(self):
         """The FastAPI limit MUST match the Next.js front-door ceiling
