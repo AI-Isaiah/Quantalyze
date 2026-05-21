@@ -7,6 +7,18 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.3.7] - 2026-05-21
+
+**fix(audit-2026-05-07): sanitizeFilename accepts `string | null | undefined` safely — closes C-0180.**
+
+Supabase row types declare `.name` as `string`, but the runtime value is null when the DB column is null. Three of four PDF route callers (factsheet/pdf, tearsheet.pdf, portfolio-pdf) pass `strategy.name` / `portfolio.name` directly with no `?? ''` defense at the call site, so a null name would crash the PDF download route with `Cannot read properties of null (reading 'replace')`.
+
+### Fixed
+- `src/lib/sanitize-filename.ts` (C-0180): signature widened to `(name: string | null | undefined, fallback = "document")` plus a runtime `typeof name !== "string"` guard that returns the fallback. Defense-in-depth against non-string runtime values too (numbers, objects, arrays). Existing call sites need no changes — they remain type-compatible because the input type widened.
+
+### Added (regression tests — fail without fix, pass with fix)
+- `src/lib/sanitize-filename.test.ts` — 3 new tests: null returns fallback, undefined returns fallback, non-string runtime values return fallback. 14 tests total pass.
+
 ## [0.24.3.4] - 2026-05-21
 
 **fix(audit-2026-05-07): close /api/account/export GDPR/security CRITICALs (C-0021, C-0022, C-0023) + document C-0025 idempotency trade-off.**

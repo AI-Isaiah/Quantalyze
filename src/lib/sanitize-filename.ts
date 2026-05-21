@@ -14,9 +14,24 @@
  *     (audit-2026-05-07 red-team MED#5 / cd-parameter-pollution.)
  *
  * Truncates to 80 characters to avoid unreasonable header lengths.
- * Returns `fallback` when the result would be empty.
+ * Returns `fallback` when the input is null, undefined, non-string, or
+ * the result would be empty after stripping.
+ *
+ * C-0180 (audit-2026-05-07): the parameter type now accepts `string |
+ * null | undefined` because Supabase row types declare `.name` as
+ * `string` but the runtime value is null when the column is null. Three
+ * of four PDF route callers (factsheet/pdf, tearsheet.pdf, portfolio-
+ * pdf) pass `strategy.name` / `portfolio.name` directly with no
+ * `?? ''` defense at the call site, so a null name would crash the PDF
+ * download route with `Cannot read properties of null (reading 'replace')`.
+ * The runtime `typeof` guard makes the function safe at every call
+ * site regardless of TypeScript's static narrowing.
  */
-export function sanitizeFilename(name: string, fallback = "document"): string {
+export function sanitizeFilename(
+  name: string | null | undefined,
+  fallback = "document",
+): string {
+  if (typeof name !== "string") return fallback;
   return (
     name
       .replace(/[\r\n"\\;=]/g, "")

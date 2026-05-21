@@ -66,4 +66,29 @@ describe("sanitizeFilename", () => {
     expect(out).not.toContain(";");
     expect(out).not.toContain("=");
   });
+
+  // C-0180 (audit-2026-05-07) — Supabase row types declare `.name` as
+  // string but the runtime value is null when the DB column is null.
+  // Three PDF route callers pass `strategy.name` / `portfolio.name`
+  // directly with no `?? ''` defense; a null name would crash the
+  // route handler with `Cannot read properties of null`. The runtime
+  // typeof guard returns the fallback instead.
+  it("returns fallback when name is null (C-0180 PDF route null-safety)", () => {
+    expect(sanitizeFilename(null)).toBe("document");
+    expect(sanitizeFilename(null, "Strategy")).toBe("Strategy");
+  });
+
+  it("returns fallback when name is undefined", () => {
+    expect(sanitizeFilename(undefined)).toBe("document");
+    expect(sanitizeFilename(undefined, "Portfolio")).toBe("Portfolio");
+  });
+
+  it("returns fallback when name is a non-string runtime value (defense-in-depth)", () => {
+    // @ts-expect-error — testing runtime guard against non-string inputs
+    expect(sanitizeFilename(42)).toBe("document");
+    // @ts-expect-error — testing runtime guard against non-string inputs
+    expect(sanitizeFilename({})).toBe("document");
+    // @ts-expect-error — testing runtime guard against non-string inputs
+    expect(sanitizeFilename([])).toBe("document");
+  });
 });
