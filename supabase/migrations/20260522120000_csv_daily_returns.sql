@@ -114,6 +114,15 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.persist_csv_daily_returns(UUID, UUID, JSONB) FROM PUBLIC, anon;
+-- GRANT to authenticated is intentional and matches the sibling
+-- finalize_csv_strategy pattern (migration 093). The Next.js route handler
+-- calls this RPC via a per-request Supabase client that runs as the
+-- `authenticated` role (not service_role) so the inline auth.uid() guard at
+-- the top of the function can verify caller identity. Narrowing to
+-- service_role would make auth.uid() NULL and trigger the 42501 raise on
+-- every legitimate call. The probe-oracle (enumerating arbitrary
+-- strategy_ids) is closed by the collapsed "not accessible" branch above,
+-- not by the GRANT shape.
 GRANT EXECUTE ON FUNCTION public.persist_csv_daily_returns(UUID, UUID, JSONB) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.persist_csv_daily_returns(UUID, UUID, JSONB) TO service_role;
 
