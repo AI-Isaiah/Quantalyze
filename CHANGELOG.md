@@ -7,6 +7,25 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.0] - 2026-05-21
+
+**fix(audit-2026-05-07): close withAdminAuth + database.types.ts CRITICALs (admin-auth cluster + NUMERIC precision drift).**
+
+Two file-disjoint clusters from the audit, bundled in one PR because both touch cross-cutting concerns.
+
+### Fixed
+- `src/lib/api/withAdminAuth.ts` — split 401/403 so anomaly detectors and rate limiters see the right signal (no session → 401 "Unauthorized"; authenticated non-admin → 403 "Forbidden"). Pre-fix both cases returned 403, conflating brute-force probes with privilege probes.
+- `src/lib/api/withAdminAuth.ts` — emit `admin.access.denied` audit_log row on every authenticated denial, via `logAuditEventAsUser` → `log_audit_event_service`. Pre-fix probes against `/api/admin/*` left no forensic trace beyond raw HTTP logs. The unauth path deliberately does NOT emit (no user_id to attribute, and audit-logging every unauth probe is a DoS surface).
+- `src/lib/audit.ts` — adds `admin.access.denied` to the `AuditAction` union; no DB constraint change needed (action is free TEXT on `log_audit_event_*`).
+
+### Added
+- `src/lib/api/withAdminAuth.test.ts` — new tests covering the 401 path (asserts NO audit row emitted) and the 403 path (asserts `admin.access.denied` row with the right path/method/email metadata). Existing CSRF + body-guard + happy-path tests retained.
+- `src/lib/supabase/numeric-precision.ts` — guardrails for the Supabase `gen types typescript` NUMERIC → `number` drift. Exports `KNOWN_NUMERIC_COLUMNS` catalog (canonical (table, column) list for static-analysis follow-ups), `serializeNumeric` / `parseNumericString` (string round-trip helpers that preserve full Postgres precision when paired with PostgREST's `numericstrings` accept header), and a `NumericString` branded type.
+- `src/lib/supabase/numeric-precision.test.ts` — contract test pinning the catalog to the generated `Database` type via type-level `ResolveColumn<>` assertions. A future regeneration that drops/renames a cataloged column fails at PR time instead of at runtime. 12 tests cover serializer guards (NaN, Infinity, junk strings, bigint precision preservation) and round-trip semantics.
+
+### Documented
+- `src/lib/database.types.ts` — adds a "GENERATED FILE — do not hand-edit" header explaining the NUMERIC → `number` precision drift (IEEE-754 truncates funding-fee accruals, large notional positions in low-unit assets, and any monetary value > 9e15), naming the highest-stakes columns and pointing precision-sensitive callers at the new helpers in `numeric-precision.ts`. Bulk-replacing every NUMERIC field with the branded type was rejected as out-of-scope (would create hundreds of UI-layer call-site breaks where IEEE-754 precision is acceptable); instead the lossy assumption is now EXPLICIT and the opt-in path is documented.
+
 ## [0.24.4.9] - 2026-05-21
 
 **fix(audit-2026-05-07): close e2e spec CHAINs (demo-public + discovery-watchlist + portfolio-pdf-demo) — re-verification + PR #236 anchor-element tightening.**
