@@ -235,6 +235,14 @@ export function SyncPreviewStep({
             .from("trades")
             .select("symbol")
             .eq("strategy_id", strategyId)
+            // Bybit + OKX ingest writes daily portfolio aggregates under
+            // the synthetic symbol "PORTFOLIO". Bybit accounts can have
+            // hundreds of these clustered at the start of the table; an
+            // unordered limit(50) sample then comes back as 50× PORTFOLIO
+            // and the client-side filter leaves the detected-markets
+            // hint empty. Excluding the sentinel at the query layer keeps
+            // the sample biased toward real trading pairs.
+            .neq("symbol", "PORTFOLIO")
             .limit(50),
           apiKeyId
             ? supabase
