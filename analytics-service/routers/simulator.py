@@ -12,10 +12,17 @@ Keeping the plan's path would split the convention for one endpoint and make
 the main.py include list inconsistent. Placed in `routers/` to match the
 existing pattern.
 
-Rate limit: 20/hour (configured on the Next.js side as `simulatorLimiter`).
-The FastAPI-level limit here is lower because the Next.js layer is the
-authoritative user-level limit; this is only a safety net against an
-uncapped direct call from another service.
+Rate limit: 20/hour, user-keyed (matches `simulatorLimiter` on the Next.js
+side). The FastAPI-level limit matches the Next.js front-door ceiling so
+a legitimate user who clears the front door cannot be 429'd by the
+defense-in-depth limiter here. The key function reads `X-User-Id`
+(forwarded by the Next.js handler) and falls back to the remote address
+only when the header is absent (direct-from-elsewhere callers).
+
+G15-005 (audit-2026-05-07): previously decorated with a 30/hour ceiling
+keyed by `get_remote_address`. Behind Vercel's egress NAT every tenant
+collapsed into one shared bucket — first-mover starvation. Per-user
+keying mirrors routers/process_key.py:_process_key_rate_limit_key.
 """
 
 import logging
@@ -23,6 +30,7 @@ import logging
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from slowapi.util import get_remote_address
 
 from services.audit import log_audit_event
 from services.db import get_supabase
@@ -40,6 +48,27 @@ logger = logging.getLogger("quantalyze.analytics")
 # slowapi resolves rate-limit storage via the DECORATOR's Limiter
 # instance, not app.state.limiter — so a future swap to Redis-backed
 # storage on the shared limiter would have silently skipped this route.
+
+
+def _simulator_rate_limit_key(request: Request) -> str:
+    """G15-005 — per-user rate-limit key for /api/simulator.
+
+    Prefer the `X-User-Id` header forwarded by the Next.js front door so
+    each authenticated user gets an isolated rate-limit window. Fall back
+    to the remote address when the header is missing — that path is the
+    safety net for direct-to-FastAPI calls without the Next.js layer's
+    user resolution.
+
+    Pre-fix used slowapi's default `get_remote_address` which bucketed
+    every Vercel egress IP into one shared window. Behind a corporate /
+    cellular NAT 50+ legitimate users shared a single 30/hour FastAPI
+    bucket — first user exhausts it for the rest. Mirrors the
+    routers/process_key.py:_process_key_rate_limit_key pattern.
+    """
+    user_id = request.headers.get("X-User-Id")
+    if user_id:
+        return f"simulator:{user_id}"
+    return f"simulator:ip:{get_remote_address(request)}"
 
 
 class SimulatorRequest(BaseModel):
@@ -78,7 +107,7 @@ def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
 
 
 @router.post("/simulator")
-@limiter.limit("30/hour")
+@limiter.limit("20/hour", key_func=_simulator_rate_limit_key)
 async def portfolio_simulator(request: Request, req: SimulatorRequest):
     """Simulate ADDing a candidate strategy to the user's portfolio.
 

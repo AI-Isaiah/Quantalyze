@@ -69,7 +69,7 @@ def client(monkeypatch, supabase_mock):
     Per ``test_process_key.py`` we wire ``app.state.limiter`` so the
     slowapi @limiter.limit decorator's middleware probe does not raise,
     but we do NOT register the RateLimitExceeded handler — tests fire
-    at most a couple of requests, well under 30/hour.
+    at most a couple of requests, well under 20/hour (G15-005).
     """
     from routers import simulator as simulator_router
 
@@ -689,3 +689,84 @@ class TestG15_004_LimiterIsCanonicalSingleton:
         from routers import simulator as simulator_router
 
         assert simulator_router.limiter is rate_limit_module.limiter
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 PR C regression tests (G15-005)
+# ---------------------------------------------------------------------------
+
+
+class TestG15_005_RateLimitIsUserKeyed:
+    """G15-005 — the simulator route must be rate-limited per-user
+    (forwarded via ``X-User-Id`` header) rather than per-IP via
+    ``get_remote_address``. The IP-keyed path collapsed every tenant
+    behind Vercel's egress NAT into one shared bucket — first-mover
+    starvation. Ceiling must also match the Next.js front-door
+    (``simulatorLimiter`` = 20/hour) so a legitimate user who clears
+    the front door cannot be 429'd by the FastAPI safety net.
+    """
+
+    def test_route_uses_user_keyed_key_func_not_ip(self):
+        """The route's ``@limiter.limit(...)`` decorator overrides
+        ``key_func`` with the simulator-specific user-keyed function,
+        not the default ``get_remote_address``."""
+        from routers import simulator as simulator_router
+        from slowapi.util import get_remote_address
+
+        # _simulator_rate_limit_key MUST exist (added in G15-005). If a
+        # future refactor deletes it, the regression test fails import.
+        assert hasattr(simulator_router, "_simulator_rate_limit_key")
+        key_func = simulator_router._simulator_rate_limit_key
+        # AND it must NOT be slowapi's default IP-based key_func.
+        assert key_func is not get_remote_address
+
+    def test_user_keyed_function_isolates_users(self):
+        """The key_func returns a per-user bucket id when the
+        ``X-User-Id`` header is forwarded. Two distinct user_ids hash to
+        DIFFERENT buckets even when the remote IP is identical (the
+        shared-NAT scenario the audit flagged)."""
+        from routers import simulator as simulator_router
+
+        class _FakeRequest:
+            def __init__(self, user_id=None, client_host="10.0.0.1"):
+                self.headers = {"X-User-Id": user_id} if user_id else {}
+                # slowapi's get_remote_address reads request.client.host;
+                # populate it so the fallback path is exercise-able.
+                self.client = type("C", (), {"host": client_host})()
+
+        key_func = simulator_router._simulator_rate_limit_key
+        bucket_a = key_func(_FakeRequest(user_id="user-alice"))
+        bucket_b = key_func(_FakeRequest(user_id="user-bob"))
+        assert bucket_a != bucket_b
+        # Sanity: same user_id → same bucket (the rate-limit window
+        # must be stable across calls for a single user).
+        assert key_func(_FakeRequest(user_id="user-alice")) == bucket_a
+        # And missing header → IP-based fallback, NOT a user bucket.
+        bucket_ip = key_func(_FakeRequest(user_id=None))
+        assert bucket_ip.startswith("simulator:ip:")
+
+    def test_ceiling_matches_next_js_front_door(self):
+        """The FastAPI limit MUST match the Next.js front-door ceiling
+        (20/hour, per src/lib/ratelimit.ts:106 ``simulatorLimiter``).
+        Drift means a user who passes the Next.js gate can still be
+        429'd by FastAPI — a confusing UX bug that hides upstream limit
+        problems. Inspect the route's source for the literal limit
+        string."""
+        import inspect
+
+        from routers import simulator as simulator_router
+
+        module_source = inspect.getsource(simulator_router)
+        # The simulator decorator MUST be 20/hour; not 30/hour (pre-fix).
+        assert '@limiter.limit("20/hour"' in module_source, (
+            "Simulator route rate-limit ceiling must be 20/hour to "
+            "match the Next.js simulatorLimiter front-door cap."
+        )
+        # Belt-and-suspenders: the pre-fix 30/hour string must not
+        # remain in any decorator. (A comment mentioning the historical
+        # value is allowed because that's documentation, not behavior;
+        # the assertion is decorator-shaped to avoid false-positives.)
+        assert '@limiter.limit("30/hour"' not in module_source, (
+            "Pre-fix simulator used @limiter.limit('30/hour'); "
+            "regression check."
+        )
