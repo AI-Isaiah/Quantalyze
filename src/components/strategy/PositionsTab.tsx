@@ -3,11 +3,13 @@
 import { useMemo } from "react";
 import { formatPercent, formatNumber, cn } from "@/lib/utils";
 import type { StrategyAnalytics, Position } from "@/lib/types";
+import type { SupportedExchange } from "@/lib/utils";
 
 export function PositionsTab({
   analytics,
   positions,
   positionsError,
+  exchange,
 }: {
   analytics: StrategyAnalytics;
   positions: Position[] | null;
@@ -19,6 +21,20 @@ export function PositionsTab({
    * truly empty result and gave operators no signal to investigate.
    */
   positionsError?: boolean;
+  /**
+   * G14-003 (PARTIAL): the funding-cutover in analytics-service/services/
+   * exchange.py only excludes FUNDING_FEE from daily_pnl for Binance.
+   * OKX (account_bills) and Bybit (position_closed_pnl) still aggregate
+   * funding into the realized-pnl number. Rendering the explicit
+   * `+ Funding` breakdown for those exchanges double-counts the funding
+   * leg on the allocator dashboard. Gate the breakdown to Binance until
+   * the OKX/Bybit cutover (tracked as PR D in goal task #8) lands.
+   *
+   * Optional + defaults to undefined (treated as "not Binance" → safe
+   * default of no funding line) so callers that haven't been threaded
+   * through can't accidentally re-introduce the bug.
+   */
+  exchange?: SupportedExchange | null;
 }) {
   const dqf = analytics.data_quality_flags ?? null;
   const positionMetricsFailed = dqf?.position_metrics_failed === true;
@@ -43,9 +59,18 @@ export function PositionsTab({
   // Show funding breakdown in tooltip if ANY closed position has a non-zero
   // funding_pnl. Use per-row presence check rather than summing — avoids
   // false-negative when payments cancel out to zero total.
+  //
+  // G14-003 PARTIAL gate: only Binance has the daily_pnl FUNDING_FEE
+  // exclusion live (analytics-service/services/exchange.py); OKX/Bybit
+  // still bake funding into realized_pnl. Showing `+ Funding` for those
+  // exchanges double-counts on the allocator-facing tooltip.
   const hasFunding = useMemo(
-    () => closedPositions.some((p) => p.funding_pnl != null && p.funding_pnl !== 0),
-    [closedPositions],
+    () =>
+      exchange === "binance" &&
+      closedPositions.some(
+        (p) => p.funding_pnl != null && p.funding_pnl !== 0,
+      ),
+    [exchange, closedPositions],
   );
   const totalFundingPnl = useMemo(
     () => closedPositions.reduce((s, p) => s + (p.funding_pnl ?? 0), 0),

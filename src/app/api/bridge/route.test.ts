@@ -178,47 +178,38 @@ describe("POST /api/bridge", () => {
     expect(body.error).toMatch(/Too many requests/i);
   });
 
-  // G13-038 follow-up: the 429 envelope SHOULD include a Retry-After header
-  // (parity with /api/simulator and /api/bridge/outcome). Currently it does
-  // not. Marked it.fails so the gap is visible.
-  // TODO(G13-038): remove `.fails` once the route emits the Retry-After header.
-  it.fails(
-    "TC3b — 429 envelope includes Retry-After header (G13-038)",
-    async () => {
-      STATE.checkLimitResult = { success: false, retryAfter: 30 };
-      const { POST } = await import("./route");
-      const res = await POST(
-        makeRequest({
-          portfolio_id: PORTFOLIO_ID,
-          underperformer_strategy_id: UNDERPERFORMER_ID,
-        }),
-      );
-      expect(res.headers.get("Retry-After")).toBe("30");
-    },
-  );
+  // G13-038: 429 envelope includes Retry-After header (parity with sibling
+  // routes). Closed by the route emitting headers: { "Retry-After": ... }.
+  it("TC3b — 429 envelope includes Retry-After header (G13-038)", async () => {
+    STATE.checkLimitResult = { success: false, retryAfter: 30 };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+    expect(res.headers.get("Retry-After")).toBe("30");
+  });
 
-  // G15-046 / G20-030 family: ratelimit_misconfigured should surface as 503,
-  // not 429, so canary alarms see the configuration outage instead of normal
-  // throttling. Route does not call isRateLimitMisconfigured(rl) yet.
-  // TODO(G15-046): remove `.fails` once the route narrows on the helper.
-  it.fails(
-    "TC3c — 503 when checkLimit() returns ratelimit_misconfigured",
-    async () => {
-      STATE.checkLimitResult = {
-        success: false,
-        retryAfter: 60,
-        reason: "ratelimit_misconfigured",
-      };
-      const { POST } = await import("./route");
-      const res = await POST(
-        makeRequest({
-          portfolio_id: PORTFOLIO_ID,
-          underperformer_strategy_id: UNDERPERFORMER_ID,
-        }),
-      );
-      expect(res.status).toBe(503);
-    },
-  );
+  // G15-046 / G20-030 family: ratelimit_misconfigured surfaces as 503 so
+  // canary alarms catch the configuration outage rather than treating
+  // users as throttled. Closed by the route calling isRateLimitMisconfigured(rl).
+  it("TC3c — 503 when checkLimit() returns ratelimit_misconfigured", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+    expect(res.status).toBe(503);
+  });
 
   it("TC4 — 400 bad JSON", async () => {
     const { POST } = await import("./route");

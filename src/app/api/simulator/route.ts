@@ -5,7 +5,11 @@ import {
   simulateAddCandidate,
   AnalyticsUpstreamError,
 } from "@/lib/analytics-client";
-import { simulatorLimiter, checkLimit } from "@/lib/ratelimit";
+import {
+  simulatorLimiter,
+  checkLimit,
+  isRateLimitMisconfigured,
+} from "@/lib/ratelimit";
 import { SimulatorRequestSchema } from "@/lib/api/simulatorSchema";
 
 /**
@@ -34,6 +38,18 @@ export async function POST(req: NextRequest) {
 
   const rl = await checkLimit(simulatorLimiter, `simulator:${user.id}`);
   if (!rl.success) {
+    // G15-046: limiter-misconfigured fail-CLOSED returns 503 so the
+    // outage surfaces to canary/health checks instead of looking like
+    // user-side throttling.
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Rate limiter unavailable" },
+        {
+          status: 503,
+          headers: { "Retry-After": String(rl.retryAfter) },
+        },
+      );
+    }
     // Expose retryAfter both as the conventional Retry-After HTTP header
     // and in the JSON body so the client can disable the retry button for
     // that duration instead of hammering the limiter in a loop.
