@@ -7,6 +7,22 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.4.0] - 2026-05-21
+
+**fix(audit-2026-05-07): PDF route hardening cluster — closes C-0090 + C-0092 + C-0093.**
+
+PR I (clustered): three audit findings on the factsheet + tearsheet PDF routes. SSRF via module-level `APP_URL` constant + missing UUID validation on the tearsheet route, CDN cache leak where disclosure-tier downgrades stayed cached for 25 hours, and a self-recursion risk on the factsheet PDF where the puppeteer instance HTTP-fetched its own deployment with no entry fence.
+
+### Fixed
+- `src/app/api/factsheet/[id]/tearsheet.pdf/route.ts` (C-0092): replaced module-level `APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"` with a per-request `appUrl(req)` helper that pulls origin from the request, gates on a production allowlist, and fails closed in prod when the resolved origin isn't allowlisted. Added UUID validation on `[id]` before constructing the page.goto URL; reject with 400 if `[id]` is not a valid UUID. Closes the env-poison and path-traversal vectors.
+- `src/app/api/factsheet/[id]/tearsheet.pdf/route.ts` (C-0093): tightened `Cache-Control` from `public, s-maxage=3600, stale-while-revalidate=86400` to `private, max-age=300` for the authenticated path (auth-gated content must not enter the CDN). Added `Vary: Cookie, Authorization, Host` so any CDN that does cache the bucket-public-tier variant keys on auth state. Comment references the disclosure-tier invalidation hook as a separate follow-up.
+- `src/app/api/factsheet/[id]/pdf/route.ts` (C-0090): added a User-Agent fingerprint fence (`Quantalyze-PDF-Renderer/1.0`) — puppeteer sets the UA on the inner request, the inner factsheet route refuses re-entry with 508 Loop Detected when it sees that UA. Documents the inline-render refactor as the durable fix (out of scope for this PR — the factsheet page is a disclosure-tier-aware Server Component tree). The fence costs one header check and closes the cold-start / front-door-dependency self-recursion window.
+
+### Added (regression tests — fail without fix, pass with fix)
+- `src/app/api/factsheet/[id]/tearsheet.pdf/route.test.ts` (new file): 10 tests covering UUID rejection, path-traversal rejection, prod-host allowlist reject + 2 positive controls, non-prod fallback, env-poison defense-in-depth, s-maxage ≤ 300 assertion, Vary token presence (Cookie, Authorization, Host).
+- `src/app/api/factsheet/[id]/pdf/route.test.ts`: +2 tests for C-0090 — 508 Loop Detected when the renderer UA is set, `setUserAgent` called with the correct UA AND before goto (verified via `mock.invocationCallOrder`).
+- Test count: factsheet/ directory went from 21 → 33 passing tests. `tsc --noEmit` clean.
+
 ## [0.24.3.9] - 2026-05-21
 
 **fix(audit-2026-05-07): bump ATTESTATION_VERSION to mark `getClientIp` semantic swap — closes C-0078.**
