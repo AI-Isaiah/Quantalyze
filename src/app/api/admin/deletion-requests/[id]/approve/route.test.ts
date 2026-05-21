@@ -293,7 +293,20 @@ function reapplyDefaultMocks() {
   );
 }
 
-describe("POST /api/admin/deletion-requests/[id]/approve (P452)", () => {
+// File-wide retry. Multiple tests in this describe use the
+// `vi.resetModules() + vi.doMock('@/lib/ratelimit'|'@/lib/supabase/admin')
+// + await import('./route')` pattern. Under heavy CI shard-1 concurrency
+// the route's eager module imports can race the per-test doMock
+// registration, leading to the DEFAULT (always-success / always-pass)
+// mock servicing the route call instead of the per-test override. Tests
+// then expect a 4xx/5xx but get the happy-path 200. Pass rate locally
+// is 100%, in CI 1276/1277 typically — the failure rotates across tests
+// in the describe block. Retry twice absorbs the race while we land the
+// larger refactor that moves per-test rate-limit/admin overrides onto
+// a shared mutable `state` object (mirroring how `state.deletionRow` /
+// `state.casWins` flip on the always-installed mocks), eliminating the
+// resetModules+doMock dance entirely.
+describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 2 }, () => {
   beforeEach(() => {
     callOrder.length = 0;
     state.authedUser = null;

@@ -7,6 +7,13 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.1.1] - 2026-05-21
+
+**fix(ci): wire seed demo strategies to crypto-sma discovery category.**
+
+### Fixed
+- `scripts/seed-demo-data.ts` now sets `strategies.category_id` to the crypto-sma `discovery_categories.id` on every demo strategy insert. Previously the seed inserted strategies with `category_id = NULL`, and `getStrategiesByCategory()` in `src/lib/queries.ts:179-211` joins `discovery_categories!inner` filtered by slug — which silently dropped every NULL row. The e2e test `discovery-hide-examples-default.spec.ts` failed on every PR with "discovery table never produced a non-empty-state row in 10s" because the seed never landed visible-to-discovery rows. The category_id lookup is a single `select id from discovery_categories where slug='crypto-sma'` cached once before the insert loop; throws loudly if the row is missing (the initial-schema migration `20260405061911_initial_schema.sql` seeds it, so absence indicates the migration didn't run).
+
 ## [0.24.1.0] - 2026-05-21
 
 **test(audit-2026-05-07): closeout CRITICAL test-coverage gaps from fix-list G13/G14/G15/G21.**

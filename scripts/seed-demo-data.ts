@@ -773,12 +773,42 @@ async function main() {
     if (error) throw error;
   }
 
-  console.log("[seed] Inserting 8 example strategies + analytics ...");
+  // Look up the crypto-sma discovery category id once. The discovery page
+  // query (getStrategiesByCategory in src/lib/queries.ts) joins
+  // `discovery_categories!inner` filtered by slug, so strategies with
+  // NULL category_id are silently excluded. Seeding strategies without
+  // category_id was the root cause of the recurring e2e failure
+  // `discovery-hide-examples-default.spec.ts: discovery table never
+  // produced a non-empty-state row in 10s` — the seed inserted rows but
+  // the discovery page couldn't see them.
+  const { data: cryptoCatRow, error: catErr } = await supabase
+    .from("discovery_categories")
+    .select("id")
+    .eq("slug", "crypto-sma")
+    .single();
+  if (catErr || !cryptoCatRow) {
+    throw new Error(
+      `[seed] discovery_categories row for slug='crypto-sma' not found. ` +
+        `The initial schema migration (20260405061911_initial_schema.sql) ` +
+        `seeds this row — if it's missing the migration didn't run. ` +
+        `Error: ${catErr?.message ?? "no rows"}`,
+    );
+  }
+  const cryptoSmaCategoryId = cryptoCatRow.id;
+
+  console.log(
+    `[seed] Resolved crypto-sma category_id=${cryptoSmaCategoryId}; ` +
+      "inserting 8 example strategies + analytics ...",
+  );
   for (let i = 0; i < STRATEGY_PROFILES.length; i++) {
     const profile = STRATEGY_PROFILES[i];
     const { error: sErr } = await supabase.from("strategies").insert({
       id: profile.id,
       user_id: profile.user_id,
+      // Link to crypto-sma category so /discovery/crypto-sma can find
+      // the row. discovery_categories!inner join in
+      // getStrategiesByCategory drops rows where category_id IS NULL.
+      category_id: cryptoSmaCategoryId,
       name: profile.name,
       description: profile.description,
       strategy_types: profile.strategy_types,
