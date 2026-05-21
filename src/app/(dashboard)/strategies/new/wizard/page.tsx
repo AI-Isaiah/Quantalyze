@@ -44,7 +44,24 @@ interface InitialDraft {
   api_key_id: string | null;
 }
 
-export default async function WizardPage() {
+interface WizardPageProps {
+  searchParams: Promise<{ source?: string }>;
+}
+
+export default async function WizardPage({ searchParams }: WizardPageProps) {
+  // Read `?source=csv` from the server-side searchParams so we can pass a
+  // stable key down to <WizardClient> and force a remount on the API↔CSV
+  // boundary. Reading on the client via useSearchParams() does NOT remount
+  // the component on same-route query-string nav (the bug the user hit
+  // when clicking "Upload a CSV track record instead" from ConnectKeyStep):
+  // useSearchParams() updates the value, but useState lazy initializers
+  // (which set `step` from `source` once on mount) never re-run, so `step`
+  // gets stuck on `"connect_key"` even after `source` flips to `"csv"`.
+  // Keying the client island by `source` here gives Next a stable signal
+  // to remount the subtree when the query string crosses the branch.
+  const sp = await searchParams;
+  const source: "api" | "csv" = sp?.source === "csv" ? "csv" : "api";
+
   const supabase = await createClient();
 
   const {
@@ -99,8 +116,8 @@ export default async function WizardPage() {
         blank is acceptable; if we ever want a skeleton, mirror the chrome
         exactly to avoid layout shift.
       */}
-      <Suspense fallback={null}>
-        <WizardClient initialDraft={initialDraft} />
+      <Suspense key={source} fallback={null}>
+        <WizardClient key={source} initialDraft={initialDraft} />
       </Suspense>
     </DesktopGate>
   );

@@ -7,6 +7,27 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.13] - 2026-05-21
+
+**fix(wizard): remount WizardClient on `?source` change so client-side nav from API→CSV branch renders the right body.**
+
+Closes the follow-up to PR #261. After that fix, a FRESH page load of `/strategies/new/wizard?source=csv` worked. But a same-route client-side navigation (the "Upload a CSV track record instead" Link inside `ConnectKeyStep` at line 349) still showed the wizard chrome with an empty body. User reported they had to Cmd+Shift+R for the upload form to appear.
+
+### Root cause
+Same-route query-string nav in Next 16 App Router does NOT remount the page tree and does NOT re-fire the Suspense boundary. `useSearchParams()` returns the fresh `source="csv"` value, BUT `WizardClient.tsx:106` uses `useState` with a lazy initializer to derive `step` from `source` — lazy initializers only run on mount, never on subsequent renders. So `step` stayed at `"connect_key"` while `source` flipped to `"csv"`, leaving the CSV branch JSX trying to render with `step === "connect_key"` (no match) → empty body.
+
+PR #261's `<Suspense>` only fixed the hard-reload path because hard reload triggers a remount.
+
+### Fixed
+- `src/app/(dashboard)/strategies/new/wizard/page.tsx`: read `?source` server-side from the page's `searchParams` prop and pass it as a `key` to both the `<Suspense>` boundary and `<WizardClient>`. React's keyed remount semantics force a fresh mount whenever `source` changes, so the `useState` initializer re-runs with the correct `source` value and `step` initializes to `"csv_upload"` (or `"connect_key"` when going back to API).
+
+### Risk accepted
+- Keyed remount discards any in-flight wizard state at the moment the user crosses the API↔CSV boundary. The existing UX already treats branch switch as a fresh start (no shared inputs between the two paths), so this is the desired behavior.
+
+### No unit test
+- The bug only manifests in real Next.js routing. RTL doesn't simulate same-route query-string navigation with keyed-remount semantics. Manual verification: click "Upload a CSV track record instead" from ConnectKeyStep → CsvUploadStep body renders without a hard refresh.
+
+
 ## [0.24.5.12] - 2026-05-21
 
 **fix(strategies): surface in-progress wizard draft via Resume banner + empty-state CTA swap.**
