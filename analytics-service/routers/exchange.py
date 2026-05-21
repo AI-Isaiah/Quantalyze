@@ -103,10 +103,17 @@ async def fetch_trades(request: Request, req: FetchTradesRequest):
     if not strategy_result.data or not strategy_result.data.get("api_key_id"):
         raise HTTPException(status_code=400, detail="Strategy has no connected API key")
 
-    # Fetch encrypted API key and verify ownership
+    # Fetch encrypted API key and verify ownership.
+    #
+    # C-0202 (audit-2026-05-07) — filter on is_active=True. A deactivated
+    # key (user revoked, admin disabled, sole-source purge) must NOT be
+    # usable by /fetch-trades; otherwise the deactivation gate becomes a
+    # paper-only control. .single() returns no row when the filter rejects,
+    # and the existing 404 below fires with an operator-safe message
+    # (doesn't disclose that the key exists but is deactivated).
     api_key_row = supabase.table("api_keys").select("*").eq(
         "id", strategy_result.data["api_key_id"]
-    ).single().execute()
+    ).eq("is_active", True).single().execute()
 
     if not api_key_row.data:
         raise HTTPException(status_code=404, detail="API key not found")
