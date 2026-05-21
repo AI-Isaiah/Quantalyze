@@ -20,6 +20,7 @@ const {
   isAdminUserMock,
   createAdminClientMock,
   assertSameOriginMock,
+  logAuditEventAsUserMock,
 } = vi.hoisted(() => {
   return {
     getUserMock: vi.fn<() => Promise<{ data: { user: unknown } }>>(),
@@ -28,6 +29,7 @@ const {
     assertSameOriginMock: vi.fn<(...args: unknown[]) => Response | null>(
       () => null,
     ),
+    logAuditEventAsUserMock: vi.fn<(...args: unknown[]) => void>(),
   };
 });
 
@@ -48,6 +50,14 @@ vi.mock("@/lib/admin", () => ({
 
 vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: (req: unknown) => assertSameOriginMock(req),
+}));
+
+vi.mock("@/lib/audit", () => ({
+  logAuditEventAsUser: (
+    client: unknown,
+    actingUserId: unknown,
+    event: unknown,
+  ) => logAuditEventAsUserMock(client, actingUserId, event),
 }));
 
 import { withAdminAuth } from "./withAdminAuth";
@@ -91,7 +101,33 @@ describe("withAdminAuth", () => {
       expect(handler).not.toHaveBeenCalled();
     });
 
-    it("rejects when user is not an admin", async () => {
+    it("rejects unauthenticated requests with 401 and emits NO audit row", async () => {
+      // audit-2026-05-07 (admin-auth cluster) — 401 vs 403 split. Pre-fix
+      // the no-session case returned 403, conflating "you haven't shown me
+      // credentials" with "your credentials don't grant access". The
+      // unauth path also does NOT emit admin.access.denied — without a
+      // user_id there's nothing forensically attributable, and audit-
+      // logging every unauthenticated probe is a DoS surface.
+      getUserMock.mockResolvedValueOnce({ data: { user: null } });
+
+      const handler = vi.fn();
+      const wrapped = withAdminAuth(handler as never);
+      const res = await wrapped(makeRequest({ id: "abc" }));
+
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "Authentication required" });
+      expect(handler).not.toHaveBeenCalled();
+      expect(isAdminUserMock).not.toHaveBeenCalled();
+      expect(logAuditEventAsUserMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects authenticated non-admin requests with 403 and emits admin.access.denied", async () => {
+      // audit-2026-05-07 (admin-auth cluster) — silent admin-bypass fix.
+      // An authenticated user probing /api/admin/* now leaves a forensic
+      // anchor in audit_log via log_audit_event_service (fire-and-forget
+      // through logAuditEventAsUser). The 403 body is the generic "Forbidden"
+      // — we deliberately don't leak whether the route exists or what role
+      // would have been required.
       isAdminUserMock.mockResolvedValueOnce(false);
 
       const handler = vi.fn();
@@ -104,6 +140,22 @@ describe("withAdminAuth", () => {
       expect(res.status).toBe(403);
       expect(await res.json()).toEqual({ error: "Forbidden" });
       expect(handler).not.toHaveBeenCalled();
+
+      // The audit emission MUST happen on the denial path. If this
+      // assertion is removed, the silent-probe regression returns.
+      expect(logAuditEventAsUserMock).toHaveBeenCalledTimes(1);
+      const [, actingUserId, event] = logAuditEventAsUserMock.mock.calls[0];
+      expect(actingUserId).toBe(adminUser.id);
+      expect(event).toMatchObject({
+        action: "admin.access.denied",
+        entity_type: "user",
+        entity_id: adminUser.id,
+        metadata: {
+          path: "/api/admin/test",
+          method: "POST",
+          email: adminUser.email,
+        },
+      });
     });
 
     it("Audit-2026-05-07 C-0146: returns 401 Unauthorized when caller has no JWT", async () => {
@@ -122,6 +174,9 @@ describe("withAdminAuth", () => {
       // isAdminUser should NOT be probed once we've decided the caller
       // is unauthenticated — short-circuit before the DB read.
       expect(isAdminUserMock).not.toHaveBeenCalled();
+      // No audit emission on the unauth path — no attributable user_id,
+      // and flooding audit_log from this path is a DoS surface.
+      expect(logAuditEventAsUserMock).not.toHaveBeenCalled();
     });
   });
 

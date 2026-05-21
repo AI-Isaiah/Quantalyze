@@ -327,7 +327,16 @@ export type AuditAction =
   // --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ---
   | "debug_key_flow.invoke"
   // --- audit-2026-05-07 P700: break-glass ADMIN_EMAIL fallback grant ---
-  | "admin.access.via_env_email_fallback";
+  | "admin.access.via_env_email_fallback"
+  // --- audit-2026-05-07 (admin-auth cluster): forensic anchor emitted by
+  //     withAdminAuth when an authenticated non-admin caller hits an
+  //     /api/admin/* route. Pre-fix the 403 was issued with no audit row,
+  //     making /api/admin/* privilege-probing forensically invisible. The
+  //     row attributes the probe to the acting user (via
+  //     log_audit_event_service) with the path/method/email of the probe.
+  //     Unauthenticated callers (no user_id) do NOT emit this — see
+  //     withAdminAuth.ts for the rationale. ---
+  | "admin.access.denied";
 
 /**
  * entity_type values are one per action. See ADR-0023 for the mapping.
