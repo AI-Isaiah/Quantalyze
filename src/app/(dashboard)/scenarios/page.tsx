@@ -33,6 +33,23 @@ export default async function ScenariosPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login?next=/scenarios");
 
+  // C-0017 (audit-2026-05-07): role gate. /scenarios surfaces raw
+  // daily_returns + codename mapping for the institutional-tier strategy
+  // universe via createAdminClient (RLS-bypassed). The sidebar HIDES the
+  // entry point from non-allocators, but the route itself must enforce
+  // the same gate or a non-allocator can directly navigate and pull the
+  // RSC payload. Mirrors the `isAllocator = role IN ('allocator','both')`
+  // contract used by withAllocatorAuth, the dashboard layout, and the
+  // sibling /api/intro route.
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", user.id)
+    .maybeSingle();
+  const isAllocator =
+    profile?.role === "allocator" || profile?.role === "both";
+  if (!isAllocator) redirect("/");
+
   // Use admin client to fetch all strategy analytics + daily returns. The
   // scenario builder is read-only: every allocator can compare the same
   // universe of strategies; the client-side recomputation math depends on
