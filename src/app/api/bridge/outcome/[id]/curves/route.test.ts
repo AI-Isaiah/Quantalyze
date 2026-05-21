@@ -20,6 +20,7 @@ vi.mock("server-only", () => ({}));
 
 type OutcomeRow = {
   id: string;
+  allocator_id: string;
   strategy_id: string;
   match_decision_id: string | null;
   allocated_at: string | null;
@@ -139,6 +140,7 @@ beforeEach(() => {
   STATE.authUser = { id: "00000000-0000-0000-0000-000000000001" };
   STATE.outcomeRow = {
     id: OUTCOME_ID,
+    allocator_id: "00000000-0000-0000-0000-000000000001",
     strategy_id: STRAT_ID,
     match_decision_id: MATCH_DEC_ID,
     allocated_at: ALLOCATED_AT,
@@ -238,6 +240,7 @@ describe("GET /api/bridge/outcome/[id]/curves", () => {
   it("TC7 — 200 but empty original curves when match_decision_id is NULL: original=[]", async () => {
     STATE.outcomeRow = {
       id: OUTCOME_ID,
+      allocator_id: "00000000-0000-0000-0000-000000000001",
       strategy_id: STRAT_ID,
       match_decision_id: null,
       allocated_at: ALLOCATED_AT,
@@ -249,5 +252,33 @@ describe("GET /api/bridge/outcome/[id]/curves", () => {
     expect(body.original).toEqual([]);
     // replacement still populated
     expect(body.replacement.length).toBeGreaterThan(0);
+  });
+
+  it("TC8 — C-0080 cross-tenant guard: outcome owned by a different allocator -> 404 with NO curve payload leaked", async () => {
+    // Simulate the failure mode: caller is user_A, but the outcome row's
+    // allocator_id belongs to user_B. In a correctly-configured prod DB,
+    // RLS would already mask this row — but the route must NOT rely solely
+    // on RLS, because the admin client downstream bypasses it. If the
+    // equality check is removed, this test must fail by returning a 200 +
+    // curve arrays (confirmed by deletion-rebuild).
+    STATE.authUser = { id: "00000000-0000-0000-0000-000000000001" };
+    STATE.outcomeRow = {
+      id: OUTCOME_ID,
+      allocator_id: "99999999-9999-4999-8999-999999999999", // different tenant
+      strategy_id: STRAT_ID,
+      match_decision_id: MATCH_DEC_ID,
+      allocated_at: ALLOCATED_AT,
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(OUTCOME_ID));
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    // Disclosure check: response is the opaque "Not found" error, never a
+    // shape with original/replacement arrays. Any curve key in the response
+    // means the cross-tenant guard has failed.
+    expect(body).toEqual({ error: "Not found" });
+    expect(body).not.toHaveProperty("original");
+    expect(body).not.toHaveProperty("replacement");
+    expect(body).not.toHaveProperty("allocated_at");
   });
 });

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { unstable_noStore as noStore } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -29,6 +30,12 @@ export const dynamic = "force-dynamic";
  * compliance shell applies.
  */
 export default async function RecommendationsPage() {
+  // C-0016: per-user recommendations — must not be cached across users. The
+  // explicit noStore() call ensures that any future `'use cache'` directive
+  // introduced anywhere in this subtree fails loudly instead of silently
+  // leaking one allocator's matches to another.
+  noStore();
+
   const supabase = await createClient();
   const {
     data: { user },

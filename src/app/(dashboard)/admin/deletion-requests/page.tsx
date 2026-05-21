@@ -47,14 +47,13 @@ export default async function AdminDeletionRequestsPage() {
   if (!user) redirect("/login");
   if (!(await isAdminUser(supabase, user))) redirect("/discovery/crypto-sma");
 
-  const admin = createAdminClient();
-
-  // One query returns pending + recent terminal rows. The order ensures
-  // pending rows are at the top; terminal rows follow in descending
-  // recency. The limit is generous — the pending queue is expected to
-  // stay small, a large terminal backlog will eventually fall off via
-  // the 90-day retention cron in a future migration.
-  const { data: requests } = await admin
+  // C-0006: Read `data_deletion_requests` via the user-scoped client.
+  // The `deletion_admin_all` RLS policy (migration 20260408113028) gates
+  // SELECT on `profiles.is_admin = true`, which already enforces the same
+  // admin gate the page-level `isAdminUser()` check applies. Defense in
+  // depth: if the page-level gate ever drifts, RLS still blocks the leak,
+  // and we keep BYPASSRLS reserved for queries that genuinely need it.
+  const { data: requests } = await supabase
     .from("data_deletion_requests")
     .select(
       "id, user_id, requested_at, completed_at, rejected_at, rejection_reason, notes",
@@ -67,7 +66,11 @@ export default async function AdminDeletionRequestsPage() {
   const rows = requests ?? [];
 
   // Batch-fetch the target profiles so we render "name + email" without
-  // an N+1.
+  // an N+1. This MUST stay on the admin (service-role) client: column-level
+  // grants on `profiles.email` REVOKE SELECT from anon/authenticated and
+  // GRANT only to service_role (migration 20260408233236), so the
+  // user-scoped client cannot read the email column even with admin RLS.
+  const admin = createAdminClient();
   const userIds = Array.from(new Set(rows.map((r) => r.user_id)));
   const { data: profiles } = userIds.length
     ? await admin
