@@ -1,6 +1,20 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
-import { afterEach } from "vitest";
+import { afterEach, vi } from "vitest";
+
+// PR #266 red-team — the universal approval gate added to withAuth (and
+// every inline-auth API route) hits `supabase.from("profiles").select(...)
+// .eq(...).maybeSingle()` on every authenticated request. Existing route
+// tests mock supabase as a partial query builder that does NOT include
+// the `profiles` chain, so adding the gate would force a churn across
+// ~18 test files to extend each mock. Instead: stub the helper here so
+// the gate behaves as a no-op in tests by default. Tests that specifically
+// assert the gate (`src/lib/api/withAuth.approval-gate.test.ts`) re-import
+// the real implementation via `vi.importActual` and re-mock with the
+// desired per-case behaviour.
+vi.mock("@/lib/api/approval-gate", () => ({
+  assertProfileApproved: vi.fn().mockResolvedValue(null),
+}));
 
 // React Testing Library only auto-cleans when the test runner registers
 // `globals: true`, which we don't (vitest.config.ts uses imported helpers).

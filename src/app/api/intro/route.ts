@@ -3,6 +3,7 @@ import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
+import { assertProfileApproved } from "@/lib/api/approval-gate";
 import {
   notifyManagerIntroRequest,
   notifyFounderIntroRequest,
@@ -82,6 +83,11 @@ export async function POST(req: NextRequest) {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // Approval gate (PR #266 follow-up): /api/intro sends an intro request
+  // on behalf of the caller. A pending-approval user shouldn't be able to
+  // ping managers via curl.
+  const denied = await assertProfileApproved(supabase, user.id);
+  if (denied) return denied;
 
   const rl = await checkLimit(userActionLimiter, `intro:${user.id}`);
   if (!rl.success) {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
+import { assertProfileApproved } from "@/lib/api/approval-gate";
 import { assertPortfolioOwnership } from "@/lib/queries";
 import {
   runPortfolioOptimizer,
@@ -22,6 +23,13 @@ export async function POST(req: NextRequest) {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  // Approval gate (PR #266 follow-up): block pending-approval users from
+  // running the 15s Python optimizer. The dashboard UI redirects them to
+  // /pending-approval, but a non-browser caller with a valid session
+  // cookie bypassed the page-only gate before this check landed.
+  const denied = await assertProfileApproved(supabase, user.id);
+  if (denied) return denied;
 
   // Audit-2026-05-07 C-0107 (api-contract c8): apply userActionLimiter
   // per ADR-0004. The optimizer fires a 15s Python round-trip on every

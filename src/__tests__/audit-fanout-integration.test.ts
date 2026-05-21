@@ -626,6 +626,14 @@ describe("POST /api/admin/allocator-approve — allocator.approve emission", () 
           update: () => ({
             eq: async () => ({ data: null, error: null }),
           }),
+          // PR #266 follow-up: the approve route now SELECTs (role, email)
+          // after the update so it can fire the signup-approved email.
+          // Mock returns no email so the notify path is a no-op.
+          select: () => ({
+            eq: () => ({
+              single: async () => ({ data: null, error: null }),
+            }),
+          }),
         }),
       }),
     }));

@@ -69,15 +69,24 @@ def _process_key_rate_limit_key(request: Request) -> str:
 
     Pre-fix used ``get_remote_address`` which buckets all Vercel egress
     behind a single shared NAT into the same window — so one tenant's
-    burst can starve every other tenant. The unified backbone is
-    service-to-service auth via INTERNAL_API_TOKEN with a JSON
-    ``context.user_id``; we key on a hash of (token, user_id) so each
-    user gets an isolated 100/hour window.
+    burst could starve every other tenant. The unified backbone is
+    service-to-service auth via INTERNAL_API_TOKEN; we key on a hash of
+    the bearer token so each calling service gets an isolated 100/hour
+    window.
 
     Tokens are SHA-256-hashed with a non-cryptographic suffix because
     the resulting key shows up in slowapi error logs and we don't want
     raw bearer tokens in observability output. The hash collapses the
     bearer to a stable 16-char prefix.
+
+    PR #241 red-team: an earlier version composed (token_id, X-User-Id)
+    into the key so multi-user traffic on a single token got isolated
+    buckets. But `X-User-Id` is unsigned client-controlled input — a
+    caller holding the bearer token could set
+    `X-User-Id: <random-uuid-per-request>` and allocate a new bucket
+    per request, bypassing the limiter. The header read is removed
+    until a signed identity surface lands (e.g. mTLS or a JWT body
+    field bound to the token).
     """
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
@@ -85,12 +94,7 @@ def _process_key_rate_limit_key(request: Request) -> str:
     else:
         token = auth or "unauthenticated"
     token_id = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
-    # Best-effort user_id extraction. The body has been parsed by the time
-    # FastAPI hands it to slowapi only if slowapi reads it from
-    # request.state — which it does NOT. We fall back to a header sent by
-    # the Vercel thin adapters where available.
-    user_id = request.headers.get("X-User-Id") or "anon"
-    return f"process_key:{token_id}:{user_id}"
+    return f"process_key:{token_id}"
 
 
 # ---------------------------------------------------------------------------

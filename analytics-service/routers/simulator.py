@@ -51,23 +51,29 @@ logger = logging.getLogger("quantalyze.analytics")
 
 
 def _simulator_rate_limit_key(request: Request) -> str:
-    """G15-005 — per-user rate-limit key for /api/simulator.
+    """Rate-limit key for /api/simulator.
 
-    Prefer the `X-User-Id` header forwarded by the Next.js front door so
-    each authenticated user gets an isolated rate-limit window. Fall back
-    to the remote address when the header is missing — that path is the
-    safety net for direct-to-FastAPI calls without the Next.js layer's
-    user resolution.
+    Keyed on remote IP. The pre-fix shape preferred an `X-User-Id` header
+    forwarded by the Next.js front door for per-user buckets, but a
+    PR #241 follow-up red-team turned up two problems with that path:
 
-    Pre-fix used slowapi's default `get_remote_address` which bucketed
-    every Vercel egress IP into one shared window. Behind a corporate /
-    cellular NAT 50+ legitimate users shared a single 30/hour FastAPI
-    bucket — first user exhausts it for the rest. Mirrors the
-    routers/process_key.py:_process_key_rate_limit_key pattern.
+      1. `src/lib/analytics-client.ts` never actually forwards the
+         header to FastAPI — so production traffic was already falling
+         through to the IP path. The per-user keying was effectively
+         dead code.
+      2. A direct-to-FastAPI attacker holding the SERVICE_KEY could set
+         `X-User-Id: <random-uuid-per-request>` and allocate a brand-new
+         20/hour bucket on every request, bypassing the limiter entirely.
+
+    The cleanest fix is to drop the header read so the spoof surface
+    disappears. The downside — shared-NAT users still share a window —
+    is a regression to the pre-G15-005 state, but the per-user surface
+    didn't exist in production anyway. A proper per-user bucket would
+    require an internal-signed `X-User-Id` (e.g., signed via
+    INTERNAL_API_TOKEN) so the header is non-spoofable; that's a
+    follow-up. Mirrors the same fix in
+    routers/process_key.py:_process_key_rate_limit_key.
     """
-    user_id = request.headers.get("X-User-Id")
-    if user_id:
-        return f"simulator:{user_id}"
     return f"simulator:ip:{get_remote_address(request)}"
 
 

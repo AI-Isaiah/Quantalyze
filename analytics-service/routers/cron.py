@@ -35,7 +35,14 @@ logger = logging.getLogger("quantalyze.analytics")
 # Failures (valid=False or validator raise) are NOT cached: the next tick
 # must re-attempt so a transient exchange blip doesn't pin a key into
 # permanent "needs revalidation" for the TTL window.
-KEY_VALIDATION_TTL_SECONDS = 24 * 60 * 60  # 24h
+#
+# PR #257 red-team: pre-fix the TTL was 24h, which gave a user who
+# revoked a key at the exchange a worst-case 24h window where the cron
+# kept treating it as `is_active=True`. With a 15-minute cron cadence,
+# a 1h TTL still cuts ~96% of redundant validation calls while bounding
+# the staleness window to one hour — closer to the actual revocation
+# detection SLA the credential-purge flow needs.
+KEY_VALIDATION_TTL_SECONDS = 60 * 60  # 1h
 _key_validation_cache: dict[str, float] = {}
 
 

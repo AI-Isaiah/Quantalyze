@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { assertProfileApproved } from "@/lib/api/approval-gate";
 import type { DailyPnlRow } from "@/lib/types";
 
 export async function GET(request: NextRequest) {
@@ -11,6 +12,10 @@ export async function GET(request: NextRequest) {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // Approval gate (PR #266 follow-up): activity feed is dashboard data;
+  // unapproved users shouldn't reach it via curl.
+  const denied = await assertProfileApproved(supabase, user.id);
+  if (denied) return denied;
 
   const url = request.nextUrl;
   const portfolioId = url.searchParams.get("portfolio_id");
