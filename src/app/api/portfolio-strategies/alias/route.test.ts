@@ -46,7 +46,9 @@ const { mockFrom, mockRpc, authResult, rateLimitState } = vi.hoisted(() => {
   const userId = "00000000-0000-0000-0000-cccccccccccc";
   return {
     mockFrom: vi.fn(),
-    mockRpc: vi.fn(async () => ({ data: null, error: null })),
+    mockRpc: vi.fn(
+      async (..._args: unknown[]) => ({ data: null, error: null }),
+    ),
     authResult: {
       data: { user: { id: userId } as { id: string } | null },
       error: null,
