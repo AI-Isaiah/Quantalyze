@@ -149,6 +149,69 @@ def test_daily_return_accepts_negative_below_minus_one():
     assert "daily_return_lower_bound" not in rules
 
 
+# QA report 2026-05-21 ISSUE-008. A user uploaded a `pnl` column
+# (renamed to `daily_return`) with raw dollar PnL values — typical row
+# values around |3.0|, which sit between the -100.0 floor and infinity
+# so no per-row rule fires. The dataset-level sentinel detects the
+# whole series by its median absolute value and flags it so the user
+# can fix the unit rather than have it slip into the analytics pipeline
+# and produce nonsense CAGR / Sharpe / Max DD downstream.
+def test_dollar_form_daily_return_caught_by_sentinel():
+    # Median(|x|) ~= 3.0 — well above the 0.5 threshold.
+    df = pd.DataFrame({
+        "date": pd.date_range("2024-01-02", periods=20, freq="D").strftime(
+            "%Y-%m-%d",
+        ),
+        "daily_return": [
+            -3.29, 1.71, -2.40, 4.10, -1.95, 2.55, -3.10, 1.20, -2.65, 3.85,
+            -1.50, 2.10, -3.45, 4.25, -1.85, 2.95, -3.20, 1.65, -2.85, 3.05,
+        ],
+    })
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    rules = {e["rule"] for e in result["errors"]}
+    assert "daily_return_dollar_form_sentinel" in rules
+    assert result["ok"] is False
+    # The error message has to be actionable — tell the user this looks
+    # like dollar PnL and how to convert it.
+    msg = next(
+        e["message"] for e in result["errors"]
+        if e["rule"] == "daily_return_dollar_form_sentinel"
+    )
+    assert "decimal" in msg.lower() or "dollar" in msg.lower()
+
+
+def test_dollar_form_sentinel_lets_normal_decimal_returns_through():
+    # Regression: a plain decimal-return series with daily moves around
+    # |0.01| must validate cleanly (the median absolute value sits well
+    # below the 0.5 threshold).
+    df = _daily_returns_df(n=20, daily_return=0.01)
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    rules = {e["rule"] for e in result["errors"]}
+    assert "daily_return_dollar_form_sentinel" not in rules
+
+
+def test_dollar_form_sentinel_lets_leveraged_decimal_returns_through():
+    # Regression: a leveraged decimal-return series that occasionally
+    # dips below -1.0 still passes the sentinel — the median absolute
+    # value is what matters, not the extremes. This protects the
+    # widening done on 2026-05-07 for leveraged strategies.
+    df = pd.DataFrame({
+        "date": pd.date_range("2024-01-02", periods=20, freq="D").strftime(
+            "%Y-%m-%d",
+        ),
+        # Mostly small daily moves, two extreme leverage days.
+        "daily_return": (
+            [0.02, -0.01, 0.015, -0.025, 0.018, -0.02, 0.022, -0.014]
+            + [-1.5, -1.2]  # two extreme leveraged days
+            + [0.019, -0.013, 0.024, -0.021, 0.011, -0.017, 0.026, -0.012]
+            + [0.029, -0.018]
+        ),
+    })
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    rules = {e["rule"] for e in result["errors"]}
+    assert "daily_return_dollar_form_sentinel" not in rules
+
+
 # ---------------------------------------------------------------------------
 # Test 6 — currency='EUR' at row 4 (trades) → currency_usd_or_blank rule
 # ---------------------------------------------------------------------------
