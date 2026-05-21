@@ -7,6 +7,19 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.3] - 2026-05-21
+
+**fix(audit-2026-05-07): database.types.ts positions.Row drift — add duration_seconds (C-0156).**
+
+`positions.duration_seconds` (BIGINT NULL) was added by migration 114 (`20260510182439_positions_schema_rls_g12d.sql`) but the generated `Database` type in `src/lib/database.types.ts` was never re-synced. The numeric-precision contract (`src/lib/supabase/numeric-precision.test.ts`) resolves columns through `Database['public']['Tables']['positions']['Row']`, so any future addition to `KNOWN_NUMERIC_COLUMNS` that referenced `duration_seconds` would silently fail to type-check. Inline comment in the type now points back to the migration so the next regen has the receipt.
+
+### Fixed
+- `src/lib/database.types.ts` (C-0156): added `duration_seconds: number | null` to positions.Row, and optional `duration_seconds?: number | null` to positions.Insert and positions.Update, matching the BIGINT NULL declaration in migration 114.
+
+### Added (regression test — fails if the column drops back out of the type)
+- `src/lib/database.types.test.ts`: type-level assertion that `positions.Row.duration_seconds` is `number | null` and `positions.Insert.duration_seconds` is optional. Uses `expectTypeOf` so a stale regen that removes the column fails the build.
+
+
 ## [0.24.5.1] - 2026-05-21
 
 **fix(audit-2026-05-07): add same-origin CSRF guard to admin/match GET handlers — closes C-0041.**
