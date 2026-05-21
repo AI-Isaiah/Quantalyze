@@ -234,6 +234,52 @@ export const POST = withRole<{ id: string }>("admin")(
       );
     }
 
+    // Audit-2026-05-07 C-0022 / C-0023 (red-team c8): close the
+    // sanitize-then-re-export loop at the auth layer. sanitize_user
+    // (migration 055) only anonymizes profiles columns — the
+    // auth.users row is PRESERVED and the user's JWT remains valid,
+    // so without an explicit signOut a sanitized user can log back in
+    // and call POST /api/account/export to receive a bundle of their
+    // pre-sanitize audit_log + cross-party rows (which sanitize_user
+    // preserves by design). GDPR Art. 17 "right to erasure" silently
+    // becomes "right to keep accessing your erased data via Art. 15".
+    //
+    // Defense (this fix, upstream): invalidate every refresh token for
+    // the sanitized user via the admin SDK. Subsequent access tokens
+    // (which are short-lived, default 3600s) will not refresh, so the
+    // post-sanitize session expires within the access-token TTL. The
+    // export route also gates on `profiles.display_name='[deleted]'`
+    // for any session token still in circulation (see
+    // SANITIZED_DISPLAY_NAME_SENTINEL in
+    // src/app/api/account/export/route.ts). Two layers: this signOut
+    // closes the auth-token vector, the route-layer sentinel covers
+    // the in-flight-token window.
+    //
+    // Best-effort: failure here does NOT undo the destruction (which
+    // is irreversible) — we log and continue. The route-layer sentinel
+    // is the fail-safe. We don't return 500 because the destructive
+    // RPC + audit row landed; surfacing 500 would cause the operator
+    // to retry, and the second sanitize_user is idempotent but the CAS
+    // would still flip — adding noise without changing the safety
+    // contract.
+    try {
+      const { error: signOutErr } = await admin.auth.admin.signOut(
+        reqRow.user_id,
+        "global",
+      );
+      if (signOutErr) {
+        console.error(
+          "[admin/deletion-requests/approve] admin.auth.admin.signOut failed — sanitize-loop defense degrades to route-layer sentinel only:",
+          signOutErr.message,
+        );
+      }
+    } catch (signOutErr) {
+      console.error(
+        "[admin/deletion-requests/approve] admin.auth.admin.signOut threw — sanitize-loop defense degrades to route-layer sentinel only:",
+        signOutErr instanceof Error ? signOutErr.message : signOutErr,
+      );
+    }
+
     // Cluster-K C-0033 / H-0217 + red-team-CRITICAL
     // (cas-misses-rejected-at): compare-and-swap UPDATE on the
     // completed_at marker. Without the `completed_at IS NULL` predicate

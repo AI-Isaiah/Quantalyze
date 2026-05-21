@@ -54,6 +54,12 @@ const state = vi.hoisted(() => ({
   sanitizeRpc: vi.fn(),
   updateCompleted: vi.fn(),
   auditLog: vi.fn(),
+  // Audit-2026-05-07 C-0022 / C-0023 (red-team c8): sign-out hook
+  // recorder. Defaults: no-error, no-throw. Flip per-test for the
+  // failure-tolerant degradation tests.
+  signOutCalls: vi.fn(),
+  signOutShouldFail: false as false | { message: string },
+  signOutShouldThrow: false as false | Error,
 }));
 
 // Track call ORDER so we can assert requireRole (and thus the rate-limit
@@ -81,6 +87,9 @@ const { buildDefaultAdminMock, buildDefaultRateLimitMock } = vi.hoisted(
         casWins: boolean;
         updateCompleted: (patch: Record<string, unknown>) => void;
         sanitizeRpc: (name: string, args: Record<string, unknown>) => void;
+        signOutCalls: (userId: string, scope: string) => void;
+        signOutShouldFail: false | { message: string };
+        signOutShouldThrow: false | Error;
       },
       order: string[],
       testRequestId: string,
@@ -130,6 +139,28 @@ const { buildDefaultAdminMock, buildDefaultRateLimitMock } = vi.hoisted(
           order.push(`rpc:${name}`);
           s.sanitizeRpc(name, args);
           return { data: true, error: null };
+        },
+        // Audit-2026-05-07 C-0022 / C-0023 (red-team c8): the approve
+        // route now invokes admin.auth.admin.signOut(user_id, "global")
+        // immediately after the destructive RPC + account.sanitize audit
+        // emit so a sanitized user's refresh tokens are invalidated
+        // upstream (closes the sanitize-then-re-export loop at the auth
+        // layer). The mock records every call and supports per-test
+        // overrides for both error-return and throw paths.
+        auth: {
+          admin: {
+            signOut: async (userId: string, scope: string) => {
+              order.push(`signOut:${userId}:${scope}`);
+              s.signOutCalls(userId, scope);
+              if (s.signOutShouldThrow) {
+                throw s.signOutShouldThrow;
+              }
+              if (s.signOutShouldFail) {
+                return { error: s.signOutShouldFail };
+              }
+              return { error: null };
+            },
+          },
         },
       }),
     }),
@@ -318,6 +349,9 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 2 }, 
     state.sanitizeRpc.mockReset();
     state.updateCompleted.mockReset();
     state.auditLog.mockReset();
+    state.signOutCalls.mockReset();
+    state.signOutShouldFail = false;
+    state.signOutShouldThrow = false;
     rateLimitRecorder.mockReset();
     vi.resetModules();
     reapplyDefaultMocks();
@@ -577,6 +611,17 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 2 }, 
           state.sanitizeRpc(name, args);
           return { data: true, error: null };
         },
+        // C-0022 / C-0023: route invokes admin.auth.admin.signOut after
+        // emit lands. Provide a no-op recorder so the per-test override
+        // doesn't crash the route on an undefined-method access.
+        auth: {
+          admin: {
+            signOut: async (userId: string, scope: string) => {
+              state.signOutCalls(userId, scope);
+              return { error: null };
+            },
+          },
+        },
       }),
     }));
 
@@ -673,6 +718,18 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 2 }, 
             data: null,
             error: { message: "rpc failed" },
           };
+        },
+        // C-0022 / C-0023: must NOT be invoked on the rpcErr branch
+        // (the route short-circuits before signOut). Recorder is
+        // enough — the assertion below checks state.signOutCalls was
+        // never called.
+        auth: {
+          admin: {
+            signOut: async (userId: string, scope: string) => {
+              state.signOutCalls(userId, scope);
+              return { error: null };
+            },
+          },
         },
       }),
     }));
@@ -955,5 +1012,177 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 2 }, 
     expect(roleCheckIdx).toBeGreaterThanOrEqual(0);
     expect(rpcIdx).toBeGreaterThanOrEqual(0);
     expect(roleCheckIdx).toBeLessThan(rpcIdx);
+  });
+
+  /**
+   * audit-2026-05-07 C-0022 / C-0023 (red-team c8) — sanitize-loop
+   * upstream defense. sanitize_user (migration 055) preserves the
+   * auth.users row + audit_log, and DOES NOT invalidate the user's
+   * JWT. Without an explicit signOut after the destructive RPC, a
+   * sanitized user can log back in and call POST /api/account/export
+   * to receive a bundle of their pre-sanitize audit_log + cross-party
+   * rows — turning GDPR Art. 17 ("right to erasure") into "right to
+   * keep accessing your erased data via Art. 15".
+   *
+   * The fix invokes `admin.auth.admin.signOut(user_id, "global")`
+   * immediately after the synchronous account.sanitize audit emit, so
+   * every refresh token for the sanitized user is invalidated. This
+   * test pins:
+   *   - signOut WAS invoked on the happy path
+   *   - scope is "global" (covers every active device)
+   *   - argument is the sanitized user's id (NOT the acting admin's)
+   *   - signOut runs AFTER the destructive RPC (correct ordering)
+   */
+  it("C-0022/C-0023 — signOut invoked with global scope on the sanitized user_id (happy path)", async () => {
+    state.authedUser = TEST_ADMIN;
+    state.userRoles = ["admin"];
+    state.deletionRow = {
+      id: TEST_REQUEST_ID,
+      user_id: TEST_TARGET_USER_ID,
+      requested_at: "2026-05-01T00:00:00Z",
+      completed_at: null,
+      rejected_at: null,
+    };
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(), makeCtx());
+    expect(res.status).toBe(200);
+
+    expect(state.signOutCalls).toHaveBeenCalledTimes(1);
+    expect(state.signOutCalls).toHaveBeenCalledWith(
+      TEST_TARGET_USER_ID,
+      "global",
+    );
+
+    // Ordering: sign-out comes AFTER the destructive RPC.
+    const rpcIdx = callOrder.indexOf("rpc:sanitize_user");
+    const signOutIdx = callOrder.findIndex((e) =>
+      e.startsWith(`signOut:${TEST_TARGET_USER_ID}:`),
+    );
+    expect(rpcIdx).toBeGreaterThanOrEqual(0);
+    expect(signOutIdx).toBeGreaterThanOrEqual(0);
+    expect(signOutIdx).toBeGreaterThan(rpcIdx);
+  });
+
+  /**
+   * C-0022 / C-0023: signOut failure (e.g., transient Supabase auth-
+   * service blip) must NOT undo the destruction or block the response.
+   * The destructive RPC already succeeded and the audit row landed;
+   * surfacing 500 here would cause an operator retry while the safety
+   * contract is unchanged (route-layer sentinel + access-token TTL
+   * still bound the residual exposure). Log the failure for canary
+   * visibility but return 200.
+   */
+  it("C-0022/C-0023 — signOut error returns 200 (defense degrades to route-layer sentinel, no operator-retry storm)", async () => {
+    state.authedUser = TEST_ADMIN;
+    state.userRoles = ["admin"];
+    state.deletionRow = {
+      id: TEST_REQUEST_ID,
+      user_id: TEST_TARGET_USER_ID,
+      requested_at: "2026-05-01T00:00:00Z",
+      completed_at: null,
+      rejected_at: null,
+    };
+    state.signOutShouldFail = { message: "auth service unavailable" };
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(), makeCtx());
+
+    // Best-effort: error logged, route still completes successfully.
+    expect(res.status).toBe(200);
+    expect(state.signOutCalls).toHaveBeenCalledTimes(1);
+    // CAS still ran (the destructive contract is unchanged by signOut).
+    expect(state.updateCompleted).toHaveBeenCalledTimes(1);
+  });
+
+  it("C-0022/C-0023 — signOut throw is caught and does NOT block the response", async () => {
+    state.authedUser = TEST_ADMIN;
+    state.userRoles = ["admin"];
+    state.deletionRow = {
+      id: TEST_REQUEST_ID,
+      user_id: TEST_TARGET_USER_ID,
+      requested_at: "2026-05-01T00:00:00Z",
+      completed_at: null,
+      rejected_at: null,
+    };
+    state.signOutShouldThrow = new Error("network blip");
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(), makeCtx());
+
+    expect(res.status).toBe(200);
+    expect(state.signOutCalls).toHaveBeenCalledTimes(1);
+    expect(state.updateCompleted).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Complementary contract: when the destructive RPC errored (rpcErr
+   * branch), we MUST NOT invoke signOut — destruction didn't happen,
+   * so invalidating the user's tokens would be a unilateral
+   * disconnect with no justifying side effect. The route's existing
+   * rpcErr early-return must short-circuit before reaching the
+   * signOut call.
+   */
+  it("C-0022/C-0023 — rpcErr branch does NOT call signOut (no destruction → no token invalidation)", async () => {
+    state.authedUser = TEST_ADMIN;
+    state.userRoles = ["admin"];
+    state.deletionRow = {
+      id: TEST_REQUEST_ID,
+      user_id: TEST_TARGET_USER_ID,
+      requested_at: "2026-05-01T00:00:00Z",
+      completed_at: null,
+      rejected_at: null,
+    };
+
+    vi.resetModules();
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: (_table: string) => ({
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({
+                data: state.deletionRow,
+                error: null,
+              }),
+            }),
+          }),
+          update: (_patch: Record<string, unknown>) => ({
+            eq: (_idCol: string, _idVal: string) => ({
+              is: (_c1: string, _n1: unknown) => ({
+                is: (_c2: string, _n2: unknown) => ({
+                  select: async (_cols: string) => ({
+                    data: [],
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          }),
+        }),
+        rpc: async (name: string, args: Record<string, unknown>) => {
+          state.sanitizeRpc(name, args);
+          return {
+            data: null,
+            error: { message: "rpc failed" },
+          };
+        },
+        auth: {
+          admin: {
+            signOut: async (userId: string, scope: string) => {
+              state.signOutCalls(userId, scope);
+              return { error: null };
+            },
+          },
+        },
+      }),
+    }));
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(), makeCtx());
+
+    expect(res.status).toBe(500);
+    expect(state.sanitizeRpc).toHaveBeenCalledTimes(1);
+    // CRITICAL: no destruction → no token invalidation.
+    expect(state.signOutCalls).not.toHaveBeenCalled();
   });
 });
