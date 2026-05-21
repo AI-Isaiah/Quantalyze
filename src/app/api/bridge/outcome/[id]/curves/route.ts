@@ -105,11 +105,23 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
   const supabase = await createClient();
   const { data: outcome, error: outcomeErr } = await supabase
     .from("bridge_outcomes")
-    .select("id, strategy_id, match_decision_id, allocated_at")
+    .select("id, allocator_id, strategy_id, match_decision_id, allocated_at")
     .eq("id", id)
     .maybeSingle();
 
   if (outcomeErr || !outcome) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  // C-0080 (audit-2026-05-07): defense-in-depth cross-tenant guard. RLS
+  // policy bridge_outcomes_select_own already filters by allocator_id=auth.uid()
+  // at the DB layer, but this route then hops to the admin client to read
+  // strategy_analytics. An explicit app-layer equality check ensures that
+  // even if RLS were ever weakened or misconfigured, a probe that knows an
+  // outcome UUID from a different tenant cannot reach the admin-hop branch.
+  // Return 404 (not 403) so the response cannot distinguish "exists but not
+  // yours" from "doesn't exist".
+  if ((outcome as { allocator_id: string }).allocator_id !== userId) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 

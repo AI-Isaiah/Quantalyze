@@ -7,6 +7,30 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.4] - 2026-05-21
+
+**fix(audit-2026-05-07 + signup-email): build /auth/callback + close 4 CRITICALs (C-0006 + C-0016 + C-0039 + C-0080).**
+
+Bundles a production-bug fix (signup confirmation email had no landing route) with 4 file-disjoint audit CRITICALs that all touch existing handlers in /api/admin and /api/bridge.
+
+### Added (production bug — signup email confirmation flow)
+- `src/app/auth/callback/route.ts` + `route.test.ts` (9 tests): GET handler supports both PKCE (`?code=`) and OTP (`?token_hash=&type=`) verification. Open-redirect guard restricts `next` to single-slash relative paths so `?next=https://evil.com` falls back to `/onboarding`. OTP type allowlist limited to `signup | email_change | recovery | invite`. Top-of-file comment documents the production-side requirement (Supabase dashboard → Auth → Email → Confirm email ON + Site URL = NEXT_PUBLIC_SITE_URL + Resend SMTP).
+- `src/components/auth/SignupForm.tsx`: now passes `emailRedirectTo: \`${window.location.origin}/auth/callback?next=/onboarding\`` to `supabase.auth.signUp` so the email link lands on the new route.
+
+### Fixed (audit findings)
+- `src/app/(dashboard)/admin/deletion-requests/page.tsx` (C-0006): swapped the `data_deletion_requests` SELECT from `createAdminClient()` to the user-scoped `supabase` client. The `deletion_admin_all` RLS policy (`20260408113028_disclosure_and_tenancy.sql`) already gates `FOR ALL` on `profiles.is_admin = true`, mirroring the page-level `isAdminUser()` check. Defense-in-depth: if the page gate drifts, RLS still blocks the leak. The `profiles` PII SELECT keeps the admin client (column-level GRANT in `20260408233236_profile_pii_revoke.sql` requires service_role).
+- `src/app/(dashboard)/recommendations/page.tsx` (C-0016): added `noStore()` from `next/cache` at the top of the page. Per-user recommendations must never be cached across users; explicit opt-out so a future `'use cache'` slid into the subtree fails loudly.
+- `src/app/api/admin/intro-request/route.ts` (C-0039): replaced the bare `Promise.resolve().then().catch()` block with `after()` from `next/server`. The fire-and-forget email send is now kept alive past the response flush without blocking the client. Response shape unchanged.
+- `src/app/api/bridge/outcome/[id]/curves/route.ts` (C-0080): added explicit `outcome.allocator_id !== userId → 404` guard between the outcome fetch and the analytics fan-out. Defense-in-depth on top of the `bridge_outcomes_select_own` RLS policy; 404 (not 403) so a probe can't distinguish "exists but not yours" from "doesn't exist". Test TC8 stubs a cross-tenant outcome and asserts both the 404 and that no curve keys leak in the body.
+
+### Added (regression tests — fail without the fix)
+- `src/app/auth/callback/route.test.ts` — 9 tests.
+- `src/app/api/bridge/outcome/[id]/curves/route.test.ts` (TC8) — cross-tenant 404 + anti-leak assertion.
+
+### Out of scope (flagged for follow-up)
+- C-0080 chain-half on `send-intro/route.ts` accepting cross-allocator `original_strategy_id` appears already mitigated by H-0229 (allocator-holdings check at lines 283-329) but a focused audit pass should confirm end-to-end.
+
+
 ## [0.24.5.3] - 2026-05-21
 
 **fix(audit-2026-05-07): database.types.ts positions.Row drift — add duration_seconds (C-0156).**

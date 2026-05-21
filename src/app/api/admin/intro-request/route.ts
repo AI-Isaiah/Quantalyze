@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
@@ -137,23 +137,36 @@ export async function POST(req: NextRequest) {
   });
 
   if (status !== "pending") {
-    Promise.resolve(
-      admin.from("contact_requests").select("allocator_id, strategy_id").eq("id", id).single()
-    ).then(async ({ data: request }) => {
-      if (!request) return;
-      const [{ data: allocator }, { data: strategy }] = await Promise.all([
-        admin.from("profiles").select("email").eq("id", request.allocator_id).single(),
-        admin.from("strategies").select("name").eq("id", request.strategy_id).single(),
-      ]);
-      if (allocator?.email && strategy?.name) {
-        notifyAllocatorIntroStatus(allocator.email, strategy.name, status as string);
+    // C-0039 (audit-2026-05-07): register the fire-and-forget notify via
+    // Next 15+ after() so the Vercel runtime stays alive until the email
+    // send + lookup queries flush. The previous Promise.resolve(...).then()
+    // form returned the response without keeping the function instance
+    // alive, so on Vercel the worker could exit before notifyAllocator
+    // IntroStatus completed, intermittently dropping the notification.
+    // Mirrors the sibling fire-and-forget pattern in
+    // src/app/api/intro-response/route.ts.
+    after(async () => {
+      try {
+        const { data: request } = await admin
+          .from("contact_requests")
+          .select("allocator_id, strategy_id")
+          .eq("id", id)
+          .single();
+        if (!request) return;
+        const [{ data: allocator }, { data: strategy }] = await Promise.all([
+          admin.from("profiles").select("email").eq("id", request.allocator_id).single(),
+          admin.from("strategies").select("name").eq("id", request.strategy_id).single(),
+        ]);
+        if (allocator?.email && strategy?.name) {
+          await notifyAllocatorIntroStatus(allocator.email, strategy.name, status as string);
+        }
+      } catch (err) {
+        console.error(
+          "[admin/intro-request] allocator-status notify failed:",
+          err instanceof Error ? err.message : err,
+        );
       }
-    }).catch((err) =>
-      console.error(
-        "[admin/intro-request] allocator-status notify failed:",
-        err?.message ?? err,
-      ),
-    );
+    });
   }
 
   return NextResponse.json({ success: true });

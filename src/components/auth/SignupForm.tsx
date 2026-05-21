@@ -63,11 +63,19 @@ export function SignupForm() {
     // Setting `role` here is the only way to seed a profile with the
     // intended role — after signup the role-lock trigger prevents
     // authenticated clients from mutating it.
+    // `emailRedirectTo` must point at our /auth/callback route so the
+    // link in Supabase's confirmation email lands on a real page instead
+    // of 404ing. The callback route handles both the PKCE (?code=) and
+    // OTP (?token_hash=&type=) flows. Using window.location.origin keeps
+    // preview / production / localhost all working without a per-env env
+    // var. Supabase still enforces the redirect-URL allowlist set in the
+    // dashboard, so this can't be abused.
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
         data: { display_name: displayName, role },
+        emailRedirectTo: `${window.location.origin}/auth/callback?next=/onboarding`,
       },
     });
 
