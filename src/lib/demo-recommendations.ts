@@ -34,7 +34,36 @@ export interface RecommendationRow {
 export interface BatchSummary {
   id: string;
   computed_at?: string;
+  /**
+   * audit-2026-05-07 C-0123 — number of candidates this batch produced
+   * (column `match_batches.candidate_count`, default 0). The recompute
+   * writer sets this AFTER inserting `match_candidates` rows, so it
+   * doubles as the success discriminator that closes the race window
+   * where a `match_batches` row exists but its candidates have not yet
+   * been written. Treated as a "fresh / ready" gate when paired with
+   * `latestRows.length >= 3`. Optional for backwards-compat with the
+   * older `BatchSummary` callers; missing values are treated as
+   * "unknown success state" and the row-count threshold alone gates.
+   */
+  candidate_count?: number;
 }
+
+/**
+ * audit-2026-05-07 C-0123 — minimum candidates the latest batch must
+ * return before we treat it as the authoritative recommendation set.
+ * Below this we prefer to fall back to the previous batch rather than
+ * render a sparse "Top matches" list (the friend-forwarded URL case).
+ *
+ * Why >= 3 specifically: the demo UI renders up to 3 cards under the
+ * "Top matches" heading. A latest-batch result of 1-2 candidates is
+ * usually one of:
+ *   (a) the recompute is mid-flight (race: batch row inserted but only
+ *       1-2 candidates persisted so far — gated by `candidate_count`),
+ *   (b) heavy exclusion filters left only 1-2 rows ranked non-null
+ *       (the bug the finding cites — friend sees a half-broken page).
+ * Falling back to the previous batch is strictly better for both.
+ */
+export const MIN_LATEST_RECOMMENDATIONS = 3;
 
 type AdminClient = ReturnType<typeof createAdminClient>;
 
@@ -150,7 +179,25 @@ export async function resolveDemoRecommendations(
   }
   const latest = batches[0];
   const latestRows = await fetchCandidatesForBatch(admin, latest.id);
-  if (latestRows.length > 0) {
+  // audit-2026-05-07 C-0123 — tighten the fallback threshold. Previously
+  // any non-empty result claimed batches[0], so the friend-forwarded URL
+  // landed on a 1-card "Top matches" page when exclusion filters left
+  // ranked-null. Now require BOTH:
+  //   1. at least MIN_LATEST_RECOMMENDATIONS hydrated rows, and
+  //   2. when the caller provides `candidate_count`, the writer-side
+  //      success discriminator agrees the batch is fully populated
+  //      (candidate_count >= MIN_LATEST_RECOMMENDATIONS). This closes
+  //      the race window where the batch row exists but only 1-2 of
+  //      its candidates have been inserted.
+  // When `candidate_count` is undefined we fall back to the row-count
+  // gate alone — older callers (and the unit-test fake) don't supply
+  // it, and the row count is still a strictly tighter guarantee than
+  // the previous "> 0".
+  const latestSuccess =
+    latest.candidate_count === undefined
+      ? true
+      : latest.candidate_count >= MIN_LATEST_RECOMMENDATIONS;
+  if (latestRows.length >= MIN_LATEST_RECOMMENDATIONS && latestSuccess) {
     return {
       recommendations: latestRows,
       usedBatchId: latest.id,
@@ -167,6 +214,16 @@ export async function resolveDemoRecommendations(
         fellBackToPrevious: true,
       };
     }
+  }
+  // No prior fallback available: render whatever the latest produced
+  // (may be empty, may be 1-2 cards). Better than showing nothing when
+  // the friend has no prior-batch parachute.
+  if (latestRows.length > 0) {
+    return {
+      recommendations: latestRows,
+      usedBatchId: latest.id,
+      fellBackToPrevious: false,
+    };
   }
   return { recommendations: [], usedBatchId: null, fellBackToPrevious: false };
 }

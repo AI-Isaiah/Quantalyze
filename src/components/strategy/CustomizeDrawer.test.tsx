@@ -74,13 +74,40 @@ describe("CustomizeDrawer", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("clicking the backdrop calls onClose", () => {
+  it("clicking the backdrop calls onClose (selects via data-testid, not aria-hidden)", () => {
+    // audit-2026-05-07 C-0133 — the previous selector
+    // `container.querySelector('[aria-hidden="true"]')` matched the FIRST
+    // aria-hidden element in DOM order. The drawer renders multiple
+    // aria-hidden elements (backdrop + close-X SVG + inner SVG path);
+    // a future JSX reorder would silently route the click to the wrong
+    // element while keeping the assertion green (clicking the X also
+    // calls onClose). Querying by `data-testid="customize-backdrop"`
+    // pins the selector to the backdrop only.
     const onClose = vi.fn();
     const { container } = renderDrawer({ onClose });
-    const backdrop = container.querySelector('[aria-hidden="true"]');
+    const backdrop = container.querySelector(
+      '[data-testid="customize-backdrop"]',
+    );
     expect(backdrop).not.toBeNull();
     fireEvent.click(backdrop!);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("backdrop is exactly one element identified by data-testid (regression: C-0133)", () => {
+    // Regression for audit-2026-05-07 C-0133. Asserts:
+    //   (a) the backdrop is uniquely identifiable by data-testid, and
+    //   (b) it carries aria-hidden="true" + the bg-black/40 class — so a
+    //       refactor that strips the testid OR drops the visual backdrop
+    //       fails this test loudly instead of falling back to the
+    //       brittle first-aria-hidden selector.
+    const { container } = renderDrawer();
+    const matches = container.querySelectorAll(
+      '[data-testid="customize-backdrop"]',
+    );
+    expect(matches).toHaveLength(1);
+    const backdrop = matches[0];
+    expect(backdrop.getAttribute("aria-hidden")).toBe("true");
+    expect(backdrop.className).toMatch(/bg-black\/40/);
   });
 
   it("clicking the close-X button calls onClose; close-X aria-label = 'Close customize panel'", () => {

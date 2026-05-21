@@ -3,6 +3,16 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
+import type { StrategyAnalytics } from "@/lib/types";
+
+/**
+ * audit-2026-05-07 C-0142 — `ComputationStatus` is the source-of-truth DB
+ * shape pulled from `StrategyAnalytics.computation_status`. Importing it
+ * (instead of hand-rolling the string union) means adding a new DB status
+ * MUST be handled by every consumer that maps `ComputationStatus → SyncStatus`,
+ * because the exhaustive switch in `toSyncStatus()` ends in `assertNever`.
+ */
+export type ComputationStatus = StrategyAnalytics["computation_status"];
 
 export type SyncStatus =
   | "idle"
@@ -11,6 +21,39 @@ export type SyncStatus =
   | "complete"
   | "complete_with_warnings"
   | "error";
+
+/**
+ * Compile-time exhaustiveness guard. If a new `ComputationStatus` variant is
+ * added at the source (`src/lib/types.ts`) without updating the switch in
+ * `toSyncStatus`, the `never` mismatch produces a type error here.
+ */
+function assertNever(value: never): never {
+  throw new Error(
+    `assertNever: unexpected ComputationStatus variant: ${String(value)}`,
+  );
+}
+
+/**
+ * Discriminated converter from DB `computation_status` to UI `SyncStatus`.
+ * `complete_with_warnings` has no DB representation — it is a UI-only state
+ * that callers must set explicitly via a higher-level signal (warnings
+ * payload non-empty). The converter therefore maps DB `complete → complete`
+ * and lets the caller upgrade to `complete_with_warnings` separately.
+ */
+export function toSyncStatus(db: ComputationStatus): SyncStatus {
+  switch (db) {
+    case "pending":
+      return "idle";
+    case "computing":
+      return "computing";
+    case "complete":
+      return "complete";
+    case "failed":
+      return "error";
+    default:
+      return assertNever(db);
+  }
+}
 
 interface SyncProgressProps {
   strategyId: string;
@@ -136,12 +179,17 @@ export function SyncProgress({
 
     if (!data) return;
 
-    if (data.computation_status === "complete") {
-      onStatusChange?.("complete");
-    } else if (data.computation_status === "failed") {
-      onStatusChange?.("error");
-    } else if (data.computation_status === "computing") {
-      onStatusChange?.("computing");
+    // audit-2026-05-07 C-0142: route DB status → UI status via the
+    // discriminated converter. Adding a new ComputationStatus variant at
+    // the source forces a compile error in `toSyncStatus`, so we can't
+    // silently drop it here. We only forward states that map cleanly to a
+    // UI-visible transition (computing / complete / error); "idle" (from
+    // DB "pending") is not propagated mid-sync because the caller already
+    // primed us with "syncing" / "computing".
+    const db: ComputationStatus = data.computation_status;
+    const next = toSyncStatus(db);
+    if (next === "computing" || next === "complete" || next === "error") {
+      onStatusChange?.(next);
     }
   }, [strategyId, onStatusChange]);
 
