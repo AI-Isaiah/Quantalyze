@@ -151,4 +151,28 @@ describe("GET /auth/callback", () => {
     expect(loc.host).toBe("localhost:3000");
     expect(loc.pathname).toBe("/onboarding");
   });
+
+  // audit-2026-05-07 specialist red-team HIGH — WHATWG URL parser strips
+  // leading tab/LF/CR from path segments. The original guard checked the
+  // raw string with startsWith("/") + startsWith("//"), missing the
+  // `/<whitespace>//evil.example` shape because the literal string starts
+  // with "/\t" but `new URL(...)` resolves it to `//evil.example`. Each
+  // case below MUST fall back to /onboarding.
+  it.each([
+    ["%09", "tab"],
+    ["%0a", "LF"],
+    ["%0d", "CR"],
+    ["%0d%0a", "CRLF"],
+    ["%20", "space"],
+  ])(
+    "guards against open-redirect via leading-whitespace bypass (%s — %s)",
+    async (encoded) => {
+      const res = await callGet(
+        `http://localhost:3000/auth/callback?code=pkce-abc&next=/${encoded}//evil.example/phish`,
+      );
+      const loc = new URL(res.headers.get("location")!);
+      expect(loc.host).toBe("localhost:3000");
+      expect(loc.pathname).toBe("/onboarding");
+    },
+  );
 });

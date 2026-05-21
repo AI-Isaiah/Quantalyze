@@ -45,7 +45,7 @@ export default async function PortfolioDocumentsPage({
     doc_type: d.doc_type ?? "other",
     file_url: d.file_url,
     file_name: d.file_name,
-    created_at: d.created_at,
+    created_at: d.created_at ?? new Date(0).toISOString(),
     portfolio_id: d.portfolio_id,
   }));
 

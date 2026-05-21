@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 import { getAllocatorMatchPayload } from "@/lib/admin/match";
 
 // GET /api/admin/match/[allocator_id]
@@ -21,6 +22,12 @@ export async function GET(
   { params }: { params: Promise<{ allocator_id: string }> },
 ): Promise<NextResponse> {
   const { allocator_id } = await params;
+
+  // audit-2026-05-07 C-0041 follow-up — same-origin guard on admin
+  // GETs that return PII / sensitive operational data. Mirror the
+  // sibling admin/match/{allocators,eval} routes.
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
 
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();

@@ -191,15 +191,20 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // strategy.approve downstream). Adding a separate `strategy.draft`
     // audit action would require an ADR-0023 taxonomy update, which is
     // tracked as a follow-up to this P692 audit-coverage extension.
+    // The generated types declare these RPC params as non-null strings, but
+    // the underlying SQL function (per migration 031 + the envelope-encryption
+    // contract above) accepts nulls for api_secret/passphrase/dek/nonce.
+    // Cast the args object to satisfy the typed-client contract without
+    // altering the values the DB receives.
     const { data, error } = await supabase.rpc("create_wizard_strategy", {
       p_user_id: user.id,
       p_exchange: exchangeNormalized,
       p_label: labelOrDefault,
       p_api_key_encrypted: api_key_encrypted,
-      p_api_secret_encrypted: api_secret_encrypted,
-      p_passphrase_encrypted: passphrase_encrypted,
-      p_dek_encrypted: dek_encrypted,
-      p_nonce: nonce,
+      p_api_secret_encrypted: api_secret_encrypted as string,
+      p_passphrase_encrypted: passphrase_encrypted as unknown as string,
+      p_dek_encrypted: dek_encrypted as unknown as string,
+      p_nonce: nonce as unknown as string,
       p_kek_version: kek_version,
       p_placeholder_name: pickPlaceholderCodename(),
       p_wizard_session_id: wizard_session_id,

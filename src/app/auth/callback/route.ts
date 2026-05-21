@@ -63,6 +63,14 @@ function safeNextPath(raw: string | null): string {
   if (raw.startsWith("//")) return fallback;
   // Defensive: backslash tricks (some browsers normalize `\` to `/`).
   if (raw.startsWith("/\\") || raw.startsWith("\\")) return fallback;
+  // audit-2026-05-07 specialist red-team HIGH: WHATWG URL parser strips
+  // leading tab/LF/CR from path segments, so `/	//evil.com` (URL-
+  // encoded `%09//evil.com`) defeats the startsWith("//") guard because
+  // the literal string starts with "/\t//" but `new URL(...)` resolves
+  // it to `//evil.com`. Reject any path whose char[1+] is whitespace,
+  // slash, or backslash — those compositions are never legitimate next-
+  // targets on this app and are the canonical open-redirect vectors.
+  if (/^\/[\s\\/]/.test(raw)) return fallback;
   return raw;
 }
 

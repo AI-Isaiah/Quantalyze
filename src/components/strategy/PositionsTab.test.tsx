@@ -122,15 +122,15 @@ describe("PositionsTab — ROI label + tooltip (Sprint 5.6 funding cutover)", ()
   });
 
   /**
-   * G14-003 PARTIAL: OKX/Bybit daily_pnl still includes FUNDING_FEE
-   * (only Binance has the cutover live in analytics-service). Rendering
-   * the `+ Funding` breakdown for those exchanges double-counts funding
-   * on the allocator-facing tooltip. Until the OKX/Bybit cutover lands,
-   * PositionsTab MUST suppress the breakdown for non-Binance exchanges
-   * even when funding_pnl rows are non-zero.
+   * G14-003 + C-0319 (Bybit cutover): with the OKX type=8 funding-bill
+   * filter and the Bybit cumEntryValue/cumExitValue reconstruction both
+   * live in analytics-service/services/exchange.py, all three CEX
+   * integrations now exclude funding from realized_pnl. The "+ Funding"
+   * tooltip is therefore mathematically correct for okx and bybit too,
+   * and the gate is allowlisted to include them.
    */
   it.each(["okx", "bybit"] as const)(
-    "G14-003: suppresses funding breakdown for exchange=%s even when funding_pnl != 0",
+    "C-0319: shows funding breakdown for exchange=%s when funding_pnl != 0",
     (ex) => {
       const analytics = makeAnalytics();
       const positions: Position[] = [
@@ -144,13 +144,11 @@ describe("PositionsTab — ROI label + tooltip (Sprint 5.6 funding cutover)", ()
         />,
       );
 
-      expect(screen.getByText("ROI")).toBeDefined();
-      expect(screen.queryByText("Total ROI (incl. funding)")).toBeNull();
+      expect(screen.getByText("Total ROI (incl. funding)")).toBeDefined();
+      expect(screen.queryByText("ROI")).toBeNull();
       const tooltip = screen.getByTestId("roi-tooltip");
-      expect(tooltip.textContent).toContain(
-        "Price ROI excludes funding payments",
-      );
-      expect(tooltip.textContent).not.toContain("Funding:");
+      expect(tooltip.textContent).toContain("Price ROI:");
+      expect(tooltip.textContent).toContain("Funding:");
     },
   );
 

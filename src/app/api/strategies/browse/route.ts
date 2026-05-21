@@ -4,6 +4,8 @@ import { createClient } from "@/lib/supabase/server";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { displayStrategyName } from "@/lib/strategy-display";
+import type { DisclosureTier } from "@/lib/types";
 
 /**
  * Phase 10 / Plan 10-03 — GET /api/strategies/browse
@@ -34,6 +36,15 @@ export const runtime = "nodejs";
 
 export interface BrowseStrategyRow {
   id: string;
+  /**
+   * Audit C-0112 — display label only. For `disclosure_tier='institutional'`
+   * rows this is the real strategy name; for exploratory rows it is the
+   * codename (when present) or a synthetic `Strategy #<id-prefix>` label
+   * derived by `displayStrategyName`. The raw `strategies.name` column is
+   * NEVER emitted on exploratory rows because pairing it with the codename
+   * defeats the pseudonymity contract (the drawer search would otherwise
+   * cross-correlate a known real name back to its codename).
+   */
   name: string;
   codename: string | null;
   markets: string[];
@@ -69,9 +80,14 @@ export const GET = withAllocatorAuth(
     // getStrategiesByCategory in src/lib/queries.ts. The admin / service-
     // role client is intentionally NOT used here: a read-only catalog of
     // published strategies has no need to bypass RLS.
+    // Audit C-0112 — co-fetch `disclosure_tier` so the response mapping
+     // can suppress the real `name` for non-institutional rows. Ordering
+     // still happens on `name` server-side (alphabetical browse is the
+     // drawer contract); the leak prevention is in the projection step
+     // below, not in the SELECT/ORDER list.
     const { data, error } = await supabase
       .from("strategies")
-      .select("id, name, codename, markets, strategy_types")
+      .select("id, name, codename, disclosure_tier, markets, strategy_types")
       .eq("status", "published")
       .order("name", { ascending: true })
       .limit(STRATEGY_BROWSE_LIMIT);
@@ -88,17 +104,36 @@ export const GET = withAllocatorAuth(
     // even with a NOT NULL DEFAULT '{}' contract on older rows; clamp
     // them to [] so downstream consumers (the drawer's filter pills, the
     // mandate-fit chip computation) can iterate without a null check.
+    //
+    // Audit C-0112 — `name` is run through `displayStrategyName` so the
+    // raw strategies.name column is suppressed on any row whose
+    // `disclosure_tier !== 'institutional'`. This mirrors the rule
+    // applied by /api/demo/match and the Match Queue: codename wins;
+    // institutional rows may surface the real name; exploratory rows
+    // missing a codename collapse to a synthetic `Strategy #<id>`.
+    // Without this guard, the drawer's case-insensitive search keyed on
+    // `name || codename` lets an attacker who knows a real strategy
+    // name look it up and read its codename — defeating the
+    // pseudonymity contract for the entire verified catalog.
     const strategies: BrowseStrategyRow[] = (data ?? []).map((row) => {
       const r = row as {
         id: string;
         name: string;
         codename: string | null;
+        disclosure_tier: DisclosureTier | null;
         markets: unknown;
         strategy_types: unknown;
       };
-      return {
+      const tier: DisclosureTier = r.disclosure_tier ?? "exploratory";
+      const safeLabel = displayStrategyName({
         id: r.id,
         name: r.name,
+        codename: r.codename,
+        disclosure_tier: tier,
+      });
+      return {
+        id: r.id,
+        name: safeLabel,
         codename: r.codename ?? null,
         markets: Array.isArray(r.markets) ? (r.markets as string[]) : [],
         strategy_types: Array.isArray(r.strategy_types)

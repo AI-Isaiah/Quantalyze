@@ -655,14 +655,16 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
     this fetches account-level P&L history directly. Much faster and gives us
     exactly what we need for analytics: daily profit/loss.
     """
-    # Audit-2026-05-07 C-0319 / maintainability — same entry-seam reset as
-    # ``fetch_raw_trades``. ``fetch_daily_pnl`` writes the
-    # ``bybit_daily_pnl_includes_funding`` flag (Bybit branch); if a caller
-    # invokes ``fetch_raw_trades`` and then ``fetch_daily_pnl`` on the same
-    # asyncio task without an intervening drain, stale flags from the
-    # trades-sync (e.g. ``binance_partial_symbols``) would otherwise leak
-    # into the daily-PnL caller's view. Resetting here mirrors the
-    # per-call isolation contract documented in ``_LAST_DQ_FLAGS``.
+    # Audit-2026-05-07 C-0319 (Bybit cutover) / maintainability — same
+    # entry-seam reset as ``fetch_raw_trades``. The Bybit branch used to
+    # write the ``bybit_daily_pnl_includes_funding`` flag (retired in the
+    # C-0319 cutover — funding is now excluded directly from daily_pnl
+    # via cumEntryValue/cumExitValue reconstruction). The reset is kept
+    # because callers may invoke ``fetch_raw_trades`` then
+    # ``fetch_daily_pnl`` on the same asyncio task; stale trade-sync
+    # flags (e.g. ``binance_partial_symbols``) would otherwise leak into
+    # the daily-PnL caller's view. Mirrors the per-call isolation
+    # contract documented in ``_LAST_DQ_FLAGS``.
     _LAST_DQ_FLAGS.set({})
 
     daily_pnl: list[dict[str, Any]] = []
@@ -893,66 +895,166 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
             # a fire-and-forget enrichment path — its failure must not
             # abort the parent sync. But the silent surface is gone.
             # fail-soft: best-effort enrichment, but log the failure mode.
+            #
+            # Audit-2026-05-07 C-0319 (Bybit cutover) — Bybit's
+            # ``position_closed_pnl`` endpoint returns ``closedPnl`` as a
+            # COMBINED cashflow per Bybit's own help-center formula:
+            #
+            #     closedPnl = positionPnl - openFee - closeFee - sumFunding
+            #
+            # where ``positionPnl = (cumExitValue - cumEntryValue)`` for a
+            # long-side closure (``side="Sell"`` on the closing leg) and
+            # ``(cumEntryValue - cumExitValue)`` for a short-side closure
+            # (``side="Buy"`` on the closing leg). Source:
+            # https://www.bybit.com/en/help-center/article/Profit-Loss-calculations-USDT-Contract
+            #
+            # Pre-cutover, we shipped ``closedPnl`` as-is into ``daily_pnl``
+            # AND ingested funding cashflow separately into ``funding_fees
+            # → positions.funding_pnl``. The dashboard's
+            # "Total ROI (incl. funding)" then summed ``realized_pnl +
+            # funding_pnl`` and double-counted funding (subtracted in
+            # ``closedPnl`` AND added in ``funding_pnl``).
+            #
+            # Bybit V5 exposes no clean "realized PnL excluding funding"
+            # endpoint: ``/v5/execution/list`` has no ``execPnl`` /
+            # ``closedPnl`` field per the V5 docs (only price/qty/fee), and
+            # ``/v5/position/list`` is a current-snapshot endpoint, not a
+            # historical PnL stream. So the cutover is a pure
+            # post-processing reconstruction from fields the closed-pnl
+            # response already returns:
+            #
+            #     realized_pnl_ex_funding
+            #         = closedPnl + sumFunding
+            #         = positionPnl - openFee - closeFee
+            #         = ±(cumExitValue - cumEntryValue) - openFee - closeFee
+            #
+            # This matches the OKX cutover's contract (drop ``type=8``
+            # funding bills) — both branches now feed ``daily_pnl`` a
+            # funding-EXCLUDED realized-PnL series, leaving the funding
+            # cashflow ingestion in ``services.funding_fetch`` as the
+            # SINGLE source of truth for the funding component of total
+            # economic P&L. The ``bybit_daily_pnl_includes_funding`` DQ
+            # flag is therefore retired.
             try:
                 params = {"category": "linear", "limit": 200}
                 result = await exchange.private_get_v5_position_closed_pnl(params)
                 items = result.get("result", {}).get("list", [])
-                # Audit-2026-05-07 C-0319 — Bybit's ``position_closed_pnl``
-                # endpoint returns ``closedPnl`` as a COMBINED cashflow
-                # (realized PnL + funding) per the funding_fees migration
-                # preamble (services.funding_fetch). There is no per-row
-                # type filter the way OKX exposes; the only safe option
-                # for now is to surface a data-quality flag so downstream
-                # equity-curve / Sharpe computations can warn that the
-                # daily_pnl figure for Bybit perp strategies includes
-                # funding which is ALSO ingested separately into
-                # ``funding_fees``. A migration to a non-funding endpoint
-                # (or per-row split) is the durable fix; flag here is the
-                # defense-in-depth so the double-count is at least
-                # visible to operators / the admin health card.
-                if items:
-                    _record_dq_flag(
-                        "bybit_daily_pnl_includes_funding", True
+
+                # Aggregate by UTC day, mirroring the OKX branch shape:
+                # daily_pnl is a list of one (exchange, day) row per day,
+                # not one row per position closure. Aggregation moves
+                # downstream transforms onto a single contract.
+                from collections import defaultdict
+                bybit_daily_totals: dict[str, float] = defaultdict(float)
+                _bybit_rows_dropped_unparseable_ts = 0
+
+                # Build a list of (day_key, realized_ex_funding) pairs in
+                # a pure pass. Raise on any per-item math failure (the
+                # outer except logs the WARNING and discards the partial
+                # accumulation — atomicity preserved).
+                for item in items:
+                    # Reconstruct position-level PnL from entry/exit
+                    # value + fees. closedPnl alone is not enough because
+                    # it bakes funding into the number; we want the
+                    # funding-free realized PnL.
+                    cum_entry = _finite_float(
+                        item.get("cumEntryValue", 0),
+                        label="Bybit cumEntryValue",
                     )
-                # PR #181 take-2 red-team HIGH F5: build the Bybit-branch rows
-                # locally first, run the ISO conversion as a pure build of a
-                # NEW list, and only mutate `daily_pnl` on full success. The
-                # prior in-place mutation could partially convert entries —
-                # if entry N succeeded but entry N+1 raised, daily_pnl held a
-                # mix of ISO strings and digit-string timestamps. Downstream
-                # `transforms.trades_to_daily_returns_with_status` then ran
-                # `pd.to_datetime(df['timestamp'])` on the mixed column and
-                # raised a cryptic format-mismatch error with NO link back to
-                # the Bybit WARNING. Atomic conversion preserves uniform
-                # timestamp format and keeps the failure mode localized.
-                bybit_rows = [
-                    {
+                    cum_exit = _finite_float(
+                        item.get("cumExitValue", 0),
+                        label="Bybit cumExitValue",
+                    )
+                    open_fee = _finite_float(
+                        item.get("openFee", 0),
+                        label="Bybit openFee",
+                    )
+                    close_fee = _finite_float(
+                        item.get("closeFee", 0),
+                        label="Bybit closeFee",
+                    )
+                    if (
+                        cum_entry is None
+                        or cum_exit is None
+                        or open_fee is None
+                        or close_fee is None
+                    ):
+                        # Schema drift on a single row must not poison
+                        # the whole batch. Skip and continue; the outer
+                        # WARNING path is reserved for genuine API
+                        # failures, not per-row finite-validation.
+                        logger.warning(
+                            "Bybit closed_pnl row dropped: non-finite "
+                            "cumEntryValue=%r / cumExitValue=%r / "
+                            "openFee=%r / closeFee=%r (symbol=%s)",
+                            item.get("cumEntryValue"),
+                            item.get("cumExitValue"),
+                            item.get("openFee"),
+                            item.get("closeFee"),
+                            item.get("symbol"),
+                        )
+                        continue
+                    # Bybit's ``side`` on a closed-pnl row is the side of
+                    # the CLOSING order. ``Sell`` closes a long position
+                    # (positionPnl = exit - entry); ``Buy`` closes a
+                    # short position (positionPnl = entry - exit). The
+                    # default falls back to long-side semantics for any
+                    # unexpected case-variant; both directions converge
+                    # to the same magnitude when entry == exit.
+                    side = str(item.get("side", "")).strip().lower()
+                    if side == "buy":
+                        position_pnl = cum_entry - cum_exit
+                    else:
+                        position_pnl = cum_exit - cum_entry
+                    realized_ex_funding = (
+                        position_pnl - open_fee - close_fee
+                    )
+
+                    ts_raw = item.get("createdTime", "")
+                    if ts_raw and str(ts_raw).isdigit():
+                        # Atomic per-item: the int->fromtimestamp call
+                        # may overflow on a malformed createdTime; let
+                        # the outer except log the WARNING and discard
+                        # any partial accumulation.
+                        dt = datetime.fromtimestamp(
+                            int(ts_raw) / 1000, tz=timezone.utc
+                        )
+                        day_key = dt.strftime("%Y-%m-%d")
+                        bybit_daily_totals[day_key] += realized_ex_funding
+                    else:
+                        _bybit_rows_dropped_unparseable_ts += 1
+                        logger.warning(
+                            "Bybit closed_pnl row dropped: unparseable "
+                            "createdTime=%r (symbol=%s)",
+                            ts_raw, item.get("symbol"),
+                        )
+
+                # Build the daily_pnl rows in the SAME shape the OKX +
+                # Binance branches use: one row per (exchange, day) with
+                # `price = abs(daily_total)` and `side` encoding sign.
+                # Build into a fresh list and extend on full success to
+                # preserve the F5 atomic-conversion contract.
+                converted_rows: list[dict[str, Any]] = []
+                for day, pnl in sorted(bybit_daily_totals.items()):
+                    converted_rows.append({
                         "exchange": "bybit",
-                        "symbol": item.get("symbol", "PORTFOLIO"),
-                        "side": "buy" if float(item.get("closedPnl", 0)) >= 0 else "sell",
-                        "price": abs(float(item.get("closedPnl", 0))),
+                        "symbol": "PORTFOLIO",
+                        "side": "buy" if pnl >= 0 else "sell",
+                        "price": abs(pnl),
                         "quantity": 1,
                         "fee": 0,
                         "fee_currency": "USDT",
-                        "timestamp": item.get("createdTime", ""),
+                        "timestamp": f"{day}T00:00:00+00:00",
                         "order_type": "daily_pnl",
-                    }
-                    for item in items
-                ]
-                # Build converted-timestamp variant in a fresh list. On full
-                # success, we extend daily_pnl with the converted rows. On
-                # mid-loop failure, the except clause runs without mutating
-                # daily_pnl (preserving caller-visible uniformity).
-                converted_rows: list[dict[str, Any]] = []
-                for entry in bybit_rows:
-                    new_entry = dict(entry)
-                    ts_raw = entry["timestamp"]
-                    if ts_raw and str(ts_raw).isdigit():
-                        ts = int(ts_raw) / 1000
-                        new_entry["timestamp"] = datetime.fromtimestamp(
-                            ts, tz=timezone.utc
-                        ).isoformat()
-                    converted_rows.append(new_entry)
+                    })
+                logger.info(
+                    "Bybit: %d closed-pnl rows aggregated to %d daily "
+                    "PnL entries (funding excluded — reconstructed from "
+                    "cumEntryValue/cumExitValue - fees; "
+                    "%d rows dropped for unparseable createdTime)",
+                    len(items), len(converted_rows),
+                    _bybit_rows_dropped_unparseable_ts,
+                )
                 daily_pnl.extend(converted_rows)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

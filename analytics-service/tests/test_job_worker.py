@@ -2017,22 +2017,25 @@ class TestComputeIntroSnapshot:
         assert "contact_request_id" in (result.error_message or "")
 
 
-class TestRedTeamSyncTradesPreDrainPreservesBybitFundingFlag:
+class TestRedTeamSyncTradesPreDrainPreservesDqFlag:
     """Audit-2026-05-07 red-team CRITICAL conf=9 — ``fetch_daily_pnl``
-    (via ``fetch_all_trades``) sets ``bybit_daily_pnl_includes_funding``
-    and the SUBSEQUENT ``fetch_raw_trades`` resets the DQ buffer at its
-    entry seam, wiping the flag. The fix: drain the per-task DQ buffer
-    BETWEEN the two calls and merge into ``exchange_dq_flags`` so the
-    funding flag survives to land on ``strategy_analytics``.
+    (via ``fetch_all_trades``) can plant DQ flags, and the SUBSEQUENT
+    ``fetch_raw_trades`` resets the DQ buffer at its entry seam, wiping
+    those flags. The fix: drain the per-task DQ buffer BETWEEN the two
+    calls and merge into ``exchange_dq_flags`` so the flag survives to
+    land on ``strategy_analytics``.
 
-    This test exercises the full ``run_sync_trades_job`` path: plants
-    the flag during the patched ``fetch_all_trades`` (mirroring how the
-    real Bybit branch behaves), then asserts the strategy_analytics
-    upsert call carries the flag.
+    Post-C-0319 (Bybit cutover): the historical case for this regression
+    was ``bybit_daily_pnl_includes_funding``, which is now retired (the
+    Bybit branch reconstructs funding-excluded realized PnL directly).
+    The entry-seam contract still matters for every OTHER DQ flag a
+    daily-PnL branch might set — we pin it here with a synthetic
+    ``test_pre_drain_marker`` so the test stays meaningful after the
+    cutover.
     """
 
     @pytest.mark.asyncio
-    async def test_bybit_funding_flag_lands_on_strategy_analytics(
+    async def test_dq_flag_lands_on_strategy_analytics(
         self,
     ) -> None:
         from services.exchange import (
@@ -2091,11 +2094,13 @@ class TestRedTeamSyncTradesPreDrainPreservesBybitFundingFlag:
 
         mock_ctx.supabase.table.side_effect = _table
 
-        # fetch_all_trades planting the C-0319 funding flag mirrors what
-        # the real Bybit branch in services/exchange.py does inside
-        # fetch_daily_pnl when items are returned by closed_pnl.
+        # fetch_all_trades planting a DQ flag mirrors what a daily-PnL
+        # branch in services/exchange.py would do (e.g. OKX archive
+        # truncation, Binance partial-symbol failures, the Bybit
+        # sync-truncated-cursor flag in fetch_raw_trades, etc.). We use
+        # a synthetic marker so the test stays meaningful post-C-0319.
         async def _fake_fetch_all_trades(*args, **kwargs):
-            _record_dq_flag("bybit_daily_pnl_includes_funding", True)
+            _record_dq_flag("test_pre_drain_marker", True)
             return [{"test": "trade"}]
 
         # fetch_raw_trades's real implementation resets the buffer at
@@ -2133,19 +2138,19 @@ class TestRedTeamSyncTradesPreDrainPreservesBybitFundingFlag:
             result = await run_sync_trades_job(job)
 
         assert result.outcome == DispatchOutcome.DONE
-        # The Bybit funding flag must have made it into the
-        # strategy_analytics upsert payload's data_quality_flags JSONB.
+        # The DQ flag must have made it into the strategy_analytics
+        # upsert payload's data_quality_flags JSONB.
         matched = [
             p for p in upsert_payloads
             if isinstance(p, dict)
             and (p.get("data_quality_flags") or {}).get(
-                "bybit_daily_pnl_includes_funding"
+                "test_pre_drain_marker"
             )
             is True
         ]
         assert matched, (
-            "C-0319 bybit_daily_pnl_includes_funding flag was not stamped "
-            "onto strategy_analytics — the worker-side pre-drain regressed. "
+            "test_pre_drain_marker flag was not stamped onto "
+            "strategy_analytics — the worker-side pre-drain regressed. "
             f"Upsert payloads: {upsert_payloads!r}"
         )
 
@@ -2183,9 +2188,11 @@ class TestRedTeamSyncTradesRateLimitDrainsDqBuffer:
         }
 
         async def _fetch_all_trades_429(*args, **kwargs):
-            # Plant a flag the way fetch_daily_pnl's Bybit branch would
-            # before the rate-limit hit on a later request.
-            _record_dq_flag("bybit_daily_pnl_includes_funding", True)
+            # Plant a DQ flag (any name) the way a fetch_daily_pnl
+            # branch might before the rate-limit hit on a later request.
+            # The test only cares that the drain in the 429 arm empties
+            # the buffer; the flag name itself is incidental.
+            _record_dq_flag("test_429_partial_marker", True)
             raise ccxt.RateLimitExceeded("429 too many requests")
 
         async def _stamp_429(*args, **kwargs):

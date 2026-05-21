@@ -669,20 +669,22 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
 
     raw_fills: list = []
     # Audit-2026-05-07 red-team CRITICAL conf=9 — ``fetch_all_trades`` /
-    # ``fetch_daily_pnl`` writes ``bybit_daily_pnl_includes_funding`` (the
-    # C-0319 double-count signal) into the per-task DQ buffer. The next
-    # call (``fetch_raw_trades``) resets the buffer at its entry seam as
+    # ``fetch_daily_pnl`` can write DQ flags into the per-task buffer
+    # (historically ``bybit_daily_pnl_includes_funding`` pre-C-0319;
+    # post-cutover the slot is reserved for future daily-PnL-branch
+    # flags such as OKX archive truncation). The next call
+    # (``fetch_raw_trades``) resets the buffer at its entry seam as
     # defense-in-depth against cross-task leaks; that reset would wipe
-    # the funding flag before we can read it. Drain the buffer HERE so
-    # the daily-PnL flags are captured into ``exchange_dq_flags`` and
-    # survive the ``fetch_raw_trades`` reset for the strategy_analytics
-    # stamp below.
+    # any daily-PnL flag before we can read it. Drain the buffer HERE
+    # so the daily-PnL flags are captured into ``exchange_dq_flags``
+    # and survive the ``fetch_raw_trades`` reset for the
+    # strategy_analytics stamp below.
     exchange_dq_flags: dict[str, Any] = {}
     try:
         trades = await fetch_all_trades(ctx.exchange, since_ms=since_ms)
-        # Drain BEFORE the next exchange call so the Bybit funding flag
-        # (and any other daily-PnL-set keys) does not get clobbered by
-        # ``fetch_raw_trades``' entry-seam reset on the same asyncio task.
+        # Drain BEFORE the next exchange call so daily-PnL flags do not
+        # get clobbered by ``fetch_raw_trades``' entry-seam reset on
+        # the same asyncio task.
         daily_pnl_dq_flags = get_and_clear_last_dq_flags()
         if daily_pnl_dq_flags:
             exchange_dq_flags.update(daily_pnl_dq_flags)
@@ -758,11 +760,11 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         await _stamp_429(ctx.supabase, ctx.key_row)
         # Audit-2026-05-07 red-team HIGH conf=8 — RateLimitExceeded can
         # bubble out of ``fetch_all_trades`` / ``fetch_usdt_balance`` /
-        # ``fetch_raw_trades`` AFTER the daily-PnL branch has populated
-        # ``bybit_daily_pnl_includes_funding`` (or fetch_raw has
-        # accumulated partial truncation flags). Worker pools reuse
-        # asyncio tasks (see ``run_reconcile_strategy_job`` comment); a
-        # bare re-raise here would leak those flags onto the next
+        # ``fetch_raw_trades`` AFTER the daily-PnL branch or fetch_raw
+        # has accumulated partial DQ flags (truncation, partial-symbol
+        # failures, fee-currency mismatch). Worker pools reuse asyncio
+        # tasks (see ``run_reconcile_strategy_job`` comment); a bare
+        # re-raise here would leak those flags onto the next
         # compute_jobs task scheduled on the same asyncio task.
         # Mirror the explicit drain in ``run_reconcile_strategy_job``'s
         # RateLimitExceeded handler.

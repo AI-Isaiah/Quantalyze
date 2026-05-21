@@ -5,6 +5,7 @@ import { StrategyForm } from "@/components/strategy/StrategyForm";
 import { ApiKeyManager } from "@/components/strategy/ApiKeyManager";
 import { CsvUpload } from "@/components/strategy/CsvUpload";
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
+import type { Strategy } from "@/lib/types";
 import { redirect } from "next/navigation";
 
 export default async function EditStrategyPage({
@@ -22,7 +23,7 @@ export default async function EditStrategyPage({
     .select("*")
     .eq("id", id)
     .eq("user_id", user.id)
-    .single();
+    .single<Strategy & { source: string | null }>();
 
   if (!strategy) {
     return (

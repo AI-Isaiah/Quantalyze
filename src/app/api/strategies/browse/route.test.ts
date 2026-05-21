@@ -184,12 +184,15 @@ describe("GET /api/strategies/browse", () => {
     expect(body.error).toBe("Unauthorized");
   });
 
-  it("T2 — 200 + body has strategies array with required fields", async () => {
+  it("T2 — 200 + body has strategies array with required fields (institutional tier preserves real name)", async () => {
+    // Audit C-0112 — institutional rows are the only tier permitted to
+    // surface the real `strategies.name`. Pin that path here.
     STATE.strategyRows = [
       {
         id: "11111111-1111-4111-8111-111111111111",
         name: "Alpha Quant",
         codename: "AQ",
+        disclosure_tier: "institutional",
         markets: ["crypto"],
         strategy_types: ["mean-reversion"],
       },
@@ -202,7 +205,7 @@ describe("GET /api/strategies/browse", () => {
     expect(body.strategies).toHaveLength(1);
     expect(body.strategies[0]).toMatchObject({
       id: "11111111-1111-4111-8111-111111111111",
-      name: "Alpha Quant",
+      name: "AQ",
       codename: "AQ",
       markets: ["crypto"],
       strategy_types: ["mean-reversion"],
@@ -226,11 +229,17 @@ describe("GET /api/strategies/browse", () => {
   });
 
   it("T4 — orders by name ascending (alphabetical) — UI doesn't re-sort", async () => {
+    // Audit C-0112 — institutional + no-codename rows are the only path
+    // that round-trips the real strategies.name to the response. Pin the
+    // alphabetical-order contract on that path so the assertion is
+    // meaningful (exploratory-tier rows would collapse to synthetic
+    // `Strategy #<id>` labels and stop testing the order contract).
     STATE.strategyRows = [
       {
         id: "11111111-1111-4111-8111-111111111111",
         name: "Alpha",
         codename: null,
+        disclosure_tier: "institutional",
         markets: [],
         strategy_types: [],
       },
@@ -238,6 +247,7 @@ describe("GET /api/strategies/browse", () => {
         id: "22222222-2222-4222-8222-222222222222",
         name: "Bravo",
         codename: null,
+        disclosure_tier: "institutional",
         markets: [],
         strategy_types: [],
       },
@@ -403,5 +413,135 @@ describe("GET /api/strategies/browse", () => {
     expect(res.status).toBe(500);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     consoleSpy.mockRestore();
+  });
+
+  // ============================================================
+  // T12 — audit-2026-05-07 C-0112: codename+name pair leak
+  //
+  // Before this fix the route projected the raw strategies.name column
+  // for EVERY row, regardless of disclosure_tier. Because the drawer
+  // searches case-insensitively over both `name` and `codename`, a
+  // caller who knows a real strategy name (e.g. from a SEC filing, a
+  // Twitter mention, the manager's own bio) could query the drawer and
+  // see which codename it maps to — defeating pseudonymity for the
+  // entire verified catalog. The fix replaces the response `name` with
+  // `displayStrategyName(...)`, which surfaces the real name ONLY when
+  // `disclosure_tier === 'institutional'`.
+  // ============================================================
+  it("T12a — exploratory tier + codename present → response name === codename (real name suppressed)", async () => {
+    STATE.strategyRows = [
+      {
+        id: "33333333-3333-4333-8333-333333333333",
+        name: "Renaissance Medallion",
+        codename: "Sigma-7",
+        disclosure_tier: "exploratory",
+        markets: ["crypto"],
+        strategy_types: ["systematic"],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies).toHaveLength(1);
+    // The pseudonymity contract: the response label is the codename, NOT
+    // the real strategy name. A drawer search for "Renaissance" must NOT
+    // find this row, because the row never carries the string
+    // "Renaissance" anywhere on the wire.
+    expect(body.strategies[0].name).toBe("Sigma-7");
+    expect(body.strategies[0].codename).toBe("Sigma-7");
+    expect(JSON.stringify(body)).not.toContain("Renaissance");
+    expect(JSON.stringify(body)).not.toContain("Medallion");
+  });
+
+  it("T12b — exploratory tier + no codename → response name === 'Strategy #<id-prefix>' (real name suppressed)", async () => {
+    STATE.strategyRows = [
+      {
+        id: "44444444-4444-4444-8444-444444444444",
+        name: "Bridgewater Pure Alpha",
+        codename: null,
+        disclosure_tier: "exploratory",
+        markets: ["fx"],
+        strategy_types: ["macro"],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // No codename on an exploratory row → fall back to the synthetic
+    // `Strategy #<id-prefix>` label rather than leaking the real name.
+    expect(body.strategies[0].name).toBe("Strategy #44444444");
+    expect(JSON.stringify(body)).not.toContain("Bridgewater");
+    expect(JSON.stringify(body)).not.toContain("Pure Alpha");
+  });
+
+  it("T12c — institutional tier → real strategies.name surfaces ONLY when codename is absent", async () => {
+    // Institutional managers have opted into open identity, so the real
+    // name is the legitimate label. But `displayStrategyName` still
+    // prefers codename when one is set — pin both cases.
+    STATE.strategyRows = [
+      {
+        id: "55555555-5555-4555-8555-555555555555",
+        name: "Two Sigma Equity Long-Short",
+        codename: null,
+        disclosure_tier: "institutional",
+        markets: ["equity"],
+        strategy_types: ["long-short"],
+      },
+      {
+        id: "66666666-6666-4666-8666-666666666666",
+        name: "Citadel Wellington",
+        codename: "Wellington-1",
+        disclosure_tier: "institutional",
+        markets: ["multi"],
+        strategy_types: ["multi-strategy"],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies[0].name).toBe("Two Sigma Equity Long-Short");
+    // Codename still wins on institutional rows so the UI renders a
+    // single canonical label.
+    expect(body.strategies[1].name).toBe("Wellington-1");
+    expect(body.strategies[1].codename).toBe("Wellington-1");
+  });
+
+  it("T12d — missing/null disclosure_tier defaults to exploratory (fail-closed)", async () => {
+    // Legacy rows or partial-import rows may have a NULL
+    // disclosure_tier. The route MUST treat those as exploratory, not
+    // accidentally elevate them to institutional and leak the name.
+    STATE.strategyRows = [
+      {
+        id: "77777777-7777-4777-8777-777777777777",
+        name: "Legacy Hedge Fund 2007",
+        codename: null,
+        // disclosure_tier intentionally omitted
+        markets: ["equity"],
+        strategy_types: ["long-short"],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies[0].name).toBe("Strategy #77777777");
+    expect(JSON.stringify(body)).not.toContain("Legacy Hedge Fund");
+  });
+
+  it("T12e — SELECT list co-fetches disclosure_tier (so the mapping has the data it needs)", async () => {
+    // Belt-and-braces: if a future refactor drops disclosure_tier from
+    // the SELECT list, the route would silently default every row to
+    // 'exploratory' and synthesize labels for institutional rows too —
+    // not a security regression, but a UX one. Pin the SELECT shape.
+    STATE.strategyRows = [];
+    const { GET } = await import("./route");
+    await GET(makeRequest());
+    const cols = STATE.observedFilters.selectCols ?? "";
+    expect(cols).toContain("disclosure_tier");
+    expect(cols).toContain("codename");
+    expect(cols).toContain("name");
   });
 });
