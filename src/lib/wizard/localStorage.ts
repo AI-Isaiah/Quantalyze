@@ -372,7 +372,19 @@ export function deriveWizardResumeOverrides(
     // API branch: only restore the LS step when the pointer matches the
     // server-side draft. Mismatch ⇒ leave the SSR default ("sync_preview")
     // and surface the resume banner instead.
-    out.step = loaded.step;
+    //
+    // Steps "metadata" and "submit" depend on React-only state
+    // (syncSnapshot, metadataDraft) that is NOT persisted to localStorage
+    // — the parsed analytics + sample symbols are too large and the
+    // metadata draft is held in client form state until finalize. Restoring
+    // either step from LS would render an empty content region (the
+    // conditional in WizardClient.tsx requires the dependent state). Same
+    // safety pattern as the CSV branch's csv_upload-only restore above.
+    // Fall through to the SSR default "sync_preview", which re-runs the
+    // poll and rebuilds syncSnapshot from the server-side draft.
+    if (loaded.step === "connect_key" || loaded.step === "sync_preview") {
+      out.step = loaded.step;
+    }
   }
 
   if (initialDraftId && loaded.strategyId !== initialDraftId) {
