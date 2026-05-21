@@ -42,6 +42,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
+  // C-0043 (audit-2026-05-07) — canonical error shape across src/app/api/
+  // is uniformly `{ error: string }`. No route in the tree returns
+  // `{ error, fields }`, so field-level validation errors are surfaced as
+  // human-readable strings naming the offending field. Keep every error
+  // response in this route conforming to that single shape.
   if (!body.allocator_id || typeof body.allocator_id !== "string") {
     return NextResponse.json({ error: "allocator_id is required" }, { status: 400 });
   }
@@ -124,11 +129,20 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   const strategy_id = url.searchParams.get("strategy_id");
   const decision = url.searchParams.get("decision");
 
-  if (!allocator_id || !strategy_id || !decision) {
-    return NextResponse.json({ error: "allocator_id, strategy_id, decision required" }, { status: 400 });
+  // C-0043 (audit-2026-05-07) — same canonical `{ error: string }` shape
+  // as the POST handler. Messages are human-readable and name the
+  // offending field inline (no separate `fields` map).
+  if (!allocator_id) {
+    return NextResponse.json({ error: "allocator_id is required" }, { status: 400 });
+  }
+  if (!strategy_id) {
+    return NextResponse.json({ error: "strategy_id is required" }, { status: 400 });
+  }
+  if (!decision) {
+    return NextResponse.json({ error: "decision is required" }, { status: 400 });
   }
   if (!VALID.includes(decision as Decision)) {
-    return NextResponse.json({ error: "invalid decision" }, { status: 400 });
+    return NextResponse.json({ error: "decision must be thumbs_up|thumbs_down|snoozed" }, { status: 400 });
   }
 
   const admin = createAdminClient();

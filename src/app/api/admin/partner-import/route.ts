@@ -96,6 +96,18 @@ class StrategyTierConflictError extends Error {
 //
 // Auth: admin only. partner_tag validated via the shared isValidPartnerTag
 // helper against the canonical PARTNER_TAG_RE.
+//
+// Contract v2 (audit-2026-05-07 C-0052): the request MAY pass an explicit
+// `?with_header=true|false` query parameter to declare whether the CSV
+// payloads (`managers_csv`, `allocators_csv`) include a header row.
+// Defaults to `true` so older clients that omit the parameter continue to
+// work unchanged; we log a deprecation warning in that case so we can
+// retire the implicit-header contract once all in-tree callers pass an
+// explicit value. Invalid values (anything other than `true`/`false`) are
+// rejected with a 400. The previous parser sniffed the first row and was
+// brittle — a data row that happened to spell `manager_email` would be
+// misclassified as a header. The query parameter is now the single source
+// of truth; the parser never sniffs.
 
 interface ManagerRow {
   manager_email: string;
@@ -128,8 +140,11 @@ interface ParsedCsv<T> {
   raw_rows_parsed: number;
 }
 
-function parseManagerRows(raw: string): ParsedCsv<ManagerRow> {
-  const rawCount = countDataRows(raw);
+function parseManagerRows(
+  raw: string,
+  hasHeader: boolean,
+): ParsedCsv<ManagerRow> {
+  const rawCount = countDataRows(raw, hasHeader);
   const rows = parseCsvWithSchema(
     raw,
     ["manager_email", "strategy_name", "disclosure_tier"],
@@ -144,12 +159,16 @@ function parseManagerRows(raw: string): ParsedCsv<ManagerRow> {
         disclosure_tier,
       };
     },
+    hasHeader,
   );
   return { rows, raw_rows_parsed: rawCount };
 }
 
-function parseAllocatorRows(raw: string): ParsedCsv<AllocatorRow> {
-  const rawCount = countDataRows(raw);
+function parseAllocatorRows(
+  raw: string,
+  hasHeader: boolean,
+): ParsedCsv<AllocatorRow> {
+  const rawCount = countDataRows(raw, hasHeader);
   const rows = parseCsvWithSchema(
     raw,
     ["allocator_email", "mandate_archetype", "ticket_size_usd"],
@@ -164,26 +183,33 @@ function parseAllocatorRows(raw: string): ParsedCsv<AllocatorRow> {
         ticket_size_usd: Number.isFinite(ticket_size_usd) ? ticket_size_usd : 0,
       };
     },
+    hasHeader,
   );
   return { rows, raw_rows_parsed: rawCount };
 }
 
 /**
- * Count the data-row lines in a raw CSV payload (header row excluded,
- * trailing empty lines excluded). Used for the H-0239 raw-vs-parsed
- * delta surface — the count uses the same `parseCsv` splitter the
- * downstream parser uses so the delta reflects what the parser
- * actually saw (any multi-line-quote silent split is included in the
- * raw count and will surface as a parsed-vs-raw mismatch).
+ * Count the data-row lines in a raw CSV payload (header row excluded
+ * when present, trailing empty lines excluded). Used for the H-0239
+ * raw-vs-parsed delta surface — the count uses the same `parseCsv`
+ * splitter the downstream parser uses so the delta reflects what the
+ * parser actually saw (any multi-line-quote silent split is included
+ * in the raw count and will surface as a parsed-vs-raw mismatch).
+ *
+ * Audit-2026-05-07 C-0052: `hasHeader` is now explicit. When false, row
+ * 0 is data and is included in the count; when true (the default for
+ * back-compat) row 0 is the header and is excluded.
  */
-function countDataRows(raw: string): number {
+function countDataRows(raw: string, hasHeader: boolean): number {
   const rows = parseCsv(raw);
-  if (rows.length <= 1) return 0;
-  // Exclude header. Empty rows (length 0) are already dropped by
-  // parseCsvWithSchema; we mirror that here so the delta only reflects
-  // rows the schema mapper SAW and chose to drop, not raw blank lines.
+  if (rows.length === 0) return 0;
+  const startIdx = hasHeader ? 1 : 0;
+  // Exclude header (when present). Empty rows (length 0) are already
+  // dropped by parseCsvWithSchema; we mirror that here so the delta
+  // only reflects rows the schema mapper SAW and chose to drop, not
+  // raw blank lines.
   let nonEmpty = 0;
-  for (let i = 1; i < rows.length; i++) {
+  for (let i = startIdx; i < rows.length; i++) {
     if (rows[i].length > 0 && rows[i].some((cell) => cell.trim() !== "")) {
       nonEmpty += 1;
     }
@@ -322,6 +348,40 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
 
+  // Contract v2 (C-0052): resolve the with_header flag from the URL
+  // BEFORE parsing the JSON body. Three states:
+  //   * absent → default to `true` and log a deprecation warning so we
+  //     can retire the implicit-header contract once all callers
+  //     migrate.
+  //   * "true" / "false" (case-insensitive) → use as-is.
+  //   * anything else → 400. Strict rejection is the whole point of the
+  //     fix; silently coercing "yes"/"1"/"y" would re-introduce the
+  //     brittle sniff-style behaviour we're trying to eliminate.
+  const url = new URL(request.url);
+  const withHeaderRaw = url.searchParams.get("with_header");
+  let hasHeader: boolean;
+  if (withHeaderRaw === null) {
+    hasHeader = true;
+    console.warn(
+      "[api/admin/partner-import] DEPRECATION: request omitted `with_header` query parameter; defaulting to true. Pass `?with_header=true|false` explicitly. (audit-2026-05-07 C-0052)",
+    );
+  } else {
+    const normalized = withHeaderRaw.toLowerCase();
+    if (normalized === "true") {
+      hasHeader = true;
+    } else if (normalized === "false") {
+      hasHeader = false;
+    } else {
+      return NextResponse.json(
+        {
+          error:
+            "with_header must be 'true' or 'false' (audit-2026-05-07 C-0052: explicit contract v2)",
+        },
+        { status: 400 },
+      );
+    }
+  }
+
   let body: {
     partner_tag?: unknown;
     managers_csv?: unknown;
@@ -349,8 +409,8 @@ export async function POST(request: Request): Promise<NextResponse> {
   let managersRawCount = 0;
   let allocatorsRawCount = 0;
   try {
-    const managersParsed = parseManagerRows(managersCsv);
-    const allocatorsParsed = parseAllocatorRows(allocatorsCsv);
+    const managersParsed = parseManagerRows(managersCsv, hasHeader);
+    const allocatorsParsed = parseAllocatorRows(allocatorsCsv, hasHeader);
     managers = managersParsed.rows;
     allocators = allocatorsParsed.rows;
     managersRawCount = managersParsed.raw_rows_parsed;

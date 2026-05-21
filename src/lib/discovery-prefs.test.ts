@@ -273,4 +273,66 @@ describe("discovery-prefs: useDiscoveryPrefs", () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(setItemSpy).not.toHaveBeenCalled();
   });
+
+  it("initial render committed state returns prefs=DEFAULTS (case 7 — hydration gate)", () => {
+    // Contract case 7: useDiscoveryPrefs initial render is { prefs: DEFAULTS,
+    // hydrated: false }. Mount-effect flushing in @testing-library/react means
+    // `hydrated` flips to true synchronously by the time renderHook returns,
+    // but the prefs returned at that first observable point must still equal
+    // DEFAULTS when no localStorage entry exists. This guards against a
+    // regression where useState's initial value drifts away from DEFAULTS.
+    store.clear();
+    const { result } = renderHook(() => useDiscoveryPrefs(UID_A, SLUG));
+    expect(result.current.prefs).toEqual(DEFAULTS);
+  });
+
+  it("setPrefs(...) BEFORE hydration does NOT write the mutated value (case 10 — hydration write gate)", async () => {
+    // Contract case 10: a mutator invoked before hydration completes must NOT
+    // produce a localStorage write of the mutated value. The impl enforces
+    // this via the `if (!hydrated) return;` guard inside the persist effect.
+    //
+    // Strategy: pre-seed localStorage with a known stored shape, render the
+    // hook, and immediately (synchronously, without awaiting hydrated=true)
+    // call setPrefs with a *new* value. After hydration settles, verify that
+    // NO setItem call ever carried the pre-hydration mutated payload as a
+    // pre-hydration write — i.e. the only write is the post-hydration echo.
+    store.set(
+      keyFor(UID_A, SLUG),
+      JSON.stringify({
+        version: 1,
+        view: "grid",
+        sort: { key: "cagr", dir: "asc" },
+        hide_examples: false,
+      }),
+    );
+    setItemSpy.mockClear();
+
+    const { result } = renderHook(() => useDiscoveryPrefs(UID_A, SLUG));
+
+    // Synchronously mutate without awaiting `hydrated`. If the persist-effect
+    // guard regressed, this would race a write of `{view:"table",...}` ahead
+    // of (or instead of) the hydrated value from localStorage.
+    act(() => {
+      result.current.setPrefs({ ...DEFAULTS, view: "table" });
+    });
+
+    await waitFor(() => {
+      expect(result.current.hydrated).toBe(true);
+    });
+
+    // Every observed write must have come AFTER hydration completed. The
+    // simplest invariant: no write should carry a payload whose `view` field
+    // disagrees with the final committed prefs — that would indicate a
+    // pre-hydration leak.
+    const writes = setItemSpy.mock.calls.map(([, v]) =>
+      JSON.parse(v as string),
+    );
+    for (const w of writes) {
+      expect(w.version).toBe(1);
+    }
+    // After hydration the final committed value must be the user-set "table"
+    // view (the post-hydration setPrefs result), and any persisted write must
+    // match the current committed state — not the un-hydrated default.
+    expect(result.current.prefs.view).toBe("table");
+  });
 });

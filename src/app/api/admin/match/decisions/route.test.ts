@@ -118,6 +118,37 @@ describe("POST /api/admin/match/decisions — 401 vs 403 (P444)", () => {
   });
 });
 
+describe("POST /api/admin/match/decisions — canonical error shape (C-0043)", () => {
+  beforeEach(() => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    vi.resetModules();
+  });
+
+  it("returns canonical { error: string } shape for invalid decision value", async () => {
+    const { POST } = await import("./route");
+    const req = new NextRequest("http://localhost:3000/api/admin/match/decisions", {
+      method: "POST",
+      headers: VALID_ORIGIN,
+      body: JSON.stringify({
+        allocator_id: "alloc-1",
+        strategy_id: "strat-1",
+        decision: "thumbs_sideways",
+      }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as Record<string, unknown>;
+    // C-0043: canonical shape is flat `{ error: string }` — NOT the
+    // legacy/mixed `{ error, fields: { name: string[] } }` shape. Assert
+    // both directions so regressions surface either way.
+    expect(typeof json.error).toBe("string");
+    expect(json.error).toContain("decision");
+    expect(json).not.toHaveProperty("fields");
+    expect(Object.keys(json)).toEqual(["error"]);
+  });
+});
+
 describe("DELETE /api/admin/match/decisions — 401 vs 403 (P444)", () => {
   beforeEach(() => {
     userState.current = null;
