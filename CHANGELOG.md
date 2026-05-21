@@ -7,6 +7,50 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.17] - 2026-05-21
+
+**fix(ci): allowlist localhost:3000 in CSRF guard for the seed-gated e2e server.**
+
+Third stop on the Railway-unblock train. v0.24.5.16 set the Origin header on the prefs-isolation PUT, but the next layer rejected it with `{"error":"Origin not allowed"}`. The seed-gated step runs the server in production mode (`npm run start`), so `src/lib/csrf.ts:67`'s `NODE_ENV !== "production"` localhost auto-allowlist never fires. The CSRF allowlist needs an explicit `NEXT_PUBLIC_ALLOWED_ORIGINS=http://localhost:3000` to accept the test request.
+
+### Why this is a CI-only change
+`NEXT_PUBLIC_ALLOWED_ORIGINS` is read by `buildAllowedHosts()` at server module-load. The env var is only set inside the seed-gated step's `env:` block in `.github/workflows/ci.yml:851-869`; production Vercel deploys never see it. The variable was added in PR #155 specifically for cases where allowlist drift in non-prod-NODE_ENV runs leaks into 403s — this is exactly its intended use case.
+
+### Fixed
+- `.github/workflows/ci.yml` seed-gated `Run seed-gated specs` step env: added `NEXT_PUBLIC_ALLOWED_ORIGINS: http://localhost:3000`.
+
+
+## [0.24.5.16] - 2026-05-21
+
+**fix(e2e): set Origin header on `discovery-prefs-isolation` PUT so it clears the CSRF guard.**
+
+Second half of the Railway-unblock work. The C-0300 sentinel fix (v0.24.5.15) exposed a previously-masked failure: the seed-gated `discovery-prefs-isolation` spec — also rewritten in PR #256 — calls `page.request.put("/api/preferences", ...)` to seed user A's prefs row, but Playwright's `APIRequestContext` does NOT add an `Origin` header for programmatic requests. The CSRF guard at `src/lib/csrf.ts:82` (`Missing Origin or Referer header`) 403s before the route's RPC ever runs, so the isolation contract was unverifiable.
+
+### Root cause
+PR #256 rewrote the spec from localStorage isolation (browser-driven, Origin set automatically) to server-side RLS isolation (programmatic API context, no Origin). The CSRF guard pre-dated the rewrite — it was added in PR #27 — and was never tested against a programmatic-API caller until #256.
+
+### Fixed
+- `e2e/discovery-prefs-isolation.spec.ts:133` — set `headers.origin = new URL(page.url()).origin` so the request presents the page's current origin (localhost:3000 in CI, per `src/lib/csrf.ts:67`'s non-prod allowlist).
+
+
+## [0.24.5.15] - 2026-05-21
+
+**fix(ci): commit the chromium-linux baseline PNGs that PR #256's C-0300 sentinel requires.**
+
+Unblocks Railway deploys. Every CI run on `main` since PR #256 merged ~2h earlier has been red because the sentinel test asserts three baseline PNGs exist on disk, but those PNGs were never generated. Railway gates on CI; 14+ commits queued without deploying as a result — most relevantly PR #260 (Bybit sync 7-day truncation fix).
+
+### Root cause
+PR #256 added `e2e/demo-screenshot.spec.ts:24` — a sentinel that runs unconditionally in CI via `--grep "C-0300 sentinel"` and fails if `e2e/demo-screenshot.spec.ts-snapshots/demo-{375,768,1280}-chromium-linux.png` are missing. The sentinel correctly caught its own missing artifacts, but no one ran the Recovery procedure documented at lines 63-82 of the spec to actually generate them.
+
+The placeholder.supabase.co `[demo] profile fetch failed` log lines visible in the failed e2e logs are unrelated stderr noise — the unconditional spec set (auth, smoke, demo-public, demo-founder-view, onboarding-banner-smoke) passes all 28 tests against the placeholder env. The console-error filter at `e2e/demo-public.spec.ts:266` already scopes `Failed to fetch` suppression to `/api/demo/match`.
+
+### Fixed
+- Generated the three baselines by running the spec's documented Recovery command (Playwright Linux Docker image, placeholder env, `--update-snapshots --grep-invert "C-0300 sentinel"`) and committed them under `e2e/demo-screenshot.spec.ts-snapshots/`. The captured render is the "Demo data is loading" empty state matching the spec's intended placeholder-CI profile (per lines 53-55).
+
+### Not touched
+- The screenshot regression suite (`Screenshot regression: /demo` describe block) remains excluded from CI's command list pending owner decision on whether to enable it now that baselines exist. The sentinel will continue to enforce that any future PR that deletes the baselines also re-runs the Recovery procedure.
+
+
 ## [0.24.5.14] - 2026-05-21
 
 **fix(auth): build the forgot-password flow that PR #258's signup copy points at.**
