@@ -8,14 +8,42 @@ describe("Disclaimer", () => {
     expect(screen.getByText(/not financial advice/i)).toBeDefined();
   });
 
-  it("renders strategy variant", () => {
-    render(<Disclaimer variant="strategy" />);
+  it("strategy variant: api_verified claims exchange-API verification", () => {
+    render(<Disclaimer variant="strategy" trustTier="api_verified" />);
     expect(screen.getByText(/data verified from exchange api/i)).toBeDefined();
   });
 
-  it("renders factsheet variant", () => {
-    render(<Disclaimer variant="factsheet" />);
+  it("strategy variant: csv_uploaded never claims exchange-API verification", () => {
+    render(<Disclaimer variant="strategy" trustTier="csv_uploaded" />);
+    expect(
+      screen.getByText(/uploaded by the manager as a daily-return series/i),
+    ).toBeDefined();
+    expect(screen.queryByText(/data verified from exchange api/i)).toBeNull();
+  });
+
+  it("strategy variant: self_reported is honest about provenance", () => {
+    render(<Disclaimer variant="strategy" trustTier="self_reported" />);
+    expect(screen.getByText(/self-reported by the manager/i)).toBeDefined();
+    expect(screen.queryByText(/data verified from exchange api/i)).toBeNull();
+  });
+
+  it("strategy variant: missing trustTier defaults to self_reported (no invented claim)", () => {
+    render(<Disclaimer variant="strategy" />);
+    expect(screen.getByText(/self-reported by the manager/i)).toBeDefined();
+    expect(screen.queryByText(/data verified from exchange api/i)).toBeNull();
+  });
+
+  it("factsheet variant: keeps preamble + adds tier-aware provenance for csv_uploaded", () => {
+    render(<Disclaimer variant="factsheet" trustTier="csv_uploaded" />);
     expect(screen.getByText(/informational purposes only/i)).toBeDefined();
+    expect(
+      screen.getByText(/uploaded by the manager as a daily-return series/i),
+    ).toBeDefined();
+  });
+
+  it("factsheet variant: api_verified keeps the exchange-API claim", () => {
+    render(<Disclaimer variant="factsheet" trustTier="api_verified" />);
+    expect(screen.getByText(/data verified from exchange api/i)).toBeDefined();
   });
 
   it("applies footer-specific styles", () => {

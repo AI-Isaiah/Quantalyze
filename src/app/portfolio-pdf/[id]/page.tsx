@@ -307,7 +307,13 @@ export default async function PortfolioPdfPage({
         </div>
       )}
 
-      <Disclaimer variant="factsheet" />
+      {/*
+       * Portfolio PDFs may mix tiers across constituent strategies. Until the
+       * portfolio aggregate provenance is tracked, fall back to the no-claim
+       * default so the footer never asserts "exchange-API verified" on a
+       * portfolio whose constituents include CSV-uploaded strategies.
+       */}
+      <Disclaimer variant="factsheet" trustTier={null} />
     </div>
   );
 }

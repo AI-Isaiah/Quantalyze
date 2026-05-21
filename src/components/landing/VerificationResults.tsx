@@ -121,7 +121,14 @@ export function VerificationResults({
         </Link>
       </div>
 
-      <Disclaimer variant="strategy" className="text-center" />
+      {/* VerificationResults only renders after a successful exchange-API
+       * verification flow on the landing page — provenance is always
+       * `api_verified` by construction. */}
+      <Disclaimer
+        variant="strategy"
+        trustTier="api_verified"
+        className="text-center"
+      />
     </div>
   );
 }
