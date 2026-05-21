@@ -125,6 +125,13 @@ export const ADMIN_ROUTE_MANIFEST: readonly AdminRouteEntry[] = [
       "v0.22.24.2 review-fix inlined the handler to drop withAdminAuth round-trip",
   },
   {
+    route: "src/app/api/admin/manager-approve/route.ts",
+    current: "isAdminUser-inline",
+    target: "withRole",
+    notes:
+      "task #14 (v0.24.5.18) mirror of allocator-approve — same inlined-handler shape",
+  },
+  {
     // `[allocator_id]` sorts before `allocators` under default localeCompare
     // (brackets are punctuation, ignored at primary collation level so the
     // letters that follow compare first — `a` of `allocator_id` < `a` of

@@ -7,6 +7,35 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.19] - 2026-05-21
+
+**fix(ship): CI follow-up to v0.24.5.18 — manifest entry + test redirect.**
+
+- `src/lib/auth/rbac-manifest.ts` — added entry for the new `/api/admin/manager-approve` route (CI's `check-admin-route-manifest` enforces that every `src/app/api/admin/*` route has a manifest declaration).
+- `src/components/auth/SignupForm.repeated-signup.test.tsx` — updated the auto-confirm-redirect assertion from `/onboarding` to `/pending-approval` to match the v0.24.5.18 behavior change.
+
+
+## [0.24.5.18] - 2026-05-21
+
+**feat(auth): universal signup-approval gate + "your application is being reviewed" landing page.**
+
+Every new signup — manager OR allocator — now requires admin approval before reaching the dashboard. Before this change, anyone could sign up, get dropped into the dashboard with `{allocator,manager}_status='newbie'`, and start using the platform with zero gate. Real users hit the wall when feature-gated screens denied them, with no signal what was wrong.
+
+### Root cause
+The profiles schema already had `allocator_status` and `manager_status` columns with `'newbie'` default. Admin UI already queried `pendingAllocators` and had a `/api/admin/allocator-approve` route that wrote `status='verified'`. But NO gate in `(dashboard)/layout.tsx` or `(auth)/onboarding/page.tsx` checked those statuses. A pending newbie account had identical access to a verified one.
+
+### Fixed
+- `src/lib/approval.ts` + `src/lib/approval.test.ts` — `isProfileApproved()` truth table (admin override, allocator/manager/both/unknown role). 9 regression tests pin the contract so a future status-name drift (`'verified'` → `'approved'`) can't silently let pending users through.
+- `src/app/(auth)/pending-approval/page.tsx` — new landing screen: "Thanks for signing up. Your application is being reviewed. We'll email you as soon as it's approved." Includes sign-out + support-email contact.
+- `src/app/(dashboard)/layout.tsx` — gate at the dashboard root: pending profile → redirect to `/pending-approval`. Admin override preserved so the first admin signup can still reach the queue used to approve everyone else.
+- `src/app/(auth)/onboarding/page.tsx` — same gate (lives under `(auth)`, outside the dashboard layout).
+- `src/components/auth/SignupForm.tsx` — post-signup `router.push("/pending-approval")` + `emailRedirectTo` updated so the email confirmation link lands on the pending screen, not the dashboard.
+- `src/app/api/admin/manager-approve/route.ts` — mirror of `/api/admin/allocator-approve`, writes `manager_status='verified'`, emits `manager.approve` audit action.
+- `src/app/(dashboard)/admin/page.tsx` + `src/components/admin/AdminTabs.tsx` — new "Managers" tab next to "Allocators" with the symmetric pending queue + Approve button. Each tab's query is now role-scoped (`role IN ('allocator','both')` and `role IN ('manager','both')`) so single-role users appear in exactly one list and `both` profiles need both approvals before reaching the dashboard.
+- `src/lib/audit.ts` — `'manager.approve'` added to the `AuditAction` union.
+- `supabase/migrations/20260521150000_universal_signup_approval_gate.sql` — backfill every existing profile to `'verified'` so the gate landing in prod does NOT lock out current users. Only brand-new signups (which hit the schema default of `'newbie'`) encounter the pending screen.
+
+
 ## [0.24.5.17] - 2026-05-21
 
 **fix(ci): allowlist localhost:3000 in CSRF guard for the seed-gated e2e server.**

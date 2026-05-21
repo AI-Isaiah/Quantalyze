@@ -75,7 +75,13 @@ export function SignupForm() {
       password,
       options: {
         data: { display_name: displayName, role },
-        emailRedirectTo: `${window.location.origin}/auth/callback?next=/onboarding`,
+        // task #14 (2026-05-21): post-confirmation landing flips from
+        // /onboarding to /pending-approval. Every new signup now needs
+        // admin approval before the dashboard opens. The pending-approval
+        // page short-circuits to /onboarding for verified profiles so the
+        // existing email-link flow still works for users approved between
+        // signup and email click.
+        emailRedirectTo: `${window.location.origin}/auth/callback?next=/pending-approval`,
       },
     });
 
@@ -103,7 +109,13 @@ export function SignupForm() {
       return;
     }
 
-    router.push("/onboarding");
+    // task #14 (2026-05-21): land on /pending-approval, not /onboarding.
+    // The dashboard + onboarding gates also redirect un-verified profiles
+    // here, so this push is mostly to skip one extra round-trip; if Supabase
+    // ever returns an active session at signup (currently it requires email
+    // confirmation), the user lands on the right screen on the first paint
+    // instead of flashing the dashboard before the redirect fires.
+    router.push("/pending-approval");
     router.refresh();
   }
 
