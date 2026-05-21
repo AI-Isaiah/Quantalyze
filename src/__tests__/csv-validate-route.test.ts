@@ -29,6 +29,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
+// next/server: mock `after` so it runs synchronously in the test
+// environment rather than throwing "called outside a request scope".
+// Pattern mirrors deletion-request-admin-self.test.ts.
+vi.mock("next/server", async (orig) => {
+  const real = await orig<typeof import("next/server")>();
+  return {
+    ...real,
+    after: (cb: () => void | Promise<void>) => queueMicrotask(() => void cb()),
+  };
+});
+
 // ---------------------------------------------------------------------
 // Module mocks — withAuth + ratelimit + analytics-client + supabase server
 // ---------------------------------------------------------------------

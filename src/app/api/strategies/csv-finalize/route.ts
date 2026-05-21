@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -504,6 +504,34 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     }
   }
 
+  // CSV → analytics pipeline Task 11: enqueue the analytics computation
+  // for the freshly persisted series. Gated by USE_COMPUTE_JOBS_QUEUE so
+  // the legacy direct-compute path can keep working while the worker is
+  // deployed. Mirrors finalize-wizard/route.ts:619-644.
+  if (newStrategyId && dailyReturnsSeries.length > 0) {
+    after(async () => {
+      if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
+      try {
+        const { createAdminClient } = await import("@/lib/supabase/admin");
+        const admin = createAdminClient();
+        const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
+          p_strategy_id: newStrategyId,
+          p_kind: "compute_analytics_from_csv",
+          p_metadata: { source: "csv-finalize", fmt },
+        });
+        if (enqueueErr) {
+          console.warn(
+            `[strategies/csv-finalize] enqueue_compute_analytics_from_csv failed (non-blocking): ${enqueueErr.message}`,
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `[strategies/csv-finalize] enqueue side-effect threw (non-blocking): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    });
+  }
+
   return NextResponse.json({
     strategy_id: newStrategyId,
     status: "pending_review",
@@ -601,6 +629,32 @@ async function unifiedCsvFinalizeHandler(args: {
           { status: 500 },
         );
       }
+    }
+    // CSV → analytics pipeline Task 11 (unified path): same non-blocking
+    // enqueue so the unified-backbone flip doesn't lose compute jobs.
+    if (args.dailyReturnsSeries.length > 0) {
+      const strategyIdForEnqueue = unifiedBody.strategy_id;
+      after(async () => {
+        if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
+        try {
+          const { createAdminClient } = await import("@/lib/supabase/admin");
+          const admin = createAdminClient();
+          const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
+            p_strategy_id: strategyIdForEnqueue,
+            p_kind: "compute_analytics_from_csv",
+            p_metadata: { source: "csv-finalize", fmt: args.fmt },
+          });
+          if (enqueueErr) {
+            console.warn(
+              `[strategies/csv-finalize unified] enqueue_compute_analytics_from_csv failed (non-blocking): ${enqueueErr.message}`,
+            );
+          }
+        } catch (err) {
+          console.warn(
+            `[strategies/csv-finalize unified] enqueue side-effect threw (non-blocking): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      });
     }
   }
   return NextResponse.json(result.body);
