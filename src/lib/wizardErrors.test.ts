@@ -103,6 +103,26 @@ describe("wizardErrors", () => {
       expect(result.cause).toContain("Your trades span");
     });
 
+    it("floor-rounds sub-7 span so 6.97 days never displays as 7.0", () => {
+      // Regression — 2026-05-21 user dogfooding report. The gate compares
+      // strict `< 7` (strategyGate.ts:89) but `.toFixed(1)` rounds half-up,
+      // so a real span of 6.95-6.99 was rendered as "7.0" alongside a
+      // failure message. The user read "7.0 days" and reasonably concluded
+      // they were AT the threshold but still being rejected — confusing.
+      // After the fix, floor-rounding guarantees a sub-7 value never
+      // displays as "7.0".
+      const just_under = formatKeyError("GATE_INSUFFICIENT_DAYS", { days: 6.97 });
+      expect(just_under.cause).toContain("6.9 calendar day");
+      expect(just_under.cause).not.toContain("7.0 calendar day");
+
+      const really_close = formatKeyError("GATE_INSUFFICIENT_DAYS", { days: 6.99 });
+      expect(really_close.cause).toContain("6.9 calendar day");
+      expect(really_close.cause).not.toContain("7.0 calendar day");
+
+      const half_below = formatKeyError("GATE_INSUFFICIENT_DAYS", { days: 6.5 });
+      expect(half_below.cause).toContain("6.5 calendar day");
+    });
+
     it("GATE_INSUFFICIENT_DAYS title talks about history, not activity", () => {
       // Regression: the old wording "needs at least 7 days of activity"
       // was misleading for high-frequency keys (3,842 fills in <7 days
