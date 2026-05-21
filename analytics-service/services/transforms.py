@@ -117,9 +117,25 @@ def trades_to_daily_returns_with_status(
         )
         daily_pnl = df.groupby("date")["daily_pnl"].sum()
 
-        # Minimum balance threshold: ignore dust accounts (e.g., $0.50 after withdrawal)
-        # that would produce absurd percentage returns
-        min_balance = max(daily_pnl.abs().max() * 2, 100) if len(daily_pnl) > 0 else 100
+        # audit-2026-05-07 C-0233 — dust threshold MUST be a fixed absolute
+        # floor, not a function of the largest single-day PnL. Pre-fix:
+        # `min_balance = max(daily_pnl.abs().max() * 2, 100)` scaled with the
+        # LARGEST single-day P&L. A strategy with one $1M PnL day (Bybit
+        # funding spike, OKX inverse-perp glitch, USDT-margin liquidation
+        # cascade) gets `min_balance = $2M`; if the actual balance is $500k
+        # — a perfectly reasonable institutional balance — the heuristic
+        # branch fires and CAGR/Sharpe degrade by 5–10× per the docstring.
+        # Manually-verified strategies with one big day show wrong numbers
+        # on the public factsheet.
+        #
+        # The docstring is explicit about intent ("ignore dust accounts,
+        # e.g., $0.50 after withdrawal"), so the threshold should be a
+        # small absolute number well above genuine dust but well below
+        # any real trading balance. $1,000 USDT mirrors the audit's
+        # explicit example and is the smallest defensible institutional
+        # balance — below that, the % returns are likely already gibberish.
+        _DUST_BALANCE_THRESHOLD = 1000.0  # USDT — fixed, not PnL-scaled
+        min_balance = _DUST_BALANCE_THRESHOLD
         if account_balance and account_balance > min_balance:
             # Derive starting balance from current balance and cumulative PnL.
             # current_balance = starting_balance + total_pnl, so:
@@ -162,7 +178,12 @@ def trades_to_daily_returns_with_status(
         )
         daily_agg["pnl"] = daily_agg["net_notional"] - daily_agg["total_fees"]
 
-        min_balance_t = max(daily_agg["pnl"].abs().max(), 100) if len(daily_agg) > 0 else 100
+        # audit-2026-05-07 C-0233 — same fixed-floor fix as the daily_pnl
+        # branch above. Pre-fix: `max(daily_agg["pnl"].abs().max(), 100)`
+        # scaled with the LARGEST single-day P&L; one outlier day inflated
+        # the threshold and forced the heuristic-capital branch even when
+        # the caller had a legitimate institutional balance.
+        min_balance_t = 1000.0  # USDT — fixed dust floor, matches daily_pnl path
         if account_balance and account_balance > min_balance_t:
             total_pnl = daily_agg["pnl"].sum()
             estimated_start = account_balance - total_pnl

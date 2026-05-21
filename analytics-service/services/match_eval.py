@@ -120,6 +120,25 @@ def compute_hit_rate_metrics(
 
     allocator_ids = sorted({i["allocator_id"] for i in valid_intros})
 
+    # audit-2026-05-07 C-0231: compute the max intro timestamp so the
+    # match_batches fetch can be bounded by `.lt("computed_at",
+    # max_intro_ts)`. Without this bound, the paginated SELECT pulls the
+    # ENTIRE allocator-batch history every call — for a long-lived
+    # allocator with thousands of historical batches, that's quadratic
+    # memory growth as match_batches fills. The "latest batch before
+    # intro" lookup downstream only ever consults rows older than the
+    # NEWEST intro in this window, so any batch with `computed_at >=
+    # max_intro_ts` is irrelevant. Adding a SMALL guard (1 microsecond
+    # buffer via `<=` semantics in `.lt`) keeps PostgREST's half-open
+    # range semantics intact (`.lt` is strict `<`, so the bound stays
+    # accurate even if a batch is computed at the exact same instant as
+    # the intro — the in-memory comparison uses `<` too).
+    max_intro_ts: str | None = None
+    for intro in valid_intros:
+        ts = intro.get("created_at")
+        if ts and (max_intro_ts is None or ts > max_intro_ts):
+            max_intro_ts = ts
+
     # batches_by_allocator: allocator_id -> list of {id, computed_at}.
     # Paginated fetch over `match_batches` filtered to the relevant
     # allocators. We do NOT wrap this in a try/except: if PostgREST errors
@@ -139,10 +158,21 @@ def compute_hit_rate_metrics(
     # could land in any UUID bucket, so a row-index-based pagination would skip
     # or duplicate them. The composite ordering is stable because writers
     # never mutate `(allocator_id, computed_at)` post-insert.
-    for row in paginated_select(
+    batches_query = (
         supabase.table("match_batches")
         .select("id, allocator_id, computed_at")
-        .in_("allocator_id", allocator_ids),
+        .in_("allocator_id", allocator_ids)
+    )
+    if max_intro_ts is not None:
+        # audit-2026-05-07 C-0231: bound the fetch by max intro timestamp.
+        # Use strict `<` semantics — the downstream in-memory comparison
+        # also uses `<` (line: `if computed_at_dt < created_at_dt`), so any
+        # batch at exactly `max_intro_ts` would never win for any intro in
+        # the window anyway. Bounding here saves PostgREST round-trip
+        # bandwidth + memory for every call.
+        batches_query = batches_query.lt("computed_at", max_intro_ts)
+    for row in paginated_select(
+        batches_query,
         order_by=(("allocator_id", False), ("computed_at", True)),
         truncation_hint=f"match_batches in_(allocator_id, n={len(allocator_ids)})",
     ):

@@ -149,6 +149,43 @@ def _is_serialization_failure(exc: BaseException) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Missing-RPC fallback (audit-2026-05-07 C-0190)
+# ---------------------------------------------------------------------------
+# PostgreSQL SQLSTATE 42883 = `undefined_function`. PostgREST surfaces it on
+# `APIError.code` when the named RPC does not exist (e.g. the
+# `claim_compute_jobs_with_priority` migration 086 has not been applied to
+# this Supabase project yet). Without an explicit fallback, the worker boots,
+# the dispatch loop fires every 30s, and every tick logs an opaque error
+# while zero jobs are claimed — a silent total-stall failure mode.
+#
+# We catch 42883 specifically and fall back to the legacy
+# `claim_compute_jobs(p_batch_size, p_worker_id)` RPC (the pre-086 signature).
+# Once a fallback succeeds we latch the choice in `_FALLBACK_CLAIM_RPC` so
+# subsequent ticks skip the missing-RPC probe.
+_SQLSTATE_UNDEFINED_FUNCTION = "42883"
+_FALLBACK_CLAIM_RPC: bool = False
+
+
+def _is_undefined_function(exc: BaseException) -> bool:
+    """Return True iff `exc` is a PostgREST APIError signaling SQLSTATE 42883
+    (function does not exist). Match SQLSTATE on `.code` or the canonical
+    message substring 'does not exist' alongside the RPC name (some
+    postgrest versions surface the SQLSTATE only in the message string)."""
+    code = getattr(exc, "code", None)
+    if code == _SQLSTATE_UNDEFINED_FUNCTION:
+        return True
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict) and details.get("code") == _SQLSTATE_UNDEFINED_FUNCTION:
+        return True
+    # Defensive: some PostgREST versions stash the SQLSTATE only inside the
+    # message string. Match on the canonical PostgreSQL phrase.
+    msg = str(exc) if exc is not None else ""
+    if "claim_compute_jobs_with_priority" in msg and "does not exist" in msg:
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Safe mark wrapper (DRY for the 3 try/except blocks in dispatch_tick)
 # ---------------------------------------------------------------------------
 # PR #149 review I5 (maintainability conf 9) + I6 (red-team conf 8):
@@ -261,7 +298,7 @@ async def dispatch_tick(worker_id: str) -> None:
     # this is effectively a free op on most ticks.
     flag_active = await is_unified_backbone_active()
 
-    def _claim():
+    def _claim_priority():
         return supabase.rpc(
             "claim_compute_jobs_with_priority",
             {
@@ -271,7 +308,43 @@ async def dispatch_tick(worker_id: str) -> None:
             },
         ).execute()
 
-    claim_result = await db_execute(_claim)
+    def _claim_legacy():
+        # Pre-migration-086 signature: 2 args, no priority/throttle.
+        # Used only as the fallback path when migration 086 has not been
+        # applied to this Supabase project (audit-2026-05-07 C-0190).
+        return supabase.rpc(
+            "claim_compute_jobs",
+            {
+                "p_batch_size": 5,
+                "p_worker_id": worker_id,
+            },
+        ).execute()
+
+    # audit-2026-05-07 C-0190: handle SQLSTATE 42883 (undefined_function)
+    # from `claim_compute_jobs_with_priority` so a Supabase environment
+    # without migration 086 falls back to the legacy claim RPC instead of
+    # silently stalling. Once a fallback succeeds we latch the choice in
+    # `_FALLBACK_CLAIM_RPC` — the missing-RPC condition is environmental
+    # (migration not applied), not transient, so probing the missing
+    # function every 30s would only pollute logs with identical errors.
+    global _FALLBACK_CLAIM_RPC
+    if _FALLBACK_CLAIM_RPC:
+        claim_result = await db_execute(_claim_legacy)
+    else:
+        try:
+            claim_result = await db_execute(_claim_priority)
+        except Exception as exc:  # noqa: BLE001
+            if _is_undefined_function(exc):
+                logger.warning(
+                    "claim_compute_jobs_with_priority missing (SQLSTATE 42883); "
+                    "falling back to legacy claim_compute_jobs RPC. Apply "
+                    "migration 086 to restore priority-aware claiming.",
+                    extra={"event_type": "claim_rpc_fallback"},
+                )
+                _FALLBACK_CLAIM_RPC = True
+                claim_result = await db_execute(_claim_legacy)
+            else:
+                raise
     jobs = claim_result.data or []
 
     # Update healthz timestamp as soon as the claim RPC succeeds — an idle
