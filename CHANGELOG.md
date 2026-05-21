@@ -7,6 +7,22 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.9] - 2026-05-21
+
+**fix(wizard): floor-round insufficient-days span so a 6.97-day strategy never displays as "7.0 calendar day(s)".**
+
+Closes the production dogfooding report "the account has definitely more than 7 trading days". The `GATE_INSUFFICIENT_DAYS` gate compares strict `< 7` (strategyGate.ts:89), but the user-facing copy used `.toFixed(1)` which rounds half-up — so a real span of 6.95-6.99 was rendered as "Your trades span 7.0 calendar day(s)" alongside the failure message. Users reading "7.0 days" reasonably believed they were exactly at the threshold yet still rejected, and concluded the gate was broken.
+
+### Fixed
+- `src/lib/wizardErrors.ts:593`: floor-round span days before formatting (`Math.floor(days * 10) / 10`). A sub-7 value now displays as "6.9" (or lower) — never "7.0". Boundary cases: 6.97 → "6.9", 6.99 → "6.9", 6.5 → "6.5", exact 7.0 → never reaches this branch (gate passes).
+
+### Added (regression tests — fail without the fix)
+- `src/lib/wizardErrors.test.ts`: new test asserting 6.97 and 6.99 day spans display as "6.9", not "7.0". Verified the test fails without the fix and passes with it.
+
+### Not fixed (flagged for follow-up)
+- This is a display-only fix. The Bybit sync-truncation bug that motivated the dogfood report is fixed separately by PR #260 (v0.24.5.10).
+
+
 ## [0.24.5.8] - 2026-05-21
 
 **fix(signup): detect repeated-signup via `data.user.identities=[]` and steer users toward sign-in.**
