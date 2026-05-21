@@ -37,7 +37,27 @@ from unittest.mock import MagicMock
 
 
 def _install_stubs():
-    """Stub out heavy packages unavailable in the local test env."""
+    """Stub out heavy packages unavailable in the local test env.
+
+    audit-2026-05-21: pre-fix this function ALWAYS overwrote
+    `slowapi.Limiter` and `slowapi.util.get_remote_address` with
+    MagicMocks, even when the real `slowapi` package was installed. That
+    pollution leaked into sibling test modules (test_simulator_router.py)
+    because Python caches modules in `sys.modules` — once the real
+    `slowapi.Limiter` is replaced with a MagicMock, every `@limiter.limit`
+    decorator subsequently evaluated wraps the route handler in a
+    non-callable MagicMock and FastAPI's route registration returns 422
+    for valid JSON bodies. The 12 simulator_router failures in CI's
+    full-suite run all trace back here.
+
+    Fix: detect whether each real package is installed BEFORE writing
+    anything into sys.modules. If the real package is on disk we leave
+    it alone — the real Limiter is what the routers were built against
+    and what the sibling test fixture monkeypatches. We only stub when
+    the package is genuinely missing.
+    """
+    import importlib.util
+
     stubs = [
         "slowapi",
         "slowapi.util",
@@ -45,11 +65,29 @@ def _install_stubs():
         "ccxt.async_support",
     ]
     for name in stubs:
-        if name not in sys.modules:
-            sys.modules[name] = MagicMock()
+        # Already imported AND not a MagicMock stub installed by a prior
+        # run of this function => real package, leave alone. The
+        # find_spec() call returns the import-system view; if the
+        # package is installed on disk, find_spec finds it even if the
+        # module was never imported yet.
+        if name in sys.modules:
+            continue
+        if importlib.util.find_spec(name) is not None:
+            # Real package is installed but not yet imported — leave the
+            # slot empty so subsequent `import` statements pull the real
+            # module instead of our stub.
+            continue
+        sys.modules[name] = MagicMock()
 
-    sys.modules["slowapi"].Limiter = MagicMock(return_value=MagicMock())
-    sys.modules["slowapi.util"].get_remote_address = MagicMock()
+    # Only overwrite Limiter / get_remote_address when there is no real
+    # slowapi installation. If the real package is on disk, the existing
+    # router code already imports the real Limiter and our routers'
+    # `@limiter.limit` decorators work correctly — overwriting would
+    # break sibling tests via sys.modules pollution.
+    real_slowapi_available = importlib.util.find_spec("slowapi") is not None
+    if not real_slowapi_available:
+        sys.modules["slowapi"].Limiter = MagicMock(return_value=MagicMock())
+        sys.modules["slowapi.util"].get_remote_address = MagicMock()
 
 
 _install_stubs()

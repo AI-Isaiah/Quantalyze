@@ -45,6 +45,19 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 # Stub heavy packages before importing any router modules.
+#
+# audit-2026-05-21: pre-fix this block ALWAYS overwrote `slowapi.Limiter`
+# and `slowapi.util.get_remote_address` with MagicMocks, even when the
+# real `slowapi` package was installed. That pollution leaked into sibling
+# test modules (test_simulator_router.py) — once the real `slowapi.Limiter`
+# is replaced with a MagicMock, every `@limiter.limit` decorator
+# subsequently evaluated wraps the route handler in a non-callable
+# MagicMock and FastAPI returns 422 for valid JSON bodies. Detect-then-
+# stub keeps the structural assertions in this file working both when
+# slowapi is missing (rare CI image) AND when it's installed (every dev
+# env + the main CI image).
+import importlib.util as _importlib_util
+
 _STUBS = [
     "slowapi",
     "slowapi.util",
@@ -52,10 +65,18 @@ _STUBS = [
     "ccxt.async_support",
 ]
 for name in _STUBS:
-    if name not in sys.modules:
-        sys.modules[name] = MagicMock()
-sys.modules["slowapi"].Limiter = MagicMock(return_value=MagicMock())
-sys.modules["slowapi.util"].get_remote_address = MagicMock()
+    if name in sys.modules:
+        continue
+    if _importlib_util.find_spec(name) is not None:
+        # Real package is installed on disk; leave the sys.modules slot
+        # empty so the next `import` pulls the real module.
+        continue
+    sys.modules[name] = MagicMock()
+
+_real_slowapi_available = _importlib_util.find_spec("slowapi") is not None
+if not _real_slowapi_available:
+    sys.modules["slowapi"].Limiter = MagicMock(return_value=MagicMock())
+    sys.modules["slowapi.util"].get_remote_address = MagicMock()
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
