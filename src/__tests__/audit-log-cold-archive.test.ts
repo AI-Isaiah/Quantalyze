@@ -120,17 +120,14 @@ describe("Migration 056 — audit_log_cold table + append-only invariant", () =>
           })
           .select("id")
           .single();
-        if (insertErr || !insertData) {
-          // If INSERT failed (e.g., policy blocks service-role direct
-          // insert), the test proves the invariant a different way —
-          // nothing outside the cron can write cold rows.
-          console.warn(
-            "[audit-log-cold-archive] service_role INSERT into audit_log_cold failed:",
-            insertErr?.message,
-          );
-          return;
-        }
-        row.coldRowId = insertData.id as string;
+        // C-0004 (audit-2026-05-07): fail loud on setup failure. Pre-fix
+        // this branch returned silently if the seed INSERT failed,
+        // disguising a missed precondition as a passing assertion. The
+        // append-only invariant being tested requires a row to UPDATE —
+        // if we cannot seed one, the test must fail, not skip.
+        expect(insertErr).toBeNull();
+        expect(insertData).toBeTruthy();
+        row.coldRowId = insertData!.id as string;
 
         // Attempt to UPDATE — must fail or affect zero rows.
         const { data: updated, error: updateErr } = await admin
@@ -191,14 +188,14 @@ describe("Migration 056 — audit_log_cold table + append-only invariant", () =>
           })
           .select("id")
           .single();
-        if (insertErr || !insertData) {
-          console.warn(
-            "[audit-log-cold-archive] service_role INSERT into audit_log_cold failed:",
-            insertErr?.message,
-          );
-          return;
-        }
-        row.coldRowId = insertData.id as string;
+        // C-0004 (audit-2026-05-07): fail loud on setup failure.
+        // Pre-fix this branch swallowed seed-INSERT errors and returned
+        // early, hiding a precondition miss as a passing test. The
+        // append-only DELETE invariant requires a row to attempt to
+        // DELETE; without one the test is unable to make its claim.
+        expect(insertErr).toBeNull();
+        expect(insertData).toBeTruthy();
+        row.coldRowId = insertData!.id as string;
 
         // Attempt DELETE — must fail or affect zero rows.
         const { data: deleted, error: deleteErr } = await admin
@@ -268,15 +265,15 @@ describe("Migration 056 — audit_log_cold table + append-only invariant", () =>
           })
           .select("id, created_at")
           .single();
-        if (backdatedErr || !backdatedInsert) {
-          console.warn(
-            "[audit-log-cold-archive] backdated INSERT rejected; cannot test hot→cold move:",
-            backdatedErr?.message,
-          );
-          return;
-        }
+        // C-0004 (audit-2026-05-07): fail loud on setup failure. The
+        // hot→cold move test cannot make its claim without a backdated
+        // hot row to migrate. Pre-fix this branch returned silently on
+        // a rejected seed INSERT, presenting a missing precondition as
+        // a passing assertion.
+        expect(backdatedErr).toBeNull();
+        expect(backdatedInsert).toBeTruthy();
 
-        const backdatedId = backdatedInsert.id as string;
+        const backdatedId = backdatedInsert!.id as string;
 
         // Invoke the test-only RPC that runs the cron's CTE body.
         const { data: moveCount, error: rpcErr } = await admin.rpc(
