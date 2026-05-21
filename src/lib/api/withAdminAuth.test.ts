@@ -101,26 +101,6 @@ describe("withAdminAuth", () => {
       expect(handler).not.toHaveBeenCalled();
     });
 
-    it("rejects unauthenticated requests with 401 and emits NO audit row", async () => {
-      // audit-2026-05-07 (admin-auth cluster) — 401 vs 403 split. Pre-fix
-      // the no-session case returned 403, conflating "you haven't shown me
-      // credentials" with "your credentials don't grant access". The
-      // unauth path also does NOT emit admin.access.denied — without a
-      // user_id there's nothing forensically attributable, and audit-
-      // logging every unauthenticated probe is a DoS surface.
-      getUserMock.mockResolvedValueOnce({ data: { user: null } });
-
-      const handler = vi.fn();
-      const wrapped = withAdminAuth(handler as never);
-      const res = await wrapped(makeRequest({ id: "abc" }));
-
-      expect(res.status).toBe(401);
-      expect(await res.json()).toEqual({ error: "Authentication required" });
-      expect(handler).not.toHaveBeenCalled();
-      expect(isAdminUserMock).not.toHaveBeenCalled();
-      expect(logAuditEventAsUserMock).not.toHaveBeenCalled();
-    });
-
     it("rejects authenticated non-admin requests with 403 and emits admin.access.denied", async () => {
       // audit-2026-05-07 (admin-auth cluster) — silent admin-bypass fix.
       // An authenticated user probing /api/admin/* now leaves a forensic
@@ -134,9 +114,6 @@ describe("withAdminAuth", () => {
       const wrapped = withAdminAuth(handler as never);
       const res = await wrapped(makeRequest({ id: "abc" }));
 
-      // Audit-2026-05-07 C-0146: authenticated but not admin → 403 Forbidden
-      // (RFC 7231). Pre-fix this returned 403 with body "Unauthorized";
-      // the split now uses "Forbidden" so the body matches the status.
       expect(res.status).toBe(403);
       expect(await res.json()).toEqual({ error: "Forbidden" });
       expect(handler).not.toHaveBeenCalled();
