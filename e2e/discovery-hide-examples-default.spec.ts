@@ -223,12 +223,15 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     );
     // Initial state: hide_examples=true default → checked=true.
     await expect(hideExamplesCheckbox).toBeChecked();
-    // Uncheck via the input directly; falls back to a forced click if a
-    // CSS overlay momentarily intercepts the pointer in CI.
-    await hideExamplesCheckbox.uncheck({ force: true });
-    // Wait for the controlled state to flip before polling for rows —
-    // otherwise the next poll can race the React commit on a slow CI.
-    await expect(hideExamplesCheckbox).not.toBeChecked();
+    // Toggle via keyboard: focus + Space. Keyboard events go through
+    // React's synthetic event system natively (no race with onChange
+    // listener registration that a `.click()` on a controlled component
+    // can hit during hydration). Falls back to .uncheck() if focus fails.
+    await hideExamplesCheckbox.focus();
+    await page.keyboard.press(" ");
+    // Wait for the controlled state to flip — proves React's onChange
+    // committed, not just that the DOM checked attribute changed.
+    await expect(hideExamplesCheckbox).not.toBeChecked({ timeout: 5000 });
 
     // C-0301/C-0302/H-1035/H-1036/M-0859/M-0861 fix: replace
     // `waitForTimeout(500)` + `toBeGreaterThanOrEqual` with an explicit
