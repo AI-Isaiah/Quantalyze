@@ -7,6 +7,24 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.11] - 2026-05-21
+
+**fix(wizard): wrap WizardClient in <Suspense> so /strategies/new/wizard?source=csv stops hiding the CsvUploadStep.**
+
+Closes the production dogfood report "where is the CSV upload?". Direct navigation to `/strategies/new/wizard?source=csv` rendered the wizard chrome (header, "01/03 Upload CSV" pills, footer) but the upload form body was empty.
+
+### Root cause
+`WizardClient` calls `useSearchParams()` to read `?source=csv`. Under Next 16 + React 19, `useSearchParams()` requires a `<Suspense>` boundary; without one, the entire client tree up to the nearest boundary (here, the root layout) bails to CSR. That triggered a hydration window where `searchParams` was null on the SSR/initial-CSR pass (so `source` defaulted to "api"), then re-resolved to "csv" — but step state had already initialized to "connect_key" and neither branch rendered cleanly afterward. `force-dynamic` does NOT change this — the Suspense gate applies to client-side searchParams resolution regardless of server-render mode.
+
+Documented in project memory as "Wizard CSV-source hydration error" — first observed 2026-05-07, papered over via "go through /strategies/new" workaround. PR #130 added a localStorage-during-render fix but did not address the missing Suspense boundary.
+
+### Fixed
+- `src/app/(dashboard)/strategies/new/wizard/page.tsx`: wrap `<WizardClient />` in `<Suspense fallback={null}>`. Scope-limits the CSR bail-out to the wizard subtree and gives React 19 a stable hydration anchor for the step state.
+
+### Not added (and why)
+- No unit test: the bug only manifests in a real Next SSR + hydration flow. RTL doesn't simulate it. Manual verification by reloading `/strategies/new/wizard?source=csv` and confirming the CsvUploadStep body renders is the definitive check.
+
+
 ## [0.24.5.10] - 2026-05-21
 
 **fix(analytics): Bybit fetch_daily_pnl was truncating closed-PnL history to the last 7 days on every sync.**

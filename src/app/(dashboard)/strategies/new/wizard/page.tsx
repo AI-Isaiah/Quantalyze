@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
@@ -72,7 +73,35 @@ export default async function WizardPage() {
 
   return (
     <DesktopGate>
-      <WizardClient initialDraft={initialDraft} />
+      {/*
+        Suspense boundary is mandatory: WizardClient calls useSearchParams()
+        which, under Next 16 + React 19, bails the WHOLE client tree (up to
+        the nearest Suspense or the root layout) to CSR when a route is
+        statically rendered. With no boundary here, the boundary becomes the
+        root layout — meaning EVERY paint up to root re-runs client-side.
+        That re-run created a hydration window where WizardClient mounted
+        with searchParams=null (SSR's view), computed source="api", then
+        the client re-resolved searchParams to "csv" but the step state had
+        already been initialized to "connect_key" — and neither the api nor
+        csv step rendered cleanly afterward. The user-visible symptom: the
+        wizard chrome (header + step pills + footer) rendered fine but the
+        CsvUploadStep body was empty.
+
+        `force-dynamic` does NOT skip this requirement in Next 16 — the
+        Suspense gate applies to client-side searchParams resolution
+        regardless of server-render mode. Wrapping WizardClient in its own
+        Suspense scopes the CSR bail-out to the wizard subtree only and
+        gives React 19 a stable hydration anchor for the step state.
+
+        fallback={null} matches the previous SSR markup (the wizard chrome
+        is inside WizardClient, so a non-null fallback would briefly flash a
+        different shell). The chrome is cheap to render so a momentary
+        blank is acceptable; if we ever want a skeleton, mirror the chrome
+        exactly to avoid layout shift.
+      */}
+      <Suspense fallback={null}>
+        <WizardClient initialDraft={initialDraft} />
+      </Suspense>
     </DesktopGate>
   );
 }
