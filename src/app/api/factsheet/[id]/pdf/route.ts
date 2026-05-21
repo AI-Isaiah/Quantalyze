@@ -13,6 +13,37 @@ import { safeCompare } from "@/lib/timing-safe-compare";
 
 export const maxDuration = 30;
 
+/**
+ * audit-2026-05-07 C-0090 — self-recursion fence.
+ *
+ * The PDF route launches a headless Chromium and `page.goto(...)`s the
+ * SAME deployment's `/factsheet/[id]` HTML page to render its visual
+ * output. That HTML page is canonically a leaf (it does not embed
+ * `<img src="/api/factsheet/.../pdf">` or trigger another PDF render),
+ * but the architecture has two latent recursion hazards:
+ *
+ *   1. If a future component on `/factsheet/[id]` ever fetches the PDF
+ *      endpoint (e.g. a "download PDF" iframe preview), the inner
+ *      puppeteer would launch another puppeteer, ad infinitum — under
+ *      cold-start that doubles every level and exhausts the lambda's
+ *      acquirePdfSlot semaphore.
+ *   2. Inlining the render via renderToStaticMarkup (the canonical fix)
+ *      is a significant refactor: the HTML page is a Server Component
+ *      with disclosure-tier-aware data fetching, async params, and a
+ *      full layout tree. The PDF route would need to either duplicate
+ *      that logic or import + render it directly — neither is small.
+ *
+ * Pragmatic closure (per audit brief): set a recognizable User-Agent
+ * on the puppeteer page, and have THIS route refuse any request that
+ * carries it. Re-entry is then provably impossible: even if someone
+ * spoofs the UA externally, the worst they can do is get a 508 back.
+ *
+ * The User-Agent value is versioned so a future refactor that switches
+ * to inline render can leave the fence in place (defense in depth)
+ * without colliding with downstream User-Agent telemetry / WAF rules.
+ */
+export const PDF_RENDERER_USER_AGENT = "Quantalyze-PDF-Renderer/1.0";
+
 // Phase-4 red-team / audit-2026-05-07 — explicit allow-list for the
 // puppeteer goto host. Pre-fix, `appUrl(req)` blindly trusted
 // `req.nextUrl.origin` (derived from the inbound Host header), so any
@@ -102,6 +133,20 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  // audit-2026-05-07 C-0090 — self-recursion fence. Refuse any request
+  // whose User-Agent matches the renderer fingerprint we set on the
+  // puppeteer page below. This is structurally impossible under the
+  // current call graph (the inner page.goto targets /factsheet/[id],
+  // not /api/factsheet/[id]/pdf), but the fence catches any future
+  // regression that introduces recursion — and any external caller
+  // spoofing the UA — before we touch the rate limiter or DB.
+  if (req.headers.get("user-agent") === PDF_RENDERER_USER_AGENT) {
+    console.error(
+      "[pdf] Refused self-recursive call: User-Agent matches PDF renderer fingerprint",
+    );
+    return new NextResponse("Loop Detected", { status: 508 });
+  }
+
   // Adversarial revision 2026-05-06 (Phase 18 Plan 03 / B4) — internal cron
   // callers (e.g. /api/cron/founder-lp-report) pass `x-internal-token:
   // ${INTERNAL_API_TOKEN}` to bypass `publicIpLimiter`. This prevents the
@@ -230,6 +275,14 @@ export async function GET(
     page.setDefaultNavigationTimeout(15_000);
     page.setDefaultTimeout(15_000);
     await page.setViewport({ width: 800, height: 1100 });
+
+    // audit-2026-05-07 C-0090 — stamp the renderer fingerprint on every
+    // outbound request from this puppeteer instance. The fence at the
+    // top of GET() rejects any inbound request that carries this UA, so
+    // self-recursion is provably impossible from this point forward.
+    // setUserAgent applies to the navigation AND every sub-resource the
+    // page fetches, which is exactly the scope we want.
+    await page.setUserAgent(PDF_RENDERER_USER_AGENT);
 
     await page.goto(`${targetOrigin}/factsheet/${id}`, {
       waitUntil: "networkidle0",
