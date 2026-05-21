@@ -385,3 +385,49 @@ def test_strictly_increasing_rejects_duplicate_dates():
     assert "monotonic_dates" in rules, (
         f"Expected monotonic_dates violation, got rules: {rules}"
     )
+
+
+# ---------------------------------------------------------------------------
+# CSV → analytics pipeline Task 4. The validate response must include the
+# full daily-return series for ok=True daily_returns and daily_nav uploads
+# so the wizard can forward it to csv-finalize for persistence.
+# ---------------------------------------------------------------------------
+
+def test_validate_envelope_includes_daily_returns_series_for_daily_returns():
+    # Use varied returns (not all-equal) to keep daily Sharpe below the 10.0
+    # sentinel threshold. Uniform floats produce a near-zero std via fp
+    # rounding that fires the sentinel even for n=10 identical values.
+    df = pd.DataFrame({
+        "date": pd.date_range("2024-01-02", periods=10, freq="D").strftime("%Y-%m-%d"),
+        "daily_return": [0.001, 0.002, 0.003, 0.001, 0.002,
+                         0.003, 0.001, 0.002, 0.003, 0.001],
+    })
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    assert result["ok"] is True
+    assert "daily_returns_series" in result
+    series = result["daily_returns_series"]
+    assert len(series) == 10
+    for row in series:
+        assert "date" in row
+        assert "daily_return" in row
+        assert isinstance(row["daily_return"], float)
+
+
+def test_validate_envelope_includes_daily_returns_series_for_daily_nav():
+    # N-row NAV → N-1 row return series after pct_change().dropna()
+    df = _daily_nav_df(n=5)
+    result = validate_csv(_csv_bytes(df), "daily_nav")
+    assert result["ok"] is True
+    assert "daily_returns_series" in result
+    series = result["daily_returns_series"]
+    assert len(series) == 4  # 5 NAV rows - 1 (first dropped)
+    # First derived return: (101 - 100) / 100 = 0.01
+    assert abs(series[0]["daily_return"] - 0.01) < 1e-9
+
+
+def test_validate_envelope_omits_daily_returns_series_for_trades():
+    df = _trades_df(n=5)
+    result = validate_csv(_csv_bytes(df), "trades")
+    # trades format produces no daily-return series — Phase 1 keeps the
+    # honest "analytics not generated" copy for these uploads.
+    assert "daily_returns_series" not in result or result["daily_returns_series"] is None
