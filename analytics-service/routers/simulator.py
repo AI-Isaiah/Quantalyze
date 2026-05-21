@@ -12,10 +12,17 @@ Keeping the plan's path would split the convention for one endpoint and make
 the main.py include list inconsistent. Placed in `routers/` to match the
 existing pattern.
 
-Rate limit: 20/hour (configured on the Next.js side as `simulatorLimiter`).
-The FastAPI-level limit here is lower because the Next.js layer is the
-authoritative user-level limit; this is only a safety net against an
-uncapped direct call from another service.
+Rate limit: 20/hour, user-keyed (matches `simulatorLimiter` on the Next.js
+side). The FastAPI-level limit matches the Next.js front-door ceiling so
+a legitimate user who clears the front door cannot be 429'd by the
+defense-in-depth limiter here. The key function reads `X-User-Id`
+(forwarded by the Next.js handler) and falls back to the remote address
+only when the header is absent (direct-from-elsewhere callers).
+
+G15-005 (audit-2026-05-07): previously decorated with a 30/hour ceiling
+keyed by `get_remote_address`. Behind Vercel's egress NAT every tenant
+collapsed into one shared bucket — first-mover starvation. Per-user
+keying mirrors routers/process_key.py:_process_key_rate_limit_key.
 """
 
 import logging
@@ -23,16 +30,45 @@ import logging
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from services.audit import log_audit_event
 from services.db import get_supabase
+from services.rate_limit import limiter
 from services.simulator_scoring import simulate_add_candidate
 
 router = APIRouter(prefix="/api", tags=["simulator"])
 logger = logging.getLogger("quantalyze.analytics")
-limiter = Limiter(key_func=get_remote_address)
+
+# G15-004 (audit-2026-05-07) — use the canonical process-wide Limiter
+# from services.rate_limit (NOT a local instance) so the route's storage
+# shares state with `app.state.limiter` registered in main.py. The
+# previous local `Limiter(key_func=get_remote_address)` broke the API-5
+# shared-storage invariant (per services/rate_limit.py module docstring):
+# slowapi resolves rate-limit storage via the DECORATOR's Limiter
+# instance, not app.state.limiter — so a future swap to Redis-backed
+# storage on the shared limiter would have silently skipped this route.
+
+
+def _simulator_rate_limit_key(request: Request) -> str:
+    """G15-005 — per-user rate-limit key for /api/simulator.
+
+    Prefer the `X-User-Id` header forwarded by the Next.js front door so
+    each authenticated user gets an isolated rate-limit window. Fall back
+    to the remote address when the header is missing — that path is the
+    safety net for direct-to-FastAPI calls without the Next.js layer's
+    user resolution.
+
+    Pre-fix used slowapi's default `get_remote_address` which bucketed
+    every Vercel egress IP into one shared window. Behind a corporate /
+    cellular NAT 50+ legitimate users shared a single 30/hour FastAPI
+    bucket — first user exhausts it for the rest. Mirrors the
+    routers/process_key.py:_process_key_rate_limit_key pattern.
+    """
+    user_id = request.headers.get("X-User-Id")
+    if user_id:
+        return f"simulator:{user_id}"
+    return f"simulator:ip:{get_remote_address(request)}"
 
 
 class SimulatorRequest(BaseModel):
@@ -46,16 +82,32 @@ def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
 
     Duplicates `routers.portfolio._records_to_series` — kept local so the
     simulator router doesn't cross-import from another router.
+
+    G15-006 (audit-2026-05-07): the returned Series is `.sort_index()`-ed
+    and deduped (keep='last') so storage drift — duplicate-date backfill
+    writes or out-of-order imports — cannot silently break the downstream
+    `cumprod()` in `services/simulator_scoring.py:634`. cumprod is path-
+    dependent; an unsorted index produces a garbage equity curve, and a
+    duplicate index entry inflates the compounded factor for that date.
+    These guards exist for storage-drift safety, not for the happy-path.
     """
     if not isinstance(raw, list) or not raw:
         return None
     dates = [r["date"] for r in raw]
     vals = [r["value"] for r in raw]
-    return pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
+    series = pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
+    # G15-006 — sort then dedupe (keep='last'). Order matters: dedupe BEFORE
+    # sort would keep the last-by-input occurrence rather than the
+    # last-by-date occurrence; in practice the two coincide on a well-formed
+    # input but the contract is "last value on a given date wins" — which
+    # only holds after sort.
+    series = series.sort_index()
+    series = series[~series.index.duplicated(keep="last")]
+    return series
 
 
 @router.post("/simulator")
-@limiter.limit("30/hour")
+@limiter.limit("20/hour", key_func=_simulator_rate_limit_key)
 async def portfolio_simulator(request: Request, req: SimulatorRequest):
     """Simulate ADDing a candidate strategy to the user's portfolio.
 
@@ -173,12 +225,60 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
             detail="Candidate has no returns history",
         )
 
-    result = simulate_add_candidate(
-        portfolio_returns=portfolio_returns,
-        candidate_id=req.candidate_strategy_id,
-        candidate_returns=candidate_series,
-        weights=weights,
-    )
+    # G15-007 (audit-2026-05-07) — wrap the math call in try/except so a
+    # numpy/pandas blow-up is observable (audit_log + structured log line
+    # tagged with the correlation_id) instead of escaping as a bare 500
+    # with no trail. Mirrors the portfolio-router exception handling
+    # pattern. Re-raised as HTTPException so the response carries the
+    # correlation_id in the detail object — operators can join the wire-
+    # level 500 to the analytics-service log by that id.
+    correlation_id = request.headers.get("x-correlation-id") or ""
+    try:
+        result = simulate_add_candidate(
+            portfolio_returns=portfolio_returns,
+            candidate_id=req.candidate_strategy_id,
+            candidate_returns=candidate_series,
+            weights=weights,
+        )
+    except Exception as exc:
+        logger.exception(
+            "simulate_add_candidate failed (portfolio_id=%s candidate=%s "
+            "correlation_id=%s): %s",
+            req.portfolio_id,
+            req.candidate_strategy_id,
+            correlation_id,
+            exc,
+        )
+        # Fire an audit row so operators can reconstruct WHO triggered
+        # the failure from audit_log alone (the structured log has the
+        # exception detail; the audit row has the user/entity context).
+        try:
+            log_audit_event(
+                user_id=req.user_id,
+                action="simulator.run.failed",
+                entity_type="simulator_run",
+                entity_id=req.portfolio_id,
+                metadata={
+                    "candidate_strategy_id": req.candidate_strategy_id,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:400],
+                    "correlation_id": correlation_id,
+                },
+            )
+        except Exception as audit_exc:
+            # Don't let an audit-emit failure mask the original error.
+            logger.error(
+                "simulator failure audit emit failed: %s",
+                audit_exc,
+                exc_info=True,
+            )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Portfolio impact simulation failed",
+                "correlation_id": correlation_id,
+            },
+        )
 
     # Hydrate the response with the human-readable candidate name so the
     # UI can render it without a second round-trip.

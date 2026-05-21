@@ -65,4 +65,12 @@ paths = [
   '''(^|/)\.planning/''',
   '''(^|/)src/app/api/webhooks/resend/route\.test\.ts$''',
   '''(^|/)analytics-service/tests/cassettes/''',
+  # fix-list.md was historically copied to the repo root by audit-fix
+  # automation. It contains audit prose describing high-entropy
+  # identifiers (RPC names, on_conflict columns) that trip the generic
+  # high-entropy detector. The canonical copy lives in
+  # .planning/audit-2026-05-07/ (already allowlisted via the
+  # .planning/ rule above). The root-level file is now gitignored;
+  # this allowlist line also suppresses leftover historical commits.
+  '''(^|/)fix-list\.md$''',
 ]

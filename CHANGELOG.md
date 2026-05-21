@@ -7,6 +7,21 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.4.8] - 2026-05-21
+
+**fix(audit-2026-05-07): close 4 simulator-router CRITICALs (G15-004/005/006/007) — rate-limit + series-drift + exception envelope.**
+
+PR C of the audit closeout, scoped to `analytics-service/routers/simulator.py`. Four CRITICALs from G15 cluster closed with 10 new regression tests (25/25 pass). Behind a shared NAT (corporate / cellular), 50+ legitimate allocators were collapsed into one 30/hour FastAPI bucket; the first user exhausted simulator access for the rest of the day. Storage-drift (out-of-order or duplicate-date backfill) could silently corrupt the simulator's equity curve via path-dependent `cumprod`. Internal numpy/pandas exceptions returned bare 500s with no audit trail.
+
+### Fixed
+- `analytics-service/routers/simulator.py:37` (G15-004): import the canonical `Limiter` singleton from `services.rate_limit` instead of declaring a local instance. Slowapi resolves rate-limit storage via the decorator's Limiter, not `app.state.limiter` — the prior local instance broke the API-5 shared-storage invariant and would have silently skipped this route on a future Redis-backed swap.
+- `analytics-service/routers/simulator.py:53-71,110` (G15-005): per-user rate-limit key (`_simulator_rate_limit_key`) reading `X-User-Id` from the Next.js front door, with IP fallback for direct-to-FastAPI callers. Ceiling lowered from 30/hour-IP to 20/hour-user to match the Next.js `simulatorLimiter`. Mirrors `routers/process_key.py:_process_key_rate_limit_key`.
+- `analytics-service/routers/simulator.py:80-106` (G15-006): `_records_to_series` now `.sort_index()`-es then `.duplicated(keep='last')`-dedupes the constructed Series. Storage drift no longer feeds an unsorted/duplicated index into `simulator_scoring.py:634`'s `cumprod`.
+- `analytics-service/routers/simulator.py:~176` (G15-007): `simulate_add_candidate` call wrapped in try/except; failures emit `simulator.run.failed` via `log_audit_event` with a correlation id, then re-raise as HTTPException(500) with the correlation id in the response detail. Audit-emit failures are themselves logged but do not mask the original error.
+
+### Added (regression tests — fail without fix, pass with fix)
+- `analytics-service/tests/test_simulator_router.py` — 10 new tests across 4 test classes: `TestG15_004_LimiterIsCanonicalSingleton` (singleton identity + main-app limiter parity), `TestG15_005_RateLimitIsUserKeyed` (route decorator key_func, per-user isolation, 20/hour ceiling), `TestG15_006_RecordsToSeriesSortedAndDeduped` (out-of-order sort, duplicate-keep-last, combined), `TestG15_007_ExceptionAuditAndCorrelationId` (500 envelope with correlation id, no leak when audit-emit itself fails). Pre-existing 15 tests still pass; 25 total.
+
 ## [0.24.4.7] - 2026-05-21
 
 **fix(audit-2026-05-07): /fetch-trades must reject deactivated API keys — closes C-0202.**

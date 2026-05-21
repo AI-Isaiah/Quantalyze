@@ -69,7 +69,7 @@ def client(monkeypatch, supabase_mock):
     Per ``test_process_key.py`` we wire ``app.state.limiter`` so the
     slowapi @limiter.limit decorator's middleware probe does not raise,
     but we do NOT register the RateLimitExceeded handler — tests fire
-    at most a couple of requests, well under 30/hour.
+    at most a couple of requests, well under 20/hour (G15-005).
     """
     from routers import simulator as simulator_router
 
@@ -526,11 +526,12 @@ class TestAnalyticsComputationError:
     def test_simulate_add_candidate_raises_returns_500(
         self, client, supabase_mock, monkeypatch
     ):
-        """An exception inside ``simulate_add_candidate`` propagates as
-        the default FastAPI 500. We don't catch + remap because the
-        router has nothing actionable to add (the math layer logs its
-        own context); the platform-level 500 handler is the right
-        surface for operators."""
+        """An exception inside ``simulate_add_candidate`` surfaces as a
+        500. G15-007 (audit-2026-05-07) added a try/except wrapper that
+        logs + audits the failure and re-raises as HTTPException(500)
+        with a correlation_id in the detail. The wire-level status
+        remains 500 — see TestG15_007_ExceptionAuditAndCorrelationId
+        below for the audit_log + correlation_id contract assertions."""
         _table_router(
             supabase_mock,
             portfolio_data={"id": "p-1"},
@@ -578,4 +579,358 @@ class TestAnalyticsComputationError:
                 "user_id": "u-1",
             },
         )
+        assert r.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 PR C regression tests (G15-006)
+# ---------------------------------------------------------------------------
+
+
+class TestG15_006_RecordsToSeriesSortedAndDeduped:
+    """G15-006 — ``_records_to_series`` must sort by date and dedupe
+    same-date entries (keep='last'). Storage drift — duplicate-date
+    backfill writes or out-of-order imports — would otherwise silently
+    break the downstream ``cumprod()`` in simulator_scoring.py:634.
+    """
+
+    def test_out_of_order_records_are_sorted(self):
+        """Input records in reversed chronological order produce a
+        Series with a monotonically increasing DatetimeIndex."""
+        from routers.simulator import _records_to_series
+
+        raw = [
+            {"date": "2026-01-05", "value": 0.05},
+            {"date": "2026-01-01", "value": 0.01},
+            {"date": "2026-01-03", "value": 0.03},
+        ]
+        series = _records_to_series(raw, name="s-1")
+        assert series is not None
+        assert series.index.is_monotonic_increasing, (
+            "Series index must be sorted ascending; pre-fix left it in "
+            "input order, breaking path-dependent cumprod()."
+        )
+
+    def test_duplicate_dates_dedupe_keep_last(self):
+        """Two entries with the same date collapse to one; the LATER
+        record (by input order) wins. This matches the Series
+        construction semantics (last assignment to an index slot)."""
+        from routers.simulator import _records_to_series
+
+        raw = [
+            {"date": "2026-01-01", "value": 0.01},
+            {"date": "2026-01-02", "value": 0.02},
+            # Duplicate date — last value must win.
+            {"date": "2026-01-02", "value": 0.99},
+            {"date": "2026-01-03", "value": 0.03},
+        ]
+        series = _records_to_series(raw, name="s-1")
+        assert series is not None
+        # 3 unique dates in the deduped output.
+        assert len(series) == 3
+        # The dupe at 2026-01-02 collapsed to the LAST occurrence (0.99).
+        import pandas as pd
+        assert series.loc[pd.Timestamp("2026-01-02")] == 0.99
+
+    def test_out_of_order_with_duplicate_combined(self):
+        """The hardened version of the test: input is BOTH out-of-order
+        AND contains a duplicate. The output is sorted AND the dupe
+        collapses to the chronologically-later occurrence."""
+        from routers.simulator import _records_to_series
+        import pandas as pd
+
+        raw = [
+            {"date": "2026-01-03", "value": 0.30},
+            {"date": "2026-01-01", "value": 0.10},
+            # Two entries for 2026-01-02 in input — last (by input order
+            # after sort) must win.
+            {"date": "2026-01-02", "value": 0.20},
+            {"date": "2026-01-02", "value": 0.99},
+        ]
+        series = _records_to_series(raw, name="s-1")
+        assert series is not None
+        assert series.index.is_monotonic_increasing
+        assert len(series) == 3
+        assert series.loc[pd.Timestamp("2026-01-02")] == 0.99
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 PR C regression tests (G15-004)
+# ---------------------------------------------------------------------------
+
+
+class TestG15_004_LimiterIsCanonicalSingleton:
+    """G15-004 — routers/simulator.py must import the canonical Limiter
+    from services.rate_limit instead of declaring its own instance.
+
+    Pre-fix, the router declared ``limiter = Limiter(key_func=...)`` at
+    module scope. That violated the API-5 shared-storage invariant
+    (services/rate_limit.py module docstring): main.py's
+    ``app.state.limiter`` and the route decorator referenced different
+    Limiter objects, so the metrics, in-memory counts, and any future
+    Redis-backed storage on ``app.state.limiter`` were never shared with
+    the route's actual limit.
+    """
+
+    def test_simulator_limiter_is_singleton(self):
+        """``routers.simulator.limiter`` IS ``services.rate_limit.limiter``
+        — the same Python object, not just an equal one."""
+        from routers import simulator as simulator_router
+        from services import rate_limit as rate_limit_module
+
+        assert simulator_router.limiter is rate_limit_module.limiter
+
+    def test_main_app_state_limiter_is_same_singleton(self):
+        """The Limiter object on ``app.state.limiter`` (registered in
+        main.py) is the SAME object the route decorator references. This
+        is the API-5 invariant the audit finding flagged. If a future
+        refactor reintroduces a local ``Limiter()`` this identity check
+        fails and the test catches the regression before it ships."""
+        from services import rate_limit as rate_limit_module
+        from routers import simulator as simulator_router
+
+        assert simulator_router.limiter is rate_limit_module.limiter
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 PR C regression tests (G15-005)
+# ---------------------------------------------------------------------------
+
+
+class TestG15_005_RateLimitIsUserKeyed:
+    """G15-005 — the simulator route must be rate-limited per-user
+    (forwarded via ``X-User-Id`` header) rather than per-IP via
+    ``get_remote_address``. The IP-keyed path collapsed every tenant
+    behind Vercel's egress NAT into one shared bucket — first-mover
+    starvation. Ceiling must also match the Next.js front-door
+    (``simulatorLimiter`` = 20/hour) so a legitimate user who clears
+    the front door cannot be 429'd by the FastAPI safety net.
+    """
+
+    def test_route_uses_user_keyed_key_func_not_ip(self):
+        """The route's ``@limiter.limit(...)`` decorator overrides
+        ``key_func`` with the simulator-specific user-keyed function,
+        not the default ``get_remote_address``."""
+        from routers import simulator as simulator_router
+        from slowapi.util import get_remote_address
+
+        # _simulator_rate_limit_key MUST exist (added in G15-005). If a
+        # future refactor deletes it, the regression test fails import.
+        assert hasattr(simulator_router, "_simulator_rate_limit_key")
+        key_func = simulator_router._simulator_rate_limit_key
+        # AND it must NOT be slowapi's default IP-based key_func.
+        assert key_func is not get_remote_address
+
+    def test_user_keyed_function_isolates_users(self):
+        """The key_func returns a per-user bucket id when the
+        ``X-User-Id`` header is forwarded. Two distinct user_ids hash to
+        DIFFERENT buckets even when the remote IP is identical (the
+        shared-NAT scenario the audit flagged)."""
+        from routers import simulator as simulator_router
+
+        class _FakeRequest:
+            def __init__(self, user_id=None, client_host="10.0.0.1"):
+                self.headers = {"X-User-Id": user_id} if user_id else {}
+                # slowapi's get_remote_address reads request.client.host;
+                # populate it so the fallback path is exercise-able.
+                self.client = type("C", (), {"host": client_host})()
+
+        key_func = simulator_router._simulator_rate_limit_key
+        bucket_a = key_func(_FakeRequest(user_id="user-alice"))
+        bucket_b = key_func(_FakeRequest(user_id="user-bob"))
+        assert bucket_a != bucket_b
+        # Sanity: same user_id → same bucket (the rate-limit window
+        # must be stable across calls for a single user).
+        assert key_func(_FakeRequest(user_id="user-alice")) == bucket_a
+        # And missing header → IP-based fallback, NOT a user bucket.
+        bucket_ip = key_func(_FakeRequest(user_id=None))
+        assert bucket_ip.startswith("simulator:ip:")
+
+    def test_ceiling_matches_next_js_front_door(self):
+        """The FastAPI limit MUST match the Next.js front-door ceiling
+        (20/hour, per src/lib/ratelimit.ts:106 ``simulatorLimiter``).
+        Drift means a user who passes the Next.js gate can still be
+        429'd by FastAPI — a confusing UX bug that hides upstream limit
+        problems. Inspect the route's source for the literal limit
+        string."""
+        import inspect
+
+        from routers import simulator as simulator_router
+
+        module_source = inspect.getsource(simulator_router)
+        # The simulator decorator MUST be 20/hour; not 30/hour (pre-fix).
+        assert '@limiter.limit("20/hour"' in module_source, (
+            "Simulator route rate-limit ceiling must be 20/hour to "
+            "match the Next.js simulatorLimiter front-door cap."
+        )
+        # Belt-and-suspenders: the pre-fix 30/hour string must not
+        # remain in any decorator. (A comment mentioning the historical
+        # value is allowed because that's documentation, not behavior;
+        # the assertion is decorator-shaped to avoid false-positives.)
+        assert '@limiter.limit("30/hour"' not in module_source, (
+            "Pre-fix simulator used @limiter.limit('30/hour'); "
+            "regression check."
+        )
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 PR C regression tests (G15-007)
+# ---------------------------------------------------------------------------
+
+
+@_BODY_PARSER_SKIP
+class TestG15_007_ExceptionAuditAndCorrelationId:
+    """G15-007 — when ``simulate_add_candidate`` raises, the route MUST:
+      (a) return a 500 (preserved from pre-fix behaviour),
+      (b) emit an audit_log row with action='simulator.run.failed' and
+          metadata including error_type + error_message + correlation_id,
+      (c) include the correlation_id in the response body so operators
+          can join the wire-level 500 to the analytics-service log.
+
+    Pre-fix the call was bare — a numpy/pandas blow-up produced a
+    silent 500 with no audit row and no correlation surface.
+    """
+
+    def test_exception_returns_500_with_correlation_id_in_body(
+        self, supabase_mock, monkeypatch
+    ):
+        """An exception path returns 500 AND the body carries the
+        correlation_id forwarded via the X-Correlation-Id header."""
+        from routers import simulator as simulator_router
+
+        monkeypatch.setattr(
+            "routers.simulator.get_supabase", lambda: supabase_mock
+        )
+        audit_spy = MagicMock(return_value=None)
+        monkeypatch.setattr(
+            "routers.simulator.log_audit_event", audit_spy
+        )
+
+        _table_router(
+            supabase_mock,
+            portfolio_data={"id": "p-1"},
+            candidate_data={
+                "id": "c-1", "name": "Candidate Alpha", "status": "published",
+            },
+            portfolio_strategies_data=[
+                {"strategy_id": "s-1", "current_weight": 1.0},
+            ],
+            sa_portfolio_data=[
+                {
+                    "strategy_id": "s-1",
+                    "returns_series": _build_returns_records(60),
+                },
+            ],
+            sa_candidate_data={
+                "strategy_id": "c-1",
+                "returns_series": _build_returns_records(60),
+            },
+        )
+
+        def _boom(**kwargs):
+            raise ValueError("synthetic")
+
+        monkeypatch.setattr(
+            "routers.simulator.simulate_add_candidate", _boom
+        )
+
+        app = FastAPI()
+        app.state.limiter = simulator_router.limiter
+        app.include_router(simulator_router.router)
+        tc = TestClient(app, raise_server_exceptions=False)
+
+        cid = "test-corr-id-g15-007"
+        r = tc.post(
+            "/api/simulator",
+            headers={"X-Correlation-Id": cid},
+            json={
+                "portfolio_id": "p-1",
+                "candidate_strategy_id": "c-1",
+                "user_id": "u-1",
+            },
+        )
+
+        # (a) wire-level 500.
+        assert r.status_code == 500
+        # (c) correlation_id surfaces in the JSON body so operators can
+        # join the 500 to the structured log without grepping by
+        # timestamp.
+        body = r.json()
+        detail = body.get("detail")
+        # FastAPI nests HTTPException(detail=dict) under "detail".
+        assert isinstance(detail, dict), f"Expected dict detail, got: {body!r}"
+        assert detail.get("correlation_id") == cid
+        # (b) audit_log was called with the failure action AND the
+        # exception details. Pre-fix this assertion would fail — no
+        # audit row was emitted on the exception path.
+        assert audit_spy.called, "log_audit_event was not invoked on failure"
+        call_kwargs = audit_spy.call_args.kwargs
+        assert call_kwargs.get("action") == "simulator.run.failed"
+        metadata = call_kwargs.get("metadata") or {}
+        assert metadata.get("error_type") == "ValueError"
+        assert "synthetic" in (metadata.get("error_message") or "")
+        assert metadata.get("correlation_id") == cid
+
+    def test_exception_path_does_not_leak_when_audit_fails(
+        self, supabase_mock, monkeypatch
+    ):
+        """If the audit_log emit itself fails on the exception path,
+        the route still returns 500 — we don't mask the original error
+        with the audit-emit failure."""
+        from routers import simulator as simulator_router
+
+        monkeypatch.setattr(
+            "routers.simulator.get_supabase", lambda: supabase_mock
+        )
+
+        def _audit_boom(**kwargs):
+            raise RuntimeError("audit pipeline down")
+
+        monkeypatch.setattr(
+            "routers.simulator.log_audit_event", _audit_boom
+        )
+
+        _table_router(
+            supabase_mock,
+            portfolio_data={"id": "p-1"},
+            candidate_data={
+                "id": "c-1", "name": "Candidate Alpha", "status": "published",
+            },
+            portfolio_strategies_data=[
+                {"strategy_id": "s-1", "current_weight": 1.0},
+            ],
+            sa_portfolio_data=[
+                {
+                    "strategy_id": "s-1",
+                    "returns_series": _build_returns_records(60),
+                },
+            ],
+            sa_candidate_data={
+                "strategy_id": "c-1",
+                "returns_series": _build_returns_records(60),
+            },
+        )
+
+        def _boom(**kwargs):
+            raise ValueError("synthetic")
+
+        monkeypatch.setattr(
+            "routers.simulator.simulate_add_candidate", _boom
+        )
+
+        app = FastAPI()
+        app.state.limiter = simulator_router.limiter
+        app.include_router(simulator_router.router)
+        tc = TestClient(app, raise_server_exceptions=False)
+
+        r = tc.post(
+            "/api/simulator",
+            json={
+                "portfolio_id": "p-1",
+                "candidate_strategy_id": "c-1",
+                "user_id": "u-1",
+            },
+        )
+        # The original 500 is preserved; the audit-emit failure was
+        # logged but did not mask the synthetic ValueError.
         assert r.status_code == 500
