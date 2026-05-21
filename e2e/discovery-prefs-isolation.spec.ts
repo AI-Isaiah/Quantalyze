@@ -130,9 +130,19 @@ test.describe("DISCO-02 allocator preferences isolation", () => {
     // the `update_allocator_mandates` RPC. We use a distinguishing sentinel
     // (`bybit`) so user B's later GET cannot pass by accident if both rows
     // happen to be empty.
+    //
+    // CSRF guard: src/app/api/preferences/route.ts:29 calls
+    // assertSameOrigin(req) which requires Origin or Referer matching the
+    // allowlist (localhost:3000 in non-prod, per src/lib/csrf.ts:67).
+    // Playwright's APIRequestContext does NOT set Origin automatically for
+    // programmatic requests even when initiated through `page.request`, so
+    // we set it explicitly from the page's current origin. Without this the
+    // route 403s with `{"error":"Missing Origin or Referer header"}` and
+    // the rest of the isolation contract becomes unverifiable.
+    const pageOrigin = new URL(page.url()).origin;
     const putRes = await page.request.put("/api/preferences", {
       data: { excluded_exchanges: ["bybit"] },
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", origin: pageOrigin },
     });
     expect(
       putRes.ok(),

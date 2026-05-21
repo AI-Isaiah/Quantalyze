@@ -7,6 +7,19 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.16] - 2026-05-21
+
+**fix(e2e): set Origin header on `discovery-prefs-isolation` PUT so it clears the CSRF guard.**
+
+Second half of the Railway-unblock work. The C-0300 sentinel fix (v0.24.5.15) exposed a previously-masked failure: the seed-gated `discovery-prefs-isolation` spec — also rewritten in PR #256 — calls `page.request.put("/api/preferences", ...)` to seed user A's prefs row, but Playwright's `APIRequestContext` does NOT add an `Origin` header for programmatic requests. The CSRF guard at `src/lib/csrf.ts:82` (`Missing Origin or Referer header`) 403s before the route's RPC ever runs, so the isolation contract was unverifiable.
+
+### Root cause
+PR #256 rewrote the spec from localStorage isolation (browser-driven, Origin set automatically) to server-side RLS isolation (programmatic API context, no Origin). The CSRF guard pre-dated the rewrite — it was added in PR #27 — and was never tested against a programmatic-API caller until #256.
+
+### Fixed
+- `e2e/discovery-prefs-isolation.spec.ts:133` — set `headers.origin = new URL(page.url()).origin` so the request presents the page's current origin (localhost:3000 in CI, per `src/lib/csrf.ts:67`'s non-prod allowlist).
+
+
 ## [0.24.5.15] - 2026-05-21
 
 **fix(ci): commit the chromium-linux baseline PNGs that PR #256's C-0300 sentinel requires.**
