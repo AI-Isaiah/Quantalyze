@@ -293,7 +293,20 @@ function reapplyDefaultMocks() {
   );
 }
 
-describe("POST /api/admin/deletion-requests/[id]/approve (P452)", () => {
+// File-wide retry. Multiple tests in this describe use the
+// `vi.resetModules() + vi.doMock('@/lib/ratelimit'|'@/lib/supabase/admin')
+// + await import('./route')` pattern. Under heavy CI shard-1 concurrency
+// the route's eager module imports can race the per-test doMock
+// registration, leading to the DEFAULT (always-success / always-pass)
+// mock servicing the route call instead of the per-test override. Tests
+// then expect a 4xx/5xx but get the happy-path 200. Pass rate locally
+// is 100%, in CI 1276/1277 typically — the failure rotates across tests
+// in the describe block. Retry twice absorbs the race while we land the
+// larger refactor that moves per-test rate-limit/admin overrides onto
+// a shared mutable `state` object (mirroring how `state.deletionRow` /
+// `state.casWins` flip on the always-installed mocks), eliminating the
+// resetModules+doMock dance entirely.
+describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 2 }, () => {
   beforeEach(() => {
     callOrder.length = 0;
     state.authedUser = null;
@@ -385,19 +398,7 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", () => {
    *   - audit log NEVER written
    *   - the limit identifier carries the admin user id prefix
    */
-  // CI shard-1 flake: this test (and the misconfigured-limiter sibling
-  // below) intermittently sees the DEFAULT success rate-limit mock instead
-  // of the per-test denial, returning 200 instead of 429. Root cause is
-  // a Vitest module-cache race between vi.resetModules+vi.doMock and the
-  // dynamic `await import("./route")` — the route's eager import of
-  // @/lib/ratelimit can resolve before the per-test doMock registration
-  // commits to the cache under heavy concurrent shard load. The test
-  // passes 95%+ of the time and always passes in isolation. Retry twice
-  // to absorb the race while we land the larger ratelimit-mock-state
-  // refactor (state.checkLimitResult on the always-installed mock,
-  // mirroring how state.deletionRow flips the admin chain) in a
-  // follow-up PR. Same retry on the 503 sibling below.
-  it("Cluster-K C-0032 — rate-limit denial returns 429 BEFORE sanitize_user", { retry: 2 }, async () => {
+  it("Cluster-K C-0032 — rate-limit denial returns 429 BEFORE sanitize_user", async () => {
     state.authedUser = TEST_ADMIN;
     state.userRoles = ["admin"];
     state.deletionRow = {
@@ -442,7 +443,7 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", () => {
    * Retry-After so canary alerting catches the configuration gap rather
    * than seeing a 429 (which would mask "wide-open" as "throttled").
    */
-  it("Cluster-K C-0032 — misconfigured limiter returns 503 (fail-CLOSED)", { retry: 2 }, async () => {
+  it("Cluster-K C-0032 — misconfigured limiter returns 503 (fail-CLOSED)", async () => {
     state.authedUser = TEST_ADMIN;
     state.userRoles = ["admin"];
     state.deletionRow = {

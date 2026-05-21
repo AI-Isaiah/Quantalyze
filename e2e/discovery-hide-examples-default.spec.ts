@@ -188,10 +188,11 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
         "(DEFAULTS.hide_examples=true must filter seed strategies out)",
     ).toEqual([]);
 
-    // Now toggle "Hide examples" OFF via the inline checkbox in
-    // StrategyFilters.tsx (search: `Hide examples toggle`). The checkbox
-    // is `checked={!showExamples}` and clicking the surrounding <label>
-    // flips it.
+    // Now toggle "Hide examples" OFF. Target the <input type="checkbox">
+    // directly — clicking the surrounding <label> has been flaky in CI
+    // (the click occasionally landed before React's controlled checkbox
+    // had committed its initial render, so the synthetic change event
+    // was dropped). The input itself is always interactive once visible.
     //
     // C-0301/H-1034 fix: no `if (hideExamplesLabel.count())` silent skip.
     // The toggle must exist; a UI rename is a real regression we want to
@@ -203,7 +204,17 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
       hideExamplesLabel,
       "Hide examples toggle must be present (StrategyFilters.tsx)",
     ).toBeVisible({ timeout: 5000 });
-    await hideExamplesLabel.click();
+    const hideExamplesCheckbox = hideExamplesLabel.locator(
+      'input[type="checkbox"]',
+    );
+    // Initial state: hide_examples=true default → checked=true.
+    await expect(hideExamplesCheckbox).toBeChecked();
+    // Uncheck via the input directly; falls back to a forced click if a
+    // CSS overlay momentarily intercepts the pointer in CI.
+    await hideExamplesCheckbox.uncheck({ force: true });
+    // Wait for the controlled state to flip before polling for rows —
+    // otherwise the next poll can race the React commit on a slow CI.
+    await expect(hideExamplesCheckbox).not.toBeChecked();
 
     // C-0301/C-0302/H-1035/H-1036/M-0859/M-0861 fix: replace
     // `waitForTimeout(500)` + `toBeGreaterThanOrEqual` with an explicit
