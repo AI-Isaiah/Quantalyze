@@ -92,6 +92,7 @@ function parseDailyReturnsSeries(
     };
   }
   const out: CsvDailyReturnRow[] = [];
+  const seenDates = new Set<string>();
   for (let i = 0; i < raw.length; i++) {
     const row = raw[i];
     if (!row || typeof row !== "object") {
@@ -110,6 +111,15 @@ function parseDailyReturnsSeries(
         message: `daily_returns_series[${i}].daily_return must be a finite number.`,
       };
     }
+    // Surface duplicate dates as CSV_INVALID_FORMAT here rather than waiting
+    // for the RPC's UNIQUE (strategy_id, date) constraint to throw 23505.
+    if (seenDates.has(r.date)) {
+      return {
+        ok: false,
+        message: `daily_returns_series[${i}].date is a duplicate of an earlier row (${r.date}).`,
+      };
+    }
+    seenDates.add(r.date);
     out.push({ date: r.date, daily_return: r.daily_return });
   }
   return { ok: true, series: out };

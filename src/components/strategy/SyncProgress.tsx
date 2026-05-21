@@ -35,10 +35,10 @@ function assertNever(value: never): never {
 
 /**
  * Discriminated converter from DB `computation_status` to UI `SyncStatus`.
- * `complete_with_warnings` has no DB representation — it is a UI-only state
- * that callers must set explicitly via a higher-level signal (warnings
- * payload non-empty). The converter therefore maps DB `complete → complete`
- * and lets the caller upgrade to `complete_with_warnings` separately.
+ * `complete_with_warnings` is now a first-class DB status (added in the
+ * CSV → analytics pipeline, Task 7) and maps directly to its UI variant.
+ * Callers may still synthesise it from a separate warnings payload when
+ * `complete` is paired with non-empty warnings — both routes are valid.
  */
 export function toSyncStatus(db: ComputationStatus): SyncStatus {
   switch (db) {
