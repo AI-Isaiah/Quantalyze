@@ -1,5 +1,18 @@
 import { test, expect } from "@playwright/test";
 
+/**
+ * Audit 2026-05-07 C-0309: credentials are read from env vars at test
+ * time, never committed to the repo. Local devs source from the macOS
+ * Keychain via `security find-generic-password -s quantalyze-test -a
+ * <role>@quantalyze.test -w`; CI injects them through the existing
+ * E2E_TEST_EMAIL / E2E_TEST_PASSWORD pipeline. When the env is not
+ * present the authenticated/admin describes skip rather than
+ * authenticating with stale committed credentials.
+ */
+const E2E_EMAIL = process.env.E2E_TEST_EMAIL;
+const E2E_PASSWORD = process.env.E2E_TEST_PASSWORD;
+const HAS_E2E_CREDS = !!E2E_EMAIL && !!E2E_PASSWORD;
+
 test.describe("Public browsing flow", () => {
   test("landing page links to /browse", async ({ page }) => {
     await page.goto("/");
@@ -50,10 +63,22 @@ test.describe("Public browsing flow", () => {
 
 test.describe("Authenticated flows", () => {
   test.beforeEach(async ({ page }) => {
-    // Login with test account
+    test.skip(
+      !HAS_E2E_CREDS,
+      "set E2E_TEST_EMAIL and E2E_TEST_PASSWORD before running this spec " +
+        "(local: source from macOS Keychain `security find-generic-password " +
+        "-s quantalyze-test -a <role>@quantalyze.test -w`; CI: injected via " +
+        "GitHub Actions secrets)",
+    );
+
+    // Login with test account — credentials sourced from env, never
+    // hardcoded in the repo (audit 2026-05-07 C-0309).
     await page.goto("/login");
-    await page.fill('input[name="email"], input[placeholder*="email" i]', "matratzentester24@gmail.com");
-    await page.fill('input[type="password"]', "Test12");
+    await page.fill(
+      'input[name="email"], input[placeholder*="email" i]',
+      E2E_EMAIL!,
+    );
+    await page.fill('input[type="password"]', E2E_PASSWORD!);
     await page.click('button:has-text("Sign in")');
     // Wait for redirect to discovery
     await page.waitForURL(/\/(discovery|strategies)/, { timeout: 10000 });
@@ -106,9 +131,22 @@ test.describe("Authenticated flows", () => {
 
 test.describe("Admin flows", () => {
   test.beforeEach(async ({ page }) => {
+    test.skip(
+      !HAS_E2E_CREDS,
+      "set E2E_TEST_EMAIL and E2E_TEST_PASSWORD before running this spec " +
+        "(local: source from macOS Keychain `security find-generic-password " +
+        "-s quantalyze-test -a <role>@quantalyze.test -w`; CI: injected via " +
+        "GitHub Actions secrets)",
+    );
+
+    // Login with test account — credentials sourced from env, never
+    // hardcoded in the repo (audit 2026-05-07 C-0309).
     await page.goto("/login");
-    await page.fill('input[name="email"], input[placeholder*="email" i]', "matratzentester24@gmail.com");
-    await page.fill('input[type="password"]', "Test12");
+    await page.fill(
+      'input[name="email"], input[placeholder*="email" i]',
+      E2E_EMAIL!,
+    );
+    await page.fill('input[type="password"]', E2E_PASSWORD!);
     await page.click('button:has-text("Sign in")');
     await page.waitForURL(/\/(discovery|strategies)/, { timeout: 10000 });
   });

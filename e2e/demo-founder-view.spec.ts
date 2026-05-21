@@ -14,6 +14,13 @@ import {
  * layout chrome (brand banner + the PageHeader description text), not on
  * queue contents.
  */
+// C-0295 (audit-2026-05-07): the `/api/demo/match` console-error
+// exclusion below must only apply when running against the placeholder
+// Supabase env (CI unseeded profile). Against a real seeded DB those
+// 500s are real regressions and must NOT be masked.
+const isPlaceholderEnv =
+  process.env.NEXT_PUBLIC_SUPABASE_URL?.includes("placeholder") ?? false;
+
 test.describe("Public /demo/founder-view page", () => {
   test("loads with brand banner and read-only description", async ({
     page,
@@ -56,9 +63,11 @@ test.describe("Public /demo/founder-view page", () => {
     await page.goto("/demo/founder-view");
     await page.waitForTimeout(1000);
 
+    // C-0295: only mask /api/demo/match errors against placeholder env.
+    // On real seeded Supabase those 500s indicate a genuine regression.
     const realErrors = filterUnexpectedConsoleErrors(errors, {
       ignoreTextIncludes: ["Hydration", "NEXT_REDIRECT", "Failed to fetch"],
-      ignoreTextOrUrlIncludes: ["/api/demo/match"],
+      ignoreTextOrUrlIncludes: isPlaceholderEnv ? ["/api/demo/match"] : [],
     });
     if (realErrors.length > 0) {
       // Surface the full context in CI logs when this fires so the next
