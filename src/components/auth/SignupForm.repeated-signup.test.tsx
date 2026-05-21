@@ -99,7 +99,14 @@ describe("SignupForm — repeated-signup UX guard", () => {
     expect(container.textContent).not.toMatch(/already exists/i);
   });
 
-  it("routes to /onboarding when session is returned immediately (auto-confirm path)", async () => {
+  it("routes to /pending-approval when session is returned immediately (auto-confirm path)", async () => {
+    // Updated 2026-05-21 (v0.24.5.18): SignupForm now routes to
+    // /pending-approval instead of /onboarding so the universal-approval
+    // gate (src/lib/approval.ts) can show "your application is being
+    // reviewed" before any dashboard tease. The (dashboard)/layout +
+    // /onboarding gates also redirect un-verified profiles to the same
+    // page, so the redirect here is mostly cosmetic (avoids a flash of
+    // the dashboard shell) but still asserted to lock the behavior.
     signUpMock.mockResolvedValueOnce({
       data: {
         user: { id: "new-uid", identities: [{ id: "id-1", provider: "email" }] },
@@ -113,7 +120,7 @@ describe("SignupForm — repeated-signup UX guard", () => {
     fireEvent.click(getByText("Create account"));
 
     await waitFor(() => {
-      expect(pushMock).toHaveBeenCalledWith("/onboarding");
+      expect(pushMock).toHaveBeenCalledWith("/pending-approval");
     });
   });
 });

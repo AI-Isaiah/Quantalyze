@@ -7,6 +7,14 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.19] - 2026-05-21
+
+**fix(ship): CI follow-up to v0.24.5.18 — manifest entry + test redirect.**
+
+- `src/lib/auth/rbac-manifest.ts` — added entry for the new `/api/admin/manager-approve` route (CI's `check-admin-route-manifest` enforces that every `src/app/api/admin/*` route has a manifest declaration).
+- `src/components/auth/SignupForm.repeated-signup.test.tsx` — updated the auto-confirm-redirect assertion from `/onboarding` to `/pending-approval` to match the v0.24.5.18 behavior change.
+
+
 ## [0.24.5.18] - 2026-05-21
 
 **feat(auth): universal signup-approval gate + "your application is being reviewed" landing page.**
