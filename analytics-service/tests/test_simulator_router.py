@@ -721,7 +721,7 @@ class TestG15_005_RateLimitIsUserKeyed:
         # AND it must NOT be slowapi's default IP-based key_func.
         assert key_func is not get_remote_address
 
-    def test_key_function_ignores_spoofable_user_header(self):
+    def test_key_function_ignores_spoofable_user_header(self, monkeypatch):
         """PR #241 red-team — the key_func MUST NOT read ``X-User-Id``.
         That header is unsigned client input; an attacker holding the
         SERVICE_KEY could set it to a fresh uuid per request and
@@ -732,16 +732,25 @@ class TestG15_005_RateLimitIsUserKeyed:
         without regressing the legitimate-traffic shape.
 
         Two requests from the same remote IP land in the SAME bucket
-        regardless of the X-User-Id value they claim."""
+        regardless of the X-User-Id value they claim.
+
+        ``get_remote_address`` is stubbed here so the test pins the
+        key_func's BEHAVIOUR (does it consult X-User-Id or not?)
+        without coupling to slowapi's request-shape contract (which
+        differs across CI Python / slowapi versions and reads
+        request.scope vs request.client.host depending on version).
+        """
         from routers import simulator as simulator_router
 
+        ip_box = {"value": "10.0.0.1"}
+        monkeypatch.setattr(
+            "routers.simulator.get_remote_address",
+            lambda _req: ip_box["value"],
+        )
+
         class _FakeRequest:
-            def __init__(self, user_id=None, client_host="10.0.0.1"):
+            def __init__(self, user_id=None):
                 self.headers = {"X-User-Id": user_id} if user_id else {}
-                # slowapi's get_remote_address reads request.client.host;
-                # populate it so the same IP keys to the same bucket
-                # regardless of header content.
-                self.client = type("C", (), {"host": client_host})()
 
         key_func = simulator_router._simulator_rate_limit_key
         bucket_a = key_func(_FakeRequest(user_id="user-alice"))
@@ -754,9 +763,8 @@ class TestG15_005_RateLimitIsUserKeyed:
         bucket_ip = key_func(_FakeRequest(user_id=None))
         assert bucket_ip.startswith("simulator:ip:")
         # Different IP → different bucket.
-        bucket_other_ip = key_func(
-            _FakeRequest(user_id="user-alice", client_host="10.0.0.99"),
-        )
+        ip_box["value"] = "10.0.0.99"
+        bucket_other_ip = key_func(_FakeRequest(user_id="user-alice"))
         assert bucket_other_ip != bucket_a
 
     def test_ceiling_matches_next_js_front_door(self):
