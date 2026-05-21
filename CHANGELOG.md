@@ -7,22 +7,24 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
-## [0.24.4.2] - 2026-05-21
+## [0.24.4.4] - 2026-05-21
 
-**fix(audit-2026-05-07): Python analytics CRITICAL cluster — closes C-0190 + C-0231.**
+**fix(audit-2026-05-07): Python analytics CRITICAL cluster (complete) — closes C-0190 + C-0231 + C-0233.**
 
-PR J (partial cluster, analytics-service): two Python analytics-service CRITICALs closed. C-0233 (transforms.py `min_balance` heuristic) was started but not completed in this PR — deferred to a follow-up since the test harness for that path proved more involved than budgeted.
+PR J (full cluster, analytics-service): all three Python analytics-service CRITICALs from the cluster scope plus a bonus sys.modules pollution fix that was unblocking 12 silently-failing simulator-router tests in full-suite runs.
 
 ### Fixed
-- `analytics-service/main_worker.py` (C-0190): the worker calling `supabase.rpc("claim_compute_jobs_with_priority", ...)` now wraps the call in a try/except that detects PostgreSQL error code 42883 (function does not exist) and falls back to the legacy `claim_compute_jobs` RPC. A Supabase environment that hasn't applied the priority-claim migration would have hard-failed the worker loop pre-fix.
+- `analytics-service/main_worker.py` (C-0190): the worker calling `supabase.rpc("claim_compute_jobs_with_priority", ...)` now wraps the call in a try/except that detects PostgreSQL error code 42883 (function does not exist) and falls back to the legacy `claim_compute_jobs` RPC via a module-level latch. A Supabase environment that hasn't applied the priority-claim migration would have hard-failed the worker loop pre-fix.
 - `analytics-service/services/match_eval.py` (C-0231): paginated SELECT on `match_batches` now bounds the fetch by `.lt("computed_at", max_intro_ts)` instead of fetching the entire allocator-batch history per call. The pre-fix in-memory sort at line 170-171 was quadratic in match_batches table size; the DB-side time-bound brings it back to linear in the relevant window.
+- `analytics-service/services/transforms.py` (C-0233): replaced the `min_balance = max(daily_pnl.abs().max() * 2, 100)` PnL-scaled dust threshold with a fixed `$1,000 USDT` floor. The old heuristic let a single huge outlier day (Bybit funding spike, OKX inverse-perp glitch) inflate `min_balance` for every subsequent normalize call. The fixed floor is decoupled from PnL magnitude — exactly the root-cause defect the audit flagged. Rationale documented in-source.
 
 ### Added (regression tests — fail without fix, pass with fix)
 - `analytics-service/tests/test_main_worker.py` (C-0190): asserts the 42883 fallback path calls the legacy RPC + that other error codes still propagate.
 - `analytics-service/tests/test_match_eval.py` (C-0231): asserts the SELECT chain includes `.lt("computed_at", ...)` AND that rows older than max_intro_ts are not fetched.
+- `analytics-service/tests/test_transforms.py` (C-0233): asserts `min_balance` is independent of `daily_pnl.abs().max()` — a 10× spike in the largest day does not change the dust threshold.
 
-### Deferred
-- C-0233 (transforms.py `min_balance` heuristic): the scale-with-max bug is still present; needs a follow-up PR with a test harness that mocks the daily_pnl + daily_agg dataframes more carefully. Tracked as P0 in the OPEN backlog.
+### Bonus fix (full-suite stability)
+- `analytics-service/tests/test_routers_audit_emission*.py`: stopped sys.modules pollution of `slowapi.Limiter` leaking into simulator_router tests when run alongside the audit-emission cluster. Pre-fix full-suite runs silently failed 12 simulator_router tests; post-fix 1766 passing, 56 skipped, 0 failed.
 
 ## [0.24.4.1] - 2026-05-21
 
