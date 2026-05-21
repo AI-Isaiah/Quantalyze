@@ -7,6 +7,22 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.12] - 2026-05-21
+
+**fix(strategies): surface in-progress wizard draft via Resume banner + empty-state CTA swap.**
+
+Closes dogfood report "I create my strategy, click around, come back to /strategies and I do not see the upload anymore". The page deliberately hides `source='wizard' AND status='draft'` rows (to avoid routing them through the legacy StrategyForm), but that hiding was total — a user mid-wizard who navigated away saw "No strategies yet. Create your first strategy.", lost the trail to their draft, and the cleanup cron eventually swept it.
+
+### Fixed
+- `src/app/(dashboard)/strategies/page.tsx`: separate query fetches the most-recent `source='wizard' AND status='draft'` row for the user.
+  - Empty state + draft → CTA switches to "Resume your draft" → `/strategies/new/wizard`
+  - Has list + draft → "Resume draft" banner renders above the list (draft name + start date + 30-day expiry hint)
+  - Existing `.or()` filter that hides wizard drafts inline STAYS — preserves the StrategyForm-routing safety invariant.
+
+### Added (regression tests — 2 of 4 fail without the fix)
+- `src/app/(dashboard)/strategies/page.wizard-draft-banner.test.tsx` — 4 tests covering empty-state with/without draft and list-state with/without draft.
+
+
 ## [0.24.5.11] - 2026-05-21
 
 **fix(wizard): wrap WizardClient in <Suspense> so /strategies/new/wizard?source=csv stops hiding the CsvUploadStep.**
