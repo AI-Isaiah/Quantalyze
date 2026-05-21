@@ -1,6 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
-import { isAdmin } from "@/lib/admin";
+// audit-2026-05-07 C-0144 + C-0150: `isAdmin(email)` is no longer used by
+// the proxy gate (see admin-route block below). Page-level `isAdminUser` is
+// the authoritative check.
 
 const PUBLIC_ROUTES = ["/login", "/signup", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security"];
 const ADMIN_ROUTES = ["/admin", "/api/admin"];
@@ -112,21 +114,21 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // Admin route protection: fast-path email check via the canonical isAdmin()
-  // helper in lib/admin.ts. This bounces non-admin users early without a DB
-  // call. The authoritative check (isAdminUser) at the page/API handler level
-  // also queries profiles.is_admin, so DB-only admins still pass at the DAL
-  // layer — they just won't be blocked here at the proxy level.
-  const isAdminRoute = ADMIN_ROUTES.some((route) =>
-    request.nextUrl.pathname.startsWith(route)
-  );
-  if (isAdminRoute) {
-    if (!isAdmin(session?.user?.email)) {
-      const url = request.nextUrl.clone();
-      url.pathname = DEFAULT_AUTHENTICATED_ROUTE;
-      return NextResponse.redirect(url);
-    }
-  }
+  // audit-2026-05-07 C-0144 + C-0150: the previous proxy-level email-only
+  // check redirected any admin whose email did NOT match ADMIN_EMAIL away
+  // from /admin/* — locking out DB-admins whose profiles.is_admin=TRUE but
+  // whose email isn't in the env var (the exact "DB-only admin" persona the
+  // RBAC refactor was supposed to protect). The proxy now does NOT enforce
+  // admin status: page-level `isAdminUser` is the authoritative gate
+  // (matches RLS) and reliably returns 403 for non-admins. We accept the
+  // cost of one DB call to load the page-level gate for non-admin probes;
+  // the alternative (proxy DB call) trades one cost for another and adds
+  // proxy-level Supabase coupling. The matching-ADMIN_EMAIL fast-pass is
+  // gone — if it's needed back later, add it as a positive allowlist (fast
+  // pass through), never as a deny.
+  // `ADMIN_ROUTES` retained for future use (e.g. logging an access-attempt
+  // probe at the proxy level without changing the response).
+  void ADMIN_ROUTES;
 
   return supabaseResponse;
 }

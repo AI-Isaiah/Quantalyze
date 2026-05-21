@@ -153,15 +153,25 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   }
 
   const supabase = await createClient();
-  const { data: newStrategyId, error } = await supabase.rpc(
-    "finalize_csv_strategy",
-    {
-      p_user_id: user.id,
-      p_wizard_session_id: wizard_session_id,
-      p_fmt: fmt,
-      p_strategy_name: trimmedName,
-    },
-  );
+  // C-0155/C-0157: `finalize_csv_strategy` exists in DB (migration 093) but is
+  // missing from the generated database.types.ts Functions union. Cast through
+  // unknown to call it while we wait for the generated types to be regenerated.
+  const { data: newStrategyId, error } = await (
+    supabase.rpc as unknown as (
+      fn: "finalize_csv_strategy",
+      args: {
+        p_user_id: string;
+        p_wizard_session_id: string;
+        p_fmt: string;
+        p_strategy_name: string;
+      },
+    ) => Promise<{ data: string | null; error: { code?: string; message?: string } | null }>
+  )("finalize_csv_strategy", {
+    p_user_id: user.id,
+    p_wizard_session_id: wizard_session_id,
+    p_fmt: fmt,
+    p_strategy_name: trimmedName,
+  });
 
   if (error) {
     console.error(

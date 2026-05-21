@@ -60,13 +60,20 @@ export function PositionsTab({
   // funding_pnl. Use per-row presence check rather than summing — avoids
   // false-negative when payments cancel out to zero total.
   //
-  // G14-003 PARTIAL gate: only Binance has the daily_pnl FUNDING_FEE
-  // exclusion live (analytics-service/services/exchange.py); OKX/Bybit
-  // still bake funding into realized_pnl. Showing `+ Funding` for those
-  // exchanges double-counts on the allocator-facing tooltip.
+  // G14-003 + C-0319 (Bybit cutover): Binance, OKX, and Bybit all
+  // exclude funding from realized_pnl now (FUNDING_FEE filter in the
+  // Binance branch, type=8 bills dropped in the OKX branch, and
+  // cumEntryValue/cumExitValue reconstruction in the Bybit branch —
+  // see analytics-service/services/exchange.py). Funding cashflow lives
+  // exclusively in positions.funding_pnl via services.funding_fetch, so
+  // the "+ Funding" tooltip is now mathematically correct for all three
+  // CEX integrations. Gate stays on exchange identity so a future
+  // integration that has NOT yet shipped the funding-exclusion cutover
+  // (e.g. a new exchange added to services/exchange.py) lands as opt-in
+  // rather than silently displaying a double-count.
   const hasFunding = useMemo(
     () =>
-      exchange === "binance" &&
+      (exchange === "binance" || exchange === "okx" || exchange === "bybit") &&
       closedPositions.some(
         (p) => p.funding_pnl != null && p.funding_pnl !== 0,
       ),

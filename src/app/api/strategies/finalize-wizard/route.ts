@@ -476,6 +476,11 @@ async function runLegacyFinalize(args: {
   fields: ValidatedPayload;
 }): Promise<NextResponse> {
   const { supabase, user, fields } = args;
+  // The generated types declare these RPC params as non-null primitives, but
+  // the underlying SQL function accepts nulls for leverage_range, aum, and
+  // max_capacity (per the wizard's "skip optional metadata" path). Cast each
+  // nullable arg to satisfy the typed-client contract without changing the
+  // value the DB receives.
   const { data: finalizedId, error } = await supabase.rpc(
     "finalize_wizard_strategy",
     {
@@ -488,9 +493,9 @@ async function runLegacyFinalize(args: {
       p_subtypes: fields.subtypes,
       p_markets: fields.markets,
       p_supported_exchanges: fields.supported_exchanges,
-      p_leverage_range: fields.leverage_range,
-      p_aum: fields.aumNum,
-      p_max_capacity: fields.maxCapacityNum,
+      p_leverage_range: fields.leverage_range as unknown as string,
+      p_aum: fields.aumNum as unknown as number,
+      p_max_capacity: fields.maxCapacityNum as unknown as number,
     },
   );
 

@@ -2,9 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 import type { ComputeJobAdminRow } from "@/lib/types";
 
 export async function GET(request: NextRequest) {
+  // audit-2026-05-07 C-0041 follow-up — same-origin guard on admin
+  // GETs that return PII / sensitive operational data. Mirror the
+  // sibling admin/match/{allocators,eval} routes.
+  const csrfError = assertSameOrigin(request);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const {
     data: { user },

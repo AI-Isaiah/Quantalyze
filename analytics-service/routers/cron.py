@@ -15,6 +15,52 @@ from services.exchange import create_exchange, fetch_all_trades, parse_since_ms,
 router = APIRouter(prefix="/api", tags=["cron"])
 logger = logging.getLogger("quantalyze.analytics")
 
+# audit-2026-05-07 C-0193 — per-key validation cache.
+#
+# Pre-fix every cron tick (currently every 15 min) called
+# `validate_key_permissions` for EVERY active api_keys row, which hits the
+# exchange's /account or /apiRestrictions endpoint per key. With N keys
+# that's N exchange RPCs every 15 min just to confirm "yes, still valid",
+# burning the per-IP rate-limit budget against work the user already paid
+# for last tick.
+#
+# In-memory TTL keyed by api_keys.id:
+#   * miss / expired entry  -> re-validate, refresh the entry on success
+#   * fresh entry           -> assume valid, skip the exchange round-trip
+#
+# In-memory only (no migration), so a pod restart or a deploy invalidates
+# the whole cache and the next tick re-validates everything from scratch
+# — that's intentional: a TTL is a budget, not a guarantee.
+#
+# Failures (valid=False or validator raise) are NOT cached: the next tick
+# must re-attempt so a transient exchange blip doesn't pin a key into
+# permanent "needs revalidation" for the TTL window.
+KEY_VALIDATION_TTL_SECONDS = 24 * 60 * 60  # 24h
+_key_validation_cache: dict[str, float] = {}
+
+
+def _validation_cache_hit(key_id: str, *, now: float | None = None) -> bool:
+    """Return True if `key_id` has a fresh validation entry.
+
+    `now` is injectable so tests can advance time deterministically without
+    monkey-patching `time.monotonic`.
+    """
+    entry = _key_validation_cache.get(key_id)
+    if entry is None:
+        return False
+    current = time.monotonic() if now is None else now
+    return (current - entry) < KEY_VALIDATION_TTL_SECONDS
+
+
+def _record_validation_success(key_id: str, *, now: float | None = None) -> None:
+    """Refresh the cache entry after a successful re-validation."""
+    _key_validation_cache[key_id] = time.monotonic() if now is None else now
+
+
+def _invalidate_validation_cache(key_id: str) -> None:
+    """Drop a key from the cache (e.g. on credential rejection)."""
+    _key_validation_cache.pop(key_id, None)
+
 # Per-key timeout in seconds
 KEY_SYNC_TIMEOUT = 60
 # Max concurrent keys per batch
@@ -100,14 +146,74 @@ async def _sync_single_key(
         exchange = create_exchange(exchange_name, api_key, api_secret, passphrase)
 
         try:
-            # Re-validate key permissions before syncing
-            validation = await validate_key_permissions(exchange)
+            # audit-2026-05-07 C-0193 — skip the exchange round-trip when a
+            # recent successful validation is still within TTL. Tests use
+            # `_validation_cache_hit` directly; the production path treats a
+            # hit as "valid, no re-check needed."
+            if _validation_cache_hit(key_id):
+                validation = {"valid": True, "error": None, "error_code": None}
+            else:
+                # Re-validate key permissions before syncing
+                validation = await validate_key_permissions(exchange)
             if not validation["valid"]:
                 error_code = validation.get("error_code")
                 is_credential_failure = error_code in CREDENTIAL_REJECTION_CODES
 
                 supabase = get_supabase()
                 if is_credential_failure and strategy_id:
+                    # audit-2026-05-07 C-0195 — before flipping is_active=False,
+                    # check whether this key backs any allocator_holdings rows.
+                    # An allocator's portfolio of holdings depends on the key
+                    # staying active for the next sync window; silently flipping
+                    # is_active=False breaks the allocator's holdings ingest
+                    # without surfacing why. ON DELETE RESTRICT on the FK
+                    # already prevents row deletion, but a soft-deactivate has
+                    # the same operational effect.
+                    allocator_used = False
+                    try:
+                        ah_result = (
+                            supabase.table("allocator_holdings")
+                            .select("id")
+                            .eq("api_key_id", key_id)
+                            .limit(1)
+                            .execute()
+                        )
+                        allocator_used = bool(getattr(ah_result, "data", None))
+                    except Exception:
+                        # A Supabase blip on the linkage probe must NOT silently
+                        # green-light deactivation. Fail closed: treat the key
+                        # as allocator-used and skip the flip; the next tick
+                        # will retry. logger.exception so the traceback reaches
+                        # Sentry.
+                        logger.exception(
+                            "cron_sync: allocator_holdings linkage probe failed "
+                            "for key %s — failing closed (skipping deactivation)",
+                            key_id,
+                        )
+                        allocator_used = True
+
+                    if allocator_used:
+                        logger.warning(
+                            "cron_sync: key %s failed validation (code=%s) but "
+                            "backs allocator_holdings rows — NOT deactivating "
+                            "(allocator-protected path)",
+                            key_id,
+                            error_code,
+                        )
+                        _invalidate_validation_cache(key_id)
+                        return {
+                            "key_id": key_id,
+                            "strategy_id": strategy_id,
+                            "strategy_ids": strategy_ids,
+                            "exchange": exchange_name,
+                            "trades_fetched": 0,
+                            "duration_s": round(time.monotonic() - start, 2),
+                            "status": "key_revoked",
+                            "error_code": error_code,
+                            "error": validation.get("error", "Key no longer valid"),
+                            "allocator_protected": True,
+                        }
+
                     logger.warning(
                         "cron_sync: key %s failed validation (code=%s): %s — deactivating",
                         key_id,
@@ -126,6 +232,7 @@ async def _sync_single_key(
                             "vanished mid-tick (deleted/re-keyed by another writer)",
                             key_id,
                         )
+                    _invalidate_validation_cache(key_id)
                 else:
                     # Transient failure — leave is_active=True, retry next tick.
                     logger.warning(
@@ -134,6 +241,9 @@ async def _sync_single_key(
                         error_code,
                         validation.get("error", "unknown"),
                     )
+                    # Transient failures evict from cache so next tick
+                    # re-validates instead of trusting a stale entry.
+                    _invalidate_validation_cache(key_id)
                 return {
                     "key_id": key_id,
                     "strategy_id": strategy_id,
@@ -145,6 +255,10 @@ async def _sync_single_key(
                     "error_code": error_code,
                     "error": validation.get("error", "Key no longer valid"),
                 }
+
+            # Cache the successful validation so subsequent ticks within the
+            # TTL window can skip the exchange round-trip (C-0193).
+            _record_validation_success(key_id)
 
             since_ms = parse_since_ms(key_row.get("last_sync_at"))
             trades = await fetch_all_trades(exchange, since_ms=since_ms)
@@ -199,13 +313,65 @@ async def _sync_single_key(
             # `per_strategy_stored` carries the per-strategy breakdown.
             trades_stored = per_strategy_stored.get(strategy_id, 0)
 
-        # Update last_sync_at and balance unconditionally — even if some
-        # per-strategy RPCs failed, the trades we *did* land must not be
-        # refetched on the next tick.
-        update_data: dict = {"last_sync_at": datetime.now(timezone.utc).isoformat()}
+        # audit-2026-05-07 C-0198 — only advance `last_sync_at` when something
+        # was actually stored, OR when there were no trades to store at all
+        # (idle tick). The pre-fix branch advanced the cursor on EVERY return,
+        # so a tick where the worker fetched trades but every per-strategy RPC
+        # failed (concurrent advisory-lock contention, deadlock, etc.) would
+        # silently lose those trades on the next tick because `last_sync_at`
+        # already pointed past them. With this gate, a 100%-RPC-failure tick
+        # leaves the cursor alone so the next tick retries the same window.
+        #
+        # Balance updates are independent of the cursor gate — fetching the
+        # USDT balance succeeded if we got here, and stashing it doesn't
+        # affect trade replay semantics.
+        synced_count = sum(per_strategy_stored.values())
+        any_trades_to_store = bool(trades) and bool(strategy_ids)
+        should_advance_cursor = (not any_trades_to_store) or synced_count > 0
+
+        update_data: dict = {}
+        if should_advance_cursor:
+            update_data["last_sync_at"] = datetime.now(timezone.utc).isoformat()
         if account_balance is not None:
             update_data["account_balance_usdt"] = account_balance
-        supabase.table("api_keys").update(update_data).eq("id", key_id).execute()
+        if update_data:
+            supabase.table("api_keys").update(update_data).eq("id", key_id).execute()
+        if not should_advance_cursor:
+            logger.warning(
+                "cron_sync: key %s held last_sync_at unchanged — %d trade(s) "
+                "fetched but 0 stored (all per-strategy RPCs failed); next "
+                "tick will retry the same window",
+                key_id,
+                len(trades),
+            )
+
+        # audit-2026-05-07 C-0197 — mark strategy_analytics rows stale for
+        # strategies that actually received new trades. The downstream
+        # analytics cron will pick up `computation_status='stale'` rows and
+        # recompute; pre-fix the cron synced trades but never told the
+        # analytics layer that its inputs had changed, so KPI rows stayed
+        # stale until a user-triggered recompute (or the daily portfolio
+        # recompute cascade) happened to touch them.
+        stale_strategy_ids = [
+            sid for sid, stored in per_strategy_stored.items() if stored > 0
+        ]
+        if stale_strategy_ids:
+            try:
+                supabase.table("strategy_analytics").update(
+                    {"computation_status": "stale"}
+                ).in_("strategy_id", stale_strategy_ids).execute()
+            except Exception:
+                # Non-fatal: the next analytics cron tick will still pick
+                # the rows up if they were already stale; if they weren't,
+                # the user-facing KPIs are stale by one cron cycle until a
+                # downstream recompute touches them. logger.exception so
+                # the traceback reaches Sentry.
+                logger.exception(
+                    "cron_sync: failed to mark strategy_analytics stale for %d "
+                    "strategy id(s) on key %s — analytics may lag one cycle",
+                    len(stale_strategy_ids),
+                    key_id,
+                )
 
         duration = time.monotonic() - start
         # `partial` means *some* strategies landed AND *some* failed.

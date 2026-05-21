@@ -72,7 +72,7 @@ export default async function ManagePortfolioPage({ params }: { params: Promise<
                         {ps.current_weight != null && <span className="font-metric">{(ps.current_weight * 100).toFixed(1)}%</span>}
                       </div>
                     </div>
-                    <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${statusStyles[ps.relationship_status] ?? ""}`}>
+                    <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${(ps.relationship_status && statusStyles[ps.relationship_status]) ?? ""}`}>
                       {ps.relationship_status}
                     </span>
                     <RemoveStrategyButton

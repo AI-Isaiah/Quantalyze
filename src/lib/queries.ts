@@ -263,7 +263,7 @@ export async function getPublicStrategyDetail(strategyId: string): Promise<{
     .select(`*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS})`)
     .eq("id", strategyId)
     .eq("status", "published")
-    .single();
+    .single<Strategy & { strategy_analytics: { daily_returns?: unknown; computed_at: string | null; computation_status: string | null } | null }>();
 
   if (error || !strategy) return null;
 
@@ -293,7 +293,7 @@ export async function getFactsheetDetail(strategyId: string): Promise<{
     )
     .eq("id", strategyId)
     .eq("status", "published")
-    .single();
+    .single<Strategy & { discovery_categories: { slug: string } | null; strategy_analytics: { daily_returns?: unknown; computed_at: string | null; computation_status: string | null; monthly_returns?: unknown; metrics_json?: unknown } | null }>();
 
   if (error || !strategy) return null;
 
@@ -951,7 +951,11 @@ export async function getDecks(): Promise<DeckWithCount[]> {
     name: d.name,
     description: d.description,
     slug: d.slug,
-    created_at: d.created_at,
+    // Generated DB types declare decks.created_at as nullable, but the column
+    // is filled by `DEFAULT now()` on insert — the Deck interface tightens to
+    // non-null. Coerce to epoch so older rows that somehow have null don't
+    // crash the consumer.
+    created_at: d.created_at ?? new Date(0).toISOString(),
     strategy_count: Array.isArray(d.deck_strategies) ? d.deck_strategies.length : 0,
   }));
 }
@@ -2192,6 +2196,9 @@ export const getMyAllocationDashboard = cache(
     // empty flagged-holdings panel masking real breach signals. Lift the
     // error channel the same way `assertOk` does for the Promise.all
     // fan-out above.
+    // Generated row type widens disclosure_tier to `string` (DB-level CHECK
+    // constraint, not a Postgres enum). Re-narrow on the way out via
+    // displayStrategyName's accepted shape.
     const candidateStrategiesRes = candidateIds.length > 0
       ? await supabase
           .from("strategies")
@@ -2202,9 +2209,9 @@ export const getMyAllocationDashboard = cache(
             id: string;
             name: string | null;
             codename: string | null;
-            disclosure_tier: DisclosureTier | null;
+            disclosure_tier: string;
           }>,
-          error: null as null,
+          error: null as { message?: string } | null,
         };
     const candidateStrategies = assertOk(
       candidateStrategiesRes,
@@ -2217,7 +2224,7 @@ export const getMyAllocationDashboard = cache(
           id: s.id,
           name: s.name ?? null,
           codename: s.codename ?? null,
-          disclosure_tier: s.disclosure_tier ?? null,
+          disclosure_tier: (s.disclosure_tier ?? null) as DisclosureTier | null,
         }),
       ]),
     );

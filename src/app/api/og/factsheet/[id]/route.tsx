@@ -18,8 +18,8 @@ export async function GET(
   const { id } = await ctx.params;
   let data: {
     id?: string;
-    name?: string;
-    codename?: string;
+    name?: string | null;
+    codename?: string | null;
     description?: string | null;
     strategy_analytics?: { daily_returns?: unknown } | { daily_returns?: unknown }[] | null;
   } | null = null;

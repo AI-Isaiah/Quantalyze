@@ -7,6 +7,38 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.7] - 2026-05-21
+
+**fix(audit-2026-05-07): close last 7 CRITICALs (C-0112 + C-0155 + C-0157 + C-0193 + C-0195 + C-0197 + C-0198 + C-0319) + 3 specialist-review HIGHs.**
+
+Final cluster of audit CRITICALs plus three critical findings surfaced by the specialist-review fan-out on PRs #251 / #254 / #256.
+
+### Audit CRITICALs closed (the last 8)
+
+- `src/app/api/strategies/browse/route.ts` + test (**C-0112**): browse endpoint now routes every row through `displayStrategyName` from `@/lib/strategy-display`. Real `strategies.name` is emitted only for `disclosure_tier='institutional'`; exploratory rows return the codename or synthetic `Strategy #<id>` label. Real name never accompanies a codename on the wire for the exploratory tier — defeats the cross-correlation attack. 5 new regression tests pin the contract.
+- `src/lib/supabase/{server,client,admin}.ts` + ~10 callsite files (**C-0155 + C-0157**): `createClient` (server, user-scoped) is now typed with `createServerClient<Database>(…)`. Browser-side and admin-client factories carry inline comments documenting the partial fix. `tsc --noEmit` → 0; 22 callsite drift errors fixed (RPC casts, curated-interface narrowing, optional-fallbacks). Follow-up needed to regenerate `database.types.ts` against the live schema before typing the other two factories.
+- `analytics-service/routers/cron.py` + test (**C-0193 + C-0195 + C-0197 + C-0198**): four file-disjoint cron-router CRITICALs closed together:
+  - **C-0193** per-key validation cache (24h TTL) — no more re-validating every key every tick.
+  - **C-0195** allocator_holdings probe before `is_active=False` — keys in use by an allocator cannot be silently deactivated; fail-closed on probe failure.
+  - **C-0197** post-sync `computation_status='stale'` write to `strategy_analytics` — stops analytics drift after a successful sync.
+  - **C-0198** `last_sync_at` cursor advance is gated on `synced_count > 0` — zero-stored holds the cursor so the next tick replays the window.
+- `analytics-service/services/exchange.py` + `services/job_worker.py` + tests + `src/components/strategy/PositionsTab.{tsx,test.tsx}` (**C-0319**): Bybit funding double-count closed. Reconstructed `realized_pnl_ex_funding = ±(cumExitValue − cumEntryValue) − openFee − closeFee` from existing `/v5/position/closed-pnl` response fields (Bybit's own help-center formula `closedPnl = positionPnl − openFee − closeFee − sumFunding`). No second API call. `bybit_daily_pnl_includes_funding` data-quality flag retired. PositionsTab UI allowlist widened: Bybit + OKX now also render the "+ Funding" breakdown (both branches exclude funding from `realized_pnl` post-cutover).
+
+### Specialist-review CRITICAL fixes (PRs #251 / #254 / #256)
+
+- `src/proxy.ts` (PR #256 sec HIGH#1 — lockout vector): the email-only `isAdmin(session?.user?.email)` gate at the proxy level redirected DB-admins (`profiles.is_admin=TRUE` but email not in `ADMIN_EMAIL`) away from every `/admin/*` route before the page-level check ran. Removed the proxy-level deny; the authoritative `isAdminUser` page gate handles rejection (matches RLS). One unused `isAdmin` import dropped. This is the exact "DB-only admin" persona the C-0144 + C-0150 refactor was supposed to protect.
+- `src/app/auth/callback/route.ts` + test (PR #254 sec HIGH — open-redirect bypass): added a `/^\/[\s\/]/` guard so leading-whitespace shapes like `/%09//evil.com` and `/%0d%0a//evil.com` fall back to `/onboarding`. The WHATWG URL parser strips leading TAB / LF / CR from path segments, so the prior `startsWith("//")` guard missed these variants. 5 new parameterized tests cover %09 / %0a / %0d / %0d%0a / %20.
+- `src/app/api/admin/{match/[allocator_id],allocators/[id]/holdings,compute-jobs}/route.ts` (PR #251 red-team HIGH — symmetry gap): added `assertSameOrigin` to three more admin GET handlers that return PII / sensitive operational data. The original C-0041 PR claimed it had closed all admin/match GETs but missed `match/[allocator_id]`; the other two carry the same exposure profile and are closed here for consistency.
+
+### Out of scope (filed for follow-up, not blocking)
+
+- C-0156-style schema drift swept across the type file (`strategies.fingerprint`, `strategy_verifications.transitioned_at`, etc. likely missing from `database.types.ts`). Recommend regenerating types once and adding a CI guardrail that fails on `git diff` after regen.
+- 3 e2e specs still embed hardcoded test creds (`csv-upload-flow.spec.ts`, `match-queue.spec.ts`, `for-quants-onboarding.spec.ts`) — same audit spirit as C-0309. Tracked as follow-up.
+- `noStore()` is `unstable_noStore` in Next.js 16; rename to `await connection()` in `recommendations/page.tsx` (deprecation, not blocker).
+- Dead-admin test in `src/lib/admin.test.ts` doesn't stub `ADMIN_EMAIL` so it does not actually fail without the C-0150 fix — strengthen with `vi.stubEnv` in a follow-up.
+- `admin.access.via_env_email_fallback` orphan in `AuditAction` union — emitter was deleted; literal lingers as forensic baggage.
+
+
 ## [0.24.5.6] - 2026-05-21
 
 **fix(audit-2026-05-07): close 7-CRITICAL cluster — RBAC + CI/workflows + e2e (C-0144 + C-0150 + C-0230 + C-0291 + C-0294 + C-0300 + C-0303).**

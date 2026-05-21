@@ -36,7 +36,11 @@ vi.mock("@/lib/admin", () => ({
 function makeReq(params: Record<string, string> = {}) {
   const url = new URL("http://localhost:3000/api/admin/compute-jobs");
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  return new NextRequest(url.toString(), { method: "GET" });
+  // audit-2026-05-07 C-0041 follow-up: route runs assertSameOrigin before auth.
+  return new NextRequest(url.toString(), {
+    method: "GET",
+    headers: { origin: "http://localhost:3000" },
+  });
 }
 
 const SAMPLE_JOBS = [

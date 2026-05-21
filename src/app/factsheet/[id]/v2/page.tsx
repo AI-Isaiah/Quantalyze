@@ -4,6 +4,7 @@ import { unstable_cache } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { displayStrategyName } from "@/lib/strategy-display";
+import type { DisclosureTier } from "@/lib/types";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
@@ -145,7 +146,12 @@ export async function generateMetadata({
   // exploratory-tier names to "Strategy #<hex>", which is correct for
   // Match Queue surfaces but wrong here — and it diverges from the H1
   // the user already sees on the page.
-  const name = data?.name ?? data?.codename ?? (data ? displayStrategyName(data) : "Strategy");
+  const name = data?.name ?? data?.codename ?? (data ? displayStrategyName({
+    id: data.id,
+    name: data.name,
+    codename: data.codename,
+    disclosure_tier: data.disclosure_tier as DisclosureTier | null,
+  }) : "Strategy");
   const description = (data?.description ?? "Institutional strategy factsheet on Quantalyze.").slice(0, 200);
   const title = `${name} — Quantalyze Factsheet`;
   // Dynamic OG image — uses the strategy-id-derived endpoint so social shares
@@ -184,6 +190,21 @@ export default async function FactsheetV2Page({
   // per hit. `name` / `codename` come along on the probe so the
   // payload-pending fallback below can name the strategy without a second
   // query.
+  // strategy_verifications is missing from the generated database.types.ts
+  // (type drift — table exists per migration 089). Route the verifications
+  // query through an `unknown`-cast handle so the typed client doesn't reject
+  // it; the runtime call is unchanged.
+  const supabaseUntyped = supabase as unknown as {
+    from: (table: "strategy_verifications") => {
+      select: (cols: string) => {
+        eq: (col: string, val: string) => {
+          order: (col: string, opts: { ascending: boolean }) => {
+            limit: (n: number) => Promise<{ data: { trust_tier: string | null; created_at: string | null }[] | null; error: unknown }>;
+          };
+        };
+      };
+    };
+  };
   const [signRes, vRes] = await Promise.all([
     supabase
       .from("strategies")
@@ -191,7 +212,7 @@ export default async function FactsheetV2Page({
       .eq("id", id)
       .eq("status", "published")
       .maybeSingle(),
-    supabase
+    supabaseUntyped
       .from("strategy_verifications")
       .select("trust_tier, created_at")
       .eq("strategy_id", id)
@@ -239,7 +260,7 @@ export default async function FactsheetV2Page({
         id: signature.id,
         name: null,
         codename: null,
-        disclosure_tier: signature.disclosure_tier ?? null,
+        disclosure_tier: (signature.disclosure_tier ?? null) as DisclosureTier | null,
       });
     return (
       <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">

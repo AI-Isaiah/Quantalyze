@@ -70,6 +70,19 @@ import pytest
 from routers import cron as cron_mod
 
 
+@pytest.fixture(autouse=True)
+def _clear_validation_cache():
+    """C-0193: `_key_validation_cache` is module-level state. Without a
+    reset between tests, an earlier test that records `key-1` as
+    recently-validated would let the next test skip the
+    `validate_key_permissions` stub entirely — producing false greens for
+    tests that assert on validation behaviour.
+    """
+    cron_mod._key_validation_cache.clear()
+    yield
+    cron_mod._key_validation_cache.clear()
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -104,6 +117,59 @@ def _stub_validation(
         "markets_loaded": True,
         "markets_error": None,
     }
+
+
+def _wire_allocator_holdings_empty(mock_supabase: MagicMock) -> MagicMock:
+    """Stub the allocator_holdings linkage probe to return no rows so the
+    credential-rejection path proceeds to the deactivate UPDATE.
+
+    The C-0195 fix routes `.table("allocator_holdings").select("id")
+    .eq("api_key_id", key_id).limit(1).execute()` BEFORE the
+    `is_active=False` UPDATE. Without an explicit stub, MagicMock auto-
+    generates truthy `.data` and the fix's fail-closed branch fires
+    everywhere, masking the deactivate path the legacy tests assert.
+    """
+    ah_chain = MagicMock()
+    ah_chain.select.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=[]
+    )
+    existing_side_effect = mock_supabase.table.side_effect
+    existing_return = mock_supabase.table.return_value
+
+    def _dispatch(name: str):
+        if name == "allocator_holdings":
+            return ah_chain
+        if existing_side_effect is not None:
+            return existing_side_effect(name)
+        return existing_return
+
+    mock_supabase.table.side_effect = _dispatch
+    return ah_chain
+
+
+def _wire_allocator_holdings_used(
+    mock_supabase: MagicMock, key_id: str = "key-1"
+) -> MagicMock:
+    """Stub the allocator_holdings linkage probe to return one row,
+    signalling the key backs an allocator's holdings and must NOT be
+    deactivated (C-0195 allocator-protected path).
+    """
+    ah_chain = MagicMock()
+    ah_chain.select.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=[{"id": "holding-1", "api_key_id": key_id}]
+    )
+    existing_side_effect = mock_supabase.table.side_effect
+    existing_return = mock_supabase.table.return_value
+
+    def _dispatch(name: str):
+        if name == "allocator_holdings":
+            return ah_chain
+        if existing_side_effect is not None:
+            return existing_side_effect(name)
+        return existing_return
+
+    mock_supabase.table.side_effect = _dispatch
+    return ah_chain
 
 
 def _make_mock_supabase_for_cron_sync(
@@ -228,6 +294,10 @@ class TestRevokedKeyBranch:
         eq_chain.execute.return_value = MagicMock(data=[{"id": "key-1"}])
         update_chain.eq.return_value = eq_chain
         mock_supabase.table.return_value.update.return_value = update_chain
+        # C-0195: allocator_holdings linkage probe must return no rows so
+        # the deactivate path is reached (this test pre-dates the
+        # allocator-protected path and asserts the legacy contract).
+        _wire_allocator_holdings_empty(mock_supabase)
 
         mock_exchange = AsyncMock()
         mock_exchange.close = AsyncMock()
@@ -250,7 +320,10 @@ class TestRevokedKeyBranch:
         # Mutation contract: ONE .update on api_keys, payload is
         # exactly {"is_active": False} (no other fields — a flipped
         # bool or an extra field would still pass an `assert_called`
-        # assertion), scoped to ONE .eq('id', key_id).
+        # assertion), scoped to ONE .eq('id', key_id). The .return_value
+        # generic accessor still resolves to the api_keys mock because
+        # _wire_allocator_holdings_empty routes the allocator_holdings
+        # table to a separate chain.
         mock_supabase.table.assert_any_call("api_keys")
         mock_supabase.table.return_value.update.assert_called_once_with(
             {"is_active": False}
@@ -739,6 +812,9 @@ class TestDeactivateNoOpDetection:
         eq_chain.execute.return_value = MagicMock(data=[])
         update_chain.eq.return_value = eq_chain
         mock_supabase.table.return_value.update.return_value = update_chain
+        # C-0195: allocator_holdings linkage probe must return no rows so
+        # the deactivate path is reached and the no-op log can be asserted.
+        _wire_allocator_holdings_empty(mock_supabase)
 
         mock_exchange = AsyncMock()
         mock_exchange.close = AsyncMock()
@@ -839,9 +915,19 @@ class TestPartialStatusOnRpcFailure:
         # CRITICAL: last_sync_at UPDATE MUST still have fired — else the
         # next tick refetches `strat-A` / `strat-C`'s already-landed
         # trades and re-runs the (still-broken) `strat-B` RPC needlessly.
-        mock_supabase.table.return_value.update.assert_called_once()
-        update_payload = mock_supabase.table.return_value.update.call_args.args[0]
-        assert "last_sync_at" in update_payload
+        # Post-C-0197, the cron also issues a separate
+        # `.table("strategy_analytics").update({"computation_status":
+        # "stale"})` so the analytics layer recomputes; both updates
+        # land on `mock_supabase.table.return_value.update` because the
+        # generic mock doesn't dispatch by table name. Walk the call
+        # list and require the last_sync_at payload to appear in it.
+        update_payloads = [
+            call.args[0]
+            for call in mock_supabase.table.return_value.update.call_args_list
+        ]
+        assert any("last_sync_at" in p for p in update_payloads), (
+            f"Expected a `last_sync_at` update payload; got {update_payloads!r}"
+        )
 
 
 class TestSyncTradesShapeFallbackLogged:
@@ -1731,3 +1817,502 @@ class TestCronRecomputeConcurrencyCap:
             f"Expected cron_recompute_sem to cap concurrency at 1, "
             f"observed max in-flight = {in_flight_max}"
         )
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 C-0193 / C-0195 / C-0197 / C-0198 — cron cluster
+# ---------------------------------------------------------------------------
+
+
+class TestC0193ValidationCache:
+    """C-0193: pre-fix every cron tick re-validated EVERY active api_keys
+    row against the exchange — N exchange round-trips per tick burning
+    per-IP rate-limit budget. Post-fix an in-memory TTL keyed by
+    api_keys.id lets subsequent ticks skip the round-trip while the entry
+    is fresh. The first sync MUST hit `validate_key_permissions`; the
+    second sync within TTL MUST NOT.
+    """
+
+    @pytest.mark.asyncio
+    async def test_C0193_validation_skipped_on_second_call_within_ttl(self):
+        mock_supabase = MagicMock()
+        # supabase.rpc('sync_trades', ...).execute() returns int
+        rpc_chain = MagicMock()
+        rpc_chain.execute.return_value = MagicMock(data=1)
+        mock_supabase.rpc.return_value = rpc_chain
+        # api_keys/strategy_analytics generic update chain
+        update_chain = MagicMock()
+        update_chain.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "key-1"}]
+        )
+        update_chain.in_.return_value.execute.return_value = MagicMock(data=[])
+        mock_supabase.table.return_value.update.return_value = update_chain
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        validate_mock = AsyncMock(return_value=_stub_validation(valid=True))
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(cron_mod, "validate_key_permissions", validate_mock), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(strategy_ids=["strat-A"])
+            # First call: cache miss, validate must fire.
+            await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+            assert validate_mock.call_count == 1, (
+                "First sync should hit validate_key_permissions exactly once"
+            )
+            # Second call within TTL: cache hit, validate must NOT fire.
+            await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+            assert validate_mock.call_count == 1, (
+                "Second sync within TTL must skip the exchange round-trip; "
+                f"got call_count={validate_mock.call_count}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_C0193_expired_entry_revalidates(self, monkeypatch):
+        """Once the TTL elapses, the next sync MUST re-validate. We
+        shrink the TTL to 0 so any positive monotonic delta evicts the
+        entry, then drive the sync twice.
+        """
+        monkeypatch.setattr(cron_mod, "KEY_VALIDATION_TTL_SECONDS", 0)
+
+        mock_supabase = MagicMock()
+        rpc_chain = MagicMock()
+        rpc_chain.execute.return_value = MagicMock(data=1)
+        mock_supabase.rpc.return_value = rpc_chain
+        update_chain = MagicMock()
+        update_chain.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "key-1"}]
+        )
+        update_chain.in_.return_value.execute.return_value = MagicMock(data=[])
+        mock_supabase.table.return_value.update.return_value = update_chain
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        validate_mock = AsyncMock(return_value=_stub_validation(valid=True))
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(cron_mod, "validate_key_permissions", validate_mock), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(strategy_ids=["strat-A"])
+            await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+            await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        assert validate_mock.call_count == 2, (
+            "With TTL=0 the cache MUST evict and the second sync must "
+            f"re-validate; got call_count={validate_mock.call_count}"
+        )
+
+
+class TestC0195AllocatorProtectedKeyNotDeactivated:
+    """C-0195: an api_keys row that backs `allocator_holdings` rows must
+    NOT be deactivated by the cron's credential-rejection path. Silently
+    flipping `is_active=False` on a key the allocator's holdings ingest
+    depends on breaks the next holdings sync window without surfacing
+    why. The cron must skip the UPDATE, log a warning, and surface
+    `allocator_protected=True` in the result so the operator can route
+    the rejection through the allocator-aware revocation flow.
+    """
+
+    @pytest.mark.asyncio
+    async def test_C0195_allocator_used_key_skips_deactivation(self, caplog):
+        mock_supabase = MagicMock()
+        # If `.update` is reached on api_keys, the test fails (allocator
+        # protection should short-circuit before the UPDATE).
+        update_chain = MagicMock()
+        update_chain.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "key-1"}]
+        )
+        mock_supabase.table.return_value.update.return_value = update_chain
+        # allocator_holdings probe returns one row → key is in use.
+        _wire_allocator_holdings_used(mock_supabase, key_id="key-1")
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(
+                     valid=False, error_code="AUTH_FAILED", error="bad creds"
+                 )),
+             ):
+            key_row = _make_key_row(strategy_ids=["strat-A"])
+            with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+                result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        # Status is still key_revoked (the credential rejection is real),
+        # but the result carries the allocator-protected flag and the
+        # `.update` mutation was NEVER issued.
+        assert result["status"] == "key_revoked"
+        assert result["error_code"] == "AUTH_FAILED"
+        assert result.get("allocator_protected") is True
+        mock_supabase.table.return_value.update.assert_not_called()
+        # Operator-visible warning so a backed-off deactivation doesn't
+        # silently slip past the cron run summary.
+        assert any(
+            "allocator-protected" in record.message.lower()
+            and "key-1" in record.message
+            for record in caplog.records
+            if record.levelname == "WARNING"
+        ), (
+            "Expected WARNING log mentioning the allocator-protected path "
+            "and the key id; got "
+            + repr([r.message for r in caplog.records])
+        )
+
+
+class TestC0197StrategyAnalyticsMarkedStale:
+    """C-0197: after a successful `sync_trades` RPC the cron must signal
+    the analytics layer that its inputs changed by writing
+    `computation_status='stale'` to the affected `strategy_analytics`
+    rows. Pre-fix the cron synced trades but never told analytics — KPI
+    rows stayed stale until a user-triggered recompute happened to touch
+    them. Tests assert the UPDATE was issued with the right payload and
+    filter set.
+    """
+
+    @pytest.mark.asyncio
+    async def test_C0197_successful_sync_marks_strategy_analytics_stale(self):
+        mock_supabase = MagicMock()
+        rpc_chain = MagicMock()
+        rpc_chain.execute.return_value = MagicMock(data=4)
+        mock_supabase.rpc.return_value = rpc_chain
+
+        # Track update payloads by the *table* they were issued against.
+        # The generic `mock_supabase.table.return_value.update` collapses
+        # api_keys + strategy_analytics into the same MagicMock; we need
+        # to dispatch by table name so the C-0197 assertion can isolate
+        # the strategy_analytics mutation.
+        updates_by_table: dict[str, list[dict]] = defaultdict_factory()
+        in_filters: dict[str, list[tuple[str, list[str]]]] = defaultdict_factory()
+        api_keys_eq_calls: list[tuple[str, str]] = []
+
+        def _make_chain(table_name: str):
+            chain = MagicMock()
+
+            def _update(payload: dict):
+                updates_by_table[table_name].append(payload)
+                upd = MagicMock()
+
+                def _eq(col, val):
+                    if table_name == "api_keys":
+                        api_keys_eq_calls.append((col, val))
+                    eq_chain = MagicMock()
+                    eq_chain.execute.return_value = MagicMock(data=[{"id": val}])
+                    return eq_chain
+
+                def _in(col, vals):
+                    in_filters[table_name].append((col, list(vals)))
+                    in_chain = MagicMock()
+                    in_chain.execute.return_value = MagicMock(data=[])
+                    return in_chain
+
+                upd.eq.side_effect = _eq
+                upd.in_.side_effect = _in
+                return upd
+
+            chain.update.side_effect = _update
+            return chain
+
+        mock_supabase.table.side_effect = lambda name: _make_chain(name)
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}, {"id": "t2"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(
+                strategy_ids=["strat-A", "strat-B"]
+            )
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        assert result["status"] == "ok"
+        # strategy_analytics MUST have one UPDATE with the stale marker
+        # scoped to the synced strategy_ids only.
+        sa_updates = updates_by_table.get("strategy_analytics", [])
+        assert sa_updates == [{"computation_status": "stale"}], (
+            f"Expected exactly one strategy_analytics stale UPDATE; got {sa_updates!r}"
+        )
+        sa_filters = in_filters.get("strategy_analytics", [])
+        assert len(sa_filters) == 1, (
+            f"Expected exactly one .in_(...) filter on the stale UPDATE; got {sa_filters!r}"
+        )
+        column, ids = sa_filters[0]
+        assert column == "strategy_id"
+        assert sorted(ids) == ["strat-A", "strat-B"]
+
+    @pytest.mark.asyncio
+    async def test_C0197_no_stale_update_when_nothing_stored(self):
+        """If sync_trades stored zero trades across the board (e.g. all
+        per-strategy RPCs failed), DO NOT mark analytics stale —
+        nothing changed, and bouncing the rows would force a useless
+        recompute.
+        """
+        mock_supabase = MagicMock()
+
+        # Every sync_trades RPC raises.
+        def _rpc(name: str, args: dict):
+            chain = MagicMock()
+            chain.execute.side_effect = RuntimeError("postgres dead")
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc
+
+        sa_update_calls: list[dict] = []
+
+        def _table(name: str):
+            chain = MagicMock()
+
+            def _update(payload: dict):
+                if name == "strategy_analytics":
+                    sa_update_calls.append(payload)
+                upd = MagicMock()
+                upd.eq.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "x"}]
+                )
+                upd.in_.return_value.execute.return_value = MagicMock(data=[])
+                return upd
+
+            chain.update.side_effect = _update
+            return chain
+
+        mock_supabase.table.side_effect = _table
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(strategy_ids=["strat-A"])
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        # All RPCs failed → status=error (covered by red-team test),
+        # AND no strategy_analytics UPDATE was issued.
+        assert result["status"] == "error"
+        assert sa_update_calls == [], (
+            f"Expected zero strategy_analytics stale UPDATEs when nothing "
+            f"was stored; got {sa_update_calls!r}"
+        )
+
+
+class TestC0198CursorOnlyAdvancesWhenStored:
+    """C-0198: pre-fix the cron advanced `api_keys.last_sync_at`
+    unconditionally — even when `sync_trades` returned with zero trades
+    stored (e.g. all per-strategy RPCs failed). On the next tick
+    `parse_since_ms(last_sync_at)` already points past the unsync'd
+    trades, so they're never refetched and the user-facing trade list
+    silently loses data. Post-fix the cursor only advances when
+    something landed; a 100%-RPC-failure tick keeps `last_sync_at`
+    where it was so the next tick replays the window.
+    """
+
+    @pytest.mark.asyncio
+    async def test_C0198_zero_stored_does_not_advance_last_sync_at(self):
+        mock_supabase = MagicMock()
+
+        # Every sync_trades RPC blows up → synced_count == 0.
+        def _rpc(name: str, args: dict):
+            chain = MagicMock()
+            chain.execute.side_effect = RuntimeError("postgres dead")
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc
+
+        api_keys_update_payloads: list[dict] = []
+
+        def _table(name: str):
+            chain = MagicMock()
+
+            def _update(payload: dict):
+                if name == "api_keys":
+                    api_keys_update_payloads.append(payload)
+                upd = MagicMock()
+                upd.eq.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "key-1"}]
+                )
+                upd.in_.return_value.execute.return_value = MagicMock(data=[])
+                return upd
+
+            chain.update.side_effect = _update
+            return chain
+
+        mock_supabase.table.side_effect = _table
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}, {"id": "t2"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(strategy_ids=["strat-A", "strat-B"])
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        # Status = error because every RPC failed (covered elsewhere).
+        assert result["status"] == "error"
+        # The critical assertion: NO api_keys UPDATE carried `last_sync_at`.
+        # With balance=None there should be zero api_keys UPDATEs at all.
+        assert all(
+            "last_sync_at" not in p for p in api_keys_update_payloads
+        ), (
+            "Expected no last_sync_at cursor advance when synced_count==0; "
+            f"got {api_keys_update_payloads!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_C0198_partial_success_does_advance_last_sync_at(self):
+        """Sanity-check the inverse: at least one strategy stored
+        trades → cursor MUST advance, otherwise the next tick refetches
+        the already-landed window for the successful strategies.
+        """
+        mock_supabase = MagicMock()
+
+        # strat-A: success (data=3). strat-B: raises.
+        def _rpc(name: str, args: dict):
+            chain = MagicMock()
+            if args.get("p_strategy_id") == "strat-B":
+                chain.execute.side_effect = RuntimeError("deadlock")
+            else:
+                chain.execute.return_value = MagicMock(data=3)
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc
+
+        api_keys_update_payloads: list[dict] = []
+
+        def _table(name: str):
+            chain = MagicMock()
+
+            def _update(payload: dict):
+                if name == "api_keys":
+                    api_keys_update_payloads.append(payload)
+                upd = MagicMock()
+                upd.eq.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "key-1"}]
+                )
+                upd.in_.return_value.execute.return_value = MagicMock(data=[])
+                return upd
+
+            chain.update.side_effect = _update
+            return chain
+
+        mock_supabase.table.side_effect = _table
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(strategy_ids=["strat-A", "strat-B"])
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        assert result["status"] == "partial"
+        assert any(
+            "last_sync_at" in p for p in api_keys_update_payloads
+        ), (
+            "Expected last_sync_at cursor advance when at least one "
+            f"strategy stored; got {api_keys_update_payloads!r}"
+        )
+
+
+def defaultdict_factory():
+    """Local helper to avoid importing collections.defaultdict at module
+    top-level (and to keep the test additions self-contained)."""
+    from collections import defaultdict
+    return defaultdict(list)

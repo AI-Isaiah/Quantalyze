@@ -2860,33 +2860,41 @@ class TestFetchDailyPnlBybitFailLoud:
     @pytest.mark.asyncio
     async def test_bybit_closed_pnl_item_parse_failure_emits_warning(self, caplog):
         """A malformed item INSIDE the Bybit closed_pnl response (e.g.,
-        `closedPnl: 'NaN-string'` which `float()` rejects) raises inside
-        the per-item loop. Pre-sweep, the outer bare-pass swallowed it
-        and downstream timestamps remained malformed with no log.
-        Post-sweep, a WARNING fires.
+        ``cumEntryValue='NaN-string'`` which ``_finite_float`` rejects)
+        triggers the per-row drop branch in the Bybit aggregator.
+        Pre-sweep, the outer bare-pass swallowed parse failures and
+        downstream rows aggregated incorrectly with no log. Post-sweep,
+        a WARNING fires with the 'Bybit closed_pnl row dropped' prefix.
 
         Review-cluster gate rename (audit-2026-05-07): the prior test
         name 'test_bybit_iso_conversion_failure' was misleading — the
-        actual trigger is closedPnl parsing, not the ISO conversion (the
-        mock data here has a valid digit-string createdTime). Renamed
-        to accurately describe what's tested. A separate test for the
-        true ISO-conversion path is a follow-up (would require mocking
-        datetime.fromtimestamp to raise).
+        actual trigger is per-row field parsing, not the ISO
+        conversion. C-0319 cutover (Bybit funding exclusion) refactored
+        the per-item parse from a ``closedPnl`` float to a
+        cumEntryValue / cumExitValue / openFee / closeFee
+        reconstruction; the fixture now plants NaN on cumEntryValue,
+        which is the equivalent rejection path under the new schema.
         """
         import logging
         from services.exchange import fetch_daily_pnl
 
         mock_exchange = MagicMock()
         mock_exchange.id = "bybit"
-        # `float('NaN-string')` raises ValueError inside the per-item
-        # parse loop, which is wrapped by the Bybit try/except.
+        # ``_finite_float`` rejects 'NaN-string' on cumEntryValue and
+        # emits a WARNING; the aggregator then drops the row via the
+        # per-row 'Bybit closed_pnl row dropped' WARNING.
         mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
             return_value={
                 "result": {
                     "list": [
                         {
                             "symbol": "BTCUSDT",
-                            "closedPnl": "NaN-string",
+                            "side": "Sell",
+                            "cumEntryValue": "NaN-string",
+                            "cumExitValue": "1010",
+                            "openFee": "0",
+                            "closeFee": "0",
+                            "closedPnl": "10",
                             "createdTime": "1700000000000",
                         }
                     ]
@@ -2898,7 +2906,9 @@ class TestFetchDailyPnlBybitFailLoud:
             result = await fetch_daily_pnl(mock_exchange)
         # Failure-soft contract: the call returned without raising.
         assert isinstance(result, list)
-        # Operator visibility: WARNING with exact prefix.
+        # Operator visibility: WARNING with the 'Bybit closed_pnl'
+        # prefix (matches both the row-drop WARNING and the outer
+        # fetch-failure WARNING).
         matching = [
             r for r in caplog.records
             if "Bybit closed_pnl" in r.getMessage()
@@ -3707,13 +3717,25 @@ class TestClusterIOkxFundingBillFilter:
 
 
 class TestClusterIBybitFundingFlag:
-    """C-0319 — Bybit's ``closedPnl`` is a COMBINED cashflow (realized
-    + funding) per the funding_fees migration preamble. Until a
-    non-funding endpoint cutover lands, surface a DQ flag so downstream
-    Sharpe / equity-curve math can warn."""
+    """C-0319 (Bybit cutover) — Bybit's ``closedPnl`` is the
+    funding-INCLUSIVE cashflow per Bybit's own help-center formula:
+
+        closedPnl = positionPnl - openFee - closeFee - sumFunding
+
+    The cutover reconstructs realized-PnL-EXCLUDING-funding directly
+    from ``cumEntryValue``, ``cumExitValue``, ``openFee``, ``closeFee``
+    (fields the same response returns) and pushes that into
+    ``daily_pnl``. The ``bybit_daily_pnl_includes_funding`` DQ flag is
+    therefore retired — these tests pin the post-cutover contract.
+    """
 
     @pytest.mark.asyncio
-    async def test_bybit_daily_pnl_sets_funding_flag(self) -> None:
+    async def test_bybit_daily_pnl_no_funding_flag_post_cutover(self) -> None:
+        """Post-cutover: the legacy ``bybit_daily_pnl_includes_funding``
+        flag must NEVER fire, regardless of whether closed_pnl returned
+        rows. This is the regression that pins the cutover — pre-cutover
+        ``fetch_daily_pnl`` stamped the flag on every non-empty Bybit
+        response."""
         from services.exchange import (
             fetch_daily_pnl,
             get_and_clear_last_dq_flags,
@@ -3728,7 +3750,12 @@ class TestClusterIBybitFundingFlag:
                     "list": [
                         {
                             "symbol": "BTCUSDT",
-                            "closedPnl": "12.34",
+                            "side": "Sell",          # closing a long
+                            "cumEntryValue": "1000",
+                            "cumExitValue": "1015",
+                            "openFee": "0.5",
+                            "closeFee": "0.5",
+                            "closedPnl": "12.0",
                             "createdTime": "1700000000000",
                         }
                     ]
@@ -3738,13 +3765,15 @@ class TestClusterIBybitFundingFlag:
 
         await fetch_daily_pnl(mock_exchange, since_ms=None)
         flags = get_and_clear_last_dq_flags()
-        assert flags.get("bybit_daily_pnl_includes_funding") is True
+        assert flags.get("bybit_daily_pnl_includes_funding") is None, (
+            "C-0319 cutover: bybit_daily_pnl_includes_funding flag is "
+            "retired. fetch_daily_pnl must never set it post-cutover."
+        )
 
     @pytest.mark.asyncio
     async def test_bybit_no_rows_no_flag(self) -> None:
-        """When Bybit returns no closed positions, the flag must NOT
-        fire (otherwise every clean Bybit sync would carry the
-        double-count warning forever)."""
+        """When Bybit returns no closed positions, the legacy flag
+        must NOT fire (the flag is retired by C-0319)."""
         from services.exchange import (
             fetch_daily_pnl,
             get_and_clear_last_dq_flags,
@@ -3760,6 +3789,204 @@ class TestClusterIBybitFundingFlag:
         await fetch_daily_pnl(mock_exchange, since_ms=None)
         flags = get_and_clear_last_dq_flags()
         assert flags.get("bybit_daily_pnl_includes_funding") is None
+
+
+class TestClusterIBybitFundingCutoverC0319:
+    """C-0319 (Bybit cutover) — regression suite pinning the cumEntry/
+    cumExit reconstruction. These tests would FAIL under the
+    pre-cutover code path (which shipped ``closedPnl`` as-is into
+    ``daily_pnl``), so they encode the FIX, not just the resulting
+    behaviour."""
+
+    @pytest.mark.asyncio
+    async def test_C0319_bybit_funding_excluded_from_daily_pnl_long(
+        self,
+    ) -> None:
+        """A long-side closure that paid 2.10 USDT of cumulative funding
+        during its lifetime: pre-cutover ``closedPnl`` already subtracts
+        funding (and trading fees), so shipping closedPnl as-is into
+        daily_pnl LOSES 2.10 of realized PnL (the funding line then
+        re-adds 2.10 in positions.funding_pnl, completing the
+        double-count). Post-cutover, daily_pnl carries the
+        realized-PnL-EXCLUDING-funding figure (positionPnl - fees).
+        """
+        from services.exchange import fetch_daily_pnl
+
+        # Bybit-help-center worked example for a closing Sell of 0.4 BTC:
+        # entry=6000, exit=5000 — but the help-center example is a SHORT.
+        # We re-use the same arithmetic for a long (side=Sell closing a
+        # buy position): positionPnl = exit - entry = 1015 - 1000 = 15
+        # USDT. Fees: openFee=0.5, closeFee=0.5. Funding paid=2.10.
+        # Bybit closedPnl = 15 - 0.5 - 0.5 - 2.10 = 11.90.
+        # realized_pnl_ex_funding = 15 - 0.5 - 0.5 = 14.0.
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "side": "Sell",
+                            "cumEntryValue": "1000",
+                            "cumExitValue": "1015",
+                            "openFee": "0.5",
+                            "closeFee": "0.5",
+                            "closedPnl": "11.90",
+                            "createdTime": "1700000000000",
+                        }
+                    ]
+                }
+            }
+        )
+
+        result = await fetch_daily_pnl(mock_exchange, since_ms=None)
+        bybit_rows = [r for r in result if r.get("exchange") == "bybit"]
+        # One day, one aggregate row.
+        assert len(bybit_rows) == 1, bybit_rows
+        # Magnitude = realized PnL EXCLUDING funding (14.0), NOT the
+        # funding-inclusive closedPnl (11.90). This is the C-0319 fix.
+        assert bybit_rows[0]["price"] == pytest.approx(14.0), (
+            "Post-C-0319: daily_pnl magnitude must equal positionPnl - "
+            "openFee - closeFee (funding excluded), not closedPnl which "
+            "bakes funding in. Got %r." % bybit_rows[0]["price"]
+        )
+        # Positive realized: side encodes sign convention used by
+        # transforms.trades_to_daily_returns_with_status.
+        assert bybit_rows[0]["side"] == "buy"
+
+    @pytest.mark.asyncio
+    async def test_C0319_bybit_funding_excluded_from_daily_pnl_short(
+        self,
+    ) -> None:
+        """Short-side closure (side=Buy on the closing leg).
+        positionPnl = cumEntryValue - cumExitValue. Help-center example:
+        entry=6000, exit=5000 on 0.4 BTC short → positionPnl = +400.
+        After 1.32 + 1.10 fees: realized_pnl_ex_funding = 397.58.
+        Bybit closedPnl after 2.10 funding = 395.48."""
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "cumEntryValue": "2400",  # 0.4 * 6000
+                            "cumExitValue": "2000",   # 0.4 * 5000
+                            "openFee": "1.32",
+                            "closeFee": "1.1",
+                            "closedPnl": "395.48",
+                            "createdTime": "1700000000000",
+                        }
+                    ]
+                }
+            }
+        )
+
+        result = await fetch_daily_pnl(mock_exchange, since_ms=None)
+        bybit_rows = [r for r in result if r.get("exchange") == "bybit"]
+        assert len(bybit_rows) == 1
+        assert bybit_rows[0]["price"] == pytest.approx(397.58), (
+            "Short-side: positionPnl = cumEntryValue - cumExitValue. "
+            "Expected 400 - 1.32 - 1.1 = 397.58."
+        )
+        assert bybit_rows[0]["side"] == "buy"
+
+    @pytest.mark.asyncio
+    async def test_C0319_bybit_funding_excluded_aggregates_by_day(
+        self,
+    ) -> None:
+        """Multiple closures on the same UTC day collapse into a single
+        daily aggregate row (mirroring the OKX branch contract)."""
+        from services.exchange import fetch_daily_pnl
+
+        # Two timestamps within the same UTC day. 1700006400000 ms =
+        # 2023-11-15 00:00:00 UTC; 1700049600000 ms = 2023-11-15
+        # 12:00:00 UTC. Both land on 2023-11-15.
+        same_day_ts = "1700006400000"
+        same_day_ts2 = "1700049600000"
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT", "side": "Sell",
+                            "cumEntryValue": "1000",
+                            "cumExitValue": "1010",
+                            "openFee": "0", "closeFee": "0",
+                            "closedPnl": "10",
+                            "createdTime": same_day_ts,
+                        },
+                        {
+                            "symbol": "ETHUSDT", "side": "Sell",
+                            "cumEntryValue": "500",
+                            "cumExitValue": "505",
+                            "openFee": "0", "closeFee": "0",
+                            "closedPnl": "5",
+                            "createdTime": same_day_ts2,
+                        },
+                    ]
+                }
+            }
+        )
+
+        result = await fetch_daily_pnl(mock_exchange, since_ms=None)
+        bybit_rows = [r for r in result if r.get("exchange") == "bybit"]
+        # Two closures, one aggregated daily row.
+        assert len(bybit_rows) == 1
+        # 10 + 5 = 15 realized-PnL-ex-funding for the day.
+        assert bybit_rows[0]["price"] == pytest.approx(15.0)
+        assert bybit_rows[0]["symbol"] == "PORTFOLIO"
+
+    @pytest.mark.asyncio
+    async def test_C0319_bybit_funding_drops_non_finite_row(self) -> None:
+        """Schema-drift defense: a single row with non-finite cumEntry
+        is dropped (with a WARNING) and does not poison the day's
+        aggregate."""
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT", "side": "Sell",
+                            "cumEntryValue": "NaN",
+                            "cumExitValue": "1010",
+                            "openFee": "0", "closeFee": "0",
+                            "closedPnl": "10",
+                            "createdTime": "1700000000000",
+                        },
+                        {
+                            "symbol": "ETHUSDT", "side": "Sell",
+                            "cumEntryValue": "500",
+                            "cumExitValue": "505",
+                            "openFee": "0", "closeFee": "0",
+                            "closedPnl": "5",
+                            "createdTime": "1700000000000",
+                        },
+                    ]
+                }
+            }
+        )
+
+        import logging as _logging
+        caplog_logger = _logging.getLogger("quantalyze.analytics")
+        caplog_logger.setLevel(logging.WARNING)
+        result = await fetch_daily_pnl(mock_exchange, since_ms=None)
+        bybit_rows = [r for r in result if r.get("exchange") == "bybit"]
+        # The clean row survives; the NaN row is filtered.
+        assert len(bybit_rows) == 1
+        assert bybit_rows[0]["price"] == pytest.approx(5.0)
 
 
 class TestClusterIOkxFiniteValidation:
@@ -4226,25 +4453,31 @@ class TestClusterIBybitPageCapTruncationFlag:
 
 class TestRedTeamPhase2RegressionEntrySeamClobbers:
     """Audit-2026-05-07 red-team CRITICAL conf=9 — Phase-2 introduced a
-    silent-drop regression: ``fetch_daily_pnl`` sets
-    ``bybit_daily_pnl_includes_funding=True`` (the C-0319 double-count
-    flag) and ``fetch_raw_trades`` then resets the buffer at its entry
-    seam, wiping the flag before the worker can drain it. Pin the full
-    production sequence (fetch_daily_pnl -> fetch_raw_trades) so a
-    regression that drops the worker-side pre-drain is caught at CI.
+    silent-drop regression where ``fetch_raw_trades`` reset the per-task
+    DQ buffer at its entry seam, wiping flags set by an earlier
+    ``fetch_daily_pnl`` call before the worker could drain them. The
+    fix is a drain BETWEEN the two exchange calls in the worker.
+
+    Post-C-0319 (Bybit cutover) the ``bybit_daily_pnl_includes_funding``
+    flag is retired (funding is now correctly excluded from daily_pnl
+    via cumEntryValue/cumExitValue reconstruction). The
+    entry-seam-clobber contract still holds for OTHER DQ flags — we
+    pin it here using the ``sync_truncated_bybit`` flag, which fires
+    in the same code path and exercises the same per-task buffer.
     """
 
     @pytest.mark.asyncio
-    async def test_bybit_funding_flag_survives_fetch_raw_trades_reset(
+    async def test_dq_flag_survives_fetch_raw_trades_reset(
         self,
     ) -> None:
-        """The flag must be capturable by a drain placed BETWEEN
-        fetch_daily_pnl and fetch_raw_trades. This pins the contract
-        the C-0319 fix relies on: callers MUST drain between the two
-        exchange calls.
+        """A DQ flag set during fetch_daily_pnl must be capturable by a
+        drain placed BETWEEN fetch_daily_pnl and fetch_raw_trades.
+        Pins the contract: callers MUST drain between the two exchange
+        calls or the trades-sync entry-seam reset clobbers the flag.
         """
         import asyncio
         from services.exchange import (
+            _record_dq_flag,
             fetch_daily_pnl,
             fetch_raw_trades,
             get_and_clear_last_dq_flags,
@@ -4260,7 +4493,12 @@ class TestRedTeamPhase2RegressionEntrySeamClobbers:
                     "list": [
                         {
                             "symbol": "BTCUSDT",
-                            "closedPnl": "12.34",
+                            "side": "Sell",
+                            "cumEntryValue": "1000",
+                            "cumExitValue": "1015",
+                            "openFee": "0.5",
+                            "closeFee": "0.5",
+                            "closedPnl": "11.90",
                             "createdTime": "1700000000000",
                         }
                     ]
@@ -4277,12 +4515,16 @@ class TestRedTeamPhase2RegressionEntrySeamClobbers:
         async def _mock_db_execute(fn):
             return await asyncio.to_thread(fn)
 
-        # Step 1: fetch_daily_pnl (mirrors fetch_all_trades on Bybit).
+        # Step 1: fetch_daily_pnl runs. To pin the entry-seam contract
+        # without depending on the retired C-0319 flag, plant a
+        # synthetic DQ flag that the per-task buffer carries forward.
         await fetch_daily_pnl(mock_exchange, since_ms=None)
+        _record_dq_flag("test_entry_seam_marker", True)
         # Step 2: simulated worker-side drain — the fix's contract.
         daily_flags = get_and_clear_last_dq_flags()
-        assert daily_flags.get("bybit_daily_pnl_includes_funding") is True, (
-            "fetch_daily_pnl must set the C-0319 funding flag"
+        assert daily_flags.get("test_entry_seam_marker") is True, (
+            "Drain between fetch_daily_pnl and fetch_raw_trades must "
+            "capture flags set during the daily_pnl call."
         )
 
         # Step 3: fetch_raw_trades — its entry-seam reset must NOT see
@@ -4291,10 +4533,7 @@ class TestRedTeamPhase2RegressionEntrySeamClobbers:
         with patch("services.db.db_execute", side_effect=_mock_db_execute):
             await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
         post_flags = get_and_clear_last_dq_flags()
-        # No leak: post-fetch_raw_trades drain is empty because Bybit
-        # returned no fills (the truncation flag is not set on a clean
-        # single-page response).
-        assert post_flags.get("bybit_daily_pnl_includes_funding") is None
+        assert post_flags.get("test_entry_seam_marker") is None
 
 
 class TestRedTeamListMergeCap:
