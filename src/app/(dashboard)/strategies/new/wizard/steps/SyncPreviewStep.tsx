@@ -28,6 +28,22 @@ import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
  */
 
 /**
+ * How recent does a `complete` strategy_analytics row need to be for
+ * the wizard to skip the /api/keys/sync kickoff on resume? The
+ * analytics-service worker is already incremental (it uses
+ * `api_keys.last_fetched_trade_timestamp` as the `since_ms` cursor —
+ * see analytics-service/services/job_worker.py:_dispatch_sync_trades),
+ * so a re-sync only fetches the delta. But the round-trip still costs
+ * 30-60s of "Fetching trades..." UI latency for the user. Skipping the
+ * kickoff when the row is fresh gets them straight to the factsheet.
+ *
+ * 5 minutes balances "don't show stale numbers on a long session
+ * resume" against "don't re-fire a sync on every viewport remount."
+ * QA report 2026-05-21 ISSUE-005.
+ */
+const SYNC_FRESHNESS_WINDOW_MS = 5 * 60 * 1000;
+
+/**
  * Pure helper: derive the detected-markets set from a sample of trade
  * symbols. The Bybit + OKX ingest writes daily portfolio-level
  * aggregates under the synthetic symbol "PORTFOLIO"
@@ -140,6 +156,34 @@ export function SyncPreviewStep({
     startedAtRef.current = Date.now();
     (async () => {
       try {
+        // QA report 2026-05-21 ISSUE-005 — skip the /api/keys/sync
+        // round-trip on resume when the analytics row is both COMPLETE
+        // and fresh (within SYNC_FRESHNESS_WINDOW_MS). The worker is
+        // already incremental via api_keys.last_fetched_trade_timestamp,
+        // so a re-sync only fetches the delta — but the user still
+        // sees ~30-60s of "Fetching trades..." while the round-trip
+        // unwinds. Skipping when fresh gets them straight to the
+        // factsheet polling tick, which then materializes the snapshot
+        // on the first poll. Stale rows still kick off as before so
+        // a long-paused session doesn't show outdated metrics.
+        const supabase = createClient();
+        const { data: existing } = await supabase
+          .from("strategy_analytics")
+          .select("computation_status, computed_at")
+          .eq("strategy_id", strategyId)
+          .maybeSingle();
+        const computedAtMs = existing?.computed_at
+          ? Date.parse(existing.computed_at)
+          : null;
+        const isFresh =
+          existing?.computation_status === "complete" &&
+          computedAtMs !== null &&
+          Number.isFinite(computedAtMs) &&
+          Date.now() - computedAtMs < SYNC_FRESHNESS_WINDOW_MS;
+        if (isFresh) {
+          if (mountedRef.current) setPhase("waiting_for_complete");
+          return;
+        }
         const res = await fetch("/api/keys/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
