@@ -219,6 +219,126 @@ class TestTradesToDailyReturnsWithStatus:
         assert len(result) == 2
 
 
+class TestDustThresholdC0233:
+    """audit-2026-05-07 C-0233 regression — pre-fix the dust-balance
+    threshold was `max(daily_pnl.abs().max() * 2, 100)`, scaling with the
+    LARGEST single-day P&L. A strategy with one outlier day (Bybit funding
+    spike, OKX inverse-perp glitch) would force the heuristic-capital
+    branch even when the caller had a legitimate institutional balance,
+    distorting CAGR/Sharpe by 5–10× on the public factsheet.
+
+    Post-fix: threshold is a FIXED absolute floor ($1,000 USDT), so any
+    realistic institutional balance flows through the real-capital
+    branch and the factsheet renders accurate numbers."""
+
+    def _outlier_day_trades(self) -> list[dict]:
+        """One day with a $1,000,000 PnL spike — the outlier-day scenario
+        the audit calls out. Pre-fix this forces `min_balance = $2M` and
+        any account_balance < $2M (i.e. any realistic balance) falls
+        through to the heuristic."""
+        return [
+            {
+                "timestamp": "2026-04-01T10:00:00Z",
+                "symbol": "PORTFOLIO",
+                "side": "buy",
+                "price": "1000000",  # $1M PnL spike on day 1
+                "quantity": "1",
+                "fee": "0",
+                "order_type": "daily_pnl",
+            },
+            {
+                "timestamp": "2026-04-02T10:00:00Z",
+                "symbol": "PORTFOLIO",
+                "side": "buy",
+                "price": "5000",  # normal day
+                "quantity": "1",
+                "fee": "0",
+                "order_type": "daily_pnl",
+            },
+        ]
+
+    def test_real_balance_below_pnl_spike_still_takes_real_capital_path(self):
+        """The headline case: account_balance = $500k (legitimate
+        institutional), max daily PnL = $1M. Pre-fix, min_balance =
+        $1M × 2 = $2M and the heuristic branch fires. Post-fix, the
+        fixed $1k floor means real balance wins and the factsheet
+        renders accurate numbers."""
+        trades = self._outlier_day_trades()
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=500_000.0, balance_error=False
+        )
+        assert len(returns) == 2
+        assert meta["used_heuristic_capital"] is False, (
+            "real institutional balance ($500k) MUST flow through the "
+            "real-capital branch even when one day's PnL exceeds the "
+            "balance — the fixed dust floor decouples the heuristic "
+            "trigger from PnL magnitude"
+        )
+        assert meta["computation_status_hint"] == "complete"
+
+    def test_genuine_dust_balance_still_falls_back_to_heuristic(self):
+        """Negative control — a balance BELOW the $1k dust floor (e.g.,
+        a drained paper account with $50 leftover) MUST still trigger
+        the heuristic branch. The fix decouples threshold from PnL
+        magnitude; it does not remove dust filtering entirely."""
+        trades = self._outlier_day_trades()
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=50.0, balance_error=False
+        )
+        assert len(returns) == 2
+        assert meta["used_heuristic_capital"] is True, (
+            "balance below the $1k dust floor MUST take the heuristic "
+            "branch; the audit fix preserves dust filtering"
+        )
+
+    def test_individual_trades_path_also_decoupled_from_pnl_magnitude(self):
+        """The fix applies to both branches (daily_pnl AND individual
+        trades). Pre-fix the individual-trades branch had its own
+        `max(daily_agg["pnl"].abs().max(), 100)` threshold with the same
+        PnL-coupling bug."""
+        # Two trades on different days; a huge fill exceeds the balance
+        # if the pre-fix threshold of max(pnl) is used.
+        trades = [
+            {
+                "timestamp": "2026-04-01T10:00:00Z",
+                "symbol": "BTCUSDT",
+                "side": "buy",
+                "price": "500000",  # huge notional
+                "quantity": "1",
+                "fee": "0",
+                "order_type": "market",
+            },
+            {
+                "timestamp": "2026-04-01T14:00:00Z",
+                "symbol": "BTCUSDT",
+                "side": "sell",
+                "price": "510000",  # net +$10k on the day
+                "quantity": "1",
+                "fee": "0",
+                "order_type": "market",
+            },
+            {
+                "timestamp": "2026-04-02T10:00:00Z",
+                "symbol": "BTCUSDT",
+                "side": "buy",
+                "price": "100",
+                "quantity": "1",
+                "fee": "0",
+                "order_type": "market",
+            },
+        ]
+        # $50k balance — well above the $1k dust floor, but below the
+        # pre-fix threshold derived from the $510k notional.
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=50_000.0, balance_error=False
+        )
+        assert meta["used_heuristic_capital"] is False, (
+            "individual-trades branch must also decouple dust threshold "
+            "from per-day PnL magnitude; realistic balance must flow "
+            "through the real-capital branch"
+        )
+
+
 class TestCapDataPoints:
     def test_under_limit(self):
         data = [1, 2, 3]
