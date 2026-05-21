@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -56,6 +57,14 @@ export function LoginForm() {
         required
         autoComplete="current-password"
       />
+      <div className="text-right">
+        <Link
+          href="/forgot-password"
+          className="text-sm text-accent hover:text-accent-hover"
+        >
+          Forgot password?
+        </Link>
+      </div>
       {error && (
         <p className="text-sm text-negative">{error}</p>
       )}
