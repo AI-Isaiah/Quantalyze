@@ -587,10 +587,18 @@ export function formatKeyError(
   }
 
   if (code === "GATE_INSUFFICIENT_DAYS" && context?.days !== undefined) {
+    // Floor-round so a sub-7 value never displays as "7.0". The gate
+    // compares strictly `< 7` (see strategyGate.ts:89), but `.toFixed(1)`
+    // rounds half-up, so a real span of 6.95 was rendered as "7.0" — a
+    // user reading "we found 7.0 days" sees a passing-looking number
+    // alongside a failure and is justifiably confused. Floor at 1
+    // decimal: 6.95 → "6.9", 6.99 → "6.9", 7.0 exact → never reaches
+    // here (gate passes). For values < 0.1 the fallback string is "0.0".
+    const floored = Math.floor(context.days * 10) / 10;
     return {
       ...base,
       cause:
-        `Your trades span ${context.days.toFixed(1)} calendar day(s). ` + base.cause,
+        `Your trades span ${floored.toFixed(1)} calendar day(s). ` + base.cause,
     };
   }
 
