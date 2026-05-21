@@ -117,6 +117,23 @@ vi.mock("@/components/discovery/SimulateImpactButton", () => ({
 // hold the reference.
 beforeEach(() => {
   installFetchMock();
+  // CI flake root cause (HANDOVER-CI-FLAKES-2026-05-20 mode B): the
+  // "Flip the view radio/toggle to grid" test at line ~340 persists
+  // `discovery_view_preferences:u-1:crypto-sma` = `{view:"grid",...}`
+  // to the SHARED jsdom localStorage. The DISCO-04 sparkline tests
+  // below re-use `userId="u-1"`, `slug="crypto-sma"` — when the file's
+  // tests run in CI shard ordering that puts the grid test BEFORE the
+  // sparkline test, the userId-mode sparkline render hydrates into the
+  // grid view (no <table>, no sparkline cells), the data-testid lookup
+  // returns null, and the stroke assertion fails. Local runs were
+  // green because the file finished cleanly and vitest tore down jsdom
+  // before any next file could observe the leak. Fix: clear shared
+  // localStorage between tests so prefs persistence can't carry across.
+  try {
+    window.localStorage.clear();
+  } catch {
+    // jsdom may not implement clear in some configurations; non-fatal.
+  }
 });
 afterEach(() => {
   restoreFetchMock();
