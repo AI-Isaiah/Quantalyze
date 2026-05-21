@@ -264,7 +264,7 @@ export interface StrategyAnalytics {
   id: string;
   strategy_id: string;
   computed_at: string;
-  computation_status: "pending" | "computing" | "complete" | "failed";
+  computation_status: "pending" | "computing" | "complete" | "complete_with_warnings" | "failed";
   computation_error: string | null;
   benchmark: string | null;
   cumulative_return: number | null;
@@ -386,6 +386,13 @@ export interface AnalyticsDataQualityFlags {
    *  connector / malicious tenant emitting `is_maker: null` to suppress
    *  the trade_mix panel. Absent when zero. */
   fills_missing_is_maker_pct?: number;
+  /**
+   * CSV → analytics pipeline Task 7. True when the metrics were computed
+   * from a CSV-uploaded daily-return series (source='csv'), not from an
+   * exchange-backed trades + position-reconstruction pipeline. The
+   * factsheet can render a "CSV-sourced" chip alongside the metrics.
+   */
+  csv_source?: boolean;
 }
 
 export interface VolumeMetrics {

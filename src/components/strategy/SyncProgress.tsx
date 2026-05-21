@@ -48,6 +48,8 @@ export function toSyncStatus(db: ComputationStatus): SyncStatus {
       return "computing";
     case "complete":
       return "complete";
+    case "complete_with_warnings":
+      return "complete_with_warnings";
     case "failed":
       return "error";
     default:
