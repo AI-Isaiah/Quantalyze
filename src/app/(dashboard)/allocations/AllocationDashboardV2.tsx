@@ -4,6 +4,8 @@ import { useMemo } from "react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
+import { KeyFilterPanel } from "./components/KeyFilterPanel";
+import { useExcludedKeyIds } from "./hooks/useExcludedKeyIds";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 import EquityChartWidget from "./widgets/performance/EquityChart";
 import { buildAllocatorPortfolioFactsheetPayload } from "@/lib/factsheet/allocator-portfolio-payload";
@@ -38,9 +40,26 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     equityDailyPoints,
     activeVenues = [],
     snapshotCount,
+    apiKeys = [],
+    allocator_id: allocatorId,
   } = props;
 
-  const holdingsEmpty = holdingsSummary.length === 0;
+  // Per-API-key include/exclude — display-time filter for Overview
+  // aggregates. Excluded keys still ingest server-side (the toggle does
+  // NOT pause sync); we just drop their holdingsSummary rows from the
+  // client-side projection so KPIs / holdings tiles reflect the
+  // user-curated subset. The equity curve + factsheet panels still read
+  // the pre-blended server snapshots — the KeyFilterPanel surfaces a
+  // caveat when this divergence is active (see KeyFilterPanel.tsx for
+  // the rationale + the gap-tracking comment).
+  const { excluded: excludedKeyIds } = useExcludedKeyIds(allocatorId);
+
+  const filteredHoldingsSummary = useMemo(() => {
+    if (excludedKeyIds.size === 0) return holdingsSummary;
+    return holdingsSummary.filter((row) => !excludedKeyIds.has(row.api_key_id));
+  }, [holdingsSummary, excludedKeyIds]);
+
+  const holdingsEmpty = filteredHoldingsSummary.length === 0;
 
   const factsheetPayload = useMemo(
     () =>
@@ -92,6 +111,11 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         portfolioId={portfolio?.id ?? null}
         flaggedCount={flaggedHoldings.length}
         className="mt-3 px-1"
+      />
+      <KeyFilterPanel
+        allocatorId={allocatorId}
+        apiKeys={apiKeys}
+        holdingsSummary={holdingsSummary}
       />
 
       {factsheetPayload ? (
