@@ -7,6 +7,22 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.2.0] - 2026-05-21
+
+**fix(audit-2026-05-07): close 6 OPEN CRITICALs from G14/G15/G17 + the 3 it.fails markers PR #233 left for follow-up.**
+
+PR C of the audit closeout. Two fail-loud route fixes (sync-funding cron, bridge/simulator rate-limit gates), one false-promise removal on /security, a defensive UI gate on the funding breakdown for non-Binance exchanges, and one stale fix-list entry retired after verifying the prior closure landed. Regression tests added for every behavior change so the gaps surface immediately if regressed.
+
+### Fixed
+- `/api/cron/sync-funding` (G14-005) now returns HTTP 500 when 100% of the strategy-enqueue attempts fail (was silently 200, masking platform-wide outages from Vercel cron alerting). Body still includes `enqueued`, `failed`, and the truncated `errors` array so on-call has searchable context. Single new test pins the 500-on-all-fail path.
+- `/api/bridge` (G13-038) 429 envelope now includes the standard `Retry-After` HTTP header plus `retryAfter` in the JSON body, matching `/api/simulator` and `/api/portfolio-optimizer`. Flips the `it.fails` marker PR #233 (TC3b) left for follow-up.
+- `/api/bridge` + `/api/simulator` (G15-046) call `isRateLimitMisconfigured(rl)` before returning 429 and surface a 503 with `Retry-After` instead. A production Upstash misconfiguration now reaches canary alerts as a service outage rather than user-side throttling. Flips the `it.fails` markers PR #233 left for follow-up (bridge TC3c, simulator TC4).
+- `/security` (G14-006) no longer claims "raw fills older than 30 days are hard-deleted by a daily job." No such cron exists (verified `vercel.json` + migration 102 `sync_trades_preserve_fills.sql` which explicitly preserves `is_fill=true` rows). Copy now describes the actual lifecycle — fills and aggregates are retained for the life of the connection; deletion happens when the API key is disconnected or the account closes.
+- `PositionsTab` (G14-003 PARTIAL) now takes an `exchange` prop and gates the `+ Funding` ROI breakdown on `exchange === "binance"`. The Sprint 5.6 cutover in `analytics-service/services/exchange.py` only excludes FUNDING_FEE from `daily_pnl` for Binance; OKX (`account_bills`) and Bybit (`position_closed_pnl`) still bake funding into realized P&L, so showing the explicit `+ Funding` breakdown for those exchanges double-counted on the allocator-facing tooltip. Default (no prop) suppresses the breakdown, so callers that haven't been wired through can't accidentally re-introduce the bug. Three regression tests pin the gate (okx, bybit, undefined). Full cutover for OKX/Bybit tracked in PR D follow-up.
+
+### Verified (no code change)
+- G14-004 (silent fetch truncation across Binance/OKX/Bybit): already closed by prior PRs (markers `C-0322` / `H-1103` at `funding_fetch.py:336`, `:469`, `:645`). All three fetchers re-raise on pagination exceptions; `logger.warning`+`break` pattern no longer present. Fix-list entry retired.
+
 ## [0.24.1.1] - 2026-05-21
 
 **fix(ci): wire seed demo strategies to crypto-sma discovery category.**

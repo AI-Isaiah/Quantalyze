@@ -19,6 +19,7 @@ import { VolumeExposureTab } from "./VolumeExposureTab";
 import { PositionsTab } from "./PositionsTab";
 import { formatPercent, formatNumber, metricColor, cn } from "@/lib/utils";
 import type { StrategyAnalytics, Position } from "@/lib/types";
+import type { SupportedExchange } from "@/lib/utils";
 
 const TABS = ["Overview", "Returns", "Risk", "Volume & Exposure", "Positions"] as const;
 type Tab = (typeof TABS)[number];
@@ -28,6 +29,7 @@ export function PerformanceReport({
   percentiles,
   positions,
   positionsError,
+  exchange,
 }: {
   analytics: StrategyAnalytics;
   percentiles?: Percentiles;
@@ -37,6 +39,11 @@ export function PerformanceReport({
    *  banner instead of the silent "no positions reconstructed yet"
    *  empty state. */
   positionsError?: boolean;
+  /** G14-003 PARTIAL: thread exchange through so PositionsTab can gate
+   *  the `+ Funding` breakdown. OKX/Bybit still double-count funding
+   *  via their realized-pnl endpoints; only Binance can render the
+   *  breakdown safely until the analytics-service cutover lands. */
+  exchange?: SupportedExchange | null;
 }) {
   const [tab, setTab] = useState<Tab>("Overview");
 
@@ -183,7 +190,12 @@ export function PerformanceReport({
             <VolumeExposureTab analytics={analytics} />
           )}
           {tab === "Positions" && (
-            <PositionsTab analytics={analytics} positions={positions || null} positionsError={positionsError} />
+            <PositionsTab
+              analytics={analytics}
+              positions={positions || null}
+              positionsError={positionsError}
+              exchange={exchange ?? null}
+            />
           )}
         </>
       )}

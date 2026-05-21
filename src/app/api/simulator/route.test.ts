@@ -192,30 +192,25 @@ describe("POST /api/simulator", () => {
     expect(body.retryAfter).toBe(42);
   });
 
-  // TC4: G15-046 — desired behavior. Route currently emits 429 for the
-  // ratelimit_misconfigured variant; should emit 503 so canary alarms see
-  // the configuration outage. Marked it.fails so the regression is
-  // visible without blocking the test suite. See fix-list.md G15-046.
-  // TODO(G15-046): remove `.fails` once the route checks
-  // `isRateLimitMisconfigured(rl)` before returning 429.
-  it.fails(
-    "TC4 — 503 when checkLimit() returns ratelimit_misconfigured (G15-046)",
-    async () => {
-      STATE.checkLimitResult = {
-        success: false,
-        retryAfter: 60,
-        reason: "ratelimit_misconfigured",
-      };
-      const { POST } = await import("./route");
-      const res = await POST(
-        makeRequest({
-          portfolio_id: PORTFOLIO_ID,
-          candidate_strategy_id: CANDIDATE_ID,
-        }),
-      );
-      expect(res.status).toBe(503);
-    },
-  );
+  // TC4: G15-046 — ratelimit_misconfigured surfaces as 503 (fail-CLOSED on
+  // limiter outage) so canary alarms catch the configuration outage rather
+  // than treating users as throttled. Closed by the route narrowing on
+  // isRateLimitMisconfigured(rl) before the 429 branch.
+  it("TC4 — 503 when checkLimit() returns ratelimit_misconfigured (G15-046)", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        candidate_strategy_id: CANDIDATE_ID,
+      }),
+    );
+    expect(res.status).toBe(503);
+  });
 
   it("TC5 — 400 on Zod parse failure", async () => {
     const { POST } = await import("./route");

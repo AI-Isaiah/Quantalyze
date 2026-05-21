@@ -85,11 +85,13 @@ export default function SecurityPage() {
             <div className="mt-4 space-y-4 text-[14px] leading-relaxed text-text-primary">
               <p>
                 The data we persist is: read-only exchange API credentials
-                (encrypted), raw trade fills for the last 30 days, and
-                aggregate analytics (Sharpe, Sortino, drawdown, daily
-                returns) kept indefinitely. Raw fills older than 30 days are
-                hard-deleted by a daily job; aggregates remain because the
-                factsheet needs them.
+                (encrypted), raw trade fills, and aggregate analytics
+                (Sharpe, Sortino, drawdown, daily returns) — all kept for
+                the life of the connection so factsheet and historical
+                breakdowns stay reproducible. When you disconnect an
+                exchange key or close your account, fills and aggregates
+                for that connection are removed (see the section below on
+                deletion).
               </p>
               <p>
                 Tenant isolation is enforced at the database. Row-Level

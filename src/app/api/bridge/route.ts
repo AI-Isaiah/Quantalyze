@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { findReplacementCandidates } from "@/lib/analytics-client";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import {
+  userActionLimiter,
+  checkLimit,
+  isRateLimitMisconfigured,
+} from "@/lib/ratelimit";
 
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
@@ -19,9 +23,30 @@ export async function POST(req: NextRequest) {
 
   const rl = await checkLimit(userActionLimiter, `bridge:${user.id}`);
   if (!rl.success) {
+    // G15-046: surface limiter misconfiguration as 503 so canary alerts
+    // catch the outage instead of treating users as throttled.
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Rate limiter unavailable" },
+        {
+          status: 503,
+          headers: { "Retry-After": String(rl.retryAfter) },
+        },
+      );
+    }
+    // G13-038: include the conventional Retry-After header on the 429
+    // envelope so clients (and Vercel's analytics) get a structured
+    // back-off hint. Mirror the sibling /api/simulator + /api/portfolio-
+    // optimizer shape.
     return NextResponse.json(
-      { error: "Too many requests. Bridge scoring is compute-intensive." },
-      { status: 429 },
+      {
+        error: "Too many requests. Bridge scoring is compute-intensive.",
+        retryAfter: rl.retryAfter,
+      },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
     );
   }
 

@@ -98,12 +98,19 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  return NextResponse.json({
-    enqueued,
-    failed,
-    total_candidates: rows.length,
-    ...(errors.length > 0 ? { errors: errors.slice(0, 5) } : {}),
-  });
+  // G14-005: fail loud when the cron tick enqueued zero of N candidates.
+  // A 200 here masks platform-wide outages from Vercel cron alerting and
+  // the run looks "successful" until allocators notice missing funding rows.
+  const allFailed = rows.length > 0 && enqueued === 0;
+  return NextResponse.json(
+    {
+      enqueued,
+      failed,
+      total_candidates: rows.length,
+      ...(errors.length > 0 ? { errors: errors.slice(0, 5) } : {}),
+    },
+    { status: allFailed ? 500 : 200 },
+  );
 }
 
 export const GET = handle;

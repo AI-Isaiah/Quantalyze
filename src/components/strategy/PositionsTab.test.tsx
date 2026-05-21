@@ -79,7 +79,13 @@ describe("PositionsTab — ROI label + tooltip (Sprint 5.6 funding cutover)", ()
   it("shows plain 'ROI' heading + 'Price ROI excludes funding payments' tooltip when all funding_pnl = 0", () => {
     const analytics = makeAnalytics();
     const positions: Position[] = [makePosition({ funding_pnl: 0 })];
-    render(<PositionsTab analytics={analytics} positions={positions} />);
+    render(
+      <PositionsTab
+        analytics={analytics}
+        positions={positions}
+        exchange="binance"
+      />,
+    );
 
     // Heading reverts to plain "ROI"
     expect(screen.getByText("ROI")).toBeDefined();
@@ -91,13 +97,19 @@ describe("PositionsTab — ROI label + tooltip (Sprint 5.6 funding cutover)", ()
     expect(tooltip.textContent).not.toContain("Funding:");
   });
 
-  it("shows 'Total ROI (incl. funding)' heading + breakdown tooltip when any funding_pnl != 0", () => {
+  it("shows 'Total ROI (incl. funding)' heading + breakdown tooltip when any funding_pnl != 0 (binance)", () => {
     const analytics = makeAnalytics();
     const positions: Position[] = [
       makePosition({ id: "p1", realized_pnl: 10, funding_pnl: -2.5 }),
       makePosition({ id: "p2", realized_pnl: 5, funding_pnl: 0 }),
     ];
-    render(<PositionsTab analytics={analytics} positions={positions} />);
+    render(
+      <PositionsTab
+        analytics={analytics}
+        positions={positions}
+        exchange="binance"
+      />,
+    );
 
     expect(screen.getByText("Total ROI (incl. funding)")).toBeDefined();
     expect(screen.queryByText("ROI")).toBeNull();
@@ -107,6 +119,51 @@ describe("PositionsTab — ROI label + tooltip (Sprint 5.6 funding cutover)", ()
     // totalRealizedPnl = 10 + 5 = 15; totalFundingPnl = -2.5 + 0 = -2.5
     expect(tooltip.textContent).toContain("Price ROI:");
     expect(tooltip.textContent).toContain("Funding:");
+  });
+
+  /**
+   * G14-003 PARTIAL: OKX/Bybit daily_pnl still includes FUNDING_FEE
+   * (only Binance has the cutover live in analytics-service). Rendering
+   * the `+ Funding` breakdown for those exchanges double-counts funding
+   * on the allocator-facing tooltip. Until the OKX/Bybit cutover lands,
+   * PositionsTab MUST suppress the breakdown for non-Binance exchanges
+   * even when funding_pnl rows are non-zero.
+   */
+  it.each(["okx", "bybit"] as const)(
+    "G14-003: suppresses funding breakdown for exchange=%s even when funding_pnl != 0",
+    (ex) => {
+      const analytics = makeAnalytics();
+      const positions: Position[] = [
+        makePosition({ id: "p1", realized_pnl: 10, funding_pnl: -2.5 }),
+      ];
+      render(
+        <PositionsTab
+          analytics={analytics}
+          positions={positions}
+          exchange={ex}
+        />,
+      );
+
+      expect(screen.getByText("ROI")).toBeDefined();
+      expect(screen.queryByText("Total ROI (incl. funding)")).toBeNull();
+      const tooltip = screen.getByTestId("roi-tooltip");
+      expect(tooltip.textContent).toContain(
+        "Price ROI excludes funding payments",
+      );
+      expect(tooltip.textContent).not.toContain("Funding:");
+    },
+  );
+
+  it("G14-003: suppresses funding breakdown when exchange prop is not provided (safe default)", () => {
+    const analytics = makeAnalytics();
+    const positions: Position[] = [
+      makePosition({ id: "p1", realized_pnl: 10, funding_pnl: -2.5 }),
+    ];
+    render(<PositionsTab analytics={analytics} positions={positions} />);
+
+    expect(screen.queryByText("Total ROI (incl. funding)")).toBeNull();
+    const tooltip = screen.getByTestId("roi-tooltip");
+    expect(tooltip.textContent).not.toContain("Funding:");
   });
 
   /**

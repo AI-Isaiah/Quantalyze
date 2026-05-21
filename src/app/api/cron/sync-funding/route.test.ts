@@ -169,6 +169,34 @@ describe.each([
     }
   });
 
+  it("returns 500 when EVERY enqueue fails (G14-005 fail-loud)", async () => {
+    const strategies = [{ id: "strat-a" }, { id: "strat-b" }];
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: () => ({
+          select: () => ({
+            eq: () => ({
+              in: () => Promise.resolve({ data: strategies, error: null }),
+            }),
+          }),
+        }),
+        rpc: vi.fn().mockImplementation(() =>
+          Promise.resolve({ data: null, error: { message: "queue down" } }),
+        ),
+      }),
+    }));
+    const handler = await getHandler(_verb);
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.enqueued).toBe(0);
+    expect(body.failed).toBe(2);
+    expect(body.total_candidates).toBe(2);
+    expect(Array.isArray(body.errors)).toBe(true);
+  });
+
   it("collects rpc failures in the errors array", async () => {
     const strategies = [{ id: "strat-a" }, { id: "strat-b" }];
     let rpcCall = 0;
