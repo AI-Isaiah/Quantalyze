@@ -356,6 +356,68 @@ describe("POST /api/admin/partner-import — audit-2026-05-07 cluster A", () => 
     expect((evt?.metadata.managers_created as number) ?? 0).toBeGreaterThan(0);
   });
 
+  it("C-0053 (audit-2026-05-21 v0.24.3.1): 500 response body surfaces partial_completion=true for operator retry decisions", async () => {
+    // Pre-fix: the 500 envelope returned counters but no explicit
+    // `partial_completion` flag — an operator could not tell from the
+    // response alone whether re-running was safe (zero rows persisted)
+    // or duplicative (phase-1 manager auth rows already committed).
+    // The audit metadata had the flag; the operator-facing JSON did not.
+    STATE.failOnStrategyName = "Bob Trend";
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo-partner",
+        managers_csv: SAMPLE_MANAGERS_CSV,
+        allocators_csv: SAMPLE_ALLOCATORS_CSV,
+      }),
+    );
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.partial_completion).toBe(true);
+    expect(body.managers_created).toBeGreaterThan(0);
+    // The downstream allocator phase was never reached because the throw
+    // happens in phase 2; this pins the contract that the 500 body's
+    // counters reflect actual persisted state.
+    expect(body.allocators_created).toBe(0);
+  });
+
+  it("C-0053 (audit-2026-05-21 v0.24.3.1): phase-2 throw aborts before allocator phase runs (no allocator_preferences upsert)", async () => {
+    // mapConcurrent fail-stop semantics: when phase 2 throws on row 'Bob
+    // Trend', phase 3 (allocator upsert loop) must not run AT ALL. Pre-
+    // existing tests asserted partial_completion in audit + response;
+    // this pins the inverse — STATE.insertedPrefs MUST remain empty so
+    // the operator knows allocator rows are NOT in the partial state.
+    STATE.failOnStrategyName = "Bob Trend";
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo-partner",
+        managers_csv: SAMPLE_MANAGERS_CSV,
+        allocators_csv: SAMPLE_ALLOCATORS_CSV,
+      }),
+    );
+    expect(res.status).toBe(500);
+    expect(STATE.insertedPrefs).toHaveLength(0);
+    // Profiles upserts happened for managers in phase 1 — that's the
+    // partial state the audit metadata + response body now both expose.
+    expect(STATE.insertedProfiles.length).toBeGreaterThan(0);
+  });
+
+  it("C-0053 (audit-2026-05-21 v0.24.3.1): success-path response body emits partial_completion=false", async () => {
+    // Operator clients can switch on `partial_completion` uniformly
+    // across success and failure responses instead of inferring partial
+    // state from the HTTP status. Pre-fix only the 500 / audit paths
+    // had the flag; the 200 success body did not surface it.
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo-partner",
+        managers_csv: SAMPLE_MANAGERS_CSV,
+        allocators_csv: SAMPLE_ALLOCATORS_CSV,
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.partial_completion).toBe(false);
+  });
+
   it("H-0238: huge partner_tag in audit metadata is truncated by capAuditMetadata", async () => {
     // partner_tag must match ^[a-z0-9-]+$; build a 4kB legal tag.
     const huge = "a".repeat(4096);

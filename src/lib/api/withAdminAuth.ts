@@ -20,8 +20,19 @@ export function withAdminAuth(handler: AdminHandler) {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
 
+    // Audit-2026-05-07 C-0146 (api-contract c9): split unauthenticated
+    // (RFC 7235 → 401) from forbidden (RFC 7231 → 403). The pre-fix gate
+    // unified both into a single 403 "Unauthorized" envelope, conflating
+    // "missing JWT" with "JWT present but caller is not admin". Every
+    // route built on this wrapper (allocator-approve, strategy-review,
+    // intro-request, for-quants-leads/process, etc.) inherited the
+    // contract bug. Mirror withAuth.ts and requireRole() in src/lib/auth.ts
+    // which both already get this right.
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
     if (!(await isAdminUser(supabase, user))) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
     let body: Record<string, unknown>;

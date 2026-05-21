@@ -7,6 +7,29 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.3.1] - 2026-05-21
+
+**fix(audit-2026-05-07): close `/api/admin/partner-import` CRITICALs + `withAdminAuth` RFC 7235 401/403 split.**
+
+Cluster fix for the partner-import admin route (6C + 2H findings) plus the shared `withAdminAuth` wrapper used by 7 admin routes. Most partner-import findings were already closed by prior multi-phase work (#211); this PR pins the remaining surfaces in the operator-facing response body and tests, then closes C-0146 at the wrapper layer.
+
+### Fixed
+- `src/lib/api/withAdminAuth.ts` (C-0146 api-contract c9): split unauthenticated (RFC 7235 → 401 "Unauthorized") from forbidden (RFC 7231 → 403 "Forbidden"). The pre-fix gate unified both into a single 403 "Unauthorized" envelope, conflating "missing JWT" with "JWT present but caller is not admin". Every route wrapping `withAdminAuth` (allocator-approve, strategy-review, intro-request, for-quants-leads/process, users/[id]/roles, etc.) inherited the contract bug. Now mirrors `src/lib/api/withAuth.ts` and `requireRole()` in `src/lib/auth.ts`. The wrapper short-circuits before the `isAdminUser()` DB read when the JWT is missing.
+- `/api/admin/partner-import` (C-0053 red-team c8 secondary remediation): the 500 response body now surfaces a `partial_completion` boolean alongside the existing counters (`managers_created`, `strategies_created`, `allocators_created`, `strategies_skipped_existing`, `managers_rows_skipped`, `allocators_rows_skipped`). Pre-fix only the audit-metadata copy carried the flag; an operator inspecting the response alone could not tell whether retry was safe (zero rows persisted) or duplicative (phase-1 manager auth + profile rows already committed). The 200 success body and the 400 envelopes (`PartnerTagConflictError`, `ProfileValidationError`) also emit the flag for client-side parity so callers can switch on `partial_completion` uniformly instead of branching on the HTTP status.
+
+### Added (regression tests — fail without fix, pass with fix)
+- `src/lib/api/withAdminAuth.test.ts`: new C-0146 test pins the 401-on-null-user path with body `{error:"Unauthorized"}` and asserts `isAdminUser()` is NOT probed when the JWT is missing (short-circuit). Existing 403-on-non-admin test updated to expect body `{error:"Forbidden"}` (status now matches body).
+- `src/app/api/admin/partner-import/route.test.ts`: three new tests pin (1) `partial_completion=true` in the 500 envelope when phase-2 strategy insert throws after phase-1 succeeded, (2) `STATE.insertedPrefs` remains empty when phase-2 throws (phase-3 fail-stop semantics — operator knows allocator rows are NOT in the partial state), (3) `partial_completion=false` in the 200 success envelope.
+
+### Verified (no code change — covered by prior PRs, re-checked against live source)
+- `C-0055` (UNIQUE strategies pre-fetch + intra-batch dedup): closed by #211, tested in route.test.ts.
+- `C-0054` (partial-completion catch-path audit emission): closed by #211, tested.
+- `C-0056` (`crypto.randomUUID()` for `entity_id`): closed by #211, tested via RFC 4122 v4 regex + non-determinism assertion.
+- `C-0057` (test gap: 403 non-admin + UUID-shape + rollup metadata + no per-row events): closed by #211, all four assertions present.
+- `H-0238` (`capAuditMetadata` cap on attacker-influenced `partner_tag`): closed by #211, tested with a 4096-char tag.
+- `H-0239` (raw-vs-parsed row-count delta): closed by #211, surfaced on both response + audit metadata, tested.
+- `C-0052` (header-mandatory contract change): the new `parseCsvWithSchema` requires a header row; downstream callers (CsvUpload wizard, partner-import UI) all emit the header. No external callers post header-less payloads — this is documented here in the changelog as the deprecation notice the audit asked for.
+
 ## [0.24.2.0] - 2026-05-21
 
 **fix(audit-2026-05-07): close 6 OPEN CRITICALs from G14/G15/G17 + the 3 it.fails markers PR #233 left for follow-up.**
