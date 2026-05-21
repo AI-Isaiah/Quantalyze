@@ -112,7 +112,22 @@ export async function seedTestAllocator(): Promise<SeededAllocator> {
     admin
       .from("profiles")
       .upsert(
-        { id: data.user.id, display_name: email, role: "allocator" },
+        {
+          id: data.user.id,
+          display_name: email,
+          role: "allocator",
+          // v0.24.5.18 universal approval gate (src/lib/approval.ts):
+          // every dashboard route redirects un-verified profiles to
+          // /pending-approval. Seeded test users would otherwise hit
+          // that gate before any spec assertion runs. Stamp them as
+          // verified at seed time so /discovery/* and other dashboard
+          // routes render. Both fields are set even though only the
+          // role-matching field gates — defense against a future seed
+          // call that flips role to 'both' (which requires BOTH sides
+          // verified per isProfileApproved's truth table).
+          allocator_status: "verified",
+          manager_status: "verified",
+        },
         { onConflict: "id" },
       ),
     // Stamp an investor_attestations row so the seeded user clears the
