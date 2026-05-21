@@ -49,6 +49,18 @@ describe("WatchlistTabs", () => {
     expect(screen.getByText("3")).toBeDefined();
   });
 
+  // audit-2026-05-21 e2e-spec-chains: e2e/discovery-watchlist.spec.ts now
+  // targets the badge via `data-testid="watchlist-count-badge"` instead of
+  // the loose `tab.toContainText("1")` substring match (which would
+  // false-pass on counts of 11, 100, etc. — PR #236 anchor-element
+  // principle). Pin the testid here so a future rename silently breaks
+  // unit + e2e together in CI rather than only when the nightly fires.
+  it("badge is queryable by data-testid='watchlist-count-badge' (e2e selector contract)", () => {
+    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={1} idBase="t" panelId="p" />);
+    const badge = screen.getByTestId("watchlist-count-badge");
+    expect(badge.textContent).toBe("1");
+  });
+
   it("does not render a count badge when count === 0", () => {
     render(
       <WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />,

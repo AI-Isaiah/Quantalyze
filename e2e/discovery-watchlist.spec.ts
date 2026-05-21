@@ -166,24 +166,39 @@ test.describe("DISCO-01 watchlist", () => {
     // tableRowCount === 0 silently masked the entire happy-path
     // assertion on every clean test DB.
     await page.waitForSelector("table tbody tr", { timeout: 15000 });
-    const firstRow = page.locator("table tbody tr").first();
+    // audit-2026-05-21 PR #236 anchor-element pattern — select the
+    // specific row that contains the seeded strategy's factsheet
+    // anchor (`/factsheet/${strategyId}`) rather than `.first()`.
+    // PR #236 demonstrated that `tbody.allTextContents()` + regex
+    // concatenates per-row text and produces brittle assertions; the
+    // safer pattern is to query a stable anchor element by href and
+    // navigate up to its row. If a future shard, parallel run, or
+    // unclean DB leaves an extra published row, `.first()` would
+    // bind to the wrong row and either time out on the star button
+    // or silently star a row from a prior run.
+    const strategyId = seededStrategy!.strategyId;
+    const seededRow = page
+      .locator("table tbody tr")
+      .filter({
+        has: page.locator(`a[href="/factsheet/${strategyId}"]`),
+      });
     await expect(
-      firstRow,
-      "discovery table rendered zero rows despite a seeded published " +
-        "strategy with category_id=crypto-sma — published-filter, RLS, " +
+      seededRow,
+      "discovery table did not render the seeded strategy " +
+        `(strategyId=${strategyId}) — published-filter, RLS, ` +
         "or discovery_categories.slug inner-join regression",
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 10000 });
     // Belt-and-braces: the seeded strategy's star button must actually
-    // exist on the first row. If the table renders the "no strategies
-    // match your filters" empty-state row (a <tr> with no star button)
-    // this assertion surfaces the structural failure immediately.
-    const starButton = firstRow
+    // exist on the targeted row. If the row rendered but StarToggle
+    // failed to hydrate, this surfaces the structural failure with the
+    // strategyId in the diagnostic.
+    const starButton = seededRow
       .locator('button[aria-label*="to watchlist"]')
       .first();
     await expect(
       starButton,
-      "first discovery row has no watchlist star button — empty-state row " +
-        "rendered instead of the seeded strategy (category_id mismatch?)",
+      `seeded row (strategyId=${strategyId}) has no watchlist star button — ` +
+        "StarToggle render regression",
     ).toBeVisible({ timeout: 10000 });
 
     // 1. Click the FIRST row's star (unstarred → starred). Match the
@@ -203,21 +218,45 @@ test.describe("DISCO-01 watchlist", () => {
     // 2. Reload and confirm the star is still filled (server-persisted).
     // Use a polling expect on the aria-label so a hydration delay is
     // distinguishable from a state-not-persisted regression — the
-    // previous synchronous expect raced StarToggle hydration.
+    // previous synchronous expect raced StarToggle hydration. Target
+    // the row by factsheet href (PR #236 pattern) so an unrelated
+    // first row from prior runs cannot mask the assertion.
     await page.reload();
     await page.waitForSelector("table tbody tr", { timeout: 15000 });
-    const firstRowAfterReload = page.locator("table tbody tr").first();
+    const seededRowAfterReload = page
+      .locator("table tbody tr")
+      .filter({
+        has: page.locator(`a[href="/factsheet/${strategyId}"]`),
+      });
     await expect(
-      firstRowAfterReload.locator('button[aria-label*="from watchlist"]'),
+      seededRowAfterReload.locator('button[aria-label*="from watchlist"]'),
       "StarToggle did not persist 'starred' state across reload",
     ).toBeVisible({ timeout: 5000 });
 
-    // 3. The My Watchlist tab badge must read "1".
+    // 3. The My Watchlist tab badge must read exactly "1". Use the
+    // dedicated `[data-testid="watchlist-count-badge"]` element from
+    // WatchlistTabs.tsx so a substring match like
+    // `toContainText("1")` can't false-pass on a future count of 11,
+    // 100, etc. — PR #236 anchor-element principle applied to the
+    // badge text.
     const watchTab = page.getByRole("tab", { name: /My Watchlist/ });
-    await expect(watchTab).toContainText("1");
+    const watchTabBadge = watchTab.getByTestId("watchlist-count-badge");
+    await expect(
+      watchTabBadge,
+      "My Watchlist tab badge missing — WatchlistTabs.tsx render " +
+        "regression or count is zero (badge is conditional on count > 0)",
+    ).toHaveText("1", { timeout: 5000 });
 
-    // 4. Clicking My Watchlist filters to exactly 1 row.
+    // 4. Clicking My Watchlist filters to exactly the seeded row.
+    // Assert by the seeded factsheet anchor (not `.toHaveCount(1)`) so
+    // a parallel-shard pollution or unclean DB cannot make the test
+    // pass against an unrelated starred row.
     await watchTab.click();
+    await expect(
+      page.locator(`table tbody tr a[href="/factsheet/${strategyId}"]`),
+      "My Watchlist tab did not filter to the seeded row — server-side " +
+        "user_favorites scope regression or hydration race",
+    ).toBeVisible({ timeout: 5000 });
     await expect(page.locator("table tbody tr")).toHaveCount(1);
   });
 
