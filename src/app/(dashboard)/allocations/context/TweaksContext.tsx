@@ -247,6 +247,22 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
     };
   }, [state.displayFont]);
 
+  // Outcomes-tile visibility — surfaces body[data-show-outcomes] so the
+  // single CSS rule in globals.css can hide the Outcomes tab button +
+  // tabpanel without prop-drilling. Default `true` is rendered as the
+  // attribute being absent (cleaner DOM than data-show-outcomes="true"
+  // attached to every page).
+  useEffect(() => {
+    if (state.showOutcomes) {
+      document.body.removeAttribute("data-show-outcomes");
+    } else {
+      document.body.setAttribute("data-show-outcomes", "false");
+    }
+    return () => {
+      document.body.removeAttribute("data-show-outcomes");
+    };
+  }, [state.showOutcomes]);
+
   // Accent intensity — swap --color-accent + --color-accent-hover at the
   // root so all DESIGN.md token consumers (border-accent, text-accent,
   // bg-accent, var(--color-accent-hover) etc.) flip in lock-step.

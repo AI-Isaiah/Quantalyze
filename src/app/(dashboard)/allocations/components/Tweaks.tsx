@@ -199,7 +199,7 @@ export function Tweaks() {
         </Seg>
       </Row>
 
-      <Row label="Outcomes widget">
+      <Row label="Outcomes tab">
         <Seg active={state.showOutcomes} onClick={() => set("showOutcomes", true)}>
           Show
         </Seg>

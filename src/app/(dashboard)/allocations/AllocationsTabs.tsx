@@ -10,7 +10,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
 import { ScenarioStub } from "./ScenarioStub";
-import { TweaksProvider } from "./context/TweaksContext";
+import { TweaksProvider, useTweakValue } from "./context/TweaksContext";
 import { TweaksToggle } from "./components/TweaksToggle";
 import { Tweaks } from "./components/Tweaks";
 // Phase 11 / 11-05 — onboarding nudge surfaces (S1 + S2). Both render
@@ -420,15 +420,31 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     // PR3 — keyboard nav only walks VISIBLE_TAB_KEYS (5 surfaces). Scenario
     // is reachable via "+ Allocation" / direct URL so excluding it from
     // arrow nav doesn't strand the panel.
-    const idx = VISIBLE_TAB_KEYS.indexOf(key);
+    //
+    // Tweaks showOutcomes=Hide path: when the user hides the Outcomes
+    // tab via the Tweaks panel, the CSS rule in globals.css drops the
+    // button from the visible surface. The keyboard handler ALSO needs
+    // to skip it; otherwise ArrowRight from Holdings would focus a
+    // display:none button (silent no-op), mutate the URL to
+    // ?tab=outcomes, then OutcomesTabRedirectGuard would bounce the user
+    // back to Overview a frame later — a visible flicker for sighted
+    // users and a focus blackhole for screen-reader users. Read the body
+    // attribute the TweaksContext effect maintains.
+    const outcomesHidden =
+      typeof document !== "undefined" &&
+      document.body.getAttribute("data-show-outcomes") === "false";
+    const keyboardKeys = outcomesHidden
+      ? VISIBLE_TAB_KEYS.filter((k) => k !== "outcomes")
+      : VISIBLE_TAB_KEYS;
+    const idx = keyboardKeys.indexOf(key);
     if (idx < 0) return;
     let next: TabKey | null = null;
-    const len = VISIBLE_TAB_KEYS.length;
-    if (e.key === "ArrowRight") next = VISIBLE_TAB_KEYS[(idx + 1) % len];
+    const len = keyboardKeys.length;
+    if (e.key === "ArrowRight") next = keyboardKeys[(idx + 1) % len];
     else if (e.key === "ArrowLeft")
-      next = VISIBLE_TAB_KEYS[(idx - 1 + len) % len];
-    else if (e.key === "Home") next = VISIBLE_TAB_KEYS[0];
-    else if (e.key === "End") next = VISIBLE_TAB_KEYS[len - 1];
+      next = keyboardKeys[(idx - 1 + len) % len];
+    else if (e.key === "Home") next = keyboardKeys[0];
+    else if (e.key === "End") next = keyboardKeys[len - 1];
     if (next) {
       e.preventDefault();
       changeTab(next);
@@ -492,7 +508,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
 
   return (
     <TweaksProvider>
-    <div>
+    <div data-allocator-dashboard>
       {showOnboardingBanner && (
         <div className="mb-6">
           <OnboardingBanner />
@@ -503,14 +519,20 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
           )}
         </div>
       )}
-      <div className="mb-4 flex flex-wrap items-end gap-x-4 gap-y-3 border-b border-border pb-3">
+      <div
+        data-allocator-tabstrip
+        className="mb-4 flex flex-wrap items-end gap-x-4 gap-y-3 border-b border-border pb-3"
+      >
         <div className="flex flex-col gap-1">
           {entityName ? (
             <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
               {entityName}
             </p>
           ) : null}
-          <h1 className="font-serif text-[28px] leading-none tracking-tight text-text-primary">
+          {/* Tweaks display-font knob (serif | sans). `.font-display` resolves
+              to Instrument Serif by default and flips to DM Sans when the
+              user picks Sans via the Tweaks panel — see globals.css. */}
+          <h1 className="font-display text-[28px] leading-none tracking-tight text-text-primary">
             My Allocation
           </h1>
         </div>
@@ -532,6 +554,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
                 type="button"
                 role="tab"
                 id={`tab-${key}`}
+                data-tab-key={key}
                 aria-selected={isActive}
                 aria-controls={`panel-${key}`}
                 tabIndex={isActive ? 0 : -1}
@@ -645,6 +668,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
       <div
         role="tabpanel"
         id="panel-outcomes"
+        data-allocator-panel="outcomes"
         aria-labelledby="tab-outcomes"
         hidden={activeTab !== "outcomes"}
       >
@@ -695,7 +719,30 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
           bottom-right per the truth screenshot. */}
       <TweaksToggle />
       <Tweaks />
+      {/* Tweaks showOutcomes knob: when the user disables the Outcomes tab
+          while currently viewing it, redirect to Overview so they don't sit
+          on a CSS-hidden panel with no way back via the (now hidden) tab. */}
+      <OutcomesTabRedirectGuard activeTab={activeTab} onRedirect={changeTab} />
     </div>
     </TweaksProvider>
   );
+}
+
+// Lives inside <TweaksProvider> so `useTweakValue` resolves; runs an effect
+// that bounces the user off the Outcomes tab when its visibility knob flips
+// to Hide. No DOM output.
+function OutcomesTabRedirectGuard({
+  activeTab,
+  onRedirect,
+}: {
+  activeTab: TabKey;
+  onRedirect: (key: TabKey) => void;
+}) {
+  const showOutcomes = useTweakValue("showOutcomes");
+  useEffect(() => {
+    if (!showOutcomes && activeTab === "outcomes") {
+      onRedirect("overview");
+    }
+  }, [showOutcomes, activeTab, onRedirect]);
+  return null;
 }

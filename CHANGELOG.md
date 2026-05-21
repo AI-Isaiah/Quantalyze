@@ -7,6 +7,26 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.0.0] - 2026-05-21
+
+**feat(allocations): per-API-key include/exclude toggle on Overview + Tweaks panel rewiring.**
+
+### Added (per-API-key filter)
+- New **Data sources** panel on the allocator Overview tab. One chip per connected API key with an include/exclude checkbox — flip a key off to drop its holdings from the Overview's holdings totals (HoldingsSummary client-side filter via `row.api_key_id`). Persists per-allocator in `localStorage["allocations.excludedKeyIds.{allocator_id}"]`. Live "N holdings · $X" rollup updates as keys are toggled.
+- New `useExcludedKeyIds` hook (`src/app/(dashboard)/allocations/hooks/useExcludedKeyIds.ts`) — localStorage-backed, per-allocator-scoped, SSR-safe (hydrate post-mount), with parse guards against corrupt JSON / non-array roots / non-string entries / prototype pollution. Persist effect bails out on empty allocator id to avoid writing the prefix-only key footgun.
+- New `KeyFilterPanel` component (`src/app/(dashboard)/allocations/components/KeyFilterPanel.tsx`) — chip-style UI with strikethrough styling for excluded keys, explicit caveat surfaced when any key is excluded ("chart unchanged") so the user understands the equity curve still reflects all keys until per-key server aggregation lands.
+
+### Fixed (Tweaks panel — previously dead)
+- Tweaks panel "Outcomes tab" Show/Hide knob now actually hides the Outcomes tab button + tabpanel via a new `body[data-show-outcomes="false"]` rule in `globals.css`. Previously the knob persisted state but had no consumer — toggling it did nothing. Also added an `OutcomesTabRedirectGuard` inside the TweaksProvider scope that bounces the user off `?tab=outcomes` when they Hide the tab while sitting on it, so they don't get stranded on a CSS-hidden panel.
+- Tweaks "Display font" Serif/Sans toggle now actually swaps the "My Allocation" page heading. The heading was using `font-serif` (a static Tailwind class) so the existing `body[data-display-font="sans"] .font-display` CSS rule had nothing to target on the allocator surface. Switched to `font-display` — the heading still renders Instrument Serif by default, and now flips to DM Sans when the user picks Sans.
+- Tweaks "Density" Tight/Regular/Loose knob now visibly compresses/relaxes the allocator dashboard. Previously the `--row-h` / `--density-pad` tokens had zero consumers in the dashboard so the knob produced no visible change beyond the body font-size tweak on "Tight". Added `[data-allocator-dashboard]` + `[data-allocator-tabstrip]` data attributes on the AllocationsTabs root + heading, and CSS rules that scale `--tab-gap-y` / `--tab-pad-block` per density. Red-team-found bug fixed: keyboard arrow-nav now skips the hidden Outcomes tab when `showOutcomes=false` so ArrowRight from Holdings lands on Mandate instead of focusing a `display:none` button and triggering the redirect-guard flicker.
+
+### Test coverage
+- `useExcludedKeyIds.test.tsx` — 10 tests covering hydration, toggle/setExcluded/clear semantics, per-allocator scoping, corrupt-JSON / non-array / non-string fallbacks, empty-allocator-id guard.
+- `KeyFilterPanel.test.tsx` — 7 tests covering rendering, default-included state, toggle behavior, all-excluded warning, per-allocator hydration.
+- `Tweaks.test.tsx` — 2 new tests pinning `body[data-show-outcomes]` and `body[data-display-font]` attribute round-tripping.
+- `AllocationsTabs.test.tsx` — 3 new tests covering `OutcomesTabRedirectGuard` bounce, no-redirect-when-shown, and keyboard arrow-nav skip-hidden-outcomes (the red-team finding's regression test).
+
 ## [0.23.4.0] - 2026-05-20
 
 **fix(factsheet/v2 + CI): hide comparator-only panels; close CI flakes documented in HANDOVER-CI-FLAKES-2026-05-20.md.**
