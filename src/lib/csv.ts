@@ -103,35 +103,63 @@ export function parseCsv(text: string): string[][] {
  * must appear in the header (order doesn't matter, extra columns are
  * tolerated). If any required column is missing, throws an Error.
  *
- * @param raw      Raw CSV string (with or without trailing newlines).
- * @param columns  Required header column names, in any order. Matching is
- *                 case-insensitive.
- * @param mapRow   Converts a keyed row (header-name → cell value) to the
- *                 typed output, or returns `null` to skip the row
- *                 (e.g. validation failure). Keys match the original
- *                 (lowercased) column names in `columns`.
+ * Audit-2026-05-07 C-0052 (partner-import contract): callers MUST pass an
+ * explicit `hasHeader` flag rather than relying on the parser to sniff
+ * the first row. Header sniffing is fragile (a data row that happens to
+ * spell `manager_email` would be misclassified as a header). The flag
+ * defaults to `true` purely to keep historical call-sites compiling; the
+ * partner-import route now passes an explicit value derived from the
+ * `with_header` query parameter.
+ *
+ * When `hasHeader === false`, the caller MUST pass `columns` in the
+ * exact positional order of the CSV — there is no header to remap by.
+ *
+ * @param raw       Raw CSV string (with or without trailing newlines).
+ * @param columns   Required column names. When `hasHeader === true` these
+ *                  are matched against the header case-insensitively in
+ *                  any order; when `hasHeader === false` they're used as
+ *                  positional keys for the row-object passed to `mapRow`.
+ * @param mapRow    Converts a keyed row (header-name → cell value) to the
+ *                  typed output, or returns `null` to skip the row
+ *                  (e.g. validation failure). Keys match the original
+ *                  (lowercased) column names in `columns`.
+ * @param hasHeader Whether row 0 of `raw` is a header. Defaults to
+ *                  `true`. Callers should pass this explicitly to avoid
+ *                  the documented sniff-is-implicit ambiguity.
  */
 export function parseCsvWithSchema<T>(
   raw: string,
   columns: readonly string[],
   mapRow: (row: Record<string, string>) => T | null,
+  hasHeader: boolean = true,
 ): T[] {
   const rows = parseCsv(raw);
   if (rows.length === 0) return [];
 
-  // Lowercase the header so matching is case-insensitive (preserves the
-  // behavior of the old partner-import parser which did
-  // `rows[0][0]?.toLowerCase() === "manager_email"`).
-  const header = rows[0].map((h) => h.trim().toLowerCase());
   const wantedColumns = columns.map((c) => c.toLowerCase());
-  for (const col of wantedColumns) {
-    if (!header.includes(col)) {
-      throw new Error(`Missing CSV header column: ${col}`);
+  let header: string[];
+  let dataStartIdx: number;
+  if (hasHeader) {
+    // Lowercase the header so matching is case-insensitive (preserves the
+    // behavior of the old partner-import parser which did
+    // `rows[0][0]?.toLowerCase() === "manager_email"`).
+    header = rows[0].map((h) => h.trim().toLowerCase());
+    for (const col of wantedColumns) {
+      if (!header.includes(col)) {
+        throw new Error(`Missing CSV header column: ${col}`);
+      }
     }
+    dataStartIdx = 1;
+  } else {
+    // No header row — treat the supplied `columns` as the positional
+    // schema. The CSV's first row IS data; row-objects key off the
+    // lowercased column names just like the header-present path.
+    header = wantedColumns;
+    dataStartIdx = 0;
   }
 
   const results: T[] = [];
-  for (let i = 1; i < rows.length; i++) {
+  for (let i = dataStartIdx; i < rows.length; i++) {
     const cells = rows[i];
     if (cells.length === 0) continue;
     const rowObj: Record<string, string> = {};

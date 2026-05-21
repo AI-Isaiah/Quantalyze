@@ -195,8 +195,12 @@ vi.mock("@/lib/audit", async () => {
 
 import { POST } from "./route";
 
-function buildRequest(body: Record<string, unknown>): NextRequest {
-  return new NextRequest("https://example.com/api/admin/partner-import", {
+function buildRequest(
+  body: Record<string, unknown>,
+  query: string = "",
+): NextRequest {
+  const url = `https://example.com/api/admin/partner-import${query}`;
+  return new NextRequest(url, {
     method: "POST",
     headers: {
       origin: "https://example.com",
@@ -676,5 +680,124 @@ describe("POST /api/admin/partner-import — audit-2026-05-07 cluster A", () => 
     expect(body.managers_rows_skipped).toBe(1);
     const evt = auditEmissions.find((e) => e.action === "admin.partner_import");
     expect(evt?.metadata.managers_rows_skipped).toBe(1);
+  });
+
+  // -------------------------------------------------------------------
+  // C-0052 (audit-2026-05-07): partner-import contract v2 — explicit
+  // `with_header` query parameter replaces the brittle implicit-header
+  // sniff. These tests pin the three contract states:
+  //   1. Omitted → default to true (header assumed present) — keeps
+  //      pre-v2 clients working unchanged.
+  //   2. Explicit `with_header=false` → first CSV row is data.
+  //   3. Anything other than `true`/`false` → 400.
+  // -------------------------------------------------------------------
+
+  it("C-0052: default behavior (no with_header query param) assumes header is present", async () => {
+    // CSV starts with a header line — must parse the same way the
+    // pre-v2 contract did when `with_header` is absent. This is the
+    // back-compat anchor.
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo-partner",
+        managers_csv: SAMPLE_MANAGERS_CSV,
+        allocators_csv: SAMPLE_ALLOCATORS_CSV,
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies_created).toBe(3);
+    expect(body.allocators_created).toBe(1);
+  });
+
+  it("C-0052: explicit ?with_header=true honored (same as default)", async () => {
+    const res = await POST(
+      buildRequest(
+        {
+          partner_tag: "demo-partner",
+          managers_csv: SAMPLE_MANAGERS_CSV,
+          allocators_csv: SAMPLE_ALLOCATORS_CSV,
+        },
+        "?with_header=true",
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies_created).toBe(3);
+  });
+
+  it("C-0052: explicit ?with_header=false treats row 0 as data (no header)", async () => {
+    // Same data rows as SAMPLE_MANAGERS_CSV but the header line is
+    // omitted. Under contract v2 with `with_header=false`, every line
+    // is a data row → 3 strategies, no rows skipped at the schema
+    // mapper because there's no header to drop.
+    const headerlessManagers = [
+      "alice@x,Acme Macro,institutional",
+      "alice@x,Acme Beta,institutional",
+      "bob@x,Bob Trend,exploratory",
+    ].join("\n");
+    const headerlessAllocators = ["lp1@x,family_office,1000000"].join("\n");
+    const res = await POST(
+      buildRequest(
+        {
+          partner_tag: "demo-partner",
+          managers_csv: headerlessManagers,
+          allocators_csv: headerlessAllocators,
+        },
+        "?with_header=false",
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies_created).toBe(3);
+    expect(body.allocators_created).toBe(1);
+    expect(body.managers_rows_skipped).toBe(0);
+  });
+
+  it("C-0052: invalid ?with_header value → 400 + no audit emission", async () => {
+    // Strict rejection — silently coercing "yes"/"1"/"y" would re-
+    // introduce the brittle sniff-style behaviour the contract-v2 fix
+    // is trying to eliminate. Pin "no audit on bad input" so a future
+    // regression that emits an audit row before the param-validation
+    // gate lands red.
+    const res = await POST(
+      buildRequest(
+        {
+          partner_tag: "demo-partner",
+          managers_csv: SAMPLE_MANAGERS_CSV,
+          allocators_csv: SAMPLE_ALLOCATORS_CSV,
+        },
+        "?with_header=yes",
+      ),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/with_header must be 'true' or 'false'/);
+    expect(auditEmissions).toHaveLength(0);
+  });
+
+  it("C-0052: ?with_header=false WITH a header row mis-parses (contract is operator's responsibility)", async () => {
+    // Defensive contract check — the route does NOT sniff. If the
+    // operator passes `with_header=false` but the CSV actually starts
+    // with `manager_email,strategy_name,disclosure_tier`, row 0 is
+    // treated as a data row → the `mapper_email` cell holds the
+    // literal string "manager_email" and the strategy_name cell holds
+    // "strategy_name". The route happily lands an "import" of a row
+    // named after the header text. This pins the deterministic
+    // (non-sniffing) behaviour: the parser obeys the explicit flag
+    // even when the data clearly contains a header.
+    const res = await POST(
+      buildRequest(
+        {
+          partner_tag: "demo-partner",
+          managers_csv: SAMPLE_MANAGERS_CSV,
+          allocators_csv: "",
+        },
+        "?with_header=false",
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // 4 rows: 1 header-as-data + 3 real data rows.
+    expect(body.strategies_created).toBe(4);
   });
 });

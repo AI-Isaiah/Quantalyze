@@ -101,10 +101,80 @@ export async function POST(req: NextRequest) {
     ? { status: "published", review_note: null }
     : { status: "draft", review_note: (review_note as string) || "Needs changes before approval." };
 
-  const { error } = await admin.from("strategies").update(update).eq("id", id);
+  // audit-2026-05-07 C-0060 — TOCTOU hardening for the approve path.
+  //
+  // The gate above runs five SELECTs in parallel, then a separate UPDATE
+  // flips status='published'. Between the read and the write, cron-sync
+  // can mutate `trades` or set `strategy_analytics.computation_status`
+  // back to 'computing'/'failed', and the admin's click would still
+  // publish the strategy.
+  //
+  // PostgREST cannot express a cross-table UPDATE WHERE predicate, so we
+  // close the race with two layers:
+  //  1. A final sequential gate re-check immediately before the UPDATE
+  //     (tightens the window from "5 parallel SELECTs + JS work" to
+  //     "two awaited SELECTs and the UPDATE round-trip").
+  //  2. A status-pinning UPDATE filter (.eq('status','pending_review'))
+  //     combined with .select('id'): the UPDATE only matches rows still
+  //     in the review queue, and `affected.length===0` distinguishes
+  //     concurrent-state-change (409) from a genuine DB error (500).
+  //
+  // The reject path keeps a single .eq('id') UPDATE — flipping back to
+  // 'draft' is idempotent regardless of any intervening state.
+  if (action === "approve") {
+    const [
+      { count: recheckTradeCount },
+      { data: recheckAnalytics },
+    ] = await Promise.all([
+      admin
+        .from("trades")
+        .select("id", { count: "exact", head: true })
+        .eq("strategy_id", id),
+      admin
+        .from("strategy_analytics")
+        .select("computation_status")
+        .eq("strategy_id", id)
+        .single(),
+    ]);
+    if ((recheckTradeCount ?? 0) < 5) {
+      return NextResponse.json(
+        { error: "Cannot approve: trade count fell below threshold during review." },
+        { status: 409 },
+      );
+    }
+    if (recheckAnalytics?.computation_status !== "complete") {
+      return NextResponse.json(
+        { error: "Cannot approve: analytics no longer complete." },
+        { status: 409 },
+      );
+    }
 
-  if (error) {
-    return NextResponse.json({ error: "Update failed" }, { status: 500 });
+    const { data: updated, error } = await admin
+      .from("strategies")
+      .update(update)
+      .eq("id", id)
+      .eq("status", "pending_review")
+      .select("id");
+
+    if (error) {
+      return NextResponse.json({ error: "Update failed" }, { status: 500 });
+    }
+    if (!updated || updated.length === 0) {
+      // No row matched (id+status). Either the strategy left
+      // `pending_review` between the gate check and the UPDATE, or it was
+      // never in review. Return 409 so the admin retries instead of
+      // assuming success.
+      return NextResponse.json(
+        { error: "Strategy is no longer awaiting review." },
+        { status: 409 },
+      );
+    }
+  } else {
+    const { error } = await admin.from("strategies").update(update).eq("id", id);
+
+    if (error) {
+      return NextResponse.json({ error: "Update failed" }, { status: 500 });
+    }
   }
 
   // Bust just this strategy's v2 factsheet payload so a publish/unpublish

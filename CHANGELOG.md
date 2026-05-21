@@ -7,6 +7,23 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.5.5] - 2026-05-21
+
+**fix(audit-2026-05-07): close 6-CRITICAL cluster (C-0025 + C-0043 + C-0052 + C-0060 + C-0126 + C-0158).**
+
+Bundles 6 file-disjoint audit CRITICALs authored in parallel.
+
+### Added
+- `src/app/api/account/export/latest/route.ts` + test (C-0025): new `GET /api/account/export/latest`. Returns the most recent in-bucket GDPR export bundle with a fresh signed URL — no new generation, no rate-limit consumption. Emits a distinct `account.export_resigned` audit event (separate from `account.export`) so forensics can tell fresh exports from re-signs. Returns 404 + `code: "no_prior_export"` when none exists. `Cache-Control: private, no-store`.
+- `src/components/admin/AllocatorMatchQueue.test.tsx` (C-0126): asserts `forceReadOnly={true}` blocks every mutating keyboard shortcut (s/u/d/r/?) and still allows the read-only `/api/demo/match` GET. The component already gated handlers behind `forceReadOnly` — this test pins that contract so a future refactor can't silently drop it.
+
+### Fixed
+- `src/app/api/admin/match/decisions/route.ts` (C-0043): normalized all 14 error responses to the canonical `{ error: string }` shape (DELETE previously fanned `"allocator_id, strategy_id, decision required"` into a conjoined message; now three distinct field-level errors matching POST's pattern).
+- `src/app/api/admin/partner-import/route.ts` + `src/lib/csv.ts` (C-0052): explicit `with_header=true|false` query parameter replaces the runtime CSV header-sniff. Default remains `true` so existing callers continue to work; missing parameter logs a deprecation warning. Invalid value → 400.
+- `src/app/api/admin/strategy-review/route.ts` (C-0060): closed the TOCTOU race on approve. The approve path now (1) re-checks trade count + `strategy_analytics.computation_status` immediately before the UPDATE and (2) pins the UPDATE filter to `.eq('status','pending_review').select('id')` so a concurrent state change matches 0 rows and returns 409 instead of silently flipping to published.
+- `src/lib/discovery-prefs.test.ts` (C-0158): added the two contract-cases the header documented but the test bodies omitted — initial render returns `prefs:DEFAULTS, hydrated:false` (case 7) and `setPrefs(...)` before hydration does NOT write to localStorage (case 10, hydration gate).
+
+
 ## [0.24.5.4] - 2026-05-21
 
 **fix(audit-2026-05-07 + signup-email): build /auth/callback + close 4 CRITICALs (C-0006 + C-0016 + C-0039 + C-0080).**
