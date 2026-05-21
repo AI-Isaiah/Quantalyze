@@ -7,6 +7,30 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.4.9] - 2026-05-21
+
+**fix(audit-2026-05-07): close e2e spec CHAINs (demo-public + discovery-watchlist + portfolio-pdf-demo) — re-verification + PR #236 anchor-element tightening.**
+
+Documentation-and-tightening pass for the three e2e spec CHAINs in cluster C of audit-2026-05-07 (29 findings total: C-0296/C-0297/C-0298 + 4 H + 3 M on demo-public; C-0306/C-0307/C-0308 + 4 H + 4 M on discovery-watchlist; C-0310/C-0311/C-0312 + 3 H + 2 M on portfolio-pdf-demo). The live specs were already hardened by PR #207 (cluster C close-out, 2026-05-17), but the FIX-LIST.md status markers were still `⏳` because closure was tracked in the cluster-C ledger only. This PR re-verifies each finding against the live spec and flips status markers to `✅ CLOSED-2026-05-21 (PR #207; re-verified)`.
+
+Plus one substantive tightening on `discovery-watchlist.spec.ts`, mirroring the anchor-element pattern PR #236 used to fix the `hide-examples` CI flake (`tbody.allTextContents()` regex against concatenated row text → exact-equality match against `a[href^="/factsheet/"]` link elements):
+
+### Fixed
+- `e2e/discovery-watchlist.spec.ts`: row selection now targets the seeded strategy's factsheet anchor (`table tbody tr` filtered by `a[href="/factsheet/${strategyId}"]`) instead of `.first()`. Prevents a parallel-shard pollution or unclean DB row from binding the test to the wrong row and either timing out the star-button assertion or silently starring an unrelated row from a prior run. Applies to the initial star click, the post-reload assertion, and the "My Watchlist filters to exactly the seeded row" assertion.
+- `e2e/discovery-watchlist.spec.ts`: My Watchlist tab badge count is now asserted via `tab.getByTestId("watchlist-count-badge").toHaveText("1")` instead of `tab.toContainText("1")`. The substring match would false-pass on a future leak of count 11, 100, etc. — the testid-anchored exact match closes that gap. The `data-testid` attribute on `WatchlistTabs.tsx` already existed (line 88 of the component); this just wires it into the e2e selector.
+
+### Added (regression tests — fail without fix, pass with fix)
+- `src/components/strategy/WatchlistTabs.test.tsx`: new test pins `data-testid="watchlist-count-badge"` as the stable selector contract between the unit suite and the e2e spec — a future rename now silently breaks unit + e2e together in CI rather than only when the nightly fires.
+
+### Verified (no code change — re-confirmed against live source)
+- `e2e/demo-public.spec.ts` (10 findings: C-0296/C-0297/C-0298, H-1029/H-1030/H-1031/H-1032, M-0856/M-0857/M-0858): canonical PERSONAS import + exclusivity check, scoped Failed-to-fetch URL filter, networkidle settle with 10s cap, 768 viewport, breadcrumb-on-overflow, RSC-aware XSS canary — all intact.
+- `e2e/discovery-watchlist.spec.ts` (11 findings: C-0306/C-0307/C-0308, H-1043/H-1044/H-1045/H-1046, M-0868/M-0869/M-0870/M-0871): seedTestAllocator + HAS_SEED_ENV gate, URL+method-only waitForResponse with separate status assertion, test.afterAll cleanup via deleteUser CASCADE, unauth-401 test, user-B RLS-leak proof via bare SELECT on anon JWT — all intact.
+- `e2e/portfolio-pdf-demo.spec.ts` (8 findings: C-0310/C-0311/C-0312, H-1051/H-1052/H-1053, M-0877/M-0878): canonical signDemoPdfToken import, hard-skip when DEMO_PDF_SECRET missing (no fallback), %PDF- + %%EOF magic-byte assertion, expired/cross-portfolio/malformed token coverage, fetchPdfTolerant retry on 503 with Retry-After — all intact.
+
+### Status
+- All 29 findings in scope marked `✅ CLOSED-2026-05-21` in `.planning/audit-2026-05-07/FIX-LIST.md`.
+
+
 ## [0.24.4.8] - 2026-05-21
 
 **fix(audit-2026-05-07): close 4 simulator-router CRITICALs (G15-004/005/006/007) — rate-limit + series-drift + exception envelope.**
