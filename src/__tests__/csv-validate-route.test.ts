@@ -1018,6 +1018,54 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     delete process.env.USE_COMPUTE_JOBS_QUEUE;
   });
 
+  // ---- 10c. Flag-off path writes strategy_analytics placeholder (API M-1) ----
+
+  it("Test 10c: flag-off after() writes strategy_analytics placeholder to break wizard hang (API M-1)", async () => {
+    // Phase 19.1 red-team (2026-05-22): pre-fix, when
+    // USE_COMPUTE_JOBS_QUEUE != "true" the after() block early-
+    // returned WITHOUT writing any placeholder, leaving the wizard's
+    // SyncProgress poller to spin forever because no
+    // strategy_analytics row existed. Fix writes a `failed`
+    // placeholder so the poller breaks out with a meaningful failure.
+    delete process.env.USE_COMPUTE_JOBS_QUEUE;
+    STATE.runAfterCallback = true;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Flag-off placeholder",
+      daily_returns_series: [{ date: "2024-10-01", daily_return: 0.001 }],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    // No enqueue should have fired (flag is off)
+    const enqueueCalls = adminRpcMock.mock.calls.filter(
+      ([name]) => name === "enqueue_compute_job",
+    );
+    expect(enqueueCalls).toHaveLength(0);
+
+    // But the placeholder MUST have fired.
+    expect(adminUpsertMock).toHaveBeenCalledTimes(1);
+    const [table, payload, opts] = adminUpsertMock.mock.calls[0];
+    expect(table).toBe("strategy_analytics");
+    expect(payload).toMatchObject({
+      strategy_id: NEW_STRATEGY_ID,
+      computation_status: "failed",
+      data_quality_flags: { csv_source: true },
+    });
+    expect(payload.computation_error).toMatch(
+      /queue disabled.*support@quantalyze\.com/i,
+    );
+    expect(payload.computation_error).toContain(NEW_STRATEGY_ID);
+    expect(opts).toMatchObject({ onConflict: "strategy_id" });
+
+    warnSpy.mockRestore();
+  });
+
   // ---- 11. after() failure logs but does NOT 500 (T-19.1-11) ----------------
 
   it("Test 11: after() throw logs non-blocking warning and keeps response 200 (T-19.1-11)", async () => {

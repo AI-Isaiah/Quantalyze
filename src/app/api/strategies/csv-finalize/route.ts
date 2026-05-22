@@ -391,7 +391,45 @@ function enqueueCsvAnalyticsAfter(
   opts: { logPrefix: string; correlationId: string },
 ): void {
   after(async () => {
-    if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
+    // Phase 19.1 red-team / API M-1 (2026-05-22): flag-off path used
+    // to early-return BEFORE writing any placeholder. The strategy
+    // row was persisted, the daily-returns series was persisted, but
+    // no strategy_analytics row existed → SyncProgress poller hit
+    // `if (!data) return` early-out and never called onStatusChange,
+    // so the wizard spun forever. Write a `failed` placeholder
+    // matching the API W-2 shape so the poller surfaces a meaningful
+    // failure (with a support-recovery surface) instead of polling
+    // indefinitely.
+    if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") {
+      console.warn(
+        `${opts.logPrefix} USE_COMPUTE_JOBS_QUEUE != "true" — writing strategy_analytics placeholder to break wizard hang [correlation_id=${opts.correlationId}, strategy_id=${strategyId}]`,
+      );
+      try {
+        const { createAdminClient } = await import("@/lib/supabase/admin");
+        const admin = createAdminClient();
+        const { error: placeholderErr } = await admin
+          .from("strategy_analytics")
+          .upsert(
+            {
+              strategy_id: strategyId,
+              computation_status: "failed",
+              computation_error: `compute job queue disabled — contact support@quantalyze.com with strategy id ${strategyId}`,
+              data_quality_flags: { csv_source: true },
+            },
+            { onConflict: "strategy_id" },
+          );
+        if (placeholderErr) {
+          console.warn(
+            `${opts.logPrefix} flag-off strategy_analytics placeholder upsert failed (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderErr.message}`,
+          );
+        }
+      } catch (placeholderThrow) {
+        console.warn(
+          `${opts.logPrefix} flag-off strategy_analytics placeholder upsert threw (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderThrow instanceof Error ? placeholderThrow.message : String(placeholderThrow)}`,
+        );
+      }
+      return;
+    }
     let enqueueFailed = false;
     let enqueueErrMessage = "";
     try {
