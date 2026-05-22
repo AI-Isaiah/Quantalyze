@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -40,6 +40,133 @@ import { canonicalizeExchangeList } from "@/lib/constants";
 
 const ALLOWED_FMTS = new Set(["daily_returns", "daily_nav", "trades"]);
 const MAX_NAME_CHARS = 80;
+
+// Phase 19.1 — CSV → analytics pipeline. The wizard's csv-validate step
+// canonicalises every supported `fmt` into a `daily_returns_series` array
+// (NAV → pct_change for `daily_nav`; verbatim for `daily_returns`; absent
+// for `trades`). We persist the series via the SECURITY DEFINER
+// `persist_csv_daily_returns` RPC after the strategy row exists and
+// enqueue `compute_analytics_from_csv` for the Python worker.
+//
+// All validation runs at the route boundary — `parseDailyReturnsSeries`
+// is the single gate that protects the RPC from malformed input. The
+// duplicate-date guard returns a clean 400 here so the UNIQUE
+// (strategy_id, date) constraint inside the RPC never has to surface
+// a 23505 to the user (PR #274 / T-19.1-04 mitigation).
+const MAX_DAILY_RETURNS_ROWS = 5000;
+const DAILY_RETURNS_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * One row in the persisted CSV daily-returns series. Mirrors the JSONB
+ * element shape that `persist_csv_daily_returns(p_rows JSONB)` consumes;
+ * the RPC's body re-validates with `jsonb_typeof` etc., but the route's
+ * parser is the load-bearing gate that turns malformed input into a
+ * clean `400 CSV_INVALID_FORMAT` envelope instead of letting the RPC
+ * raise a 23505 / 22023.
+ */
+export interface CsvDailyReturnRow {
+  /** YYYY-MM-DD (UTC calendar date). */
+  date: string;
+  /** Finite number; the daily fractional return for `date`. */
+  daily_return: number;
+}
+
+/**
+ * Parsed envelope. `ok=true` → `rows` is the validated series (possibly
+ * empty for `trades` fmt where the wizard omits the field entirely);
+ * `ok=false` → caller renders a 400 `CSV_INVALID_FORMAT` response with
+ * the human-readable message + optional debug_context (row index +
+ * offending date for the duplicate-date case).
+ *
+ * Invariants enforced:
+ *   1. Array shape — anything else returns "must be an array".
+ *   2. ≤ 5000 rows — message cites the literal cap so the caller can
+ *      surface it to the user without hard-coding the constant twice.
+ *   3. YYYY-MM-DD date — the worker indexes on this exact format.
+ *   4. Finite numeric daily_return — NaN / Infinity short-circuited
+ *      before reaching the RPC (T-19.1-12).
+ *   5. Unique dates — duplicate guard (T-19.1-04, PR #274). Pre-fix
+ *      a hostile or buggy client could send two rows with the same
+ *      date and trigger the UNIQUE (strategy_id, date) constraint
+ *      inside the RPC as a 23505 → 500. We turn it into a 400 here.
+ */
+type ParsedDailyReturnsSeries =
+  | { ok: true; rows: CsvDailyReturnRow[] }
+  | {
+      ok: false;
+      code: "CSV_INVALID_FORMAT";
+      message: string;
+      debug_context?: Record<string, unknown>;
+    };
+
+export function parseDailyReturnsSeries(raw: unknown): ParsedDailyReturnsSeries {
+  // Absent (e.g. fmt=trades, or legacy clients pre-19.1) — treat as
+  // empty so the unified path doesn't try to persist an empty series.
+  if (raw === undefined || raw === null) {
+    return { ok: true, rows: [] };
+  }
+  if (!Array.isArray(raw)) {
+    return {
+      ok: false,
+      code: "CSV_INVALID_FORMAT",
+      message: "daily_returns_series must be an array.",
+    };
+  }
+  if (raw.length > MAX_DAILY_RETURNS_ROWS) {
+    return {
+      ok: false,
+      code: "CSV_INVALID_FORMAT",
+      message: `daily_returns_series exceeds ${MAX_DAILY_RETURNS_ROWS} rows (got ${raw.length}).`,
+      debug_context: { row_count: raw.length, cap: MAX_DAILY_RETURNS_ROWS },
+    };
+  }
+  const out: CsvDailyReturnRow[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < raw.length; i++) {
+    const row = raw[i];
+    if (!row || typeof row !== "object") {
+      return {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        message: `daily_returns_series[${i}] must be an object.`,
+        debug_context: { row: i },
+      };
+    }
+    const r = row as Record<string, unknown>;
+    if (typeof r.date !== "string" || !DAILY_RETURNS_DATE_REGEX.test(r.date)) {
+      return {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        message: `daily_returns_series[${i}].date must be a YYYY-MM-DD string.`,
+        debug_context: { row: i, date: typeof r.date === "string" ? r.date : null },
+      };
+    }
+    if (typeof r.daily_return !== "number" || !Number.isFinite(r.daily_return)) {
+      return {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        message: `daily_returns_series[${i}].daily_return must be a finite number.`,
+        debug_context: { row: i },
+      };
+    }
+    // T-19.1-04 / PR #274: surface a duplicate date as a route-boundary
+    // 400 so the UNIQUE (strategy_id, date) constraint inside the RPC
+    // never has to throw 23505. Defense-in-depth: the RPC's ON CONFLICT
+    // upsert is idempotent, so even a guarded row slipping through
+    // wouldn't 500 — but the user-visible envelope here is cleaner.
+    if (seen.has(r.date)) {
+      return {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        message: `daily_returns_series[${i}].date is a duplicate date: ${r.date}.`,
+        debug_context: { row: i, date: r.date },
+      };
+    }
+    seen.add(r.date);
+    out.push({ date: r.date, daily_return: r.daily_return });
+  }
+  return { ok: true, rows: out };
+}
 
 /**
  * Subset of `strategies` columns the wizard's csv_metadata step can
@@ -276,6 +403,27 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
+  // Phase 19.1 / T-19.1-04: parse + validate the daily-return series at
+  // the route boundary before the strategy row gets created. Failure
+  // here is a clean 400 — neither the SECURITY DEFINER RPC nor the
+  // worker has to defend against malformed JSON.
+  const parsedSeries = parseDailyReturnsSeries(
+    (body as Record<string, unknown>).daily_returns_series,
+  );
+  if (!parsedSeries.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: parsedSeries.code,
+        human_message: parsedSeries.message,
+        debug_context: parsedSeries.debug_context ?? {},
+        correlation_id: null,
+      },
+      { status: 400 },
+    );
+  }
+  const dailyReturnsSeries = parsedSeries.rows;
+
   // Cross-AI revision 2026-04-30: strategy_name is REQUIRED and validated
   // against the same 1–80 char range as the UI. Defense-in-depth: the RPC
   // also validates, but rejecting here gives a clearer error envelope.
@@ -331,6 +479,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       strategy_name: trimmedName,
       userId: user.id,
       metadataRaw,
+      dailyReturnsSeries,
     });
   }
 
@@ -405,6 +554,86 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     await applyCsvMetadataUpdate(supabase, newStrategyId, user.id, metadataRaw);
   }
 
+  // Phase 19.1: persist the validated daily-return series via the
+  // SECURITY DEFINER `persist_csv_daily_returns` RPC. Hard-fail on
+  // error because:
+  //   (a) the strategies row IS already created at this point, but
+  //       `wizard_session_id` is unique-claimed by finalize_csv_strategy
+  //       so a naive client retry can't recover it.
+  //   (b) without persisted series the worker will permanently fail
+  //       with "Insufficient CSV history" and the user has no recovery
+  //       path.
+  // A 500 with CSV_PERSIST_FAIL surfaces the strategy id so support can
+  // help the user recover manually. database.types.ts hasn't been
+  // regenerated for the new RPC — mirror the finalize_csv_strategy
+  // cast-through-unknown pattern from above.
+  if (newStrategyId && dailyReturnsSeries.length > 0) {
+    const { error: persistError } = await (
+      supabase.rpc as unknown as (
+        fn: "persist_csv_daily_returns",
+        args: { p_user_id: string; p_strategy_id: string; p_rows: CsvDailyReturnRow[] },
+      ) => Promise<{ data: number | null; error: { code?: string; message?: string } | null }>
+    )("persist_csv_daily_returns", {
+      p_user_id: user.id,
+      p_strategy_id: newStrategyId,
+      p_rows: dailyReturnsSeries,
+    });
+    if (persistError) {
+      console.error(
+        "[strategies/csv-finalize] persist_csv_daily_returns error:",
+        persistError.code,
+        persistError.message,
+      );
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "CSV_PERSIST_FAIL",
+          human_message:
+            "Your strategy was created but the daily-return data could not be saved. Contact support@quantalyze.com with your strategy id so we can recover.",
+          debug_context: { strategy_id: newStrategyId },
+          correlation_id: null,
+        },
+        { status: 500 },
+      );
+    }
+  }
+
+  // Phase 19.1 / T-19.1-05 / PR #275: enqueue the analytics computation
+  // for the freshly persisted series, gated by USE_COMPUTE_JOBS_QUEUE so
+  // the legacy direct-compute path can keep working while the Python
+  // worker is deployed. Non-blocking — failure here logs a warning but
+  // never 500s the wizard. Mirrors finalize-wizard/route.ts:619-644.
+  if (newStrategyId && dailyReturnsSeries.length > 0) {
+    const strategyIdForEnqueue = newStrategyId;
+    const fmtForEnqueue = fmt;
+    after(async () => {
+      if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
+      try {
+        const { createAdminClient } = await import("@/lib/supabase/admin");
+        const admin = createAdminClient();
+        // @audit-skip: compute_jobs enqueue is internal worker-state
+        // scheduling, not a user-visible mutation. User intent is already
+        // captured by the finalize_csv_strategy + persist_csv_daily_returns
+        // RPCs above. Mirrors finalize-wizard's enqueue (which evades the
+        // gate only via incidental multi-line formatting).
+        const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
+          p_strategy_id: strategyIdForEnqueue,
+          p_kind: "compute_analytics_from_csv",
+          p_metadata: { source: "csv-finalize", fmt: fmtForEnqueue },
+        });
+        if (enqueueErr) {
+          console.warn(
+            `[strategies/csv-finalize] enqueue_compute_analytics_from_csv failed (non-blocking): ${enqueueErr.message}`,
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `[strategies/csv-finalize] enqueue side-effect threw (non-blocking): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    });
+  }
+
   return NextResponse.json({
     strategy_id: newStrategyId,
     status: "pending_review",
@@ -423,6 +652,14 @@ async function unifiedCsvFinalizeHandler(args: {
   strategy_name: string;
   userId: string;
   metadataRaw: unknown;
+  // Phase 19.1 / T-19.1-10: dailyReturnsSeries is passed EXPLICITLY through
+  // the handler signature, NOT captured from the outer scope. Closure
+  // capture would make the dependency invisible to the type system and
+  // to future refactors (e.g. moving this function to a sibling file).
+  // Code review caught the closure-capture variant on the discarded
+  // PR #270 branch; the explicit param + the audit-coverage test pin
+  // the contract.
+  dailyReturnsSeries: CsvDailyReturnRow[];
 }): Promise<NextResponse> {
   // M-3: csv-finalize keeps a route-local INTERNAL_API_TOKEN check because
   // the 503 envelope must use CSV_FINALIZE_FAIL shape, not the generic
@@ -469,6 +706,73 @@ async function unifiedCsvFinalizeHandler(args: {
       args.userId,
       args.metadataRaw,
     );
+    // Phase 19.1: mirror the legacy-path persist so a
+    // PROCESS_KEY_UNIFIED_BACKBONE=true flip can't silently drop series
+    // data. Same CSV_PERSIST_FAIL envelope, same hard-fail rationale.
+    if (args.dailyReturnsSeries.length > 0) {
+      const { error: persistError } = await (
+        supabase.rpc as unknown as (
+          fn: "persist_csv_daily_returns",
+          args: { p_user_id: string; p_strategy_id: string; p_rows: CsvDailyReturnRow[] },
+        ) => Promise<{ data: number | null; error: { code?: string; message?: string } | null }>
+      )("persist_csv_daily_returns", {
+        p_user_id: args.userId,
+        p_strategy_id: unifiedBody.strategy_id,
+        p_rows: args.dailyReturnsSeries,
+      });
+      if (persistError) {
+        console.error(
+          "[strategies/csv-finalize unified] persist_csv_daily_returns error:",
+          persistError.code,
+          persistError.message,
+        );
+        return NextResponse.json(
+          {
+            ok: false,
+            code: "CSV_PERSIST_FAIL",
+            human_message:
+              "Your strategy was created but the daily-return data could not be saved. Contact support@quantalyze.com with your strategy id so we can recover.",
+            debug_context: { strategy_id: unifiedBody.strategy_id },
+            correlation_id: null,
+          },
+          { status: 500 },
+        );
+      }
+    }
+
+    // Phase 19.1 / T-19.1-05 / PR #275: mirror the legacy-path enqueue
+    // so the unified-backbone flip doesn't lose compute jobs. Same
+    // non-blocking semantics.
+    if (args.dailyReturnsSeries.length > 0) {
+      const strategyIdForEnqueue = unifiedBody.strategy_id;
+      const fmtForEnqueue = args.fmt;
+      after(async () => {
+        if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
+        try {
+          const { createAdminClient } = await import("@/lib/supabase/admin");
+          const admin = createAdminClient();
+          // @audit-skip: compute_jobs enqueue is internal worker-state
+          // scheduling, not a user-visible mutation. User intent is already
+          // captured by the finalize_csv_strategy + persist_csv_daily_returns
+          // RPCs above. Mirrors finalize-wizard's enqueue (which evades the
+          // gate only via incidental multi-line formatting).
+          const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
+            p_strategy_id: strategyIdForEnqueue,
+            p_kind: "compute_analytics_from_csv",
+            p_metadata: { source: "csv-finalize", fmt: fmtForEnqueue },
+          });
+          if (enqueueErr) {
+            console.warn(
+              `[strategies/csv-finalize unified] enqueue_compute_analytics_from_csv failed (non-blocking): ${enqueueErr.message}`,
+            );
+          }
+        } catch (err) {
+          console.warn(
+            `[strategies/csv-finalize unified] enqueue side-effect threw (non-blocking): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      });
+    }
   }
   return NextResponse.json(result.body);
 }
