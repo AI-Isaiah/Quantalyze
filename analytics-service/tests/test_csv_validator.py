@@ -385,3 +385,96 @@ def test_strictly_increasing_rejects_duplicate_dates():
     assert "monotonic_dates" in rules, (
         f"Expected monotonic_dates violation, got rules: {rules}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 19.1 / CSV → analytics pipeline Task 4. validate_csv() envelope must
+# include the full daily-return series for ok=True daily_returns and
+# daily_nav uploads so the wizard can forward it to csv-finalize for
+# persistence. Trades format omits the key entirely.
+# Re-derived from PR #270 commit 8611ae1c.
+# ---------------------------------------------------------------------------
+
+def test_validate_envelope_includes_daily_returns_series_for_daily_returns():
+    """Test 1 — daily_returns format: series is the validated rows verbatim,
+    each entry shaped {"date": "YYYY-MM-DD", "daily_return": float}."""
+    # Varied returns to stay below the 10.0 daily Sharpe sentinel.
+    df = pd.DataFrame({
+        "date": pd.date_range("2024-01-02", periods=10, freq="D").strftime("%Y-%m-%d"),
+        "daily_return": [0.001, 0.002, 0.003, 0.001, 0.002,
+                         0.003, 0.001, 0.002, 0.003, 0.001],
+    })
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    assert result["ok"] is True
+    assert "daily_returns_series" in result
+    series = result["daily_returns_series"]
+    assert len(series) == 10
+    for row in series:
+        assert "date" in row
+        assert "daily_return" in row
+        assert isinstance(row["daily_return"], float)
+
+
+def test_validate_envelope_includes_daily_returns_series_for_daily_nav():
+    """Test 2 — daily_nav format: series equals pct_change().dropna() of NAV,
+    so an N-row NAV input produces an N-1 row return series."""
+    df = _daily_nav_df(n=5)
+    result = validate_csv(_csv_bytes(df), "daily_nav")
+    assert result["ok"] is True
+    assert "daily_returns_series" in result
+    series = result["daily_returns_series"]
+    assert len(series) == 4  # 5 NAV rows - 1 (first pct_change is NaN, dropped)
+    # First derived return: (101 - 100) / 100 = 0.01
+    assert abs(series[0]["daily_return"] - 0.01) < 1e-9
+
+
+def test_validate_envelope_omits_daily_returns_series_for_trades():
+    """Test 3 — trades format: key absent from envelope (not present, not None)."""
+    df = _trades_df(n=5)
+    result = validate_csv(_csv_bytes(df), "trades")
+    # trades format produces no daily-return series — Phase 19.1 reserves
+    # the new pipeline for daily_returns + daily_nav uploads only.
+    assert "daily_returns_series" not in result
+
+
+def test_validate_envelope_daily_returns_series_handles_sparse_calendar():
+    """Test 4 — a series that skips weekends round-trips through
+    daily_returns_series without raising. compute_all_metrics downstream
+    must accept gappy daily series, which means the envelope must too."""
+    # 5 weekday-only rows over 7 calendar days (Mon-Fri).
+    dates = ["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"]
+    df = pd.DataFrame({
+        "date": dates,
+        "daily_return": [0.001, 0.002, -0.001, 0.003, 0.002],
+    })
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    assert result["ok"] is True, f"Expected ok=True, errors: {result.get('errors')}"
+    assert "daily_returns_series" in result
+    series = result["daily_returns_series"]
+    assert len(series) == 5
+    # All five dates must be present in the envelope verbatim.
+    series_dates = {row["date"] for row in series}
+    assert series_dates == set(dates)
+
+
+def test_validate_envelope_daily_returns_series_stringifies_dates():
+    """Test 5 — when the validated DataFrame holds the date column as
+    pd.Timestamp / datetime.date objects (which pandera coerces it to),
+    daily_returns_series[i]["date"] must be the YYYY-MM-DD string form,
+    not the typed object. Downstream JSON serialization depends on this."""
+    df = pd.DataFrame({
+        "date": pd.date_range("2024-01-02", periods=3, freq="D").strftime("%Y-%m-%d"),
+        "daily_return": [0.001, 0.002, 0.003],
+    })
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    assert result["ok"] is True
+    assert "daily_returns_series" in result
+    for row in result["daily_returns_series"]:
+        assert isinstance(row["date"], str), (
+            f"date must be str, got {type(row['date']).__name__}: {row['date']!r}"
+        )
+        # Must match YYYY-MM-DD pattern exactly.
+        import re
+        assert re.match(r"^\d{4}-\d{2}-\d{2}$", row["date"]), (
+            f"date {row['date']!r} not in YYYY-MM-DD form"
+        )
