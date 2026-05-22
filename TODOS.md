@@ -42,6 +42,51 @@ Real harm: orphan strategy rows accumulate, user confusion. Pre-existing issue (
 
 Plan 05 ships live-DB regression tests for 1-row / all-zero / NaN-Inf CSVs. The matching pytest unit tests in `analytics-service/tests/test_csv_analytics_runner.py` (Plan 02 / Wave 1) cover the happy path + benchmark unavailable + sparse weekday calendar — but not the new edge cases against the live `compute_all_metrics` math directly. Adding mocked equivalents of Tests 9-11 would catch regressions without requiring `TEST_SUPABASE_DB_URL`.
 
+### Claude red-team review (2026-05-22) — follow-ups
+
+Five additional findings from the post-PR red-team pass against Phase 19.1. Fixes 1-4 landed in this branch (commits prefixed `19.1-redteam`). The items below are the remaining follow-ups that need separate plans / migrations / monitoring infra.
+
+#### P0 — `complete_with_warnings` CHECK constraint missing
+
+Pre-existing production bug NOT introduced by Phase 19.1, but surfaced during the red-team pass. The PROD `strategy_analytics_computation_status_check` constraint admits only `pending|computing|complete|failed`. However, `analytics-service/services/analytics_runner.py:1322` writes `complete_with_warnings` when `consumer_specific_flags` is non-empty (the OKX exchange runner uses this path). Writes that hit this branch silently fail (or were rare enough to not surface). Same gap exists on `portfolio_analytics_computation_status_check`.
+
+**Action:** ship a new migration `2026MMddhhmmss_widen_strategy_analytics_computation_status.sql`:
+
+```sql
+ALTER TABLE strategy_analytics DROP CONSTRAINT strategy_analytics_computation_status_check;
+ALTER TABLE strategy_analytics ADD CONSTRAINT strategy_analytics_computation_status_check
+  CHECK (computation_status IN ('pending','computing','complete','complete_with_warnings','failed'));
+-- repeat for portfolio_analytics
+```
+
+Add a regression test that asserts the widened set is admitted (INSERT round-trip for each value).
+
+**Priority:** P0 — affects the existing exchange runner today.
+
+#### P1 — Unified backbone CSV-finalize broken-by-construction
+
+If `PROCESS_KEY_UNIFIED_BACKBONE=on` is flipped while CSV finalize is in scope, the upstream `/process-key` csv-finalize branch calls `finalize_csv_strategy` via the service-role client which has no `auth.uid()` → `42501` every time. The legacy direct-RPC path uses the request-scoped Supabase client and works.
+
+**Action:** Either (a) skip unified path for `step=finalize` until the upstream supports JWT impersonation, or (b) add JWT forwarding upstream. Document the prerequisite in the unified-backbone flag's flip-runbook so a future operator doesn't enable it without addressing this gap.
+
+#### P2 — Admin RLS policy EXISTS subquery on `csv_daily_returns`
+
+The `csv_daily_returns_admin_select` RLS policy runs `EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND is_admin)` per row. At 5000 rows per query this is a planner gamble — Postgres might inline the EXISTS into the row scan, or might materialize it once. Empirically fine today, brittle as data grows.
+
+**Action:** future migration — wrap the admin-check as a `SECURITY DEFINER` function (cached per session) or use `(SELECT auth.uid())` to hoist the lookup. Cross-reference admin-policy patterns already in use by the dashboard tables.
+
+#### P2 — Worker crash mid-job leaves `computing` state
+
+Pre-existing pattern inherited by the new CSV runner. If the worker SIGKILLs after `_mark_computing` but before any terminal write, the `strategy_analytics` row stays at `computing` until the existing stale-checkpoint watchdog catches it. For CSV uploads the user-visible symptom is a wizard that polls `computing` indefinitely.
+
+**Action:** add a cron-style janitor (Vercel Cron or Supabase Edge Function) that detects `computation_status='computing'` rows older than 30 minutes and marks them `failed` with `computation_error='worker crash recovery — please retry'`. Use the existing `pg_cron`-based approach (see analytics watchdog precedent).
+
+#### P3 — `@audit-skip` pragma copy-paste risk
+
+The `@audit-skip` justification blocks in `csv-finalize/route.ts` (around `enqueueCsvAnalyticsAfter` and `applyCsvMetadataUpdate`) are sound for the current use, but future maintainers might quote the justification verbatim in unrelated places without understanding the audit-gate model. Pre-existing risk amplified by the recent extraction into shared helpers.
+
+**Action:** add a CLAUDE.md note (`## Audit-skip pragma — when it's appropriate`) describing when `@audit-skip` is OK (continuation of an already-audited user-intent flow; internal worker-state scheduling) and when it is NOT (any new user-initiated mutation lacking an upstream audit row).
+
 ---
 
 ## Phase 18 — Root-Cause Fix + Founder LP Skeleton
