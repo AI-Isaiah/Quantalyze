@@ -32,10 +32,17 @@ import { canonicalizeExchangeList } from "@/lib/constants";
  * the RPC. The RPC also validates server-side; this is defense in
  * depth so the error envelope is more specific than a generic 22023.
  *
- * Error envelope shape (v0): { ok: false, code, human_message,
- * debug_context, correlation_id: null }. Phase 16 / OBSERV-06 will
- * thread real correlation_id values through this route without
- * breaking the contract.
+ * Error envelope shape (v1): { ok: false, code, human_message,
+ * debug_context, correlation_id }. Phase 19.1 specialist review
+ * 2026-05-22 / API W-1 threaded a route-level UUID through every
+ * envelope (success + error). Phase 16 / OBSERV-06 will replace the
+ * crypto.randomUUID() with the Sentry-resolved id when that lands;
+ * the contract is the same.
+ *
+ * Success envelope shape (v1): { ok: true, strategy_id, status,
+ * correlation_id }. Phase 19.1 / API C-1 added the `ok: true`
+ * discriminator so consumers can branch on body.ok without status-
+ * code sniffing.
  */
 
 const ALLOWED_FMTS = new Set(["daily_returns", "daily_nav", "trades"]);
@@ -316,7 +323,7 @@ async function persistDailyReturnsOrErrorResponse(
   userId: string,
   strategyId: string,
   rows: CsvDailyReturnRow[],
-  opts: { logPrefix: string },
+  opts: { logPrefix: string; correlationId: string },
 ): Promise<NextResponse | null> {
   if (rows.length === 0) return null;
   const { error: persistError } = await (
@@ -331,7 +338,7 @@ async function persistDailyReturnsOrErrorResponse(
   });
   if (persistError) {
     console.error(
-      `${opts.logPrefix} persist_csv_daily_returns error:`,
+      `${opts.logPrefix} persist_csv_daily_returns error [correlation_id=${opts.correlationId}]:`,
       persistError.code,
       persistError.message,
     );
@@ -342,7 +349,7 @@ async function persistDailyReturnsOrErrorResponse(
         human_message:
           "Your strategy was created but the daily-return data could not be saved. Contact support@quantalyze.com with your strategy id so we can recover.",
         debug_context: { strategy_id: strategyId },
-        correlation_id: null,
+        correlation_id: opts.correlationId,
       },
       { status: 500 },
     );
@@ -367,7 +374,7 @@ async function persistDailyReturnsOrErrorResponse(
 function enqueueCsvAnalyticsAfter(
   strategyId: string,
   fmt: string,
-  opts: { logPrefix: string },
+  opts: { logPrefix: string; correlationId: string },
 ): void {
   after(async () => {
     if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
@@ -382,12 +389,12 @@ function enqueueCsvAnalyticsAfter(
       });
       if (enqueueErr) {
         console.warn(
-          `${opts.logPrefix} enqueue_compute_analytics_from_csv failed (non-blocking): ${enqueueErr.message}`,
+          `${opts.logPrefix} enqueue_compute_analytics_from_csv failed (non-blocking) [correlation_id=${opts.correlationId}]: ${enqueueErr.message}`,
         );
       }
     } catch (err) {
       console.warn(
-        `${opts.logPrefix} enqueue side-effect threw (non-blocking): ${err instanceof Error ? err.message : String(err)}`,
+        `${opts.logPrefix} enqueue side-effect threw (non-blocking) [correlation_id=${opts.correlationId}]: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   });
@@ -432,6 +439,14 @@ async function applyCsvMetadataUpdate(
 }
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
+  // API W-1 / specialist-review revision 2026-05-22: generate the
+  // correlation_id at request entry so every error/success envelope
+  // emitted by this route can be traced through logs and across the
+  // process-key upstream. The route's header still references
+  // "OBSERV-06 will thread this later"; this change is the threaded
+  // piece for csv-finalize specifically.
+  const correlation_id = crypto.randomUUID();
+
   const rl = await checkLimit(
     csvValidateLimiter,
     `strategies-csv-finalize:${user.id}`,
@@ -443,7 +458,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         code: "CSV_RATE_LIMIT",
         human_message: "Too many requests. Wait a minute and try again.",
         debug_context: {},
-        correlation_id: null,
+        correlation_id,
       },
       { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
@@ -457,7 +472,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         code: "CSV_INVALID_FORMAT",
         human_message: "Invalid request body.",
         debug_context: {},
-        correlation_id: null,
+        correlation_id,
       },
       { status: 400 },
     );
@@ -477,7 +492,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         code: "CSV_INVALID_FORMAT",
         human_message: "wizard_session_id must be a valid UUID.",
         debug_context: {},
-        correlation_id: null,
+        correlation_id,
       },
       { status: 400 },
     );
@@ -492,7 +507,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         debug_context: {
           fmt_received: typeof fmt === "string" ? fmt : "(missing)",
         },
-        correlation_id: null,
+        correlation_id,
       },
       { status: 400 },
     );
@@ -512,7 +527,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         code: parsedSeries.code,
         human_message: parsedSeries.message,
         debug_context: parsedSeries.debug_context ?? {},
-        correlation_id: null,
+        correlation_id,
       },
       { status: 400 },
     );
@@ -529,7 +544,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         code: "CSV_INVALID_FORMAT",
         human_message: "strategy_name is required.",
         debug_context: {},
-        correlation_id: null,
+        correlation_id,
       },
       { status: 400 },
     );
@@ -542,7 +557,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         code: "CSV_INVALID_FORMAT",
         human_message: "strategy_name cannot be empty.",
         debug_context: {},
-        correlation_id: null,
+        correlation_id,
       },
       { status: 400 },
     );
@@ -554,7 +569,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         code: "CSV_INVALID_FORMAT",
         human_message: `strategy_name must be ${MAX_NAME_CHARS} characters or fewer.`,
         debug_context: { length: strategy_name.length },
-        correlation_id: null,
+        correlation_id,
       },
       { status: 400 },
     );
@@ -592,7 +607,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         human_message:
           "daily_returns_series is required for fmt=daily_returns and fmt=daily_nav (received 0 rows).",
         debug_context: { fmt, row_count: 0 },
-        correlation_id: null,
+        correlation_id,
       },
       { status: 400 },
     );
@@ -613,6 +628,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       userId: user.id,
       metadataRaw,
       dailyReturnsSeries,
+      correlationId: correlation_id,
     });
   }
 
@@ -650,7 +666,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           code: "CSV_FORBIDDEN",
           human_message: "Authentication mismatch — please sign in again.",
           debug_context: {},
-          correlation_id: null,
+          correlation_id,
         },
         { status: 401 },
       );
@@ -662,7 +678,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           code: "CSV_INVALID_FORMAT",
           human_message: error.message ?? "Invalid request.",
           debug_context: { sqlstate: error.code },
-          correlation_id: null,
+          correlation_id,
         },
         { status: 400 },
       );
@@ -674,7 +690,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         human_message:
           "Your file validated cleanly, but saving the strategy hit an error. Click Submit strategy again to retry — your data is unchanged.",
         debug_context: {},
-        correlation_id: null,
+        correlation_id,
       },
       { status: 500 },
     );
@@ -707,7 +723,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       user.id,
       newStrategyId,
       dailyReturnsSeries,
-      { logPrefix: "[strategies/csv-finalize]" },
+      {
+        logPrefix: "[strategies/csv-finalize]",
+        correlationId: correlation_id,
+      },
     );
     if (persistFailResponse) return persistFailResponse;
   }
@@ -723,20 +742,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   if (newStrategyId && dailyReturnsSeries.length > 0) {
     enqueueCsvAnalyticsAfter(newStrategyId, fmt, {
       logPrefix: "[strategies/csv-finalize]",
+      correlationId: correlation_id,
     });
   }
 
   // API C-1 (specialist review 2026-05-22): emit `ok: true` discriminator
   // on the success envelope so consumers can use `body.ok` to branch
   // without status-code sniffing. Error envelopes already carry
-  // `ok: false`; this closes the asymmetry. correlation_id stays `null`
-  // here pending the dedicated correlation_id fix — keeping it on the
-  // wire so the field shape is consistent across success+error.
+  // `ok: false`; this closes the asymmetry. API W-1: correlation_id is
+  // the UUID generated at request entry (see top of POST), now threaded
+  // through every envelope on this route.
   return NextResponse.json({
     ok: true,
     strategy_id: newStrategyId,
     status: "pending_review",
-    correlation_id: null,
+    correlation_id,
   });
 });
 
@@ -760,6 +780,10 @@ async function unifiedCsvFinalizeHandler(args: {
   // PR #270 branch; the explicit param + the audit-coverage test pin
   // the contract.
   dailyReturnsSeries: CsvDailyReturnRow[];
+  // API W-1 (specialist review 2026-05-22): correlation_id is generated
+  // at the route entry and threaded through both handler paths so every
+  // envelope shares a traceable id.
+  correlationId: string;
 }): Promise<NextResponse> {
   // M-3: csv-finalize keeps a route-local INTERNAL_API_TOKEN check because
   // the 503 envelope must use CSV_FINALIZE_FAIL shape, not the generic
@@ -772,7 +796,7 @@ async function unifiedCsvFinalizeHandler(args: {
         code: "CSV_FINALIZE_FAIL",
         human_message: "Service unavailable.",
         debug_context: {},
-        correlation_id: null,
+        correlation_id: args.correlationId,
       },
       { status: 503 },
     );
@@ -791,6 +815,12 @@ async function unifiedCsvFinalizeHandler(args: {
     routeTag: "strategies/csv-finalize",
     // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
     userId: args.userId,
+    // API W-1: forward our route-level correlation_id so the upstream
+    // X-Correlation-Id header matches what the user-visible envelopes
+    // carry. Without this, postProcessKey falls back to its own
+    // getCorrelationId() lookup and the trail breaks at the route
+    // boundary.
+    correlationId: args.correlationId,
   });
   if (!result.ok) return result.response;
   // QA ISSUE-010 + /ship specialist review: apply the same metadata
@@ -814,7 +844,10 @@ async function unifiedCsvFinalizeHandler(args: {
       args.userId,
       unifiedBody.strategy_id,
       args.dailyReturnsSeries,
-      { logPrefix: "[strategies/csv-finalize unified]" },
+      {
+        logPrefix: "[strategies/csv-finalize unified]",
+        correlationId: args.correlationId,
+      },
     );
     if (persistFailResponse) return persistFailResponse;
 
@@ -823,6 +856,7 @@ async function unifiedCsvFinalizeHandler(args: {
     if (args.dailyReturnsSeries.length > 0) {
       enqueueCsvAnalyticsAfter(unifiedBody.strategy_id, args.fmt, {
         logPrefix: "[strategies/csv-finalize unified]",
+        correlationId: args.correlationId,
       });
     }
   }
@@ -830,13 +864,12 @@ async function unifiedCsvFinalizeHandler(args: {
   // on the unified-path success envelope. The /process-key router may or
   // may not include `ok: true` in its body; merge defensively so we
   // never double-emit while still guaranteeing the field is present.
-  // correlation_id stays `null` here pending the dedicated
-  // correlation_id fix.
+  // API W-1: correlation_id is the route-level UUID, not null.
   return NextResponse.json(
     {
       ok: true,
       ...(result.body as Record<string, unknown>),
-      correlation_id: null,
+      correlation_id: args.correlationId,
     },
     { status: result.status },
   );
