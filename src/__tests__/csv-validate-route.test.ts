@@ -417,6 +417,15 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
       wizard_session_id: VALID_SESSION,
       fmt: "daily_returns",
       strategy_name: "Aurora Capital — BTC vol carry",
+      // WR-04 (19.1-REVIEW): daily_returns_series is now required for
+      // fmt=daily_returns. A minimal 2-row series satisfies both the
+      // route's WR-04 guard and the runner's >=2 row requirement
+      // (compute_all_metrics is mocked at the runner level so the
+      // values themselves don't matter here).
+      daily_returns_series: [
+        { date: "2024-01-01", daily_return: 0.001 },
+        { date: "2024-01-02", daily_return: 0.002 },
+      ],
     });
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
     const res = await POST(req);
@@ -426,9 +435,15 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
     expect(json.status).toBe("pending_review");
 
     // Cross-AI revision 2026-04-30: RPC was called with p_strategy_name (not p_placeholder_name).
-    expect(rpcMock).toHaveBeenCalledTimes(1);
-    const [name, args] = rpcMock.mock.calls[0];
-    expect(name).toBe("finalize_csv_strategy");
+    // WR-04 (19.1-REVIEW): a non-empty daily_returns_series now triggers
+    // a second RPC call (persist_csv_daily_returns); find the
+    // finalize_csv_strategy call explicitly rather than asserting the
+    // total call count.
+    const finalizeCall = rpcMock.mock.calls.find(
+      ([n]) => n === "finalize_csv_strategy",
+    );
+    expect(finalizeCall).toBeDefined();
+    const [name, args] = finalizeCall!;
     expect(args).toMatchObject({
       p_user_id: "00000000-0000-0000-0000-000000000abc",
       p_wizard_session_id: VALID_SESSION,
@@ -454,6 +469,12 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
         wizard_session_id: VALID_SESSION,
         fmt: "daily_returns",
         strategy_name: "MM Daily 0.5R",
+        // WR-04 (19.1-REVIEW): daily_returns_series required for
+        // fmt=daily_returns. Two minimal rows.
+        daily_returns_series: [
+          { date: "2024-01-01", daily_return: 0.001 },
+          { date: "2024-01-02", daily_return: 0.002 },
+        ],
         metadata: {
           description: "Daily PnL series exported from internal book.",
           category_id: "ccccccc1-1111-4111-8111-111111111111",
@@ -500,6 +521,12 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
         wizard_session_id: VALID_SESSION,
         fmt: "daily_returns",
         strategy_name: "Legacy CSV upload",
+        // WR-04 (19.1-REVIEW): daily_returns_series required for
+        // fmt=daily_returns. Two minimal rows.
+        daily_returns_series: [
+          { date: "2024-01-01", daily_return: 0.001 },
+          { date: "2024-01-02", daily_return: 0.002 },
+        ],
         // No `metadata` field — pre-ISSUE-010 callers must still work.
       });
       const { POST } = await import("@/app/api/strategies/csv-finalize/route");
@@ -521,6 +548,12 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
         wizard_session_id: VALID_SESSION,
         fmt: "daily_returns",
         strategy_name: "Strict projection",
+        // WR-04 (19.1-REVIEW): daily_returns_series required for
+        // fmt=daily_returns. Two minimal rows.
+        daily_returns_series: [
+          { date: "2024-01-01", daily_return: 0.001 },
+          { date: "2024-01-02", daily_return: 0.002 },
+        ],
         metadata: {
           description: "ok",
           // Hostile / unknown fields — must NOT reach the UPDATE.
@@ -706,6 +739,51 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     // Critically: the RPC was NEVER called — the route boundary closed
     // the 23505 → 500 leak that the UNIQUE constraint inside the RPC
     // would otherwise produce.
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  // ---- 5b. WR-04 (19.1-REVIEW): empty-series guard for return-bearing fmts --
+
+  it("Test 5b: empty daily_returns_series with fmt=daily_returns → 400 CSV_INVALID_FORMAT, RPC never called (WR-04)", async () => {
+    // Pre-fix: an empty array would parse to {ok: true, rows: []}, the
+    // strategy row would be created via finalize_csv_strategy, then BOTH
+    // persist_csv_daily_returns AND the after() enqueue would skip on
+    // the `dailyReturnsSeries.length > 0` gate. The wizard's
+    // SyncProgress poller would hang indefinitely because strategy_
+    // analytics has no row at all — no 'computing', no 'complete', no
+    // 'failed' to break out on.
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Empty series guard (daily_returns)",
+      daily_returns_series: [],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("CSV_INVALID_FORMAT");
+    expect(json.human_message).toMatch(/required/i);
+    expect(json.debug_context).toMatchObject({ fmt: "daily_returns", row_count: 0 });
+    // Critically: the strategy row was NEVER created. Pre-fix the
+    // strategy would land in a half-baked pending_review state with
+    // no analytics row.
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("Test 5c: empty daily_returns_series with fmt=daily_nav → 400 CSV_INVALID_FORMAT, RPC never called (WR-04)", async () => {
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_nav",
+      strategy_name: "Empty series guard (daily_nav)",
+      daily_returns_series: [],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("CSV_INVALID_FORMAT");
+    expect(json.debug_context).toMatchObject({ fmt: "daily_nav", row_count: 0 });
     expect(rpcMock).not.toHaveBeenCalled();
   });
 

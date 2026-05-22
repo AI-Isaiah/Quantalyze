@@ -465,6 +465,44 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
+  // WR-04 (19.1-REVIEW): reject empty daily_returns_series for the
+  // return-series-bearing fmts BEFORE strategy creation. The legacy
+  // path gates BOTH persist_csv_daily_returns AND the after()
+  // compute_analytics_from_csv enqueue on dailyReturnsSeries.length
+  // > 0. If a malformed-but-zod-passing payload lands `[]` (or omits
+  // the field entirely → parseDailyReturnsSeries returns rows=[] per
+  // its undefined/null branch) for fmt=daily_returns or fmt=daily_nav,
+  // the strategy row would be created (status='pending_review') but
+  // no series is persisted and no compute job is enqueued. The
+  // wizard's SyncProgress poller then hangs indefinitely because
+  // strategy_analytics has no row at all — no 'computing', no
+  // 'complete', no 'failed' to break out on. Reject at the route
+  // boundary so the strategy is never created in this half-baked
+  // state. Placed AFTER strategy_name validation so existing tests
+  // that test strategy_name in isolation (no series payload) still
+  // see the more specific strategy_name error first.
+  //
+  // fmt='trades' currently produces no series (csv_validator.py:541-561)
+  // and is intentionally exempt — that path falls through with the
+  // "analytics not generated" copy until a future iteration extends
+  // trades-derived analytics.
+  if (
+    (fmt === "daily_returns" || fmt === "daily_nav") &&
+    dailyReturnsSeries.length === 0
+  ) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        human_message:
+          "daily_returns_series is required for fmt=daily_returns and fmt=daily_nav (received 0 rows).",
+        debug_context: { fmt, row_count: 0 },
+        correlation_id: null,
+      },
+      { status: 400 },
+    );
+  }
+
   // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
   // QA ISSUE-010 follow-up (ship specialist review): the metadata UPDATE
   // applied below the RPC also needs to fire on the unified path, or the
