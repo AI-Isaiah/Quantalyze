@@ -26,11 +26,7 @@ COMMENT ON TABLE csv_daily_returns IS
    Worker handler compute_analytics_from_csv reads this table to feed
    compute_all_metrics(). ON DELETE CASCADE from strategies(id).';
 
--- STEP 2: Index for worker SELECT
-CREATE INDEX IF NOT EXISTS csv_daily_returns_strategy_date_idx
-  ON csv_daily_returns (strategy_id, date);
-
--- STEP 3: RLS (3-tier)
+-- STEP 2: RLS (3-tier)
 ALTER TABLE csv_daily_returns ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS csv_daily_returns_owner_select ON csv_daily_returns;
@@ -50,7 +46,7 @@ CREATE POLICY csv_daily_returns_service_all ON csv_daily_returns FOR ALL
   USING (auth.role() = 'service_role')
   WITH CHECK (auth.role() = 'service_role');
 
--- STEP 4: persist_csv_daily_returns SECURITY DEFINER RPC
+-- STEP 3: persist_csv_daily_returns SECURITY DEFINER RPC
 CREATE OR REPLACE FUNCTION public.persist_csv_daily_returns(
   p_user_id    UUID,
   p_strategy_id UUID,
@@ -79,14 +75,19 @@ BEGIN
 
   SELECT user_id INTO v_owner_id
     FROM strategies WHERE id = p_strategy_id;
-  IF v_owner_id IS NULL THEN
-    RAISE EXCEPTION 'persist_csv_daily_returns: strategy % not found', p_strategy_id
-      USING ERRCODE = '22023';
-  END IF;
-  IF v_owner_id <> p_user_id THEN
-    RAISE EXCEPTION 'persist_csv_daily_returns: strategy % does not belong to user %',
-      p_strategy_id, p_user_id
+  -- Collapse missing-strategy and wrong-owner into a single 42501 so
+  -- authenticated callers cannot use this RPC to enumerate which strategy
+  -- UUIDs exist. The two states are indistinguishable to legitimate callers
+  -- (the application only ever passes its own freshly-created strategy_id).
+  IF v_owner_id IS NULL OR v_owner_id <> p_user_id THEN
+    RAISE EXCEPTION 'persist_csv_daily_returns: strategy % not accessible', p_strategy_id
       USING ERRCODE = '42501';
+  END IF;
+
+  IF jsonb_typeof(p_rows) <> 'array' THEN
+    RAISE EXCEPTION 'persist_csv_daily_returns: p_rows must be a JSON array (got %)',
+      jsonb_typeof(p_rows)
+      USING ERRCODE = '22023';
   END IF;
 
   IF jsonb_array_length(p_rows) > 5000 THEN
@@ -113,6 +114,15 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.persist_csv_daily_returns(UUID, UUID, JSONB) FROM PUBLIC, anon;
+-- GRANT to authenticated is intentional and matches the sibling
+-- finalize_csv_strategy pattern (migration 093). The Next.js route handler
+-- calls this RPC via a per-request Supabase client that runs as the
+-- `authenticated` role (not service_role) so the inline auth.uid() guard at
+-- the top of the function can verify caller identity. Narrowing to
+-- service_role would make auth.uid() NULL and trigger the 42501 raise on
+-- every legitimate call. The probe-oracle (enumerating arbitrary
+-- strategy_ids) is closed by the collapsed "not accessible" branch above,
+-- not by the GRANT shape.
 GRANT EXECUTE ON FUNCTION public.persist_csv_daily_returns(UUID, UUID, JSONB) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.persist_csv_daily_returns(UUID, UUID, JSONB) TO service_role;
 
@@ -121,7 +131,7 @@ COMMENT ON FUNCTION public.persist_csv_daily_returns IS
    auth.uid() = p_user_id AND strategy.user_id = p_user_id before
    inserting. Idempotent via ON CONFLICT DO UPDATE. Row limit 5000.';
 
--- STEP 5: Self-verifying DO block
+-- STEP 4: Self-verifying DO block
 DO $$
 DECLARE
   v_col_count    INT;
