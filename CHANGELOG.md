@@ -7,6 +7,21 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.7.1] - 2026-05-22
+
+**fix(csv-pipeline): pre-merge hardening pass — five fixes caught by subagent review on the in-progress CSV → analytics pipeline (PR #270).**
+
+Split out of the feature PR per request so the review surfaces stay separable. Hardens the `persist_csv_daily_returns` RPC, closes a probe-oracle, drops a redundant index, adds a JSONB array-type guard, surfaces a silent-swallow path in the new analytics runner, refreshes a stale `SyncProgress` JSDoc, rejects duplicate dates at the route boundary instead of bouncing off a 23505, and instruments two `enqueue_compute_job` call sites with `@audit-skip` pragmas so `audit-coverage.test.ts` admits the internal worker scheduling.
+
+### Fixed
+- `supabase/migrations/20260522120000_csv_daily_returns.sql` — collapses the IS-NULL / wrong-owner branches in `persist_csv_daily_returns` into a single `42501` so an authenticated caller can't enumerate which `strategy_id` UUIDs exist by passing `[]`. Drops the explicit `csv_daily_returns_strategy_date_idx` (the UNIQUE constraint already creates the implicit B-tree — explicit index doubled write I/O on the hot upsert path). Adds `jsonb_typeof = 'array'` guard before the row-count cap so a non-array `p_rows` surfaces as a clean `22023` instead of an opaque runtime error.
+- `supabase/migrations/20260522120000_csv_daily_returns.sql` — inline justification for `GRANT EXECUTE … TO authenticated` so future migration reviewers don't re-litigate the GRANT shape. Pattern matches the sibling `finalize_csv_strategy` (migration 093).
+- `analytics-service/services/analytics_runner.py` — `_mark_unrecoverable` in `run_csv_strategy_analytics` now `logger.warning`s the swallowed exception so an operator can see when a strategy gets stuck in `computing` because the failure-marking upsert itself failed.
+- `src/components/strategy/SyncProgress.tsx` — refresh stale JSDoc claiming `complete_with_warnings` has no DB representation (the CSV pipeline made it a first-class DB status).
+- `src/app/api/strategies/csv-finalize/route.ts` — `parseDailyReturnsSeries` now rejects duplicate `date` values at the route boundary with a `CSV_INVALID_FORMAT` envelope instead of letting the RPC's `UNIQUE (strategy_id, date)` constraint surface as a 500/23505.
+- `src/app/api/strategies/csv-finalize/route.ts` — `@audit-skip` pragmas on both `enqueue_compute_job` RPC calls (legacy + unified path) so `audit-coverage.test.ts` admits the internal worker scheduling. Compute_jobs is internal worker state, not a user-visible mutation; user intent is captured by the upstream `finalize_csv_strategy` + `persist_csv_daily_returns` RPCs.
+
+
 ## [0.24.6.1] - 2026-05-21
 
 **fix(typecheck): add `csv_metadata` to `WIZARD_STEP_KEYS` exhaustiveness array.**
