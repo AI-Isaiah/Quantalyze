@@ -364,6 +364,20 @@ async function persistDailyReturnsOrErrorResponse(
  * the same code. Non-blocking — a failure logs but does NOT change the
  * response envelope.
  *
+ * API W-2 (specialist review 2026-05-22): on enqueue failure we ALSO
+ * write a `strategy_analytics` placeholder row with
+ * computation_status='failed'. WR-04 closed the in-handler empty-series
+ * → user-stuck-polling hole, but this async after() enqueue has the
+ * same shape: if enqueue_compute_job fails (e.g. migration not applied
+ * to a non-prod env, or a transient 5xx from the admin RPC), the user
+ * gets 200 + persistent state but no compute job ever runs. The
+ * SyncProgress poller in CsvSubmitStep then polls forever because
+ * strategy_analytics has no row at all — no 'computing', no 'complete',
+ * no 'failed' to break out on. The placeholder upsert breaks the loop
+ * out with a meaningful surface (`computation_error` cites the enqueue
+ * cause). Best-effort: if the placeholder write itself fails, log so
+ * operators have evidence.
+ *
  * @audit-skip: compute_jobs enqueue is internal worker-state scheduling,
  * not a user-visible mutation. User intent is already captured by the
  * finalize_csv_strategy + persist_csv_daily_returns RPCs run earlier in
@@ -378,6 +392,8 @@ function enqueueCsvAnalyticsAfter(
 ): void {
   after(async () => {
     if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
+    let enqueueFailed = false;
+    let enqueueErrMessage = "";
     try {
       const { createAdminClient } = await import("@/lib/supabase/admin");
       const admin = createAdminClient();
@@ -388,14 +404,48 @@ function enqueueCsvAnalyticsAfter(
         p_metadata: { source: "csv-finalize", fmt },
       });
       if (enqueueErr) {
+        enqueueFailed = true;
+        enqueueErrMessage = enqueueErr.message ?? "(no message)";
         console.warn(
-          `${opts.logPrefix} enqueue_compute_analytics_from_csv failed (non-blocking) [correlation_id=${opts.correlationId}]: ${enqueueErr.message}`,
+          `${opts.logPrefix} enqueue_compute_analytics_from_csv failed (non-blocking) [correlation_id=${opts.correlationId}]: ${enqueueErrMessage}`,
         );
       }
     } catch (err) {
+      enqueueFailed = true;
+      enqueueErrMessage = err instanceof Error ? err.message : String(err);
       console.warn(
-        `${opts.logPrefix} enqueue side-effect threw (non-blocking) [correlation_id=${opts.correlationId}]: ${err instanceof Error ? err.message : String(err)}`,
+        `${opts.logPrefix} enqueue side-effect threw (non-blocking) [correlation_id=${opts.correlationId}]: ${enqueueErrMessage}`,
       );
+    }
+    // API W-2: enqueue failure → write strategy_analytics placeholder so
+    // the wizard's SyncProgress poller breaks out with a meaningful
+    // error surface instead of polling forever. Best-effort: if even
+    // the placeholder write fails, log so operators have evidence.
+    if (enqueueFailed) {
+      try {
+        const { createAdminClient } = await import("@/lib/supabase/admin");
+        const admin = createAdminClient();
+        const { error: placeholderErr } = await admin
+          .from("strategy_analytics")
+          .upsert(
+            {
+              strategy_id: strategyId,
+              computation_status: "failed",
+              computation_error: `compute job enqueue failed: ${enqueueErrMessage}`,
+              data_quality_flags: { csv_source: true },
+            },
+            { onConflict: "strategy_id" },
+          );
+        if (placeholderErr) {
+          console.warn(
+            `${opts.logPrefix} strategy_analytics placeholder upsert failed (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderErr.message}`,
+          );
+        }
+      } catch (placeholderThrow) {
+        console.warn(
+          `${opts.logPrefix} strategy_analytics placeholder upsert threw (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderThrow instanceof Error ? placeholderThrow.message : String(placeholderThrow)}`,
+        );
+      }
     }
   });
 }

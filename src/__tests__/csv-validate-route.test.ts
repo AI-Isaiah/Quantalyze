@@ -100,6 +100,11 @@ vi.mock("@/lib/csrf", () => ({
 // client mocks for the persist + enqueue + unified-path tests. Hoisted
 // so vi.mock can pick them up; tests reset them in beforeEach.
 const adminRpcMock = vi.hoisted(() => vi.fn());
+// API W-2 (specialist review 2026-05-22): on enqueue failure the route
+// writes a strategy_analytics placeholder via the admin client. Capture
+// the call so the regression test can assert the failure-recovery
+// shape without depending on console.warn ordering.
+const adminUpsertMock = vi.hoisted(() => vi.fn());
 const isUnifiedBackboneActiveMock = vi.hoisted(() =>
   vi.fn(async () => false),
 );
@@ -108,6 +113,14 @@ const postProcessKeyMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     rpc: (name: string, args: Record<string, unknown>) => adminRpcMock(name, args),
+    from: (table: string) => ({
+      upsert: (payload: Record<string, unknown>, opts?: Record<string, unknown>) => {
+        // Returns a result-shaped Promise so the route's `await ... upsert(...)`
+        // pattern lands a `{ error }` envelope. The mock's resolved value
+        // can be overridden per test via adminUpsertMock.mockResolvedValueOnce.
+        return Promise.resolve(adminUpsertMock(table, payload, opts));
+      },
+    }),
   }),
 }));
 
@@ -621,6 +634,10 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
       return { data: null, error: null };
     });
     adminRpcMock.mockResolvedValue({ data: null, error: null });
+    // Default placeholder upsert success — API W-2 happy path doesn't
+    // invoke this, but a test that triggers the failure-placeholder
+    // branch can override per-call via mockResolvedValueOnce.
+    adminUpsertMock.mockReturnValue({ error: null });
     STATE.runAfterCallback = false;
     STATE.afterPromise = undefined;
   });
@@ -1025,6 +1042,55 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
       ),
     );
     expect(warnedNonBlocking).toBe(true);
+    warnSpy.mockRestore();
+    delete process.env.USE_COMPUTE_JOBS_QUEUE;
+  });
+
+  // ---- 12. after() enqueue failure writes strategy_analytics placeholder (API W-2)
+
+  it("Test 12: after() enqueue error writes strategy_analytics failed placeholder (API W-2)", async () => {
+    // API W-2 (specialist review 2026-05-22): an enqueue error must
+    // surface as a strategy_analytics row with computation_status='failed'
+    // so the wizard's SyncProgress poller breaks out of its perpetual
+    // polling state. Without this, a missing migration on a non-prod env
+    // or a transient enqueue_compute_job 5xx leaves the user with 200
+    // + persistent state but no compute job ever runs.
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    STATE.runAfterCallback = true;
+    adminRpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "PGRST116", message: "migration not applied" },
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Enqueue error placeholder",
+      daily_returns_series: [{ date: "2024-07-01", daily_return: 0.003 }],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    // The placeholder upsert must fire on strategy_analytics with a
+    // failed status, an error message that names the enqueue cause,
+    // and the csv_source flag for the provenance pill.
+    expect(adminUpsertMock).toHaveBeenCalledTimes(1);
+    const [table, payload, opts] = adminUpsertMock.mock.calls[0];
+    expect(table).toBe("strategy_analytics");
+    expect(payload).toMatchObject({
+      strategy_id: NEW_STRATEGY_ID,
+      computation_status: "failed",
+      data_quality_flags: { csv_source: true },
+    });
+    expect(payload.computation_error).toMatch(
+      /compute job enqueue failed: migration not applied/,
+    );
+    // onConflict ensures we don't 23505 if a strategy_analytics row
+    // already exists (computing/complete).
+    expect(opts).toMatchObject({ onConflict: "strategy_id" });
+
     warnSpy.mockRestore();
     delete process.env.USE_COMPUTE_JOBS_QUEUE;
   });
