@@ -456,9 +456,16 @@ function enqueueCsvAnalyticsAfter(
  * (or unified router) returns. Gated by `.eq("user_id", user.id)` +
  * the strategies_update RLS policy. Non-fatal: a failure here logs
  * but does NOT 500 the response because the strategy row is already
- * persisted and the unique constraint on wizard_session_id will block
- * a naive retry. Shared between the legacy RPC path and the unified-
- * backbone path so the two stay in lockstep.
+ * persisted. (Pre-19.1-redteam this comment claimed a unique
+ * constraint on wizard_session_id blocked retries; that index is
+ * deferred to BACKBONE-07 per migration
+ * 20260501055202_strategy_verifications.sql:27, so a naive retry
+ * actually creates an additional orphan strategy. The metadata
+ * UPDATE is still non-fatal because partial discovery metadata is
+ * a better failure mode than rolling back a persisted strategy +
+ * persisted daily returns + a leaked support-recovery surface.)
+ * Shared between the legacy RPC path and the unified-backbone path
+ * so the two stay in lockstep.
  */
 async function applyCsvMetadataUpdate(
   supabase: SupabaseClient,
@@ -756,17 +763,24 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Phase 19.1: persist the validated daily-return series via the
   // SECURITY DEFINER `persist_csv_daily_returns` RPC. Hard-fail on
   // error because:
-  //   (a) the strategies row IS already created at this point, but
-  //       `wizard_session_id` is unique-claimed by finalize_csv_strategy
-  //       so a naive client retry can't recover it.
-  //   (b) without persisted series the worker will permanently fail
-  //       with "Insufficient CSV history" and the user has no recovery
+  //   (a) the strategies row IS already created at this point —
+  //       there is NO UNIQUE INDEX on wizard_session_id today
+  //       (deferred to BACKBONE-07 / R4 per CONTEXT.md), so a client
+  //       retry creates an additional orphan strategy rather than
+  //       recovering the original.
+  //   (b) without persisted series the worker permanently fails with
+  //       "Insufficient CSV history" and the user has no recovery
   //       path.
-  // A 500 with CSV_PERSIST_FAIL surfaces the strategy id so support can
-  // help the user recover manually. Maintainability W-1 (specialist
-  // review 2026-05-22): both paths route through
+  // A 500 with CSV_PERSIST_FAIL surfaces the orphan strategy_id so
+  // support can clean it up. Until BACKBONE-07 lands, double-submits
+  // are best-effort prevented client-side by the wizard's submit
+  // button disable-on-click. Maintainability W-1 (specialist review
+  // 2026-05-22): both paths route through
   // persistDailyReturnsOrErrorResponse so the cast-through-unknown is
-  // centralised in one place.
+  // centralised in one place. Phase 19.1 red-team revision 2026-05-22
+  // / DOC C-1: rewrote the false "unique-claimed" rationale; see
+  // migration 20260501055202_strategy_verifications.sql:27 for the
+  // unique-index deferral.
   if (newStrategyId) {
     const persistFailResponse = await persistDailyReturnsOrErrorResponse(
       supabase,
