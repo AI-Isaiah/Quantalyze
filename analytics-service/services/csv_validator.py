@@ -531,9 +531,41 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
         "last_rows": _redact_preview(last_raw),
     }
 
-    return {
+    # Phase 19.1 / CSV → analytics pipeline Task 4: include the full
+    # normalized daily-return series in the envelope so the wizard can
+    # forward it to csv-finalize for persistence. Only emitted for
+    # ok=True on daily_returns / daily_nav (trades format produces no
+    # return series — that branch keeps the honest "analytics not
+    # generated" copy until a future iteration). Re-derived from PR
+    # #270 commit 8611ae1c.
+    daily_returns_series = None
+    if ok and fmt == "daily_returns" and "daily_return" in df_validated.columns:
+        valid = df_validated[["date", "daily_return"]].dropna()
+        daily_returns_series = [
+            {
+                "date": str(pd.to_datetime(d).date()),
+                "daily_return": float(r),
+            }
+            for d, r in zip(valid["date"], valid["daily_return"])
+        ]
+    elif ok and fmt == "daily_nav" and "nav" in df_validated.columns:
+        nav_series = df_validated[["date", "nav"]].dropna().copy()
+        nav_series["return"] = nav_series["nav"].pct_change()
+        valid = nav_series.dropna(subset=["return"])
+        daily_returns_series = [
+            {
+                "date": str(pd.to_datetime(d).date()),
+                "daily_return": float(r),
+            }
+            for d, r in zip(valid["date"], valid["return"])
+        ]
+
+    envelope: dict[str, Any] = {
         "ok": ok,
         "preview": preview,
         "errors": all_errors,
         "correlation_id": None,
     }
+    if daily_returns_series is not None:
+        envelope["daily_returns_series"] = daily_returns_series
+    return envelope
