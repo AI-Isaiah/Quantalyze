@@ -176,6 +176,15 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
   // the strategy name is preserved (applied via the hydration effect below).
   const [csvFmt, setCsvFmt] = useState<CsvFmt | null>(null);
   const [csvPreview, setCsvPreview] = useState<CsvPreview | null>(null);
+  // Phase 19.1 — parsed daily-return rows from the csv-validate envelope.
+  // Held in component state (NOT persisted to localStorage — same reason
+  // csvPreview isn't persisted: too large + resume requires re-upload).
+  // Forwarded to CsvSubmitStep so the csv-finalize POST body includes
+  // `daily_returns_series` for fmt=daily_returns/daily_nav. Without this
+  // wiring the route rejects with CSV_INVALID_FORMAT "received 0 rows".
+  const [csvDailyReturnsSeries, setCsvDailyReturnsSeries] = useState<
+    { date: string; daily_return: number }[] | undefined
+  >(undefined);
   const [csvValidationPassed, setCsvValidationPassed] = useState<boolean>(false);
   const [strategyName, setStrategyName] = useState<string>("");
   // QA report 2026-05-21 ISSUE-010: classification metadata captured on
@@ -574,6 +583,9 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 onSuccess={(payload) => {
                   setCsvFmt(payload.fmt);
                   setCsvPreview(payload.preview);
+                  // Phase 19.1 — capture daily-return rows so CsvSubmitStep
+                  // can thread them into the csv-finalize POST body.
+                  setCsvDailyReturnsSeries(payload.dailyReturnsSeries);
                   setCsvValidationPassed(payload.validationPassed);
                   setStrategyName(payload.strategyName);
                   setStep("csv_preview");
@@ -672,6 +684,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 fmt={csvFmt}
                 strategyName={strategyName}
                 preview={csvPreview}
+                dailyReturnsSeries={csvDailyReturnsSeries}
                 metadata={csvMetadataDraft}
                 onBack={() => {
                   setStep("csv_metadata");

@@ -7,6 +7,26 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.7.1] - 2026-05-22
+
+**fix(wizard-csv): thread `daily_returns_series` through wizard → csv-finalize (Phase 19.1 Plan 09 prod E2E hotfix).** The first production CSV upload after v0.24.7.0 returned 400 `CSV_INVALID_FORMAT` "daily_returns_series is required for fmt=daily_returns and fmt=daily_nav (received 0 rows)". The csv-validate envelope already shipped the parsed series, but the wizard never deserialized it, so every CSV upload silently failed at submit despite 90+ rows being detected on the preview screen.
+
+The fix threads `daily_returns_series` from the csv-validate response through three wizard components: `CsvUploadStep` extends its `ValidateResponse` type and `onSuccess` payload to forward the field; `WizardClient` holds it in component state (not persisted to localStorage — same reason `csvPreview` isn't); `CsvSubmitStep` accepts a `dailyReturnsSeries` prop and includes it in the `/api/strategies/csv-finalize` POST body (snake_case, spread conditionally so `fmt=trades` still sends a clean body without the key). Adds `src/app/(dashboard)/strategies/new/wizard/steps/CsvSubmitStep.test.tsx` with 3 regression cases verified RED→GREEN against this commit's diff — pins the contract that the POST body contains `daily_returns_series` for `fmt=daily_returns`/`daily_nav` and omits the key entirely for `fmt=trades`.
+
+Also closes Phase 19.1 Plans 07-08 with canonical verdict lines: Plan 07 verified the Railway analytics-service deploy is live at main HEAD (`4d9eeaa9`) with the new `compute_analytics_from_csv` dispatch + `WATCHDOG_PER_KIND_OVERRIDES` invariant intact; Plan 08 verified `USE_COMPUTE_JOBS_QUEUE="true"` was already set on Vercel production (22 days old, pre-existed Phase 19.1) and the latest production deploy is post-PR-#276 at the correct main HEAD. No env-var mutation or `vercel --prod` invocation occurred — both were already correct.
+
+### Fixed
+- **Wizard CSV upload silently dropped `daily_returns_series`** between the `csv-validate` envelope and the `csv-finalize` POST body — `ValidateResponse` type omitted the field, the `onSuccess` callback didn't forward it, and `WizardClient` had no state slot for it. Plan 03's TypeScript surface had unit tests on the route boundary (`csv-validate-route.test.ts` constructs JSON bodies manually) but no component test exercised the wizard → validate → finalize seam, so the missing wiring shipped to production undetected.
+- **Wizard hydration fix for the regression test** — `CsvSubmitStep.test.tsx` mocks `globalThis.fetch` and asserts the POST body shape on `<button name="Submit strategy">` click. Without the fix, 2/3 cases fail because `body.daily_returns_series` is `undefined`. With the fix, 3/3 pass and the `fmt=trades` case verifies the key is genuinely absent (not just `undefined`).
+
+### Added
+- **Regression test** `src/app/(dashboard)/strategies/new/wizard/steps/CsvSubmitStep.test.tsx` — 3 cases covering `fmt=daily_returns` series threading, `fmt=daily_nav` series threading, and `fmt=trades` series omission.
+- **Plan 07 SUMMARY** with canonical verdict line `19.1-07-VERDICT: DEPLOYED` — documents Railway service ID `26ec84d9-70fc-4e01-8be2-5ca2f5712cd3`, deployment ID `6d18f208-d9c5-4140-b9e6-7fc5a83e1157`, SHA equality with `origin/main` HEAD, watchdog-headroom pytest PASS, and clean worker startup logs.
+- **Plan 08 SUMMARY** with canonical verdict line `19.1-08-VERDICT: FLIPPED` — documents env-var read via W6 fallback (`vercel env pull`), CURRENT_VALUE=true (set 22d ago), deployment `dpl_Bq31Wo5PEWWRrK9EKzZC8bpS8tvm`, alias `quantalyze-rho.vercel.app`, and the plan-vs-reality reconciliation for the 307→/login middleware auth gate (production middleware redirects all unauth'd `/api` requests uniformly; route existence verified via `git ls-tree origin/main` instead of curl).
+
+### Notes
+- Phase 19.1 Plans 09 (end-to-end production verification) and 10 (stop-gap removal + branch cleanup) remain open after this PR merges. After Vercel redeploys with the wiring fix (~3 min post-merge), re-upload a CSV through the prod wizard to close Plan 09; Plan 10 ships as a separate PR once Plan 09 emits the canonical `19.1-09-VERDICT: PASS` line.
+
 ## [0.24.7.0] - 2026-05-22
 
 **feat(csv-pipeline): CSV → analytics → factsheet pipeline (Phase 19.1) — CSV-uploaded strategies now produce real CAGR / Sharpe / drawdown / sparkline metrics via the same `compute_all_metrics` pipeline as exchange-backed strategies. Replaces the v0.24.6.0 `analyticsMissingMessage` stop-gap.**
