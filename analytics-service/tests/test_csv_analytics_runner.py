@@ -240,6 +240,49 @@ async def test_mark_unrecoverable_logs_warning_before_reraise(
 
 
 @pytest.mark.asyncio
+async def test_csv_analytics_missing_strategy_raises_404() -> None:
+    """Test 6 — WR-01 (19.1-REVIEW). A strategy_id that does not exist in
+    the `strategies` table must raise HTTPException(404) BEFORE the
+    runner touches strategy_analytics. Without this probe, a deleted-
+    between-enqueue-and-dispatch race would land a spurious
+    strategy_analytics row and then fail with a misleading
+    "Insufficient CSV history" 400.
+    """
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = MagicMock()
+    table = MagicMock()
+    sb.table.return_value = table
+
+    # Strategy probe path: .table("strategies").select(...).eq(...).single().execute()
+    # returns data=None to simulate a missing strategy.
+    select_chain = MagicMock()
+    eq_chain = MagicMock()
+    single_chain = MagicMock()
+    single_chain.execute.return_value = MagicMock(data=None)
+    eq_chain.single.return_value = single_chain
+    select_chain.eq.return_value = eq_chain
+    table.select.return_value = select_chain
+    # Upsert chain — should never fire on the 404 path, but configure
+    # it so an accidental call doesn't AttributeError and mask the bug.
+    table.upsert.return_value = MagicMock(execute=MagicMock())
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb):
+        with pytest.raises(HTTPException) as exc_info:
+            await run_csv_strategy_analytics("deleted-strategy-uuid")
+
+    assert exc_info.value.status_code == 404
+    assert "Strategy not found" in exc_info.value.detail
+    # Spurious strategy_analytics upsert must NOT have been written —
+    # the probe gates the entire pipeline.
+    upsert_calls = table.upsert.call_args_list
+    assert len(upsert_calls) == 0, (
+        f"Missing strategy must not trigger any strategy_analytics upsert; "
+        f"got {len(upsert_calls)} call(s)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_csv_analytics_sparse_calendar_completes() -> None:
     """Test 5 — 60 weekday-only rows skipping weekends complete without
     raising. compute_all_metrics is mocked because we are pinning the

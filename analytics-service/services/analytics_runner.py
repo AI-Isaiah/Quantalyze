@@ -1463,8 +1463,31 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
     that gets stuck because the DB went down would leave operators
     blind. Re-derived from PR #270 commit 06c38b80 + PR #273 commit
     01cbea60 under the GSD workflow.
+
+    WR-01 (19.1-REVIEW): mirror the exchange runner's strategy-existence
+    probe before the unconditional `_mark_computing` upsert. Otherwise a
+    `compute_analytics_from_csv` job enqueued for a strategy that was
+    deleted between enqueue and dispatch (wizard race, admin delete-and-
+    recreate) would land a spurious `strategy_analytics` row and then
+    fail with a misleading "Insufficient CSV history" 400 — operator
+    triage gets pointed at data quality instead of the actual cause.
+    Raising 404 here gets `classify_exception`-mapped to `permanent`
+    (no retry).
     """
     supabase = get_supabase()
+
+    # Verify strategy exists BEFORE touching strategy_analytics. Mirrors
+    # run_strategy_analytics:748-757; the response is unused beyond the
+    # existence check.
+    strategy_result = await db_execute(
+        lambda: supabase.table("strategies")
+        .select("id, user_id")
+        .eq("id", strategy_id)
+        .single()
+        .execute()
+    )
+    if not strategy_result.data:
+        raise HTTPException(status_code=404, detail="Strategy not found")
 
     # Mark computing.
     def _mark_computing() -> None:
