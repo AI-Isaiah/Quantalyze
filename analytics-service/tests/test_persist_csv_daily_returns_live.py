@@ -26,13 +26,15 @@ What this suite pins (PR #272 hardening invariants):
 W3 revision 2026-05-22 — edge-case suite (Plan 02 unit tests mock the DB and
 cannot express the persisted-table + worker contract these three encode):
 
-  9. Single-row CSV → terminal state (`failed` or `complete_with_warnings`),
-     never a stuck `computing` row.
- 10. All-zero returns → NaN-safe terminal state; cagr is one of
+  9. Single-row CSV → terminal state (`failed`), never a stuck `computing` row.
+ 10. All-zero returns → NaN-safe terminal state (`complete` only — the CSV
+     runner never emits `complete_with_warnings`, and `failed` is a bug
+     because zero-variance is mathematically valid input); cagr is one of
      {0.0, NULL, NaN-text}, never Infinity/-Infinity.
- 11. NaN/Inf returns → clean failure with structured error; worker does not
-     leak a Python traceback to the user-visible computation_error field and
-     does not poison subsequent jobs.
+ 11. NaN/Inf returns → terminal state (`complete` or `failed`, never
+     `complete_with_warnings`); clean failure with structured error; worker
+     does not leak a Python traceback to the user-visible computation_error
+     field and does not poison subsequent jobs.
 
 Tests 9-11 additionally require SUPABASE_URL + SUPABASE_SERVICE_KEY (the
 analytics-runner uses the Supabase Python client via get_supabase()) — they
@@ -738,20 +740,37 @@ class TestEdgeCaseTerminalStates:
         self, service_role_conn: psycopg.Connection
     ) -> None:
         """Test 10 — 60 days of all-zero daily_return must not panic the
-        CAGR / Sharpe math on zero variance. The runner is allowed to mark
-        the row `complete` OR `complete_with_warnings` (benchmark_unavailable
-        is a permissible warning); what it MUST NOT produce is
+        CAGR / Sharpe math on zero variance.
+
+        Specialist-review revision 2026-05-22: tighten the accepted terminal
+        set. Zero-variance is mathematically valid input, so `failed` is a
+        bug here — the runner must produce a numerically-safe `complete`.
+        The CSV runner (analytics_runner.py:run_csv_strategy_analytics)
+        only writes `'complete'` or `'failed'` and never
+        `'complete_with_warnings'`, so listing that state was misleading
+        cargo from the exchange-runner contract. Accept ONLY `complete`
+        for this test; what the runner MUST NOT produce is
         Infinity/-Infinity in cagr, and the row must NOT stay `computing`.
+
+        Date-generation revision 2026-05-22: the original payload used
+        `f"2024-{(i // 30) + 1:02d}-{(i % 30) + 1:02d}"` which generates
+        invalid calendar dates (e.g. 2024-02-30 → 22008 at date cast)
+        BEFORE the all-zero series reached the runner. Use bdate_range so
+        the test exercises the zero-variance branch it advertises.
         """
+        import pandas as pd  # local — keeps module-level import cheap
+
         owner = _create_test_user(service_role_conn)
         sid = _create_test_strategy(service_role_conn, owner)
         try:
-            # 60 ascending dates, all zero return. Use a chunked persist to
-            # respect the RPC's 5000-row cap (we're well under, but the loop
-            # template is reusable).
+            # 60 ascending business days, all zero return. bdate_range
+            # guarantees valid calendar dates — the earlier modular
+            # `(i // 30) + 1, (i % 30) + 1` recipe could emit 2024-02-30
+            # which the RPC's date cast rejects with 22008, masking the
+            # zero-variance branch this test is meant to exercise.
             payload = [
-                {"date": f"2024-{(i // 30) + 1:02d}-{(i % 30) + 1:02d}", "daily_return": 0.0}
-                for i in range(60)
+                {"date": d.strftime("%Y-%m-%d"), "daily_return": 0.0}
+                for d in pd.bdate_range("2024-01-01", periods=60)
             ]
             with service_role_conn.transaction():
                 with service_role_conn.cursor() as cur:
@@ -766,13 +785,15 @@ class TestEdgeCaseTerminalStates:
             _invoke_csv_runner(sid)
             row = _poll_analytics_terminal(service_role_conn, sid, timeout_sec=90)
 
-            assert row["computation_status"] in (
-                "complete",
-                "complete_with_warnings",
-                "failed",
-            ), (
-                "all-zero returns: expected terminal state, got "
-                f"{row['computation_status']!r}"
+            # `failed` is a bug — zero-variance is mathematically valid
+            # input the metrics layer must handle. `complete_with_warnings`
+            # is removed because the CSV runner never emits it (see
+            # analytics_runner.py:1567-1581 — only 'complete' or 'failed').
+            assert row["computation_status"] == "complete", (
+                "all-zero returns: expected `complete` (zero-variance is "
+                "valid input the metrics layer must handle), got "
+                f"{row['computation_status']!r} "
+                f"(computation_error={row['computation_error']!r})"
             )
             # The cagr_text column is the raw textual cast — Postgres serializes
             # IEEE special values as 'Infinity', '-Infinity', 'NaN'. The
@@ -832,19 +853,22 @@ class TestEdgeCaseTerminalStates:
             # Acceptable outcomes:
             #   (a) failed — runner caught the NaN/Inf math and marked
             #       _mark_unrecoverable with a sanitized message.
-            #   (b) complete / complete_with_warnings — runner sanitized
-            #       the inputs (pd.Series may drop NaN before metrics),
-            #       resulting in a numerically-safe payload. Still
-            #       acceptable as long as cagr is not Inf.
+            #   (b) complete — runner sanitized the inputs (pd.Series may
+            #       drop NaN before metrics), resulting in a numerically-
+            #       safe payload. Still acceptable as long as cagr is not
+            #       Inf.
             # NOT acceptable:
             #   - computing (stuck row)
+            #   - complete_with_warnings (the CSV runner never emits this
+            #     state — analytics_runner.py:1567-1581 only writes
+            #     'complete' or 'failed'. Listing it here would silently
+            #     accept a state the contract says can't occur).
             assert row["computation_status"] in (
                 "failed",
                 "complete",
-                "complete_with_warnings",
             ), (
-                "NaN/Inf input: expected terminal state, got "
-                f"{row['computation_status']!r}"
+                "NaN/Inf input: expected terminal state (failed or "
+                f"complete), got {row['computation_status']!r}"
             )
             assert row["computation_status"] != "computing", (
                 "NaN/Inf input: stuck `computing` row — worker did not "
