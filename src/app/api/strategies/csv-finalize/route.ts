@@ -726,9 +726,17 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     });
   }
 
+  // API C-1 (specialist review 2026-05-22): emit `ok: true` discriminator
+  // on the success envelope so consumers can use `body.ok` to branch
+  // without status-code sniffing. Error envelopes already carry
+  // `ok: false`; this closes the asymmetry. correlation_id stays `null`
+  // here pending the dedicated correlation_id fix — keeping it on the
+  // wire so the field shape is consistent across success+error.
   return NextResponse.json({
+    ok: true,
     strategy_id: newStrategyId,
     status: "pending_review",
+    correlation_id: null,
   });
 });
 
@@ -818,5 +826,18 @@ async function unifiedCsvFinalizeHandler(args: {
       });
     }
   }
-  return NextResponse.json(result.body);
+  // API C-1 (specialist review 2026-05-22): emit `ok: true` discriminator
+  // on the unified-path success envelope. The /process-key router may or
+  // may not include `ok: true` in its body; merge defensively so we
+  // never double-emit while still guaranteeing the field is present.
+  // correlation_id stays `null` here pending the dedicated
+  // correlation_id fix.
+  return NextResponse.json(
+    {
+      ok: true,
+      ...(result.body as Record<string, unknown>),
+      correlation_id: null,
+    },
+    { status: result.status },
+  );
 }
