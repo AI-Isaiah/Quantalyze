@@ -438,6 +438,10 @@ async function writeFailedStrategyAnalyticsPlaceholder(
       );
       return;
     }
+    // @audit-skip: internal recovery placeholder for a failed CSV finalize.
+    // strategy_analytics rows are server-internal compute state, not a
+    // user-visible mutation — user intent was already audited earlier in
+    // this request by the finalize_csv_strategy RPC.
     const { error: placeholderErr } = await admin
       .from("strategy_analytics")
       .upsert(
@@ -492,7 +496,9 @@ function enqueueCsvAnalyticsAfter(
     try {
       const { createAdminClient } = await import("@/lib/supabase/admin");
       const admin = createAdminClient();
-      // @audit-skip: see helper-level audit-skip block above.
+      // @audit-skip: see helper-level audit-skip block above. Internal
+      // compute-job enqueue — user intent was already audited by
+      // finalize_csv_strategy + persist_csv_daily_returns earlier.
       const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
         p_strategy_id: strategyId,
         p_kind: "compute_analytics_from_csv",
