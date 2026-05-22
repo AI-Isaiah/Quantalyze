@@ -1441,3 +1441,145 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             ).execute()
         )
         raise HTTPException(status_code=500, detail="Analytics computation failed")
+
+
+async def run_csv_strategy_analytics(strategy_id: str) -> dict:
+    """Phase 19.1 / CSV → analytics pipeline Plan 02 Task 2.
+
+    Analytics pipeline for source='csv' strategies. Loads
+    csv_daily_returns, builds a pd.Series, and calls compute_all_metrics
+    directly — bypasses the 700-line trades-to-returns chain used by the
+    exchange-backed path. CSV uploads have no fills, no positions, no
+    trade_mix, no volume metrics; those panels stay null on the
+    strategy_analytics row.
+
+    Mirrors the structure of run_strategy_analytics but skips the
+    exchange-specific branches. Sets computation_status='computing' on
+    entry; 'complete' or 'failed' on exit.
+
+    On the unrecoverable-exception path (T-19.1-03 / PR #273), we wrap
+    the failure-marker upsert in try/except and log a warning BEFORE
+    re-raising the outer 500 — without that evidence, a `computing` row
+    that gets stuck because the DB went down would leave operators
+    blind. Re-derived from PR #270 commit 06c38b80 + PR #273 commit
+    01cbea60 under the GSD workflow.
+    """
+    supabase = get_supabase()
+
+    # Mark computing.
+    def _mark_computing() -> None:
+        supabase.table("strategy_analytics").upsert(
+            {"strategy_id": strategy_id, "computation_status": "computing"},
+            on_conflict="strategy_id",
+        ).execute()
+    await db_execute(_mark_computing)
+
+    try:
+        # Load persisted series.
+        def _load_series():
+            return (
+                supabase.table("csv_daily_returns")
+                .select("date, daily_return")
+                .eq("strategy_id", strategy_id)
+                .order("date")
+                .execute()
+            )
+        rows_resp = await db_execute(_load_series)
+        data = rows_resp.data or []
+
+        if len(data) < 2:
+            def _mark_failed():
+                supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        "computation_error": "Insufficient CSV history. At least 2 data points required.",
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+            await db_execute(_mark_failed)
+            raise HTTPException(status_code=400, detail="Insufficient CSV history")
+
+        # Local import keeps the cycle risk low (analytics_runner is
+        # imported at worker startup; pandas is already pulled in via
+        # services.benchmark but the explicit local import documents
+        # intent).
+        import pandas as pd
+        dates = pd.DatetimeIndex([r["date"] for r in data])
+        values = [float(r["daily_return"]) for r in data]
+        returns = pd.Series(values, index=dates, name="returns")
+
+        benchmark_rets, benchmark_stale = None, True
+        try:
+            benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "csv analytics: benchmark fetch failed for %s: %s",
+                strategy_id, exc,
+            )
+
+        metrics_result = compute_all_metrics(returns, benchmark_rets)
+
+        data_quality_flags: dict = {"csv_source": True}
+        if benchmark_stale or benchmark_rets is None:
+            data_quality_flags["benchmark_unavailable"] = True
+            data_quality_flags["benchmark_note"] = "Benchmark data unavailable."
+
+        def _mark_complete():
+            payload = {
+                "strategy_id": strategy_id,
+                "computation_status": "complete",
+                "computation_error": None,
+                "data_quality_flags": data_quality_flags,
+                "trade_metrics": None,    # CSV has no fills
+                "volume_metrics": None,
+                "exposure_metrics": None,
+            }
+            payload.update(metrics_result.metrics_json)
+            supabase.table("strategy_analytics").upsert(
+                payload, on_conflict="strategy_id"
+            ).execute()
+        await db_execute(_mark_complete)
+
+        if metrics_result.sibling_kinds:
+            def _upsert_siblings():
+                supabase.rpc(
+                    "upsert_strategy_analytics_series_batch",
+                    {
+                        "p_strategy_id": strategy_id,
+                        "p_kinds": metrics_result.sibling_kinds,
+                    },
+                ).execute()
+            await db_execute(_upsert_siblings)
+
+        return {"status": "complete", "strategy_id": strategy_id}
+
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.error("csv analytics failed for %s: %s", strategy_id, exc)
+
+        def _mark_unrecoverable():
+            supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    "computation_status": "failed",
+                    "computation_error": "CSV analytics computation failed.",
+                },
+                on_conflict="strategy_id",
+            ).execute()
+
+        try:
+            await db_execute(_mark_unrecoverable)
+        except Exception as mark_exc:  # noqa: BLE001
+            # PR #273 (T-19.1-03) — log BEFORE re-raise so a stuck
+            # 'computing' row has log evidence pointing at the inner
+            # mark-unrecoverable failure. Without this, the strategy
+            # would be stuck in 'computing' forever with no operator
+            # signal.
+            logger.warning(
+                "csv analytics: could not mark strategy %s unrecoverable: %s",
+                strategy_id,
+                mark_exc,
+            )
+        raise HTTPException(status_code=500, detail="CSV analytics computation failed")
