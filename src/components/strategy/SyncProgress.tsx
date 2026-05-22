@@ -35,10 +35,14 @@ function assertNever(value: never): never {
 
 /**
  * Discriminated converter from DB `computation_status` to UI `SyncStatus`.
- * `complete_with_warnings` has no DB representation — it is a UI-only state
- * that callers must set explicitly via a higher-level signal (warnings
- * payload non-empty). The converter therefore maps DB `complete → complete`
- * and lets the caller upgrade to `complete_with_warnings` separately.
+ *
+ * Phase 19.1: `complete_with_warnings` is a first-class DB status written
+ * by `run_strategy_analytics` when consumer-specific flags fire (e.g. the
+ * used_heuristic_capital path). `run_csv_strategy_analytics` writes plain
+ * `complete`. Callers that want to upgrade an exchange-backed `complete`
+ * to `complete_with_warnings` based on a non-DB signal (warnings payload
+ * non-empty in the wizard) can still do so; the converter now also
+ * accepts the DB-native variant and routes it to the same UI state.
  */
 export function toSyncStatus(db: ComputationStatus): SyncStatus {
   switch (db) {
@@ -48,6 +52,8 @@ export function toSyncStatus(db: ComputationStatus): SyncStatus {
       return "computing";
     case "complete":
       return "complete";
+    case "complete_with_warnings":
+      return "complete_with_warnings";
     case "failed":
       return "error";
     default:
@@ -188,7 +194,12 @@ export function SyncProgress({
     // primed us with "syncing" / "computing".
     const db: ComputationStatus = data.computation_status;
     const next = toSyncStatus(db);
-    if (next === "computing" || next === "complete" || next === "error") {
+    if (
+      next === "computing" ||
+      next === "complete" ||
+      next === "complete_with_warnings" ||
+      next === "error"
+    ) {
       onStatusChange?.(next);
     }
   }, [strategyId, onStatusChange]);
