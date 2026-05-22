@@ -524,6 +524,11 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       try {
         const { createAdminClient } = await import("@/lib/supabase/admin");
         const admin = createAdminClient();
+        // @audit-skip: compute_jobs enqueue is internal worker-state
+        // scheduling, not a user-visible mutation. User intent is already
+        // captured by the finalize_csv_strategy + persist_csv_daily_returns
+        // RPCs above. Mirrors finalize-wizard's enqueue (which evades the
+        // gate only via incidental multi-line formatting).
         const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
           p_strategy_id: newStrategyId,
           p_kind: "compute_analytics_from_csv",
@@ -649,6 +654,9 @@ async function unifiedCsvFinalizeHandler(args: {
         try {
           const { createAdminClient } = await import("@/lib/supabase/admin");
           const admin = createAdminClient();
+          // @audit-skip: see legacy-path enqueue above; compute_jobs is
+          // internal worker scheduling, not a user-visible mutation. User
+          // intent is captured by the finalize + persist RPCs upstream.
           const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
             p_strategy_id: strategyIdForEnqueue,
             p_kind: "compute_analytics_from_csv",
