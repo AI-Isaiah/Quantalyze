@@ -891,38 +891,66 @@ async function unifiedCsvFinalizeHandler(args: {
   // UPDATE the legacy path does, so the unified-backbone path doesn't
   // silently lose classification data when the feature flag flips on.
   // The unified router returns the new strategy_id in result.body.
+  //
+  // Phase 19.1 red-team / API H-1 (2026-05-22): if the upstream
+  // returns 200 with a missing or non-UUID `strategy_id` (Python
+  // regression, API drift, accidental shape change), we MUST NOT
+  // emit `ok: true` to the caller — the wizard's SyncProgress poller
+  // would then hit `if (!data) return` early-out forever because no
+  // strategy_analytics row exists for it to find. Surface 502
+  // CSV_FINALIZE_FAIL so the wizard can retry / contact support
+  // with the correlation_id.
   const unifiedBody = result.body as { strategy_id?: unknown };
-  if (typeof unifiedBody?.strategy_id === "string" && unifiedBody.strategy_id) {
-    const supabase = await createClient();
-    await applyCsvMetadataUpdate(
-      supabase,
-      unifiedBody.strategy_id,
-      args.userId,
-      args.metadataRaw,
+  if (!isUuid(unifiedBody?.strategy_id)) {
+    console.error(
+      `[strategies/csv-finalize unified] missing/invalid strategy_id in upstream body [correlation_id=${args.correlationId}]:`,
+      unifiedBody,
     );
-    // Phase 19.1 / Maintainability W-1: shared helper for the persist
-    // call so the legacy and unified paths cannot drift. Same
-    // CSV_PERSIST_FAIL envelope, same hard-fail rationale.
-    const persistFailResponse = await persistDailyReturnsOrErrorResponse(
-      supabase,
-      args.userId,
-      unifiedBody.strategy_id,
-      args.dailyReturnsSeries,
+    return NextResponse.json(
       {
-        logPrefix: "[strategies/csv-finalize unified]",
-        correlationId: args.correlationId,
+        ok: false,
+        code: "CSV_FINALIZE_FAIL",
+        human_message:
+          "The unified backbone returned an unexpected response. Please retry.",
+        debug_context: {
+          unified_response_body: unifiedBody,
+          missing_strategy_id: true,
+        },
+        correlation_id: args.correlationId,
       },
+      { status: 502 },
     );
-    if (persistFailResponse) return persistFailResponse;
+  }
+  const newStrategyId: string = unifiedBody.strategy_id;
+  const supabase = await createClient();
+  await applyCsvMetadataUpdate(
+    supabase,
+    newStrategyId,
+    args.userId,
+    args.metadataRaw,
+  );
+  // Phase 19.1 / Maintainability W-1: shared helper for the persist
+  // call so the legacy and unified paths cannot drift. Same
+  // CSV_PERSIST_FAIL envelope, same hard-fail rationale.
+  const persistFailResponse = await persistDailyReturnsOrErrorResponse(
+    supabase,
+    args.userId,
+    newStrategyId,
+    args.dailyReturnsSeries,
+    {
+      logPrefix: "[strategies/csv-finalize unified]",
+      correlationId: args.correlationId,
+    },
+  );
+  if (persistFailResponse) return persistFailResponse;
 
-    // Phase 19.1 / T-19.1-05 / PR #275 + Maintainability W-2: shared
-    // helper for the enqueue side-effect. Same non-blocking semantics.
-    if (args.dailyReturnsSeries.length > 0) {
-      enqueueCsvAnalyticsAfter(unifiedBody.strategy_id, args.fmt, {
-        logPrefix: "[strategies/csv-finalize unified]",
-        correlationId: args.correlationId,
-      });
-    }
+  // Phase 19.1 / T-19.1-05 / PR #275 + Maintainability W-2: shared
+  // helper for the enqueue side-effect. Same non-blocking semantics.
+  if (args.dailyReturnsSeries.length > 0) {
+    enqueueCsvAnalyticsAfter(newStrategyId, args.fmt, {
+      logPrefix: "[strategies/csv-finalize unified]",
+      correlationId: args.correlationId,
+    });
   }
   // API C-1 (specialist review 2026-05-22): emit `ok: true` discriminator
   // on the unified-path success envelope. The /process-key router may or

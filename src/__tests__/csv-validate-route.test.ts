@@ -1094,4 +1094,79 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     warnSpy.mockRestore();
     delete process.env.USE_COMPUTE_JOBS_QUEUE;
   });
+
+  // ---- 13. unified backbone returns missing strategy_id → 502 (API H-1)
+
+  it("Test 13: unified backbone 200 with missing strategy_id → 502 CSV_FINALIZE_FAIL (API H-1)", async () => {
+    // Phase 19.1 red-team (2026-05-22): if the upstream `/process-key`
+    // csv-finalize branch returns 200 with no strategy_id (Python
+    // regression, API drift, shape change), the route MUST NOT emit
+    // ok:true with a missing id — the wizard's SyncProgress poller
+    // would hit `if (!data) return` early-out forever because no
+    // strategy_analytics row exists for it to find.
+    isUnifiedBackboneActiveMock.mockResolvedValue(true);
+    postProcessKeyMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: { status: "pending_review" }, // ← strategy_id missing
+    });
+    process.env.INTERNAL_API_TOKEN = "test-token";
+
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Missing strategy_id in upstream",
+      daily_returns_series: [{ date: "2024-08-01", daily_return: 0.001 }],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(502);
+    const json = await res.json();
+    expect(json.ok).toBe(false);
+    expect(json.code).toBe("CSV_FINALIZE_FAIL");
+    expect(json.human_message).toMatch(/unexpected response/i);
+    expect(json.debug_context).toMatchObject({
+      missing_strategy_id: true,
+    });
+    expect(typeof json.correlation_id).toBe("string");
+    expect(json.correlation_id.length).toBeGreaterThan(0);
+    // Critically: NO persist call, NO enqueue, NO metadata update —
+    // the half-baked upstream is treated as a hard failure.
+    const persistCalls = rpcMock.mock.calls.filter(
+      ([name]) => name === "persist_csv_daily_returns",
+    );
+    expect(persistCalls).toHaveLength(0);
+
+    delete process.env.INTERNAL_API_TOKEN;
+  });
+
+  it("Test 13b: unified backbone 200 with non-UUID strategy_id → 502 CSV_FINALIZE_FAIL", async () => {
+    // Defense in depth: empty string and obvious garbage must also be
+    // rejected, not just `undefined`. A typo in the Python router that
+    // returns `strategy_id: ""` or `strategy_id: "TBD"` would otherwise
+    // slip through the old typeof-string-and-truthy check (the empty
+    // string was already gated, but anything else passed).
+    isUnifiedBackboneActiveMock.mockResolvedValue(true);
+    postProcessKeyMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: { strategy_id: "not-a-uuid", status: "pending_review" },
+    });
+    process.env.INTERNAL_API_TOKEN = "test-token";
+
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Garbage strategy_id in upstream",
+      daily_returns_series: [{ date: "2024-09-01", daily_return: 0.002 }],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(502);
+    const json = await res.json();
+    expect(json.code).toBe("CSV_FINALIZE_FAIL");
+    expect(json.debug_context).toMatchObject({ missing_strategy_id: true });
+
+    delete process.env.INTERNAL_API_TOKEN;
+  });
 });
