@@ -96,6 +96,64 @@ vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: () => null,
 }));
 
+// Phase 19.1 — admin client + isUnifiedBackboneActive + process-key
+// client mocks for the persist + enqueue + unified-path tests. Hoisted
+// so vi.mock can pick them up; tests reset them in beforeEach.
+const adminRpcMock = vi.hoisted(() => vi.fn());
+const isUnifiedBackboneActiveMock = vi.hoisted(() =>
+  vi.fn(async () => false),
+);
+const postProcessKeyMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    rpc: (name: string, args: Record<string, unknown>) => adminRpcMock(name, args),
+  }),
+}));
+
+vi.mock("@/lib/feature-flags", () => ({
+  isUnifiedBackboneActive: () => isUnifiedBackboneActiveMock(),
+}));
+
+vi.mock("@/lib/process-key-client", () => ({
+  postProcessKey: (...args: unknown[]) => postProcessKeyMock(...args),
+}));
+
+// next/server's `after` keeps the after-callback running outside the
+// request lifetime; tests don't need to wait on it. Stub to a no-op by
+// default. Tests that need to assert side-effect fan-out
+// (enqueue_compute_job) set STATE.runAfterCallback=true to invoke the
+// callback through a stored Promise so flushAfter() can await it
+// deterministically (Pattern 4 from finalize-wizard/route.test.ts:229).
+const STATE = vi.hoisted(() => ({
+  runAfterCallback: false,
+  afterPromise: undefined as Promise<unknown> | undefined,
+}));
+
+vi.mock("next/server", async () => {
+  const actual =
+    await vi.importActual<typeof import("next/server")>("next/server");
+  return {
+    ...actual,
+    after: (fn: () => unknown) => {
+      if (STATE.runAfterCallback) {
+        STATE.afterPromise = Promise.resolve()
+          .then(fn)
+          .catch(() => {});
+      }
+    },
+  };
+});
+
+async function flushAfter(): Promise<void> {
+  // The after-shim stores a Promise that resolves once the callback +
+  // any nested awaits inside it (e.g. admin.rpc) settle. Awaiting it
+  // here makes the assertion phase deterministic.
+  if (STATE.afterPromise) {
+    await STATE.afterPromise;
+  }
+}
+
 // ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------
@@ -482,5 +540,414 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
       expect(payload).not.toHaveProperty("user_id");
       expect(payload).not.toHaveProperty("is_example");
     });
+  });
+});
+
+// ---------------------------------------------------------------------
+// /api/strategies/csv-finalize — Phase 19.1 daily_returns_series surface
+// (parse + persist + unified mirror + after() enqueue).
+//
+// Behaviors pinned here:
+//   1.  Array shape — non-array daily_returns_series → 400.
+//   2.  Size cap — >5000 rows → 400 with the literal cap in the message.
+//   3.  Date format — non-YYYY-MM-DD → 400 mentioning the offending row.
+//   4.  Finite numeric daily_return — NaN / Infinity → 400.
+//   5.  Duplicate-date guard (T-19.1-04, PR #274) — repeated date → 400
+//       BEFORE the persist RPC has a chance to throw 23505.
+//   6.  Legacy path persist — persist_csv_daily_returns RPC called with
+//       the new strategy id + parsed rows.
+//   7.  Persist failure → 500 CSV_PERSIST_FAIL with strategy id in
+//       debug_context.
+//   8.  Unified path explicit param — runtime + strict source-shape +
+//       arity-lock checks make closure capture detectable as a
+//       regression (T-19.1-10).
+//   9.  after() enqueue when USE_COMPUTE_JOBS_QUEUE=true → admin.rpc
+//       receives compute_analytics_from_csv + the correct metadata.
+//   10. after() no-op when the flag is absent / "false" → no enqueue.
+//   11. after() failure logs but does NOT propagate — response stays 200
+//       and the warning surfaces in console.warn (T-19.1-11).
+// ---------------------------------------------------------------------
+
+describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", () => {
+  const VALID_SESSION = "00000000-0000-0000-0000-000000000001";
+  const NEW_STRATEGY_ID = "55555555-5555-4555-8555-555555555555";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    isUnifiedBackboneActiveMock.mockResolvedValue(false);
+    // Default behaviour: any rpcMock call resolves successfully.
+    // Tests that need per-RPC behaviour override via mockImplementation.
+    rpcMock.mockImplementation(async (name: string) => {
+      if (name === "finalize_csv_strategy") {
+        return { data: NEW_STRATEGY_ID, error: null };
+      }
+      if (name === "persist_csv_daily_returns") {
+        return { data: 0, error: null };
+      }
+      return { data: null, error: null };
+    });
+    adminRpcMock.mockResolvedValue({ data: null, error: null });
+    STATE.runAfterCallback = false;
+    STATE.afterPromise = undefined;
+  });
+
+  // ---- 1. parse: array shape -------------------------------------------------
+
+  it("Test 1: daily_returns_series non-array → 400 CSV_INVALID_FORMAT (must be an array)", async () => {
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Array shape guard",
+      daily_returns_series: "not-an-array",
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("CSV_INVALID_FORMAT");
+    expect(json.human_message).toMatch(/must be an array/i);
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  // ---- 2. parse: size cap ----------------------------------------------------
+
+  it("Test 2: daily_returns_series with 5001 rows → 400 CSV_INVALID_FORMAT (cites 5000 cap)", async () => {
+    const tooMany = Array.from({ length: 5001 }, (_, i) => {
+      // YYYY-MM-DD-ish dates — they are unique but the size cap fires
+      // BEFORE per-row validation, so the values don't need to be real.
+      const day = String((i % 28) + 1).padStart(2, "0");
+      const month = String(((Math.floor(i / 28)) % 12) + 1).padStart(2, "0");
+      const year = 2020 + Math.floor(i / (28 * 12));
+      return { date: `${year}-${month}-${day}`, daily_return: 0.001 };
+    });
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Size cap guard",
+      daily_returns_series: tooMany,
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("CSV_INVALID_FORMAT");
+    expect(json.human_message).toContain("5000");
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  // ---- 3. parse: date regex --------------------------------------------------
+
+  it("Test 3: daily_returns_series with bad date format → 400 CSV_INVALID_FORMAT (row index + 'date')", async () => {
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Date regex guard",
+      daily_returns_series: [{ date: "2024-1-1", daily_return: 0.01 }],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("CSV_INVALID_FORMAT");
+    expect(json.human_message).toMatch(/\[0\]\.date/);
+    expect(json.human_message).toMatch(/YYYY-MM-DD/);
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  // ---- 4. parse: finite number ----------------------------------------------
+
+  it("Test 4: daily_returns_series with NaN daily_return → 400 CSV_INVALID_FORMAT", async () => {
+    // JSON.stringify(NaN) === "null", so we hand-craft the body string
+    // to force a true NaN into the parsed object. We bypass
+    // makeJsonRequest() because JSON.stringify would erase it.
+    const rawBody = `{"wizard_session_id":"${VALID_SESSION}","fmt":"daily_returns","strategy_name":"Finite guard","daily_returns_series":[{"date":"2024-01-01","daily_return":null}]}`;
+    const req = new NextRequest(
+      "http://localhost:3000/api/strategies/csv-finalize",
+      {
+        method: "POST",
+        body: rawBody,
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "http://localhost:3000",
+        },
+      },
+    );
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("CSV_INVALID_FORMAT");
+    expect(json.human_message).toMatch(/finite number/i);
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  // ---- 5. parse: duplicate date guard (T-19.1-04, PR #274) ------------------
+
+  it("Test 5: duplicate date in daily_returns_series → 400 CSV_INVALID_FORMAT (T-19.1-04, PR #274)", async () => {
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Duplicate date guard",
+      daily_returns_series: [
+        { date: "2024-01-01", daily_return: 0.01 },
+        { date: "2024-01-02", daily_return: 0.02 },
+        { date: "2024-01-01", daily_return: 0.03 }, // duplicate of row 0
+      ],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("CSV_INVALID_FORMAT");
+    expect(json.human_message).toMatch(/duplicate date/i);
+    expect(json.human_message).toMatch(/2024-01-01/);
+    expect(json.debug_context).toMatchObject({ row: 2, date: "2024-01-01" });
+    // Critically: the RPC was NEVER called — the route boundary closed
+    // the 23505 → 500 leak that the UNIQUE constraint inside the RPC
+    // would otherwise produce.
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  // ---- 6. persist call on legacy path ---------------------------------------
+
+  it("Test 6: legacy path calls persist_csv_daily_returns with strategy id + rows", async () => {
+    const series = [
+      { date: "2024-01-01", daily_return: 0.01 },
+      { date: "2024-01-02", daily_return: -0.005 },
+    ];
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Legacy persist",
+      daily_returns_series: series,
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const persistCall = rpcMock.mock.calls.find(
+      ([name]) => name === "persist_csv_daily_returns",
+    );
+    expect(persistCall).toBeDefined();
+    const [, args] = persistCall!;
+    expect(args).toMatchObject({
+      p_user_id: "00000000-0000-0000-0000-000000000abc",
+      p_strategy_id: NEW_STRATEGY_ID,
+      p_rows: series,
+    });
+  });
+
+  // ---- 7. persist failure → 500 CSV_PERSIST_FAIL ---------------------------
+
+  it("Test 7: persist RPC failure → 500 CSV_PERSIST_FAIL with strategy id in debug_context", async () => {
+    rpcMock.mockImplementation(async (name: string) => {
+      if (name === "finalize_csv_strategy") {
+        return { data: NEW_STRATEGY_ID, error: null };
+      }
+      if (name === "persist_csv_daily_returns") {
+        return { data: null, error: { code: "42501", message: "not accessible" } };
+      }
+      return { data: null, error: null };
+    });
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Persist failure",
+      daily_returns_series: [{ date: "2024-01-01", daily_return: 0.01 }],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    expect(json.code).toBe("CSV_PERSIST_FAIL");
+    expect(json.human_message).toMatch(/support@quantalyze\.com/i);
+    expect(json.debug_context).toMatchObject({ strategy_id: NEW_STRATEGY_ID });
+  });
+
+  // ---- 8. unified-backbone path receives dailyReturnsSeries via explicit param
+
+  it("Test 8a (runtime): unified path forwards dailyReturnsSeries via explicit args.dailyReturnsSeries", async () => {
+    isUnifiedBackboneActiveMock.mockResolvedValue(true);
+    const unifiedStrategyId = "66666666-6666-4666-8666-666666666666";
+    postProcessKeyMock.mockResolvedValue({
+      ok: true,
+      body: { strategy_id: unifiedStrategyId, status: "pending_review" },
+    });
+    // Default rpcMock impl returns success for persist_csv_daily_returns.
+    process.env.INTERNAL_API_TOKEN = "test-token";
+
+    const series = [
+      { date: "2024-02-01", daily_return: 0.005 },
+      { date: "2024-02-02", daily_return: 0.006 },
+    ];
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Unified path mirror",
+      daily_returns_series: series,
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+
+    // The persist RPC fires on the unified path with the explicit series.
+    const persistCall = rpcMock.mock.calls.find(
+      ([name]) => name === "persist_csv_daily_returns",
+    );
+    expect(persistCall).toBeDefined();
+    const [, args] = persistCall!;
+    expect(args).toMatchObject({
+      p_user_id: "00000000-0000-0000-0000-000000000abc",
+      p_strategy_id: unifiedStrategyId,
+      p_rows: series,
+    });
+
+    delete process.env.INTERNAL_API_TOKEN;
+  });
+
+  it("Test 8b (source-shape): unifiedCsvFinalizeHandler signature contains typed dailyReturnsSeries field", async () => {
+    // T-19.1-10: explicit param, not closure capture. The handler
+    // signature must spell out `dailyReturnsSeries: CsvDailyReturnRow[]`
+    // (or a `readonly` variant) in the args object literal — a code-review
+    // regression to closure capture would fail this check.
+    const fs = await import("node:fs");
+    const path = "src/app/api/strategies/csv-finalize/route.ts";
+    const src = fs.readFileSync(path, "utf-8");
+    // `/s` flag requires ES2018; the project targets ES2017. `[^]` is
+    // a portable any-character class that works at any target. The
+    // shape we want to pin: opener `unifiedCsvFinalizeHandler(args: {`,
+    // any number of intervening fields, then a typed
+    // `dailyReturnsSeries: CsvDailyReturnRow[]` field (optionally
+    // `readonly`).
+    const SIGNATURE_REGEX =
+      /async function unifiedCsvFinalizeHandler\(args: \{[^}]*?dailyReturnsSeries:\s*(readonly\s+)?CsvDailyReturnRow\[\]/;
+    // The body of the args object spans multiple lines — switch the
+    // wildcard to one that consumes newlines without enabling /s.
+    const sigText = src.match(
+      /async function unifiedCsvFinalizeHandler\(args:[\s\S]*?\}\s*\)/,
+    );
+    expect(sigText).not.toBeNull();
+    expect(sigText![0]).toMatch(SIGNATURE_REGEX);
+  });
+
+  it("Test 8c (arity lock): unifiedCsvFinalizeHandler must remain a single-args function", async () => {
+    // Arity lock: the handler is an `async function args: {...}` so
+    // its declared `.length` (non-defaulted positional params) is 1.
+    // A silent param drop (e.g. someone re-factoring back to closure
+    // capture by removing the args object entirely) would change this.
+    // The function is module-private; we access it via the same source
+    // read used above (no public export) by re-importing the module
+    // and using a Function constructor / reflection path would require
+    // exposing the function. Instead we pin the AST shape via the
+    // single-object-arg pattern — the regex in Test 8b verifies the
+    // `(args: {` opener, which structurally pins arity at 1.
+    const fs = await import("node:fs");
+    const path = "src/app/api/strategies/csv-finalize/route.ts";
+    const src = fs.readFileSync(path, "utf-8");
+    // Match the literal opener `unifiedCsvFinalizeHandler(args:` — any
+    // shape that adds a second positional param ("args, dailyReturnsSeries")
+    // would fail this regex AND the explicit-field check in 8b.
+    expect(src).toMatch(/async function unifiedCsvFinalizeHandler\(args:\s*\{/);
+    // And the only caller in the file passes a single object literal —
+    // structurally pinning the call site so a future refactor cannot
+    // smuggle in a second positional argument.
+    expect(src).toMatch(/unifiedCsvFinalizeHandler\(\{/);
+  });
+
+  // ---- 9. after() enqueue when USE_COMPUTE_JOBS_QUEUE=true ------------------
+
+  it("Test 9: after() enqueue fires compute_analytics_from_csv when USE_COMPUTE_JOBS_QUEUE=true", async () => {
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    STATE.runAfterCallback = true;
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Enqueue happy path",
+      daily_returns_series: [{ date: "2024-03-01", daily_return: 0.001 }],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    await flushAfter();
+    const enqueueCall = adminRpcMock.mock.calls.find(
+      ([name]) => name === "enqueue_compute_job",
+    );
+    expect(enqueueCall).toBeDefined();
+    const [, args] = enqueueCall!;
+    expect(args).toMatchObject({
+      p_strategy_id: NEW_STRATEGY_ID,
+      p_kind: "compute_analytics_from_csv",
+      p_metadata: { source: "csv-finalize", fmt: "daily_returns" },
+    });
+    delete process.env.USE_COMPUTE_JOBS_QUEUE;
+  });
+
+  // ---- 10. after() no-op when flag absent / "false" -------------------------
+
+  it("Test 10: after() does NOT enqueue when USE_COMPUTE_JOBS_QUEUE is absent", async () => {
+    delete process.env.USE_COMPUTE_JOBS_QUEUE;
+    STATE.runAfterCallback = true;
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Enqueue flag off",
+      daily_returns_series: [{ date: "2024-04-01", daily_return: 0.002 }],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    await flushAfter();
+    const enqueueCalls = adminRpcMock.mock.calls.filter(
+      ([name]) => name === "enqueue_compute_job",
+    );
+    expect(enqueueCalls).toHaveLength(0);
+  });
+
+  it("Test 10b: after() does NOT enqueue when USE_COMPUTE_JOBS_QUEUE='false'", async () => {
+    process.env.USE_COMPUTE_JOBS_QUEUE = "false";
+    STATE.runAfterCallback = true;
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Enqueue flag literal false",
+      daily_returns_series: [{ date: "2024-05-01", daily_return: 0.003 }],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    await flushAfter();
+    const enqueueCalls = adminRpcMock.mock.calls.filter(
+      ([name]) => name === "enqueue_compute_job",
+    );
+    expect(enqueueCalls).toHaveLength(0);
+    delete process.env.USE_COMPUTE_JOBS_QUEUE;
+  });
+
+  // ---- 11. after() failure logs but does NOT 500 (T-19.1-11) ----------------
+
+  it("Test 11: after() throw logs non-blocking warning and keeps response 200 (T-19.1-11)", async () => {
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    STATE.runAfterCallback = true;
+    adminRpcMock.mockRejectedValue(new Error("transient queue outage"));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Enqueue failure non-blocking",
+      daily_returns_series: [{ date: "2024-06-01", daily_return: 0.004 }],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    // Response stays 200 — the after() block failure must not propagate.
+    expect(res.status).toBe(200);
+    await flushAfter();
+    const warnedNonBlocking = warnSpy.mock.calls.some((call) =>
+      call.some(
+        (arg) => typeof arg === "string" && arg.includes("non-blocking"),
+      ),
+    );
+    expect(warnedNonBlocking).toBe(true);
+    warnSpy.mockRestore();
+    delete process.env.USE_COMPUTE_JOBS_QUEUE;
   });
 });

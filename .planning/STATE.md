@@ -4,8 +4,8 @@ milestone: v1.0.0
 milestone_name: API-Key Rewrite
 status: executing
 stopped_at: context exhaustion at 76% (2026-05-07)
-last_updated: "2026-05-22T09:44:46.160Z"
-last_activity: 2026-05-22 -- Phase 19.1 planning complete
+last_updated: "2026-05-22T09:46:36.234Z"
+last_activity: 2026-05-22 -- Phase 19.1 execution started
 progress:
   total_phases: 6
   completed_phases: 4
@@ -21,15 +21,15 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-04-30 at v1.0.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked.
-**Current focus:** Phase 16 — diagnostic-spike-observability
+**Current focus:** Phase 19.1 — csv-analytics-factsheet-pipeline-prior-work-on-feat-csv-anal
 **Last milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 (shipped 2026-04-29). v0.17.1.x cleanup landed at v0.17.1.31 on 2026-04-30, all 5 carryover items closed.
 
 ## Current Position
 
-Phase: 19.1
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-05-22 -- Phase 19.1 planning complete
+Phase: 19.1 (csv-analytics-factsheet-pipeline-prior-work-on-feat-csv-anal) — EXECUTING
+Plan: 1 of 10
+Status: Executing Phase 19.1
+Last activity: 2026-05-22 -- Phase 19.1 execution started
 
 Progress: [██░░░░░░░░] 20% (1 of 5 phases complete; Phase 15 shipped local on v1.0.0-api-key-rewrite-15-16, awaiting milestone ship)
 
