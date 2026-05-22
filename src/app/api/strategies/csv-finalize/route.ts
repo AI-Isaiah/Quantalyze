@@ -299,6 +299,101 @@ function buildMetadataUpdatePayload(
 }
 
 /**
+ * Phase 19.1 specialist-review revision 2026-05-22 / Maintainability W-1:
+ * shared helper for the persist_csv_daily_returns RPC call. Returns
+ * `null` on success; returns the prepared 500 NextResponse on failure
+ * (caller forwards verbatim). Used by BOTH the legacy direct-RPC path
+ * and the unified-backbone path so the two cannot drift.
+ *
+ * The cast-through-unknown pattern is inlined here — `database.types.ts`
+ * hasn't been regenerated for the new RPC, so a typed `.rpc()` call
+ * would fail compilation. Centralising the cast in this helper means
+ * there's exactly one place to delete when the types regeneration
+ * lands (Phase 19.x cleanup TODO).
+ */
+async function persistDailyReturnsOrErrorResponse(
+  supabase: SupabaseClient,
+  userId: string,
+  strategyId: string,
+  rows: CsvDailyReturnRow[],
+  opts: { logPrefix: string },
+): Promise<NextResponse | null> {
+  if (rows.length === 0) return null;
+  const { error: persistError } = await (
+    supabase.rpc as unknown as (
+      fn: "persist_csv_daily_returns",
+      args: { p_user_id: string; p_strategy_id: string; p_rows: CsvDailyReturnRow[] },
+    ) => Promise<{ data: number | null; error: { code?: string; message?: string } | null }>
+  )("persist_csv_daily_returns", {
+    p_user_id: userId,
+    p_strategy_id: strategyId,
+    p_rows: rows,
+  });
+  if (persistError) {
+    console.error(
+      `${opts.logPrefix} persist_csv_daily_returns error:`,
+      persistError.code,
+      persistError.message,
+    );
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_PERSIST_FAIL",
+        human_message:
+          "Your strategy was created but the daily-return data could not be saved. Contact support@quantalyze.com with your strategy id so we can recover.",
+        debug_context: { strategy_id: strategyId },
+        correlation_id: null,
+      },
+      { status: 500 },
+    );
+  }
+  return null;
+}
+
+/**
+ * Phase 19.1 specialist-review revision 2026-05-22 / Maintainability W-2:
+ * shared helper for the `compute_analytics_from_csv` enqueue side-effect.
+ * Wraps the `after()` callback so the legacy and unified paths schedule
+ * the same code. Non-blocking — a failure logs but does NOT change the
+ * response envelope.
+ *
+ * @audit-skip: compute_jobs enqueue is internal worker-state scheduling,
+ * not a user-visible mutation. User intent is already captured by the
+ * finalize_csv_strategy + persist_csv_daily_returns RPCs run earlier in
+ * this request. Mirrors finalize-wizard's enqueue (which evades the
+ * gate only via incidental multi-line formatting). PR #275 hardening
+ * justification preserved when this helper was extracted.
+ */
+function enqueueCsvAnalyticsAfter(
+  strategyId: string,
+  fmt: string,
+  opts: { logPrefix: string },
+): void {
+  after(async () => {
+    if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
+    try {
+      const { createAdminClient } = await import("@/lib/supabase/admin");
+      const admin = createAdminClient();
+      // @audit-skip: see helper-level audit-skip block above.
+      const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
+        p_strategy_id: strategyId,
+        p_kind: "compute_analytics_from_csv",
+        p_metadata: { source: "csv-finalize", fmt },
+      });
+      if (enqueueErr) {
+        console.warn(
+          `${opts.logPrefix} enqueue_compute_analytics_from_csv failed (non-blocking): ${enqueueErr.message}`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `${opts.logPrefix} enqueue side-effect threw (non-blocking): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  });
+}
+
+/**
  * QA ISSUE-010 + /ship specialist review: persist classification
  * metadata via an authenticated UPDATE after the SECURITY DEFINER RPC
  * (or unified router) returns. Gated by `.eq("user_id", user.id)` +
@@ -602,38 +697,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   //       with "Insufficient CSV history" and the user has no recovery
   //       path.
   // A 500 with CSV_PERSIST_FAIL surfaces the strategy id so support can
-  // help the user recover manually. database.types.ts hasn't been
-  // regenerated for the new RPC — mirror the finalize_csv_strategy
-  // cast-through-unknown pattern from above.
-  if (newStrategyId && dailyReturnsSeries.length > 0) {
-    const { error: persistError } = await (
-      supabase.rpc as unknown as (
-        fn: "persist_csv_daily_returns",
-        args: { p_user_id: string; p_strategy_id: string; p_rows: CsvDailyReturnRow[] },
-      ) => Promise<{ data: number | null; error: { code?: string; message?: string } | null }>
-    )("persist_csv_daily_returns", {
-      p_user_id: user.id,
-      p_strategy_id: newStrategyId,
-      p_rows: dailyReturnsSeries,
-    });
-    if (persistError) {
-      console.error(
-        "[strategies/csv-finalize] persist_csv_daily_returns error:",
-        persistError.code,
-        persistError.message,
-      );
-      return NextResponse.json(
-        {
-          ok: false,
-          code: "CSV_PERSIST_FAIL",
-          human_message:
-            "Your strategy was created but the daily-return data could not be saved. Contact support@quantalyze.com with your strategy id so we can recover.",
-          debug_context: { strategy_id: newStrategyId },
-          correlation_id: null,
-        },
-        { status: 500 },
-      );
-    }
+  // help the user recover manually. Maintainability W-1 (specialist
+  // review 2026-05-22): both paths route through
+  // persistDailyReturnsOrErrorResponse so the cast-through-unknown is
+  // centralised in one place.
+  if (newStrategyId) {
+    const persistFailResponse = await persistDailyReturnsOrErrorResponse(
+      supabase,
+      user.id,
+      newStrategyId,
+      dailyReturnsSeries,
+      { logPrefix: "[strategies/csv-finalize]" },
+    );
+    if (persistFailResponse) return persistFailResponse;
   }
 
   // Phase 19.1 / T-19.1-05 / PR #275: enqueue the analytics computation
@@ -641,34 +717,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // the legacy direct-compute path can keep working while the Python
   // worker is deployed. Non-blocking — failure here logs a warning but
   // never 500s the wizard. Mirrors finalize-wizard/route.ts:619-644.
+  // Maintainability W-2 (specialist review 2026-05-22): both paths route
+  // through enqueueCsvAnalyticsAfter so the after()-callback shape is
+  // centralised.
   if (newStrategyId && dailyReturnsSeries.length > 0) {
-    const strategyIdForEnqueue = newStrategyId;
-    const fmtForEnqueue = fmt;
-    after(async () => {
-      if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
-      try {
-        const { createAdminClient } = await import("@/lib/supabase/admin");
-        const admin = createAdminClient();
-        // @audit-skip: compute_jobs enqueue is internal worker-state
-        // scheduling, not a user-visible mutation. User intent is already
-        // captured by the finalize_csv_strategy + persist_csv_daily_returns
-        // RPCs above. Mirrors finalize-wizard's enqueue (which evades the
-        // gate only via incidental multi-line formatting).
-        const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
-          p_strategy_id: strategyIdForEnqueue,
-          p_kind: "compute_analytics_from_csv",
-          p_metadata: { source: "csv-finalize", fmt: fmtForEnqueue },
-        });
-        if (enqueueErr) {
-          console.warn(
-            `[strategies/csv-finalize] enqueue_compute_analytics_from_csv failed (non-blocking): ${enqueueErr.message}`,
-          );
-        }
-      } catch (err) {
-        console.warn(
-          `[strategies/csv-finalize] enqueue side-effect threw (non-blocking): ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
+    enqueueCsvAnalyticsAfter(newStrategyId, fmt, {
+      logPrefix: "[strategies/csv-finalize]",
     });
   }
 
@@ -744,71 +798,23 @@ async function unifiedCsvFinalizeHandler(args: {
       args.userId,
       args.metadataRaw,
     );
-    // Phase 19.1: mirror the legacy-path persist so a
-    // PROCESS_KEY_UNIFIED_BACKBONE=true flip can't silently drop series
-    // data. Same CSV_PERSIST_FAIL envelope, same hard-fail rationale.
-    if (args.dailyReturnsSeries.length > 0) {
-      const { error: persistError } = await (
-        supabase.rpc as unknown as (
-          fn: "persist_csv_daily_returns",
-          args: { p_user_id: string; p_strategy_id: string; p_rows: CsvDailyReturnRow[] },
-        ) => Promise<{ data: number | null; error: { code?: string; message?: string } | null }>
-      )("persist_csv_daily_returns", {
-        p_user_id: args.userId,
-        p_strategy_id: unifiedBody.strategy_id,
-        p_rows: args.dailyReturnsSeries,
-      });
-      if (persistError) {
-        console.error(
-          "[strategies/csv-finalize unified] persist_csv_daily_returns error:",
-          persistError.code,
-          persistError.message,
-        );
-        return NextResponse.json(
-          {
-            ok: false,
-            code: "CSV_PERSIST_FAIL",
-            human_message:
-              "Your strategy was created but the daily-return data could not be saved. Contact support@quantalyze.com with your strategy id so we can recover.",
-            debug_context: { strategy_id: unifiedBody.strategy_id },
-            correlation_id: null,
-          },
-          { status: 500 },
-        );
-      }
-    }
+    // Phase 19.1 / Maintainability W-1: shared helper for the persist
+    // call so the legacy and unified paths cannot drift. Same
+    // CSV_PERSIST_FAIL envelope, same hard-fail rationale.
+    const persistFailResponse = await persistDailyReturnsOrErrorResponse(
+      supabase,
+      args.userId,
+      unifiedBody.strategy_id,
+      args.dailyReturnsSeries,
+      { logPrefix: "[strategies/csv-finalize unified]" },
+    );
+    if (persistFailResponse) return persistFailResponse;
 
-    // Phase 19.1 / T-19.1-05 / PR #275: mirror the legacy-path enqueue
-    // so the unified-backbone flip doesn't lose compute jobs. Same
-    // non-blocking semantics.
+    // Phase 19.1 / T-19.1-05 / PR #275 + Maintainability W-2: shared
+    // helper for the enqueue side-effect. Same non-blocking semantics.
     if (args.dailyReturnsSeries.length > 0) {
-      const strategyIdForEnqueue = unifiedBody.strategy_id;
-      const fmtForEnqueue = args.fmt;
-      after(async () => {
-        if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
-        try {
-          const { createAdminClient } = await import("@/lib/supabase/admin");
-          const admin = createAdminClient();
-          // @audit-skip: compute_jobs enqueue is internal worker-state
-          // scheduling, not a user-visible mutation. User intent is already
-          // captured by the finalize_csv_strategy + persist_csv_daily_returns
-          // RPCs above. Mirrors finalize-wizard's enqueue (which evades the
-          // gate only via incidental multi-line formatting).
-          const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
-            p_strategy_id: strategyIdForEnqueue,
-            p_kind: "compute_analytics_from_csv",
-            p_metadata: { source: "csv-finalize", fmt: fmtForEnqueue },
-          });
-          if (enqueueErr) {
-            console.warn(
-              `[strategies/csv-finalize unified] enqueue_compute_analytics_from_csv failed (non-blocking): ${enqueueErr.message}`,
-            );
-          }
-        } catch (err) {
-          console.warn(
-            `[strategies/csv-finalize unified] enqueue side-effect threw (non-blocking): ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
+      enqueueCsvAnalyticsAfter(unifiedBody.strategy_id, args.fmt, {
+        logPrefix: "[strategies/csv-finalize unified]",
       });
     }
   }
