@@ -1499,16 +1499,26 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
 
     try:
         # Load persisted series.
+        #
+        # WR-02 (19.1-REVIEW): use paginated_select. A bare
+        # .select(...).eq(...).order(...).execute() caps at PostgREST's
+        # default 1000-row response on hosted Supabase, but
+        # persist_csv_daily_returns accepts up to 5000 rows (migration
+        # 20260522120000:160). A 1001–5000-row CSV persists fine but
+        # would silently truncate to the first 1000 rows here, feeding
+        # compute_all_metrics a partial series. Composite order_by
+        # (date asc) matches the (strategy_id, date) UNIQUE index from
+        # the same migration so paginated rows cannot duplicate or
+        # skip at page boundaries.
         def _load_series():
-            return (
+            return paginated_select(
                 supabase.table("csv_daily_returns")
                 .select("date, daily_return")
-                .eq("strategy_id", strategy_id)
-                .order("date")
-                .execute()
+                .eq("strategy_id", strategy_id),
+                order_by=(("date", False),),
+                truncation_hint=f"csv_daily_returns strategy_id={strategy_id}",
             )
-        rows_resp = await db_execute(_load_series)
-        data = rows_resp.data or []
+        data = await db_execute(_load_series)
 
         if len(data) < 2:
             def _mark_failed():
@@ -1578,6 +1588,49 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
         return {"status": "complete", "strategy_id": strategy_id}
 
     except HTTPException:
+        raise
+    except PaginatedSelectTruncated as trunc:
+        # WR-03 (19.1-REVIEW) + audit-#52 fail-loud contract: mirror the
+        # exchange runner's typed-truncation branch (lines 1399-1428).
+        # The catch-all below would otherwise downgrade this to the
+        # generic "CSV analytics computation failed." message and a
+        # 500 — classify_exception then tags 500 as `unknown` →
+        # indefinite retry on a permanent data-shape fault. Preserve
+        # the typed signal so the dispatcher classifies it as permanent
+        # and the operator-facing computation_error names the specific
+        # cause.
+        logger.error(
+            "csv analytics: pagination truncation for %s "
+            "(page_count=%d, page_size=%d, hint=%s)",
+            strategy_id, trunc.page_count, trunc.page_size, trunc.hint or "n/a",
+        )
+
+        def _mark_truncated():
+            supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    "computation_status": "failed",
+                    "computation_error": (
+                        f"CSV analytics aborted: dataset exceeds "
+                        f"{trunc.page_count * trunc.page_size:,} rows "
+                        f"({trunc.hint or 'unknown source'}); operator "
+                        "intervention required."
+                    ),
+                    "data_quality_flags": {"csv_source": True},
+                },
+                on_conflict="strategy_id",
+            ).execute()
+        try:
+            await db_execute(_mark_truncated)
+        except Exception as mark_exc:  # noqa: BLE001
+            # Same defensive logging as _mark_unrecoverable below — if
+            # the truncation-marker write itself fails, log so a stuck
+            # 'computing' row has operator-visible evidence.
+            logger.warning(
+                "csv analytics: could not mark strategy %s truncated: %s",
+                strategy_id,
+                mark_exc,
+            )
         raise
     except Exception as exc:  # noqa: BLE001
         logger.error("csv analytics failed for %s: %s", strategy_id, exc)

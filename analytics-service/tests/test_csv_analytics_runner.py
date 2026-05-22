@@ -26,8 +26,18 @@ from services.metrics import MetricsResult
 
 def _make_supabase_mock(rows: list[dict]) -> MagicMock:
     """Build a Supabase client mock matching the get_supabase() shape used
-    in analytics_runner.py. The .table().select().eq().order().execute()
-    chain returns ``rows`` on data."""
+    in analytics_runner.py.
+
+    Supports two read patterns:
+      1.  .select(...).eq(...).order(...).execute() — legacy direct
+          callers (e.g. the strategy-existence probe via .single()).
+      2.  .select(...).eq(...).order(...).range(start, end).execute() —
+          the WR-02 paginated_select helper used by _load_series. The
+          ``range`` page returns ``rows`` once; on the next iteration
+          ``paginated_select`` sees len(chunk) < page_size (1000) and
+          terminates, so the same mock works for tests that use ≤ 1000
+          rows without faking page boundaries explicitly.
+    """
     sb = MagicMock()
     table = MagicMock()
     sb.table.return_value = table
@@ -43,6 +53,14 @@ def _make_supabase_mock(rows: list[dict]) -> MagicMock:
     eq_chain.order.return_value = order_chain
     select_chain.eq.return_value = eq_chain
     table.select.return_value = select_chain
+
+    # WR-02 (19.1-REVIEW): paginated_select calls .order(...).range(s, e)
+    # .execute(). Wire the same rows on the range chain so the first
+    # page returns everything; paginated_select then short-circuits on
+    # the partial-page signal (len(chunk) < 1000).
+    range_chain = MagicMock()
+    range_chain.execute.return_value = MagicMock(data=rows)
+    order_chain.range.return_value = range_chain
 
     # .rpc(...).execute() — used by the sibling_kinds batch upsert path.
     sb.rpc.return_value = MagicMock(execute=MagicMock())
@@ -193,14 +211,16 @@ async def test_mark_unrecoverable_logs_warning_before_reraise(
     async def _side_effect_db_execute(fn):
         name = getattr(fn, "__name__", "")
         if name == "_load_series":
-            # Return our rows so we get past the < 2 gate.
-            return MagicMock(data=rows)
+            # WR-02: _load_series now returns the rows list directly
+            # (paginated_select contract), not a Supabase response wrapper.
+            return rows
         if name == "_mark_unrecoverable":
             # Simulate DB unreachable on the failure-marker write — this
             # is the exact path PR #273's warning protects.
             raise RuntimeError("DB unreachable during mark_unrecoverable")
         # All other db_execute calls (strategy-existence probe,
-        # _mark_computing, future helpers) succeed with no-op data.
+        # _mark_computing, future helpers) succeed with a benign
+        # response object whose .data is a truthy list.
         return MagicMock(data=[{"id": "test-strategy-uuid"}])
 
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
@@ -236,6 +256,78 @@ async def test_mark_unrecoverable_logs_warning_before_reraise(
     assert "DB unreachable during mark_unrecoverable" in msg, (
         f"warning must reference the inner mark_unrecoverable exception, "
         f"got: {msg!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_csv_analytics_paginated_truncation_writes_specific_error() -> None:
+    """WR-03 (19.1-REVIEW). When paginated_select raises
+    PaginatedSelectTruncated during _load_series, the runner must:
+      1. Persist a specific computation_error mentioning the row cap
+         and the truncation hint (operator triage signal).
+      2. Stamp data_quality_flags.csv_source=True so the provenance
+         pill survives the failure (mirrors WR-05).
+      3. Re-raise the typed exception so the worker dispatcher's
+         classify_exception can tag it as permanent (no retry on a
+         data-shape fault), rather than downgrading it to the catch-
+         all "CSV analytics computation failed." 500 → indefinite retry.
+    """
+    from services.analytics_runner import (
+        PaginatedSelectTruncated,
+        run_csv_strategy_analytics,
+    )
+
+    sb = MagicMock()
+    table = MagicMock()
+    sb.table.return_value = table
+    table.upsert.return_value = MagicMock(execute=MagicMock())
+    # Strategy probe must succeed so we reach _load_series.
+    select_chain = MagicMock()
+    eq_chain = MagicMock()
+    eq_chain.single.return_value.execute.return_value = MagicMock(
+        data={"id": "trunc-strategy-uuid", "user_id": "u"}
+    )
+    select_chain.eq.return_value = eq_chain
+    table.select.return_value = select_chain
+
+    trunc = PaginatedSelectTruncated(
+        page_count=1000, page_size=1000,
+        hint="csv_daily_returns strategy_id=trunc-strategy-uuid",
+    )
+
+    async def _side_effect_db_execute(fn):
+        name = getattr(fn, "__name__", "")
+        if name == "_load_series":
+            raise trunc
+        # All other callables (strategy probe lambda, _mark_computing,
+        # _mark_truncated) run for real against the supabase mock so
+        # we can assert on the resulting upsert.
+        return fn()
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.db_execute",
+               side_effect=_side_effect_db_execute):
+        with pytest.raises(PaginatedSelectTruncated):
+            await run_csv_strategy_analytics("trunc-strategy-uuid")
+
+    # _mark_truncated must have written a failed row with a specific
+    # error mentioning the row cap + provenance flag.
+    failed = [
+        c for c in table.upsert.call_args_list
+        if c.args[0].get("computation_status") == "failed"
+    ]
+    assert len(failed) == 1, (
+        f"Expected exactly one failed upsert from _mark_truncated, "
+        f"got {len(failed)}"
+    )
+    payload = failed[0].args[0]
+    assert "1,000,000" in payload["computation_error"] or "1000000" in payload["computation_error"], (
+        f"computation_error must cite the row cap; got: "
+        f"{payload['computation_error']!r}"
+    )
+    assert payload["data_quality_flags"] == {"csv_source": True}, (
+        f"WR-05 provenance flag must survive truncation; got: "
+        f"{payload.get('data_quality_flags')!r}"
     )
 
 
