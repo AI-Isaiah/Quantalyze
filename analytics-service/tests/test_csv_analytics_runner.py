@@ -149,6 +149,10 @@ async def test_csv_analytics_insufficient_history() -> None:
     failed = [c for c in upsert_calls if c.args[0].get("computation_status") == "failed"]
     assert len(failed) >= 1, "Expected at least one upsert with status='failed'"
     assert "Insufficient CSV history" in failed[0].args[0]["computation_error"]
+    # WR-05 (19.1-REVIEW): csv_source provenance flag must survive the
+    # insufficient-history failure path so the owner UI renders the
+    # "CSV upload failed" pill, not the generic "missing data" copy.
+    assert failed[0].args[0].get("data_quality_flags") == {"csv_source": True}
 
 
 @pytest.mark.asyncio
@@ -257,6 +261,50 @@ async def test_mark_unrecoverable_logs_warning_before_reraise(
         f"warning must reference the inner mark_unrecoverable exception, "
         f"got: {msg!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_csv_analytics_unrecoverable_stamps_csv_source_flag() -> None:
+    """WR-05 (19.1-REVIEW). When the runner hits the catch-all
+    exception path (compute_all_metrics raises) and successfully writes
+    the _mark_unrecoverable row, the persisted row must carry
+    data_quality_flags={'csv_source': True} so downstream consumers can
+    still render the "CSV upload failed" provenance pill. Without the
+    flag the owner UI falls back to generic "missing data" copy and
+    the user loses the signal that this strategy came from a CSV
+    upload (not an exchange-backed sync) in the first place.
+    """
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+    ] * 5
+    sb = _make_supabase_mock(rows)
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               side_effect=RuntimeError("compute_all_metrics blew up")):
+        with pytest.raises(HTTPException) as exc_info:
+            await run_csv_strategy_analytics("test-strategy-uuid")
+
+    assert exc_info.value.status_code == 500
+
+    upsert_calls = sb.table.return_value.upsert.call_args_list
+    failed = [c for c in upsert_calls if c.args[0].get("computation_status") == "failed"]
+    assert len(failed) >= 1, (
+        "Expected at least one failed upsert from _mark_unrecoverable"
+    )
+    # The LAST failed upsert is the _mark_unrecoverable write (there
+    # is no insufficient-history write on this path).
+    payload = failed[-1].args[0]
+    assert payload.get("data_quality_flags") == {"csv_source": True}, (
+        f"_mark_unrecoverable must stamp csv_source=True; got: "
+        f"{payload.get('data_quality_flags')!r}"
+    )
+    assert payload["computation_error"] == "CSV analytics computation failed."
 
 
 @pytest.mark.asyncio

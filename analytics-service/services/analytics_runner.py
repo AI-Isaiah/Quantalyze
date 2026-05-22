@@ -1521,12 +1521,18 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
         data = await db_execute(_load_series)
 
         if len(data) < 2:
+            # WR-05 (19.1-REVIEW): stamp csv_source=True so the
+            # provenance pill renders "CSV upload failed — insufficient
+            # history" instead of falling through to generic "missing
+            # data" copy. Downstream consumers gate the chip on
+            # data_quality_flags?.csv_source (src/lib/types.ts:335).
             def _mark_failed():
                 supabase.table("strategy_analytics").upsert(
                     {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
                         "computation_error": "Insufficient CSV history. At least 2 data points required.",
+                        "data_quality_flags": {"csv_source": True},
                     },
                     on_conflict="strategy_id",
                 ).execute()
@@ -1635,12 +1641,17 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.error("csv analytics failed for %s: %s", strategy_id, exc)
 
+        # WR-05 (19.1-REVIEW): stamp csv_source=True so the provenance
+        # pill survives the unrecoverable failure. Without it the
+        # owner-side UI sees null data_quality_flags and falls back to
+        # generic "missing data" copy instead of "CSV upload failed".
         def _mark_unrecoverable():
             supabase.table("strategy_analytics").upsert(
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
                     "computation_error": "CSV analytics computation failed.",
+                    "data_quality_flags": {"csv_source": True},
                 },
                 on_conflict="strategy_id",
             ).execute()
