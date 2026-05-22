@@ -181,34 +181,27 @@ async def test_mark_unrecoverable_logs_warning_before_reraise(
     ] * 5
     sb = _make_supabase_mock(rows)
 
-    # First upsert (mark_computing) succeeds; second upsert (mark_complete
-    # — never reached) doesn't matter; third upsert (_mark_unrecoverable)
-    # raises. We can't easily distinguish call ordering inside the mock
-    # without inspection — instead, route ALL upsert.execute calls
-    # AFTER the first one to raise. We accomplish this by replacing the
-    # whole supabase mock's upsert chain via db_execute side_effects:
-    # easier path is to make compute_all_metrics raise, then the next
-    # db_execute call (which runs _mark_unrecoverable) raises too.
-    #
-    # We patch services.analytics_runner.db_execute directly. It is
-    # called sequentially: _mark_computing → _load_series →
-    # _mark_unrecoverable. So make the third call raise.
-
-    call_counter = {"n": 0}
-    original_db_execute_count = 3  # mark_computing, load_series, mark_unrecoverable
+    # WR-06 (19.1-REVIEW): route side-effects by the named callable
+    # being dispatched, NOT by call-counter position. Counter-based
+    # routing silently broke whenever the runner gained a new db_execute
+    # call (e.g. the WR-01 strategy-existence probe) — the third call
+    # would no longer be _mark_unrecoverable and the warning under test
+    # would no longer fire. Naming the callable lets the test detect the
+    # specific failing path regardless of how many db_execute calls
+    # surround it.
 
     async def _side_effect_db_execute(fn):
-        call_counter["n"] += 1
-        if call_counter["n"] == 1:
-            # _mark_computing — succeed.
-            return None
-        if call_counter["n"] == 2:
-            # _load_series — return our rows so we get past the < 2 gate.
+        name = getattr(fn, "__name__", "")
+        if name == "_load_series":
+            # Return our rows so we get past the < 2 gate.
             return MagicMock(data=rows)
-        if call_counter["n"] == 3:
-            # _mark_unrecoverable — simulate DB unreachable.
+        if name == "_mark_unrecoverable":
+            # Simulate DB unreachable on the failure-marker write — this
+            # is the exact path PR #273's warning protects.
             raise RuntimeError("DB unreachable during mark_unrecoverable")
-        return None
+        # All other db_execute calls (strategy-existence probe,
+        # _mark_computing, future helpers) succeed with no-op data.
+        return MagicMock(data=[{"id": "test-strategy-uuid"}])
 
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.db_execute",
