@@ -34,6 +34,15 @@ describe("toSyncStatus (audit-2026-05-07 C-0142)", () => {
     expect(toSyncStatus("failed")).toBe("error");
   });
 
+  it("maps DB 'complete_with_warnings' to UI 'complete_with_warnings' (Phase 19.1)", () => {
+    // Phase 19.1: `complete_with_warnings` was promoted to a first-class
+    // DB status (the analytics_runner writes it when consumer-specific
+    // flags fire). The converter must surface it as the dedicated UI
+    // state — silently collapsing to plain 'complete' would hide the
+    // warning provenance from allocators reading the sync chip.
+    expect(toSyncStatus("complete_with_warnings")).toBe("complete_with_warnings");
+  });
+
   it("covers every ComputationStatus variant (exhaustive)", () => {
     // Pinning the full DB → UI mapping. If a new DB variant is added,
     // TypeScript fails the build at `toSyncStatus`'s switch; this list
@@ -42,6 +51,7 @@ describe("toSyncStatus (audit-2026-05-07 C-0142)", () => {
       ["pending", "idle"],
       ["computing", "computing"],
       ["complete", "complete"],
+      ["complete_with_warnings", "complete_with_warnings"],
       ["failed", "error"],
     ];
     for (const [db, ui] of cases) {

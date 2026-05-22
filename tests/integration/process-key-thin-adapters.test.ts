@@ -464,6 +464,7 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
         wizard_session_id: "44444444-4444-4444-4444-444444444444",
         fmt: "daily_returns",
         strategy_name: "Apollo CSV",
+        daily_returns_series: [{ date: "2024-01-02", daily_return: 0.01 }],
       }),
     );
     const call = findProcessKeyCall();
@@ -707,6 +708,15 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
 
   it("strategies/csv-finalize: flow_type=csv (re-routed from /csv/finalize)", async () => {
     vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    // H-1 (red-team): unified handler requires upstream to return a
+    // UUID strategy_id or it surfaces 502. Default mock omits it; override here.
+    mockFetch.mockImplementationOnce(async (url: string | URL, init?: RequestInit) => {
+      fetchCalls.push({ url: String(url), init: init ?? {} });
+      return new Response(
+        JSON.stringify({ strategy_id: TEST_STRATEGY_ID, queued: true }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
 
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
     const res = await POST(
@@ -714,6 +724,7 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
         wizard_session_id: "44444444-4444-4444-4444-444444444444",
         fmt: "daily_returns",
         strategy_name: "Apollo CSV",
+        daily_returns_series: [{ date: "2024-01-02", daily_return: 0.01 }],
       }),
     );
 
@@ -867,6 +878,7 @@ describe("thin adapters — flag=off preserves legacy path", () => {
         wizard_session_id: "44444444-4444-4444-4444-444444444444",
         fmt: "daily_returns",
         strategy_name: "Apollo CSV",
+        daily_returns_series: [{ date: "2024-01-02", daily_return: 0.01 }],
       }),
     );
 
@@ -958,6 +970,7 @@ describe("thin adapters — INTERNAL_API_TOKEN missing returns 503 (I-T3)", () =
         wizard_session_id: "44444444-4444-4444-4444-444444444444",
         fmt: "daily_returns",
         strategy_name: "Apollo CSV",
+        daily_returns_series: [{ date: "2024-01-02", daily_return: 0.01 }],
       }),
     );
     expect(res.status).toBe(503);

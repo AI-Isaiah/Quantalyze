@@ -4,14 +4,14 @@ milestone: v1.0.0
 milestone_name: API-Key Rewrite
 status: executing
 stopped_at: context exhaustion at 76% (2026-05-07)
-last_updated: "2026-05-07T18:55:59.988Z"
-last_activity: 2026-05-06 -- Phase 18 planning complete
+last_updated: "2026-05-22T09:46:36.234Z"
+last_activity: 2026-05-22 -- Phase 19.1 execution started
 progress:
-  total_phases: 5
-  completed_phases: 3
-  total_plans: 27
-  completed_plans: 26
-  percent: 96
+  total_phases: 6
+  completed_phases: 4
+  total_plans: 46
+  completed_plans: 35
+  percent: 76
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-04-30 at v1.0.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked.
-**Current focus:** Phase 16 — diagnostic-spike-observability
+**Current focus:** Phase 19.1 — csv-analytics-factsheet-pipeline-prior-work-on-feat-csv-anal
 **Last milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 (shipped 2026-04-29). v0.17.1.x cleanup landed at v0.17.1.31 on 2026-04-30, all 5 carryover items closed.
 
 ## Current Position
 
-Phase: 18
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-05-06 -- Phase 18 planning complete
+Phase: 19.1 (csv-analytics-factsheet-pipeline-prior-work-on-feat-csv-anal) — EXECUTING
+Plan: 1 of 10
+Status: Executing Phase 19.1
+Last activity: 2026-05-22 -- Phase 19.1 execution started
 
 Progress: [██░░░░░░░░] 20% (1 of 5 phases complete; Phase 15 shipped local on v1.0.0-api-key-rewrite-15-16, awaiting milestone ship)
 
@@ -150,6 +150,7 @@ Progress: [██░░░░░░░░] 20% (1 of 5 phases complete; Phase 15
 - v1.0.0 plan = autoplan-restructured "API-Key Rewrite" with 5 phases (15-19) and conditional Day-2 decision gate. Phase 19 only runs if Phase 16 diagnostic finds the root cause requires architectural rewrite vs single-config fix.
 - Roadmap (2026-04-30) ratified 5-phase structure with explicit wave dependencies + 11 phase-internal gates. Conditional Phase 19 modeled in `.planning/ROADMAP.md` "Conditional Execution Logic" diagram.
 - 2026-05-06 — Phase 18 plan-phase records that BACKBONE-06 (open-perp correctness) + BACKBONE-07 (TWR ≠ YTD reconciliation) push from Phase 18 to Phase 19 per `.planning/phases/18-root-cause-fix-founder-lp-skeleton/18-CONTEXT.md` L22-23. Rationale: Phase 19's `IngestionAdapter.reconstruct_positions` + equity-curve refactor absorbs the same call sites; Phase 18 already heavy with FIX-04 redact mirror + LP cron + 10-team verification. Day-2 doc Section 5's "IN (Phase 18)" rows are now superseded — see `.planning/phase-16/day-2-decision.md` Section 5 REVISED header AND inline row supersede annotations (Adversarial revision 2026-05-06: W6).
+- Phase 19.1 inserted after Phase 19: CSV → analytics → factsheet pipeline (prior work on feat/csv-analytics-pipeline-2026-05-21 may be discarded) (URGENT)
 
 ### Cross-AI dual-voice review conventions (from v0.17.0.0 onward)
 

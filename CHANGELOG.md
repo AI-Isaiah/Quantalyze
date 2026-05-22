@@ -7,6 +7,37 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.7.0] - 2026-05-22
+
+**feat(csv-pipeline): CSV → analytics → factsheet pipeline (Phase 19.1) — CSV-uploaded strategies now produce real CAGR / Sharpe / drawdown / sparkline metrics via the same `compute_all_metrics` pipeline as exchange-backed strategies. Replaces the v0.24.6.0 `analyticsMissingMessage` stop-gap.**
+
+Re-implements + ships to production the work originally drafted on the discarded `feat/csv-analytics-pipeline-2026-05-21` branch (PR #270, closed). Architecture verbatim from PR #270; replanned through the GSD workflow with two pre-execution reviews (Grok 4.3 + fresh-Claude subagent) that surfaced 7 blockers + 8 warnings, all closed before execution. Production deploy applied this PR — both migrations are LIVE on the test (`qmnijlgmdhviwzwfyzlc`) and prod (`khslejtfbuezsmvmtsdn`) Supabase projects via Supabase MCP `apply_migration`.
+
+### Added
+- **`csv_daily_returns` table** + `persist_csv_daily_returns(p_user_id, p_strategy_id, p_rows)` SECURITY DEFINER RPC. PRIMARY KEY (strategy_id, date); no redundant explicit index (PR #272 hardening). RPC pre-hardened: collapsed 42501 probe-oracle (missing-strategy + wrong-owner indistinguishable), `jsonb_typeof` guard before `jsonb_array_length`, 5000-row cap, GRANT TO authenticated with inline justification (matches finalize_csv_strategy migration 093 pattern). 3-tier RLS (service_role all, owner select, admin select).
+- **`compute_analytics_from_csv` worker kind** registered in `compute_job_kinds` + admitted into `compute_jobs_kind_target_coherence` (strategy-scoped arm). Strict superset of migration 108 — `process_key_long` branch + all 6 pre-existing strategy-scoped kinds preserved verbatim.
+- **`run_csv_strategy_analytics(strategy_id)`** in `analytics-service/services/analytics_runner.py` — parallel to `run_strategy_analytics`. Reads `csv_daily_returns` rows, feeds `compute_all_metrics` directly (no trades → fills → positions chain). Sets `data_quality_flags.csv_source = True`; handles benchmark unavailability; logs warning before re-raise on `_mark_unrecoverable` silent-swallow path (PR #273 hardening).
+- **`compute_analytics_from_csv` worker dispatch** in `job_worker.py` + `main_worker.py` — `TIMEOUT_PER_KIND` 10 min, `WATCHDOG_PER_KIND_OVERRIDES` 15 min (preserves the `test_every_kind_has_watchdog_headroom` invariant).
+- **`daily_returns_series` in csv-validate envelope** (`csv_validator.py`) — present for `daily_returns` (verbatim) and `daily_nav` (via `pct_change().dropna()`). Trades format omits the field.
+- **`parseDailyReturnsSeries` route-boundary helper** in `csv-finalize/route.ts` — ≤5000 rows, YYYY-MM-DD date regex, finite-number per value, **duplicate-date guard** (PR #274 hardening — returns 400 `CSV_INVALID_FORMAT` instead of letting the RPC's UNIQUE constraint throw 23505 as a 500).
+- **`unifiedCsvFinalizeHandler` signature extended** with explicit `dailyReturnsSeries: CsvDailyReturnRow[]` param — no closure capture (T-19.1-10, strict signature regex pinned in tests).
+- **`after()` enqueue on both legacy + unified-backbone paths**, gated by `USE_COMPUTE_JOBS_QUEUE`. Non-blocking — failure logs a warning but never 500s the wizard. `@audit-skip` pragmas on both `enqueue_compute_job` call sites with verbatim justification (PR #275 hardening).
+- **12 live-DB pytest regression tests** in `analytics-service/tests/test_persist_csv_daily_returns_live.py` — pin probe-oracle, GRANT shape, jsonb_typeof guard, row-cap, empty-array guard, idempotency, no-redundant-index, single-row CSV terminal state, all-zero NaN-safety, NaN/Inf clean failure. Gated by `TEST_SUPABASE_DB_URL` skipif (matches `test_resend_correlation_rls.py` convention).
+
+### Changed
+- **`computation_status` union** in `src/lib/types.ts` extended with `"complete_with_warnings"` — first-class DB status (was a UI-only state; PR #274 jsdoc refresh on `SyncProgress.tsx`). `AnalyticsDataQualityFlags` gets optional `csv_source?: boolean`.
+- **`csv-finalize/route.ts`** legacy path persists daily returns via `persist_csv_daily_returns` RPC after `applyCsvMetadataUpdate`. Persist error → 500 `CSV_PERSIST_FAIL` (hard-fail: `wizard_session_id` is unique-claimed, no client retry path).
+
+### Fixed
+- **CSV-uploaded strategies show real metrics on `/strategy/[id]`** instead of the v0.24.6.0 "Platform-computed analytics are not generated for CSV-uploaded strategies in this release" stop-gap. Stop-gap removal + `page.tsx` `complete_with_warnings` widening still pending Plans 09 + 10 of phase 19.1 (E2E verification + cleanup).
+
+### Notes
+- Migrations applied to PROD via Supabase MCP `apply_migration` during ship; verdict line `19.1-06-VERDICT: PROD-APPLIED`. Cross-project schema parity verified 6/6 fields between TEST and PROD.
+- Tests: 4483 vitest pass, 1812 pytest pass, 0 failures. Live-DB regression tests skip cleanly when `TEST_SUPABASE_DB_URL` unset (CI gate).
+- Pre-existing finalize+persist atomicity gap noted by Grok 4.3 adversarial review — explicitly deferred to BACKBONE-07 / R4 (`wizard_session_id` UNIQUE INDEX) per CONTEXT.md `<deferred>`. Logged in TODOS for follow-up.
+- Plans 07-10 (Railway deploy verification, Vercel `USE_COMPUTE_JOBS_QUEUE` flip, E2E production smoke, stop-gap removal + branch cleanup) follow in subsequent commits after this PR lands.
+
+
 ## [0.24.6.1] - 2026-05-21
 
 **fix(typecheck): add `csv_metadata` to `WIZARD_STEP_KEYS` exhaustiveness array.**

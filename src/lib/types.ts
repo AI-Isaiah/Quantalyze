@@ -264,7 +264,7 @@ export interface StrategyAnalytics {
   id: string;
   strategy_id: string;
   computed_at: string;
-  computation_status: "pending" | "computing" | "complete" | "failed";
+  computation_status: "pending" | "computing" | "complete" | "complete_with_warnings" | "failed";
   computation_error: string | null;
   benchmark: string | null;
   cumulative_return: number | null;
@@ -321,6 +321,18 @@ export interface StrategyAnalytics {
  * src/components/strategy-v2/TradeAndPositionPanel.tsx for current surfaces.
  */
 export interface AnalyticsDataQualityFlags {
+  /**
+   * Phase 19.1 — present (and true) when the strategy_analytics row was
+   * produced by `run_csv_strategy_analytics`, i.e. the CSV → analytics
+   * pipeline. CSV-sourced runs route directly through `compute_all_metrics`
+   * from a `csv_daily_returns` series and DO NOT touch trades / fills /
+   * positions; trade_metrics / volume_metrics / exposure_metrics are NULL
+   * by design. Distinct from the exchange-backed path; surfacing this lets
+   * the UI render an appropriate provenance pill instead of falsely
+   * implying "missing data". Absent when written by the legacy exchange
+   * runner.
+   */
+  csv_source?: boolean;
   benchmark_unavailable?: boolean;
   /** Human-readable note paired with `benchmark_unavailable`. Emitted by
    *  analytics_runner.py:868 when benchmark_returns is None or stale. */

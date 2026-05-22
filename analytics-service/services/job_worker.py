@@ -185,6 +185,7 @@ class DispatchResult:
 TIMEOUT_PER_KIND: dict[str, float] = {
     "sync_trades": 15 * 60,      # 15 minutes (supports 90-day raw fill backfill)
     "compute_analytics": 15 * 60,  # 15 minutes
+    "compute_analytics_from_csv": 10 * 60,   # Phase 19.1 — pure math, no exchange I/O
     "compute_portfolio": 10 * 60,  # 10 minutes
     "poll_positions": 3 * 60,    # 3 minutes (services.positions.fetch_positions)
     "sync_funding": 3 * 60,      # 3 minutes (funding volume << trade volume)
@@ -1225,6 +1226,32 @@ async def run_compute_analytics_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+async def run_compute_analytics_from_csv_job(job: dict) -> DispatchResult:
+    """Phase 19.1 / CSV → analytics pipeline Plan 02 Task 3. Worker
+    handler for the compute_analytics_from_csv kind. Delegates to
+    services.analytics_runner.run_csv_strategy_analytics, which reads
+    from csv_daily_returns and calls compute_all_metrics directly —
+    no trades/fills/positions chain.
+
+    strategy_id missing → permanent failure (no retry; this is a
+    coding bug, not a transient).
+    """
+    strategy_id = job.get("strategy_id")
+    if not strategy_id:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message="run_compute_analytics_from_csv_job: strategy_id missing",
+            error_kind="permanent",
+        )
+
+    # Lazy import (mirrors run_compute_analytics_job) to keep import-time
+    # cycles isolated.
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    await run_csv_strategy_analytics(strategy_id)
+    return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
 async def run_compute_portfolio_job(job: dict) -> DispatchResult:
     """Run portfolio analytics via the existing routers.portfolio helper.
 
@@ -2212,6 +2239,10 @@ async def dispatch(job: dict) -> DispatchResult:
         handler = run_sync_trades_job
     elif kind == "compute_analytics":
         handler = run_compute_analytics_job
+    elif kind == "compute_analytics_from_csv":
+        # Phase 19.1 — CSV-sourced analytics. Routes through the
+        # csv_daily_returns table instead of the trades/fills chain.
+        handler = run_compute_analytics_from_csv_job
     elif kind == "compute_portfolio":
         handler = run_compute_portfolio_job
     elif kind == "poll_positions":

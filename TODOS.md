@@ -12,6 +12,83 @@
 
 ---
 
+## Phase 19.1 follow-ups — CSV → analytics pipeline post-deploy work
+
+### P1 — Plans 07-10 (remaining phase work, blocked on PR merge + Railway deploy)
+
+Plans 01-06 of Phase 19.1 landed in this PR (v0.24.7.0): code on the branch + both migrations applied to TEST + PROD. The remaining plans are gated on this PR merging to main and Railway redeploying analytics-service with the new code:
+
+- **Plan 07** — Railway deploy verification: assert deployed_sha == main HEAD via Supabase MCP probe, watchdog-headroom test passes against deployed image, hard 15-min timeout on deploy convergence.
+- **Plan 08** — Vercel `USE_COMPUTE_JOBS_QUEUE=true` flip + redeploy: idempotent (`vercel env get` → skip if already true; fallback to `vercel env pull` if the `get` subcommand is unavailable).
+- **Plan 09** — End-to-end production smoke: upload real CSV via wizard, poll `strategy_analytics.computation_status` until terminal, curl factsheet HTML, assert no stop-gap copy + CAGR card test-ids present.
+- **Plan 10** — Stop-gap removal (`src/app/strategy/[id]/analyticsMissingMessage.ts` + `page.tsx` gate widening to admit `complete_with_warnings`) + delete the two discarded remote branches `feat/csv-analytics-pipeline-2026-05-21` and `feat/csv-analytics-pipeline-hardening-2026-05-22`.
+
+Plans 07-10 are gated on Plan 06's verdict line `19.1-06-VERDICT: PROD-APPLIED` (already emitted) plus this PR landing on main. After merge, resume autonomous mode with: `gsd-autonomous --only 19.1` from Plan 07.
+
+### P2 — Pre-existing atomicity gap (Grok 4.3 ship-review finding)
+
+`csv-finalize/route.ts` calls `finalize_csv_strategy` then `persist_csv_daily_returns` non-transactionally. If `persist_csv_daily_returns` fails, the strategy row is already committed but has no daily returns. Mitigated today:
+- 500 `CSV_PERSIST_FAIL` returned with strategy_id (support recovery path)
+- No `after()` enqueue fires (early-return blocks it)
+- Worker doesn't get a job → no silent loop on "Insufficient CSV history"
+
+Real harm: orphan strategy rows accumulate, user confusion. Pre-existing issue (`finalize_csv_strategy` was on main before Phase 19.1). Deferred to BACKBONE-07 / R4 (`wizard_session_id` UNIQUE INDEX) per CONTEXT.md `<deferred>`. **Action when BACKBONE-07 ships:** wrap both RPCs in a single transaction OR add a Sentry alert + cron-based orphan-strategy cleanup.
+
+### P2 — `after()` enqueue silent-failure monitoring
+
+`csv-finalize/route.ts` after() block catches enqueue errors and logs warnings (non-blocking by design — the wizard returns 200 regardless). If enqueue fails silently in production (transient RPC error, etc.), the strategy has data but no compute job → factsheet shows "Analytics being computed" indefinitely. Real harm: stuck-pending strategies. **Mitigation needed:** Sentry alert on `enqueue_compute_job` failure path + dashboard for stuck `pending`/`null` `computation_status` rows >2h after `created_at`.
+
+### P3 — `compute_all_metrics` edge case coverage in unit tests
+
+Plan 05 ships live-DB regression tests for 1-row / all-zero / NaN-Inf CSVs. The matching pytest unit tests in `analytics-service/tests/test_csv_analytics_runner.py` (Plan 02 / Wave 1) cover the happy path + benchmark unavailable + sparse weekday calendar — but not the new edge cases against the live `compute_all_metrics` math directly. Adding mocked equivalents of Tests 9-11 would catch regressions without requiring `TEST_SUPABASE_DB_URL`.
+
+### Claude red-team review (2026-05-22) — follow-ups
+
+Five additional findings from the post-PR red-team pass against Phase 19.1. Fixes 1-4 landed in this branch (commits prefixed `19.1-redteam`). The items below are the remaining follow-ups that need separate plans / migrations / monitoring infra.
+
+#### P0 — `complete_with_warnings` CHECK constraint missing
+
+Pre-existing production bug NOT introduced by Phase 19.1, but surfaced during the red-team pass. The PROD `strategy_analytics_computation_status_check` constraint admits only `pending|computing|complete|failed`. However, `analytics-service/services/analytics_runner.py:1322` writes `complete_with_warnings` when `consumer_specific_flags` is non-empty (the OKX exchange runner uses this path). Writes that hit this branch silently fail (or were rare enough to not surface). Same gap exists on `portfolio_analytics_computation_status_check`.
+
+**Action:** ship a new migration `2026MMddhhmmss_widen_strategy_analytics_computation_status.sql`:
+
+```sql
+ALTER TABLE strategy_analytics DROP CONSTRAINT strategy_analytics_computation_status_check;
+ALTER TABLE strategy_analytics ADD CONSTRAINT strategy_analytics_computation_status_check
+  CHECK (computation_status IN ('pending','computing','complete','complete_with_warnings','failed'));
+-- repeat for portfolio_analytics
+```
+
+Add a regression test that asserts the widened set is admitted (INSERT round-trip for each value).
+
+**Priority:** P0 — affects the existing exchange runner today.
+
+#### P1 — Unified backbone CSV-finalize broken-by-construction
+
+If `PROCESS_KEY_UNIFIED_BACKBONE=on` is flipped while CSV finalize is in scope, the upstream `/process-key` csv-finalize branch calls `finalize_csv_strategy` via the service-role client which has no `auth.uid()` → `42501` every time. The legacy direct-RPC path uses the request-scoped Supabase client and works.
+
+**Action:** Either (a) skip unified path for `step=finalize` until the upstream supports JWT impersonation, or (b) add JWT forwarding upstream. Document the prerequisite in the unified-backbone flag's flip-runbook so a future operator doesn't enable it without addressing this gap.
+
+#### P2 — Admin RLS policy EXISTS subquery on `csv_daily_returns`
+
+The `csv_daily_returns_admin_select` RLS policy runs `EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND is_admin)` per row. At 5000 rows per query this is a planner gamble — Postgres might inline the EXISTS into the row scan, or might materialize it once. Empirically fine today, brittle as data grows.
+
+**Action:** future migration — wrap the admin-check as a `SECURITY DEFINER` function (cached per session) or use `(SELECT auth.uid())` to hoist the lookup. Cross-reference admin-policy patterns already in use by the dashboard tables.
+
+#### P2 — Worker crash mid-job leaves `computing` state
+
+Pre-existing pattern inherited by the new CSV runner. If the worker SIGKILLs after `_mark_computing` but before any terminal write, the `strategy_analytics` row stays at `computing` until the existing stale-checkpoint watchdog catches it. For CSV uploads the user-visible symptom is a wizard that polls `computing` indefinitely.
+
+**Action:** add a cron-style janitor (Vercel Cron or Supabase Edge Function) that detects `computation_status='computing'` rows older than 30 minutes and marks them `failed` with `computation_error='worker crash recovery — please retry'`. Use the existing `pg_cron`-based approach (see analytics watchdog precedent).
+
+#### P3 — `@audit-skip` pragma copy-paste risk
+
+The `@audit-skip` justification blocks in `csv-finalize/route.ts` (around `enqueueCsvAnalyticsAfter` and `applyCsvMetadataUpdate`) are sound for the current use, but future maintainers might quote the justification verbatim in unrelated places without understanding the audit-gate model. Pre-existing risk amplified by the recent extraction into shared helpers.
+
+**Action:** add a CLAUDE.md note (`## Audit-skip pragma — when it's appropriate`) describing when `@audit-skip` is OK (continuation of an already-audited user-intent flow; internal worker-state scheduling) and when it is NOT (any new user-initiated mutation lacking an upstream audit row).
+
+---
+
 ## Phase 18 — Root-Cause Fix + Founder LP Skeleton
 
 - 10-team onboarding tracker: [`.planning/phase-18/team-status.md`](.planning/phase-18/team-status.md) — one row per onboarding team (FIX-03). Founder updates as teams flow through the wizard.
