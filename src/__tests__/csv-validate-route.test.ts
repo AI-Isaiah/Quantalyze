@@ -110,6 +110,35 @@ const isUnifiedBackboneActiveMock = vi.hoisted(() =>
 );
 const postProcessKeyMock = vi.hoisted(() => vi.fn());
 
+// API M-2 (red-team 2026-05-22): the route now SELECTs current
+// computation_status BEFORE upserting the failure placeholder, to
+// avoid stomping a `complete` row the worker may have written
+// concurrently. Capture the SELECT chain so tests can pin the
+// guarded behaviour. Default behaviour returns `{ data: null }`
+// (no existing row → upsert proceeds), matching the pre-M-2
+// observable surface for existing tests.
+type AdminSelectResult = {
+  data: { computation_status?: string } | null;
+  error: { code?: string; message?: string } | null;
+};
+const adminSelectMaybeSingleMock = vi.hoisted(
+  () =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.fn(
+      async (
+        _table?: string,
+        _col?: string,
+        _val?: unknown,
+      ): Promise<{
+        data: { computation_status?: string } | null;
+        error: { code?: string; message?: string } | null;
+      }> => ({ data: null, error: null }),
+    ),
+);
+// Re-export the type so existing vi.fn() inference doesn't break the
+// adminSelectMaybeSingleMock.mockResolvedValue calls below.
+void (null as AdminSelectResult | null);
+
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     rpc: (name: string, args: Record<string, unknown>) => adminRpcMock(name, args),
@@ -120,6 +149,11 @@ vi.mock("@/lib/supabase/admin", () => ({
         // can be overridden per test via adminUpsertMock.mockResolvedValueOnce.
         return Promise.resolve(adminUpsertMock(table, payload, opts));
       },
+      select: (_cols: string) => ({
+        eq: (col: string, val: unknown) => ({
+          maybeSingle: () => adminSelectMaybeSingleMock(table, col, val),
+        }),
+      }),
     }),
   }),
 }));
@@ -638,6 +672,10 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     // invoke this, but a test that triggers the failure-placeholder
     // branch can override per-call via mockResolvedValueOnce.
     adminUpsertMock.mockReturnValue({ error: null });
+    // API M-2 (red-team 2026-05-22): default the guard SELECT to "no
+    // existing row" so the upsert proceeds. Tests that need to assert
+    // the worker-already-complete guard override via mockResolvedValueOnce.
+    adminSelectMaybeSingleMock.mockResolvedValue({ data: null, error: null });
     STATE.runAfterCallback = false;
     STATE.afterPromise = undefined;
   });
@@ -1138,6 +1176,99 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     // onConflict ensures we don't 23505 if a strategy_analytics row
     // already exists (computing/complete).
     expect(opts).toMatchObject({ onConflict: "strategy_id" });
+
+    warnSpy.mockRestore();
+    delete process.env.USE_COMPUTE_JOBS_QUEUE;
+  });
+
+  // ---- 12b. M-2 guard: worker-complete-already → placeholder SKIPPED -------
+
+  it("Test 12b: placeholder upsert SKIPPED when worker already wrote computation_status='complete' (API M-2)", async () => {
+    // Phase 19.1 red-team (2026-05-22): if `enqueue_compute_job`
+    // returns an error AFTER the job was actually committed server-
+    // side (transient 5xx after partial success), the worker may
+    // race ahead and write computation_status='complete' before the
+    // route's after() block tries to write `failed`. Pre-M-2 the
+    // unconditional upsert with onConflict='strategy_id' would stomp
+    // `complete` with `failed`. Guard: SELECT first; if `complete`,
+    // log + skip.
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    STATE.runAfterCallback = true;
+    adminRpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "PGRST500", message: "transient 5xx after commit" },
+    });
+    // Worker has already landed the terminal row.
+    adminSelectMaybeSingleMock.mockResolvedValue({
+      data: { computation_status: "complete" },
+      error: null,
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Race with worker",
+      daily_returns_series: [{ date: "2024-08-15", daily_return: 0.005 }],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    // The SELECT pre-check must have fired.
+    expect(adminSelectMaybeSingleMock).toHaveBeenCalled();
+    // The upsert must NOT have fired — the guard preserved the
+    // worker's `complete` status.
+    expect(adminUpsertMock).not.toHaveBeenCalled();
+    // The route must have logged the skip for forensic trail.
+    const skipLogged = warnSpy.mock.calls.some((call) =>
+      call.some(
+        (arg) => typeof arg === "string" && arg.includes("SKIPPED") && arg.includes("complete"),
+      ),
+    );
+    expect(skipLogged).toBe(true);
+
+    warnSpy.mockRestore();
+    delete process.env.USE_COMPUTE_JOBS_QUEUE;
+  });
+
+  it("Test 12c: placeholder upsert PROCEEDS when worker has written non-terminal status (API M-2)", async () => {
+    // Conversely: if the worker has written something other than
+    // `complete` (e.g. stuck-`computing`, or a stale `failed`), the
+    // route's placeholder write should still proceed — there is no
+    // good outcome to preserve.
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    STATE.runAfterCallback = true;
+    adminRpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "PGRST500", message: "another transient 5xx" },
+    });
+    adminSelectMaybeSingleMock.mockResolvedValue({
+      data: { computation_status: "computing" },
+      error: null,
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const req = makeJsonRequest({
+      wizard_session_id: VALID_SESSION,
+      fmt: "daily_returns",
+      strategy_name: "Stuck computing race",
+      daily_returns_series: [{ date: "2024-08-16", daily_return: 0.005 }],
+    });
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    expect(adminSelectMaybeSingleMock).toHaveBeenCalled();
+    // Upsert PROCEEDED because pre-existing status was not 'complete'.
+    expect(adminUpsertMock).toHaveBeenCalledTimes(1);
+    const [, payload] = adminUpsertMock.mock.calls[0];
+    expect(payload).toMatchObject({
+      strategy_id: NEW_STRATEGY_ID,
+      computation_status: "failed",
+    });
 
     warnSpy.mockRestore();
     delete process.env.USE_COMPUTE_JOBS_QUEUE;

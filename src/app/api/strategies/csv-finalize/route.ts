@@ -385,6 +385,82 @@ async function persistDailyReturnsOrErrorResponse(
  * gate only via incidental multi-line formatting). PR #275 hardening
  * justification preserved when this helper was extracted.
  */
+/**
+ * Phase 19.1 red-team / API M-2 (2026-05-22): guarded placeholder
+ * write. Both the W-2 enqueue-error path AND the M-1 flag-off path
+ * write a `failed` strategy_analytics placeholder. Pre-fix, both
+ * used an unconditional `.upsert(..., { onConflict: 'strategy_id' })`
+ * which would stomp a `complete` status the worker had written
+ * concurrently — possible when `enqueue_compute_job` returns an
+ * error after the job was actually committed server-side (transient
+ * 5xx after partial success). The order between the route's
+ * placeholder write and the worker's terminal write was non-
+ * deterministic, so the user could see either `failed` or `complete`.
+ *
+ * Guard with SELECT-then-UPSERT: if the row already exists with
+ * computation_status='complete', log + skip the placeholder write
+ * entirely. Otherwise, upsert. Two round-trips, but only on the
+ * failure path. A SECURITY DEFINER conditional-update RPC would be
+ * cleaner but requires a new migration; the live-on-prod migrations
+ * are out of scope for this red-team fix-up.
+ */
+async function writeFailedStrategyAnalyticsPlaceholder(
+  strategyId: string,
+  computationError: string,
+  opts: { logPrefix: string; correlationId: string; subcontext: string },
+): Promise<void> {
+  try {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const admin = createAdminClient();
+    // SELECT current status. If `complete`, the worker has already
+    // landed a terminal row — do NOT stomp it with `failed`.
+    // PostgREST returns `data: null` when no row exists; we treat
+    // that as "go ahead, upsert".
+    const { data: existing, error: selectErr } = await admin
+      .from("strategy_analytics")
+      .select("computation_status")
+      .eq("strategy_id", strategyId)
+      .maybeSingle();
+    if (selectErr) {
+      console.warn(
+        `${opts.logPrefix} ${opts.subcontext} placeholder pre-check SELECT failed (non-blocking) [correlation_id=${opts.correlationId}]: ${selectErr.message}`,
+      );
+      // Best-effort: fall through to upsert anyway. The pre-fix
+      // behaviour is preserved on infra fault; the guard only matters
+      // when SELECT succeeds and the row is already complete.
+    } else if (
+      existing &&
+      (existing as { computation_status?: string }).computation_status ===
+        "complete"
+    ) {
+      console.warn(
+        `${opts.logPrefix} ${opts.subcontext} placeholder SKIPPED — worker already wrote computation_status='complete' [correlation_id=${opts.correlationId}, strategy_id=${strategyId}]`,
+      );
+      return;
+    }
+    const { error: placeholderErr } = await admin
+      .from("strategy_analytics")
+      .upsert(
+        {
+          strategy_id: strategyId,
+          computation_status: "failed",
+          computation_error: computationError,
+          data_quality_flags: { csv_source: true },
+        },
+        { onConflict: "strategy_id" },
+      );
+    if (placeholderErr) {
+      console.warn(
+        `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert failed (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderErr.message}`,
+      );
+    }
+  } catch (placeholderThrow) {
+    console.warn(
+      `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert threw (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderThrow instanceof Error ? placeholderThrow.message : String(placeholderThrow)}`,
+    );
+  }
+}
+
 function enqueueCsvAnalyticsAfter(
   strategyId: string,
   fmt: string,
@@ -404,30 +480,11 @@ function enqueueCsvAnalyticsAfter(
       console.warn(
         `${opts.logPrefix} USE_COMPUTE_JOBS_QUEUE != "true" — writing strategy_analytics placeholder to break wizard hang [correlation_id=${opts.correlationId}, strategy_id=${strategyId}]`,
       );
-      try {
-        const { createAdminClient } = await import("@/lib/supabase/admin");
-        const admin = createAdminClient();
-        const { error: placeholderErr } = await admin
-          .from("strategy_analytics")
-          .upsert(
-            {
-              strategy_id: strategyId,
-              computation_status: "failed",
-              computation_error: `compute job queue disabled — contact support@quantalyze.com with strategy id ${strategyId}`,
-              data_quality_flags: { csv_source: true },
-            },
-            { onConflict: "strategy_id" },
-          );
-        if (placeholderErr) {
-          console.warn(
-            `${opts.logPrefix} flag-off strategy_analytics placeholder upsert failed (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderErr.message}`,
-          );
-        }
-      } catch (placeholderThrow) {
-        console.warn(
-          `${opts.logPrefix} flag-off strategy_analytics placeholder upsert threw (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderThrow instanceof Error ? placeholderThrow.message : String(placeholderThrow)}`,
-        );
-      }
+      await writeFailedStrategyAnalyticsPlaceholder(
+        strategyId,
+        `compute job queue disabled — contact support@quantalyze.com with strategy id ${strategyId}`,
+        { ...opts, subcontext: "flag-off" },
+      );
       return;
     }
     let enqueueFailed = false;
@@ -457,33 +514,15 @@ function enqueueCsvAnalyticsAfter(
     }
     // API W-2: enqueue failure → write strategy_analytics placeholder so
     // the wizard's SyncProgress poller breaks out with a meaningful
-    // error surface instead of polling forever. Best-effort: if even
-    // the placeholder write fails, log so operators have evidence.
+    // error surface instead of polling forever. API M-2 (red-team
+    // 2026-05-22): guarded SELECT-then-UPSERT so we don't stomp a
+    // `complete` status the worker may have written concurrently.
     if (enqueueFailed) {
-      try {
-        const { createAdminClient } = await import("@/lib/supabase/admin");
-        const admin = createAdminClient();
-        const { error: placeholderErr } = await admin
-          .from("strategy_analytics")
-          .upsert(
-            {
-              strategy_id: strategyId,
-              computation_status: "failed",
-              computation_error: `compute job enqueue failed: ${enqueueErrMessage}`,
-              data_quality_flags: { csv_source: true },
-            },
-            { onConflict: "strategy_id" },
-          );
-        if (placeholderErr) {
-          console.warn(
-            `${opts.logPrefix} strategy_analytics placeholder upsert failed (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderErr.message}`,
-          );
-        }
-      } catch (placeholderThrow) {
-        console.warn(
-          `${opts.logPrefix} strategy_analytics placeholder upsert threw (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderThrow instanceof Error ? placeholderThrow.message : String(placeholderThrow)}`,
-        );
-      }
+      await writeFailedStrategyAnalyticsPlaceholder(
+        strategyId,
+        `compute job enqueue failed: ${enqueueErrMessage}`,
+        { ...opts, subcontext: "enqueue-error" },
+      );
     }
   });
 }
