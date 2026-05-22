@@ -83,6 +83,15 @@ interface ValidationEnvelope {
 interface ValidateResponse {
   ok?: boolean;
   preview?: PreviewShape | null;
+  /**
+   * Phase 19.1 — analytics-service (`csv_validator.py`) emits the parsed
+   * daily-return rows alongside `preview` for `fmt=daily_returns` and
+   * `fmt=daily_nav`. The csv-finalize route REQUIRES this series in its
+   * POST body for those formats (route.ts:748 — "daily_returns_series is
+   * required for fmt=daily_returns and fmt=daily_nav"). Trades is
+   * omitted; absent for trades is normal.
+   */
+  daily_returns_series?: { date: string; daily_return: number }[];
   errors?: { rule: string; row: number; message: string }[];
   correlation_id?: string | null;
   code?: string;
@@ -98,6 +107,13 @@ export interface CsvUploadStepProps {
   onSuccess: (payload: {
     fmt: Fmt;
     preview: PreviewShape;
+    /**
+     * Phase 19.1 — daily-return rows parsed by csv_validator. Required
+     * for `fmt=daily_returns`/`daily_nav` so CsvSubmitStep can include
+     * them in the csv-finalize POST body. Undefined for `fmt=trades` and
+     * for legacy validate responses that pre-date 19.1.
+     */
+    dailyReturnsSeries?: { date: string; daily_return: number }[];
     validationPassed: boolean;
     strategyName: string;
   }) => void;
@@ -282,6 +298,7 @@ export function CsvUploadStep({
       onSuccess({
         fmt,
         preview: data.preview,
+        dailyReturnsSeries: data.daily_returns_series,
         validationPassed: true,
         strategyName: trimmedName,
       });

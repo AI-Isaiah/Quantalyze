@@ -50,6 +50,14 @@ export interface CsvSubmitStepProps {
   strategyName: string;
   preview: PreviewShape;
   /**
+   * Phase 19.1 — parsed daily-return rows from the csv-validate envelope.
+   * Forwarded to csv-finalize as `daily_returns_series` (snake_case).
+   * REQUIRED for `fmt=daily_returns`/`daily_nav` (route.ts:748 rejects
+   * with CSV_INVALID_FORMAT "received 0 rows" if missing/empty);
+   * undefined/empty is the expected shape for `fmt=trades`.
+   */
+  dailyReturnsSeries?: { date: string; daily_return: number }[];
+  /**
    * QA report 2026-05-21 ISSUE-010: classification metadata captured on
    * the new csv_metadata step. Forwarded to /api/strategies/csv-finalize
    * so the strategy can be discovered after admin approval.
@@ -73,6 +81,7 @@ export function CsvSubmitStep({
   fmt,
   strategyName,
   preview,
+  dailyReturnsSeries,
   metadata,
   onSubmitted,
   onBack,
@@ -93,6 +102,14 @@ export function CsvSubmitStep({
           wizard_session_id: wizardSessionId,
           fmt,
           strategy_name: strategyName, // Cross-AI revision 2026-04-30
+          // Phase 19.1 — REQUIRED for fmt=daily_returns/daily_nav. The
+          // csv-finalize route rejects with CSV_INVALID_FORMAT "received
+          // 0 rows" if this is absent (route.ts:748). Omitted when the
+          // wizard never received the field from csv-validate (legacy
+          // pre-19.1 envelopes; fmt=trades).
+          ...(dailyReturnsSeries !== undefined
+            ? { daily_returns_series: dailyReturnsSeries }
+            : {}),
           // QA report 2026-05-21 ISSUE-010 — classification metadata.
           // The route persists these via an authenticated UPDATE on
           // strategies AFTER the SECURITY DEFINER finalize RPC returns
@@ -185,7 +202,7 @@ export function CsvSubmitStep({
       });
       setSubmitting(false);
     }
-  }, [submitting, wizardSessionId, fmt, strategyName, metadata, onSubmitted]);
+  }, [submitting, wizardSessionId, fmt, strategyName, dailyReturnsSeries, metadata, onSubmitted]);
 
   return (
     <section aria-labelledby="wizard-csv-submit-heading">
