@@ -271,3 +271,23 @@ Phases execute in numeric order: 15 → 16 → [Day-2 gate] → 17 → 18 → 19
 | 17. Design Contract | v1.0.0 | 6/6 | Complete    | 2026-05-01 |
 | 18. Root-Cause Fix + Founder LP Skeleton | v1.0.0 | 0/4 | Not started | - |
 | 19. Unified Backbone (conditional) | v1.0.0 | 0/TBD | Not started | - |
+| 19.1. CSV → analytics → factsheet pipeline | v1.0.0 | 0/10 | Not started | - |
+
+### Phase 19.1: CSV → analytics → factsheet pipeline (prior work on feat/csv-analytics-pipeline-2026-05-21 may be discarded) (INSERTED)
+
+**Goal:** Replace the v0.24.6.0 `analyticsMissingMessage` stop-gap with the real CSV → analytics → factsheet pipeline. Re-derive PR #270's Tasks 1-11 through the GSD workflow + ship Tasks 3, 12-17 production deploy + cleanup discarded branches.
+**Requirements**: None (inserted urgent phase — no REQ-ID assignments; plans map to CONTEXT.md decisions tasks 1-17 + cleanup)
+**Depends on:** Phase 19 (numerically after; operationally independent — Phase 19.1 ships against current main HEAD without waiting for Phase 19's conditional unified backbone)
+**Plans:** 10 plans
+
+Plans:
+- [ ] 19.1-01-PLAN.md — DB foundation: csv_daily_returns table + persist_csv_daily_returns RPC + compute_analytics_from_csv kind (Wave 1)
+- [ ] 19.1-02-PLAN.md — Python analytics: csv_validator daily_returns_series + run_csv_strategy_analytics + job_worker dispatch + watchdog override (Wave 1)
+- [ ] 19.1-03-PLAN.md — TypeScript surface: computation_status union + parseDailyReturnsSeries + persist call + unified-backbone mirror + after() enqueue (Wave 1)
+- [ ] 19.1-04-PLAN.md — [BLOCKING] Apply migrations to TEST Supabase qmnijlgmdhviwzwfyzlc (Wave 2; depends 01)
+- [ ] 19.1-05-PLAN.md — Live-DB tests for persist_csv_daily_returns (Wave 2; depends 04)
+- [ ] 19.1-06-PLAN.md — [BLOCKING] Apply migrations to PRODUCTION Supabase (Wave 3; depends 04, 05)
+- [ ] 19.1-07-PLAN.md — Railway analytics-service deploy verification (Wave 3; depends 02, 06)
+- [ ] 19.1-08-PLAN.md — Vercel USE_COMPUTE_JOBS_QUEUE flip + redeploy (Wave 3; depends 07)
+- [ ] 19.1-09-PLAN.md — End-to-end verification via production wizard (Wave 4; depends 08)
+- [ ] 19.1-10-PLAN.md — Stop-gap removal + delete feat/csv-analytics-pipeline-* branches (Wave 5; depends 09)
