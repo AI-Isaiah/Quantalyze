@@ -96,6 +96,10 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # `.planning/audit-2026-05-07/INVEST-P97.md`.
     "sync_trades": "30 minutes",       # handler timeout = 15 minutes (mig 117)
     "compute_analytics": "20 minutes", # handler timeout = 15 minutes
+    # Phase 19.1 — handler timeout = 10 minutes; watchdog must be
+    # strictly greater (the test_every_kind_has_watchdog_headroom
+    # invariant enforces). Mirrors compute_portfolio.
+    "compute_analytics_from_csv": "15 minutes",
     "poll_positions": "5 minutes",     # handler timeout = 3 minutes
     "compute_portfolio": "15 minutes", # handler timeout = 10 minutes
     # Equity-history backfill is the longest-running kind in the system —
