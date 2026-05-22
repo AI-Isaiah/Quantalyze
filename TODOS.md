@@ -12,6 +12,38 @@
 
 ---
 
+## Phase 19.1 follow-ups — CSV → analytics pipeline post-deploy work
+
+### P1 — Plans 07-10 (remaining phase work, blocked on PR merge + Railway deploy)
+
+Plans 01-06 of Phase 19.1 landed in this PR (v0.24.7.0): code on the branch + both migrations applied to TEST + PROD. The remaining plans are gated on this PR merging to main and Railway redeploying analytics-service with the new code:
+
+- **Plan 07** — Railway deploy verification: assert deployed_sha == main HEAD via Supabase MCP probe, watchdog-headroom test passes against deployed image, hard 15-min timeout on deploy convergence.
+- **Plan 08** — Vercel `USE_COMPUTE_JOBS_QUEUE=true` flip + redeploy: idempotent (`vercel env get` → skip if already true; fallback to `vercel env pull` if the `get` subcommand is unavailable).
+- **Plan 09** — End-to-end production smoke: upload real CSV via wizard, poll `strategy_analytics.computation_status` until terminal, curl factsheet HTML, assert no stop-gap copy + CAGR card test-ids present.
+- **Plan 10** — Stop-gap removal (`src/app/strategy/[id]/analyticsMissingMessage.ts` + `page.tsx` gate widening to admit `complete_with_warnings`) + delete the two discarded remote branches `feat/csv-analytics-pipeline-2026-05-21` and `feat/csv-analytics-pipeline-hardening-2026-05-22`.
+
+Plans 07-10 are gated on Plan 06's verdict line `19.1-06-VERDICT: PROD-APPLIED` (already emitted) plus this PR landing on main. After merge, resume autonomous mode with: `gsd-autonomous --only 19.1` from Plan 07.
+
+### P2 — Pre-existing atomicity gap (Grok 4.3 ship-review finding)
+
+`csv-finalize/route.ts` calls `finalize_csv_strategy` then `persist_csv_daily_returns` non-transactionally. If `persist_csv_daily_returns` fails, the strategy row is already committed but has no daily returns. Mitigated today:
+- 500 `CSV_PERSIST_FAIL` returned with strategy_id (support recovery path)
+- No `after()` enqueue fires (early-return blocks it)
+- Worker doesn't get a job → no silent loop on "Insufficient CSV history"
+
+Real harm: orphan strategy rows accumulate, user confusion. Pre-existing issue (`finalize_csv_strategy` was on main before Phase 19.1). Deferred to BACKBONE-07 / R4 (`wizard_session_id` UNIQUE INDEX) per CONTEXT.md `<deferred>`. **Action when BACKBONE-07 ships:** wrap both RPCs in a single transaction OR add a Sentry alert + cron-based orphan-strategy cleanup.
+
+### P2 — `after()` enqueue silent-failure monitoring
+
+`csv-finalize/route.ts` after() block catches enqueue errors and logs warnings (non-blocking by design — the wizard returns 200 regardless). If enqueue fails silently in production (transient RPC error, etc.), the strategy has data but no compute job → factsheet shows "Analytics being computed" indefinitely. Real harm: stuck-pending strategies. **Mitigation needed:** Sentry alert on `enqueue_compute_job` failure path + dashboard for stuck `pending`/`null` `computation_status` rows >2h after `created_at`.
+
+### P3 — `compute_all_metrics` edge case coverage in unit tests
+
+Plan 05 ships live-DB regression tests for 1-row / all-zero / NaN-Inf CSVs. The matching pytest unit tests in `analytics-service/tests/test_csv_analytics_runner.py` (Plan 02 / Wave 1) cover the happy path + benchmark unavailable + sparse weekday calendar — but not the new edge cases against the live `compute_all_metrics` math directly. Adding mocked equivalents of Tests 9-11 would catch regressions without requiring `TEST_SUPABASE_DB_URL`.
+
+---
+
 ## Phase 18 — Root-Cause Fix + Founder LP Skeleton
 
 - 10-team onboarding tracker: [`.planning/phase-18/team-status.md`](.planning/phase-18/team-status.md) — one row per onboarding team (FIX-03). Founder updates as teams flow through the wizard.
