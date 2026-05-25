@@ -7,6 +7,25 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.7.2] - 2026-05-25
+
+**fix(compute-jobs): extend `compute_jobs_kind_check` to admit `compute_analytics_from_csv` (Phase 19.1 hotfix).** Phase 19.1 Plan 02's migration `20260522120100_compute_analytics_from_csv_kind.sql` added the new job kind to ONE of two sibling CHECK constraints on `public.compute_jobs` (`compute_jobs_kind_target_coherence`) but FORGOT the simpler list-form `compute_jobs_kind_check`. Every CSV-uploaded strategy since v0.24.7.0 (2026-05-22) failed at the `enqueue_compute_job` step with `new row for relation "compute_jobs" violates check constraint "compute_jobs_kind_check"`. The route's W-2 placeholder fired correctly and wrote `strategy_analytics.computation_status='failed'` so the wizard's `SyncProgress` poller broke out instead of hanging — but no analytics ever computed. Both confirmed-affected production strategies (FX-AI2: 90 rows; break-momentum: 1,112 rows) had their daily-return rows correctly persisted in `csv_daily_returns` — only the enqueue + worker pass was missing.
+
+The hotfix mirrors migration 108's lockstep precedent (`process_key_long`, `20260510173005_process_key_long_idempotency_drain.sql:108-123`), which updated BOTH constraints in a single migration. The new migration `20260525130000_compute_jobs_kind_check_extend_csv.sql` drops + recreates `compute_jobs_kind_check` with `'compute_analytics_from_csv'` appended (strict superset — every prior admitted kind preserved verbatim). The self-verifying `DO` block asserts three regression classes (constraint missing, new kind missing, prior kind regressed) plus cross-constraint coherence against `compute_jobs_kind_target_coherence` so a future migration cannot reintroduce the same lockstep gap silently. Companion regression test `src/__tests__/compute-jobs-kind-check-csv-2026-05-25.test.ts` (6 cases, all RED→GREEN verified) pins the migration text shape and prevents a later migration from dropping the new kind without re-adding it.
+
+After this lands on prod, the two failed `strategy_analytics` placeholder rows need a separate data-fix step to reset `computation_status` and re-enqueue `compute_analytics_from_csv` jobs so the worker computes their KPIs. The migration itself does NOT touch live `strategy_analytics` rows — data fix runs separately so an apply-failure cannot half-mutate user-visible state.
+
+### Fixed
+- **CSV-uploaded strategies stuck in `Analytics: failed`** since v0.24.7.0 — root cause was migration drift between sibling CHECK constraints `compute_jobs_kind_check` and `compute_jobs_kind_target_coherence`. The Plan 02 migration updated the latter (kind→target coherence) but skipped the former (simpler list-form admission check). Migration 108's lockstep precedent is now documented in the new migration's header so future kind additions can't repeat the mistake.
+
+### Added
+- **Regression test** `src/__tests__/compute-jobs-kind-check-csv-2026-05-25.test.ts` — 6 cases covering: (1) fix migration file exists; (2) DROPs `compute_jobs_kind_check IF EXISTS`; (3) ADDs the constraint with `'compute_analytics_from_csv'`; (4) preserves every kind from the prior live constraint (strict-superset guard); (5) includes a self-verifying DO block; (6) no later migration silently drops the constraint without re-adding it (prevents future regression).
+- **Self-verifying DO block** in the new migration that catches three regression classes (constraint missing, new kind missing, prior kind regressed) plus cross-constraint coherence — fails loud at apply time if a future migration tries to silently drop the new kind.
+
+### Notes
+- After Vercel redeploys with the migration applied (~3 min post-merge), the two failed `strategy_analytics` placeholder rows for FX-AI2 (`206114ce-...-69297`) and break-momentum (`f0c43303-...-65170`) need a one-shot data-fix to clear the `failed` status and re-enqueue `compute_analytics_from_csv` jobs. Both strategies already have their full daily-return series persisted in `csv_daily_returns`; only the analytics computation is missing. Tracked as a runbook follow-up immediately after this PR lands.
+- **No 90-day history cap exists in the pipeline.** Verified during this investigation: UC244 (FX-AI2) genuinely contains 90 trading days starting 2026-01-01; MM_dailies (break-momentum) contains 1,111 rows from 2023-04-26 → 2026-05-11, all of which persisted cleanly to `csv_daily_returns`. The configured cap is `MAX_DAILY_RETURNS_ROWS = 5000` at the `csv-finalize` route boundary.
+
 ## [0.24.7.1] - 2026-05-22
 
 **fix(wizard-csv): thread `daily_returns_series` through wizard → csv-finalize (Phase 19.1 Plan 09 prod E2E hotfix).** The first production CSV upload after v0.24.7.0 returned 400 `CSV_INVALID_FORMAT` "daily_returns_series is required for fmt=daily_returns and fmt=daily_nav (received 0 rows)". The csv-validate envelope already shipped the parsed series, but the wizard never deserialized it, so every CSV upload silently failed at submit despite 90+ rows being detected on the preview screen.
