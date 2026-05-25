@@ -19,6 +19,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdtempSync, cpSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { extractUserTablesFromMigration } from "../../scripts/check-gdpr-export-coverage";
 
 const REPO_ROOT = process.cwd();
 const HOOK_SCRIPT = join(REPO_ROOT, "scripts", "check-gdpr-export-coverage.ts");
@@ -272,4 +273,58 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     expect(result.stderr).toContain("user_notes");
     expect(result.stderr).toContain("20260412094453_user_notes.sql");
   }, 30_000);
+
+  // H-1019 — CREATE TABLE body parser over/under-match bugs. These drive
+  // the exported pure helper `extractUserTablesFromMigration` directly
+  // (the colocated scripts/check-gdpr-export-coverage.test.ts is NOT in
+  // the vitest `include` globs, so its tests never run in CI — these
+  // live here, in a collected file, instead). Both assert CORRECT
+  // behaviour; both currently FAIL against the buggy regex, so they are
+  // `it.fails` SURFACE markers pending a production-code fix.
+
+  it.fails(
+    "H-1019: a table whose ONLY `user_id ... REFERENCES auth.users` text is in a SQL COMMENT must NOT be flagged user-owned",
+    () => {
+      // `userColumnRe.test(body)` runs against the ENTIRE CREATE TABLE
+      // body as a single string, so a `-- comment` line that copies a
+      // reference phrase (e.g. documenting a sibling table's FK) makes
+      // the regex match even though the table has no real user column.
+      // Effect: a sister table with no user FK is falsely demanded in
+      // USER_EXPORT_TABLES (a phantom coverage gap), and the parser's
+      // signal is no longer trustworthy. CORRECT: comment text must not
+      // count — this table has no real user-id column.
+      const sql = [
+        "CREATE TABLE sister_table (",
+        "  id UUID PRIMARY KEY,",
+        "  -- mirrors the user_id UUID REFERENCES auth.users(id) column on the parent",
+        "  parent_ref UUID NOT NULL REFERENCES other_table(id)",
+        ");",
+        "",
+      ].join("\n");
+      const out = extractUserTablesFromMigration(sql, "20260601_comment.sql");
+      expect(out.has("sister_table")).toBe(false);
+    },
+  );
+
+  it.fails(
+    "H-1019 (also-flagged security): a user_id FK added via ALTER TABLE ADD COLUMN must be discovered",
+    () => {
+      // The scan only inspects CREATE TABLE bodies. A migration that
+      // turns an existing table into user-owned data via
+      // `ALTER TABLE ... ADD COLUMN user_id UUID REFERENCES auth.users`
+      // is invisible to it — so the GDPR manifest gap goes undetected
+      // and the Art. 15 export silently omits the table's rows. CORRECT:
+      // the late-added user column makes `late_added` user-owned and the
+      // scan must surface it.
+      const sql = [
+        "CREATE TABLE late_added (",
+        "  id UUID PRIMARY KEY",
+        ");",
+        "ALTER TABLE late_added ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);",
+        "",
+      ].join("\n");
+      const out = extractUserTablesFromMigration(sql, "20260602_alter.sql");
+      expect(out.has("late_added")).toBe(true);
+    },
+  );
 });

@@ -168,6 +168,154 @@ describe("scripts/check-banned-packages.mjs", () => {
     }
   }, 60_000);
 
+  it("H-1135: detects axios in a v1 lockfile `dependencies` tree (no `packages` map)", () => {
+    // Lockfile v1 (legacy npm <7) uses a recursive `dependencies` tree
+    // and has NO `packages` map. The v2/v3 surface is covered by the
+    // tests above; this proves the v1 walk (scanLockfile lines 141-160)
+    // is actually exercised. A downgrade or a tool that emits v1 must
+    // still trip the gate — otherwise a banned package buried in a v1
+    // tree ships silently.
+    const scratch = mkdtempSync(join(tmpdir(), "banned-pkg-v1-"));
+    mkdirSync(join(scratch, "scripts"), { recursive: true });
+    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-banned-packages.mjs"));
+    // package.json stays clean — the hit is purely in the v1 lockfile.
+    writeFileSync(
+      join(scratch, "package.json"),
+      JSON.stringify({ name: "probe", version: "1.0.0", dependencies: {} }, null, 2),
+      "utf8",
+    );
+    // v1 shape: a nested transitive axios under `foo`. Crucially there is
+    // NO `packages` key, so only the v1 walk can find it.
+    const v1Lock = {
+      name: "probe",
+      lockfileVersion: 1,
+      dependencies: {
+        foo: {
+          version: "1.0.0",
+          dependencies: {
+            axios: { version: "0.30.4" },
+          },
+        },
+      },
+    };
+    writeFileSync(
+      join(scratch, "package-lock.json"),
+      JSON.stringify(v1Lock, null, 2),
+      "utf8",
+    );
+
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("axios");
+    expect(result.stderr.toLowerCase()).toMatch(/fetch|undici/);
+    // The v1 walk builds source as `package-lock.json:<parentPath><name>`,
+    // so the nested path must surface the parent — proving the recursive
+    // walk descended into `foo`'s sub-dependencies rather than only
+    // scanning the top level.
+    expect(result.stderr).toContain("package-lock.json:foo/axios");
+  }, 30_000);
+
+  it("H-1135: detects a DEEPLY nested transitive axios in a v2/v3 lockfile and reports the full node_modules path", () => {
+    // The existing transitive arm uses a 2-level path
+    // (node_modules/some-parent/node_modules/axios). This pins the
+    // contract that the v2/v3 packages-map scan keys on the LAST
+    // `node_modules/` segment (scanLockfile lines 123-126), so an
+    // arbitrarily deep transitive entry is still caught AND the full key
+    // is echoed in the error so a reviewer can locate the offending
+    // dependency chain.
+    const scratch = mkdtempSync(join(tmpdir(), "banned-pkg-deep-"));
+    mkdirSync(join(scratch, "scripts"), { recursive: true });
+    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-banned-packages.mjs"));
+    writeFileSync(
+      join(scratch, "package.json"),
+      JSON.stringify({ name: "probe", version: "1.0.0", dependencies: {} }, null, 2),
+      "utf8",
+    );
+    const deepKey =
+      "node_modules/a/node_modules/b/node_modules/c/node_modules/axios";
+    const v3Lock = {
+      name: "probe",
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "probe" },
+        [deepKey]: { version: "1.14.1" },
+      },
+    };
+    writeFileSync(
+      join(scratch, "package-lock.json"),
+      JSON.stringify(v3Lock, null, 2),
+      "utf8",
+    );
+
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("axios");
+    // The full path must appear so the reviewer can trace the chain.
+    expect(result.stderr).toContain(`package-lock.json:${deepKey}`);
+  }, 30_000);
+
+  it("H-1135: a hybrid lockfile (both `packages` and `dependencies`) reports each distinct surface exactly once", () => {
+    // npm v7+ writes BOTH a v2/v3 `packages` map AND a legacy
+    // `dependencies` tree into the same lockfile for backward-compat.
+    // The dedup `seen` set in scanLockfile (lines 108-116) keys on
+    // `name@version@source`. The two surfaces produce DISTINCT source
+    // strings (`node_modules/axios` vs `axios`), so they are
+    // intentionally reported as two findings — the dedup must NOT
+    // collapse a legitimately-distinct second surface, and equally must
+    // NOT emit either surface more than once. This pins both halves of
+    // the dedup contract the finding flags as untested.
+    const scratch = mkdtempSync(join(tmpdir(), "banned-pkg-dedup-"));
+    mkdirSync(join(scratch, "scripts"), { recursive: true });
+    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-banned-packages.mjs"));
+    writeFileSync(
+      join(scratch, "package.json"),
+      JSON.stringify({ name: "probe", version: "1.0.0", dependencies: {} }, null, 2),
+      "utf8",
+    );
+    const hybridLock = {
+      name: "probe",
+      lockfileVersion: 2,
+      packages: {
+        "": { name: "probe" },
+        "node_modules/axios": { version: "1.14.1" },
+      },
+      dependencies: {
+        axios: { version: "1.14.1" },
+      },
+    };
+    writeFileSync(
+      join(scratch, "package-lock.json"),
+      JSON.stringify(hybridLock, null, 2),
+      "utf8",
+    );
+
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    // The v2 packages-map surface.
+    const v2Line = "package-lock.json:node_modules/axios";
+    // The v1 dependencies-tree surface (top-level → no parent prefix).
+    const v1Line = "package-lock.json:axios).";
+    const v2Count = result.stderr
+      .split("\n")
+      .filter((l) => l.includes(v2Line)).length;
+    const v1Count = result.stderr
+      .split("\n")
+      .filter((l) => l.includes(v1Line)).length;
+    // Each distinct source is reported exactly once — dedup neither
+    // suppresses the distinct second surface nor double-reports either.
+    expect(v2Count).toBe(1);
+    expect(v1Count).toBe(1);
+  }, 30_000);
+
   it("H-0012: exits 1 for every other banned name injected TRANSITIVELY in package-lock.json", () => {
     // H-0012: the matcher must catch the three non-axios banned
     // packages on the LOCKFILE surface too, not just direct

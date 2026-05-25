@@ -741,6 +741,66 @@ describe("Critical regression guards", () => {
       });
     });
 
+    // H-1024 (pr-test-analyzer): the non-seeded ("placeholder-env") e2e
+    // lane MUST carry at least one assertion that an
+    // allocator/strategy-manager-protected route redirects an
+    // unauthenticated visitor to /login. That is the only signal in the
+    // CI lane that route protection / middleware wiring still works when
+    // no seeded staging Supabase is configured (forks, fresh clones).
+    // The seeded authenticated flows are gated behind
+    // vars.E2E_TEST_DB_CONFIGURED, so without this fallback the entire
+    // protected surface ships with zero e2e signal on the default lane.
+    //
+    // The invariant is split across two artifacts:
+    //   (1) ci.yml's UNCONDITIONAL `npx playwright test ...` invocation
+    //       must include the spec that carries the redirect assertion
+    //       (auth.spec.ts today), and
+    //   (2) that spec must actually assert a protected route → /login
+    //       redirect.
+    // Pinning BOTH stops a regression that either drops the spec from
+    // the CI command or guts the redirect assertion inside it.
+    describe("H-1024 — placeholder-env e2e lane covers protected-route redirect", () => {
+      // The first `npx playwright test e2e/...` line in the e2e job is
+      // the UNCONDITIONAL invocation (the seed-gated one is wrapped in a
+      // separate, vars-gated step). We isolate it so a seed-gated-only
+      // addition of auth coverage can't satisfy this test.
+      function unconditionalPlaywrightCmd(src: string): string {
+        return findOrFail(
+          src,
+          /npx playwright test (e2e\/[^\n]*)/,
+          "ci.yml: could not locate the unconditional `npx playwright test e2e/...` command in the e2e job — e2e lane shape drifted",
+        );
+      }
+
+      it("ci.yml unconditional e2e command includes the protected-route-redirect spec (auth.spec.ts)", () => {
+        const src = readText(".github/workflows/ci.yml");
+        const cmd = unconditionalPlaywrightCmd(src);
+        expectMatch(
+          cmd,
+          /\be2e\/auth\.spec\.ts\b/,
+          "ci.yml unconditional e2e command no longer runs e2e/auth.spec.ts — the only placeholder-env carrier of the protected-route → /login redirect assertion (H-1024). Authenticated surface would ship with zero route-protection signal on the non-seeded lane.",
+        );
+      });
+
+      it("e2e/auth.spec.ts asserts an allocator-protected route redirects an unauthenticated visitor to /login", () => {
+        const spec = readText("e2e/auth.spec.ts");
+        // Must navigate to a protected route (the strategies dashboard /
+        // allocator surface) AND assert the resulting URL is /login.
+        // Without the goto, a redirect assertion proves nothing; without
+        // the /login URL assertion, the protection isn't verified.
+        expectMatch(
+          spec,
+          /page\.goto\(\s*["'`]\/(?:strategies|allocator)[^"'`]*["'`]\s*\)/,
+          "e2e/auth.spec.ts no longer navigates to a protected /strategies or /allocator route — H-1024 redirect coverage gutted",
+        );
+        expectMatch(
+          spec,
+          /toHaveURL\(\s*\/[^/]*login/,
+          "e2e/auth.spec.ts no longer asserts the protected-route navigation redirects to /login — H-1024 route-protection signal lost",
+        );
+      });
+    });
+
     // retro-PR188-F3 (pr-test-analyzer #42, red-team #39/#42, HIGH/9):
     // every actions/checkout invocation across all 4 workflow files
     // MUST set `persist-credentials: false`. Without it, GITHUB_TOKEN
