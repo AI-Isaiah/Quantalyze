@@ -1447,21 +1447,6 @@ export interface MyAllocationDashboardPayload {
    */
   holdingReturnsByScopeRef: Record<string, DailyPoint[]>;
   /**
-   * audit-2026-05-07 H-0487/H-0493 — Scope refs that share an identical
-   * return series with at least one other scope ref in holdingReturnsByScopeRef.
-   * This is the M5 multi-venue aliasing sentinel: when an allocator holds BTC on
-   * both Binance and OKX, both scope_refs map to the same symbol-keyed series,
-   * so pairwise-correlation BTC@binance vs BTC@okx is degenerate (= 1.0 by
-   * construction, not real market behaviour). Consumers (composer correlation
-   * displays, diversification widgets) MUST check this set before rendering
-   * per-holding correlation or diversification scores and surface a disclaimer
-   * when aliased entries are present.
-   *
-   * Optional for backward compat with existing test fixtures that pre-date this
-   * field; always populated by getMyAllocationDashboard. Treat absent as empty set.
-   */
-  aliasedScopeRefs?: Set<string>;
-  /**
    * Phase 10 / H3. The authenticated allocator's user.id, sourced from
    * supabase.auth.getUser() server-side. Consumed by Plan 06a's per-allocator
    * localStorage scoping (N1 defense-in-depth eliminates cross-tenant draft
@@ -1630,8 +1615,9 @@ const VENUE_DISPLAY: Record<string, string> = {
  * - M5 multi-venue: breakdown JSONB is keyed by SYMBOL only — venue is not
  *   disambiguated. If an allocator holds BTC on both Binance and OKX, both
  *   scope_refs (the same symbol across venues) map to the same return
- *   series. Phase 09 Python engine accepts this approximation. Use
- *   `deriveAliasedScopeRefs` on the result to detect degenerate pairs.
+ *   series. Phase 09 Python engine accepts this approximation. (A real
+ *   per-(venue,symbol) aliasing sentinel is deferred to a dedicated PR —
+ *   it requires preserving venue granularity through the holdings collapse.)
  * - prev=0 days are skipped (avoids division by zero / non-finite values).
  * - Series with fewer than 2 snapshots produce no returns (a return is a
  *   difference; you need at least two values to subtract).
@@ -1679,45 +1665,6 @@ export function reconstructHoldingReturnsByScopeRef(
     if (dailyReturns.length > 0) result[scopeRef] = dailyReturns;
   }
   return result;
-}
-
-/**
- * audit-2026-05-07 H-0487/H-0493 — Derive the set of scope_refs that are
- * aliased to another scope_ref in `holdingReturnsByScopeRef`. Aliasing occurs
- * when an allocator holds the same symbol across multiple venues (e.g.
- * BTC@binance + BTC@okx): the breakdown JSONB is keyed by symbol only, so both
- * scope_refs map to an IDENTICAL return series. Pairwise correlation between
- * aliased refs is 1.0 by construction — a diversification widget MUST surface a
- * disclaimer rather than rendering a deceptively-low pairwise-correlation score.
- *
- * Separate from `reconstructHoldingReturnsByScopeRef` to preserve that function's
- * return type (`Record<string, DailyPoint[]>`) for backward compatibility with
- * existing callers and tests.
- */
-export function deriveAliasedScopeRefs(
-  holdingsSummary: Array<{
-    symbol: string;
-    venue: string;
-    holding_type: string;
-  }>,
-  holdingReturnsByScopeRef: Record<string, DailyPoint[]>,
-): Set<string> {
-  // Group scope_refs that emitted a series by their symbol. Any symbol with
-  // 2+ scope_refs in the result map has aliased entries.
-  const symbolToScopeRefs = new Map<string, string[]>();
-  for (const h of holdingsSummary) {
-    const scopeRef = `holding:${h.venue}:${h.symbol}:${h.holding_type}`;
-    if (!(scopeRef in holdingReturnsByScopeRef)) continue;
-    if (!symbolToScopeRefs.has(h.symbol)) symbolToScopeRefs.set(h.symbol, []);
-    symbolToScopeRefs.get(h.symbol)!.push(scopeRef);
-  }
-  const aliased = new Set<string>();
-  for (const refs of symbolToScopeRefs.values()) {
-    if (refs.length > 1) {
-      for (const ref of refs) aliased.add(ref);
-    }
-  }
-  return aliased;
 }
 
 /**
@@ -2391,13 +2338,6 @@ export const getMyAllocationDashboard = cache(
       equitySnapshots,
       phase07.holdingsSummary,
     );
-    // audit-2026-05-07 H-0487/H-0493: derive the aliased scope_refs set so
-    // composer consumers can warn that pairwise correlation is degenerate for
-    // same-symbol holdings across multiple venues (M5 multi-venue approximation).
-    const aliasedScopeRefs = deriveAliasedScopeRefs(
-      phase07.holdingsSummary,
-      holdingReturnsByScopeRef,
-    );
 
     // Phase 10 / H3 — Propagate the authenticated allocator's user.id so
     // consumers (Plan 06a localStorage scoping, Plan 07 ownership probe)
@@ -2432,7 +2372,6 @@ export const getMyAllocationDashboard = cache(
         matchDecisionsByHoldingRef,
         mandate,
         holdingReturnsByScopeRef,
-        aliasedScopeRefs,
         allocator_id: allocator_id,
         liveBaselineMetrics: liveBaselineMetricsFromHoldings(
           phase07.holdingsSummary,
@@ -2685,7 +2624,6 @@ export const getMyAllocationDashboard = cache(
       matchDecisionsByHoldingRef,
       mandate,
       holdingReturnsByScopeRef,
-      aliasedScopeRefs,
       allocator_id: allocator_id,
       liveBaselineMetrics: liveBaselineMetricsFromHoldings(
         phase07.holdingsSummary,
