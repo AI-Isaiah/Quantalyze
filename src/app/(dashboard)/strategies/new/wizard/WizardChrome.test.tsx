@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { render, screen, act } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
 import { WizardChrome } from "./WizardChrome";
 
@@ -57,5 +57,103 @@ describe("WizardChrome — savedAt rendering (hydration safety)", () => {
     );
     expect(html).toContain("Not saved yet");
     expect(html).not.toContain("Draft saved");
+  });
+});
+
+// H-0181 — toast lifecycle (useEffect showTimer 0ms + hideTimer 2000ms).
+//
+// The effect schedules setShowToast(true) at 0ms and setShowToast(false) at
+// 2000ms whenever `toastKey` changes; cleanup clears both timers. Without
+// fake-timer coverage, a regression that swaps the two timers (or drops the
+// cleanup) would leave the toast stuck on-screen forever or never show it.
+// These pin: (a) appears after the 0ms tick, (b) hides at 2000ms, (c) a
+// rapid second toastKey cancels the pending hide so the toast is not torn
+// down mid-flight, (d) absent toastKey never shows the toast.
+const TOAST_TESTID = "wizard-progress-saved-toast";
+
+describe("[H-0181] WizardChrome — progress-saved toast lifecycle", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shows the toast after the 0ms tick and hides it at 2000ms", () => {
+    vi.useFakeTimers();
+    render(
+      <WizardChrome {...baseProps} savedAt={123} toastKey={1}>
+        <div />
+      </WizardChrome>,
+    );
+    // Before the 0ms timer fires, the toast is not yet mounted.
+    expect(screen.queryByTestId(TOAST_TESTID)).toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    expect(screen.getByTestId(TOAST_TESTID)).toBeInTheDocument();
+
+    // Just before the hide boundary it's still visible.
+    act(() => {
+      vi.advanceTimersByTime(1999);
+    });
+    expect(screen.getByTestId(TOAST_TESTID)).toBeInTheDocument();
+
+    // At 2000ms total the hide timer fires.
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.queryByTestId(TOAST_TESTID)).toBeNull();
+  });
+
+  it("never shows the toast when toastKey is undefined", () => {
+    vi.useFakeTimers();
+    render(
+      <WizardChrome {...baseProps} savedAt={123}>
+        <div />
+      </WizardChrome>,
+    );
+    act(() => {
+      vi.advanceTimersByTime(2001);
+    });
+    expect(screen.queryByTestId(TOAST_TESTID)).toBeNull();
+  });
+
+  it("a rapid second toastKey resets the timers so the toast stays visible past the first window", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(
+      <WizardChrome {...baseProps} savedAt={123} toastKey={1}>
+        <div />
+      </WizardChrome>,
+    );
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    expect(screen.getByTestId(TOAST_TESTID)).toBeInTheDocument();
+
+    // Advance most of the first window, then a new save ticks toastKey.
+    act(() => {
+      vi.advanceTimersByTime(1500);
+    });
+    rerender(
+      <WizardChrome {...baseProps} savedAt={456} toastKey={2}>
+        <div />
+      </WizardChrome>,
+    );
+    // Cleanup cleared the old hide timer; the new effect re-shows at 0ms.
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    // At what would have been the FIRST window's hide boundary (2000ms from
+    // the original mount), the toast must still be on screen because the
+    // second toastKey reset the clock.
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(screen.getByTestId(TOAST_TESTID)).toBeInTheDocument();
+
+    // The toast finally hides 2000ms after the SECOND toastKey.
+    act(() => {
+      vi.advanceTimersByTime(1500);
+    });
+    expect(screen.queryByTestId(TOAST_TESTID)).toBeNull();
   });
 });
