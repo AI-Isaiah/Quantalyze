@@ -2227,11 +2227,6 @@ class EquityCurveBuilder:
         # and to_equity_curve_daily both call reconstruct_positions; pre-fix
         # this fired _match_positions_fifo twice for every snapshot read.
         self._positions_cache: list | None = None
-        # H-0815/H-0812 follow-up: surface FIFO drop counters (e.g.
-        # zero_entry_price_dropped) from the in-memory reconstruction. A
-        # corrupt position dropped here is logged by _match_positions_fifo and
-        # also recorded here so it is inspectable, not silently absent.
-        self.data_quality_flags: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Position reconstruction (in-memory, not persisted)
@@ -2269,17 +2264,16 @@ class EquityCurveBuilder:
             )
 
         all_positions: list[dict] = []
-        # Thread a drop-counter accumulator so a dropped corrupt position
-        # (e.g. zero-entry price) is surfaced on self.data_quality_flags rather
-        # than only logged — mirrors the persisted reconstruct_positions path.
-        fifo_dropped: dict[str, int] = {}
         for symbol, fills in positions_by_symbol.items():
-            matched = _match_positions_fifo(
-                symbol, fills, strategy_id="<in-memory>", dropped_flags=fifo_dropped
-            )
+            # Explicit decision (review): a corrupt zero/non-finite-entry
+            # position dropped by _match_positions_fifo IS surfaced — it emits
+            # an unconditional logger.warning. This in-memory equity path has no
+            # persisted data_quality_flags channel (unlike the DB-backed
+            # reconstruct_positions in position_reconstruction.py), so we
+            # deliberately do NOT thread a dropped_flags accumulator here — it
+            # would be write-only state that nothing reads.
+            matched = _match_positions_fifo(symbol, fills, strategy_id="<in-memory>")
             all_positions.extend(matched)
-        for _k, _v in fifo_dropped.items():
-            self.data_quality_flags[_k] = self.data_quality_flags.get(_k, 0) + _v
 
         # Attach mark prices to open positions (BACKBONE-06).
         for pos in all_positions:

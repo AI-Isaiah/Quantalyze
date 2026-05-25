@@ -285,9 +285,16 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
         )
 
     # Audit H-0812: merge FIFO drop counters (e.g. zero_entry_price_dropped)
-    # into the strategy-level flags. Counters sum; any other value type wins.
+    # into the strategy-level flags, using the SAME bool-OR / int-sum / else-
+    # replace rule as the per-position aggregation above so the two merges
+    # cannot diverge (review). Only int counters flow through today, but the
+    # mirrored shape future-proofs a bool drop-flag against a mis-merge.
     for k, v in fifo_dropped_flags.items():
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
+        if isinstance(v, bool):
+            aggregated_data_quality_flags[k] = (
+                aggregated_data_quality_flags.get(k, False) or v
+            )
+        elif isinstance(v, (int, float)):
             aggregated_data_quality_flags[k] = (
                 aggregated_data_quality_flags.get(k, 0) + v
             )
