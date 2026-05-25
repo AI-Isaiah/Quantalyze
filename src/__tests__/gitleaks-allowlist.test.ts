@@ -84,6 +84,10 @@ const EXPECTED_ALLOWLIST_FIXTURES: Array<{
     label: "package-lock integrity hashes (high-entropy noise)",
     relPath: "package-lock.json",
   },
+  {
+    label: "gitleaks-allowlist meta-test JWT fixture (H-0017)",
+    relPath: "src/__tests__/gitleaks-allowlist.test.ts",
+  },
 ];
 
 function readGitleaksConfig(): string {
