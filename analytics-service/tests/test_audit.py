@@ -21,7 +21,10 @@ keeps the orthogonal invariants:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -349,3 +352,189 @@ class TestLoggerErrorScrubsPiiMetadata:
             f"NULL-branch substring leaked: {msg!r}"
         )
         assert "[REDACTED]" in msg
+
+
+# ---------------------------------------------------------------------------
+# H-0771 — concurrency / thread-safety coverage for the fire-and-forget
+# wrapper. audit.py:31-34 claims "Synchronous supabase-py call dispatched
+# inside the caller's thread ... the service-role client is thread-safe."
+# Every other test in this file drives the wrapper single-threaded, so that
+# claim is untested. These tests exercise log_audit_event from many threads
+# (and from an asyncio task pool via to_thread) and assert no emit is lost,
+# no exception escapes, and every concurrent call reaches the RPC exactly
+# once. A regression where get_supabase returns a non-thread-safe singleton
+# or supabase-py raises on concurrent .execute() would surface here.
+# ---------------------------------------------------------------------------
+
+
+def _make_thread_recording_supabase(call_delay_s: float = 0.0):
+    """Build a supabase double whose .rpc(...).execute() records the calling
+    thread and (optionally) sleeps inside .execute() to force interleaving.
+
+    Returns (supabase, recorded_payloads, recorded_threads). The recording
+    lists are appended under a lock so the test harness itself never loses a
+    record — any lost RPC then provably comes from the wrapper, not the mock.
+    """
+    lock = threading.Lock()
+    recorded_payloads: list[dict] = []
+    recorded_threads: list[int] = []
+
+    def _execute():
+        if call_delay_s:
+            time.sleep(call_delay_s)
+        with lock:
+            recorded_threads.append(threading.get_ident())
+        return MagicMock(data=None, error=None)
+
+    def _rpc(_name, params):
+        with lock:
+            recorded_payloads.append(params)
+        return MagicMock(execute=_execute)
+
+    supabase = MagicMock()
+    supabase.rpc.side_effect = _rpc
+    return supabase, recorded_payloads, recorded_threads
+
+
+class TestLogAuditEventConcurrency:
+    """H-0771: the thread-safety contract in audit.py must actually hold."""
+
+    def test_concurrent_threads_all_reach_rpc_exactly_once(self, monkeypatch):
+        """50 threads each emit one event; the RPC must fire exactly 50 times,
+        with 50 distinct entity_ids preserved and no exception escaping a
+        worker thread. A non-thread-safe client or a lost-update bug would
+        show up as < 50 recorded payloads or a captured exception."""
+        # call_delay forces overlap so the threads genuinely contend inside
+        # .execute() rather than each running to completion before the next
+        # GIL release.
+        supabase, payloads, threads = _make_thread_recording_supabase(
+            call_delay_s=0.002
+        )
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+
+        n = 50
+        errors: list[BaseException] = []
+        errors_lock = threading.Lock()
+        start = threading.Barrier(n)
+
+        def _worker(i: int) -> None:
+            start.wait()  # release all threads simultaneously
+            try:
+                log_audit_event(
+                    user_id=DUMMY_USER,
+                    action="bridge.score_candidates",
+                    entity_type="bridge_run",
+                    entity_id=f"00000000-0000-0000-0000-{i:012d}",
+                    metadata={"i": i},
+                )
+            except BaseException as exc:  # noqa: BLE001 — record, don't swallow silently
+                with errors_lock:
+                    errors.append(exc)
+
+        workers = [threading.Thread(target=_worker, args=(i,)) for i in range(n)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(timeout=10)
+
+        assert not any(w.is_alive() for w in workers), "a worker thread hung"
+        assert errors == [], f"worker thread(s) raised: {errors!r}"
+        # Every concurrent emit must reach the RPC exactly once — no lost call.
+        assert len(payloads) == n, (
+            f"expected {n} RPC calls, recorded {len(payloads)} — an emit was "
+            "lost under concurrency"
+        )
+        assert len(threads) == n
+        # Distinct entity_ids prove no payload was overwritten/clobbered.
+        seen_ids = {p["p_entity_id"] for p in payloads}
+        assert len(seen_ids) == n, (
+            f"expected {n} distinct entity_ids, saw {len(seen_ids)} — "
+            "concurrent payloads collided"
+        )
+        # The work genuinely ran across multiple OS threads (not serialized
+        # onto one), proving we exercised the cross-thread path.
+        assert len({*threads}) > 1, "all calls ran on one thread — no real concurrency"
+
+    def test_concurrent_asyncio_to_thread_gather(self, monkeypatch):
+        """The wrapper is documented as the thing an async router calls without
+        awaiting; routers offload it via asyncio.to_thread in some paths. Drive
+        it through asyncio.gather(*to_thread(...)) and assert every emit lands.
+        This is the asyncio-context coverage the audit flagged as absent."""
+        supabase, payloads, _threads = _make_thread_recording_supabase(
+            call_delay_s=0.001
+        )
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+
+        n = 30
+
+        async def _drive() -> None:
+            await asyncio.gather(
+                *[
+                    asyncio.to_thread(
+                        log_audit_event,
+                        DUMMY_USER,
+                        "simulator.run",
+                        "simulator_run",
+                        f"00000000-0000-0000-0000-{i:012d}",
+                        {"i": i},
+                    )
+                    for i in range(n)
+                ]
+            )
+
+        asyncio.run(_drive())
+
+        assert len(payloads) == n, (
+            f"expected {n} RPC calls via to_thread gather, recorded {len(payloads)}"
+        )
+        assert len({p["p_entity_id"] for p in payloads}) == n
+
+    def test_transient_counter_no_lost_updates_under_contention(self, monkeypatch):
+        """The transient branch increments the module-level
+        `audit_emit_transient_failures_total` counter (audit.py:284-285) on a
+        read-modify-write with no lock. The counter is a metric used for
+        alerting; lost updates would under-report Railway blips. Drive many
+        concurrent transient failures and assert the counter equals the exact
+        number of failures — pinning the no-lost-update contract."""
+        import httpx
+
+        class _TransientSupabase:
+            def rpc(self, *_a, **_k):
+                raise httpx.ConnectError("simulated railway blip")
+
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: _TransientSupabase())
+        # Sentry is best-effort; the wrapper already wraps it in try/except, but
+        # neutralize it so the test asserts on the counter alone.
+        monkeypatch.setattr(audit_module.sentry_sdk, "set_tag", lambda *a, **k: None)
+        monkeypatch.setattr(
+            audit_module.sentry_sdk, "capture_exception", lambda *a, **k: None
+        )
+        monkeypatch.setattr(audit_module, "audit_emit_transient_failures_total", 0)
+
+        n_threads = 8
+        per_thread = 250
+        total = n_threads * per_thread
+        start = threading.Barrier(n_threads)
+
+        def _worker() -> None:
+            start.wait()
+            for _ in range(per_thread):
+                # transient branch swallows (returns) — never raises here.
+                log_audit_event(
+                    user_id=DUMMY_USER,
+                    action="bridge.run",
+                    entity_type="bridge_run",
+                    entity_id=DUMMY_ENTITY,
+                )
+
+        workers = [threading.Thread(target=_worker) for _ in range(n_threads)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(timeout=15)
+
+        assert not any(w.is_alive() for w in workers), "a worker thread hung"
+        assert audit_module.audit_emit_transient_failures_total == total, (
+            f"transient counter lost updates: expected {total}, got "
+            f"{audit_module.audit_emit_transient_failures_total}"
+        )

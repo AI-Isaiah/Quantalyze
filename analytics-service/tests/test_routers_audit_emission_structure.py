@@ -40,6 +40,7 @@ deployment's runtime audit_log observation.
 from __future__ import annotations
 
 import ast
+import asyncio
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -352,3 +353,176 @@ def test_every_audit_emission_is_AFTER_compute_and_BEFORE_return():
             f"{emission_line} has no `return` statement at or after it — the "
             f"emission may be unreachable or trapped in a dead branch."
         )
+
+
+# ---------------------------------------------------------------------------
+# H-0815 — behavioral coverage of the wrapper+caller PAIR.
+#
+# The structural tests above prove the emission call EXISTS in the right place
+# with the right shape, but they never RUN the handler. They cannot catch the
+# runtime failure mode the audit flagged: the fire-and-forget contract says a
+# router's compute path must still return its result when the audit emit
+# raises. After audit-2026-05-07 P907 + P908, log_audit_event RE-RAISES on an
+# unexpected exception (Branch 3, fail-loud). The router happy-path emit sites
+# (routers/portfolio.py::portfolio_bridge line ~1740 / ~1711,
+# routers/simulator.py::portfolio_simulator line ~297) call log_audit_event
+# UNWRAPPED — so an unexpected RPC error there propagates out of the handler
+# AFTER the compute already succeeded, turning a successful bridge run into a
+# 500. That is precisely the "compute path succeeds when audit RPC raises"
+# contract the structural test cannot observe.
+#
+# These tests drive portfolio_bridge end-to-end with a table-routing Supabase
+# double and assert the CORRECT behavior: the handler returns its computed
+# 200 payload even when the audit emit raises.
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402 — kept local to the behavioral block
+
+
+def _make_chain(execute_result):
+    """A Supabase query-builder double: every fluent method returns self,
+    and `.execute()` returns the pre-baked result for this table."""
+    chain = MagicMock()
+    for method in (
+        "select", "eq", "in_", "not_", "is_", "order", "limit", "single",
+    ):
+        getattr(chain, method).return_value = chain
+    # `.not_.in_(...)` chains off the `not_` attribute too.
+    chain.not_.in_.return_value = chain
+    chain.not_.is_.return_value = chain
+    chain.execute.return_value = MagicMock(data=execute_result)
+    return chain
+
+
+def _make_bridge_supabase(*, candidates_present: bool):
+    """Route .table(name) to a per-table chain so portfolio_bridge reaches its
+    happy-path audit emit. When candidates_present is False we steer through
+    the empty-candidates fast-path (emit @ line ~1711); when True, through the
+    full scoring path (emit @ line ~1740)."""
+    PORTFOLIO_ID = "11111111-1111-1111-1111-111111111111"
+    UNDERPERF_ID = "22222222-2222-2222-2222-222222222222"
+    CANDIDATE_ID = "33333333-3333-3333-3333-333333333333"
+
+    series_records = [
+        {"date": "2024-01-02", "value": 0.01},
+        {"date": "2024-01-03", "value": -0.02},
+        {"date": "2024-01-04", "value": 0.015},
+    ]
+
+    # strategy_analytics is queried twice (portfolio members, then candidates).
+    # The router calls .in_(strategy_ids) the first time and .in_(candidate_ids)
+    # the second; a single chain whose execute() returns the portfolio member
+    # series both times is fine because candidate_returns is built from rows
+    # whose strategy_id matches candidate_ids — so for the empty-candidates
+    # path we return NO candidate rows by returning rows keyed only to the
+    # portfolio member. We disambiguate via a stateful side_effect below.
+    sa_call_count = {"n": 0}
+
+    def _sa_execute():
+        sa_call_count["n"] += 1
+        if sa_call_count["n"] == 1:
+            # portfolio members: one member with a usable series
+            return MagicMock(data=[
+                {"strategy_id": UNDERPERF_ID, "returns_series": series_records},
+            ])
+        # candidates query
+        if candidates_present:
+            return MagicMock(data=[
+                {"strategy_id": CANDIDATE_ID, "returns_series": series_records},
+            ])
+        return MagicMock(data=[])  # empty → fast-path
+
+    tables: dict[str, MagicMock] = {}
+    tables["portfolios"] = _make_chain([{"id": PORTFOLIO_ID}])
+    tables["portfolio_strategies"] = _make_chain([
+        {"strategy_id": UNDERPERF_ID, "current_weight": 1.0},
+    ])
+    sa_chain = _make_chain(None)
+    sa_chain.execute.side_effect = _sa_execute
+    tables["strategy_analytics"] = sa_chain
+    tables["strategies"] = _make_chain(
+        [{"id": CANDIDATE_ID, "name": "Cand"}] if candidates_present else []
+    )
+
+    supabase = MagicMock()
+    supabase.table.side_effect = lambda name: tables[name]
+    return supabase, PORTFOLIO_ID, UNDERPERF_ID
+
+
+def _reset_bridge_rate_limiter():
+    """Clear the per-user bridge attempt cache so repeated test runs don't trip
+    the 10/hour per-user limiter (which would 429 before the emit)."""
+    from routers import portfolio as portfolio_router
+
+    portfolio_router._bridge_user_attempts.clear()
+
+
+def _call_undecorated(handler, *args, **kwargs):
+    """Invoke the route handler bypassing the slowapi @limiter decorator."""
+    fn = getattr(handler, "__wrapped__", handler)
+    return asyncio.run(fn(*args, **kwargs))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="H-0815: portfolio_bridge happy-path log_audit_event is unwrapped; "
+    "after audit-2026-05-07 P907+P908 an unexpected audit RPC error re-raises "
+    "(Branch 3) and escapes the handler AFTER compute succeeded, violating the "
+    "fire-and-forget contract (successful run becomes a 500). Production fix in "
+    "routers/portfolio.py: wrap happy-path emit sites (lines ~1711/~1740) in "
+    "try/except like the simulator failure-path emit already does.",
+)
+@pytest.mark.parametrize("candidates_present", [False, True])
+def test_bridge_returns_result_when_audit_emit_raises(
+    monkeypatch, candidates_present
+):
+    """Fire-and-forget contract: portfolio_bridge must return its 200 payload
+    even when the happy-path log_audit_event raises an unexpected exception.
+
+    This is the runtime failure the AST-only structural test cannot see. The
+    emit site is unwrapped, so under audit-2026-05-07 P907 + P908 (Branch 3
+    re-raises) the exception escapes the handler and the successful compute is
+    lost. Asserting the handler returns proves the contract holds (or SURFACES
+    the violation if it does not)."""
+    from routers import portfolio as portfolio_router
+    from models.schemas import BridgeRequest
+
+    _reset_bridge_rate_limiter()
+
+    supabase, portfolio_id, underperf_id = _make_bridge_supabase(
+        candidates_present=candidates_present
+    )
+    monkeypatch.setattr(portfolio_router, "get_supabase", lambda: supabase)
+
+    # The audit emit raises an UNEXPECTED error (not transient / not 42501),
+    # so the wrapper's Branch 3 re-raises it into the caller.
+    def _raising_emit(**_kwargs):
+        raise RuntimeError("unexpected audit RPC failure")
+
+    monkeypatch.setattr(portfolio_router, "log_audit_event", _raising_emit)
+
+    # find_replacement_candidates is imported lazily inside the handler from
+    # services.bridge_scoring; for the candidates_present path, stub it so we
+    # don't depend on real scoring math (orthogonal to the audit contract).
+    if candidates_present:
+        import services.bridge_scoring as bs
+
+        monkeypatch.setattr(
+            bs,
+            "find_replacement_candidates",
+            lambda *a, **k: [{"strategy_id": "33333333-3333-3333-3333-333333333333"}],
+        )
+
+    req = BridgeRequest(
+        portfolio_id=portfolio_id,
+        underperformer_strategy_id=underperf_id,
+        user_id="44444444-4444-4444-4444-444444444444",
+    )
+    request = MagicMock()  # slowapi is bypassed via __wrapped__
+
+    result = _call_undecorated(portfolio_router.portfolio_bridge, request, req)
+
+    # Correct behavior: compute succeeded, so the handler returns its payload.
+    assert result["ok"] is True
+    assert result["status"] == "complete"
+    assert result["portfolio_id"] == portfolio_id

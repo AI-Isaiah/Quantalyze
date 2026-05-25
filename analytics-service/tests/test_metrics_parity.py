@@ -892,3 +892,92 @@ def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
         "sibling": sibling,
     }
     assertMetricParity(actual, golden_252d_expected)
+
+
+# ---------------------------------------------------------------------------
+# H-0753 — fixture schema validation for golden_252d_expected.json.
+#
+# conftest.golden_252d_expected does a bare `json.loads(...read_text())` with
+# NO schema check. A contributor who commits a truncated / syntactically-valid-
+# but-semantically-wrong fixture (e.g. `{}`, or one missing the `sibling` key)
+# would surface a confusing missing-KEY error deep inside assertMetricParity
+# instead of a clear "fixture schema invalid" message. This test reads the
+# COMMITTED fixture directly and asserts its top-level + well-known nested
+# shape, so a malformed fixture fails HERE with an actionable message.
+# ---------------------------------------------------------------------------
+
+# Well-known keys that any valid golden_252d_expected.json must carry. These
+# are intentionally a SUBSET (a few load-bearing names per section), not the
+# full key list — the goal is a fast "this is structurally a metrics fixture"
+# gate at load time, not a second parity assertion.
+_REQUIRED_TOP_LEVEL_KEYS = {"metrics_json", "sibling"}
+_REQUIRED_METRICS_JSON_KEYS = {
+    "cagr",
+    "sharpe",
+    "sortino",
+    "volatility",
+    "max_drawdown",
+    "trade_metrics",
+}
+_REQUIRED_SIBLING_KEYS = {
+    "daily_returns_grid",
+    "rolling_beta",
+    "rolling_alpha",
+    "exposure_series",
+}
+
+
+def test_golden_252d_expected_fixture_schema_is_valid():
+    """The committed golden_252d_expected.json must have a well-formed schema.
+
+    Fails with a clear, actionable message at load time if the fixture is
+    truncated, replaced with `{}`, or missing a load-bearing section — instead
+    of the confusing deep missing-key error from assertMetricParity that
+    H-0753 describes."""
+    data = json.loads(
+        (FIXTURES_DIR / "golden_252d_expected.json").read_text()
+    )
+
+    assert isinstance(data, dict) and data, (
+        "golden_252d_expected.json is empty or not a JSON object — fixture is "
+        "truncated or was overwritten with {} during a bad regen"
+    )
+
+    missing_top = _REQUIRED_TOP_LEVEL_KEYS - data.keys()
+    assert not missing_top, (
+        f"golden_252d_expected.json missing required top-level key(s): "
+        f"{sorted(missing_top)}. The fixture is semantically invalid; "
+        f"regenerate via `python -m tests.fixtures.regen_golden`."
+    )
+
+    mj = data["metrics_json"]
+    assert isinstance(mj, dict) and mj, "metrics_json section is empty / not a dict"
+    missing_mj = _REQUIRED_METRICS_JSON_KEYS - mj.keys()
+    assert not missing_mj, (
+        f"golden_252d_expected.json['metrics_json'] missing well-known key(s): "
+        f"{sorted(missing_mj)} — fixture schema drifted or is truncated."
+    )
+
+    sib = data["sibling"]
+    assert isinstance(sib, dict) and sib, "sibling section is empty / not a dict"
+    missing_sib = _REQUIRED_SIBLING_KEYS - sib.keys()
+    assert not missing_sib, (
+        f"golden_252d_expected.json['sibling'] missing well-known key(s): "
+        f"{sorted(missing_sib)} — fixture schema drifted or is truncated."
+    )
+
+
+def test_golden_252d_expected_conftest_fixture_matches_committed_file(
+    golden_252d_expected,
+):
+    """The conftest fixture must return exactly the committed file's parsed
+    content (no transformation), so the schema gate above also governs what
+    every parity test consumes."""
+    committed = json.loads(
+        (FIXTURES_DIR / "golden_252d_expected.json").read_text()
+    )
+    assert golden_252d_expected == committed, (
+        "conftest.golden_252d_expected diverged from the committed fixture file"
+    )
+    # And the fixture the parity tests consume satisfies the same schema gate.
+    assert _REQUIRED_TOP_LEVEL_KEYS <= golden_252d_expected.keys()
