@@ -443,7 +443,43 @@ export async function getStrategyDetail(
  * Returns `null` for missing scalars so per-panel partial-data banners can
  * distinguish "no data" from "0% return".
  */
+/**
+ * audit-2026-05-07 H-1255 — Narrowed Strategy type that reflects the actual
+ * column projection used by getStrategyDetailV2. The SELECT in
+ * STRATEGY_V2_STRATEGY_COLUMNS fetches 9 columns; casting to the full
+ * Strategy interface widens access to fields that PostgREST never returned
+ * (e.g. aum, status, user_id, description) — those fields are `undefined`
+ * at runtime while TypeScript says they exist. Define the projection type
+ * here so a consumer reading `result.strategy.aum` becomes a compile-time error.
+ * NOTE: this Pick intentionally includes ONE field beyond the 9 SELECTed —
+ * `trust_tier` — which is likewise `undefined` at runtime on the v2 path (see
+ * the inline DEFERRED-CROSSFILE note on that member below).
+ */
+export type StrategyV2ProjectedColumns = Pick<
+  Strategy,
+  | "id"
+  | "name"
+  | "start_date"
+  | "supported_exchanges"
+  | "strategy_types"
+  | "subtypes"
+  | "markets"
+  | "leverage_range"
+  | "avg_daily_turnover"
+  // trust_tier is NOT in STRATEGY_V2_STRATEGY_COLUMNS — it arrives via the
+  // strategy_verifications join in `getStrategyDetail` but NOT in `getStrategyDetailV2`.
+  // StrategyV2Shell.tsx reads it, so it is `undefined` at runtime on the v2 path.
+  // DEFERRED-CROSSFILE: to fix, add strategy_verifications to the v2 SELECT and
+  // backfill STRATEGY_V2_STRATEGY_COLUMNS (touch to the migration constant).
+  | "trust_tier"
+>;
+
 export interface StrategyV2Detail {
+  // DEFERRED-CROSSFILE H-1255: should be `StrategyV2ProjectedColumns` once
+  // test fixtures in StrategyV2Shell.test.tsx and tests/visual/strategy-v2-panel-count.test.tsx
+  // are updated to only supply the 9-10 projected columns. Until then, `Strategy` is kept
+  // so excess-property-check on those literal fixtures doesn't break compilation.
+  // The cast inside getStrategyDetailV2 is already narrowed to StrategyV2ProjectedColumns.
   strategy: Strategy;
   panel1: {
     supported_exchanges: string[];
@@ -555,12 +591,16 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
 
   if (error || !strategy) return null;
 
-  // The explicit projection above narrows the inferred Supabase row type to a
-  // subset of `Strategy` (panel-relevant columns only). The cast through
-  // `unknown` acknowledges that — we never read fields outside the projection
-  // from this binding. `result.strategy` consumers (page metadata + shell
-  // header) only use id / name / start_date.
-  const s = strategy as unknown as Strategy;
+  // audit-2026-05-07 H-1255: narrowed to StrategyV2ProjectedColumns (the 9
+  // columns SELECTed above, plus trust_tier which the type intentionally
+  // includes but the v2 SELECT does NOT fetch — undefined at runtime, see the
+  // DEFERRED note on the type def) so TypeScript catches any consumer that
+  // reads a non-projected field (e.g. .aum, .status, .user_id) — those
+  // fields are undefined at runtime even though the full Strategy type permits
+  // them. This replaces the prior `as unknown as Strategy` which widened
+  // silently to the full interface and hid the PR #106/#107 class of bug where
+  // data_quality_flags was dropped from the SELECT and every chip was dead.
+  const s = strategy as unknown as StrategyV2ProjectedColumns;
 
   // Pitfall 8: do NOT fall back to EMPTY_ANALYTICS. Read the row directly so
   // missing keys remain `null` and per-panel banners trigger correctly.
@@ -679,7 +719,11 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
   const history_days = historyDaysFromJson ?? historyDaysFromSeries;
 
   return {
-    strategy: s,
+    // Cast back to Strategy to satisfy StrategyV2Detail.strategy while keeping
+    // the internal `s` binding narrow (StrategyV2ProjectedColumns). The interface
+    // field will be narrowed to StrategyV2ProjectedColumns once test fixtures
+    // are updated — see DEFERRED-CROSSFILE note on StrategyV2Detail above.
+    strategy: s as unknown as Strategy,
     panel1,
     panel2Headline,
     panel2Equity,
@@ -816,11 +860,15 @@ const EXPECTED_LAZY_METRICS_KINDS_BY_PANEL = {
  *   - The strategy has no series rows yet (compute_analytics not run)
  *   - The RPC call fails for any reason (defensive fallback)
  *
- * Each lazy panel invokes this from its `useEffect` once the panel mounts
- * via the IntersectionObserver scaffold. Memoization (React Query / SWR /
- * useEffect deps) is the consumer's responsibility.
+ * audit-2026-05-07 H-0495: wrapped in React.cache() so multiple calls with
+ * the same (strategyId, panelId) within the same RSC render tree share a
+ * single RPC round-trip + a single createClient() instantiation. Without this,
+ * a v2 page with 4 lazy panels fires 4 independent RPC calls each performing
+ * its own cookie read + auth-header resolution. cache() deduplicates within a
+ * single server request. The IntersectionObserver consumer-side memoization
+ * (React Query / SWR / useEffect deps) still applies for client-side re-mount.
  */
-export async function fetchStrategyLazyMetrics(
+export const fetchStrategyLazyMetrics = cache(async function fetchStrategyLazyMetrics(
   strategyId: string,
   panelId: LazyMetricsPanelId,
 ): Promise<LazyMetricsPayload> {
@@ -935,7 +983,7 @@ export async function fetchStrategyLazyMetrics(
     );
   }
   return filtered as LazyMetricsPayload;
-}
+});
 
 export async function getUserPortfolios(): Promise<PortfolioWithCount[]> {
   const supabase = await createClient();
@@ -1572,7 +1620,9 @@ const VENUE_DISPLAY: Record<string, string> = {
  * - M5 multi-venue: breakdown JSONB is keyed by SYMBOL only — venue is not
  *   disambiguated. If an allocator holds BTC on both Binance and OKX, both
  *   scope_refs (the same symbol across venues) map to the same return
- *   series. Phase 09 Python engine accepts this approximation.
+ *   series. Phase 09 Python engine accepts this approximation. (A real
+ *   per-(venue,symbol) aliasing sentinel is deferred to a dedicated PR —
+ *   it requires preserving venue granularity through the holdings collapse.)
  * - prev=0 days are skipped (avoids division by zero / non-finite values).
  * - Series with fewer than 2 snapshots produce no returns (a return is a
  *   difference; you need at least two values to subtract).
