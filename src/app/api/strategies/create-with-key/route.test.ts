@@ -13,7 +13,7 @@
  * envelope-shaped responses must round-trip to a 200 with strategy_id +
  * api_key_id.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 
 vi.mock("server-only", () => ({}));
@@ -282,5 +282,58 @@ describe("POST /api/strategies/create-with-key — P467 scope-rejection paths", 
     expect(encryptKeyMock).not.toHaveBeenCalled();
     expect(rpcMock).not.toHaveBeenCalled();
     consoleErr.mockRestore();
+  });
+});
+
+/**
+ * H-0306 — auth boundary. The describe blocks above mock @/lib/api/withAuth
+ * to bypass auth entirely, so the unauthed branch was never executed in CI.
+ * Per Rule 9 the auth boundary is the single most important invariant on a
+ * mutation route. This block re-imports the route against the REAL withAuth
+ * (via vi.importActual) wrapped around a Supabase client whose
+ * auth.getUser() returns no user, and asserts the 401 short-circuit fires
+ * BEFORE any rate-limit / validation / encryption / RPC work.
+ */
+describe("POST /api/strategies/create-with-key — unmocked withAuth boundary (H-0306)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it("returns 401 when the session is missing — handler never runs", async () => {
+    // Real withAuth — not the bypass mock above.
+    vi.doMock("@/lib/api/withAuth", async () => {
+      const actual = await vi.importActual<typeof import("@/lib/api/withAuth")>(
+        "@/lib/api/withAuth",
+      );
+      return actual;
+    });
+    // Supabase client with NO authenticated user → withAuth's 401 branch.
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getUser: async () => ({ data: { user: null }, error: null }),
+        },
+        rpc: rpcMock,
+      }),
+    }));
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(401);
+    const json = await res.json();
+    expect(json.error).toBe("Unauthorized");
+
+    // The handler body never executed: no validation, no encryption, no RPC.
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
   });
 });

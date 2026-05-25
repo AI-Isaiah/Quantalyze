@@ -42,6 +42,9 @@ const STATE = vi.hoisted(() => ({
   apiKeyRefCount: 1 as number,
   // Captured api_keys deletes (cleanup branch).
   apiKeysDeleteCalls: [] as Array<{ column: string; value: unknown }>,
+  // H-0312: inject a failure on the api_keys delete to exercise the
+  // non-fatal cleanup branch (the route warns + still returns 200).
+  apiKeysDeleteError: null as { message: string } | null,
   // Captured audit emissions.
   auditCalls: [] as Array<{ action: string; entity_id: unknown }>,
 }));
@@ -99,8 +102,9 @@ vi.mock("@/lib/supabase/server", () => ({
           eq: (column: string, value: unknown) => {
             STATE.apiKeysDeleteCalls.push({ column, value });
             return {
-              then: (resolve: (v: { error: null }) => void) =>
-                resolve({ error: null }),
+              then: (
+                resolve: (v: { error: { message: string } | null }) => void,
+              ) => resolve({ error: STATE.apiKeysDeleteError }),
             };
           },
         });
@@ -158,6 +162,7 @@ beforeEach(() => {
   STATE.strategiesDeleteCalls = [];
   STATE.apiKeyRefCount = 1;
   STATE.apiKeysDeleteCalls = [];
+  STATE.apiKeysDeleteError = null;
   STATE.auditCalls = [];
 });
 
@@ -311,5 +316,151 @@ describe("/api/strategies/draft/[id] — 200 happy path for the owner (C-0115)",
     );
     expect(strategyDeleteAudit).toBeDefined();
     expect(strategyDeleteAudit!.entity_id).toBe(DRAFT_ID);
+  });
+});
+
+// ============================================================
+// H-0312 — DELETE api_keys conditional cleanup (refCount fence) +
+//          non-fatal cleanup-failure branch.
+//
+// The DELETE handler hard-deletes the linked api_keys row ONLY when no
+// other strategy still references it (refCount === 0). Otherwise the FK's
+// ON DELETE SET NULL would silently break another strategy sharing the
+// same key. A regression that dropped the refCount guard would orphan
+// a sibling strategy's credentials; one that treated the api_keys delete
+// failure as fatal would 500 a delete whose primary effect already
+// succeeded. These tests pin both contracts.
+// ============================================================
+describe("DELETE /api/strategies/draft/[id] — api_keys cleanup (H-0312)", () => {
+  it("hard-deletes the linked api_keys row when refCount === 0", async () => {
+    STATE.user = { id: OWNER_ID };
+    STATE.draftRow = {
+      id: DRAFT_ID,
+      user_id: OWNER_ID,
+      source: "wizard",
+      status: "draft",
+      api_key_id: API_KEY_ID,
+    };
+    STATE.apiKeyRefCount = 0; // no other strategy references the key
+
+    const { DELETE } = await import("./route");
+    const res = await DELETE(makeDeleteReq(), makeCtx());
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).deleted).toBe(true);
+
+    // The api_keys delete fired, scoped to the linked key id.
+    expect(STATE.apiKeysDeleteCalls).toContainEqual({
+      column: "id",
+      value: API_KEY_ID,
+    });
+    // The forensic record shows the cascade revoke.
+    const revokeAudit = STATE.auditCalls.find(
+      (c) => c.action === "api_key.revoke",
+    );
+    expect(revokeAudit).toBeDefined();
+    expect(revokeAudit!.entity_id).toBe(API_KEY_ID);
+  });
+
+  it("does NOT delete the api_keys row when another strategy still references it (refCount > 0)", async () => {
+    STATE.user = { id: OWNER_ID };
+    STATE.draftRow = {
+      id: DRAFT_ID,
+      user_id: OWNER_ID,
+      source: "wizard",
+      status: "draft",
+      api_key_id: API_KEY_ID,
+    };
+    STATE.apiKeyRefCount = 2; // a sibling strategy shares the key
+
+    const { DELETE } = await import("./route");
+    const res = await DELETE(makeDeleteReq(), makeCtx());
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).deleted).toBe(true);
+
+    // Critical: the shared key must survive — deleting it would NULL out
+    // the sibling strategy's credentials via ON DELETE SET NULL.
+    expect(STATE.apiKeysDeleteCalls.length).toBe(0);
+    const revokeAudit = STATE.auditCalls.find(
+      (c) => c.action === "api_key.revoke",
+    );
+    expect(revokeAudit).toBeUndefined();
+  });
+
+  it("treats an api_keys delete failure as non-fatal — still returns 200", async () => {
+    STATE.user = { id: OWNER_ID };
+    STATE.draftRow = {
+      id: DRAFT_ID,
+      user_id: OWNER_ID,
+      source: "wizard",
+      status: "draft",
+      api_key_id: API_KEY_ID,
+    };
+    STATE.apiKeyRefCount = 0;
+    STATE.apiKeysDeleteError = { message: "api_keys delete blew up" };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { DELETE } = await import("./route");
+    const res = await DELETE(makeDeleteReq(), makeCtx());
+
+    // The strategy row is already gone; a dangling api_key is a cosmetic
+    // cleanup issue, NOT a request failure.
+    expect(res.status).toBe(200);
+    expect((await res.json()).deleted).toBe(true);
+    // The delete was attempted...
+    expect(STATE.apiKeysDeleteCalls).toContainEqual({
+      column: "id",
+      value: API_KEY_ID,
+    });
+    // ...but failed, so the revoke audit must NOT have been emitted.
+    const revokeAudit = STATE.auditCalls.find(
+      (c) => c.action === "api_key.revoke",
+    );
+    expect(revokeAudit).toBeUndefined();
+    warnSpy.mockRestore();
+  });
+});
+
+// ============================================================
+// H-0318 — GET source/status filter: a non-wizard or non-draft row must
+// 404 ("Not a wizard draft"), so the wizard's Resume banner can never be
+// fed a pending_review / approved / legacy-draft strategy and clobber a
+// published one. The route's GET does the source/status check AFTER the
+// ownership lookup, in-handler (route.ts:79-81).
+// ============================================================
+describe("GET /api/strategies/draft/[id] — source/status fence (H-0318)", () => {
+  it("returns 404 'Not a wizard draft' when the row is status='pending_review'", async () => {
+    STATE.user = { id: OWNER_ID };
+    STATE.draftRow = {
+      id: DRAFT_ID,
+      user_id: OWNER_ID,
+      source: "wizard",
+      status: "pending_review", // promoted past draft
+      api_key_id: null,
+    };
+
+    const { GET } = await import("./route");
+    const res = await GET(makeGetReq(), makeCtx());
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe("Not a wizard draft");
+  });
+
+  it("returns 404 'Not a wizard draft' when the row's source is not 'wizard' (legacy draft)", async () => {
+    STATE.user = { id: OWNER_ID };
+    STATE.draftRow = {
+      id: DRAFT_ID,
+      user_id: OWNER_ID,
+      source: "manual", // legacy / non-wizard origin
+      status: "draft",
+      api_key_id: null,
+    };
+
+    const { GET } = await import("./route");
+    const res = await GET(makeGetReq(), makeCtx());
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe("Not a wizard draft");
   });
 });
