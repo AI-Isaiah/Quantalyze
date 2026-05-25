@@ -124,14 +124,13 @@ describe("fetchStrategyLazyMetrics — H-0495 cache() wrapper", () => {
     //
     // Regression note: if a future refactor reverts to a bare `async function`
     // declaration, T2-T5 above still pass (the payload passthrough is identical).
-    // The cache() contract is verified at the module-import level by checking
-    // that the value is not a named function (React.cache() returns an anonymous
-    // wrapper, unlike a plain named async function which preserves its .name).
-    //
-    // React.cache() wraps the fn and returns a new object — the wrapped fn's
-    // .name is '' (empty string) since cache() doesn't preserve names.
-    // A bare `async function fetchStrategyLazyMetrics(...)` would have .name
-    // === 'fetchStrategyLazyMetrics'. This distinction encodes the contract.
+    // The `.name === ''` check below is WEAK EVIDENCE that the export is
+    // cache()-wrapped: React.cache() returns an anonymous wrapper, whereas a
+    // bare `async function fetchStrategyLazyMetrics()` would have .name ===
+    // 'fetchStrategyLazyMetrics'. It does NOT prove per-request dedup (unit
+    // tests can't observe that), and it is coupled to a React-internal detail
+    // that could change across versions without a behavioral regression — treat
+    // it as a tripwire for an accidental un-wrap, not a guarantee of the contract.
     rpcState.response = { data: {}, error: null };
     const resultPromise = fetchStrategyLazyMetrics("strat-1", "trades");
     // Must be a Promise (callable returns thenable).

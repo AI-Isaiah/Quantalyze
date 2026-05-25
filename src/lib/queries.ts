@@ -446,11 +446,14 @@ export async function getStrategyDetail(
 /**
  * audit-2026-05-07 H-1255 — Narrowed Strategy type that reflects the actual
  * column projection used by getStrategyDetailV2. The SELECT in
- * STRATEGY_V2_STRATEGY_COLUMNS fetches only 9 columns; casting to the full
+ * STRATEGY_V2_STRATEGY_COLUMNS fetches 9 columns; casting to the full
  * Strategy interface widens access to fields that PostgREST never returned
  * (e.g. aum, status, user_id, description) — those fields are `undefined`
  * at runtime while TypeScript says they exist. Define the projection type
  * here so a consumer reading `result.strategy.aum` becomes a compile-time error.
+ * NOTE: this Pick intentionally includes ONE field beyond the 9 SELECTed —
+ * `trust_tier` — which is likewise `undefined` at runtime on the v2 path (see
+ * the inline DEFERRED-CROSSFILE note on that member below).
  */
 export type StrategyV2ProjectedColumns = Pick<
   Strategy,
@@ -589,7 +592,9 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
   if (error || !strategy) return null;
 
   // audit-2026-05-07 H-1255: narrowed to StrategyV2ProjectedColumns (the 9
-  // columns actually SELECTed above) so TypeScript catches any consumer that
+  // columns SELECTed above, plus trust_tier which the type intentionally
+  // includes but the v2 SELECT does NOT fetch — undefined at runtime, see the
+  // DEFERRED note on the type def) so TypeScript catches any consumer that
   // reads a non-projected field (e.g. .aum, .status, .user_id) — those
   // fields are undefined at runtime even though the full Strategy type permits
   // them. This replaces the prior `as unknown as Strategy` which widened

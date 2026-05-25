@@ -8,8 +8,12 @@
  * value gets two "undo affordance" entries for a single removal — the second
  * tile's undo affordance is overwritten and lost.
  *
- * Fix: find the tile inside the `setConfig` updater so the second call reads
- * `prev.tiles` AFTER the first filter has logically applied, and returns null.
+ * Fix: a `pendingRemovalsRef` Set (a useRef) records each tileId as it is
+ * removed; a second synchronous call for the same tileId short-circuits to
+ * `null` because the Set already contains it (the tile is still read from the
+ * outer `config.tiles` closure, not from `prev.tiles`). The ref is cleared by a
+ * `useEffect` keyed on `[config.tiles]`, so the guard is per-render-batch only —
+ * a tile can still be intentionally re-removed after the next render.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
