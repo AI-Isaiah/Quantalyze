@@ -1,35 +1,41 @@
-# Phase 19 / BACKBONE-04 / H-8 — hourly stability-window legacy-write detector.
+# Phase 19 / BACKBONE-04 — hourly PRODUCTION soak gate (legacy-write detector).
 #
-# After PR-B (flag flip), this cron runs hourly and asserts that NO direct
-# writes to `verification_requests` have happened since the recorded
-# `flag_flipped_at` timestamp in .planning/phase-19/stability-log.md. The
-# Postgres trigger `verification_requests_post_phase19_audit` (shipped in
-# PR-B's migration sub-step) logs every direct write to `audit_log` with
-# `entity_type='verification_requests_legacy_write'`; the script greps for
-# those rows.
+# Rewritten 2026-05-25 (go/no-go review). Two corrections vs. the prior version:
+#   1. Targets PRODUCTION (khslejtfbuezsmvmtsdn), not the test project. The old
+#      version checked the test DB, where no real traffic happens, so a green
+#      run proved nothing about prod.
+#   2. Measures via the read-only `phase19_soak_status` RPC using the prod ANON
+#      key — no service_role key in CI. The old version counted audit_log rows
+#      from a trigger that was never shipped to prod, so the count was always 0
+#      (vacuously green). It now counts the legacy table directly and
+#      cross-checks the live kill-switch, so a green run MEANS something.
 #
-# Blocking semantics: PR-D candidates run this cron in their PR-check
-# pipeline and MUST observe 168 contiguous clean hourly runs since
-# `flag_flipped_at`. Any non-zero count blocks PR-D until the write source
-# is identified (via correlation_id) and removed.
+# Honesty / fail-loud:
+#   * Soak not started (flag OFF + flag_flipped_at=TODO) -> GREEN but emits a
+#     loud ::warning:: ("measured nothing"), never a silent pass.
+#   * Flag ON but flag_flipped_at unrecorded -> FAIL (exit 6). This is the exact
+#     trap that stalled the rollout (flipped, then auto-rolled-back, soak never
+#     recorded); it can no longer pass silently.
+#   * Flag rolled back mid-window -> FAIL (exit 7); soak must restart.
+#   * Any write to the legacy table since the flip -> FAIL (exit 4); PR-D blocked.
 #
-# Until PR-B ships, the script exits 2 (flag_flipped_at not yet recorded)
-# and the workflow is a no-op gate. Operators can manually trigger via
-# workflow_dispatch.
+# Required secrets (ANON key, NOT service_role — chosen for least blast radius):
+#   PROD_SUPABASE_URL        https://khslejtfbuezsmvmtsdn.supabase.co
+#   PROD_SUPABASE_ANON_KEY   prod anon/publishable key
+#   (RPC supabase/migrations/20260525113000_phase19_soak_status_rpc.sql must be
+#    applied to prod first.)
 #
-# Security note: this workflow does NOT read any event-payload inputs
-# (issue titles, PR descriptions, commit messages). The only env var is
-# the static SUPABASE_PROJECT_ID literal. No injection surface.
-name: Phase 19 stability — no legacy writes
+# Injection-safety: no github.event.* inputs are referenced anywhere in this
+# workflow. The only inputs are the two PROD_* secrets, passed via env: and
+# read by the script from the process environment (never interpolated into a
+# run: shell line), plus a literal project id. No untrusted-input surface.
+name: Phase 19 stability — no legacy writes (prod)
 
 on:
   schedule:
     - cron: "0 * * * *"  # hourly
   workflow_dispatch:
 
-# C-0293(a) fix: hourly cron only checks out the tree and runs a bash
-# script against the test Supabase project. No GitHub API writes, so
-# `contents: read` is the entire surface.
 permissions:
   contents: read
 
@@ -39,49 +45,19 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          # retro-PR179-M-persist-chain: drop the default persisted
-          # GITHUB_TOKEN cred from .git/config. This hourly cron only
-          # reads the checked-out script; no git push surface.
           persist-credentials: false
-      - name: Verify no writes to legacy verification_requests since flag_flipped_at
-        # WR-01 fix (REVIEW.md 2026-05-08): SUPABASE_URL +
-        # SUPABASE_SERVICE_ROLE_KEY are wired (via repo secrets, NOT
-        # untrusted input) so verify-no-legacy-writes.sh actually executes
-        # the count query against the test project's PostgREST endpoint
-        # instead of merely printing it. The gate is pre-flip
-        # (flag_flipped_at=TODO in stability-log.md) until PR-B ships, at
-        # which point the script enforces the zero-row contract and the
-        # workflow fails the run on any detected legacy write.
-        #
-        # 2026-05-17 noop-handling fix: the script exits 2 when
-        # flag_flipped_at is still `TODO` (pre-flip). Per this workflow's
-        # header docstring that condition is meant to be a NO-OP GATE,
-        # not a failed run — the cron is supposed to silently pass until
-        # BACKBONE-04 commit (b) records the flip timestamp. Pre-fix the
-        # bare `run: bash ...` propagated exit 2 as a failed step and
-        # surfaced the workflow as red on every hourly tick. We capture
-        # the exit code, short-circuit on 2 with a `skipping` log line,
-        # and let every other non-zero exit (1, 3, 4, 5) keep failing
-        # the step as designed. Remove this branch once PR-B ships and
-        # stability-log.md records a real ISO-8601 flag_flipped_at.
-        #
-        # Injection-safety note: no `github.event.*` inputs are used in
-        # this run block. The only inputs are the SUPABASE_* secrets
-        # (which never reach a shell expansion since the script reads
-        # them from the process env directly) and the literal
-        # SUPABASE_PROJECT_ID. The wrapping bash block runs a tracked
-        # repo script and a fixed `echo` literal.
+      - name: Soak gate — zero writes to legacy verification_requests (prod)
         run: |
           set +e
           bash scripts/verify-no-legacy-writes.sh
           rc=$?
           set -e
           if [ "$rc" = "2" ]; then
-            echo "Phase 19 not yet active (flag_flipped_at = TODO); skipping legacy-write check."
+            echo "::warning title=Phase 19 soak NOT started::Kill-switch OFF / flag_flipped_at unrecorded (or PROD secrets unset) — this run measured nothing. The 168h soak has not begun."
             exit 0
           fi
           exit "$rc"
         env:
-          SUPABASE_PROJECT_ID: qmnijlgmdhviwzwfyzlc
-          SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_PROJECT_ID: khslejtfbuezsmvmtsdn  # prod (informational only)
+          PROD_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
+          PROD_SUPABASE_ANON_KEY: ${{ secrets.PROD_SUPABASE_ANON_KEY }}

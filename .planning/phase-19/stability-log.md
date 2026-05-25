@@ -2,6 +2,23 @@
 
 **Purpose:** Records the 7-calendar-day stability window between commit (b) flag-flip and commit (d) VIEW rename per BACKBONE-04. Plan-checker reads `flag_flipped_at` and asserts ≥168h delta before commit (d) ships.
 
+## Measurement (updated 2026-05-25 — prod-based gate)
+
+The soak is now CI-verified against **production** by
+`.github/workflows/phase-19-stability.yml` (hourly), which calls the read-only
+`phase19_soak_status` RPC (migration `20260525113000`) with the prod ANON key
+and runs `scripts/verify-no-legacy-writes.sh`. This **replaces** the prior
+approach (test project + an audit trigger that was never shipped to prod),
+under which the green hourly runs were no-op skips and proved nothing.
+
+**Honest status as of 2026-05-25:** the kill-switch is **OFF** in prod
+(`feature_flags.process_key_unified_backbone`), `flag_flipped_at` below is
+unrecorded, and **the 168h soak has NOT started.** When the switch is flipped
+to `on`, record the real ISO-8601 timestamp in `flag_flipped_at` below — the
+script reads it to (a) start the window and (b) count post-flip writes to the
+legacy `verification_requests` table. The gate now fails loud if the flag is
+flipped without recording here, or rolled back mid-window.
+
 ## Flag Flip Timestamp
 
 - **flag_flipped_at:** TODO (record from commit (b) timestamp; ISO-8601 UTC, e.g. `2026-05-15T14:00:00Z`)
