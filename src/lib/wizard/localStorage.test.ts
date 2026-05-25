@@ -473,37 +473,14 @@ describe("newWizardSessionId — server-side UUID_RE compatibility (M-0590)", ()
     expect(UUID_RE.test(id)).toBe(true);
   });
 
-  // M-0590 — KNOWN BUG: when crypto.randomUUID is undefined (older browsers
-  // / restricted environments) the fallback yields `${ts}-${rnd}` — hex with
-  // a SINGLE dash, NOT the canonical 8-4-4-4-12 UUID. That value FAILS the
-  // server-side UUID_RE in /api/strategies/create-with-key, so wizard
-  // sessions started on those browsers silently 400 on the
-  // wizard_session_id check. Fix in follow-up: polyfill randomUUID or emit a
-  // UUID-shaped fallback. Until then this guard fails loud.
-  it(
-    "M-0590: fallback session id is NOT a valid UUID and would 400 server-side — fix in follow-up",
-    () => {
-      // Force the fallback branch by removing randomUUID.
-      const realCrypto = globalThis.crypto;
-      vi.stubGlobal("crypto", {
-        ...realCrypto,
-        randomUUID: undefined,
-      } as unknown as Crypto);
-
-      const id = newWizardSessionId();
-      // This assertion documents the CORRECT contract (the value must pass
-      // the same regex the server uses). It currently fails because the
-      // fallback emits `${ts}-${rnd}`.
-      expect(UUID_RE.test(id)).toBe(true);
-
-      vi.unstubAllGlobals();
-    },
-  );
-
-  it("post-fix: fallback now produces a canonical UUID-v4-shaped string", () => {
-    // M-0590 fix landed: the fallback (no crypto.randomUUID) now emits a
-    // canonical 8-4-4-4-12 hex UUID-v4 shape that passes the server-side
-    // UUID_RE, instead of the prior `${ts}-${rnd}` single-dash form.
+  // M-0590: when crypto.randomUUID is undefined (older browsers / restricted
+  // environments) the fallback must still emit a canonical 8-4-4-4-12 UUID-v4
+  // shape that passes the server-side UUID_RE in
+  // /api/strategies/create-with-key. The prior fallback yielded `${ts}-${rnd}`
+  // — hex with a SINGLE dash — which FAILED that regex and silently 400'd
+  // wizard sessions on those browsers. This guards against regressing back to
+  // a non-UUID fallback.
+  it("M-0590: crypto.randomUUID-unavailable fallback emits a UUID-v4-shaped id that passes UUID_RE", () => {
     const realCrypto = globalThis.crypto;
     vi.stubGlobal("crypto", {
       ...realCrypto,

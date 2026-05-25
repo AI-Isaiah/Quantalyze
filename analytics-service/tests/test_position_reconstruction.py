@@ -342,6 +342,23 @@ class TestMatchPositionsFIFO:
             f"{dropped_flags!r}"
         )
 
+    def test_zero_entry_price_open_position_is_dropped(self) -> None:
+        """review-5: an OPEN position with a zero entry price (a single buy@0
+        that never closes) is corrupt input on the OPEN path too. It must be
+        dropped — not persisted with entry_price_avg=0, which would feed a
+        fabricated unrealized_pnl (mark*qty) to the equity reconstructor — and
+        counted via dropped_flags, the same as the closed path."""
+        fills = [
+            _make_fill(side="buy", price=0.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+        ]
+        dropped_flags: dict[str, object] = {}
+        positions = _match_positions_fifo(
+            "BTCUSDT", fills, "strat-1", dropped_flags=dropped_flags
+        )
+        assert len(positions) == 0
+        assert dropped_flags.get("zero_entry_price_dropped") == 1
+
     def test_roi_net_of_fees_classifies_fee_only_loser_as_loser(self) -> None:
         """KPI-17 follow-up regression. The prior ROI formula was
         `(exit-entry)/entry` (gross price change), which classified a

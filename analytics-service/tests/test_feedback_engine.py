@@ -1600,6 +1600,50 @@ class TestSuccessValueMalformedDeltas:
         outcome = _make_outcome(kind="allocated", delta_180d="not-a-number")
         assert _success_value(outcome) == 0
 
+    def test_corrupt_most_mature_delta_falls_through_to_positive_less_mature(self):
+        """review-A Finding 3: a corrupt MOST-mature delta (delta_180d) is
+        skipped (logged, no signal) and the engine falls through to the next
+        maturity. Here delta_90d is NULL, so the real positive delta_30d=0.05
+        becomes authoritative → success=1. This is the load-bearing assertion
+        for the change from `return 0` to `continue` in the except handler:
+        with `return 0` it would wrongly score this as a failure."""
+        from services.feedback_engine import _success_value
+        outcome = _make_outcome(
+            kind="allocated",
+            delta_180d="not-a-number",
+            delta_90d=None,
+            delta_30d=0.05,
+        )
+        assert _success_value(outcome) == 1
+
+    def test_corrupt_most_mature_delta_falls_through_to_negative_less_mature(self):
+        """Fall-through to a less-mature delta still applies the >0 rule: a
+        corrupt delta_180d is skipped and the real delta_30d=-0.03 (≤ 0) is
+        authoritative → success=0. Confirms fall-through doesn't blanket-pass."""
+        from services.feedback_engine import _success_value
+        outcome = _make_outcome(
+            kind="allocated",
+            delta_180d="corrupt",
+            delta_90d=None,
+            delta_30d=-0.03,
+        )
+        assert _success_value(outcome) == 0
+
+    def test_corrupt_most_mature_delta_stops_at_first_valid_maturity(self):
+        """Precedence: iteration is (180d, 90d, 30d) and the FIRST non-NULL
+        parseable delta wins. A corrupt delta_180d is skipped, but a VALID
+        positive delta_90d=0.04 is authoritative and the engine returns 1
+        WITHOUT consulting the negative delta_30d=-0.02 below it. Pins that
+        fall-through stops at the most-mature usable signal, not the least."""
+        from services.feedback_engine import _success_value
+        outcome = _make_outcome(
+            kind="allocated",
+            delta_180d="not-a-number",
+            delta_90d=0.04,
+            delta_30d=-0.02,
+        )
+        assert _success_value(outcome) == 1
+
 
 @pytest.mark.skipif(not IMPORTS_OK, reason="feedback_engine not importable")
 class TestAttributeDimensionMalformedBreakdown:

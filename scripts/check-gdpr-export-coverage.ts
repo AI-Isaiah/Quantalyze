@@ -546,8 +546,20 @@ export function extractUserTablesFromMigration(
   // is taken from whichever alternative matched and keyed unquoted (the
   // capture already excludes the quotes), matching how the rest of the
   // script keys tables.
+  //
+  // Finding 4 (red-team, 2026-05-25): the prior fix only handled a bare
+  // `public.` schema prefix OR a quoted bare name — NOT a quoted and/or
+  // schema-qualified name. So `CREATE TABLE "public"."secret_data" (...)`
+  // and `CREATE TABLE app."secret5" (...)` still escaped the gate. We
+  // replace the `(?:public\.)?` prefix with a generalized OPTIONAL
+  // schema-qualifier that matches a quoted OR bare schema name followed
+  // by a dot. CRITICAL: the schema-qualifier is fully NON-capturing
+  // (`(?:...)`), so the table-name capture groups (1 = quoted name, 2 =
+  // bare name) and the body group (3) DO NOT shift — every downstream
+  // `match[1] ?? match[2]` / `match[3]` consumer is unaffected. The
+  // captured table name remains the unqualified, unquoted name.
   const createTableRe =
-    /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s*\(([\s\S]*?)\n\s*\)\s*;/gi;
+    /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"[a-z0-9_]+"|[a-z0-9_]+)\.)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s*\(([\s\S]*?)\n\s*\)\s*;/gi;
 
   // A column declaration that references profiles(id) or auth.users(id).
   // Covers: user_id, allocator_id, uploaded_by, created_by, invited_by.
@@ -585,8 +597,16 @@ export function extractUserTablesFromMigration(
   // user_id UUID REFERENCES auth.users(id)` was missed. Match an
   // OPTIONAL double-quoted form: group 1 = quoted name, group 2 = bare
   // name, group 3 = the column spec (shifted from group 2).
+  //
+  // Finding 4 (red-team, 2026-05-25): same quoted/schema-qualified
+  // escape vector as createTableRe — `ALTER TABLE "public"."x" ADD
+  // COLUMN ...` and `ALTER TABLE app."x" ADD COLUMN ...` escaped. The
+  // `(?:public\.)?` prefix is replaced with the same generalized OPTIONAL
+  // schema-qualifier (quoted OR bare schema name + dot). It is fully
+  // NON-capturing, so the table-name groups (1 quoted, 2 bare) and the
+  // column-spec group (3) DO NOT shift.
   const alterAddColumnRe =
-    /ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:public\.)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([\s\S]*?);/gi;
+    /ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:(?:"[a-z0-9_]+"|[a-z0-9_]+)\.)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([\s\S]*?);/gi;
   alterAddColumnRe.lastIndex = 0;
   while ((match = alterAddColumnRe.exec(scrubbed)) !== null) {
     // H-1020: take the table name from whichever alternative matched

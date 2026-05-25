@@ -475,4 +475,94 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
       expect(alterOut.has("bare_alter_tbl")).toBe(true);
     },
   );
+
+  // Finding 4 (red-team, 2026-05-25) — quoted-AND-schema-qualified escape
+  // vector. The H-1020 fix added quoted-bare-identifier support, but a
+  // user-owned table still escaped when the identifier was QUOTED AND
+  // SCHEMA-QUALIFIED (`CREATE TABLE "public"."secret_data" (...)`) or
+  // bare-schema + quoted-table (`CREATE TABLE app."secret5" (...)`),
+  // because the prior regex only handled a bare `public.` prefix OR a
+  // quoted bare name. The schema-qualifier is now a generalized OPTIONAL
+  // NON-capturing prefix, so these forms are detected and the table name
+  // is keyed unqualified + unquoted. These drive the exported pure helper
+  // directly and FAIL against the pre-Finding-4 regex.
+
+  it(
+    "Finding 4: a CREATE TABLE with a quoted-AND-schema-qualified name (\"public\".\"x\") and a user_id FK must be discovered",
+    () => {
+      const sql = [
+        'CREATE TABLE "public"."secret_data" (',
+        "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),",
+        "  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,",
+        "  note TEXT",
+        ");",
+        "",
+      ].join("\n");
+      const out = extractUserTablesFromMigration(
+        sql,
+        "20260607_quoted_qualified_create.sql",
+      );
+      // Keyed by the UNQUALIFIED, UNQUOTED table name.
+      expect(out.has("secret_data")).toBe(true);
+      // The schema name must NOT leak in as a table key.
+      expect(out.has("public")).toBe(false);
+    },
+  );
+
+  it(
+    "Finding 4: a CREATE TABLE with a bare-schema + quoted-table name (app.\"x\") and a user_id FK must be discovered",
+    () => {
+      const sql = [
+        'CREATE TABLE app."secret5" (',
+        "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),",
+        "  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE",
+        ");",
+        "",
+      ].join("\n");
+      const out = extractUserTablesFromMigration(
+        sql,
+        "20260608_bareschema_quoted_create.sql",
+      );
+      expect(out.has("secret5")).toBe(true);
+      expect(out.has("app")).toBe(false);
+    },
+  );
+
+  it(
+    "Finding 4: ALTER TABLE on a quoted-AND-schema-qualified name (\"public\".\"x\") adding a user_id FK must be discovered",
+    () => {
+      const sql = [
+        'CREATE TABLE "public"."secret_late" (',
+        "  id UUID PRIMARY KEY",
+        ");",
+        'ALTER TABLE "public"."secret_late" ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);',
+        "",
+      ].join("\n");
+      const out = extractUserTablesFromMigration(
+        sql,
+        "20260609_quoted_qualified_alter.sql",
+      );
+      expect(out.has("secret_late")).toBe(true);
+      expect(out.has("public")).toBe(false);
+    },
+  );
+
+  it(
+    "Finding 4: ALTER TABLE on a bare-schema + quoted-table name (app.\"x\") adding a user_id FK must be discovered",
+    () => {
+      const sql = [
+        'CREATE TABLE app."secret_late5" (',
+        "  id UUID PRIMARY KEY",
+        ");",
+        'ALTER TABLE app."secret_late5" ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);',
+        "",
+      ].join("\n");
+      const out = extractUserTablesFromMigration(
+        sql,
+        "20260610_bareschema_quoted_alter.sql",
+      );
+      expect(out.has("secret_late5")).toBe(true);
+      expect(out.has("app")).toBe(false);
+    },
+  );
 });
