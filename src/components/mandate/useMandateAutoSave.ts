@@ -1,16 +1,48 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { AllocatorPreferences } from "@/lib/preferences";
+import { SELF_EDITABLE_PREFERENCE_FIELDS } from "@/lib/preferences";
 
 export type SaveState = "idle" | "saving" | "saved" | "error";
 
+/** Union of field names an allocator may self-edit. Derived from the single
+ *  source of truth in lib/preferences so a new field promotion automatically
+ *  tightens the hook's type and surfaces consumer typos at compile time.
+ *  H-0379 / H-0383: replaces the loose `string` parameter type. */
+export type MandateField = (typeof SELF_EDITABLE_PREFERENCE_FIELDS)[number];
+
+/** Discriminated result returned by save(). Lets callers branch on the
+ *  outcome deterministically instead of subscribing to hook state.
+ *  M-1115: replaces the opaque Promise<void> signature.
+ *
+ *  Existing callers using `void save(...)` are unaffected — the result is
+ *  ignored just like Promise<void> was. */
+export type SaveResult =
+  | { ok: true; savedAt: Date }
+  | {
+      ok: false;
+      reason: "validation" | "auth" | "throttled" | "network" | "server";
+      message: string;
+      retryAfter?: number;
+    };
+
 export interface MandateAutoSaveReturn {
   saveState: SaveState;
-  fieldErrors: Record<string, string>;
+  /** Keyed by MandateField so consumer reads (`fieldErrors.max_weight`) are
+   *  type-checked against the same key set as the write site.
+   *  H-0381: replaces Record<string, string>. */
+  fieldErrors: Partial<Record<MandateField, string>>;
   lastSavedAt: Date | null;
-  savingFields: Set<string>;
-  save: (fieldName: string, value: unknown) => Promise<void>;
-  clearError: (fieldName: string) => void;
+  savingFields: Set<MandateField>;
+  /** M-1115: returns a SaveResult so callers can branch on the outcome.
+   *  All existing `void save(...)` call sites continue to work — the result
+   *  is ignored when not awaited. */
+  save: <K extends MandateField>(
+    fieldName: K,
+    value: AllocatorPreferences[K] | null,
+  ) => Promise<SaveResult>;
+  clearError: (fieldName: MandateField) => void;
 }
 
 /**
@@ -26,14 +58,16 @@ export interface MandateAutoSaveReturn {
  * - On 5xx / network: exponential backoff 1s/2s/4s, max 3 retries (4 attempts total).
  * - Generation counter per field drops stale responses so a fast second
  *   save wins over a still-in-flight first save (T-02-09 mitigation).
+ * - Component-lifetime AbortController (H-0382) cancels in-flight fetches and
+ *   retry-after sleeps on unmount, preventing setState-on-unmounted-component.
  */
 export function useMandateAutoSave(
   initialLastSavedAt: Date | null = null,
 ): MandateAutoSaveReturn {
   const [saveState, setSaveState] = useState<SaveState>("idle");
-  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<MandateField, string>>>({});
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(initialLastSavedAt);
-  const [savingFields, setSavingFields] = useState<Set<string>>(new Set());
+  const [savingFields, setSavingFields] = useState<Set<MandateField>>(new Set());
 
   // 2s fade-timer for "saved" -> "idle" transition (WizardChrome toast shape).
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -49,13 +83,26 @@ export function useMandateAutoSave(
     };
   }, [saveState]);
 
+  // Component-lifetime AbortController. Aborted on unmount so any in-flight
+  // fetch (including those sleeping inside a 429 retry-after wait) is
+  // cancelled before it can call setState on an unmounted component.
+  // H-0382: prevents mandate state forgery / React unmount-setState warnings.
+  const mountAbortRef = useRef<AbortController>(new AbortController());
+  useEffect(() => {
+    // Fresh controller on each mount so re-mounting starts with a live signal.
+    mountAbortRef.current = new AbortController();
+    return () => {
+      mountAbortRef.current.abort();
+    };
+  }, []);
+
   // Per-field generation counter. Each save() bumps the counter for that
   // field; stale responses (whose generation is less than the current one)
   // are dropped before touching state. Prevents race where save(0.25)'s
   // response arrives after save(0.30)'s and overwrites the newer value.
   const generationRef = useRef<Record<string, number>>({});
 
-  const clearError = useCallback((fieldName: string) => {
+  const clearError = useCallback((fieldName: MandateField) => {
     setFieldErrors((prev) => {
       if (!(fieldName in prev)) return prev;
       const next = { ...prev };
@@ -65,7 +112,10 @@ export function useMandateAutoSave(
   }, []);
 
   const save = useCallback(
-    async (fieldName: string, value: unknown): Promise<void> => {
+    async <K extends MandateField>(
+      fieldName: K,
+      value: AllocatorPreferences[K] | null,
+    ): Promise<SaveResult> => {
       const gen = (generationRef.current[fieldName] ?? 0) + 1;
       generationRef.current[fieldName] = gen;
 
@@ -84,22 +134,35 @@ export function useMandateAutoSave(
         attempt += 1;
 
         let res: Response;
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+        // Per-attempt timeout controller. Combined with the component-lifetime
+        // mountAbortRef so EITHER the 12s timeout OR unmount cancels the fetch.
+        const attemptController = new AbortController();
+        const timeout = setTimeout(() => attemptController.abort(), FETCH_TIMEOUT_MS);
+        // Wire mount-abort into this attempt signal.
+        const onMountAbort = () => attemptController.abort();
+        mountAbortRef.current.signal.addEventListener("abort", onMountAbort, { once: true });
         try {
           res = await fetch("/api/preferences", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ [fieldName]: value }),
             credentials: "same-origin",
-            signal: controller.signal,
+            signal: attemptController.signal,
           });
         } catch {
-          // Network error or AbortError (hung request hit the 12s timeout) —
-          // backoff if we still have attempts left.
+          // Network error or AbortError (12s timeout OR component unmounted).
+          // If unmounted, exit silently — no state updates on dead component.
+          if (mountAbortRef.current.signal.aborted) {
+            return { ok: false, reason: "network", message: "Cancelled." };
+          }
           if (attempt < MAX_ATTEMPTS) {
             await wait(1000 * Math.pow(2, attempt - 1));
-            if (generationRef.current[fieldName] !== gen) return;
+            if (mountAbortRef.current.signal.aborted) {
+              return { ok: false, reason: "network", message: "Cancelled." };
+            }
+            if (generationRef.current[fieldName] !== gen) {
+              return { ok: false, reason: "network", message: "Superseded." };
+            }
             continue;
           }
           if (generationRef.current[fieldName] === gen) {
@@ -111,16 +174,20 @@ export function useMandateAutoSave(
               return n;
             });
           }
-          return;
+          return { ok: false, reason: "network", message: "Couldn't save." };
         } finally {
           clearTimeout(timeout);
+          mountAbortRef.current.signal.removeEventListener("abort", onMountAbort);
         }
 
         // Drop stale response for an older generation of this field.
-        if (generationRef.current[fieldName] !== gen) return;
+        if (generationRef.current[fieldName] !== gen) {
+          return { ok: false, reason: "network", message: "Superseded." };
+        }
 
         if (res.ok) {
-          setLastSavedAt(new Date());
+          const savedAt = new Date();
+          setLastSavedAt(savedAt);
           setSaveState("saved");
           setSavingFields((prev) => {
             const n = new Set(prev);
@@ -128,7 +195,7 @@ export function useMandateAutoSave(
             return n;
           });
           clearError(fieldName); // WR-01: clear any stale 429-retry error on retried success
-          return;
+          return { ok: true, savedAt };
         }
 
         if (res.status === 429) {
@@ -139,7 +206,12 @@ export function useMandateAutoSave(
           }));
           setSaveState("error");
           await wait(retryAfter * 1000);
-          if (generationRef.current[fieldName] !== gen) return;
+          if (mountAbortRef.current.signal.aborted) {
+            return { ok: false, reason: "throttled", message: "Cancelled.", retryAfter };
+          }
+          if (generationRef.current[fieldName] !== gen) {
+            return { ok: false, reason: "throttled", message: "Superseded.", retryAfter };
+          }
           continue;
         }
 
@@ -156,13 +228,19 @@ export function useMandateAutoSave(
             n.delete(fieldName);
             return n;
           });
-          return;
+          const reason = res.status === 401 ? "auth" : "validation";
+          return { ok: false, reason, message: `${msg}. Try again.` };
         }
 
         // 5xx or other unexpected status — exponential backoff if attempts remain.
         if (attempt < MAX_ATTEMPTS) {
           await wait(1000 * Math.pow(2, attempt - 1));
-          if (generationRef.current[fieldName] !== gen) return;
+          if (mountAbortRef.current.signal.aborted) {
+            return { ok: false, reason: "server", message: "Cancelled." };
+          }
+          if (generationRef.current[fieldName] !== gen) {
+            return { ok: false, reason: "server", message: "Superseded." };
+          }
           continue;
         }
 
@@ -175,8 +253,10 @@ export function useMandateAutoSave(
             return n;
           });
         }
-        return;
+        return { ok: false, reason: "server", message: "Couldn't save." };
       }
+      // TypeScript needs an explicit return; the loop always returns above.
+      return { ok: false, reason: "server", message: "Couldn't save." };
     },
     [clearError],
   );
