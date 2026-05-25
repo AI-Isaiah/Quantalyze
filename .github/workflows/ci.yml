@@ -59,7 +59,7 @@ jobs:
       # imports haven't changed since the last successful run — typecheck
       # drops 30-60% on small diffs.
       - name: Cache tsconfig.tsbuildinfo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: tsconfig.tsbuildinfo
           key: ${{ runner.os }}-tsbuildinfo-${{ hashFiles('package-lock.json', 'tsconfig.json') }}-${{ hashFiles('src/**') }}
@@ -88,7 +88,7 @@ jobs:
       # whose mtime + content hash haven't changed since the last run —
       # repeat lint on unchanged files drops to milliseconds.
       - name: Cache ESLint
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: node_modules/.cache/.eslintcache
           key: ${{ runner.os }}-eslintcache-${{ hashFiles('package-lock.json', 'eslint.config.*', '.eslintrc*') }}-${{ hashFiles('src/**') }}
@@ -124,7 +124,7 @@ jobs:
       # transforms here; on a warm cache the transform step is largely a
       # no-op. Key on lockfile + vitest config + the src/tests trees.
       - name: Cache vitest transform (node_modules/.vite)
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: node_modules/.vite
           key: ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts') }}-${{ hashFiles('src/**', 'tests/**') }}
@@ -198,7 +198,7 @@ jobs:
       # lockfile-matched cache, never to a "different lockfile" prefix
       # (cross-Next-version cache restore is a known hazard).
       - name: Cache .next/cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: .next/cache
           key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-${{ hashFiles('src/**') }}
@@ -586,7 +586,7 @@ jobs:
       # browser bundle compatibility.
       - name: Cache Playwright browsers
         id: playwright-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('node_modules/@playwright/test/package.json') }}
@@ -732,7 +732,7 @@ jobs:
       # different bucket than this e2e job sees.
       - name: Restore .next/cache for rebuild (read-only)
         if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: .next/cache
           key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-${{ hashFiles('src/**') }}
