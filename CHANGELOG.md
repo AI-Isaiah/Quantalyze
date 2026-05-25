@@ -7,6 +7,32 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.7.3] - 2026-05-25
+
+**fix(csv-validator): auto-normalize percent-form daily_return CSVs + fix zero-padded sentinel masking (2026-05-25 prod incident follow-up).** Immediately after v0.24.7.2 unblocked the CSV analytics pipeline, the production `break-momentum` strategy (MM_dailies_0.5risk CSV) revealed a second class of bug: the file uploaded clean but the analytics worker emitted a CAGR of 5.3 million percent and a Max DD of -34,000% on 1,112 rows. The values were uniformly in percent-form without a `%` sign (median |x| over non-zero rows = 0.904; clearly not decimal returns). The existing `_check_dollar_form_sentinel` missed it because the file is ~50% zero-padded (the strategy started with months of no-trade days) and `dropna()` does NOT drop zeros — so the median over the full series collapsed to 0 and the 0.5 threshold never tripped.
+
+The fix has two halves:
+
+1. **Sentinel uses the median over non-zero values** when ≥2 non-zero samples exist. Zero-padded prefixes can no longer mask a percent-form upload. The 0.5 threshold semantics stay identical for non-padded files (the median is the same when there are no zeros).
+2. **Auto-normalize step runs BEFORE the sentinel.** If non-zero median |x| is in the percent band (> 0.5 AND ≤ 100) AND max |x| ≤ 100 (the ceiling that distinguishes percent-form from dollar-PnL), the entire `daily_return` column is divided by 100 in-place and an info-flag `{"rule":"auto_normalized_percent_form","factor":0.01,...}` is appended to a new `envelope.info_flags` array. The wizard can surface a "Returns auto-normalized from percent to decimal" chip from this; the analytics worker reads the persisted (normalized) series from `csv_daily_returns` and computes correct metrics. Genuine dollar-PnL uploads (raw $5,000/day account moves; max |x| ≫ 100) skip normalization and the post-norm sentinel still rejects them with the existing actionable error.
+
+The ISSUE-008 test fixture (values like -3.29, +1.71) was re-classified as percent-form per user policy ("when numbers are consistently big, the percent sign is just missing"). The original "reject as dollar-PnL" interpretation was overly conservative — 3.29% daily moves are plausible for a high-vol strategy; $3.29 dollar moves on a small account are also plausible but ambiguous and rare in institutional uploads. The test fixture was updated to use account-scale values (max 425) that exceed the 100 ceiling and unambiguously reject.
+
+After this lands and Railway redeploys the analytics-service, the existing `csv_daily_returns` rows for `break-momentum` will need to be re-normalized (divided by 100) and the analytics re-run. The wizard's csv-validate path will auto-normalize on FUTURE uploads, but the already-persisted values stay raw — a separate data-fix step reads the rows, divides by 100, writes back, and re-enqueues the compute job. Tracked as a runbook follow-up immediately after merge.
+
+### Fixed
+- **Auto-normalization for percent-form daily_return CSVs without a `%` sign** — institutional exports (Excel, Bloomberg, Refinitiv) routinely emit percent-form values; the wizard now recovers them instead of failing silently or rejecting.
+- **`_check_dollar_form_sentinel` no longer masked by zero-padded prefixes** — the median now computes over non-zero rows when ≥2 non-zero samples exist, so a strategy with months of pre-trading zeros can't slip a percent-form file through the sentinel.
+
+### Added
+- **New `_maybe_auto_normalize_percent_form` in `analytics-service/services/csv_validator.py`** — conservative percent-band detector (median |non-zero x| ∈ (0.5, 100] AND max |x| ≤ 100), mutates `daily_return` in-place and returns an info-flag dict. Skipped on `fmt != "daily_returns"`, on files with < 2 non-zero samples, and on files where max |x| exceeds the dollar-PnL ceiling.
+- **`envelope.info_flags` field** — always present (empty array when no info-flag fired), backward-compatible (older wizard versions ignore it). Threading into the wizard UI chip is tracked as a separate follow-up.
+- **4 regression tests** in `analytics-service/tests/test_csv_validator_percent_form_2026_05_25.py` — MM_dailies-shape (zero-padded + percent-form) auto-normalizes; UC244-shape (small decimals) doesn't; dollar-PnL still rejects; leveraged decimal (extreme -1.5 days mixed with small returns) doesn't normalize and doesn't reject.
+
+### Notes
+- The pre-existing `break-momentum` strategy in prod (`f0c43303-...-65170`) still has its raw percent-form values in `csv_daily_returns`. A separate runbook step after this PR lands divides them by 100 and re-enqueues the compute job so the factsheet renders sane CAGR/Sharpe/MDD.
+- This is a Python-only analytics-service change; no DB migration required. Railway redeploys the worker automatically on merge to main.
+
 ## [0.24.7.2] - 2026-05-25
 
 **fix(compute-jobs): extend `compute_jobs_kind_check` to admit `compute_analytics_from_csv` (Phase 19.1 hotfix).** Phase 19.1 Plan 02's migration `20260522120100_compute_analytics_from_csv_kind.sql` added the new job kind to ONE of two sibling CHECK constraints on `public.compute_jobs` (`compute_jobs_kind_target_coherence`) but FORGOT the simpler list-form `compute_jobs_kind_check`. Every CSV-uploaded strategy since v0.24.7.0 (2026-05-22) failed at the `enqueue_compute_job` step with `new row for relation "compute_jobs" violates check constraint "compute_jobs_kind_check"`. The route's W-2 placeholder fired correctly and wrote `strategy_analytics.computation_status='failed'` so the wizard's `SyncProgress` poller broke out instead of hanging — but no analytics ever computed. Both confirmed-affected production strategies (FX-AI2: 90 rows; break-momentum: 1,112 rows) had their daily-return rows correctly persisted in `csv_daily_returns` — only the enqueue + worker pass was missing.
