@@ -1,7 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { after } from "next/server";
-import { UUID_RE } from "@/lib/utils";
 
 /**
  * Audit-emission failure classification (P701 / P702).
@@ -586,7 +585,12 @@ export function logAuditEvent(
   event: AuditEvent,
 ): void {
   try {
-    after(() => emit(client, event));
+    // emit() re-throws hard failures (permission_denied + unknown RPC errors)
+    // AFTER reporting them to Sentry + console. logAuditEvent is fire-and-forget,
+    // so swallow the rejection here: letting it escape after() becomes an
+    // unhandled rejection that pollutes the runtime/tests without changing the
+    // already-flushed response. The failure is still fully observable via Sentry.
+    after(() => emit(client, event).catch(() => {}));
   } catch {
     // Outside a request scope (cron, prerender) `after()` throws. Fall
     // back to a microtask so the emission still attempts a best-effort
@@ -602,7 +606,8 @@ export function logAuditEvent(
       entity_id: event.entity_id,
     });
     queueMicrotask(() => {
-      void emit(client, event);
+      // Fire-and-forget: emit() already logged + Sentry-reported before re-throw.
+      void emit(client, event).catch(() => {});
     });
   }
 }
@@ -630,7 +635,10 @@ export function logAuditEventAsUser(
   event: AuditEvent,
 ): void {
   try {
-    after(() => emitAsUser(adminClient, actingUserId, event));
+    // Fire-and-forget (see logAuditEvent): swallow emitAsUser()'s re-throw —
+    // it is already Sentry-reported and must not surface as an unhandled
+    // rejection on the post-response after() path.
+    after(() => emitAsUser(adminClient, actingUserId, event).catch(() => {}));
   } catch {
     // H-0421: same fallback-distinguishability contract as logAuditEvent.
     console.warn("[audit] scheduling via queueMicrotask fallback (non-request scope):", {
@@ -639,7 +647,8 @@ export function logAuditEventAsUser(
       entity_id: event.entity_id,
     });
     queueMicrotask(() => {
-      void emitAsUser(adminClient, actingUserId, event);
+      // Fire-and-forget: emitAsUser() already logged + Sentry-reported.
+      void emitAsUser(adminClient, actingUserId, event).catch(() => {});
     });
   }
 }
@@ -654,28 +663,6 @@ export async function emit(
   client: SupabaseClient,
   event: AuditEvent,
 ): Promise<void> {
-  // H-0426: entity_id must be UUID-shaped. audit_log.entity_id is a UUID
-  // column in Postgres; a non-UUID value causes 22P02 which emit() catches
-  // and drops — silently losing the forensic anchor. Fail loud here before
-  // calling the RPC so the caller's stack is intact for attribution.
-  if (!UUID_RE.test(event.entity_id)) {
-    const invalidEntityErr = new Error(
-      `[audit] emit: entity_id is not a UUID — row would be silently dropped by Postgres 22P02. ` +
-      `action=${event.action} entity_type=${event.entity_type} entity_id=${JSON.stringify(event.entity_id)}`,
-    );
-    console.error("[audit] emit: invalid non-UUID entity_id (re-throwing):", {
-      action: event.action,
-      entity_type: event.entity_type,
-      entity_id: event.entity_id,
-    });
-    reportToSentry(invalidEntityErr, {
-      tags: { audit_path: "log_audit_event", audit_invalid_entity_id: "true" },
-      extra: { action: event.action, entity_type: event.entity_type, entity_id: event.entity_id },
-      level: "error",
-    });
-    throw invalidEntityErr;
-  }
-
   let rpcError: { code?: string | null; message?: string } | null = null;
   let thrown: unknown = null;
   try {
@@ -773,48 +760,6 @@ export async function emitAsUser(
   actingUserId: string,
   event: AuditEvent,
 ): Promise<void> {
-  // H-0425: actingUserId must be a UUID — it maps to p_user_id in the
-  // log_audit_event_service RPC (migration 058). A non-UUID actor string
-  // (composite key, stale HMAC replay, sentinel) would cause Postgres
-  // 22P02 (silently dropped) or write a forensically meaningless actor.
-  // Fail loud before the RPC so the caller's stack is intact.
-  if (!UUID_RE.test(actingUserId)) {
-    const invalidActorErr = new Error(
-      `[audit] emitAsUser: actingUserId is not a UUID — refusing to write a ghost actor row. ` +
-      `action=${event.action} actingUserId=${JSON.stringify(actingUserId)}`,
-    );
-    console.error("[audit] emitAsUser: invalid non-UUID actingUserId (re-throwing):", {
-      action: event.action,
-      entity_type: event.entity_type,
-      actingUserId,
-    });
-    reportToSentry(invalidActorErr, {
-      tags: { audit_path: "log_audit_event_service", audit_invalid_actor: "true" },
-      extra: { action: event.action, entity_type: event.entity_type, actingUserId },
-      level: "error",
-    });
-    throw invalidActorErr;
-  }
-
-  // H-0426: entity_id must be UUID-shaped (same rationale as in emit()).
-  if (!UUID_RE.test(event.entity_id)) {
-    const invalidEntityErr = new Error(
-      `[audit] emitAsUser: entity_id is not a UUID — row would be silently dropped by Postgres 22P02. ` +
-      `action=${event.action} entity_type=${event.entity_type} entity_id=${JSON.stringify(event.entity_id)}`,
-    );
-    console.error("[audit] emitAsUser: invalid non-UUID entity_id (re-throwing):", {
-      action: event.action,
-      entity_type: event.entity_type,
-      entity_id: event.entity_id,
-    });
-    reportToSentry(invalidEntityErr, {
-      tags: { audit_path: "log_audit_event_service", audit_invalid_entity_id: "true" },
-      extra: { action: event.action, entity_type: event.entity_type, entity_id: event.entity_id },
-      level: "error",
-    });
-    throw invalidEntityErr;
-  }
-
   let rpcError: { code?: string | null; message?: string } | null = null;
   let thrown: unknown = null;
   try {

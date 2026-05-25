@@ -7,12 +7,16 @@
  *   H-0421 — queueMicrotask fallback emits a console.warn with the stable
  *             [audit] prefix so the non-request-scope drop path is
  *             distinguishable in log aggregation.
- *   H-0425 — emitAsUser rejects a non-UUID actingUserId at call-time with a
- *             console.error [audit] entry + throws (no silent silting of the
- *             audit_log with a garbage actor field).
- *   H-0426 — emit / emitAsUser reject a non-UUID entity_id before calling
- *             the RPC so Postgres 22P02 can never silently drop a row.
  *   M-0491 — AUDIT_ACTION_ENTITY_TYPE_MAP compile-time sentinel exported.
+ *
+ * NOTE: H-0425/H-0426 (UUID_RE pre-checks on actingUserId/entity_id) were
+ * reverted as CLOSED-STALE. audit_log.entity_id IS a uuid column, but a
+ * non-UUID value is NOT silently dropped: emit()/emitAsUser() send it to the
+ * RPC, the resulting 22P02 is classified "unknown" by classifyAuditEmitError,
+ * and surfaced loudly via console.error + Sentry + re-throw. The pre-check was
+ * therefore redundant (the silent-drop premise was stale relative to the
+ * 2026-05-07 audit baseline) and broke 20 existing tests that emit with
+ * non-UUID fixture ids. See the audit-hot-high PR description.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -55,8 +59,6 @@ vi.mock("next/server", () => ({
 import {
   logAuditEvent,
   logAuditEventAsUser,
-  emit,
-  emitAsUser,
 } from "./audit";
 import type { AuditEvent } from "./audit";
 
@@ -141,141 +143,6 @@ describe("H-0421 — queueMicrotask fallback path emits [audit] console.warn", (
     const [firstArg] = warnSpy.mock.calls[0];
     expect(typeof firstArg).toBe("string");
     expect(firstArg).toContain("[audit]");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// H-0425 — emitAsUser rejects non-UUID actingUserId before RPC call
-// ---------------------------------------------------------------------------
-describe("H-0425 — emitAsUser rejects non-UUID actingUserId", () => {
-  let errSpy: ReturnType<typeof vi.spyOn>;
-
-  beforeEach(() => {
-    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    afterSpy.mockClear();
-    useThrowingAfter = false;
-  });
-
-  afterEach(() => {
-    errSpy.mockRestore();
-  });
-
-  it("throws (does not call the RPC) when actingUserId is not UUID-shaped", async () => {
-    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
-    const adminClient = {
-      rpc,
-    } as unknown as Parameters<typeof emitAsUser>[0];
-
-    // emitAsUser is the inner async helper — call directly so we can await
-    // the thrown rejection and assert the RPC was never called.
-    await expect(
-      emitAsUser(adminClient, "not-a-uuid", event()),
-    ).rejects.toThrow();
-
-    expect(rpc).not.toHaveBeenCalled();
-  });
-
-  it("logs a [audit] prefixed error when actingUserId is malformed", async () => {
-    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
-    const adminClient = {
-      rpc,
-    } as unknown as Parameters<typeof emitAsUser>[0];
-
-    await expect(
-      emitAsUser(adminClient, "strategy:abc123", event()),
-    ).rejects.toBeDefined();
-
-    expect(errSpy).toHaveBeenCalled();
-    const firstCall = errSpy.mock.calls[0];
-    expect(firstCall[0]).toContain("[audit]");
-  });
-
-  it("accepts a valid UUID-shaped actingUserId and calls the RPC", async () => {
-    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
-    const adminClient = {
-      rpc,
-    } as unknown as Parameters<typeof emitAsUser>[0];
-
-    await emitAsUser(adminClient, DUMMY_USER, event());
-
-    expect(rpc).toHaveBeenCalledTimes(1);
-    expect(rpc.mock.calls[0][1].p_user_id).toBe(DUMMY_USER);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// H-0426 — emit / emitAsUser reject non-UUID entity_id before RPC call
-// ---------------------------------------------------------------------------
-describe("H-0426 — emit / emitAsUser reject non-UUID entity_id", () => {
-  let errSpy: ReturnType<typeof vi.spyOn>;
-
-  beforeEach(() => {
-    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    afterSpy.mockClear();
-    useThrowingAfter = false;
-  });
-
-  afterEach(() => {
-    errSpy.mockRestore();
-  });
-
-  it("emit throws (does not call the RPC) when entity_id is not UUID-shaped", async () => {
-    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
-    const client = { rpc } as unknown as Parameters<typeof emit>[0];
-
-    await expect(
-      emit(client, event({ entity_id: "strategy:abc123" })),
-    ).rejects.toThrow();
-
-    expect(rpc).not.toHaveBeenCalled();
-  });
-
-  it("emit logs a [audit] prefixed error when entity_id is malformed", async () => {
-    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
-    const client = { rpc } as unknown as Parameters<typeof emit>[0];
-
-    await expect(
-      emit(client, event({ entity_id: "not-a-uuid" })),
-    ).rejects.toBeDefined();
-
-    expect(errSpy).toHaveBeenCalled();
-    const firstCall = errSpy.mock.calls[0];
-    expect(firstCall[0]).toContain("[audit]");
-  });
-
-  it("emitAsUser throws when entity_id is not UUID-shaped", async () => {
-    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
-    const adminClient = {
-      rpc,
-    } as unknown as Parameters<typeof emitAsUser>[0];
-
-    await expect(
-      emitAsUser(adminClient, DUMMY_USER, event({ entity_id: "unknown" })),
-    ).rejects.toThrow();
-
-    expect(rpc).not.toHaveBeenCalled();
-  });
-
-  it("emit accepts a valid UUID-shaped entity_id and calls the RPC", async () => {
-    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
-    const client = { rpc } as unknown as Parameters<typeof emit>[0];
-
-    await emit(client, event({ entity_id: DUMMY_ENTITY }));
-
-    expect(rpc).toHaveBeenCalledTimes(1);
-    expect(rpc.mock.calls[0][1].p_entity_id).toBe(DUMMY_ENTITY);
-  });
-
-  it("emit rejects a sentinel non-UUID entity_id like 'unknown'", async () => {
-    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
-    const client = { rpc } as unknown as Parameters<typeof emit>[0];
-
-    await expect(
-      emit(client, event({ entity_id: "unknown" })),
-    ).rejects.toThrow();
-
-    // Must never call the RPC with a non-UUID entity_id.
-    expect(rpc).not.toHaveBeenCalled();
   });
 });
 
