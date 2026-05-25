@@ -1,0 +1,97 @@
+name: Migration Drift Check
+
+# PR-time enforcement of repo-vs-prod migration-timestamp consistency.
+# Catches the MCP-vs-CLI timestamp-mismatch failure class that triggered
+# PR-Y1 era drift (5+ rows accumulated April-May 2026).
+#
+# Security: no github.event.* interpolation into shell. All secrets via
+# env: blocks (mirrors migration-policy.yml + supabase-migrate.yml). The
+# only PR-derived data is file paths, regex-validated by the `paths:`
+# filter and re-validated via the 14-digit-prefix grep in the script.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+      - '.github/workflows/migration-drift-check.yml'
+
+concurrency:
+  group: migration-drift-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # need merge-base for the PR-additions diff below
+      - name: Check secrets are configured
+        id: check
+        env:
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          if [ -z "$SUPABASE_PROJECT_REF" ] || [ -z "$SUPABASE_ACCESS_TOKEN" ] || [ -z "$SUPABASE_DB_PASSWORD" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Migration Drift Check skipped - secrets not configured."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: supabase/setup-cli@df56b21da46c98abb12a9804e4fb1f657773e333  # v2.0.0
+        if: steps.check.outputs.configured == 'true'
+        with:
+          version: 2.98.2
+      - name: Drift check (db push dry-run)
+        if: steps.check.outputs.configured == 'true'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          supabase link --project-ref "$SUPABASE_PROJECT_REF"
+          set +e
+          OUTPUT=$(supabase db push --include-all --dry-run 2>&1)
+          EXIT=$?
+          set -e
+          echo "::group::Dry-run output"
+          echo "$OUTPUT"
+          echo "::endgroup::"
+          if [ "$EXIT" -ne 0 ]; then
+            echo "::error::Migration drift detected - supabase db push --dry-run failed (exit $EXIT)."
+            echo "::error::Likely cause: a migration was applied to prod via MCP apply_migration"
+            echo "::error::with a different timestamp than the repo file. To reconcile, rename the"
+            echo "::error::local file to match the remote schema_migrations.version. See PR-Y2 pattern."
+            exit 1
+          fi
+          if echo "$OUTPUT" | grep -qF "Remote database is up to date"; then
+            echo "::notice::No drift - Remote database is up to date."
+            exit 0
+          fi
+          PENDING_TS=$(echo "$OUTPUT" | grep -oE '[0-9]{14}_' | sed 's/_$//' | sort -u || true)
+          if [ -z "$PENDING_TS" ]; then
+            echo "::notice::No 'up to date' or pending-migration signal in dry-run output. Treating as pass."
+            exit 0
+          fi
+          MERGE_BASE=$(git merge-base HEAD origin/main 2>/dev/null || echo "")
+          if [ -z "$MERGE_BASE" ]; then
+            echo "::warning::Could not resolve merge base; failing closed."
+            exit 1
+          fi
+          PR_ADDED_TS=$(git diff --diff-filter=A --name-only "$MERGE_BASE"...HEAD -- 'supabase/migrations/*.sql' \
+            | grep -oE '[0-9]{14}_' | sed 's/_$//' | sort -u || true)
+          PRE_EXISTING_DRIFT=$(comm -23 <(echo "$PENDING_TS") <(echo "$PR_ADDED_TS"))
+          if [ -n "$PRE_EXISTING_DRIFT" ]; then
+            echo "::error::Pre-existing drift (pending files not introduced by this PR):"
+            echo "$PRE_EXISTING_DRIFT" | sed 's/^/::error::  /'
+            exit 1
+          fi
+          echo "::notice::Pending migrations match this PR's additions - no drift."

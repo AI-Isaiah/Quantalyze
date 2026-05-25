@@ -7,6 +7,39 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.7.4] - 2026-05-25
+
+**chore(PR-Y2): close migration-timestamp drift + re-enable auto-on-push for `supabase-migrate.yml` + add `migration-drift-check.yml` defense.** Two channels were mutating prod's `schema_migrations` table — `supabase db push` (CLI, records the file's timestamp) and MCP `apply_migration` (records its own generated timestamp). Every MCP-applied migration drifted: remote row at one timestamp, local file at another, CLI refused to push. PR-Y1 (2026-05-15) disabled `supabase-migrate.yml`'s auto-on-push trigger to stop the workflow failing on every migration-touching merge. The accumulated drift (5 rows across April-May 2026) had to be reconciled before the trigger could be re-enabled. PR-Y2 closes that loop.
+
+Reconciliation completed:
+- **5 local migration files renamed** to match remote `schema_migrations.version` (file contents unchanged; only the timestamp prefix shifted). The chronological order in the repo is preserved verbatim. Self-verifying DO blocks, comments, and idempotency guards all survive.
+- **Test project (`qmnijlgmdhviwzwfyzlc`)** drifted rows reconciled with the same rename approach (`UPDATE supabase_migrations.schema_migrations SET version=...` for the 2 drifted rows: `csv_daily_returns` + `compute_analytics_from_csv_kind`). Test is still 38 migrations BEHIND prod — that's lag, not drift, and is a separate follow-up.
+- **Dry-run verified** via `workflow_dispatch` against this branch (run #26391083742): both plan and apply jobs completed clean. `supabase db push --include-all` is now a true no-op against prod.
+
+Auto-on-push re-enabled:
+- `.github/workflows/supabase-migrate.yml` adds `push: branches: [main] paths: ['supabase/migrations/**']` alongside the existing `workflow_dispatch:`. The next migration PR auto-applies on merge to main — no manual workflow_dispatch needed.
+- The old "RE-ENABLE WHEN" comment block is replaced with a "RE-ENABLED" block citing the four gates that were satisfied: drift closed, test project reconciled (drift portion), dry-run no-op verified, and migrations 107/119 (the deferred-apply orphans) explicitly out-of-scope because CLI treats their schema_migrations rows as applied and never tries to re-execute.
+
+Defense against drift recurrence:
+- New workflow `.github/workflows/migration-drift-check.yml` runs at PR-time on any PR touching `supabase/migrations/**`. Runs `supabase db push --include-all --dry-run` against prod (read-only); fails the PR if the dry-run reports pending migrations that aren't the PR's own additions. This catches MCP-vs-CLI timestamp mismatches within minutes of the next migration PR instead of silently accumulating.
+
+### Added
+- **`.github/workflows/migration-drift-check.yml`** — PR-time drift check via `supabase db push --dry-run`. Mirrors `migration-policy.yml`'s security model (Production environment, read-only via SUPABASE_ACCESS_TOKEN, no `github.event.*` interpolation into shell).
+
+### Changed
+- **`.github/workflows/supabase-migrate.yml`** — `on:` block adds `push: branches: [main] paths: ['supabase/migrations/**']`. The next migration PR auto-applies on merge instead of requiring manual `gh workflow run`.
+- **5 migration files renamed** (filename timestamp prefix only — content identical):
+  - `20260521203000_wizard_finalize_inserts_verification.sql` → `20260521185008_*`
+  - `20260521210000_canonicalize_supported_exchanges.sql` → `20260521190243_*`
+  - `20260522120000_csv_daily_returns.sql` → `20260522111839_*`
+  - `20260522120100_compute_analytics_from_csv_kind.sql` → `20260522111858_*`
+  - `20260525130000_compute_jobs_kind_check_extend_csv.sql` → `20260525074649_*`
+- **Test references updated** — `src/__tests__/compute-jobs-kind-check-csv-2026-05-25.test.ts` constants `FIX_FILENAME` and `FIX_TS` point at the new `20260525074649` timestamp; comment header cites `20260522111858` (the renamed sibling). All 6 tests still green. `analytics-service/services/analytics_runner.py:1507` comment reference updated from `20260522120000:160` to `20260522111839:160`.
+
+### Notes
+- **Out of scope (deferred):** Migrations 107 (`verification_requests_view_shim`) and 119 (`positions_natural_key_remediation`) still have `DEFERRED-APPLY` warnings in their headers. Their `schema_migrations` rows exist (so CLI treats them as applied; `db push` doesn't re-execute), but their SQL bodies have never run on prod. Each requires a NEW migration file with corrected body + data-cleanup preflight per the file headers. Tracked separately.
+- **Out of scope (deferred):** Test project (`qmnijlgmdhviwzwfyzlc`) is 38 migrations BEHIND prod after PR-Y2 (lag, not drift). The trigger flip is safe because `supabase-migrate.yml` writes only to prod. The highest-priority backfill is `20260525074649_compute_jobs_kind_check_extend_csv` so e2e CSV pipeline tests on test_project have parity with prod.
+
 ## [0.24.7.3] - 2026-05-25
 
 **fix(csv-validator): auto-normalize percent-form daily_return CSVs + fix zero-padded sentinel masking (2026-05-25 prod incident follow-up).** Immediately after v0.24.7.2 unblocked the CSV analytics pipeline, the production `break-momentum` strategy (MM_dailies_0.5risk CSV) revealed a second class of bug: the file uploaded clean but the analytics worker emitted a CAGR of 5.3 million percent and a Max DD of -34,000% on 1,112 rows. The values were uniformly in percent-form without a `%` sign (median |x| over non-zero rows = 0.904; clearly not decimal returns). The existing `_check_dollar_form_sentinel` missed it because the file is ~50% zero-padded (the strategy started with months of no-trade days) and `dropna()` does NOT drop zeros — so the median over the full series collapsed to 0 and the 0.5 threshold never tripped.
