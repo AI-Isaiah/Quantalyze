@@ -239,6 +239,114 @@ describe("BridgeDrawer — Phase 09.1 Plan 09 / D-15 / D-16", () => {
     expect(screen.getByText("No candidates available.")).toBeInTheDocument();
   });
 
+  // -------------------------------------------------------------------------
+  // H-0081 — state-machine error paths missing: thrown helper, network-error
+  // rejection, and concurrent click double-fire.
+  // -------------------------------------------------------------------------
+
+  // SKIPPED (not it.fails): exercising this path lets BridgeDrawer's uncaught
+  // `await sendBridgeIntro` reject as an *unhandled* rejection, which fails the
+  // entire vitest run (not just this case). The bug is tracked in
+  // SURFACED-ISSUES.md; the follow-up that wraps the await in try/catch should
+  // un-skip this and flip it to a normal passing test.
+  it.skip(
+    "H-0081: sendBridgeIntro that REJECTS (throws) leaves the button stuck on 'Sending…' with no error surfaced — fix in follow-up (wrap await in try/catch)",
+    async () => {
+      // Correct behaviour: a thrown/rejected helper should be caught, the
+      // submit button re-enabled, and an error surfaced (mirroring the
+      // resolved {ok:false} path). handleSendIntro has NO try/catch around
+      // `await sendBridgeIntro`, so a rejection strands the drawer: button
+      // stays disabled on "Sending…", no role=alert, no recovery path.
+      mockSendBridgeIntro.mockRejectedValueOnce(new Error("network exploded"));
+      const onClose = vi.fn();
+      render(
+        <BridgeDrawer
+          isOpen
+          onClose={onClose}
+          flaggedHoldings={[FLAGGED_A]}
+          matchDecisionsByHoldingRef={{}}
+        />,
+      );
+      fireEvent.click(
+        screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /Send intro/ }));
+
+      // CORRECT behaviour assertion: the button should recover to "Send intro"
+      // (no longer submitting) so the allocator can retry.
+      await waitFor(() => {
+        const btn = screen.getByRole("button", { name: /Send intro|Sending/ });
+        expect(btn).not.toBeDisabled();
+        expect(btn).toHaveTextContent("Send intro");
+      });
+      // And the drawer must not have silently closed on a failed send.
+      expect(onClose).not.toHaveBeenCalled();
+    },
+  );
+
+  it("H-0081: resolved {ok:false} (network-error message) surfaces the error and re-enables the button for retry", async () => {
+    mockSendBridgeIntro.mockResolvedValueOnce({
+      ok: false,
+      error: "Network error — could not reach server",
+    });
+    const onClose = vi.fn();
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={onClose}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Send intro/ }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Network error — could not reach server",
+      );
+    });
+    // Button is re-enabled so the allocator can retry; drawer stays open.
+    const btn = screen.getByRole("button", { name: /Send intro/ });
+    expect(btn).not.toBeDisabled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("H-0081: concurrent double-click on Send intro fires the helper only once (disabled guard)", () => {
+    // Helper stays pending so `submitting` remains true after the first click;
+    // the button's disabled guard must swallow the second click.
+    let resolveIntro: ((v: { ok: boolean }) => void) | null = null;
+    mockSendBridgeIntro.mockImplementationOnce(
+      () =>
+        new Promise<{ ok: boolean }>((resolve) => {
+          resolveIntro = resolve;
+        }),
+    );
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={vi.fn()}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    const sendBtn = screen.getByRole("button", { name: /Send intro/ });
+    fireEvent.click(sendBtn);
+    // Second click while the first is in flight (button now disabled/"Sending…").
+    fireEvent.click(sendBtn);
+
+    expect(mockSendBridgeIntro).toHaveBeenCalledTimes(1);
+
+    // Drain the pending promise so the test doesn't leak. Cast at the call
+    // site — TS narrows the closure-assigned binding to its initial `null`.
+    (resolveIntro as unknown as (v: { ok: boolean }) => void)?.({ ok: true });
+  });
+
   it("D-16 invariant — drawer never calls fetch directly; routes through sendBridgeIntro", async () => {
     const fs = await import("node:fs/promises");
     const path = await import("node:path");

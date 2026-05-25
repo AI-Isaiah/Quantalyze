@@ -314,6 +314,39 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     expect(screen.getByText("Momentum Alpha")).toBeInTheDocument();
   });
 
+  it("H-0115 — extra sensitive fields on a row (disclosure_tier / backtest_returns) are NOT rendered", async () => {
+    // The drawer narrows StrategyBrowseRow to id/name/codename/markets/
+    // strategy_types. Feed it a row that ALSO carries sensitive fields a
+    // careless upstream might leak; the display layer must not surface them.
+    // Cast through `unknown` because these keys are intentionally absent from
+    // the StrategyBrowseRow type.
+    const leakyRow = {
+      id: "s-leak",
+      name: "Leaky Strategy",
+      codename: "LEAK-1",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      disclosure_tier: "exploratory",
+      backtest_returns: [0.12, -0.04, 0.31],
+      secret_sharpe: 4.2,
+    } as unknown as StrategyBrowseRow;
+
+    renderDrawer({ fetchStrategies: async () => [leakyRow] });
+    await flush();
+
+    // Whitelisted fields render.
+    expect(screen.getByText("Leaky Strategy")).toBeInTheDocument();
+
+    // Forbidden values must NOT appear anywhere in the DOM.
+    const body = document.body.textContent ?? "";
+    expect(body).not.toContain("exploratory");
+    expect(body).not.toContain("backtest_returns");
+    expect(body).not.toContain("disclosure_tier");
+    expect(body).not.toContain("0.31");
+    expect(body).not.toContain("4.2");
+    expect(screen.queryByText(/exploratory/i)).not.toBeInTheDocument();
+  });
+
   it("T15 — backdrop click during loading state still calls onClose", async () => {
     // Slow fetcher that never resolves while we click backdrop.
     let resolveFetch: ((rows: StrategyBrowseRow[]) => void) | null = null;

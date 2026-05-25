@@ -278,4 +278,228 @@ describe("CustomRangePicker", () => {
     expect(getByText(/March 2024/)).toBeTruthy();
     expect(getByText(/April 2024/)).toBeTruthy();
   });
+
+  // ─────────────────────────────────────────── M-1099 — pickDay state machine
+  //
+  // Returns the ENABLED, day-numbered cell button. The two month grids each
+  // render 42 cells (incl. overflow days), so a bare day number is ambiguous;
+  // we filter to enabled cells whose inline color marks them as in-month
+  // (text-primary), selected (white edge) or in-range (accent) — i.e. NOT the
+  // muted out-of-month color.
+  function dayCell(container: HTMLElement, day: number): HTMLButtonElement {
+    const btns = Array.from(
+      container.querySelectorAll("button"),
+    ) as HTMLButtonElement[];
+    const matches = btns.filter(
+      (b) => b.textContent === String(day) && !b.disabled,
+    );
+    const inMonth = matches.filter((b) => {
+      const s = b.getAttribute("style") ?? "";
+      return (
+        s.includes("--color-text-primary") ||
+        s.includes("255, 255, 255") ||
+        s.includes("--color-accent")
+      );
+    });
+    const cell = inMonth[0] ?? matches[0];
+    if (!cell) throw new Error(`No enabled day cell for ${day}`);
+    return cell;
+  }
+
+  const PICK_MIN = new Date(2024, 0, 1); // Jan 1 2024
+  const PICK_MAX = new Date(2024, 4, 30); // May 30 2024 (April fully visible)
+
+  it("M-1099 — clicking Apr 10 then Apr 20 (forward) applies {2024-04-10, 2024-04-20}", () => {
+    const onApply = vi.fn();
+    const { container, getByRole } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={onApply}
+        min={PICK_MIN}
+        max={PICK_MAX}
+        initialRange={{ start: "2024-04-01", end: "2024-04-01" }}
+      />,
+    );
+    fireEvent.click(dayCell(container, 10));
+    fireEvent.click(dayCell(container, 20));
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+    expect(onApply).toHaveBeenCalledTimes(1);
+    expect(onApply).toHaveBeenCalledWith({
+      start: "2024-04-10",
+      end: "2024-04-20",
+    });
+  });
+
+  it.fails(
+    "M-1099 — clicking Apr 20 then Apr 10 (reverse) SHOULD swap to {2024-04-10, 2024-04-20} but the dead swap branch collapses it to {Apr10, Apr10} — fix in follow-up (the `|| d < start` clause in the first branch shadows the swap branch)",
+    () => {
+      const onApply = vi.fn();
+      const { container, getByRole } = render(
+        <CustomRangePicker
+          isOpen
+          onClose={() => {}}
+          onApply={onApply}
+          min={PICK_MIN}
+          max={PICK_MAX}
+          initialRange={{ start: "2024-04-01", end: "2024-04-01" }}
+        />,
+      );
+      // Reverse order: later day first, then earlier.
+      fireEvent.click(dayCell(container, 20));
+      fireEvent.click(dayCell(container, 10));
+      fireEvent.click(getByRole("button", { name: /apply/i }));
+      // CORRECT behaviour: a reverse pick swaps into a forward range.
+      expect(onApply).toHaveBeenCalledWith({
+        start: "2024-04-10",
+        end: "2024-04-20",
+      });
+    },
+  );
+
+  it("M-1099 — clicking a day below min is a no-op (cell disabled; range unchanged)", () => {
+    const onApply = vi.fn();
+    const min = new Date(2024, 3, 10); // Apr 10 2024
+    const max = new Date(2024, 4, 30); // May 30 2024
+    const { container, getByRole } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={onApply}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-04-15", end: "2024-04-20" }}
+      />,
+    );
+    // Apr 5 is below min → its cell renders disabled, so clicking it cannot
+    // mutate start/end (pickDay's clamp guard is the backstop).
+    const btns = Array.from(
+      container.querySelectorAll("button"),
+    ) as HTMLButtonElement[];
+    const apr5 = btns.find(
+      (b) => b.textContent === "5" && b.disabled,
+    );
+    expect(apr5).toBeTruthy();
+    fireEvent.click(apr5 as HTMLButtonElement);
+    // Range is untouched.
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+    expect(onApply).toHaveBeenCalledWith({
+      start: "2024-04-15",
+      end: "2024-04-20",
+    });
+  });
+
+  it("M-1099 — clicking the same day twice yields a 1-day range ('1 day' singular chip)", () => {
+    const onApply = vi.fn();
+    const { container, getByText, getByRole } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={onApply}
+        min={PICK_MIN}
+        max={PICK_MAX}
+        initialRange={{ start: "2024-04-01", end: "2024-04-15" }}
+      />,
+    );
+    fireEvent.click(dayCell(container, 12));
+    fireEvent.click(dayCell(container, 12));
+    // Day-count chip reads the singular "1 day".
+    expect(getByText(/^1 day$/)).toBeTruthy();
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+    expect(onApply).toHaveBeenCalledWith({
+      start: "2024-04-12",
+      end: "2024-04-12",
+    });
+  });
+
+  // ─────────────────────────────────── M-1100 — month-navigation arrows
+  function monthLabels(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll("div"))
+      .map((d) => d.textContent ?? "")
+      .filter((t) => /^[A-Z][a-z]+ \d{4}$/.test(t));
+  }
+
+  it("M-1100 — 'Previous month' advances BOTH grid labels back one month", () => {
+    const min = new Date(2024, 0, 1); // Jan 2024
+    const max = new Date(2024, 5, 30); // June 2024
+    const { container, getAllByLabelText } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={() => {}}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-04-15", end: "2024-04-15" }}
+      />,
+    );
+    // leftMonth = April, rightMonth = May initially.
+    expect(monthLabels(container)).toEqual(["April 2024", "May 2024"]);
+    fireEvent.click(getAllByLabelText("Previous month")[0]);
+    // After one ‹ click: left → March, right → April.
+    expect(monthLabels(container)).toEqual(["March 2024", "April 2024"]);
+  });
+
+  it("M-1100 — 'Next month' advances BOTH grid labels forward one month", () => {
+    const min = new Date(2024, 0, 1);
+    const max = new Date(2024, 5, 30);
+    const { container, getAllByLabelText } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={() => {}}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-04-15", end: "2024-04-15" }}
+      />,
+    );
+    expect(monthLabels(container)).toEqual(["April 2024", "May 2024"]);
+    fireEvent.click(getAllByLabelText("Next month")[0]);
+    expect(monthLabels(container)).toEqual(["May 2024", "June 2024"]);
+  });
+
+  it("M-1100 — navigating across the year boundary (Jan → Dec) renders 'December 2023'", () => {
+    const min = new Date(2023, 11, 1); // Dec 1 2023
+    const max = new Date(2024, 1, 1); // Feb 1 2024
+    const { container, getAllByLabelText } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={() => {}}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-01-15", end: "2024-01-15" }}
+      />,
+    );
+    // leftMonth = January 2024 initially.
+    expect(monthLabels(container)).toEqual(["January 2024", "February 2024"]);
+    fireEvent.click(getAllByLabelText("Previous month")[0]);
+    // Cross-year: left → December 2023.
+    expect(monthLabels(container)).toEqual(["December 2023", "January 2024"]);
+  });
+
+  it("M-1100 — leap-day Feb 2024 renders the clickable 29th without throwing", () => {
+    const min = new Date(2024, 1, 1); // Feb 1 2024
+    const max = new Date(2024, 2, 31); // Mar 31 2024
+    const onApply = vi.fn();
+    const { container, getByRole } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={onApply}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-02-01", end: "2024-02-01" }}
+      />,
+    );
+    // Feb 2024 is a leap year — the 29th cell exists and is enabled.
+    const feb29 = dayCell(container, 29);
+    expect(feb29).toBeTruthy();
+    fireEvent.click(feb29);
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+    // start clicks to Feb 29 (start=end after a single pick).
+    expect(onApply).toHaveBeenCalledWith({
+      start: "2024-02-29",
+      end: "2024-02-29",
+    });
+  });
 });
