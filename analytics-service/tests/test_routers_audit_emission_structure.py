@@ -473,15 +473,6 @@ def _call_undecorated(handler, *args, **kwargs):
     return asyncio.run(fn(*args, **kwargs))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="H-0815: portfolio_bridge happy-path log_audit_event is unwrapped; "
-    "after audit-2026-05-07 P907+P908 an unexpected audit RPC error re-raises "
-    "(Branch 3) and escapes the handler AFTER compute succeeded, violating the "
-    "fire-and-forget contract (successful run becomes a 500). Production fix in "
-    "routers/portfolio.py: wrap happy-path emit sites (lines ~1711/~1740) in "
-    "try/except like the simulator failure-path emit already does.",
-)
 @pytest.mark.parametrize("candidates_present", [False, True])
 def test_bridge_returns_result_when_audit_emit_raises(
     monkeypatch, candidates_present

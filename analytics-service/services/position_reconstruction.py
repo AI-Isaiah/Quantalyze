@@ -299,6 +299,16 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
 
     # Compute trade_metrics
     closed = [p for p in all_positions if p.get("status") == "closed"]
+    # Audit M-0709: `all_positions` is built by iterating `fills_by_key`
+    # (a dict keyed by (symbol, exchange)) whose insertion order tracks the
+    # input fill order, so the persisted `realized_pnl_per_trade` list — and
+    # the chronological-first-N truncation slice below — would otherwise
+    # depend on which symbol's fills the caller happened to pass first. Sort
+    # by closed_at ASC so the persisted list contract is deterministic and
+    # input-order insensitive (downstream SQN / profit-factor sums are
+    # already order-insensitive; the LIST contract was not). Positions with a
+    # missing closed_at sort last but keep their relative order (stable sort).
+    closed.sort(key=lambda p: (p.get("closed_at") is None, p.get("closed_at") or ""))
 
     # Audit-2026-05-07 round-2 / P1994: avg_winning_trade and
     # avg_losing_trade must be DOLLAR sums (realized_pnl), not ratio
@@ -842,6 +852,22 @@ def _match_positions_fifo(
                         position_quality_flags.get("duration_parse_errors", 0) + 1
                     )
 
+            # Audit M-0751: a zero (or negative) average entry price is
+            # nonsensical input — exchange/parser corruption. The roi=0 it
+            # yields (notional=0 → the divide-by-zero guard returns 0)
+            # silently pollutes win_rate / avg_roi / expectancy as if it were
+            # a real flat trade. Emit a `zero_entry_price` data-quality flag
+            # so analytics_runner / frontend can surface the corruption (the
+            # same channel already used for posSide mismatches and
+            # duration-parse errors).
+            if entry_avg <= 0:
+                position_quality_flags["zero_entry_price"] = True
+                logger.warning(
+                    "Zero-entry-price position (corrupt input) "
+                    "strategy=%s symbol=%s side=%s exit_avg=%s size=%s",
+                    strategy_id, symbol, position_side, exit_avg,
+                    total_entry_qty,
+                )
             position_dict: dict[str, Any] = {
                 "strategy_id": strategy_id,
                 "symbol": symbol,

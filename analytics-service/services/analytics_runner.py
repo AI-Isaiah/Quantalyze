@@ -312,6 +312,8 @@ def _compute_volume_metrics(fills: list[dict]) -> dict:
             cost = abs(float(raw_cost)) if raw_cost is not None else 0.0
         except (TypeError, ValueError):
             cost = 0.0
+        if not math.isfinite(cost):
+            cost = 0.0
         side = (fill.get("side") or "").lower()
         total_cost += cost
         if side == "buy":

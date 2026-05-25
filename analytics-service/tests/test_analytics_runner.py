@@ -2245,12 +2245,6 @@ class TestComputeVolumeMetrics:
     # xpass into a hard failure, forcing this marker to be removed (the test
     # ratchets the fix in rather than silently tolerating the bug).
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="H-0769: production _compute_volume_metrics does not filter "
-        "NaN cost; total_volume_usd becomes NaN (non-JSON-compliant). "
-        "Flagged — fix requires production change.",
-    )
     def test_nan_cost_does_not_poison_totals(self) -> None:
         """A NaN cost (upstream divide-by-zero) must NOT propagate into
         total_volume_usd — the result must stay finite and JSON-serializable.
@@ -2279,12 +2273,6 @@ class TestComputeVolumeMetrics:
         # The whole payload must round-trip through strict JSON (no NaN/Inf).
         json.dumps(result, allow_nan=False)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="H-0769: production _compute_volume_metrics does not filter "
-        "inf cost; total_volume_usd becomes inf and buy_volume_pct becomes "
-        "NaN (non-JSON-compliant). Flagged — fix requires production change.",
-    )
     def test_inf_cost_does_not_poison_totals(self) -> None:
         """An inf cost must NOT propagate into total_volume_usd / percentages
         — the result must stay finite and JSON-serializable.

@@ -1593,15 +1593,6 @@ class TestSuccessValueMalformedDeltas:
         outcome = _make_outcome(kind="allocated", delta_180d=0.05)
         assert _success_value(outcome) == 1
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="M-0737: _success_value calls float(v) with no try/except "
-        "(feedback_engine.py:180). A non-numeric delta string (e.g. from a "
-        "corrupt JSONB row) raises ValueError and crashes the entire "
-        "compute_adjusted_weights run for that allocator. Correct behavior: "
-        "treat an unparseable delta as failure (0) or skip it — fix in "
-        "feedback_engine._success_value (wrap float(v) in try/except).",
-    )
     def test_non_numeric_string_delta_does_not_crash(self):
         """A garbage delta string must NOT raise — it should degrade to a
         failure (0), not abort the allocator's whole feedback pass."""
@@ -1638,17 +1629,6 @@ class TestAttributeDimensionMalformedBreakdown:
         result = _attribute_dimension({"kind": "allocated"}, {})
         assert result == ALL_DIMENSIONS
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="M-0737: _attribute_dimension builds `candidates = {dim: "
-        "score_breakdown.get(key) ...}` then `max(..., key=lambda w: "
-        "candidates[w])` (feedback_engine.py:202-209). If breakdown values are "
-        "None (present key, null value — a real JSONB shape), the max() "
-        "comparison raises TypeError ('>' not supported between NoneType). "
-        "Correct behavior: skip None-valued dims (treat as absent) so a partly-"
-        "null breakdown still attributes to the best numeric dim. Fix in "
-        "feedback_engine._attribute_dimension (filter `is not None`).",
-    )
     def test_mixed_none_breakdown_values_do_not_crash(self):
         """A breakdown with some None values must attribute to the best
         NUMERIC dimension, not raise TypeError on the None comparison."""
@@ -1663,13 +1643,6 @@ class TestAttributeDimensionMalformedBreakdown:
         # preference_fit (0.5) is the highest non-None score.
         assert result == ("W_PREFERENCE_FIT",)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="M-0737: an all-None breakdown (every dim key present with a "
-        "null value) hits the same unguarded max() comparison and raises "
-        "TypeError. Correct behavior: treating every dim as absent should fall "
-        "back to the uniform D-07 attribution. Same fix as the mixed-None case.",
-    )
     def test_all_none_breakdown_values_fall_back_to_uniform(self):
         """All-None breakdown → no usable numeric dim → uniform fallback,
         not a crash."""

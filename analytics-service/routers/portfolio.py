@@ -1708,16 +1708,26 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     # the non-empty branch; the empty branch reports candidate_count=0
     # and returns a 200 with an empty list.
     if not candidate_returns:
-        log_audit_event(
-            user_id=req.user_id,
-            action="bridge.score_candidates",
-            entity_type="bridge_run",
-            entity_id=req.portfolio_id,
-            metadata={
-                "underperformer_strategy_id": req.underperformer_strategy_id,
-                "candidate_count": 0,
-            },
-        )
+        try:
+            log_audit_event(
+                user_id=req.user_id,
+                action="bridge.score_candidates",
+                entity_type="bridge_run",
+                entity_id=req.portfolio_id,
+                metadata={
+                    "underperformer_strategy_id": req.underperformer_strategy_id,
+                    "candidate_count": 0,
+                },
+            )
+        except Exception as audit_exc:
+            # Fire-and-forget: an audit-emit failure must not turn this
+            # successful run into a 500 (mirror the simulator failure-path
+            # swallow pattern).
+            logger.error(
+                "bridge audit emit failed: %s",
+                audit_exc,
+                exc_info=True,
+            )
         return {
             "ok": True,
             "status": "complete",
@@ -1737,16 +1747,26 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     # Sprint 6 Task 7.1b — audit the bridge scoring. entity is the
     # portfolio the bridge was run against; user_id is carried in the
     # request shape (BridgeRequest.user_id).
-    log_audit_event(
-        user_id=req.user_id,
-        action="bridge.score_candidates",
-        entity_type="bridge_run",
-        entity_id=req.portfolio_id,
-        metadata={
-            "underperformer_strategy_id": req.underperformer_strategy_id,
-            "candidate_count": len(candidates),
-        },
-    )
+    try:
+        log_audit_event(
+            user_id=req.user_id,
+            action="bridge.score_candidates",
+            entity_type="bridge_run",
+            entity_id=req.portfolio_id,
+            metadata={
+                "underperformer_strategy_id": req.underperformer_strategy_id,
+                "candidate_count": len(candidates),
+            },
+        )
+    except Exception as audit_exc:
+        # Fire-and-forget: an audit-emit failure must not turn this
+        # successful run into a 500 (mirror the simulator failure-path
+        # swallow pattern).
+        logger.error(
+            "bridge audit emit failed: %s",
+            audit_exc,
+            exc_info=True,
+        )
 
     return {
         "ok": True,

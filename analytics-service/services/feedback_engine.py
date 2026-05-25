@@ -186,7 +186,12 @@ def _success_value(outcome: dict[str, Any]) -> int:
     for key in ("delta_180d", "delta_90d", "delta_30d"):
         v = outcome.get(key)
         if v is not None:
-            return 1 if float(v) > 0 else 0
+            try:
+                return 1 if float(v) > 0 else 0
+            except (ValueError, TypeError):
+                # Corrupt/non-numeric delta (e.g. a bad JSONB string) must not
+                # crash the allocator's whole feedback pass — treat as failure.
+                return 0
     return 0
 
 
@@ -211,7 +216,7 @@ def _attribute_dimension(
     candidates = {
         dim: score_breakdown.get(_DIM_TO_BREAKDOWN_KEY[dim])
         for dim in ALL_DIMENSIONS
-        if _DIM_TO_BREAKDOWN_KEY[dim] in score_breakdown
+        if score_breakdown.get(_DIM_TO_BREAKDOWN_KEY[dim]) is not None
     }
     if not candidates:
         return ALL_DIMENSIONS

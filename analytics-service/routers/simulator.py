@@ -294,12 +294,21 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
     # Sprint 6 Task 7.1b — audit the simulator run. entity is the
     # portfolio the ADD scenario targeted; user_id carried in the
     # request shape (SimulatorRequest.user_id).
-    log_audit_event(
-        user_id=req.user_id,
-        action="simulator.run",
-        entity_type="simulator_run",
-        entity_id=req.portfolio_id,
-        metadata={"candidate_strategy_id": req.candidate_strategy_id},
-    )
+    try:
+        log_audit_event(
+            user_id=req.user_id,
+            action="simulator.run",
+            entity_type="simulator_run",
+            entity_id=req.portfolio_id,
+            metadata={"candidate_strategy_id": req.candidate_strategy_id},
+        )
+    except Exception as audit_exc:
+        # Fire-and-forget: an audit-emit failure must not turn this
+        # successful run into a 500 (mirror the failure-path swallow above).
+        logger.error(
+            "simulator run audit emit failed: %s",
+            audit_exc,
+            exc_info=True,
+        )
 
     return result

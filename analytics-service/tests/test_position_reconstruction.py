@@ -324,13 +324,6 @@ class TestMatchPositionsFIFO:
         assert positions[0]["entry_price_avg"] == 100.0
         assert positions[0]["exit_price_avg"] == 110.0
 
-    @pytest.mark.xfail(
-        reason="M-0751: a recorded zero-entry-price position carries no "
-        "data_quality_flags marker (e.g. zero_entry_price=True), so "
-        "analytics_runner / frontend cannot warn on the corrupted input — "
-        "fix in follow-up.",
-        strict=True,
-    )
     def test_zero_entry_price_position_sets_data_quality_flag(self) -> None:
         """CORRECT contract (M-0751): even if the team chooses to KEEP the
         zero-entry position (roi=0) rather than drop it, it must at minimum
@@ -2365,20 +2358,6 @@ class TestReconstructPayloadIdempotency:
             "payload across runs, not merely an equal returned aggregate."
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "M-0709: realized_pnl_per_trade order is NOT input-order "
-            "insensitive — all_positions is built by iterating fills_by_key "
-            "(a dict keyed by (symbol, exchange)) whose insertion order "
-            "tracks the input fill order, so shuffling which symbol's fills "
-            "appear first reorders the persisted realized_pnl_per_trade list. "
-            "The downstream SQN / profit-factor math is order-insensitive "
-            "(they sum), but the persisted LIST contract is not. Production "
-            "fix: sort realized_pnl_per_trade by closed_at ASC in "
-            "position_reconstruction.reconstruct_positions before persisting."
-        ),
-        strict=True,
-    )
     @pytest.mark.asyncio
     async def test_realized_pnl_per_trade_is_input_order_insensitive(self) -> None:
         """Two runs over the SAME fills in DIFFERENT input order must yield
