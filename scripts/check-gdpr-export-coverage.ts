@@ -535,8 +535,19 @@ export function extractUserTablesFromMigration(
 
   // BEST-EFFORT — see the limitation block on
   // `scanMigrationsForUserTables`.
+  //
+  // H-1020 (audit 2026-05-25): the table identifier was matched only as
+  // a bare `([a-z0-9_]+)`, which does NOT match a DOUBLE-QUOTED
+  // identifier (`CREATE TABLE "foo" (...)`). A quoted table therefore
+  // escaped detection → omitted from required GDPR-export coverage → a
+  // potential user-data leak. We now match an OPTIONAL double-quoted
+  // form: group 1 is the quoted name (quotes stripped by the capture),
+  // group 2 the bare name; the column body shifts to group 3. The name
+  // is taken from whichever alternative matched and keyed unquoted (the
+  // capture already excludes the quotes), matching how the rest of the
+  // script keys tables.
   const createTableRe =
-    /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?([a-z0-9_]+)\s*\(([\s\S]*?)\n\s*\)\s*;/gi;
+    /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s*\(([\s\S]*?)\n\s*\)\s*;/gi;
 
   // A column declaration that references profiles(id) or auth.users(id).
   // Covers: user_id, allocator_id, uploaded_by, created_by, invited_by.
@@ -548,8 +559,10 @@ export function extractUserTablesFromMigration(
   createTableRe.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = createTableRe.exec(scrubbed)) !== null) {
-    const tableName = match[1];
-    const body = match[2];
+    // H-1020: group 1 = quoted-form name, group 2 = bare name, group 3 =
+    // column body. Take the name from whichever alternative matched.
+    const tableName = match[1] ?? match[2];
+    const body = match[3];
 
     if (tableName in EXCLUDED_TABLES) continue;
     if (declarations.has(tableName)) continue; // first decl wins
@@ -567,12 +580,19 @@ export function extractUserTablesFromMigration(
   // same user-id-FK columns. We match the column spec up to the
   // statement terminator (";") so the userColumnRe match sees the full
   // column definition.
+  // H-1020 (audit 2026-05-25): same double-quoted-identifier escape
+  // vector as createTableRe above — `ALTER TABLE "foo" ADD COLUMN
+  // user_id UUID REFERENCES auth.users(id)` was missed. Match an
+  // OPTIONAL double-quoted form: group 1 = quoted name, group 2 = bare
+  // name, group 3 = the column spec (shifted from group 2).
   const alterAddColumnRe =
-    /ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:public\.)?([a-z0-9_]+)\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([\s\S]*?);/gi;
+    /ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:public\.)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([\s\S]*?);/gi;
   alterAddColumnRe.lastIndex = 0;
   while ((match = alterAddColumnRe.exec(scrubbed)) !== null) {
-    const tableName = match[1];
-    const columnSpec = match[2];
+    // H-1020: take the table name from whichever alternative matched
+    // (quoted group 1 or bare group 2); the column spec is now group 3.
+    const tableName = match[1] ?? match[2];
+    const columnSpec = match[3];
 
     if (tableName in EXCLUDED_TABLES) continue;
     if (declarations.has(tableName)) continue; // first decl wins

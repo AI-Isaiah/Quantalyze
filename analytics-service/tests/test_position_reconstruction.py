@@ -2393,6 +2393,95 @@ class TestReconstructPayloadIdempotency:
 
 
 # ---------------------------------------------------------------------------
+# Audit H-0812: the zero-entry drop COUNTER must thread through
+# reconstruct_positions and be MERGED (summed across symbols) into the
+# strategy-level data_quality_flags.
+# ---------------------------------------------------------------------------
+class TestZeroEntryDropFlagMergedAcrossSymbols:
+    """H-0812 integration coverage gap (pr-test HIGH).
+
+    `test_zero_entry_price_position_sets_data_quality_flag` only proves
+    the COUNTER is set when `_match_positions_fifo` is called directly
+    (and asserts ``== 1``). It exercises neither (a) the
+    `dropped_flags=fifo_dropped_flags` thread-through from
+    `_reconstruct_positions_inner` into the per-symbol FIFO call, nor (b)
+    the merge loop that SUMS that counter across every symbol bucket into
+    the strategy-level ``out["data_quality_flags"]`` (position_reconstruction.py
+    ~lines 255-261, 287-295). If that merge loop were deleted — or the
+    summing ``+ v`` replaced with a bare assignment — no existing test
+    would fail.
+
+    This drives the full `reconstruct_positions` path (mirroring the
+    harness of ``test_realized_pnl_per_trade_is_input_order_insensitive``:
+    `_make_mock_supabase` + db_execute patched to `_run_sync`, reading the
+    returned dict) with a corrupt zero-entry position on TWO different
+    symbols plus a clean trade, and asserts the strategy-level result
+    surfaces ``zero_entry_price_dropped == 2`` (summed, not last-wins) AND
+    the clean trade survives.
+    """
+
+    @pytest.mark.asyncio
+    async def test_zero_entry_drops_summed_across_two_symbols(self) -> None:
+        # Corrupt zero-entry position on BTCUSDT (buy@0 closed by sell@100),
+        # corrupt zero-entry position on ETHUSDT (buy@0 closed by sell@50),
+        # plus ONE clean, well-formed BTCUSDT round-trip that must survive.
+        fills = [
+            # --- BTCUSDT: corrupt zero-entry (must be dropped + counted) ---
+            _make_fill(symbol="BTCUSDT", side="buy", price=0.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(symbol="BTCUSDT", side="sell", price=100.0, quantity=1.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+            # --- BTCUSDT: a real, well-formed trade that must survive ---
+            _make_fill(symbol="BTCUSDT", side="buy", price=100.0, quantity=1.0,
+                       timestamp="2024-01-03T00:00:00+00:00"),
+            _make_fill(symbol="BTCUSDT", side="sell", price=110.0, quantity=1.0,
+                       timestamp="2024-01-04T00:00:00+00:00"),
+            # --- ETHUSDT: corrupt zero-entry (must be dropped + counted) ---
+            _make_fill(symbol="ETHUSDT", side="buy", price=0.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(symbol="ETHUSDT", side="sell", price=50.0, quantity=1.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+
+        with patch(
+            "services.position_reconstruction.db_execute", side_effect=_run_sync
+        ):
+            result = await reconstruct_positions("strat-zed-1", mock_supabase)
+
+        # The per-symbol drop counters (1 for BTC, 1 for ETH) must be
+        # MERGED by SUMMING into the strategy-level flag — not overwritten
+        # last-wins. Deleting the merge loop (or replacing `+ v` with `= v`)
+        # makes this assertion fail.
+        flags = result.get("data_quality_flags") or {}
+        assert flags.get("zero_entry_price_dropped") == 2, (
+            "zero-entry drops on two symbols must SUM to 2 at the "
+            f"strategy level; got flags={flags!r} (merge loop deleted or "
+            "summing replaced by assignment?)"
+        )
+
+        # The clean BTCUSDT round-trip must survive the reconstruction:
+        # exactly one closed position persisted via the atomic rebuild RPC,
+        # and the returned aggregate reflects it.
+        assert result["total_positions"] == 1
+        assert result["closed_positions"] == 1
+        atomic = [
+            c for c in mock_supabase.rpc_calls
+            if c[0] == "reconstruct_positions_atomic"
+        ]
+        assert atomic, "atomic-rebuild RPC was not called"
+        rows = atomic[0][1]["p_positions"]
+        assert len(rows) == 1, (
+            f"only the clean trade should persist, got {len(rows)} rows"
+        )
+        survivor = rows[0]
+        assert survivor["symbol"] == "BTCUSDT"
+        assert survivor["status"] == "closed"
+        assert survivor["entry_price_avg"] == 100.0
+        assert survivor["exit_price_avg"] == 110.0
+
+
+# ---------------------------------------------------------------------------
 # Audit-2026-05-07 H-0745: duration parse failure surfaces via
 # data_quality_flags rather than silently dropping duration_days.
 # ---------------------------------------------------------------------------

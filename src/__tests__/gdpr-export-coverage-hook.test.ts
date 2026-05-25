@@ -387,4 +387,92 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
       expect(out.has("late_added")).toBe(true);
     },
   );
+
+  // H-1020 — double-quoted-identifier escape vector. The CREATE/ALTER
+  // table-name regexes matched only a bare `([a-z0-9_]+)`, which does
+  // NOT match a DOUBLE-QUOTED identifier. A quoted table therefore
+  // escaped the user-FK scan → omitted from required GDPR-export
+  // coverage → a potential user-data leak. Both paths (CREATE and the
+  // H-1019 ALTER ... ADD COLUMN) are affected. These drive the exported
+  // pure helper directly and assert the quoted table is now DETECTED as
+  // user-owned. They FAIL against the pre-fix bare-identifier regex.
+
+  it(
+    "H-1020: a CREATE TABLE with a DOUBLE-QUOTED identifier whose body has a user_id FK must be discovered",
+    () => {
+      // `CREATE TABLE "quoted_user_tbl" (...)` is valid DDL. The bare
+      // `([a-z0-9_]+)` table-name capture could not match the quoted
+      // form, so the table silently dodged the coverage gate. CORRECT:
+      // the quoted table has a real user_id FK to auth.users and must be
+      // flagged (keyed unquoted, lowercase, to match the rest of the
+      // script).
+      const sql = [
+        'CREATE TABLE "quoted_user_tbl" (',
+        "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),",
+        "  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,",
+        "  note TEXT",
+        ");",
+        "",
+      ].join("\n");
+      const out = extractUserTablesFromMigration(sql, "20260603_quoted_create.sql");
+      // Keyed by the UNQUOTED name (no embedded quote chars).
+      expect(out.has("quoted_user_tbl")).toBe(true);
+    },
+  );
+
+  it(
+    "H-1020: a user_id FK added via ALTER TABLE on a DOUBLE-QUOTED identifier must be discovered",
+    () => {
+      // Same escape vector on the H-1019 ALTER ... ADD COLUMN path:
+      // `ALTER TABLE "quoted_late" ADD COLUMN user_id UUID REFERENCES
+      // auth.users(id)`. The bare table-name capture missed the quoted
+      // form, so a late-added user column on a quoted table escaped the
+      // gate. CORRECT: the table is now flagged user-owned, keyed
+      // unquoted.
+      const sql = [
+        'CREATE TABLE "quoted_late" (',
+        "  id UUID PRIMARY KEY",
+        ");",
+        'ALTER TABLE "quoted_late" ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);',
+        "",
+      ].join("\n");
+      const out = extractUserTablesFromMigration(sql, "20260604_quoted_alter.sql");
+      expect(out.has("quoted_late")).toBe(true);
+    },
+  );
+
+  it(
+    "H-1020: UNquoted-identifier behavior is unchanged after the group-index shift",
+    () => {
+      // Guard against the capture-index shift (group 1 → group 2 for the
+      // bare name; body/columnSpec shifted to group 3) regressing the
+      // common UNquoted path. Both a bare CREATE and a bare ALTER must
+      // still be detected exactly as before.
+      const createSql = [
+        "CREATE TABLE bare_create_tbl (",
+        "  id UUID PRIMARY KEY,",
+        "  user_id UUID NOT NULL REFERENCES auth.users(id)",
+        ");",
+        "",
+      ].join("\n");
+      const createOut = extractUserTablesFromMigration(
+        createSql,
+        "20260605_bare_create.sql",
+      );
+      expect(createOut.has("bare_create_tbl")).toBe(true);
+
+      const alterSql = [
+        "CREATE TABLE bare_alter_tbl (",
+        "  id UUID PRIMARY KEY",
+        ");",
+        "ALTER TABLE bare_alter_tbl ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);",
+        "",
+      ].join("\n");
+      const alterOut = extractUserTablesFromMigration(
+        alterSql,
+        "20260606_bare_alter.sql",
+      );
+      expect(alterOut.has("bare_alter_tbl")).toBe(true);
+    },
+  );
 });

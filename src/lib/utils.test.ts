@@ -46,6 +46,21 @@ describe("formatPercent", () => {
     // stays clearly distinguishable from a formatted zero/positive value.
     expect(formatPercent(0.12)).toBe("+12.00%");
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // M-0085 regression guard: the non-finite guard must cover ±Infinity,
+  // not just null/NaN. A degenerate return series can produce an
+  // Infinite percentage; callers expect the em-dash sentinel, never
+  // "Infinity%". A regression to a NaN-only guard (`Number.isNaN`) would
+  // leak "Infinity%" — these assertions pin the full `Number.isFinite`
+  // contract so that regression fails here.
+  // ─────────────────────────────────────────────────────────────────
+  it("regression (M-0085): formatPercent(Infinity) returns the em-dash", () => {
+    expect(formatPercent(Infinity)).toBe("—");
+  });
+  it("regression (M-0085): formatPercent(-Infinity) returns the em-dash", () => {
+    expect(formatPercent(Number.NEGATIVE_INFINITY)).toBe("—");
+  });
 });
 
 describe("formatNumber", () => {
@@ -76,6 +91,20 @@ describe("formatCurrency", () => {
   });
   it("returns dash for null", () => {
     expect(formatCurrency(null)).toBe("—");
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // M-0085 regression guard: the non-finite guard must cover ±Infinity,
+  // not just null/NaN. Without the full `Number.isFinite` check, an
+  // Infinite balance/PnL would leak "$Infinity"; callers expect the
+  // em-dash sentinel. A regression to a NaN-only guard (`Number.isNaN`)
+  // would fail these assertions.
+  // ─────────────────────────────────────────────────────────────────
+  it("regression (M-0085): formatCurrency(Infinity) returns the em-dash", () => {
+    expect(formatCurrency(Infinity)).toBe("—");
+  });
+  it("regression (M-0085): formatCurrency(-Infinity) returns the em-dash", () => {
+    expect(formatCurrency(Number.NEGATIVE_INFINITY)).toBe("—");
   });
 });
 

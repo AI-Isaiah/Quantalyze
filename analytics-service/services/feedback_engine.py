@@ -189,9 +189,20 @@ def _success_value(outcome: dict[str, Any]) -> int:
             try:
                 return 1 if float(v) > 0 else 0
             except (ValueError, TypeError):
-                # Corrupt/non-numeric delta (e.g. a bad JSONB string) must not
-                # crash the allocator's whole feedback pass — treat as failure.
-                return 0
+                # M-0737 / review-A: a corrupt non-numeric delta (e.g. a bad
+                # JSONB string) is NOT a usable signal. Don't fabricate a
+                # failure (0) from it — counting corruption as a loss silently
+                # biases the learning signal downward, and the module logger
+                # was previously unused on this path. Log it and fall through
+                # to the next (less-mature) maturity key; only if EVERY
+                # maturity is missing/corrupt does the function reach the
+                # terminal 0 below (genuine "no measurable improvement yet").
+                logger.warning(
+                    "feedback: non-numeric delta %r for key=%s — skipping "
+                    "(no signal), trying next maturity",
+                    v, key,
+                )
+                continue
     return 0
 
 

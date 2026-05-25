@@ -305,6 +305,7 @@ def _compute_volume_metrics(fills: list[dict]) -> dict:
     total_cost = 0.0
     buy_cost = 0.0
     sell_cost = 0.0
+    non_finite_costs = 0
 
     for fill in fills:
         raw_cost = fill.get("cost", 0)
@@ -313,6 +314,11 @@ def _compute_volume_metrics(fills: list[dict]) -> dict:
         except (TypeError, ValueError):
             cost = 0.0
         if not math.isfinite(cost):
+            # H-0769 / review-E: a non-finite (NaN/Inf) cost is corrupt input
+            # (upstream divide-by-zero or a bad fill). Coerce to 0 so it can't
+            # poison total_volume_usd / break strict JSON, but count it so the
+            # corruption is observable, not silently absorbed into a $0 volume.
+            non_finite_costs += 1
             cost = 0.0
         side = (fill.get("side") or "").lower()
         total_cost += cost
@@ -320,6 +326,13 @@ def _compute_volume_metrics(fills: list[dict]) -> dict:
             buy_cost += cost
         elif side == "sell":
             sell_cost += cost
+
+    if non_finite_costs:
+        logger.warning(
+            "volume metrics: %d non-finite fill cost(s) coerced to 0 "
+            "(corrupt input) across %d fills",
+            non_finite_costs, len(fills),
+        )
 
     buy_pct = buy_cost / total_cost if total_cost > 0 else 0.0
     sell_pct = sell_cost / total_cost if total_cost > 0 else 0.0

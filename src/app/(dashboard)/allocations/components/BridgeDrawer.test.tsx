@@ -244,19 +244,13 @@ describe("BridgeDrawer — Phase 09.1 Plan 09 / D-15 / D-16", () => {
   // rejection, and concurrent click double-fire.
   // -------------------------------------------------------------------------
 
-  // SKIPPED (not it.fails): exercising this path lets BridgeDrawer's uncaught
-  // `await sendBridgeIntro` reject as an *unhandled* rejection, which fails the
-  // entire vitest run (not just this case). The bug is tracked in
-  // SURFACED-ISSUES.md; the follow-up that wraps the await in try/catch should
-  // un-skip this and flip it to a normal passing test.
+  // H-0081 fix is in place: handleSendIntro now wraps `await sendBridgeIntro`
+  // in try/catch + finally. A rejected helper must be caught, the submit button
+  // re-enabled (finally), AND the error surfaced via setError (catch), mirroring
+  // the resolved {ok:false} path. This test pins BOTH halves of that contract.
   it(
-    "H-0081: sendBridgeIntro that REJECTS (throws) leaves the button stuck on 'Sending…' with no error surfaced — fix in follow-up (wrap await in try/catch)",
+    "H-0081: sendBridgeIntro that REJECTS (throws) re-enables the button AND surfaces the rejection message for retry",
     async () => {
-      // Correct behaviour: a thrown/rejected helper should be caught, the
-      // submit button re-enabled, and an error surfaced (mirroring the
-      // resolved {ok:false} path). handleSendIntro has NO try/catch around
-      // `await sendBridgeIntro`, so a rejection strands the drawer: button
-      // stays disabled on "Sending…", no role=alert, no recovery path.
       mockSendBridgeIntro.mockRejectedValueOnce(new Error("network exploded"));
       const onClose = vi.fn();
       render(
@@ -279,6 +273,13 @@ describe("BridgeDrawer — Phase 09.1 Plan 09 / D-15 / D-16", () => {
         expect(btn).not.toBeDisabled();
         expect(btn).toHaveTextContent("Send intro");
       });
+      // The rejection's message must be SURFACED to the allocator — not just the
+      // button recovered. The catch block does TWO things (finally re-enables
+      // the button AND setError shows the failure); a partial revert that kept
+      // the finally but dropped the setError would still pass the recovery
+      // assertion above yet leave the allocator with a stuck-looking failure and
+      // no message. Mirror the sibling {ok:false} case's role="alert" assertion.
+      expect(screen.getByRole("alert")).toHaveTextContent("network exploded");
       // And the drawer must not have silently closed on a failed send.
       expect(onClose).not.toHaveBeenCalled();
     },
