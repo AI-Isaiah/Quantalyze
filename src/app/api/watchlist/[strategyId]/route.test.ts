@@ -201,6 +201,31 @@ describe("PUT /api/watchlist/[strategyId]", () => {
     }
   });
 
+  it("action='remove' twice in a row resolves 200 both times (0-row delete is a no-op)", async () => {
+    // M-0879 (audit-2026-05-07 / reverify-2026-05-25): the route header
+    // contracts "a second remove on a non-existent row is a 0-row delete
+    // (200)" (route.ts:11, :74-87). The add-twice path is pinned above, but
+    // the symmetric remove-twice path was undocumented at the test layer.
+    // The StarToggle retry path issues remove → remove on double-tap; if a
+    // future refactor made the DELETE return 404/409 on a missing row, the
+    // retry would surface a user-visible failure. Postgres treats "row not
+    // found" as a 0-row delete (no error), so the second remove MUST still
+    // resolve 200. Here the mock's delete resolves `{ error: null }` both
+    // times (the gone-row case); the assertion is that the handler does NOT
+    // turn a benign 0-row delete into a non-200.
+    const r1 = await PUT(makeReq({ action: "remove" }), makeCtx());
+    const r2 = await PUT(makeReq({ action: "remove" }), makeCtx());
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    // Two deletes attempted; each constrained to (user_id, strategy_id).
+    expect(recorders.deleteCalls).toHaveLength(2);
+    for (const call of recorders.deleteCalls) {
+      const eqMap = Object.fromEntries(call.eqs);
+      expect(eqMap.user_id).toBe(VALID_USER.id);
+      expect(eqMap.strategy_id).toBe(STRATEGY_ID);
+    }
+  });
+
   it("returns 500 when supabase upsert reports an error", async () => {
     recorders.upsertResponse = { error: { message: "db down" } };
     const res = await PUT(makeReq({ action: "add" }), makeCtx());

@@ -512,6 +512,203 @@ class TestShutdown:
 
 
 # ---------------------------------------------------------------------------
+# Loop-level failure isolation + daily_enqueue_loop shutdown (M-1003)
+# ---------------------------------------------------------------------------
+
+class TestLoopFailureIsolation:
+    """M-1003 (audit-2026-05-07 / reverify-2026-05-25).
+
+    The three worker loops (dispatch_loop / watchdog_loop / daily_enqueue_loop)
+    each wrap their tick in `try/except Exception` (`# noqa: BLE001`) so a
+    single tick failure is logged but does NOT crash the gather — the worker
+    must survive a transient DB blip and keep ticking. The tick functions
+    themselves are covered (TestDispatchTick etc.) and dispatch_loop's
+    SHUTDOWN exit is covered (TestShutdown), but the loop-level failure
+    ISOLATION and daily_enqueue_loop's SHUTDOWN exit / initial-tick-failure
+    paths were untested. A regression that let a tick exception escape the
+    loop body (e.g. narrowing the except, or moving the wait_for outside the
+    try) would crash the whole worker on the first transient error.
+
+    Each test uses a near-zero interval and arms SHUTDOWN so the infinite loop
+    terminates deterministically without sleeping a real interval.
+
+    SHUTDOWN is a module-GLOBAL `asyncio.Event` created at import time, so it
+    binds to the FIRST event loop that awaits it. pytest-asyncio gives each
+    test a fresh loop, so a second SHUTDOWN-awaiting test on a new loop hits
+    `RuntimeError: bound to a different event loop`. To keep these tests loop-
+    isolated, each one swaps `main_worker.SHUTDOWN` with a fresh Event created
+    inside its own running loop (via `_fresh_shutdown()`), and restores the
+    original module global in `finally`. The loops read `main_worker.SHUTDOWN`
+    by module attribute at await-time, so the swap takes effect for the loop
+    task launched after it.
+    """
+
+    @staticmethod
+    def _fresh_shutdown():
+        """Install a fresh asyncio.Event() (bound to the current running loop)
+        as main_worker.SHUTDOWN and return (new_event, restore_fn)."""
+        import main_worker
+
+        original = main_worker.SHUTDOWN
+        new_event = asyncio.Event()
+        main_worker.SHUTDOWN = new_event
+
+        def restore() -> None:
+            main_worker.SHUTDOWN = original
+
+        return new_event, restore
+
+    @pytest.mark.asyncio
+    async def test_dispatch_loop_survives_a_tick_exception_then_exits_on_shutdown(self) -> None:
+        from main_worker import dispatch_loop
+
+        shutdown, restore = self._fresh_shutdown()
+        try:
+            call_count = 0
+
+            async def _flaky_tick(_worker_id: str) -> None:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    # First tick raises — the loop MUST log + isolate it and
+                    # proceed to the wait_for branch instead of crashing.
+                    raise RuntimeError("transient DB blip")
+                # Second tick onward: arm shutdown so the loop terminates after
+                # proving it survived the first failure.
+                shutdown.set()
+
+            with patch("main_worker.dispatch_tick", new=_flaky_tick):
+                loop_task = asyncio.create_task(
+                    dispatch_loop("test-worker", interval=0.01)
+                )
+                done, pending = await asyncio.wait({loop_task}, timeout=2.0)
+                for p in pending:
+                    p.cancel()
+
+            assert loop_task.done(), "dispatch_loop hung after a tick exception"
+            # The loop did NOT crash on the first raise: the tick ran at least
+            # twice (the failing tick + the survivor that armed shutdown).
+            assert call_count >= 2, (
+                f"dispatch_loop did not continue past the failing tick "
+                f"(call_count={call_count})"
+            )
+            # The exception did not propagate out of the loop coroutine.
+            assert loop_task.exception() is None, (
+                f"tick exception escaped the loop: {loop_task.exception()!r}"
+            )
+        finally:
+            restore()
+
+    @pytest.mark.asyncio
+    async def test_watchdog_loop_survives_a_tick_exception_then_exits_on_shutdown(self) -> None:
+        from main_worker import watchdog_loop
+
+        shutdown, restore = self._fresh_shutdown()
+        try:
+            call_count = 0
+
+            async def _flaky_tick() -> None:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise RuntimeError("reclaim RPC blip")
+                shutdown.set()
+
+            with patch("main_worker.watchdog_tick", new=_flaky_tick):
+                loop_task = asyncio.create_task(watchdog_loop(interval=0.01))
+                done, pending = await asyncio.wait({loop_task}, timeout=2.0)
+                for p in pending:
+                    p.cancel()
+
+            assert loop_task.done(), "watchdog_loop hung after a tick exception"
+            assert call_count >= 2, (
+                f"watchdog_loop did not continue past the failing tick "
+                f"(call_count={call_count})"
+            )
+            assert loop_task.exception() is None, (
+                f"tick exception escaped watchdog_loop: {loop_task.exception()!r}"
+            )
+        finally:
+            restore()
+
+    @pytest.mark.asyncio
+    async def test_daily_enqueue_loop_initial_tick_failure_does_not_crash_and_exits_on_shutdown(self) -> None:
+        # daily_enqueue_loop runs an INITIAL tick on startup (outside the
+        # while-loop) before entering the wait/tick cycle. That initial tick
+        # has its own try/except; if it raised unguarded the worker's
+        # asyncio.gather would crash at startup. Verify: initial tick raises →
+        # loop still reaches the wait_for branch → SHUTDOWN exits it cleanly,
+        # with no exception escaping.
+        from main_worker import daily_enqueue_loop
+
+        shutdown, restore = self._fresh_shutdown()
+        # Arm shutdown immediately so the post-initial-tick wait_for returns at
+        # once. The initial tick still fires (and raises) before the while.
+        shutdown.set()
+        try:
+            ticks = 0
+
+            async def _failing_initial_tick() -> None:
+                nonlocal ticks
+                ticks += 1
+                raise RuntimeError("startup enqueue RPC down")
+
+            with patch("main_worker.daily_enqueue_tick", new=_failing_initial_tick):
+                loop_task = asyncio.create_task(
+                    daily_enqueue_loop(interval=0.01)
+                )
+                done, pending = await asyncio.wait({loop_task}, timeout=2.0)
+                for p in pending:
+                    p.cancel()
+
+            assert loop_task.done(), "daily_enqueue_loop hung after initial tick failure"
+            assert ticks >= 1, "initial tick was never attempted"
+            # The initial-tick exception was isolated, not propagated.
+            assert loop_task.exception() is None, (
+                f"initial-tick exception escaped daily_enqueue_loop: "
+                f"{loop_task.exception()!r}"
+            )
+        finally:
+            restore()
+
+    @pytest.mark.asyncio
+    async def test_daily_enqueue_loop_exits_on_shutdown(self) -> None:
+        # The SHUTDOWN-exit path for daily_enqueue_loop was untested (only
+        # dispatch_loop's was). With a healthy initial tick and SHUTDOWN armed,
+        # the loop must run the initial tick then return promptly via the
+        # wait_for(SHUTDOWN.wait()) branch — not block for a full `interval`.
+        from main_worker import daily_enqueue_loop
+
+        shutdown, restore = self._fresh_shutdown()
+        shutdown.set()
+        try:
+            ticks = 0
+
+            async def _ok_tick() -> None:
+                nonlocal ticks
+                ticks += 1
+
+            with patch("main_worker.daily_enqueue_tick", new=_ok_tick):
+                # interval is deliberately HUGE — if the loop ignored SHUTDOWN
+                # and waited the interval, the 2s asyncio.wait timeout below
+                # would leave the task pending and the assertion would fail.
+                loop_task = asyncio.create_task(
+                    daily_enqueue_loop(interval=3600.0)
+                )
+                done, pending = await asyncio.wait({loop_task}, timeout=2.0)
+                for p in pending:
+                    p.cancel()
+
+            assert loop_task.done(), (
+                "daily_enqueue_loop did not honor SHUTDOWN within the timeout "
+                "(it waited the full interval instead of the wait_for race)"
+            )
+            assert ticks == 1, f"expected exactly one initial tick, got {ticks}"
+        finally:
+            restore()
+
+
+# ---------------------------------------------------------------------------
 # Migration 090 — partition-key dedupe contract
 # ---------------------------------------------------------------------------
 
