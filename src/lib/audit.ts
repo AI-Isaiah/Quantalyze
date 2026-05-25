@@ -159,11 +159,6 @@ function reportToSentry(
 /**
  * Fire-and-forget audit event emitter.
  *
- * Sprint 6 closeout Task 7.1a (pilot: 3 events + `log_audit_event` RPC).
- * Sprint 6 closeout Task 7.1b (fanout: 17 additional TS events + 4
- * Python events via the service-role `log_audit_event_service` RPC —
- * migration 058).
- *
  * Writes to the `audit_log` table via one of two SECURITY DEFINER RPCs:
  *
  * 1. `log_audit_event(p_action, p_entity_type, p_entity_id, p_metadata)`
@@ -231,10 +226,8 @@ function reportToSentry(
  * The canonical action string enum. Namespaced `subject.verb` so the
  * taxonomy stays grep-able and we can fan out later without colliding.
  *
- * Sprint 6 pilot (Task 7.1a) shipped the first three actions. Tasks 7.2
- * + 7.3 added the RBAC grant/revoke + GDPR workflow actions. Task 7.1b
- * fans out to the remaining mutation sites (TS + Python). Keep this
- * union in sync with `docs/architecture/adr-0023-audit-event-taxonomy.md`.
+ * Keep this union in sync with
+ * `docs/architecture/adr-0023-audit-event-taxonomy.md`.
  */
 export type AuditAction =
   // --- 7.1a pilot -------------------------------------------------------
