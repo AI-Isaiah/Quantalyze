@@ -19,9 +19,8 @@ Contract:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 

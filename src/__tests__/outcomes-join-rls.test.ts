@@ -235,7 +235,6 @@ describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", (
       authMock.userId = alloc2;
       const result2 = await getMyAllocationDashboard(alloc2);
       expect(result2.outcomes.length).toBeGreaterThanOrEqual(1);
-      const o2 = result2.outcomes[0];
 
       // H-0023 / H-0024: This codepath uses the ADMIN client (service-role,
       // RLS-bypassing — queries.ts: "match_decisions has no allocator-self-

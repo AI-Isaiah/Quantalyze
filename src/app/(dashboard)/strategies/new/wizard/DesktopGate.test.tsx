@@ -17,7 +17,7 @@
  * A regression that shortens wizard_session_id below 8 chars, drops a
  * required field, or breaks the matchMedia wiring fails here.
  */
-import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { DesktopGate } from "./DesktopGate";
 

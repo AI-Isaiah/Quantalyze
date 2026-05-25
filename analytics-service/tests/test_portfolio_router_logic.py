@@ -6,11 +6,8 @@ level before importing the router, so the alert logic can be tested in isolation
 """
 
 import sys
-import types
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
-
-import pytest
 
 
 def _install_stubs():

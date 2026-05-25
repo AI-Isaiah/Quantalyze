@@ -21,8 +21,6 @@ import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from main_worker import dispatch_tick
 from services.job_worker import DispatchOutcome, DispatchResult
 

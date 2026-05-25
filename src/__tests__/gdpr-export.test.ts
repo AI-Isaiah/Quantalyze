@@ -297,7 +297,6 @@ describe("collectUserExportBundle — C-0021 ownership assertion (audit-2026-05-
 
   it("accepts a valid UUID and proceeds to fetch (regression guard against over-strict regex)", async () => {
     const mock = makeMockClient({});
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const bundle = await collectUserExportBundle(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       mock as any,
