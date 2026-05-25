@@ -186,6 +186,87 @@ describe("Performance widgets — render with data", () => {
 });
 
 // ---------------------------------------------------------------------------
+// M-0211 — RollingSharpe edge fixtures. The shared makeDailyReturns codomain
+// is a smooth ~[-2%, +2%] sine with no extreme tail; RollingSharpe was only
+// asserted at n=300. These pin the bug-prone edges: all-zero (sharpe
+// divide-by-zero), a single -50% outlier, and the exact window-length
+// boundary (n=30 renders the 30d line; n=29 collapses to insufficient-data).
+// We feed `compositeReturns` directly (the widget reads data.compositeReturns
+// ?? buildCompositeReturns) so the fixtures are deterministic.
+// ---------------------------------------------------------------------------
+
+function makeComposite(
+  n: number,
+  valueAt: (i: number) => number,
+  startDate = "2023-01-01",
+): Array<{ date: string; value: number }> {
+  const pts: Array<{ date: string; value: number }> = [];
+  const d = new Date(startDate + "T00:00:00Z");
+  for (let i = 0; i < n; i++) {
+    pts.push({ date: d.toISOString().slice(0, 10), value: valueAt(i) });
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return pts;
+}
+
+function rollingSharpeData(
+  compositeReturns: Array<{ date: string; value: number }>,
+): WidgetProps["data"] {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return { strategies: [], portfolio: null, analytics: null, compositeReturns } as any;
+}
+
+describe("RollingSharpe — M-0211 edge fixtures", () => {
+  it("(a) all-zero returns render without NaN and without the insufficient-data state", () => {
+    // stdDev of an all-zero window is 0, so the sharpe code path takes the
+    // `s > 0 ? ... : 0` branch → value 0 (finite), NOT NaN. With 300 points
+    // all 3 windows produce series, so the chart renders. Assert the
+    // insufficient-data copy is absent and no "NaN" text leaks into the DOM.
+    const { container } = render(
+      <RollingSharpe {...baseProps} data={rollingSharpeData(makeComposite(300, () => 0))} />,
+    );
+    expect(
+      screen.queryByText(/insufficient data.*sharpe/i),
+    ).not.toBeInTheDocument();
+    expect(container.textContent ?? "").not.toMatch(/NaN/);
+  });
+
+  it("(b) a single -50% outlier renders without crashing or degrading to insufficient-data", () => {
+    const data = rollingSharpeData(
+      makeComposite(60, (i) => (i === 10 ? -0.5 : 0.005)),
+    );
+    const { container } = render(<RollingSharpe {...baseProps} data={data} />);
+    expect(
+      screen.queryByText(/insufficient data.*sharpe/i),
+    ).not.toBeInTheDocument();
+    expect(container.textContent ?? "").not.toMatch(/NaN/);
+  });
+
+  it("(c) boundary: exactly 30 points renders the chart (30d window yields 1 point)", () => {
+    const data = rollingSharpeData(
+      makeComposite(30, (i) => Math.sin(i) * 0.01),
+    );
+    render(<RollingSharpe {...baseProps} data={data} />);
+    // The 30d window produces exactly one merged row → chart renders, so the
+    // insufficient-data copy must be absent at the boundary.
+    expect(
+      screen.queryByText(/insufficient data.*sharpe/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("(c) boundary: 29 points (one below the smallest window) collapses to the insufficient-data state", () => {
+    const data = rollingSharpeData(
+      makeComposite(29, (i) => Math.sin(i) * 0.01),
+    );
+    render(<RollingSharpe {...baseProps} data={data} />);
+    // Below the 30d window every series is empty → insufficient-data state.
+    expect(
+      screen.getByText(/insufficient data.*sharpe/i),
+    ).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Barrel export test
 // ---------------------------------------------------------------------------
 

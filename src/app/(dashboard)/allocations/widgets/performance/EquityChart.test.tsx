@@ -2,7 +2,7 @@ import { render, fireEvent } from "@testing-library/react";
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
-import { EquityChart, type OverlaySeries } from "./EquityChart";
+import { EquityChart, type OverlaySeries, type Period } from "./EquityChart";
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / Task 3 — EquityChart test suite.
@@ -393,6 +393,160 @@ describe("EquityChart — audit-2026-05-07 safety guards", () => {
   // tests) — see the source-comment in EquityChart.tsx around the
   // `satisfied` flag. Not exercising it here would require manufacturing
   // data the runtime cannot actually produce.
+});
+
+// ───────────────────────────────────────────────────────────────────
+// M-1057 — yTicks MIN_TICKS=5 floor. PR4 #4 rewrote the y-tick walker to
+// pick the LARGEST nice candidate that still yields >= 5 ticks (accepting
+// sub-1% steps on tight ranges). The prior assertion only required >= 2
+// ticks (passes even with the old 3-tick collapse). These tests pin >= 5
+// ticks for both a narrow and a wide range so a revert to the round-UP
+// picker (which collapsed narrow ranges to 3 labels) fails.
+// ───────────────────────────────────────────────────────────────────
+
+// Collect the y-axis percentage tick labels (e.g. "+0%", "-0.5%").
+function pctTickLabels(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll("svg text"))
+    .map((t) => t.textContent ?? "")
+    .filter((s) => /^[+-]?\d+(\.\d+)?%$/.test(s));
+}
+
+describe("EquityChart — M-1057 yTicks MIN_TICKS floor", () => {
+  it("narrow sub-1% range still yields >= 5 percentage ticks", () => {
+    // Values oscillate in a sub-1% band around 1.0 — the exact tight range
+    // the MIN_TICKS floor exists to keep dense. After period-start
+    // normalization the span stays well under 1%, so a round-UP picker
+    // would collapse to ~3 ticks; the floor must hold it at >= 5.
+    const series: DailyPoint[] = [];
+    const d = new Date(Date.UTC(2024, 0, 1));
+    for (let i = 0; i < 120; i++) {
+      series.push({
+        date: d.toISOString().slice(0, 10),
+        // 0.997 .. 1.003 — a ~0.65% normalized span. The pre-PR4 round-UP
+        // picker collapses this to 3 ticks; the MIN_TICKS=5 floor must hold
+        // it at >= 5 (verified: NEW picker = 7 ticks, OLD picker = 3).
+        value: 1 + Math.sin(i * 0.5) * 0.003,
+      });
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    const { container } = render(
+      <EquityChart equityDailyPoints={series} initialPeriod="ALL" />,
+    );
+    expect(pctTickLabels(container).length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("wide range yields >= 5 percentage ticks (picker selects a larger step, not the smallest)", () => {
+    // A ~60% span (0.7 .. 1.3 after normalization) — the walker should pick
+    // a coarse step (e.g. 10%) that STILL clears 5 ticks, proving it selects
+    // the largest qualifying candidate rather than flooding with tiny steps.
+    const series: DailyPoint[] = [];
+    const d = new Date(Date.UTC(2024, 0, 1));
+    for (let i = 0; i < 120; i++) {
+      // Linear ramp from ~0.7 up to ~1.3 so normalized range is wide.
+      series.push({
+        date: d.toISOString().slice(0, 10),
+        value: 0.7 + (0.6 * i) / 119,
+      });
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    const { container } = render(
+      <EquityChart equityDailyPoints={series} initialPeriod="ALL" />,
+    );
+    const labels = pctTickLabels(container);
+    expect(labels.length).toBeGreaterThanOrEqual(5);
+    // Sanity: the walker did NOT flood the axis with hundreds of tiny ticks
+    // (the >50-tick safety cap should never have to fire here).
+    expect(labels.length).toBeLessThanOrEqual(50);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// M-1058 — controlled-state escape hatch (period / onPeriodChange). PR4 #1
+// added a controlled-or-uncontrolled pattern: when `period` is supplied,
+// it is the source of truth, setPeriod fires onPeriodChange AND skips the
+// internal state update. The existing suite only covers the uncontrolled
+// path ("clicking 1M switches the active tab"). These tests cover the
+// controlled path so a regression that swallows the wrapper value (chart
+// desyncs from the card-header toggle) fails.
+// ───────────────────────────────────────────────────────────────────
+
+describe("EquityChart — M-1058 controlled period mode", () => {
+  it("forwards clicks to onPeriodChange and does NOT mutate internal active tab", () => {
+    const onPeriodChange = vi.fn();
+    const { getByRole, rerender } = render(
+      <EquityChart
+        equityDailyPoints={makeSeries(200)}
+        period="1M"
+        onPeriodChange={onPeriodChange}
+      />,
+    );
+    // Controlled: '1M' is active because the prop says so.
+    expect(getByRole("tab", { name: "1M" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+
+    // Click '3M' — handler fires with '3M', but the chart must NOT flip its
+    // own active tab (the wrapper owns the value and hasn't updated yet).
+    fireEvent.click(getByRole("tab", { name: "3M" }));
+    expect(onPeriodChange).toHaveBeenCalledTimes(1);
+    expect((onPeriodChange.mock.calls[0] as unknown as [Period])[0]).toBe("3M");
+    // Still '1M' — controlled value unchanged.
+    expect(getByRole("tab", { name: "1M" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    expect(getByRole("tab", { name: "3M" }).getAttribute("aria-selected")).toBe(
+      "false",
+    );
+
+    // Wrapper now propagates the new value back as a prop — active flips.
+    rerender(
+      <EquityChart
+        equityDailyPoints={makeSeries(200)}
+        period="3M"
+        onPeriodChange={onPeriodChange}
+      />,
+    );
+    expect(getByRole("tab", { name: "3M" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    expect(getByRole("tab", { name: "1M" }).getAttribute("aria-selected")).toBe(
+      "false",
+    );
+  });
+
+  it("CUSTOM apply forwards the range through onCustomRangeChange + onPeriodChange without internal state", () => {
+    const onPeriodChange = vi.fn();
+    const onCustomRangeChange = vi.fn();
+    const { getByRole, queryByRole } = render(
+      <EquityChart
+        equityDailyPoints={makeSeries(200)}
+        period="6M"
+        onPeriodChange={onPeriodChange}
+        customRange={null}
+        onCustomRangeChange={onCustomRangeChange}
+      />,
+    );
+    // Open the picker.
+    fireEvent.click(getByRole("tab", { name: "CUSTOM" }));
+    const dialog = queryByRole("dialog", { name: "Custom date range" });
+    expect(dialog).not.toBeNull();
+
+    // Apply a range via the picker's Apply control. The two date inputs are
+    // seeded; set explicit values then Apply.
+    const inputs = dialog!.querySelectorAll('input[type="date"]');
+    expect(inputs.length).toBeGreaterThanOrEqual(2);
+    fireEvent.change(inputs[0], { target: { value: "2024-02-01" } });
+    fireEvent.change(inputs[1], { target: { value: "2024-03-01" } });
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+
+    // Controlled mode: both callbacks fire; the chart never set its own
+    // internal customRange/period.
+    expect(onCustomRangeChange).toHaveBeenCalledTimes(1);
+    expect(
+      (onCustomRangeChange.mock.calls[0] as unknown as [unknown])[0],
+    ).toEqual({ start: "2024-02-01", end: "2024-03-01" });
+    expect(onPeriodChange).toHaveBeenCalledWith("CUSTOM");
+  });
 });
 
 // Re-export to silence a "vi unused" lint nit on jsdom-only test env.

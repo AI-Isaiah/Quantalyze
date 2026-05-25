@@ -266,3 +266,65 @@ describe("KpiStripWidget — stale (no analytics, no holdings)", () => {
     expect(within(cell("Max DD 12m")).getByText("vol —")).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// M-1120 — cell separators must resolve through the `--color-border` token,
+// not the undefined `--border` token (which renders no divider under
+// Tailwind v4 @theme inline). PR4 #2 fixed this; this guards the fix.
+// ---------------------------------------------------------------------------
+
+describe("KpiStripWidget — M-1120 separators resolve through --color-border token", () => {
+  // Re-use the populated prototype scenario so the strip renders fully.
+  const SCENARIO = makeData({
+    analytics: buildAnalytics({
+      total_aum: 48_730_000,
+      return_ytd: 0.1432,
+      return_mtd: 0.0217,
+      portfolio_sharpe: 1.84,
+      portfolio_max_drawdown: -0.0683,
+      portfolio_volatility: 0.094,
+      avg_pairwise_correlation: 0.22,
+    }),
+    strategies: Array.from({ length: 8 }, (_, i) => buildStrategy(`s-${i}`)),
+  });
+
+  it("first cell has no left border; cells 1..4 use '1px solid var(--color-border)'", () => {
+    renderWidget(SCENARIO);
+    const cells = document.querySelectorAll<HTMLElement>(".kpi-cell");
+    expect(cells.length).toBe(5);
+
+    // Leftmost cell: no divider (it's the start of the strip). jsdom
+    // normalizes `borderLeft: "none"` so the shorthand re-serializes to
+    // "medium" (default width); the longhand border-left-style is the
+    // reliable "no line" signal.
+    expect(cells[0].style.borderLeftStyle).toBe("none");
+    expect(cells[0].style.borderLeft).not.toContain("var(");
+
+    // Every subsequent cell carries the divider through the CORRECT token.
+    // jsdom can't parse the var() so it stores the shorthand verbatim — we
+    // assert on that raw string.
+    for (let i = 1; i < cells.length; i++) {
+      expect(cells[i].style.borderLeft).toContain("var(--color-border)");
+      // Guard against a revert to the undefined `var(--border)` token —
+      // the substring 'var(--border)' must NOT appear in the divider.
+      expect(cells[i].style.borderLeft).not.toMatch(/var\(--border\)/);
+    }
+  });
+
+  it("inline <style> responsive overrides use --color-border, never the undefined --border", () => {
+    const { container } = renderWidget(SCENARIO);
+    const styleEl = container.querySelector("style");
+    expect(styleEl).not.toBeNull();
+    const css = styleEl?.textContent ?? "";
+
+    // The undefined token must be entirely absent from the responsive CSS.
+    expect(css).not.toMatch(/var\(--border\)/);
+
+    // The fixed token appears in the 4 responsive divider overrides
+    // (data-i 3 + 4 top-borders at 1100px; the all-cell top-border + the
+    // data-i 2/4 left-border re-adds at 720px). Assert >= 4 occurrences so a
+    // partial revert that flips even one override back to --border fails.
+    const matches = css.match(/var\(--color-border\)/g) ?? [];
+    expect(matches.length).toBeGreaterThanOrEqual(4);
+  });
+});
