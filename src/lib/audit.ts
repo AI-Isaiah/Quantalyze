@@ -1,6 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { after } from "next/server";
+import { UUID_RE } from "@/lib/utils";
 
 /**
  * Audit-emission failure classification (P701 / P702).
@@ -159,11 +160,6 @@ function reportToSentry(
 /**
  * Fire-and-forget audit event emitter.
  *
- * Sprint 6 closeout Task 7.1a (pilot: 3 events + `log_audit_event` RPC).
- * Sprint 6 closeout Task 7.1b (fanout: 17 additional TS events + 4
- * Python events via the service-role `log_audit_event_service` RPC —
- * migration 058).
- *
  * Writes to the `audit_log` table via one of two SECURITY DEFINER RPCs:
  *
  * 1. `log_audit_event(p_action, p_entity_type, p_entity_id, p_metadata)`
@@ -231,10 +227,8 @@ function reportToSentry(
  * The canonical action string enum. Namespaced `subject.verb` so the
  * taxonomy stays grep-able and we can fan out later without colliding.
  *
- * Sprint 6 pilot (Task 7.1a) shipped the first three actions. Tasks 7.2
- * + 7.3 added the RBAC grant/revoke + GDPR workflow actions. Task 7.1b
- * fans out to the remaining mutation sites (TS + Python). Keep this
- * union in sync with `docs/architecture/adr-0023-audit-event-taxonomy.md`.
+ * Keep this union in sync with
+ * `docs/architecture/adr-0023-audit-event-taxonomy.md`.
  */
 export type AuditAction =
   // --- 7.1a pilot -------------------------------------------------------
@@ -394,6 +388,93 @@ export type AuditEntityType =
   // --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ---
   | "debug_session";
 
+/**
+ * M-0491: Compile-time sentinel mapping every AuditAction to its canonical
+ * AuditEntityType (per ADR-0023). The type annotation `Record<AuditAction,
+ * AuditEntityType>` means TypeScript will error if:
+ *   - A new AuditAction is added without a corresponding entry here.
+ *   - An entry maps to a value not in AuditEntityType.
+ *
+ * This does NOT prevent a call site from pairing the wrong entity_type —
+ * that requires a full discriminated union (H-0423, deferred cross-file).
+ * But it makes action↔entity_type drift visible at the definition site
+ * rather than only at runtime inside the audit_log JSONB.
+ *
+ * To add a new action: add the literal to AuditAction, add its entity_type
+ * to AuditEntityType if needed, then add the entry here. The compiler will
+ * catch any of the three steps being omitted.
+ */
+export const AUDIT_ACTION_ENTITY_TYPE_MAP: Record<AuditAction, AuditEntityType> = {
+  // 7.1a pilot
+  "api_key.decrypt": "api_key",
+  "intro.send": "contact_request",
+  "intro.send_failed": "contact_request",
+  "deletion.request.create": "data_deletion_request",
+  // 7.2 RBAC
+  "role.grant": "user_app_role",
+  "role.revoke": "user_app_role",
+  "role.state_observed": "user_app_role",
+  "role.revoke_noop": "user_app_role",
+  // 7.3 GDPR workflow
+  "account.sanitize": "user",
+  "account.export": "user",
+  "account.export_refused": "user",
+  "account.export_resigned": "user",
+  "deletion.request.approve": "data_deletion_request",
+  "deletion.request.reject": "data_deletion_request",
+  // 7.1b TS fanout
+  "allocation.update": "allocation",
+  "contact_request.status_change": "contact_request",
+  "portfolio_document.create": "portfolio_document",
+  "alert.acknowledge": "alert",
+  "allocator.approve": "user",
+  "manager.approve": "user",
+  "notification_preferences.update": "user",
+  "attestation.accept": "investor_attestation",
+  // Phase 08: multi-scope notes
+  "user_note.portfolio.update": "user_note",
+  "user_note.holding.update": "user_note",
+  "user_note.bridge_outcome.update": "user_note",
+  "user_note.strategy.update": "user_note",
+  // Admin / system actions
+  "admin.kill_switch": "system_flag",
+  "match.decision_record": "match_decision",
+  "match.decision_delete": "match_decision",
+  "strategy.delete": "strategy",
+  "strategy.approve": "strategy",
+  "strategy.reject": "strategy",
+  "api_key.revoke": "api_key",
+  "trades.upload": "trades_upload",
+  "admin.partner_import": "partner_import",
+  // /review follow-up (T4-C1 + T4-M6)
+  "lead.process": "for_quants_lead",
+  "lead.unprocess": "for_quants_lead",
+  "sync.start": "sync",
+  // 7.1b Python cross-service
+  "bridge.score_candidates": "bridge_run",
+  "simulator.run": "simulator_run",
+  "optimizer.run": "optimizer_run",
+  "reconcile.compare": "reconcile_run",
+  // Bridge outcome tracker
+  "bridge_outcome.record": "bridge_outcome",
+  "bridge_outcome.update": "bridge_outcome",
+  "bridge_outcome.dismiss": "bridge_outcome_dismissal",
+  // Sprint 8 Phase 2: Mandate profile builder
+  "mandate_preference.update": "allocator_preference_mandate",
+  "mandate_preference.admin_update": "allocator_preference_mandate",
+  // Sprint 8 Phase 4: Feedback loop
+  "feedback.overrides_updated": "allocator_preference_feedback",
+  // Phase 06: allocator API ingestion
+  "allocator.holdings.sync_requested": "allocation",
+  "allocator.holdings.sync_completed": "allocation",
+  "allocator.holdings.sync_failed": "allocation",
+  // Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint
+  "debug_key_flow.invoke": "debug_session",
+  // audit-2026-05-07 P700 / admin-auth cluster
+  "admin.access.via_env_email_fallback": "user",
+  "admin.access.denied": "user",
+} as const;
+
 export interface AuditEvent {
   action: AuditAction;
   entity_type: AuditEntityType;
@@ -510,6 +591,15 @@ export function logAuditEvent(
     // back to a microtask so the emission still attempts a best-effort
     // background write. The event may still drop on cold-finish here,
     // but that path is non-route and rare.
+    //
+    // H-0421: emit a console.warn with the stable [audit] prefix so log
+    // aggregation can distinguish this fallback path from the normal
+    // after() path and quantify the non-route drop rate.
+    console.warn("[audit] scheduling via queueMicrotask fallback (non-request scope):", {
+      action: event.action,
+      entity_type: event.entity_type,
+      entity_id: event.entity_id,
+    });
     queueMicrotask(() => {
       void emit(client, event);
     });
@@ -541,6 +631,12 @@ export function logAuditEventAsUser(
   try {
     after(() => emitAsUser(adminClient, actingUserId, event));
   } catch {
+    // H-0421: same fallback-distinguishability contract as logAuditEvent.
+    console.warn("[audit] scheduling via queueMicrotask fallback (non-request scope):", {
+      action: event.action,
+      entity_type: event.entity_type,
+      entity_id: event.entity_id,
+    });
     queueMicrotask(() => {
       void emitAsUser(adminClient, actingUserId, event);
     });
@@ -557,6 +653,28 @@ export async function emit(
   client: SupabaseClient,
   event: AuditEvent,
 ): Promise<void> {
+  // H-0426: entity_id must be UUID-shaped. audit_log.entity_id is a UUID
+  // column in Postgres; a non-UUID value causes 22P02 which emit() catches
+  // and drops — silently losing the forensic anchor. Fail loud here before
+  // calling the RPC so the caller's stack is intact for attribution.
+  if (!UUID_RE.test(event.entity_id)) {
+    const invalidEntityErr = new Error(
+      `[audit] emit: entity_id is not a UUID — row would be silently dropped by Postgres 22P02. ` +
+      `action=${event.action} entity_type=${event.entity_type} entity_id=${JSON.stringify(event.entity_id)}`,
+    );
+    console.error("[audit] emit: invalid non-UUID entity_id (re-throwing):", {
+      action: event.action,
+      entity_type: event.entity_type,
+      entity_id: event.entity_id,
+    });
+    reportToSentry(invalidEntityErr, {
+      tags: { audit_path: "log_audit_event", audit_invalid_entity_id: "true" },
+      extra: { action: event.action, entity_type: event.entity_type, entity_id: event.entity_id },
+      level: "error",
+    });
+    throw invalidEntityErr;
+  }
+
   let rpcError: { code?: string | null; message?: string } | null = null;
   let thrown: unknown = null;
   try {
@@ -654,6 +772,48 @@ export async function emitAsUser(
   actingUserId: string,
   event: AuditEvent,
 ): Promise<void> {
+  // H-0425: actingUserId must be a UUID — it maps to p_user_id in the
+  // log_audit_event_service RPC (migration 058). A non-UUID actor string
+  // (composite key, stale HMAC replay, sentinel) would cause Postgres
+  // 22P02 (silently dropped) or write a forensically meaningless actor.
+  // Fail loud before the RPC so the caller's stack is intact.
+  if (!UUID_RE.test(actingUserId)) {
+    const invalidActorErr = new Error(
+      `[audit] emitAsUser: actingUserId is not a UUID — refusing to write a ghost actor row. ` +
+      `action=${event.action} actingUserId=${JSON.stringify(actingUserId)}`,
+    );
+    console.error("[audit] emitAsUser: invalid non-UUID actingUserId (re-throwing):", {
+      action: event.action,
+      entity_type: event.entity_type,
+      actingUserId,
+    });
+    reportToSentry(invalidActorErr, {
+      tags: { audit_path: "log_audit_event_service", audit_invalid_actor: "true" },
+      extra: { action: event.action, entity_type: event.entity_type, actingUserId },
+      level: "error",
+    });
+    throw invalidActorErr;
+  }
+
+  // H-0426: entity_id must be UUID-shaped (same rationale as in emit()).
+  if (!UUID_RE.test(event.entity_id)) {
+    const invalidEntityErr = new Error(
+      `[audit] emitAsUser: entity_id is not a UUID — row would be silently dropped by Postgres 22P02. ` +
+      `action=${event.action} entity_type=${event.entity_type} entity_id=${JSON.stringify(event.entity_id)}`,
+    );
+    console.error("[audit] emitAsUser: invalid non-UUID entity_id (re-throwing):", {
+      action: event.action,
+      entity_type: event.entity_type,
+      entity_id: event.entity_id,
+    });
+    reportToSentry(invalidEntityErr, {
+      tags: { audit_path: "log_audit_event_service", audit_invalid_entity_id: "true" },
+      extra: { action: event.action, entity_type: event.entity_type, entity_id: event.entity_id },
+      level: "error",
+    });
+    throw invalidEntityErr;
+  }
+
   let rpcError: { code?: string | null; message?: string } | null = null;
   let thrown: unknown = null;
   try {
