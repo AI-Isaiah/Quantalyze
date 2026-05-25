@@ -79,4 +79,10 @@ paths = [
   # this allowlist line also suppresses leftover historical commits.
   '''(^|/)fix-list\.md$''',
   '''(^|/)src/__tests__/gitleaks-allowlist\.test\.ts$''',
+  # H-0305 regression test (route.audit.test.ts): line 118 defines a
+  # deliberately key-shaped fixture `secretContents` that the test injects into
+  # a thrown upstream error to assert the create-with-key route STRIPS it from
+  # the response body. Not a real secret — gitleaks generic-api-key flags the
+  # fixture on the push-to-main full scan (the PR-diff scan did not). Audit H-0305.
+  '''(^|/)src/app/api/strategies/create-with-key/route\.audit\.test\.ts$''',
 ]
