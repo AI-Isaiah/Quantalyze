@@ -7,6 +7,10 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.8.3] - 2026-05-25
+
+**fix(analytics): stop the match-engine cron from failing hourly on null DB values.** `/api/match/cron-recompute` was failing every run (processed=0) with three Sentry-reported errors that predate and are unrelated to the Phase 19 backbone cutover. (1) An `AttributeError` when an allocator had no `allocator_preferences` row — postgrest `maybe_single().execute()` returns `None`, not a response with `data=None`, so `.data` blew up. (2) A `TypeError` when sorting `bridge_outcomes.strategy_id`, because holding-based (voluntary-remove) outcomes carry a NULL `strategy_id` and `sorted()` can't order `str` against `None`. Guards the three `maybe_single` dereference sites (`_load_allocator_context`, `_kill_switch_enabled`, and the internal key-permissions route — which now returns its intended 404 for an unknown key instead of a 500) and filters NULL-strategy outcomes out of the feedback engine's per-strategy attribution. Adds four regression tests that reproduce the exact production errors. Analytics-service (Python) only — no schema or frontend changes.
+
 ## [0.24.8.2] - 2026-05-25
 
 **chore(phase-19): record `flag_flipped_at` so the hourly stability gate reads the real soak-start timestamp.** The Phase 19 unified-backbone kill-switch was flipped on at `2026-05-25T15:51:07Z`, starting the 168h production soak, but `.planning/phase-19/stability-log.md` still held the `TODO` placeholder for `flag_flipped_at`. The hourly `phase-19-stability.yml` CI gate (`scripts/verify-no-legacy-writes.sh`) reads that field to (a) start the window and (b) count post-flip writes to the legacy `verification_requests` table; with the placeholder unparsed it exits 6 (flag on but flip-time unrecorded) and false-alarms every hour. Recording the real ISO-8601 timestamp lets the gate compute the window and verify zero legacy writes. Docs/version only — no production code, migrations, or runtime behavior changed.
