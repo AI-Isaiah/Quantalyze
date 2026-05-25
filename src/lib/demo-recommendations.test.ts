@@ -166,9 +166,38 @@ describe("resolveDemoRecommendations", () => {
     expect(row.reasons).toEqual(["Strong fit"]);
   });
 
-  it.skip("does not crash when admin client throws (suppressed in v1)", () => {
-    // Reserved for future hardening — current callers wrap in try/catch.
-    expect(true).toBe(true);
+  // L-0027 — replaces the prior `it.skip` placeholder (write-tests-immediately
+  // policy). `resolveDemoRecommendations` deliberately does NOT wrap the
+  // Supabase query in try/catch — error handling is the CALLER's responsibility
+  // (the /demo page wraps it). This test pins that contract: an admin-client
+  // rejection PROPAGATES to the caller rather than being silently swallowed
+  // into an empty result. If a future refactor added an internal catch that
+  // returned the empty shape, a real outage would be masked as "no
+  // recommendations" — this test would fail and force that decision to be
+  // explicit.
+  it("propagates the rejection when the admin client query throws", async () => {
+    const throwingAdmin = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            is: () => ({
+              not: () => ({
+                order: () => ({
+                  limit: () =>
+                    Promise.reject(new Error("admin client unavailable")),
+                }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    };
+    await expect(
+      resolveDemoRecommendations({
+        admin: throwingAdmin as never,
+        batches: [{ id: "batch-a" }],
+      }),
+    ).rejects.toThrow("admin client unavailable");
     void vi;
   });
 

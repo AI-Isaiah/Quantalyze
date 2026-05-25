@@ -436,6 +436,35 @@ describe("getMyAllocationDashboard", () => {
     expect(result.alertCount.total).toBe(0);
   });
 
+  // M-0480 — the scenario-test's T_H3 / T_M4 only build literal payload
+  // objects to satisfy the compiler; they never invoke
+  // getMyAllocationDashboard, so a regression returning undefined for
+  // allocator_id (or an empty-default liveBaselineMetrics) would not fail
+  // them. These assert the REAL function actually populates both fields from
+  // the userId argument and the SSR lift.
+  it("M-0480: populates allocator_id from the userId argument (no-book branch)", async () => {
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.allocator_id).toBe("user-1");
+    expect(typeof result.allocator_id).toBe("string");
+  });
+
+  it("M-0480: returns the SSR-lifted liveBaselineMetrics shape (empty-default when no holdings)", async () => {
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    // No holdings ⇒ liveBaselineMetricsFromHoldings returns the empty default.
+    // The exact field set is the SSR contract the composer consumes.
+    expect(result.liveBaselineMetrics).toEqual({
+      aum: 0,
+      ytdTwr: null,
+      sharpe: null,
+      maxDd: null,
+      avgRho: null,
+      equity: [],
+      drawdown: [],
+    });
+  });
+
   it("returns portfolio + analytics + apiKeys + empty arrays when everything else is absent", async () => {
     state.portfolios = [
       {

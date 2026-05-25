@@ -1,11 +1,14 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
 import {
   computeWizardHmac,
   deriveWizardResumeOverrides,
+  formatSavedAt,
   loadWizardState,
+  newWizardSessionId,
   saveWizardState,
   type WizardLocalState,
 } from "./localStorage";
+import { UUID_RE } from "@/lib/utils";
 
 // Regression coverage for the React #418 hydration mismatch on
 // /strategies/new/wizard?source=csv. The previous WizardClient pattern
@@ -418,5 +421,101 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
     const a = await computeWizardHmac("the-payload", "key-1");
     const b = await computeWizardHmac("the-payload", "key-2");
     expect(a).not.toBe(b);
+  });
+});
+
+// M-0590 — formatSavedAt + newWizardSessionId had no colocated coverage.
+describe("formatSavedAt — Resume banner relative-time label", () => {
+  const NOW = 1_700_000_000_000;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns '' for a non-finite timestamp", () => {
+    expect(formatSavedAt(Number.NaN)).toBe("");
+    expect(formatSavedAt(Number.POSITIVE_INFINITY)).toBe("");
+  });
+
+  it("returns 'just now' for a future timestamp (clock skew) and for <1 minute", () => {
+    expect(formatSavedAt(NOW + 60_000)).toBe("just now");
+    expect(formatSavedAt(NOW - 30_000)).toBe("just now");
+  });
+
+  it("pluralizes minutes correctly (singular at exactly 1)", () => {
+    expect(formatSavedAt(NOW - 60_000)).toBe("1 minute ago");
+    expect(formatSavedAt(NOW - 5 * 60_000)).toBe("5 minutes ago");
+    expect(formatSavedAt(NOW - 59 * 60_000)).toBe("59 minutes ago");
+  });
+
+  it("rolls over to hours then days with correct pluralization", () => {
+    expect(formatSavedAt(NOW - 60 * 60_000)).toBe("1 hour ago");
+    expect(formatSavedAt(NOW - 23 * 60 * 60_000)).toBe("23 hours ago");
+    expect(formatSavedAt(NOW - 24 * 60 * 60_000)).toBe("1 day ago");
+    expect(formatSavedAt(NOW - 3 * 24 * 60 * 60_000)).toBe("3 days ago");
+  });
+});
+
+describe("newWizardSessionId — server-side UUID_RE compatibility (M-0590)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("emits a value matching the server-side UUID_RE when crypto.randomUUID is available", () => {
+    // The modern path delegates to crypto.randomUUID(), which the
+    // /api/strategies/create-with-key route validates via isUuid(UUID_RE).
+    const id = newWizardSessionId();
+    expect(UUID_RE.test(id)).toBe(true);
+  });
+
+  // M-0590 — KNOWN BUG: when crypto.randomUUID is undefined (older browsers
+  // / restricted environments) the fallback yields `${ts}-${rnd}` — hex with
+  // a SINGLE dash, NOT the canonical 8-4-4-4-12 UUID. That value FAILS the
+  // server-side UUID_RE in /api/strategies/create-with-key, so wizard
+  // sessions started on those browsers silently 400 on the
+  // wizard_session_id check. Fix in follow-up: polyfill randomUUID or emit a
+  // UUID-shaped fallback. Until then this guard fails loud.
+  it.fails(
+    "M-0590: fallback session id is NOT a valid UUID and would 400 server-side — fix in follow-up",
+    () => {
+      // Force the fallback branch by removing randomUUID.
+      const realCrypto = globalThis.crypto;
+      vi.stubGlobal("crypto", {
+        ...realCrypto,
+        randomUUID: undefined,
+      } as unknown as Crypto);
+
+      const id = newWizardSessionId();
+      // This assertion documents the CORRECT contract (the value must pass
+      // the same regex the server uses). It currently fails because the
+      // fallback emits `${ts}-${rnd}`.
+      expect(UUID_RE.test(id)).toBe(true);
+
+      vi.unstubAllGlobals();
+    },
+  );
+
+  it("fallback currently produces a non-UUID hex-with-one-dash string (documents present behavior)", () => {
+    // Pin the present (buggy) shape so the follow-up fix is an intentional,
+    // visible change rather than a silent one. Asserts the CURRENT output
+    // is exactly the non-UUID form (NOT a weakened version of the contract
+    // above — this is a separate, factual observation of the broken path).
+    const realCrypto = globalThis.crypto;
+    vi.stubGlobal("crypto", {
+      ...realCrypto,
+      randomUUID: undefined,
+    } as unknown as Crypto);
+
+    const id = newWizardSessionId();
+    // Single dash, hex on both sides, and crucially NOT a canonical UUID.
+    expect(id).toMatch(/^[0-9a-f]+-[0-9a-f]+$/);
+    expect(UUID_RE.test(id)).toBe(false);
+
+    vi.unstubAllGlobals();
   });
 });

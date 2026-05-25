@@ -609,6 +609,107 @@ describe("useLazyPanelMetrics — Phase 14b extension", () => {
     expect(result.current.status).toBe("loading");
   });
 
+  it("Test 14b (M-1153): after the A→B→A flip, a FRESH fetch on the final strategyId resolves and populates data (versionRef admits the current request)", async () => {
+    // M-1153 (audit-2026-05-07 / reverify-2026-05-25): Test 14 proves the
+    // STALE resolve is discarded (data stays null after versionRef advances).
+    // It does NOT prove the complementary half — that versionRef matching
+    // still ADMITS a legitimately-current fetch. A regression that bumped
+    // versionRef on the wrong dep (e.g. `[]` mount-only, or an off-by-one)
+    // could over-reject: discard not just the stale resolve but ALSO the
+    // next fetch's resolve, leaving the panel stuck on null forever. Test 14
+    // alone cannot catch that — its only fetch is the stale one. Here we
+    // drive abc → xyz → abc (versionRef → 3), then fire a SECOND fetch from
+    // the final mount and assert it resolves into `data`. This proves
+    // `requestVersion === versionRef.current` for the live request, the
+    // exact invariant versionRef delivers.
+    let resolveStale: (v: unknown) => void = () => {};
+    let resolveFresh: (v: unknown) => void = () => {};
+    fetchSpy
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveStale = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFresh = resolve;
+          }),
+      );
+
+    const stalePayload = {
+      rolling_volatility_3m: [{ date: "2024-01-01", value: 999 }],
+    };
+    const freshPayload = {
+      rolling_volatility_3m: [{ date: "2024-06-01", value: 1 }],
+    };
+
+    const { result, rerender } = renderHook(
+      ({ strategyId }) =>
+        useLazyPanelMetrics("panel5", { fetchOnIntersect: true, strategyId }),
+      { initialProps: { strategyId: "abc" } },
+    );
+    const node = document.createElement("div");
+    act(() => {
+      result.current.ref(node);
+    });
+    fireIntersection(observers[0], node);
+
+    // First fetch (version 1) in-flight against abc.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(fetchSpy).toHaveBeenCalledWith("abc", "rolling");
+    expect(result.current.status).toBe("loading");
+
+    // The flip: abc → xyz → abc. versionRef advances on each strategyId
+    // change (now 3); the in-flight fetch captured version 1.
+    rerender({ strategyId: "xyz" });
+    rerender({ strategyId: "abc" });
+
+    // Resolve abc's STALE fetch — discarded by the version mismatch (1 !== 3).
+    await act(async () => {
+      resolveStale(stalePayload);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.data).toBeNull();
+
+    // Now fire a FRESH fetch from the final mount. The observer was
+    // unobserved on first intersection, so re-attach the ref to create a new
+    // observer for the current strategyId, then intersect again. The new
+    // fetch captures the current versionRef (3) — so its resolve MUST be
+    // admitted.
+    act(() => {
+      result.current.ref(node);
+    });
+    fireIntersection(observers[observers.length - 1], node);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.current.status).toBe("loading");
+
+    await act(async () => {
+      resolveFresh(freshPayload);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The current-version fetch is NOT over-rejected: data populates and the
+    // status flips to ready. A `[]`-deps / off-by-one versionRef regression
+    // that discarded this resolve would leave data null + status "loading".
+    expect(result.current.status).toBe("ready");
+    expect(result.current.data).toEqual(freshPayload);
+  });
+
   it("Test 9: cleanup runs after fetch resolves without throwing", async () => {
     fetchSpy.mockResolvedValue({});
     const { result, unmount } = renderHook(() =>
