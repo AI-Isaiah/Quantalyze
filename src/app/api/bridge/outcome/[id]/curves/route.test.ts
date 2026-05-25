@@ -47,6 +47,9 @@ const STATE = vi.hoisted(() => ({
     | { success: false; retryAfter: number },
   // Spy tracker for the Voice-D10 limiter-identity assertion
   lastLimiterArg: null as unknown,
+  // H-0255: capture the per-user rate-limit KEY so a test can pin the
+  // `bridge_outcome_curves:${userId}` bucket shape (per-user, not global).
+  lastLimiterKey: null as string | null,
 }));
 
 // user-scoped supabase client: returns auth + outcomeRow from bridge_outcomes
@@ -112,8 +115,9 @@ vi.mock("@/lib/supabase/admin", () => ({
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: { __name: "userActionLimiter" },
   bridgeOutcomeCurvesLimiter: { __name: "bridgeOutcomeCurvesLimiter" },
-  checkLimit: async (limiter: unknown, _id: string) => {
+  checkLimit: async (limiter: unknown, id: string) => {
     STATE.lastLimiterArg = limiter;
+    STATE.lastLimiterKey = id;
     return STATE.checkLimitResult;
   },
 }));
@@ -168,6 +172,7 @@ beforeEach(() => {
   ];
   STATE.checkLimitResult = { success: true };
   STATE.lastLimiterArg = null;
+  STATE.lastLimiterKey = null;
 });
 
 afterEach(() => {
@@ -235,6 +240,47 @@ describe("GET /api/bridge/outcome/[id]/curves", () => {
     expect(
       (STATE.lastLimiterArg as { __name?: string })?.__name,
     ).toBe("bridgeOutcomeCurvesLimiter");
+  });
+
+  it("TC6b — H-0255: the rate-limit bucket key is scoped PER USER as `bridge_outcome_curves:${userId}` (not a global key)", async () => {
+    // The companion TC6 (mock returns deny → assert 429) is the C3
+    // antipattern: it cannot fail unless the route deletes the limit
+    // branch. This test pins the load-bearing property the 429 test does
+    // NOT — that the limiter is applied PER USER. A regression that
+    // hard-codes a constant key (e.g. `bridge_outcome_curves:global`)
+    // would let one user's curve-exploration burn every other user's
+    // budget; that regression fails this test even though TC6 stays green.
+    const userA = "00000000-0000-0000-0000-00000000000a";
+    STATE.authUser = { id: userA };
+    STATE.outcomeRow = {
+      id: OUTCOME_ID,
+      allocator_id: userA,
+      strategy_id: STRAT_ID,
+      match_decision_id: MATCH_DEC_ID,
+      allocated_at: ALLOCATED_AT,
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(OUTCOME_ID));
+    expect(res.status).toBe(200);
+    // The key must embed the authenticated user's id — proof the bucket
+    // is per-user, not shared.
+    expect(STATE.lastLimiterKey).toBe(`bridge_outcome_curves:${userA}`);
+
+    // And a different user must get a DIFFERENT key (the property that
+    // makes "per user" meaningful).
+    const userB = "00000000-0000-0000-0000-00000000000b";
+    STATE.authUser = { id: userB };
+    STATE.outcomeRow = {
+      id: OUTCOME_ID,
+      allocator_id: userB,
+      strategy_id: STRAT_ID,
+      match_decision_id: MATCH_DEC_ID,
+      allocated_at: ALLOCATED_AT,
+    };
+    const res2 = await GET(makeRequest(), withParams(OUTCOME_ID));
+    expect(res2.status).toBe(200);
+    expect(STATE.lastLimiterKey).toBe(`bridge_outcome_curves:${userB}`);
+    expect(STATE.lastLimiterKey).not.toBe(`bridge_outcome_curves:${userA}`);
   });
 
   it("TC7 — 200 but empty original curves when match_decision_id is NULL: original=[]", async () => {
