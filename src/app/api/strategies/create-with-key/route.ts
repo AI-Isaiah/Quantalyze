@@ -137,11 +137,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         ? "KEY_HAS_WITHDRAW_PERMS"
         : "KEY_HAS_TRADING_PERMS";
       return NextResponse.json(
-        {
-          code,
-          error:
-            "This key has trading or withdrawal permissions. Only read-only keys are accepted.",
-        },
+        // H-0305 consistency: ConnectKeyStep reads `code` only (maps it to copy
+        // client-side), so omit `error` — all failure bodies are uniform { code }.
+        { code },
         { status: 400 },
       );
     }
@@ -180,7 +178,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         Object.keys(encrypted),
       );
       return NextResponse.json(
-        { code: "UNKNOWN", error: "Encryption service returned an unexpected response" },
+        // H-0305 consistency: uniform { code } body; detail is in the server log above.
+        { code: "UNKNOWN" },
         { status: 502 },
       );
     }

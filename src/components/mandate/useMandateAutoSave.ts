@@ -22,7 +22,14 @@ export type SaveResult =
   | { ok: true; savedAt: Date }
   | {
       ok: false;
-      reason: "validation" | "auth" | "throttled" | "network" | "server";
+      reason:
+        | "validation"
+        | "auth"
+        | "throttled"
+        | "network"
+        | "server"
+        | "superseded"
+        | "cancelled";
       message: string;
       retryAfter?: number;
     };
@@ -156,6 +163,15 @@ export function useMandateAutoSave(
       while (attempt < MAX_ATTEMPTS) {
         attempt += 1;
 
+        // If the component already unmounted (e.g. during a prior backoff
+        // sleep), short-circuit before issuing another fetch. A listener added
+        // to an ALREADY-aborted signal never fires (WHATWG), so onMountAbort
+        // below would not abort this attempt and the PUT would escape post-
+        // unmount as an unintended write. Guard synchronously here.
+        if (mountAbortRef.current.signal.aborted) {
+          return { ok: false, reason: "cancelled", message: "Cancelled." };
+        }
+
         let res: Response;
         // Per-attempt timeout controller. Combined with the component-lifetime
         // mountAbortRef so EITHER the 12s timeout OR unmount cancels the fetch.
@@ -176,15 +192,15 @@ export function useMandateAutoSave(
           // Network error or AbortError (12s timeout OR component unmounted).
           // If unmounted, exit silently — no state updates on dead component.
           if (mountAbortRef.current.signal.aborted) {
-            return { ok: false, reason: "network", message: "Cancelled." };
+            return { ok: false, reason: "cancelled", message: "Cancelled." };
           }
           if (attempt < MAX_ATTEMPTS) {
-            await wait(1000 * Math.pow(2, attempt - 1));
+            await wait(1000 * Math.pow(2, attempt - 1), mountAbortRef.current.signal);
             if (mountAbortRef.current.signal.aborted) {
-              return { ok: false, reason: "network", message: "Cancelled." };
+              return { ok: false, reason: "cancelled", message: "Cancelled." };
             }
             if (generationRef.current[fieldName] !== gen) {
-              return { ok: false, reason: "network", message: "Superseded." };
+              return { ok: false, reason: "superseded", message: "Superseded." };
             }
             continue;
           }
@@ -202,7 +218,7 @@ export function useMandateAutoSave(
         // now owns the in-flight marker, so it will clear it on its own terminal
         // outcome. Clearing here would wrongly hide the newer save's spinner.
         if (generationRef.current[fieldName] !== gen) {
-          return { ok: false, reason: "network", message: "Superseded." };
+          return { ok: false, reason: "superseded", message: "Superseded." };
         }
 
         if (res.ok) {
@@ -238,18 +254,27 @@ export function useMandateAutoSave(
             [fieldName]: `Saving too fast. Will retry in ${retryAfter}s.`,
           }));
           setSaveState("error");
-          await wait(retryAfter * 1000);
+          // Cap a hostile/huge Retry-After so the hook can't be pinned for
+          // minutes; the abort-aware wait() also resolves immediately on unmount.
+          await wait(Math.min(retryAfter, 30) * 1000, mountAbortRef.current.signal);
           if (mountAbortRef.current.signal.aborted) {
-            return { ok: false, reason: "throttled", message: "Cancelled.", retryAfter };
+            return { ok: false, reason: "cancelled", message: "Cancelled." };
           }
           if (generationRef.current[fieldName] !== gen) {
-            return { ok: false, reason: "throttled", message: "Superseded.", retryAfter };
+            return { ok: false, reason: "superseded", message: "Superseded." };
           }
           continue;
         }
 
         if (res.status === 400 || res.status === 401) {
           const body = await res.json().catch(() => ({}));
+          // A concurrent save() may have bumped the generation while we awaited
+          // res.json(); if so this response is stale — don't paint an error over
+          // (or clear the spinner of) the newer in-flight save. The 429/5xx
+          // paths re-check post-await too; this path must as well.
+          if (generationRef.current[fieldName] !== gen) {
+            return { ok: false, reason: "superseded", message: "Superseded." };
+          }
           const msg = (body?.error as string | undefined) ?? "Couldn't save";
           const reason = res.status === 401 ? "auth" : "validation";
           failTerminal(fieldName, `${msg}. Try again.`);
@@ -258,12 +283,12 @@ export function useMandateAutoSave(
 
         // 5xx or other unexpected status — exponential backoff if attempts remain.
         if (attempt < MAX_ATTEMPTS) {
-          await wait(1000 * Math.pow(2, attempt - 1));
+          await wait(1000 * Math.pow(2, attempt - 1), mountAbortRef.current.signal);
           if (mountAbortRef.current.signal.aborted) {
-            return { ok: false, reason: "server", message: "Cancelled." };
+            return { ok: false, reason: "cancelled", message: "Cancelled." };
           }
           if (generationRef.current[fieldName] !== gen) {
-            return { ok: false, reason: "server", message: "Superseded." };
+            return { ok: false, reason: "superseded", message: "Superseded." };
           }
           continue;
         }
@@ -282,6 +307,27 @@ export function useMandateAutoSave(
   return { saveState, fieldErrors, lastSavedAt, savingFields, save, clearError };
 }
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Sleep for `ms`, resolving early (and clearing the timer) if `signal` aborts —
+ * so an unmount during a backoff/retry-after sleep does not pin the coroutine
+ * (and its captured state setters) alive until the timer fires. Resolves rather
+ * than rejects on abort so callers' existing post-wait `signal.aborted` checks
+ * handle the cancellation uniformly.
+ */
+function wait(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const id = setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(id);
+        resolve();
+      },
+      { once: true },
+    );
+  });
 }

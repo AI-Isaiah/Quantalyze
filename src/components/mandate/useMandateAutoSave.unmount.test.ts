@@ -21,6 +21,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { useMandateAutoSave } from "./useMandateAutoSave";
+import type { SaveResult } from "./useMandateAutoSave";
 
 describe("H-0382 — unmount abort prevents setState after navigation", () => {
   beforeEach(() => {
@@ -34,38 +35,47 @@ describe("H-0382 — unmount abort prevents setState after navigation", () => {
     vi.restoreAllMocks();
   });
 
-  it("unmounting while fetch is in flight does not trigger setState after unmount", async () => {
-    // Suspend the fetch so we can unmount while it is still awaiting.
-    let resolveFetch: (r: Response) => void = () => {};
-    (fetch as ReturnType<typeof vi.fn>).mockReturnValueOnce(
-      new Promise<Response>((r) => { resolveFetch = r; }),
+  it("unmounting while a fetch is in flight aborts it and resolves {ok:false, reason:'cancelled'}", async () => {
+    // A SIGNAL-RESPECTING fetch: rejects with an AbortError when the per-attempt
+    // controller (wired to mountAbortRef) aborts on unmount. The previous version
+    // resolved {ok:true}, silently driving the SUCCESS path so the catch-block
+    // abort guard was never exercised (mutation-confirmed: deleting the guard
+    // left the old test green). This version drives the real aborted-fetch path.
+    (fetch as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      (_url: string, opts: { signal: AbortSignal }) =>
+        new Promise<Response>((_resolve, reject) => {
+          opts.signal.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        }),
     );
 
     const { result, unmount } = renderHook(() => useMandateAutoSave(null));
 
-    // Start a save but don't await it — it is now suspended inside fetch().
+    let savePromise!: Promise<SaveResult>;
     void act(() => {
-      void result.current.save("max_weight", 0.25);
+      savePromise = result.current.save("max_weight", 0.25);
     });
 
-    // Unmount (simulates user navigating away mid-save).
+    // Navigate away mid-save → mountAbortRef aborts → the fetch rejects AbortError.
     unmount();
 
-    // Resolve the suspended fetch after unmount — should be a silent no-op.
+    let saveResult!: SaveResult;
     await act(async () => {
-      resolveFetch({
-        ok: true,
-        status: 200,
-        headers: new Headers(),
-        json: async () => ({ success: true }),
-      } as unknown as Response);
+      saveResult = await savePromise;
       await vi.runAllTimersAsync();
     });
 
-    // The fetch was initiated exactly once; no retries were scheduled.
+    // Exactly one fetch (no retry), and the hook reports the cancellation
+    // explicitly rather than a spurious success or a generic network failure.
     expect(fetch).toHaveBeenCalledTimes(1);
-    // If we reach here without React throwing an act() or setState-after-unmount
-    // warning, the mount-abort guard is working.
+    expect(saveResult.ok).toBe(false);
+    if (!saveResult.ok) {
+      expect(saveResult.reason).toBe("cancelled");
+      expect(saveResult.message).toBe("Cancelled.");
+    }
   });
 
   it("unmounting during 429 retry-after sleep prevents the retry from firing", async () => {

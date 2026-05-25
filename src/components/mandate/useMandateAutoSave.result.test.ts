@@ -10,11 +10,13 @@
  *
  * After the fix, save() returns Promise<SaveResult>:
  *   | { ok: true;  savedAt: Date }
- *   | { ok: false; reason: 'validation'|'auth'|'throttled'|'network'|'server';
+ *   | { ok: false; reason: 'validation'|'auth'|'throttled'|'network'|'server'
+ *                        |'superseded'|'cancelled';
  *       message: string; retryAfter?: number }
  *
- * All existing `void save(...)` call sites are unaffected — they ignore the
- * result exactly as they did with Promise<void>.
+ * `superseded` (a newer save bumped the generation) and `cancelled` (unmount)
+ * are benign no-ops, distinct from genuine failures. All existing
+ * `void save(...)` call sites are unaffected — they ignore the result.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -142,6 +144,93 @@ describe("M-1115 — save() returns SaveResult", () => {
     expect(saveResult.ok).toBe(false);
     if (!saveResult.ok) {
       expect(saveResult.reason).toBe("server");
+    }
+  });
+
+  it("429 budget-exhausted resolves {ok:false, reason:'throttled'} and clears the spinner", async () => {
+    // MAX_ATTEMPTS (4) consecutive 429s: the hook must terminate cleanly rather
+    // than fall through the loop and leave the field pinned in savingFields with
+    // a message promising a retry that never runs (the 429-leak contract).
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(errorResponse(429, { error: "rate" }, "1"))
+      .mockResolvedValueOnce(errorResponse(429, { error: "rate" }, "1"))
+      .mockResolvedValueOnce(errorResponse(429, { error: "rate" }, "1"))
+      .mockResolvedValueOnce(errorResponse(429, { error: "rate" }, "1"));
+
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    let saveResult!: SaveResult;
+    await act(async () => {
+      const promise = result.current.save("max_weight", 0.25);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(1000);
+      saveResult = await promise;
+    });
+
+    expect(saveResult.ok).toBe(false);
+    if (!saveResult.ok) {
+      expect(saveResult.reason).toBe("throttled");
+    }
+    // No stuck spinner after a terminal outcome.
+    expect(result.current.savingFields.has("max_weight")).toBe(false);
+  });
+
+  it("network failure exhausted resolves {ok:false, reason:'network'}", async () => {
+    // Every attempt throws a (non-abort) network error → terminal network failure
+    // after the retry budget, NOT a 'cancelled'/'superseded' benign no-op.
+    (fetch as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new TypeError("fetch failed"),
+    );
+
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    let saveResult!: SaveResult;
+    await act(async () => {
+      const promise = result.current.save("max_weight", 0.25);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(4000);
+      saveResult = await promise;
+    });
+
+    expect(saveResult.ok).toBe(false);
+    if (!saveResult.ok) {
+      expect(saveResult.reason).toBe("network");
+      expect(saveResult.message).toBe("Couldn't save.");
+    }
+  });
+
+  it("a save superseded by a newer save for the same field resolves {ok:false, reason:'superseded'}", async () => {
+    // First save hangs in fetch; a second save() for the same field bumps the
+    // generation. When the first response finally arrives it is dropped as stale
+    // (reason 'superseded') WITHOUT clobbering the newer save's success state.
+    let resolveFirst!: (r: Response) => void;
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(
+        new Promise<Response>((r) => {
+          resolveFirst = r;
+        }),
+      )
+      .mockResolvedValueOnce(okResponse());
+
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    let firstResult!: SaveResult;
+    let secondResult!: SaveResult;
+    await act(async () => {
+      const first = result.current.save("max_weight", 0.25);
+      const second = result.current.save("max_weight", 0.3); // bumps generation
+      secondResult = await second;
+      resolveFirst(okResponse()); // release the now-stale first response
+      firstResult = await first;
+      await vi.runAllTimersAsync();
+    });
+
+    expect(secondResult.ok).toBe(true);
+    expect(firstResult.ok).toBe(false);
+    if (!firstResult.ok) {
+      expect(firstResult.reason).toBe("superseded");
     }
   });
 

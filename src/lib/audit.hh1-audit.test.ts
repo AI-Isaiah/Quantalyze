@@ -147,6 +147,52 @@ describe("H-0421 — queueMicrotask fallback path emits [audit] console.warn", (
 });
 
 // ---------------------------------------------------------------------------
+// Fire-and-forget swallow — logAuditEvent must NOT leak an unhandled rejection
+// when emit() re-throws a hard failure (permission_denied / unknown) on the
+// post-response after() path. Removing the `.catch(() => {})` wrapper would let
+// that rejection escape after() — vitest fails the test on the unhandled
+// rejection, so this test is the regression guard for the swallow.
+// ---------------------------------------------------------------------------
+describe("logAuditEvent fire-and-forget swallows emit() re-throws (no unhandled rejection)", () => {
+  let errSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    afterSpy.mockClear();
+    afterThrowSpy.mockClear();
+    useThrowingAfter = false; // normal after() passthrough (runs cb in a microtask)
+  });
+
+  afterEach(() => {
+    errSpy.mockRestore();
+    useThrowingAfter = false;
+  });
+
+  it("does not leak an unhandled rejection when emit() re-throws permission_denied", async () => {
+    // 42501 → classifyAuditEmitError = permission_denied → emit() logs
+    // console.error + Sentry, then RE-THROWS. logAuditEvent wraps the after()
+    // emit in .catch(() => {}); without it the rejection escapes the microtask.
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied" },
+    });
+    const client = { rpc } as unknown as Parameters<typeof logAuditEvent>[0];
+
+    const ret = logAuditEvent(client, event());
+    expect(ret).toBeUndefined(); // fire-and-forget contract
+
+    // Drain microtasks so the after() callback + emit()'s awaited rpc run.
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+
+    // emit() observed the failure loudly before re-throwing (proves it ran and
+    // the failure is NOT silently lost — only the unhandled-rejection noise is).
+    expect(errSpy).toHaveBeenCalled();
+    const calls = errSpy.mock.calls as unknown as unknown[][];
+    expect(calls.some((c) => String(c[0]).includes("[audit]"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // M-0491 — AUDIT_ACTION_ENTITY_TYPE_MAP compile-time sentinel
 // ---------------------------------------------------------------------------
 describe("M-0491 — AUDIT_ACTION_ENTITY_TYPE_MAP catches action/entity_type drift", () => {

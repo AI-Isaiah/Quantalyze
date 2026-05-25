@@ -138,9 +138,9 @@ describe("POST /api/strategies/create-with-key — envelope-encryption shape", (
     expect(res.status).toBe(502);
     const json = await res.json();
     expect(json.code).toBe("UNKNOWN");
-    expect(json.error).toBe(
-      "Encryption service returned an unexpected response",
-    );
+    // H-0305 consistency: error bodies are uniform { code } only — no raw
+    // message leaks into the response (detail is in the server log instead).
+    expect(json.error).toBeUndefined();
   });
 });
 
