@@ -418,6 +418,115 @@ describe("POST /api/admin/deletion-requests/[id]/approve — self-action guard (
     expect(res.status).toBe(403);
     expect(sanitizeUserRpcMock).not.toHaveBeenCalled();
   });
+
+  // ---------------------------------------------------------------------------
+  // H-0013: self-guard perimeter — multi-role caller + malformed user_id.
+  //
+  // The self-action guard in _shared.ts keys STRICTLY on
+  // `reqRow.user_id === actingUserId` (actingUserId = the JWT user.id). These
+  // tests pin two perimeter cases the prior suite never exercised:
+  //   (a) a caller who holds admin AND a second role must STILL be blocked
+  //       from approving their own deletion request — the guard is identity-
+  //       based, not role-set-based, so adding roles must not create a bypass.
+  //   (b) a request row with a NULL user_id (malformed/orphaned row): the
+  //       TS self-guard does NOT fire (null !== adminId), so the route must
+  //       NOT silently anonymize. The ONLY backstop is the DB function's
+  //       `IF p_user_id IS NULL THEN RAISE` guard (migration 055). We mirror
+  //       that DB behavior in the mock and assert the route fails LOUD (500)
+  //       and never marks the request completed.
+  // ---------------------------------------------------------------------------
+
+  it("H-0013: multi-role caller (admin + strategy_manager) is STILL blocked from approving their OWN request", async () => {
+    // Caller resolves to two roles. The unified admin check must still admit
+    // them as admin; the self-guard must still fire on identity.
+    userRolesQueryMock.mockResolvedValue({
+      data: [{ role: "admin" }, { role: "strategy_manager" }],
+      error: null,
+    });
+    requestLoadMock.mockResolvedValue({
+      data: {
+        id: "req-multirole-self",
+        user_id: "admin-user-id", // == caller id
+        requested_at: new Date().toISOString(),
+        completed_at: null,
+        rejected_at: null,
+      },
+      error: null,
+    });
+
+    const { POST } = await loadApproveRoute();
+    const req = makeRequest("req-multirole-self", {}, "approve");
+    const res = await POST(req, makeParamsCtx({ id: "req-multirole-self" }));
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toMatch(/admins cannot approve their own/i);
+    // Adding a second role must not open a sanitize path.
+    expect(sanitizeUserRpcMock).not.toHaveBeenCalled();
+    expect(requestUpdateMock).not.toHaveBeenCalled();
+  });
+
+  it("H-0013: multi-role caller proceeds on a DIFFERENT user's request (extra role does not break the happy path)", async () => {
+    userRolesQueryMock.mockResolvedValue({
+      data: [{ role: "admin" }, { role: "strategy_manager" }],
+      error: null,
+    });
+    requestLoadMock.mockResolvedValue({
+      data: {
+        id: "req-multirole-other",
+        user_id: "target-user-id",
+        requested_at: new Date().toISOString(),
+        completed_at: null,
+        rejected_at: null,
+      },
+      error: null,
+    });
+
+    const { POST } = await loadApproveRoute();
+    const req = makeRequest("req-multirole-other", {}, "approve");
+    const res = await POST(req, makeParamsCtx({ id: "req-multirole-other" }));
+
+    expect(res.status).toBe(200);
+    expect(sanitizeUserRpcMock).toHaveBeenCalledTimes(1);
+    expect(sanitizeUserRpcMock.mock.calls[0][0]).toMatchObject({
+      p_user_id: "target-user-id",
+    });
+  });
+
+  it("H-0013: malformed request row with NULL user_id is NOT silently sanitized — DB null-guard surfaces as 500, request stays open", async () => {
+    // The TS self-guard compares `null === "admin-user-id"` → false, so it
+    // does NOT short-circuit. The route then calls sanitize_user(null). The
+    // real DB function (migration 055) RAISEs on a null p_user_id — mirror
+    // that here so the test exercises the actual failure surface.
+    requestLoadMock.mockResolvedValue({
+      data: {
+        id: "req-null-user",
+        user_id: null,
+        requested_at: new Date().toISOString(),
+        completed_at: null,
+        rejected_at: null,
+      },
+      error: null,
+    });
+    sanitizeUserRpcMock.mockImplementation((args: { p_user_id: unknown }) => {
+      if (args.p_user_id == null) {
+        return Promise.resolve({
+          data: null,
+          error: { message: "sanitize_user: p_user_id is required" },
+        });
+      }
+      return Promise.resolve({ data: true, error: null });
+    });
+
+    const { POST } = await loadApproveRoute();
+    const req = makeRequest("req-null-user", {}, "approve");
+    const res = await POST(req, makeParamsCtx({ id: "req-null-user" }));
+
+    // Fails LOUD: destructive RPC rejected → 500, NOT a silent success.
+    expect(res.status).toBe(500);
+    // The request row must NOT be marked completed when sanitize failed.
+    expect(requestUpdateMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("POST /api/admin/deletion-requests/[id]/reject — self-action guard (C3)", () => {

@@ -101,7 +101,7 @@ describe("MANDATE-05 / MANDATE-06: update_allocator_mandates RPC", () => {
   );
 
   it.skipIf(!HAS_LIVE_DB)(
-    "unauthenticated anon call: RPC rejects at the GRANT layer (42501) or inside the function body (28000)",
+    "unauthenticated anon call: RPC is rejected at the GRANT layer (42501 insufficient_privilege) — anon REVOKEd in migration 061, function body never runs",
     async () => {
       const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
       if (!anonKey) {
@@ -112,23 +112,28 @@ describe("MANDATE-05 / MANDATE-06: update_allocator_mandates RPC", () => {
         p_max_weight: 0.25,
       });
       expect(error).not.toBeNull();
-      // Two valid rejection paths, both defense-in-depth:
-      //   42501 (insufficient_privilege at GRANT layer): migration 061's
-      //     REVOKE ALL FROM anon + GRANT EXECUTE TO authenticated stops
-      //     the anon role before the function body runs. This is the
-      //     primary gate and the expected path in production.
-      //   28000 (insufficient_privilege inside function body): the
-      //     v_auth_uid IS NULL guard fires if a client somehow bypasses
-      //     the GRANT (e.g., service_role calling without a JWT GUC).
-      //   Message-text match covers PostgREST versions that wrap the
-      //     underlying pg error without preserving the code field.
-      expect(
+      // H-0039: the prior assertion accepted THREE different signatures —
+      // 42501 OR 28000 OR a broad /permission|insufficient_privilege|no auth/
+      // message match — so it no longer pinned which enforcement layer fired.
+      // That matters: 42501 (GRANT layer) means the anon role was stopped
+      // BEFORE the function executed; 28000 (the v_auth_uid IS NULL body
+      // guard) means anon got INTO the function. The latter would mean the
+      // REVOKE ALL FROM anon in migration 061 regressed — a real security
+      // hole, not an acceptable alternate path. We pin the GRANT-layer
+      // denial: code 42501 (with a message fallback for PostgREST versions
+      // that strip the code field, but ONLY for the 42501-equivalent
+      // permission-denied text — never the body-guard "no auth" text).
+      const isGrantLayerDenial =
         error!.code === "42501" ||
-          error!.code === "28000" ||
-          /permission denied|insufficient_privilege|no auth/i.test(
-            error!.message,
-          ),
+        (error!.code == null &&
+          /permission denied|insufficient_privilege/i.test(error!.message));
+      expect(
+        isGrantLayerDenial,
+        `Expected GRANT-layer 42501 denial (anon REVOKEd in mig 061). Got code=${error!.code} message=${error!.message}. A 28000 here would mean anon reached the function body — REVOKE ALL FROM anon regressed.`,
       ).toBe(true);
+      // Belt-and-suspenders: assert the body guard's 28000 did NOT fire,
+      // which would prove anon executed the function.
+      expect(error!.code).not.toBe("28000");
     },
     30_000,
   );
@@ -217,23 +222,30 @@ describe("MANDATE-05 / MANDATE-06: update_allocator_mandates RPC", () => {
       expect(seedErr).toBeNull();
 
       // Attempt a direct UPDATE as the authenticated allocator — MANDATE-06
-      // Option A: this must affect 0 rows because allocator_prefs_self_update
-      // was DROPPED in migration 061. Depending on PostgREST version, either:
-      //   (a) error is null + data is empty (RLS hides the row), or
-      //   (b) error is a permission-denied message.
+      // Option A. allocator_prefs_self_update was DROPPED in migration 061
+      // (verified by that migration's self-check). With NO permissive UPDATE
+      // policy on allocator_preferences, PostgreSQL RLS finds zero updatable
+      // rows: the UPDATE silently affects 0 rows and PostgREST returns
+      //   error === null  AND  data === []  (the .select() of updated rows).
+      //
+      // H-0039: the prior assertion accepted EITHER an error (matching
+      // /permission|policy|denied/) OR empty data — so a material behavior
+      // change between PostgREST versions (usable error message vs. a
+      // success-shaped empty response the UI might read as "saved!") would
+      // pass either way. We now PIN the deterministic RLS outcome: no error,
+      // empty data. A genuine permission-denied error here would be a real
+      // behavior change worth surfacing, not silently absorbing.
       const { data: updateData, error: updateErr } = await testUserClient
         .from("allocator_preferences")
         .update({ max_weight: 0.40 })
         .eq("user_id", testUserId!)
         .select();
 
-      if (updateErr) {
-        // RLS rejected at PostgREST layer — acceptable.
-        expect(/permission|policy|denied/i.test(updateErr.message)).toBe(true);
-      } else {
-        // No error — data MUST be empty (0 rows affected).
-        expect(updateData).toEqual([]);
-      }
+      expect(
+        updateErr,
+        `Expected no PostgREST error (RLS yields 0 rows, not a denial). Got: ${updateErr?.code} ${updateErr?.message}`,
+      ).toBeNull();
+      expect(updateData).toEqual([]);
 
       // Verify the value was NOT overwritten — still 0.25 from the RPC seed.
       const { data } = await admin

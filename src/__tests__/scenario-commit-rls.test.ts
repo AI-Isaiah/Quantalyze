@@ -558,23 +558,52 @@ describe("POST /api/allocator/scenario/commit — live-DB RLS regression (Phase 
       trackedBridgeOutcomeIds.push(body.results[0].bridge_outcome_id);
       trackedAuditEntities.push(md);
 
-      // Audit emission is fire-and-forget — poll briefly.
+      // Audit emission is fire-and-forget via `after()`. Against a REAL
+      // running server (HAS_FULL_LIVE), `after()` fires after the HTTP
+      // response is flushed and the audit row lands within the function's
+      // keep-alive window — so we poll with a bounded budget and then
+      // HARD-assert the row exists. Capture the last-seen row(s) so a
+      // failure surfaces what (if anything) was emitted.
+      //
+      // H-0037: the prior assertion `expect(auditFound || true).toBe(true)`
+      // was a tautology — it could never fail, so a regression that dropped
+      // logAuditEvent from the success branch (or emitted the wrong action /
+      // entity_id) would ship green. We now assert (a) exactly one
+      // match.decision_record row for THIS match_decision and (b) its
+      // metadata pins source + kind, so the test exercises the real audit
+      // contract rather than mere table-reachability.
       let auditFound = false;
-      for (let attempt = 0; attempt < 10 && !auditFound; attempt++) {
+      let auditRowsSeen:
+        | { id: string; action: string; entity_id: string; metadata: unknown }[]
+        | null = null;
+      for (let attempt = 0; attempt < 20 && !auditFound; attempt++) {
         await new Promise((r) => setTimeout(r, 250));
         const { data: auditRows } = await admin
           .from("audit_log")
           .select("id, action, entity_id, metadata")
           .eq("action", "match.decision_record")
           .eq("entity_id", md);
+        auditRowsSeen = auditRows ?? null;
         if (auditRows && auditRows.length > 0) {
           auditFound = true;
           break;
         }
       }
-      // Soft assertion — the audit table is in scope but emission timing
-      // depends on the after() background lifecycle in test environments.
-      expect(auditFound || true).toBe(true);
+      // Hard assertion: the success branch MUST have emitted exactly one
+      // match.decision_record audit row for this match_decision. If this
+      // ever fails on a healthy server, the audit emission regressed.
+      expect(
+        auditFound,
+        `No match.decision_record audit_log row for match_decision ${md} after 5s. Saw: ${JSON.stringify(auditRowsSeen)}`,
+      ).toBe(true);
+      expect(auditRowsSeen).not.toBeNull();
+      expect(auditRowsSeen!.length).toBe(1);
+      const auditMeta = auditRowsSeen![0].metadata as {
+        kind?: string;
+        source?: string;
+      };
+      expect(auditMeta.source).toBe("scenario_commit");
+      expect(auditMeta.kind).toBe("voluntary_add");
     },
     30_000,
   );

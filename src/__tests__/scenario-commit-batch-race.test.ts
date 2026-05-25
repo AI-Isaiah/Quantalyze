@@ -67,7 +67,16 @@ describe("migration 083 — commit_scenario_batch race-safe M7 (live-DB)", () =>
   advertiseLiveDbSkipReason("scenario-commit-batch-race");
 
   let admin: SupabaseClient;
+  // H-0033 / H-0036: two INDEPENDENT user-scoped sessions for the SAME
+  // allocator. `Promise.all` from a single supabase-js client serializes
+  // RPC calls over one pooled connection, so the pre-fix SELECT-then-INSERT
+  // window never actually opens — the test would pass with AND without the
+  // 083 fix. Driving the two RPCs from two clients with SEPARATE access
+  // tokens (separate sessions → separate PostgREST connections) is the
+  // closest we can get to true overlapping transactions from a test
+  // process, so the race window can actually fire.
   let userClientA: SupabaseClient;
+  let userClientA2: SupabaseClient;
   let allocatorAId: string;
   let allocatorAEmail: string;
   let allocatorAPassword: string;
@@ -108,6 +117,25 @@ describe("migration 083 — commit_scenario_batch race-safe M7 (live-DB)", () =>
     if (signInA.error) {
       throw new Error(
         `Failed to sign in allocator A: ${signInA.error.message}`,
+      );
+    }
+
+    // Second INDEPENDENT session for the SAME allocator A. A distinct
+    // createClient + signInWithPassword yields a separate access token and
+    // its own connection, so the two RPC calls below can genuinely overlap
+    // (separate transactions) instead of serializing over one pooled
+    // socket. Both tokens carry the same auth.uid(), so both satisfy the
+    // RPC's p_allocator_id == auth.uid() ownership check.
+    userClientA2 = createClient(LIVE_DB_URL!, ANON_KEY!, {
+      auth: { storageKey: "race-session-2", persistSession: false },
+    });
+    const signInA2 = await userClientA2.auth.signInWithPassword({
+      email: allocatorAEmail,
+      password: allocatorAPassword,
+    });
+    if (signInA2.error) {
+      throw new Error(
+        `Failed to sign in allocator A (session 2): ${signInA2.error.message}`,
       );
     }
 
@@ -215,12 +243,16 @@ describe("migration 083 — commit_scenario_batch race-safe M7 (live-DB)", () =>
         percent_allocated: 4,
       };
 
-      // Fire the two RPC calls "concurrently" — Promise.all is the
-      // closest we can get to true concurrency over the wire from a
-      // single test process, and it's enough to force overlapping
-      // SELECTs in the pre-fix path. (Pre-fix would surface as one
-      // result with error=null and one with error.code='23505' on
-      // uniq_match_dec_thumbup_per_pair_holding.)
+      // Fire the two RPC calls concurrently from TWO INDEPENDENT sessions
+      // (separate access tokens → separate connections). This is the fix
+      // for H-0033/H-0036: a single-client Promise.all serializes over one
+      // pooled socket, so the pre-fix SELECT-then-INSERT window never opens
+      // and the test would pass with AND without the 083 fix. Two sessions
+      // give the two transactions a genuine chance to interleave their
+      // SELECTs before either INSERTs — which is precisely the window the
+      // pre-fix code mishandles (loser → 23505 on
+      // uniq_match_dec_thumbup_per_pair_holding) and the 083 ON CONFLICT
+      // path closes.
       const [r1, r2] = await Promise.all([
         userClientA.rpc(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -231,7 +263,7 @@ describe("migration 083 — commit_scenario_batch race-safe M7 (live-DB)", () =>
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
           } as any,
         ),
-        userClientA.rpc(
+        userClientA2.rpc(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           "commit_scenario_batch" as any,
           {
@@ -248,14 +280,21 @@ describe("migration 083 — commit_scenario_batch race-safe M7 (live-DB)", () =>
       const successes = [r1, r2].filter((r) => r.error === null);
       expect(successes.length).toBeGreaterThanOrEqual(1);
 
-      // No caller may surface a unique-violation on the match_decisions
-      // index — that's the specific failure mode 083 fixes. (T2 may
-      // still fail on bridge_outcomes_allocator_match_decision_unique
+      // H-0034: THIS is the differentiating assertion (not `successes >= 1`,
+      // which the pre-fix path also satisfies when it serializes). NO caller
+      // may surface a unique-violation on the match_decisions index — that's
+      // the EXACT failure mode 083 fixes, and the EXACT signature the pre-fix
+      // SELECT-then-INSERT path raises on the race loser when the window
+      // actually opens (now that two sessions force the overlap). If 083
+      // regressed, the loser's r.error.message would reference
+      // uniq_match_dec_thumbup_per_pair_holding and this check fails.
+      //
+      // (T2 may still fail on bridge_outcomes_allocator_match_decision_unique
       // because both attempts insert a bridge_outcome against the same
-      // match_decision_id; that's a separate, expected-by-design
-      // collision and surfaces as ERRCODE 23505 referencing
-      // bridge_outcomes_allocator_match_decision_unique — NOT
-      // uniq_match_dec_thumbup_per_pair_holding.)
+      // match_decision_id; that's a separate, expected-by-design collision
+      // — ERRCODE 23505 referencing the bridge_outcomes index, NOT the
+      // match_decisions index. We assert specifically on the match_decisions
+      // index name so that expected collision does not mask a real failure.)
       for (const r of [r1, r2]) {
         if (r.error !== null) {
           expect(r.error.message).not.toMatch(

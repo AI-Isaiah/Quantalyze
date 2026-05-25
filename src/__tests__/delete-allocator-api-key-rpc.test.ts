@@ -102,6 +102,45 @@ async function seedHolding(
   return (data as { id: string }).id;
 }
 
+/**
+ * Seed N daily equity snapshots for an allocator (migration 077 cascade
+ * coverage). The snapshot FK is to auth.users(id), NOT api_keys(id), which is
+ * exactly why migration 069's holdings-only cascade left stale equity behind
+ * — the bug 077 closes. Returns the asof strings seeded so the test can count
+ * precisely.
+ */
+async function seedEquitySnapshots(
+  admin: ReturnType<typeof createLiveAdminClient>,
+  allocatorId: string,
+  days = 3,
+): Promise<string[]> {
+  const rows: { allocator_id: string; asof: string; value_usd: number }[] = [];
+  const asofs: string[] = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(Date.now() - i * 86400_000).toISOString().slice(0, 10);
+    asofs.push(d);
+    rows.push({ allocator_id: allocatorId, asof: d, value_usd: 1000 + i });
+  }
+  const { error } = await admin
+    .from("allocator_equity_snapshots")
+    .upsert(rows as never, { onConflict: "allocator_id,asof" });
+  if (error) {
+    throw new Error(`seedEquitySnapshots(${allocatorId}): ${error.message}`);
+  }
+  return asofs;
+}
+
+async function countSnapshots(
+  admin: ReturnType<typeof createLiveAdminClient>,
+  allocatorId: string,
+): Promise<number> {
+  const { count } = await admin
+    .from("allocator_equity_snapshots")
+    .select("*", { count: "exact", head: true })
+    .eq("allocator_id", allocatorId);
+  return count ?? 0;
+}
+
 async function createAuthedClient(
   email: string,
   password: string,
@@ -386,4 +425,187 @@ describe("Migration 069 — delete_allocator_api_key RPC (MANAGE-03 Disconnect c
     advertiseLiveDbSkipReason("delete-allocator-api-key-rpc");
     expect(true).toBe(true);
   });
+});
+
+// ===========================================================================
+// H-1183: Migration 077 — last-key snapshot cascade.
+//
+// delete_allocator_api_key now ALSO deletes allocator_equity_snapshots when
+// p_cascade_holdings=true AND the delete drops the caller's api_keys count to
+// zero. The snapshot FK is to auth.users(id), not api_keys(id), so prior to
+// 077 deleting a key left a full stale equity series behind — which collides
+// with the reconstruct UPSERT (DO NOTHING) and produces a permanently empty
+// dashboard on delete-and-reconnect. These tests pin the three branches of
+// the 077 last-key gate. The pre-077 function (no snapshot cascade) would
+// FAIL case (a): snapshots would survive a sole-key cascade=true delete.
+// ===========================================================================
+describe("Migration 077 — delete_allocator_api_key last-key equity-snapshot cascade", () => {
+  it.skipIf(!HAS_LIVE_DB)(
+    "cascade=true + SOLE key + seeded snapshots: snapshots are wiped (count → 0)",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const cleanup: Parameters<typeof cleanupLiveDbRow>[1] = { userIds: [] };
+      const apiKeyIds: string[] = [];
+      try {
+        const password = `Rpc077SoleA${ts}!`;
+        const email = `rpc077-sole-${ts}@test.sec`;
+        const ownerId = await createTestUser(admin, email, password);
+        cleanup.userIds!.push(ownerId);
+
+        const keyId = await seedApiKey(admin, ownerId, `sole-${ts}`);
+        apiKeyIds.push(keyId);
+        // Holdings are required by the cascade path (cascade=true deletes
+        // them first; the api_keys delete then succeeds). Seed one.
+        await seedHolding(admin, ownerId, keyId);
+        await seedEquitySnapshots(admin, ownerId, 3);
+        expect(await countSnapshots(admin, ownerId)).toBe(3);
+
+        const clientOwner = await createAuthedClient(email, password);
+        if (!clientOwner) return;
+
+        const { error } = await clientOwner.rpc("delete_allocator_api_key", {
+          p_api_key_id: keyId,
+          p_cascade_holdings: true,
+        });
+        expect(error).toBeNull();
+
+        // Sole key gone → remaining key count 0 → snapshot cascade fires.
+        const { count: keyCount } = await admin
+          .from("api_keys")
+          .select("*", { count: "exact", head: true })
+          .eq("id", keyId);
+        expect(keyCount).toBe(0);
+        // FLAGSHIP 077 assertion: equity series is wiped.
+        expect(await countSnapshots(admin, ownerId)).toBe(0);
+        apiKeyIds.length = 0;
+      } finally {
+        for (const id of apiKeyIds) {
+          try {
+            await admin.from("api_keys").delete().eq("id", id);
+          } catch {
+            /* already gone */
+          }
+        }
+        await cleanupLiveDbRow(admin, cleanup);
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "cascade=true + MULTI-key (delete 1 of 2) + seeded snapshots: snapshots SURVIVE (last-key gate not met)",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const cleanup: Parameters<typeof cleanupLiveDbRow>[1] = { userIds: [] };
+      const apiKeyIds: string[] = [];
+      try {
+        const password = `Rpc077MultiA${ts}!`;
+        const email = `rpc077-multi-${ts}@test.sec`;
+        const ownerId = await createTestUser(admin, email, password);
+        cleanup.userIds!.push(ownerId);
+
+        // TWO keys — deleting one leaves one behind, so v_remaining_keys=1
+        // and the snapshot cascade must NOT fire.
+        const keyId1 = await seedApiKey(admin, ownerId, `multi1-${ts}`);
+        const keyId2 = await seedApiKey(admin, ownerId, `multi2-${ts}`);
+        apiKeyIds.push(keyId1, keyId2);
+        await seedHolding(admin, ownerId, keyId1);
+        await seedEquitySnapshots(admin, ownerId, 3);
+        expect(await countSnapshots(admin, ownerId)).toBe(3);
+
+        const clientOwner = await createAuthedClient(email, password);
+        if (!clientOwner) return;
+
+        const { error } = await clientOwner.rpc("delete_allocator_api_key", {
+          p_api_key_id: keyId1,
+          p_cascade_holdings: true,
+        });
+        expect(error).toBeNull();
+
+        // key1 gone, key2 remains.
+        const { count: key1Count } = await admin
+          .from("api_keys")
+          .select("*", { count: "exact", head: true })
+          .eq("id", keyId1);
+        expect(key1Count).toBe(0);
+        const { count: key2Count } = await admin
+          .from("api_keys")
+          .select("*", { count: "exact", head: true })
+          .eq("id", keyId2);
+        expect(key2Count).toBe(1);
+        // Multi-key invariant: snapshots untouched (remaining N-1 keys'
+        // first-writer-wins aggregated series stays accurate).
+        expect(await countSnapshots(admin, ownerId)).toBe(3);
+        // key1 already removed by RPC; key2 cleaned below.
+        apiKeyIds.splice(apiKeyIds.indexOf(keyId1), 1);
+      } finally {
+        for (const id of apiKeyIds) {
+          try {
+            await admin.from("api_keys").delete().eq("id", id);
+          } catch {
+            /* already gone */
+          }
+        }
+        await cleanupLiveDbRow(admin, cleanup);
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "cascade=false + SOLE key + NO holdings + seeded snapshots: snapshots SURVIVE (only hard-delete wipes equity)",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const cleanup: Parameters<typeof cleanupLiveDbRow>[1] = { userIds: [] };
+      const apiKeyIds: string[] = [];
+      try {
+        const password = `Rpc077SoftA${ts}!`;
+        const email = `rpc077-soft-${ts}@test.sec`;
+        const ownerId = await createTestUser(admin, email, password);
+        cleanup.userIds!.push(ownerId);
+
+        // No holdings, so cascade=false succeeds (the api_keys delete won't
+        // hit the FK RESTRICT). This isolates the cascade-flag gate: the
+        // snapshot cascade is guarded by `IF p_cascade_holdings THEN` and
+        // must NOT run when cascade=false, even on a sole-key delete.
+        const keyId = await seedApiKey(admin, ownerId, `soft-${ts}`);
+        apiKeyIds.push(keyId);
+        await seedEquitySnapshots(admin, ownerId, 3);
+        expect(await countSnapshots(admin, ownerId)).toBe(3);
+
+        const clientOwner = await createAuthedClient(email, password);
+        if (!clientOwner) return;
+
+        const { data, error } = await clientOwner.rpc(
+          "delete_allocator_api_key",
+          { p_api_key_id: keyId, p_cascade_holdings: false },
+        );
+        expect(error).toBeNull();
+        expect(data).toBe(0); // 0 holdings deleted
+
+        const { count: keyCount } = await admin
+          .from("api_keys")
+          .select("*", { count: "exact", head: true })
+          .eq("id", keyId);
+        expect(keyCount).toBe(0);
+        // cascade=false → equity series preserved (the user did NOT ask for
+        // a clean slate; soft path must not destroy derived history).
+        expect(await countSnapshots(admin, ownerId)).toBe(3);
+        apiKeyIds.length = 0;
+      } finally {
+        for (const id of apiKeyIds) {
+          try {
+            await admin.from("api_keys").delete().eq("id", id);
+          } catch {
+            /* already gone */
+          }
+        }
+        await cleanupLiveDbRow(admin, cleanup);
+      }
+    },
+    30_000,
+  );
 });
