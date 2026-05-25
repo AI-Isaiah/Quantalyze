@@ -237,15 +237,39 @@ export function useDashboardConfig(): UseDashboardConfigReturn {
     });
   }, []);
 
+  // audit-2026-05-07 (H-0123 c8) — rapid double-click race: the old impl
+  // read `config.tiles` from the stale closure, so two synchronous calls
+  // within the same render cycle both found the tile and both returned it.
+  // A caller wiring the return value to setToast/setRecentlyClosed would
+  // create duplicate undo affordances — the second tile's undo path was
+  // silently overwritten.
+  //
+  // Fix: track in-flight removals via a ref Set. The first call for a given
+  // tileId (a) reads the tile from the current closure (valid — the hook
+  // hasn't re-rendered yet), (b) guards the Set, and (c) schedules the
+  // filter. Any subsequent call for the SAME tileId within the same render
+  // cycle finds it already in the Set and returns null — making removeTile
+  // idempotent within a batch. The Set is cleared at the next render when
+  // config changes (via the useEffect below), so subsequent intentional
+  // removes after a re-render work normally.
+  const pendingRemovalsRef = useRef<Set<string>>(new Set());
+  // Clear the in-flight set once React has committed the state update and
+  // re-rendered — ensures removeTile is idempotent per-batch only, not
+  // across independent user interactions.
+  useEffect(() => {
+    pendingRemovalsRef.current.clear();
+  }, [config.tiles]);
   const removeTile = useCallback(
     (tileId: string): LegacyTileConfig | null => {
+      // Idempotent within the current render cycle.
+      if (pendingRemovalsRef.current.has(tileId)) return null;
       const tile = config.tiles.find((t) => t.i === tileId) ?? null;
-      if (tile) {
-        setConfig((prev) => ({
-          ...prev,
-          tiles: prev.tiles.filter((t) => t.i !== tileId),
-        }));
-      }
+      if (!tile) return null;
+      pendingRemovalsRef.current.add(tileId);
+      setConfig((prev) => ({
+        ...prev,
+        tiles: prev.tiles.filter((t) => t.i !== tileId),
+      }));
       return tile;
     },
     [config.tiles],
