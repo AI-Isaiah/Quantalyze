@@ -361,6 +361,433 @@ def test_resolve_has_maker_taker_env_garbage_still_rejected():
         _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "yes")
 
 
+# ---------------------------------------------------------------------------
+# H-0782 / H-0797: KPI-17 position-side volume attribution coverage.
+#
+# The full-fixture parity test (``test_metrics_parity_full``) calls
+# ``_compute_position_side_volume_pcts(fills, [])`` with an EMPTY positions
+# list because the committed golden fixture carries neither fill ``cost`` /
+# ``timestamp`` fields nor position ``opened_at`` / ``closed_at`` windows, so
+# the helper can only short-circuit to 0/0. That leaves the actual KPI-17
+# timestamp-window attribution logic (the fix for the v0.16.x
+# buy/sell-as-long-volume bug) STRUCTURALLY UNREACHABLE by parity.
+#
+# These tests drive the helper with NON-EMPTY fills + positions so long/short
+# attribution is genuinely computed, and pin hand-derived numeric values. A
+# regression that flips long<->short attribution, breaks the timestamp window
+# match, or reverts the KPI-17 fix will fail here even though parity passes.
+# ---------------------------------------------------------------------------
+
+# A long window [Jan-01, Jan-05] and a non-overlapping short window
+# [Jan-10, Jan-15]. Fills are attributed to the first window whose
+# [opened, closed] interval contains the fill timestamp.
+_PSV_POSITIONS = [
+    {
+        "opened_at": "2025-01-01T00:00:00Z",
+        "closed_at": "2025-01-05T00:00:00Z",
+        "side": "long",
+    },
+    {
+        "opened_at": "2025-01-10T00:00:00Z",
+        "closed_at": "2025-01-15T00:00:00Z",
+        "side": "short",
+    },
+]
+
+
+def test_position_side_volume_attribution_pinned():
+    """H-0782 / H-0797: real long/short attribution, hand-computed pins.
+
+    Long-window cost = 100 + 300 = 400. Short-window cost = 100.
+    A fill outside every window (Jan-20) and a fill with no timestamp are
+    BOTH excluded from ``attributed_total``.
+
+      attributed_total = 400 + 100        = 500
+      long_volume_pct  = 400 / 500        = 0.8
+      short_volume_pct = 100 / 500        = 0.2
+    """
+    fills = [
+        {"timestamp": "2025-01-02T00:00:00Z", "cost": 100.0},  # long window
+        {"timestamp": "2025-01-04T00:00:00Z", "cost": 300.0},  # long window
+        {"timestamp": "2025-01-12T00:00:00Z", "cost": 100.0},  # short window
+        {"timestamp": "2025-01-20T00:00:00Z", "cost": 999.0},  # unattributed
+        {"cost": 50.0},  # missing timestamp -> skipped
+    ]
+    result = _compute_position_side_volume_pcts(fills, _PSV_POSITIONS)
+    assert result == {"long_volume_pct": 0.8, "short_volume_pct": 0.2}
+
+
+def test_position_side_volume_long_short_flip_is_detectable():
+    """H-0797: a long<->short flip must change the pinned output.
+
+    Swapping the two windows' sides (long->short, short->long) MUST flip the
+    attribution to 0.2/0.8. This proves the assertion above cannot be a
+    tautology that passes regardless of which side a fill is attributed to —
+    it is the regression an attacker reverting the KPI-17 fix would trip.
+    """
+    flipped_positions = [
+        {**_PSV_POSITIONS[0], "side": "short"},
+        {**_PSV_POSITIONS[1], "side": "long"},
+    ]
+    fills = [
+        {"timestamp": "2025-01-02T00:00:00Z", "cost": 100.0},
+        {"timestamp": "2025-01-04T00:00:00Z", "cost": 300.0},
+        {"timestamp": "2025-01-12T00:00:00Z", "cost": 100.0},
+    ]
+    result = _compute_position_side_volume_pcts(fills, flipped_positions)
+    # Same 400/100 split, opposite side labels.
+    assert result == {"long_volume_pct": 0.2, "short_volume_pct": 0.8}
+
+
+def test_position_side_volume_uses_filled_at_fallback():
+    """H-0782: the helper accepts ``filled_at`` when ``timestamp`` is absent.
+
+    All three fills land in the long window via ``filled_at`` -> 1.0/0.0.
+    """
+    fills = [
+        {"filled_at": "2025-01-02T00:00:00Z", "cost": 200.0},
+        {"filled_at": "2025-01-03T00:00:00Z", "cost": 200.0},
+    ]
+    result = _compute_position_side_volume_pcts(fills, _PSV_POSITIONS)
+    assert result == {"long_volume_pct": 1.0, "short_volume_pct": 0.0}
+
+
+def test_position_side_volume_empty_positions_short_circuits():
+    """H-0782: empty positions list short-circuits to 0/0 (documented shape).
+
+    This pins the branch the full parity test relies on, so the contract is
+    explicit rather than implicit in the parity wiring.
+    """
+    fills = [{"timestamp": "2025-01-02T00:00:00Z", "cost": 100.0}]
+    assert _compute_position_side_volume_pcts(fills, []) == {
+        "long_volume_pct": 0.0,
+        "short_volume_pct": 0.0,
+    }
+    # No fills, non-empty positions -> also 0/0.
+    assert _compute_position_side_volume_pcts([], _PSV_POSITIONS) == {
+        "long_volume_pct": 0.0,
+        "short_volume_pct": 0.0,
+    }
+
+
+def test_position_side_volume_all_unattributed_returns_zero():
+    """H-0782: fills that match NO window -> attributed_total 0 -> 0/0.
+
+    Distinguishes "no attributable volume" from a genuine 0% long share.
+    """
+    fills = [
+        {"timestamp": "2024-12-01T00:00:00Z", "cost": 500.0},  # before any window
+        {"timestamp": "2025-06-01T00:00:00Z", "cost": 500.0},  # after every window
+    ]
+    assert _compute_position_side_volume_pcts(fills, _PSV_POSITIONS) == {
+        "long_volume_pct": 0.0,
+        "short_volume_pct": 0.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# H-0796: malformed / missing-key golden-input must surface a contextual error.
+# ---------------------------------------------------------------------------
+
+# Keys the full parity test unconditionally indexes out of the input JSON.
+_REQUIRED_INPUT_KEYS = (
+    "fills",
+    "trade_metrics_from_positions",
+    "positions_by_date",
+    "prices_by_date",
+    "nav_by_date",
+)
+
+
+def _load_golden_input(text: str, source: str = "golden_252d_input.json") -> dict:
+    """Parse + validate the golden-input JSON with contextual errors.
+
+    H-0796: a raw ``json.loads`` surfaces a truncated fixture as a test
+    *collection* error (or a bare ``KeyError`` with no key context downstream).
+    This wrapper turns both into a clear, source-attributed AssertionError so
+    a corrupted fixture reads as an actionable test failure.
+    """
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"{source} is not valid JSON (truncated or corrupted?): {exc}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise AssertionError(
+            f"{source} must decode to a JSON object, got {type(parsed).__name__}"
+        )
+    missing = [k for k in _REQUIRED_INPUT_KEYS if k not in parsed]
+    if missing:
+        raise AssertionError(
+            f"{source} is missing required input keys: {sorted(missing)} "
+            "(regenerate via tests.fixtures.regen_golden)"
+        )
+    return parsed
+
+
+def test_load_golden_input_malformed_json_raises_contextual():
+    """H-0796: truncated JSON surfaces a source-attributed error, not a raw decode error."""
+    with pytest.raises(AssertionError, match="is not valid JSON"):
+        _load_golden_input('{"fills": [1, 2, 3')  # truncated
+
+
+def test_load_golden_input_missing_key_raises_contextual():
+    """H-0796: a missing required key names WHICH key is absent."""
+    with pytest.raises(AssertionError, match="missing required input keys"):
+        _load_golden_input(json.dumps({"fills": []}))
+    # The message must name the specific missing keys.
+    try:
+        _load_golden_input(json.dumps({"fills": [], "prices_by_date": {}}))
+    except AssertionError as exc:
+        msg = str(exc)
+        assert "trade_metrics_from_positions" in msg
+        assert "nav_by_date" in msg
+        assert "fills" not in msg.split(":", 1)[1]  # present key not flagged
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected missing-key AssertionError")
+
+
+def test_load_golden_input_non_object_raises_contextual():
+    """H-0796: a top-level JSON array (wrong shape) is rejected with context."""
+    with pytest.raises(AssertionError, match="must decode to a JSON object"):
+        _load_golden_input("[1, 2, 3]")
+
+
+def test_load_golden_input_accepts_real_fixture():
+    """H-0796: the committed fixture passes the validator unchanged."""
+    text = (FIXTURES_DIR / "golden_252d_input.json").read_text()
+    parsed = _load_golden_input(text)
+    for key in _REQUIRED_INPUT_KEYS:
+        assert key in parsed
+
+
+# ---------------------------------------------------------------------------
+# H-0790: integer count metrics map to Postgres INTEGER columns. A producer
+# that returns 5.0 instead of 5 would be silently coerced by the relative
+# scalar comparator (``float(5) == float(5.0)``) yet rejected at JSONB write
+# time. This pins type fidelity for the count keys directly off the golden.
+# Tightening the global ``_assert_scalar_equal`` to ``type(expected) is
+# type(actual)`` was NOT done: the parity comparator legitimately compares
+# int-typed fixture counts against runtime values that may surface as float
+# on other metric paths, and the instruction is to add targeted coverage
+# rather than risk the golden. (See report flag.)
+# ---------------------------------------------------------------------------
+
+_INTEGER_COUNT_KEYS = (
+    "winners_count",
+    "losers_count",
+    "total_positions",
+    "long_count",
+    "short_count",
+    "closed_positions",
+    "open_positions",
+    "total_fills",
+)
+
+
+def test_count_metrics_are_integers_not_floats(golden_252d_expected):
+    """H-0790: count metrics must be true ints in the golden (no 5.0-for-5)."""
+    tm = golden_252d_expected["metrics_json"]["trade_metrics"]
+    checked = 0
+    for key in _INTEGER_COUNT_KEYS:
+        if key not in tm:
+            continue
+        checked += 1
+        value = tm[key]
+        # bool is a subclass of int — reject it explicitly so a stray True/False
+        # cannot masquerade as an integer count.
+        assert not isinstance(value, bool), f"{key} is a bool, expected int"
+        assert isinstance(value, int), (
+            f"{key} must be a JSON integer (maps to a Postgres INTEGER column), "
+            f"got {type(value).__name__}={value!r} — a float here would pass the "
+            "relative scalar comparator but be rejected at JSONB write time"
+        )
+    assert checked >= 5, (
+        "expected to find at least 5 integer count keys in the golden "
+        f"trade_metrics; only matched {checked} — has the contract drifted?"
+    )
+
+
+# ---------------------------------------------------------------------------
+# H-0784 / H-0793 / H-0795: the scalar comparator has three regimes selected by
+# branching on exact-zero (both-zero -> equal; one-zero -> absolute < 1e-12;
+# else relative < 1e-12). The audit worry is that a side rounding to zero masks
+# a real small-value regression.
+#
+# These tests pin the ACTUAL behavior at meaningful magnitudes: a regression
+# that drives r_squared / cagr from a small-but-real value to 0.0 IS caught,
+# because the one-zero branch is an *absolute* 1e-12 comparison. The comparator
+# only equates magnitudes below ~1e-12, which is the float-to-string-to-float
+# noise floor the comparator exists to absorb. Tightening it further would
+# reject legitimate 1-ULP cross-runtime drift, so the comparator is left as-is
+# and the safety property is locked in by assertion instead. (See report.)
+# ---------------------------------------------------------------------------
+
+
+def test_scalar_close_catches_small_value_collapse_to_zero():
+    """H-0795: r_squared 0.0001 -> 0.0 is a real regression and MUST fail."""
+    assert _scalar_close(0.0001, 0.0) is False
+    assert _scalar_close(0.0, 0.0001) is False
+
+
+def test_scalar_close_catches_small_relative_regression():
+    """H-0793: a 1% relative drift on a small value is caught."""
+    # 0.0001 vs 0.000099 -> 1% relative drift, both nonzero -> relative branch.
+    assert _scalar_close(0.0001, 0.000099) is False
+
+
+def test_scalar_close_both_zero_is_equal_documented():
+    """H-0784: both-exactly-zero short-circuits to equal (documented contract)."""
+    assert _scalar_close(0.0, 0.0) is True
+    assert _scalar_close(0.0, -0.0) is True
+
+
+def test_scalar_close_noise_floor_is_below_1e_12():
+    """H-0795: the masking regime is confined below the 1e-12 noise floor.
+
+    Values whose absolute difference is < 1e-12 compare equal (intended:
+    float-to-string-to-float drift). This pins where the absolute floor sits so
+    a future widening of that floor (which WOULD mask real regressions) trips
+    this test.
+    """
+    # Below floor -> equal (one side rounds to zero).
+    assert _scalar_close(1e-13, 0.0) is True
+    # At/above a meaningful magnitude -> not equal.
+    assert _scalar_close(1e-9, 0.0) is False
+
+
+def test_series_close_catches_small_value_collapse_to_zero():
+    """H-0784 (series): a real value collapsing to 0.0 in a series is caught."""
+    # one-zero branch uses absolute < rel_eps (1e-9); 0.5 vs 0.0 -> fail.
+    assert _series_close(0.5, 0.0) is False
+    # A value above the 1e-9 series floor vs zero is caught.
+    assert _series_close(1e-6, 0.0) is False
+
+
+# ---------------------------------------------------------------------------
+# H-0788 (positive-output floor): guard against an all-zero / all-NaN series
+# regression that would survive both regen and parity (both-zero / NaN==NaN
+# short-circuits make every pair "equal"). A floor on the count of finite,
+# nonzero values proves the production series actually carries signal.
+# ---------------------------------------------------------------------------
+
+
+def _count_finite_nonzero(values: list[float]) -> int:
+    return sum(
+        1
+        for v in values
+        if isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and not math.isnan(float(v))
+        and float(v) != 0.0
+    )
+
+
+def test_turnover_series_has_nonzero_signal_floor():
+    """H-0788: turnover_series must carry real signal, not collapse to all-zero.
+
+    If a turnover regression yields [0, 0, ...], regen bakes zeros into the
+    golden and ``_series_close`` short-circuits every both-zero pair to equal,
+    so parity passes on a dead series. A floor on finite-nonzero turnover
+    values catches that class of silent regression.
+    """
+    # The position/price/nav series live only in the JSON companion, not the
+    # parquet-backed ``golden_252d_input`` fixture. Reuse the validated loader.
+    input_json = _load_golden_input(
+        (FIXTURES_DIR / "golden_252d_input.json").read_text()
+    )
+    series = compute_turnover_series(
+        input_json["positions_by_date"],
+        input_json["prices_by_date"],
+        input_json["nav_by_date"],
+    )
+    turnover_vals = [
+        rec["turnover"]
+        for rec in series
+        if isinstance(rec, dict) and "turnover" in rec
+    ]
+    assert turnover_vals, "turnover_series produced no turnover values"
+    nonzero = _count_finite_nonzero(turnover_vals)
+    assert nonzero >= 30, (
+        f"turnover_series has only {nonzero} finite-nonzero values of "
+        f"{len(turnover_vals)} — a near-dead series would silently pass parity "
+        "via the both-zero short-circuit (H-0788)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# H-0791: per-key unit contract. The recursive comparator routes purely on
+# Python type, so a producer that flips a unit (ratio<->percent, days<->hours)
+# while regen drifts in lockstep would pass parity. There is no production
+# units.yaml / TypedDict to consume, so we encode the expected unit semantics
+# here as a documented, enforced contract: the golden values must fall in the
+# range the declared unit implies. (A full producer-side unit annotation is a
+# production change — flagged in the report.)
+# ---------------------------------------------------------------------------
+
+# (key, unit, validator) — validator returns True iff the golden value is
+# consistent with the declared unit. None values are skipped (rendered as "—").
+_UNIT_CONTRACT = {
+    # Fractions in [0, 1]: a flip to percent (e.g. 60.0) breaks the bound.
+    "win_rate": ("fraction[0,1]", lambda v: 0.0 <= v <= 1.0),
+    "long_volume_pct": ("fraction[0,1]", lambda v: 0.0 <= v <= 1.0),
+    "short_volume_pct": ("fraction[0,1]", lambda v: 0.0 <= v <= 1.0),
+    "buy_volume_pct": ("fraction[0,1]", lambda v: 0.0 <= v <= 1.0),
+    "sell_volume_pct": ("fraction[0,1]", lambda v: 0.0 <= v <= 1.0),
+    # Ratios: non-negative, and not a runaway percent (a ratio expressed as a
+    # percent, e.g. 250.0 for 2.5, would blow past this sane upper bound).
+    "risk_reward_ratio": ("ratio>=0", lambda v: 0.0 <= v < 100.0),
+    "weighted_risk_reward_ratio": ("ratio>=0", lambda v: 0.0 <= v < 100.0),
+    "profit_factor": ("ratio>=0", lambda v: v >= 0.0),
+}
+
+
+def test_metric_unit_contract_holds_in_golden(golden_252d_expected):
+    """H-0791: golden metric values must respect their declared unit semantics.
+
+    Documents and enforces per-key units the type-routed comparator cannot
+    see. A producer that flips ``win_rate`` to percent (60.0) or expresses a
+    ratio as a percentage trips the relevant range check here even though the
+    parity comparator (regen + runtime drifting together) would not.
+    """
+    tm = golden_252d_expected["metrics_json"]["trade_metrics"]
+    checked = 0
+    for key, (unit, ok) in _UNIT_CONTRACT.items():
+        if key not in tm:
+            continue
+        value = tm[key]
+        if value is None:
+            continue
+        assert isinstance(value, (int, float)) and not isinstance(value, bool), (
+            f"{key}: expected numeric for unit {unit}, got {type(value).__name__}"
+        )
+        assert ok(float(value)), (
+            f"{key}={value!r} violates declared unit contract '{unit}' — a "
+            "unit flip (e.g. fraction<->percent, ratio-as-percent) would pass "
+            "the type-routed parity comparator but is caught here (H-0791)"
+        )
+        checked += 1
+    assert checked >= 3, (
+        "unit contract matched fewer than 3 keys in the golden trade_metrics; "
+        f"only matched {checked} — verify the metric keys still exist"
+    )
+
+
+def test_metric_unit_contract_rejects_percent_flip():
+    """H-0791: the contract validators actually reject a unit flip.
+
+    Proves the range checks aren't vacuous: a win_rate expressed as a percent
+    (60.0) and a ratio expressed as a percent (250.0) both fail their checks.
+    """
+    win_rate_ok = _UNIT_CONTRACT["win_rate"][1]
+    rr_ok = _UNIT_CONTRACT["risk_reward_ratio"][1]
+    assert win_rate_ok(0.6) is True
+    assert win_rate_ok(60.0) is False  # percent flip
+    assert rr_ok(2.5) is True
+    assert rr_ok(250.0) is False  # ratio-as-percent flip
+
+
 def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
     """METRICS-13: full parity assertion against committed fixture (B-01 + H-A1 wiring)."""
     # Run the actual metrics path
@@ -368,8 +795,12 @@ def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
         golden_252d_input["returns"], golden_252d_input["benchmark"]
     )
 
-    # Read full inputs from JSON companion (incl. fills, positions, time-series)
-    input_json = json.loads((FIXTURES_DIR / "golden_252d_input.json").read_text())
+    # Read full inputs from JSON companion (incl. fills, positions, time-series).
+    # H-0796: validate up front so a truncated/missing-key fixture surfaces a
+    # contextual AssertionError instead of a bare decode/KeyError.
+    input_json = _load_golden_input(
+        (FIXTURES_DIR / "golden_252d_input.json").read_text()
+    )
     fills = input_json["fills"]
     trade_metrics_from_positions = input_json["trade_metrics_from_positions"]
     positions_by_date = input_json["positions_by_date"]

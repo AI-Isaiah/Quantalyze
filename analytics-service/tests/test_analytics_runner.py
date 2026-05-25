@@ -25,11 +25,13 @@ Phase 12 Plan 06 additions:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import numpy as np
 import pytest
+from supabase import Client
 
 from services.metrics import MetricsResult
 
@@ -46,6 +48,62 @@ _DEFAULT_RETURNS_META = {
     "balance_error": False,
     "computation_status_hint": "complete",
 }
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 H-0770 — MetricsResult contract shape pin
+# ---------------------------------------------------------------------------
+# The MetricsResult literals scattered through these tests embed legacy
+# series keys (`metrics_json`, `returns_series`, `drawdown_series`,
+# `monthly_returns`, `rolling_metrics`, `return_quantiles`) INSIDE the
+# `metrics_json` dict — a transitional (Phase 12) shape. The production
+# contract is the dataclass itself: exactly TWO fields, `metrics_json`
+# (top-level dict spread into strategy_analytics) and `sibling_kinds`
+# (split-storage series keyed by kind). This test pins that contract via
+# dataclasses.fields() so:
+#   - a third dataclass field added in production (drifting the contract the
+#     mock literals encode) fails loudly here, AND
+#   - the split-storage invariant (`sibling_kinds` is NOT proxied by
+#     subscript / `in`) stays locked, catching a mechanical
+#     `result.sibling_kinds[k]` → `result[k]` refactor.
+
+
+def test_metrics_result_dataclass_contract_shape():
+    """Pin the real MetricsResult dataclass shape so the mock literals used
+    throughout this module can't silently diverge from production."""
+    assert dataclasses.is_dataclass(MetricsResult)
+
+    field_names = {f.name for f in dataclasses.fields(MetricsResult)}
+    assert field_names == {"metrics_json", "sibling_kinds"}, (
+        "MetricsResult contract drifted. The mock literals in this module "
+        "encode `MetricsResult(metrics_json=..., sibling_kinds=...)`; a new "
+        "or renamed field means those mocks no longer match production. "
+        f"Got fields: {sorted(field_names)}"
+    )
+
+    # Both fields default to empty containers (field(default_factory=dict)) so
+    # MetricsResult() is constructible with no args — relied on by callers.
+    empty = MetricsResult()
+    assert empty.metrics_json == {}
+    assert empty.sibling_kinds == {}
+
+    # Split-storage invariant: subscript / `in` proxy ONLY to metrics_json.
+    # A series key that lives in sibling_kinds must NOT be visible via the
+    # bare-dict compatibility shim (D-01/D-02). This is the exact misuse the
+    # production __getitem__ guards against.
+    result = MetricsResult(
+        metrics_json={"sharpe": 1.5},
+        sibling_kinds={"exposure_series": [{"date": "2024-01-15", "gross": 1.0}]},
+    )
+    assert "sharpe" in result
+    assert result["sharpe"] == 1.5
+    assert "exposure_series" not in result, (
+        "sibling_kinds keys must NOT be visible via `in` (split storage)."
+    )
+    with pytest.raises(KeyError):
+        # Subscripting a sibling_kinds-only key must raise, not silently
+        # return it — guards the mechanical .sibling_kinds[k] → [k] refactor.
+        _ = result["exposure_series"]
 
 
 # ---------------------------------------------------------------------------
@@ -514,13 +572,45 @@ def test_weighted_rr_is_not_algebraically_profit_factor():
 
 
 def test_derived_trade_metrics_sqn():
-    """METRICS-08: SQN = (mean(R)/std(R)) × sqrt(min(N,100)) over closed positions."""
-    from services.analytics_runner import _compute_derived_trade_metrics
+    """METRICS-08: SQN = (mean(R)/std(R)) × sqrt(min(N,100)) over closed positions.
+
+    Audit-2026-05-07 H-0766 ratchet: the prior assertion only checked
+    `is None or isinstance(..., float)` — against `_sample_inputs()` (60
+    closed positions) the None branch is unreachable and the float branch
+    passes for ANY float, so a formula off by 2× (e.g. sqrt(N) instead of
+    sqrt(min(N,100)), or population vs sample variance) would slip through.
+    Pin the ABSOLUTE value, computed independently from the same fixture
+    with the canonical Van Tharp formula (sample variance, N-1 denom).
+    """
+    import math
+
+    from services.analytics_runner import (
+        _compute_derived_trade_metrics,
+        SQN_TRADE_COUNT_CAP,
+    )
 
     v, t = _sample_inputs()
     result = _compute_derived_trade_metrics(v, t)
     assert "sqn" in result
-    assert result["sqn"] is None or isinstance(result["sqn"], float)
+
+    # Independently recompute SQN from the fixture: R = realized_pnl /
+    # |avg_loss|, mean/std over R-multiples (N-1 sample variance), scaled by
+    # sqrt(min(N, cap)).
+    risk_unit = abs(t["avg_losing_trade"])
+    r_multiples = [
+        tr["realized_pnl"] / risk_unit for tr in t["realized_pnl_per_trade"]
+    ]
+    n = len(r_multiples)
+    assert n == 60  # fixture invariant — 6-element pattern × 10
+    mean_r = sum(r_multiples) / n
+    var_r = sum((r - mean_r) ** 2 for r in r_multiples) / (n - 1)
+    std_r = math.sqrt(var_r)
+    expected_sqn = (mean_r / std_r) * math.sqrt(min(n, SQN_TRADE_COUNT_CAP))
+
+    assert result["sqn"] == pytest.approx(expected_sqn), (
+        f"SQN must equal (mean(R)/std(R)) × sqrt(min(N,{SQN_TRADE_COUNT_CAP})); "
+        f"expected {expected_sqn}, got {result['sqn']}"
+    )
 
 
 def test_derived_trade_metrics_sqn_caps_at_sqrt_100():
@@ -584,15 +674,52 @@ def test_derived_trade_metrics_sqn_caps_at_sqrt_100():
 
 
 def test_derived_trade_metrics_profit_factor_segmented():
-    """METRICS-07: separate PF for long and short via realized_pnl_per_trade."""
+    """METRICS-07: separate PF for long and short via realized_pnl_per_trade.
+
+    Audit-2026-05-07 H-0766 ratchet: the prior assertion only checked
+    `is None or isinstance(..., (int, float))` — a production formula that
+    summed the wrong side, double-counted, or returned gross_profit/N
+    instead of gross_profit/gross_loss would still pass. Pin the ABSOLUTE
+    numeric value computed independently from the fixture so a wrong scalar
+    fails loudly.
+    """
     from services.analytics_runner import _compute_derived_trade_metrics
 
     v, t = _sample_inputs()
     result = _compute_derived_trade_metrics(v, t)
     assert "profit_factor_long" in result
     assert "profit_factor_short" in result
-    for key in ["profit_factor_long", "profit_factor_short"]:
-        assert result[key] is None or isinstance(result[key], (int, float))
+
+    # Independently recompute PF = gross_profit / |gross_loss| per side from
+    # the SAME realized_pnl_per_trade fixture the production code consumes.
+    long_pnls = [
+        tr["realized_pnl"] for tr in t["realized_pnl_per_trade"]
+        if tr["side"] == "long"
+    ]
+    short_pnls = [
+        tr["realized_pnl"] for tr in t["realized_pnl_per_trade"]
+        if tr["side"] == "short"
+    ]
+    expected_pf_long = (
+        sum(p for p in long_pnls if p > 0)
+        / abs(sum(p for p in long_pnls if p < 0))
+    )
+    expected_pf_short = (
+        sum(p for p in short_pnls if p > 0)
+        / abs(sum(p for p in short_pnls if p < 0))
+    )
+    # Sanity: the fixture is built so both sides have a finite, > 1 PF.
+    assert expected_pf_long == pytest.approx(2.5)        # 1250 / 500
+    assert expected_pf_short == pytest.approx(2000 / 850)  # ≈ 2.3529
+
+    assert result["profit_factor_long"] == pytest.approx(expected_pf_long), (
+        f"profit_factor_long must equal gross_profit/|gross_loss| for the "
+        f"long side; expected {expected_pf_long}, got {result['profit_factor_long']}"
+    )
+    assert result["profit_factor_short"] == pytest.approx(expected_pf_short), (
+        f"profit_factor_short must equal gross_profit/|gross_loss| for the "
+        f"short side; expected {expected_pf_short}, got {result['profit_factor_short']}"
+    )
 
 
 def test_derived_trade_metrics_handles_empty_positions():
@@ -1250,8 +1377,13 @@ def _build_balance_flag_mock_supabase(
         strategies row throws — covers the rare path where api_key_id
         stays None and an exception fires before resolution can complete,
         which must emit no_linked_api_key (NOT account_balance_unavailable).
+
+    Audit-2026-05-07 H-0767: `spec=Client` (supabase-py) so signature /
+    attribute drift on the real client surface (a renamed `rpc`, a
+    `.postgrest` reach that doesn't exist) raises AttributeError instead of
+    being silently swallowed by a bare MagicMock.
     """
-    mock = MagicMock()
+    mock = MagicMock(spec=Client)
 
     def _table(name):
         t = MagicMock()
@@ -1300,6 +1432,17 @@ def _build_balance_flag_mock_supabase(
                 return r
 
             def _eq_fill(field, value):
+                # Runner fetches raw fills at analytics_runner.py:756 via
+                # `.select("side, cost, is_maker, timestamp")
+                #   .eq("strategy_id", ...).eq("is_fill", True)`.
+                # Returning data=[] keeps fills_data empty so the runner
+                # short-circuits _compute_position_side_volume_pcts — without
+                # an explicit stub the default MagicMock chain would return
+                # another MagicMock for `.data` (truthy, non-list), which
+                # pollutes the side-volume helper and silently triggers
+                # `position_side_volume_failed=True`, contaminating the
+                # clean-path computation_status assertion added in the
+                # audit-2026-05-07 #9 consumer migration.
                 r = MagicMock()
                 r.execute.return_value = MagicMock(data=[])
                 # H-0630 pagination support. Composite order_by chains
@@ -1329,24 +1472,6 @@ def _build_balance_flag_mock_supabase(
                 )
             eq.single.return_value = single
             sel.eq.return_value = eq
-            t.select.return_value = sel
-        elif name == "trades":
-            # Runner fetches raw fills at analytics_runner.py:756 via
-            # `.select("side, cost, is_maker, timestamp").eq("strategy_id", ...).eq("is_fill", True)`.
-            # Without an explicit stub the default MagicMock chain returns
-            # another MagicMock for `.data`, which pollutes
-            # `_compute_position_side_volume_pcts` and silently triggers
-            # `position_side_volume_failed=True` — a test artifact that
-            # contaminates the clean-path computation_status assertion
-            # added in the audit-2026-05-07 #9 consumer migration.
-            # Returning data=[] keeps fills_data empty so the runner
-            # short-circuits the side-volume helper entirely.
-            sel = MagicMock()
-            eq_strat_t = MagicMock()
-            eq_strat_t.execute.return_value = MagicMock(data=[])
-            eq_t = MagicMock()
-            eq_t.eq.return_value = eq_strat_t
-            sel.eq.return_value = eq_t
             t.select.return_value = sel
         elif name == "position_snapshots":
             sel = MagicMock()
@@ -1390,6 +1515,7 @@ async def _run_and_get_success_upsert(
     daily_rows_count: int = 15,
     used_heuristic_capital: bool = False,
     balance_error: bool = False,
+    benchmark_return: tuple | None = None,
 ) -> dict:
     """Invoke run_strategy_analytics with the standard patches and return
     the full success-path upsert (computation_status='complete' OR
@@ -1404,6 +1530,13 @@ async def _run_and_get_success_upsert(
     ReturnsComputationMeta returned by the patched
     trades_to_daily_returns_with_status — defaults reproduce the
     pre-migration "no warnings" path.
+
+    `benchmark_return`: the `(series_or_None, stale_bool)` tuple the patched
+    `get_benchmark_returns` returns. Defaults to `(None, True)` which sets
+    `benchmark_unavailable=True` in DQF (the historical default for the
+    balance-flag-routing tests). Pass a valid `(pd.Series, False)` tuple to
+    exercise the genuinely-clean path where status MUST stay 'complete' with
+    zero DQF flags (audit-2026-05-07 H-0768).
     """
     from services.analytics_runner import run_strategy_analytics
 
@@ -1423,13 +1556,15 @@ async def _run_and_get_success_upsert(
         "computation_status_hint": hint,
     }
 
+    bench_return = benchmark_return if benchmark_return is not None else (None, True)
+
     with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
          patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
          patch(
              "services.analytics_runner.trades_to_daily_returns_with_status",
              return_value=(mock_returns, mock_meta),
          ), \
-         patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=bench_return)), \
          patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value={})), \
          patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value={})):
         result = await run_strategy_analytics("strat-test")
@@ -1742,6 +1877,58 @@ async def test_consumer_migration_clean_path_does_not_leak_consumer_specific_key
     )
 
 
+@pytest.mark.asyncio
+async def test_consumer_migration_fully_clean_run_status_complete_no_flags():
+    """audit-2026-05-07 H-0768 — close the assertion hole the
+    `..._clean_path_does_not_leak_consumer_specific_keys` test documented
+    (it could not assert status because its scaffolding forced
+    `benchmark_unavailable=True`).
+
+    Drive a GENUINELY clean run:
+      - api_key linked + balance present → no account_balance_unavailable /
+        no_linked_api_key
+      - benchmark returns a VALID series (not stale) → no benchmark_unavailable
+      - reconstruct/exposure return {} cleanly, snapshots + fills empty → no
+        position_* / fills_* / side-volume flags
+      - meta reports no warnings → no used_heuristic_capital / balance_error
+
+    Under these conditions the runner MUST persist
+    `computation_status == 'complete'` AND `data_quality_flags` must carry
+    ZERO flags (None or {}). A regression that promotes status to
+    'complete_with_warnings' on a clean run — or that leaks a spurious flag —
+    breaks the eight frontend consumers that exact-match 'complete' and is
+    invisible to every other test in this module.
+    """
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+
+    # A valid, non-stale benchmark series aligned to the patched returns
+    # window (15 business days from 2024-01-01).
+    bench_dates = pd.bdate_range("2024-01-01", periods=15)
+    valid_benchmark = pd.Series([0.0005] * 15, index=bench_dates, name="BTC")
+
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        benchmark_return=(valid_benchmark, False),  # (series, stale=False)
+    )
+
+    assert upsert.get("computation_status") == "complete", (
+        "A fully clean run must persist computation_status='complete' "
+        f"(no warnings promotion); got: {upsert.get('computation_status')!r}"
+    )
+    flags = upsert.get("data_quality_flags")
+    assert not flags, (
+        "A fully clean run must carry zero data_quality_flags. "
+        f"Got: {flags!r}"
+    )
+
+
 def test_volume_metrics_no_longer_aliases_long_to_buy():
     """_compute_volume_metrics dropped the misleading long_volume_pct /
     short_volume_pct aliases that copied buy/sell percentages. Those
@@ -1917,6 +2104,88 @@ class TestComputeVolumeMetrics:
         assert result["sell_volume_pct"] == 1.0
         assert result["total_volume_usd"] == 100.0
 
+    # Audit-2026-05-07 H-0769: NaN / inf cost coverage gap. A NaN cost from
+    # an upstream parser divide-by-zero is a *numeric* float, so the
+    # `except (TypeError, ValueError)` guard does NOT catch it — it survives
+    # `abs(float(...))` and propagates into total_volume_usd, which the runner
+    # then writes into strategy_analytics JSONB. NaN/Inf are NOT JSON-compliant
+    # (`json.dumps(..., allow_nan=False)` raises), so this corrupts the row or
+    # bypasses encoder safeguards downstream.
+    #
+    # These two tests pin the CORRECT contract documented in the helper's
+    # docstring ("total_volume_usd is the absolute sum"; percentages in [0,1]):
+    # the output must be FINITE and JSON-serializable. They are marked
+    # xfail(strict=True) because production (_compute_volume_metrics) does NOT
+    # currently sanitize non-finite cost — see the FLAGGED note in the audit
+    # report. When production adds an `isfinite` guard, strict-xfail turns the
+    # xpass into a hard failure, forcing this marker to be removed (the test
+    # ratchets the fix in rather than silently tolerating the bug).
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="H-0769: production _compute_volume_metrics does not filter "
+        "NaN cost; total_volume_usd becomes NaN (non-JSON-compliant). "
+        "Flagged — fix requires production change.",
+    )
+    def test_nan_cost_does_not_poison_totals(self) -> None:
+        """A NaN cost (upstream divide-by-zero) must NOT propagate into
+        total_volume_usd — the result must stay finite and JSON-serializable.
+        """
+        import json
+        import math
+
+        from services.analytics_runner import _compute_volume_metrics
+
+        result = _compute_volume_metrics(
+            [
+                {"side": "buy", "cost": float("nan")},
+                {"side": "sell", "cost": 100.0},
+            ],
+        )
+        # total_volume_usd must be finite (the NaN fill contributes 0).
+        assert math.isfinite(result["total_volume_usd"]), (
+            f"NaN cost leaked into total_volume_usd: {result['total_volume_usd']!r}"
+        )
+        assert result["total_volume_usd"] == 100.0
+        # Percentages stay bounded and finite.
+        assert math.isfinite(result["buy_volume_pct"])
+        assert math.isfinite(result["sell_volume_pct"])
+        assert 0.0 <= result["buy_volume_pct"] <= 1.0
+        assert 0.0 <= result["sell_volume_pct"] <= 1.0
+        # The whole payload must round-trip through strict JSON (no NaN/Inf).
+        json.dumps(result, allow_nan=False)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="H-0769: production _compute_volume_metrics does not filter "
+        "inf cost; total_volume_usd becomes inf and buy_volume_pct becomes "
+        "NaN (non-JSON-compliant). Flagged — fix requires production change.",
+    )
+    def test_inf_cost_does_not_poison_totals(self) -> None:
+        """An inf cost must NOT propagate into total_volume_usd / percentages
+        — the result must stay finite and JSON-serializable.
+        """
+        import json
+        import math
+
+        from services.analytics_runner import _compute_volume_metrics
+
+        result = _compute_volume_metrics(
+            [
+                {"side": "buy", "cost": float("inf")},
+                {"side": "sell", "cost": 100.0},
+            ],
+        )
+        assert math.isfinite(result["total_volume_usd"]), (
+            f"inf cost leaked into total_volume_usd: {result['total_volume_usd']!r}"
+        )
+        assert result["total_volume_usd"] == 100.0
+        assert math.isfinite(result["buy_volume_pct"])
+        assert math.isfinite(result["sell_volume_pct"])
+        assert 0.0 <= result["buy_volume_pct"] <= 1.0
+        assert 0.0 <= result["sell_volume_pct"] <= 1.0
+        json.dumps(result, allow_nan=False)
+
 
 # ---------------------------------------------------------------------------
 # Phase 12 Plan 06 / METRICS-15 / METRICS-17 — runner integration smoke tests
@@ -1990,8 +2259,15 @@ def _build_runner_mock_supabase(
       - trades_select_calls (optional): every trades.select(cols) column list
         — pass `[]` to capture; pin the projection in regression tests so a
         future PostgREST 42703 doesn't go latent again.
+
+    Audit-2026-05-07 H-0767: the client is `spec=Client` (supabase-py) so a
+    refactor that calls a method NOT on the real Client (e.g. renaming
+    `rpc` or reaching for a `.postgrest` surface that doesn't exist) raises
+    AttributeError instead of silently recording a phantom call against a
+    bare MagicMock. The `.table` / `.rpc` callables we install below are
+    both real Client attributes, so assignment is permitted under the spec.
     """
-    mock = MagicMock()
+    mock = MagicMock(spec=Client)
 
     def _table(name):
         t = MagicMock()
@@ -2126,7 +2402,19 @@ async def test_run_strategy_analytics_writes_sibling_kinds() -> None:
     Asserts:
       - supabase.rpc("upsert_strategy_analytics_series_batch", ...) called
       - payload contains expected sibling kinds (10 from metrics.py + 2 from runner)
-      - exposure_series + turnover_series present when position_snapshots non-empty
+      - exposure_series + turnover_series KEY PRESENCE in the RPC payload
+
+    SCOPE NOTE (audit-2026-05-07 H-0763 / H-0765 / M-0726): this test
+    patches `compute_exposure_metrics` to return a hand-fed `fake_exposure`,
+    so the `exposure_series in kinds_payload` assertion below proves only
+    the runner's WIRING — that whatever the exposure function returns is
+    threaded through to the batch RPC payload. It deliberately does NOT
+    exercise the real position_snapshots → exposure_series computation
+    (that would be tautological: the mock returns X, we assert X is
+    present). The genuine exposure computation is covered NON-tautologically
+    by `test_real_compute_exposure_metrics_derives_series_from_snapshots`
+    below, which drives the REAL `compute_exposure_metrics` against snapshot
+    fixtures and pins the computed gross/net values.
     """
     from services.analytics_runner import run_strategy_analytics
 
@@ -2214,12 +2502,115 @@ async def test_run_strategy_analytics_writes_sibling_kinds() -> None:
 
     # H-A1: exposure_series + turnover_series populated from real
     # position_snapshots-derived data (NOT silently skipped).
+    # NOTE: exposure_series here is the PATCHED fake_exposure value — see the
+    # SCOPE NOTE in this test's docstring. The real derivation is pinned in
+    # test_real_compute_exposure_metrics_derives_series_from_snapshots.
     assert "exposure_series" in kinds_payload, (
         "H-A1 violated: exposure_series missing from sibling_kinds"
     )
     assert "turnover_series" in kinds_payload, (
         "H-A1 violated: turnover_series missing from sibling_kinds"
     )
+
+
+@pytest.mark.asyncio
+async def test_real_compute_exposure_metrics_derives_series_from_snapshots() -> None:
+    """audit-2026-05-07 H-0763 / H-0765 / M-0726 (non-tautological coverage).
+
+    `test_run_strategy_analytics_writes_sibling_kinds` MOCKS
+    `compute_exposure_metrics`, so it cannot detect a regression where the
+    real function fails to derive exposure_series from position_snapshots.
+    This test drives the REAL `compute_exposure_metrics` against a snapshot
+    fixture and pins the COMPUTED gross/net values — the mock is told
+    nothing, the assertions check what the production math produces.
+
+    Fixture (two dates, mixed sides so net != gross on day 2):
+      2024-01-15: long 10_000 + long 5_000              → gross 15_000, net +15_000
+      2024-01-16: long 12_000 + short 4_000             → gross 16_000, net +8_000
+    """
+    from services.position_reconstruction import compute_exposure_metrics
+
+    snapshot_rows = [
+        {"snapshot_date": "2024-01-15", "side": "long", "size_usd": "10000",
+         "mark_price": "65000"},
+        {"snapshot_date": "2024-01-15", "side": "long", "size_usd": "5000",
+         "mark_price": "65000"},
+        {"snapshot_date": "2024-01-16", "side": "long", "size_usd": "12000",
+         "mark_price": "66000"},
+        {"snapshot_date": "2024-01-16", "side": "short", "size_usd": "4000",
+         "mark_price": "66000"},
+    ]
+
+    # Mock supabase supporting the REAL compute_exposure_metrics call chains:
+    #   strategies.select("api_key_id").eq("id",...).limit(1).execute()
+    #   strategies.select("id").eq("api_key_id",...).execute()  (sibling check)
+    #   position_snapshots.select(...).eq("strategy_id",...).order(...).execute()
+    def _table(name):
+        t = MagicMock()
+        if name == "strategies":
+            sel = MagicMock()
+
+            def _select(cols):
+                eq = MagicMock()
+                if "api_key_id" in cols:
+                    # self lookup: .eq("id", ...).limit(1).execute()
+                    limit = MagicMock()
+                    limit.execute.return_value = MagicMock(
+                        data=[{"api_key_id": "key-1"}]
+                    )
+                    eq.limit.return_value = limit
+                else:
+                    # sibling check: .eq("api_key_id", ...).execute()
+                    # Return exactly ONE row so the shared-api-key skip path
+                    # does NOT fire (len(sib_rows) == 1).
+                    eq.execute.return_value = MagicMock(
+                        data=[{"id": "strat-test"}]
+                    )
+                sel.eq.return_value = eq
+                return sel
+
+            t.select = _select
+        elif name == "position_snapshots":
+            sel = MagicMock()
+            eq = MagicMock()
+            order = MagicMock()
+            order.execute.return_value = MagicMock(data=snapshot_rows)
+            eq.order.return_value = order
+            sel.eq.return_value = eq
+            t.select.return_value = sel
+        return t
+
+    mock_supabase = MagicMock(spec=Client)
+    mock_supabase.table = _table
+
+    async def _mock_db_execute(fn):
+        return await asyncio.to_thread(fn)
+
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ):
+        result = await compute_exposure_metrics("strat-test", mock_supabase)
+
+    # The shared-key skip must NOT have fired (sibling check returned 1 row).
+    assert "exposure_series" in result, (
+        f"real compute_exposure_metrics did not produce exposure_series; "
+        f"got keys {sorted(result.keys())}"
+    )
+    series = result["exposure_series"]
+    assert len(series) == 2, f"expected one point per snapshot date; got {series!r}"
+
+    by_date = {pt["date"]: pt for pt in series}
+    # Day 1: gross = |10000| + |5000| = 15000; net = +10000 + 5000 = 15000.
+    assert by_date["2024-01-15"]["gross"] == pytest.approx(15000.0)
+    assert by_date["2024-01-15"]["net"] == pytest.approx(15000.0)
+    # Day 2: gross = |12000| + |4000| = 16000; net = +12000 - 4000 = 8000.
+    assert by_date["2024-01-16"]["gross"] == pytest.approx(16000.0)
+    assert by_date["2024-01-16"]["net"] == pytest.approx(8000.0)
+
+    # Aggregates are derived from the SAME per-date series, so pin them too.
+    assert result["max_gross_exposure"] == pytest.approx(16000.0)
+    assert result["mean_gross_exposure"] == pytest.approx((15000.0 + 16000.0) / 2)
 
 
 @pytest.mark.asyncio
