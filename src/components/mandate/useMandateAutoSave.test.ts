@@ -182,6 +182,35 @@ describe("useMandateAutoSave", () => {
     expect(result.current.fieldErrors.max_weight).toBe("Couldn't save.");
   });
 
+  it("TC6c 429 on every attempt exhausts the budget → terminal error, field released (no stuck spinner)", async () => {
+    // Regression for the 429 fall-through: previously the loop exited via the
+    // unconditional `continue`, leaving the field pinned in savingFields and a
+    // message falsely promising a retry that would never run.
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      errorResponse(429, { error: "Too many requests" }, "1"),
+    );
+
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    await act(async () => {
+      const promise = result.current.save("max_weight", 0.25);
+      // Three 1s Retry-After waits precede the 4th, budget-exhausting attempt.
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(1000);
+      await promise;
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(result.current.saveState).toBe("error");
+    // Terminal message must NOT promise a retry.
+    expect(result.current.fieldErrors.max_weight).toBe(
+      "Saving too fast. Please wait a moment and try again.",
+    );
+    // The field must be released from the in-flight set.
+    expect(result.current.savingFields.has("max_weight")).toBe(false);
+  });
+
   it("TC7 concurrent saves: second save wins, first stale response is dropped", async () => {
     // First save's response resolves after the second save's.
     let resolveFirst: (res: Response) => void = () => {};
