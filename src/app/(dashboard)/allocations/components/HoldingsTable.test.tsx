@@ -396,6 +396,76 @@ describe("HoldingsTable — note icon column + expandable sub-row (08-04 / MANAG
     });
   });
 
+  // M-0077 — the note sub-row (HoldingNoteRow) fires a GET /api/notes on
+  // mount to hydrate existing content. T16 covers the open→close toggle, but
+  // not the fetch-on-mount RACE: opening the row (mount → GET in flight) then
+  // immediately closing it (unmount) BEFORE the GET resolves. HoldingNoteRow's
+  // mount effect uses a `cancelled` flag in cleanup so a post-unmount resolve
+  // is dropped. The correct behaviour is: no late state update / React act
+  // warning, and no stale region left mounted after the deferred resolve.
+  it("M-0077: opening then immediately closing the note row before its mount-GET resolves leaves no stale region and does not warn", async () => {
+    // Defer the GET so it is still pending when we close the row.
+    let resolveGet: ((r: Response) => void) | null = null;
+    fetchSpy.mockReset();
+    fetchSpy.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveGet = resolve;
+        }),
+    );
+
+    // React logs act/state-after-unmount issues via console.error — capture
+    // them so a regression that drops the `cancelled` guard surfaces here.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const holdings = [makeHolding({ id: "h1", symbol: "BTC" })];
+    render(
+      <HoldingsTable
+        holdings={holdings}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    const icon = screen.getByRole("button", { name: "Add note for BTC spot" });
+
+    // Open (mounts the sub-row → GET starts) then close (unmounts) rapidly,
+    // both while the GET is still pending.
+    await act(async () => {
+      fireEvent.click(icon);
+    });
+    expect(
+      screen.getByRole("region", { name: "Note for BTC spot" }),
+    ).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(icon);
+    });
+    expect(
+      screen.queryByRole("region", { name: /Note for BTC spot/ }),
+    ).toBeNull();
+
+    // Now resolve the orphaned GET — the cancelled-guard must swallow the
+    // result without a post-unmount state update.
+    await act(async () => {
+      resolveGet?.(
+        new Response(JSON.stringify({ content: "late", updated_at: null }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    // Region stays closed; no React act/state-after-unmount warning fired.
+    expect(
+      screen.queryByRole("region", { name: /Note for BTC spot/ }),
+    ).toBeNull();
+    const offenders = errorSpy.mock.calls.filter((c) =>
+      String(c[0] ?? "").match(/unmounted|not wrapped in act|state update/i),
+    );
+    expect(offenders).toHaveLength(0);
+    errorSpy.mockRestore();
+  });
+
   it("T20: aria-expanded on the note icon mirrors the row's expansion state", async () => {
     const holdings = [makeHolding({ id: "h1", symbol: "BTC" })];
     render(

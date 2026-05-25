@@ -276,6 +276,115 @@ describe("POST /api/for-quants-lead — gap coverage", () => {
   });
 
   /**
+   * M-0315 — wizard_context schema negative cases.
+   *
+   * WIZARD_CONTEXT_SCHEMA whitelists the wizard step enum, bounds
+   * wizard_session_id to length 8..64, and requires draft_strategy_id to
+   * be a UUID. The existing suites cover the happy path (populated
+   * object) and the null/omitted omission contract, but NOT the negative
+   * cases. Without these, a schema regression (e.g. loosening the enum to
+   * z.string(), or dropping the length/uuid bounds) would silently admit
+   * arbitrary values into the founder triage queue.
+   *
+   * The route flattens Zod issues to `field -> message[]` keyed on the
+   * dotted issue path, so a wizard_context.step issue surfaces under the
+   * "wizard_context.step" field key. We assert the 400 + the keyed field
+   * AND that the bad row never reached the insert (the queue stays clean).
+   */
+  describe("wizard_context schema rejects invalid values (M-0315)", () => {
+    it("step='unknown_step' → 400 with a wizard_context.step field error and no insert", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeRequest({
+          ...VALID_PAYLOAD,
+          wizard_context: {
+            step: "unknown_step",
+            wizard_session_id: "sess-abcdef-1234",
+          },
+        }),
+      );
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as {
+        fieldErrors: Record<string, string[]>;
+      };
+      expect(body.fieldErrors["wizard_context.step"]).toBeDefined();
+      expect(body.fieldErrors["wizard_context.step"].length).toBeGreaterThanOrEqual(
+        1,
+      );
+      // A rejected step value must never land in the triage queue.
+      expect(dbState.inserted).toHaveLength(0);
+    });
+
+    it("wizard_session_id length 7 (below min 8) → 400 and no insert", async () => {
+      const { POST } = await import("./route");
+      const shortId = "1234567"; // 7 chars, below min(8)
+      expect(shortId.length).toBe(7);
+      const res = await POST(
+        makeRequest({
+          ...VALID_PAYLOAD,
+          wizard_context: {
+            step: "csv_upload",
+            wizard_session_id: shortId,
+          },
+        }),
+      );
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as {
+        fieldErrors: Record<string, string[]>;
+      };
+      expect(
+        body.fieldErrors["wizard_context.wizard_session_id"],
+      ).toBeDefined();
+      expect(dbState.inserted).toHaveLength(0);
+    });
+
+    it("wizard_session_id length 65 (above max 64) → 400 and no insert", async () => {
+      const { POST } = await import("./route");
+      const longId = "x".repeat(65); // 65 chars, above max(64)
+      expect(longId.length).toBe(65);
+      const res = await POST(
+        makeRequest({
+          ...VALID_PAYLOAD,
+          wizard_context: {
+            step: "csv_upload",
+            wizard_session_id: longId,
+          },
+        }),
+      );
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as {
+        fieldErrors: Record<string, string[]>;
+      };
+      expect(
+        body.fieldErrors["wizard_context.wizard_session_id"],
+      ).toBeDefined();
+      expect(dbState.inserted).toHaveLength(0);
+    });
+
+    it("draft_strategy_id that is not a UUID → 400 and no insert", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeRequest({
+          ...VALID_PAYLOAD,
+          wizard_context: {
+            draft_strategy_id: "not-a-uuid",
+            step: "csv_upload",
+            wizard_session_id: "sess-abcdef-1234",
+          },
+        }),
+      );
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as {
+        fieldErrors: Record<string, string[]>;
+      };
+      expect(
+        body.fieldErrors["wizard_context.draft_strategy_id"],
+      ).toBeDefined();
+      expect(dbState.inserted).toHaveLength(0);
+    });
+  });
+
+  /**
    * Red-team specialist regression — same-person retries with different
    * casing must canonicalize to the same DB row form so PR-5's future
    * UNIQUE (lower(email), date_trunc('day', created_at)) constraint

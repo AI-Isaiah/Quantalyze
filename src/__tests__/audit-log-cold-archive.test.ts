@@ -323,6 +323,73 @@ describe("Migration 056 — audit_log_cold table + append-only invariant", () =>
     45_000,
   );
 
+  // H-0010 — make the cold-row cleanup LEAK observable instead of silent.
+  // The append-only deny policy + REVOKE on audit_log_cold means a
+  // service-role PostgREST DELETE is a no-op (see the append-only DELETE
+  // test above: `expect(deleted).toEqual([])`). `deleteColdRowDirect`
+  // therefore swallows the failure and leaves the row forever. This is a
+  // real test-DB hygiene problem: __cold_test_* rows accumulate across
+  // runs, and any future probe doing `count(*) ... WHERE entity_type =
+  // 'test_probe'` would false-flag a regression.
+  //
+  // We assert the CORRECT end-state the cleanup design SHOULD provide:
+  // after attempting cleanup, a seeded cold probe row must be GONE. There
+  // is no test-only purge RPC today (migration 057 only ships
+  // test_force_hot_to_cold_move), so this currently FAILS — surfacing the
+  // leak. FLAGGED for a production follow-up: add a SECURITY DEFINER,
+  // service_role-only `test_force_cold_purge(p_id uuid)` (or marker-prefix
+  // sweep) RPC mirroring test_force_hot_to_cold_move, then route
+  // deleteColdRowDirect through it.
+  it.skipIf(!HAS_LIVE_DB).fails(
+    "H-0010: cold-row cleanup must actually remove the seeded probe row (PostgREST DELETE no-ops under deny policy) — needs test-only purge RPC in follow-up",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const cleanup: { userIds: string[] } = { userIds: [] };
+      let coldRowId: string | null = null;
+
+      try {
+        const userId = await createTestUser(admin, `cold-leak-${ts}@test.sec`);
+        cleanup.userIds.push(userId);
+
+        const { data: insertData, error: insertErr } = await admin
+          .from("audit_log_cold")
+          .insert({
+            id: crypto.randomUUID(),
+            user_id: userId,
+            action: `__cold_test_leak_${ts}`,
+            entity_type: "test_probe",
+            entity_id: crypto.randomUUID(),
+            metadata: { marker: `leak-${ts}` },
+            created_at: new Date(
+              Date.now() - 3 * 365 * 24 * 60 * 60 * 1000,
+            ).toISOString(),
+          })
+          .select("id")
+          .single();
+        expect(insertErr).toBeNull();
+        expect(insertData).toBeTruthy();
+        coldRowId = insertData!.id as string;
+
+        // Attempt the cleanup path used by every test in this file.
+        await deleteColdRowDirect(admin, coldRowId);
+
+        // Correct behavior: the probe row is gone. It is NOT (PostgREST
+        // DELETE is denied → no-op), so this assertion fails and the leak
+        // is surfaced.
+        const { data: reread } = await admin
+          .from("audit_log_cold")
+          .select("id")
+          .eq("id", coldRowId)
+          .maybeSingle();
+        expect(reread).toBeNull();
+      } finally {
+        await cleanupLiveDbRow(admin, cleanup);
+      }
+    },
+    30_000,
+  );
+
   it.skipIf(HAS_LIVE_DB)(
     "advertises skip reason when live DB is unavailable",
     () => {

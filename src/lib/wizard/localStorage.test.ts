@@ -1,11 +1,14 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
 import {
   computeWizardHmac,
   deriveWizardResumeOverrides,
+  formatSavedAt,
   loadWizardState,
+  newWizardSessionId,
   saveWizardState,
   type WizardLocalState,
 } from "./localStorage";
+import { UUID_RE } from "@/lib/utils";
 
 // Regression coverage for the React #418 hydration mismatch on
 // /strategies/new/wizard?source=csv. The previous WizardClient pattern
@@ -418,5 +421,78 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
     const a = await computeWizardHmac("the-payload", "key-1");
     const b = await computeWizardHmac("the-payload", "key-2");
     expect(a).not.toBe(b);
+  });
+});
+
+// M-0590 — formatSavedAt + newWizardSessionId had no colocated coverage.
+describe("formatSavedAt — Resume banner relative-time label", () => {
+  const NOW = 1_700_000_000_000;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns '' for a non-finite timestamp", () => {
+    expect(formatSavedAt(Number.NaN)).toBe("");
+    expect(formatSavedAt(Number.POSITIVE_INFINITY)).toBe("");
+  });
+
+  it("returns 'just now' for a future timestamp (clock skew) and for <1 minute", () => {
+    expect(formatSavedAt(NOW + 60_000)).toBe("just now");
+    expect(formatSavedAt(NOW - 30_000)).toBe("just now");
+  });
+
+  it("pluralizes minutes correctly (singular at exactly 1)", () => {
+    expect(formatSavedAt(NOW - 60_000)).toBe("1 minute ago");
+    expect(formatSavedAt(NOW - 5 * 60_000)).toBe("5 minutes ago");
+    expect(formatSavedAt(NOW - 59 * 60_000)).toBe("59 minutes ago");
+  });
+
+  it("rolls over to hours then days with correct pluralization", () => {
+    expect(formatSavedAt(NOW - 60 * 60_000)).toBe("1 hour ago");
+    expect(formatSavedAt(NOW - 23 * 60 * 60_000)).toBe("23 hours ago");
+    expect(formatSavedAt(NOW - 24 * 60 * 60_000)).toBe("1 day ago");
+    expect(formatSavedAt(NOW - 3 * 24 * 60 * 60_000)).toBe("3 days ago");
+  });
+});
+
+describe("newWizardSessionId — server-side UUID_RE compatibility (M-0590)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("emits a value matching the server-side UUID_RE when crypto.randomUUID is available", () => {
+    // The modern path delegates to crypto.randomUUID(), which the
+    // /api/strategies/create-with-key route validates via isUuid(UUID_RE).
+    const id = newWizardSessionId();
+    expect(UUID_RE.test(id)).toBe(true);
+  });
+
+  // M-0590: when crypto.randomUUID is undefined (older browsers / restricted
+  // environments) the fallback must still emit a canonical 8-4-4-4-12 UUID-v4
+  // shape that passes the server-side UUID_RE in
+  // /api/strategies/create-with-key. The prior fallback yielded `${ts}-${rnd}`
+  // — hex with a SINGLE dash — which FAILED that regex and silently 400'd
+  // wizard sessions on those browsers. This guards against regressing back to
+  // a non-UUID fallback.
+  it("M-0590: crypto.randomUUID-unavailable fallback emits a UUID-v4-shaped id that passes UUID_RE", () => {
+    const realCrypto = globalThis.crypto;
+    vi.stubGlobal("crypto", {
+      ...realCrypto,
+      randomUUID: undefined,
+    } as unknown as Crypto);
+
+    const id = newWizardSessionId();
+    expect(UUID_RE.test(id)).toBe(true);
+    // Version nibble is 4; variant nibble ∈ {8,9,a,b}.
+    expect(id[14]).toBe("4");
+    expect(id[19]).toMatch(/[89ab]/);
+
+    vi.unstubAllGlobals();
   });
 });

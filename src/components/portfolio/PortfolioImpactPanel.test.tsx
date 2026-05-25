@@ -178,6 +178,51 @@ describe("<PortfolioImpactPanel>", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
+  // M-0970 (audit-2026-05-07) — the error-state test above asserts the
+  // Retry button is PRESENT but never clicks it. For a non-429 error the
+  // button must be enabled and clicking it must re-fire fetchImpact and
+  // recover. A regression that breaks the useCallback memoization or fails
+  // to re-enable the button would slip past the present-only assertion.
+  it("M-0970: clicking Retry on a 500 re-fires the fetch and recovers", async () => {
+    let call = 0;
+    mockFetch(async () => {
+      call += 1;
+      if (call === 1) {
+        return new Response(
+          JSON.stringify({ error: "Simulator service error" }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify(buildResponse()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Recoverable"
+        onClose={() => {}}
+      />,
+    );
+
+    // First fetch fails → error state with an ENABLED Retry button (non-429).
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).not.toBeDisabled();
+
+    fireEvent.click(retryButton);
+
+    // Second fetch succeeds → the deltas section renders.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("region", { name: "Portfolio impact deltas" }),
+      ).toBeInTheDocument(),
+    );
+    expect(call).toBe(2);
+  });
+
   it("disables the retry button and shows a countdown on 429", async () => {
     mockFetch(async () =>
       new Response(
@@ -313,5 +358,468 @@ describe("<PortfolioImpactPanel>", () => {
     expect(
       screen.getByRole("button", { name: "Close panel" }),
     ).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // H-1128 — NonOkState copy for already_in_portfolio + empty_portfolio
+  // -------------------------------------------------------------------------
+
+  function nonOkResponse(status: "already_in_portfolio" | "empty_portfolio") {
+    // The non-ok branches expose no deltas / proposed metrics / proposed curve.
+    return buildResponse({
+      status,
+      overlap_days: 0,
+      partial_history: false,
+      proposed: {
+        sharpe: null,
+        max_drawdown: null,
+        avg_correlation: null,
+        concentration: null,
+      },
+      equity_curve_proposed: [],
+    });
+  }
+
+  it("H-1128: renders the already_in_portfolio empty state copy with no delta chips", async () => {
+    mockFetch(async () =>
+      new Response(JSON.stringify(nonOkResponse("already_in_portfolio")), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Already held"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/already in your portfolio/i),
+      ).toBeInTheDocument(),
+    );
+    // NonOkState must NOT render the DeltaHero / chips.
+    expect(screen.queryByText("Projected impact")).toBeNull();
+    expect(screen.queryByText("Sharpe")).toBeNull();
+    expect(screen.queryByText(/Not enough overlapping history/i)).toBeNull();
+  });
+
+  it("H-1128: renders the empty_portfolio empty state copy", async () => {
+    mockFetch(async () =>
+      new Response(JSON.stringify(nonOkResponse("empty_portfolio")), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="No holdings"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Your portfolio has no strategies yet/i),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("Projected impact")).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // H-1129 — buildDeltaAnnouncement regressed / unchanged paths (ARIA live)
+  // -------------------------------------------------------------------------
+
+  it("H-1129: announces a regression through the ARIA live region", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            deltas: {
+              sharpe_delta: -0.15,
+              dd_delta: -0.02,
+              corr_delta: -0.03,
+              concentration_delta: -0.05,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Worse Strategy"
+        onClose={() => {}}
+      />,
+    );
+
+    // value < 0 → "regressed by -0.150" (NOT "improved").
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Sharpe regressed by -0\.150/),
+      ).toBeInTheDocument(),
+    );
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/Sharpe regressed by -0\.150/);
+    expect(status.textContent).not.toMatch(/Sharpe improved/);
+  });
+
+  it("H-1129: announces 'unchanged' when a delta is exactly zero", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            deltas: {
+              sharpe_delta: 0,
+              dd_delta: 0,
+              corr_delta: 0,
+              concentration_delta: 0,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Flat Strategy"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText(/Sharpe unchanged/)).toBeInTheDocument(),
+    );
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/Sharpe unchanged/);
+  });
+
+  // -------------------------------------------------------------------------
+  // H-1130 — EquityOverlay gap handling + empty-axis branches
+  // -------------------------------------------------------------------------
+
+  it("H-1130: renders a gapped proposed path when the proposed curve is sparser than current", async () => {
+    const current = [
+      { date: "2025-01-01", value: 1.0 },
+      { date: "2025-01-02", value: 1.01 },
+      { date: "2025-01-03", value: 1.02 },
+      { date: "2025-01-04", value: 1.03 },
+      { date: "2025-01-05", value: 1.04 },
+    ];
+    // Proposed only covers the last two dates → the first three merged points
+    // have proposed === null, forcing buildPath's gap (started=false) branch.
+    const proposed = [
+      { date: "2025-01-04", value: 1.05 },
+      { date: "2025-01-05", value: 1.07 },
+    ];
+
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            equity_curve_current: current,
+            equity_curve_proposed: proposed,
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const { container } = render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Sparse proposed"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByLabelText("Portfolio equity curve: current vs proposed"),
+      ).toBeInTheDocument(),
+    );
+
+    const paths = Array.from(container.querySelectorAll("path"));
+    expect(paths.length).toBeGreaterThanOrEqual(2);
+    // The proposed line (teal #1B6B5A) starts with a fresh M segment after the
+    // null gap. Its path begins partway across the x-axis (x > left padding 8).
+    const proposedPath = paths.find(
+      (p) => p.getAttribute("stroke") === "#1B6B5A",
+    );
+    expect(proposedPath).toBeTruthy();
+    const d = proposedPath!.getAttribute("d") ?? "";
+    expect(d.startsWith("M")).toBe(true);
+    const firstX = Number(d.slice(1).split(",")[0]);
+    expect(firstX).toBeGreaterThan(8);
+  });
+
+  it("H-1130: renders the no-data state when both equity curves are empty", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            equity_curve_current: [],
+            equity_curve_proposed: [],
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="No curves"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText(/No equity history available/i)).toBeInTheDocument(),
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // H-1131 — abort-on-unmount: no setState-after-unmount warning
+  // -------------------------------------------------------------------------
+
+  it("H-1131: aborts the in-flight fetch on unmount without a setState-after-unmount warning", async () => {
+    // A fetch that resolves only when the AbortController fires, mirroring a
+    // real in-flight request that is cancelled on cleanup.
+    let abortListenerInstalled = false;
+    mockFetch(
+      (input?: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          const signal = init?.signal;
+          if (signal) {
+            abortListenerInstalled = true;
+            signal.addEventListener("abort", () => {
+              reject(
+                new DOMException("The operation was aborted.", "AbortError"),
+              );
+            });
+          }
+        }) as unknown as ReturnType<typeof fetch>,
+    );
+
+    const errorSpy = vi.spyOn(console, "error");
+
+    const { unmount } = render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Rapid close"
+        onClose={() => {}}
+      />,
+    );
+
+    // Fetch is in flight (never resolves on its own); unmount triggers abort.
+    expect(abortListenerInstalled).toBe(true);
+    unmount();
+
+    // Give any rejected promise microtasks a chance to flush.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // No "Can't perform a React state update on an unmounted component" or
+    // act() warnings should have been logged.
+    const warned = errorSpy.mock.calls.some((call) =>
+      call.some(
+        (arg) =>
+          typeof arg === "string" &&
+          /unmounted|not wrapped in act|state update/i.test(arg),
+      ),
+    );
+    expect(warned).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // H-1132 — formatDelta sign convention through the rendered chips
+  // -------------------------------------------------------------------------
+
+  it("H-1132: renders a negative ratio delta with no '+' prefix and the negative color", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            deltas: {
+              sharpe_delta: -0.15,
+              dd_delta: 0.02,
+              corr_delta: 0.03,
+              concentration_delta: 0.05,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Neg sharpe"
+        onClose={() => {}}
+      />,
+    );
+
+    const value = await screen.findByText("-0.150");
+    expect(value).toBeInTheDocument();
+    expect(value.className).toContain("text-negative");
+  });
+
+  it("H-1132: renders a zero ratio delta with the '±' prefix and neutral color", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            deltas: {
+              sharpe_delta: 0,
+              dd_delta: 0.02,
+              corr_delta: 0.03,
+              concentration_delta: 0.05,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Zero sharpe"
+        onClose={() => {}}
+      />,
+    );
+
+    const value = await screen.findByText("±0.000");
+    expect(value).toBeInTheDocument();
+    expect(value.className).toContain("text-text-secondary");
+  });
+
+  it("H-1132: formats a percent delta (MaxDD) as a percentage with a '+' prefix", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            deltas: {
+              sharpe_delta: 0.15,
+              dd_delta: 0.025,
+              corr_delta: 0.03,
+              concentration_delta: 0.05,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="MaxDD percent"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("+2.50%")).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // H-1133 — formatRetryAfter boundaries (seconds / minutes / hours)
+  // -------------------------------------------------------------------------
+
+  function rateLimited(retryAfter: number) {
+    return new Response(
+      JSON.stringify({
+        error: "Too many simulations. Try again later.",
+        retryAfter,
+      }),
+      {
+        status: 429,
+        headers: {
+          "Content-Type": "application/json",
+          "Retry-After": String(retryAfter),
+        },
+      },
+    );
+  }
+
+  it("H-1133: formats a sub-60s retry as seconds", async () => {
+    mockFetch(async () => rateLimited(30));
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Fast recovery"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText(/Try again in 30s/)).toBeInTheDocument();
+  });
+
+  it("H-1133: clamps a fractional sub-second retry to 1s (Math.max(1, ...))", async () => {
+    mockFetch(async () => rateLimited(0.5));
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Sub-second"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText(/Try again in 1s/)).toBeInTheDocument();
+  });
+
+  it("H-1133: formats an exactly-3600s retry as 1h (not 0h)", async () => {
+    mockFetch(async () => rateLimited(3600));
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="One hour"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText(/Try again in 1h/)).toBeInTheDocument();
+  });
+
+  it("H-1133: formats a 7200s retry as 2h", async () => {
+    mockFetch(async () => rateLimited(7200));
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Two hours"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText(/Try again in 2h/)).toBeInTheDocument();
   });
 });

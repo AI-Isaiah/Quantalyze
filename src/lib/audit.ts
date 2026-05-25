@@ -278,6 +278,12 @@ export type AuditAction =
   | "account.sanitize"
   | "account.export"
   | "account.export_refused"
+  // H-0015 (audit 2026-05-25): a throttled GDPR export (429) emits this
+  // so a credential-export probing storm leaves a forensic trail for
+  // SecOps. Distinct from `account.export_refused` (which is a
+  // post-rate-limit data-shape refusal) — this fires AT the rate-limit
+  // gate. Emitted by POST /api/account/export.
+  | "account.export_rate_limited"
   // audit-2026-05-07 C-0025: distinct from `account.export` (fresh job) so
   // forensics can tell when a GDPR bundle was re-signed (no new data) vs
   // generated. Emitted by GET /api/account/export/latest.

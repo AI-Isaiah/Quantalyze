@@ -102,6 +102,14 @@ class TestDispatchTick:
         assert rpc_names.count("claim_compute_jobs_with_priority") == 1
         assert rpc_names.count("mark_compute_job_done") == 3
         assert "mark_compute_job_failed" not in rpc_names
+        # H-0776: make the call_count bookkeeping load-bearing instead of
+        # dead scaffolding. The side-effect fires once per supabase.rpc()
+        # call, so 1 claim + 3 mark_done = 4 — this pins that dispatch_tick
+        # issues exactly one mark RPC per dispatched job (no extra probes,
+        # no missed marks) independently of the name-count assertions above.
+        assert call_count == 4, (
+            f"expected 1 claim + 3 mark RPC calls = 4, got {call_count}"
+        )
 
     @pytest.mark.asyncio
     async def test_dispatch_raising_exception_marks_failed(self) -> None:
@@ -184,18 +192,26 @@ class TestDispatchTick:
         chain.execute.return_value = MagicMock(data=[])
         mock_supabase.rpc.return_value = chain
 
-        main_worker_healthz.LAST_TICK_AT = 0.0
-        before = main_worker_healthz.LAST_TICK_AT
+        # M-0738: LAST_TICK_AT is a module global read by healthz-probe code
+        # elsewhere. Snapshot + restore in try/finally so this test's
+        # mutation can't leak test-order-dependent state into downstream
+        # tests (or other files) that read the same global.
+        _saved_tick = main_worker_healthz.LAST_TICK_AT
+        try:
+            main_worker_healthz.LAST_TICK_AT = 0.0
+            before = main_worker_healthz.LAST_TICK_AT
 
-        with patch("main_worker.get_supabase", return_value=mock_supabase), \
-             patch("main_worker.dispatch", new=AsyncMock()):
-            await dispatch_tick("worker-test-idle")
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=AsyncMock()):
+                await dispatch_tick("worker-test-idle")
 
-        after = main_worker_healthz.LAST_TICK_AT
-        assert after > before, (
-            "dispatch_tick with zero claimed jobs must still update "
-            "LAST_TICK_AT; otherwise healthz lies about liveness."
-        )
+            after = main_worker_healthz.LAST_TICK_AT
+            assert after > before, (
+                "dispatch_tick with zero claimed jobs must still update "
+                "LAST_TICK_AT; otherwise healthz lies about liveness."
+            )
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved_tick
 
     @pytest.mark.asyncio
     async def test_non_empty_claim_bumps_healthz_last_tick(self) -> None:
@@ -209,18 +225,23 @@ class TestDispatchTick:
         chain.execute.return_value = MagicMock(data=jobs)
         mock_supabase.rpc.return_value = chain
 
-        main_worker_healthz.LAST_TICK_AT = 0.0
-        before = main_worker_healthz.LAST_TICK_AT
+        # M-0738: snapshot + restore the global (see idle test above).
+        _saved_tick = main_worker_healthz.LAST_TICK_AT
+        try:
+            main_worker_healthz.LAST_TICK_AT = 0.0
+            before = main_worker_healthz.LAST_TICK_AT
 
-        with patch("main_worker.get_supabase", return_value=mock_supabase), \
-             patch(
-                 "main_worker.dispatch",
-                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
-             ):
-            await dispatch_tick("worker-test-busy")
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch(
+                     "main_worker.dispatch",
+                     new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+                 ):
+                await dispatch_tick("worker-test-busy")
 
-        after = main_worker_healthz.LAST_TICK_AT
-        assert after > before
+            after = main_worker_healthz.LAST_TICK_AT
+            assert after > before
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved_tick
 
     # METRICS-14 / Plan 12-07: priority-aware claim path. The throttle MUST
     # live in the claim path (dispatch_tick), not in dispatch() — by the time
@@ -361,6 +382,57 @@ class TestWatchdogTick:
         assert overrides["poll_positions"] == "5 minutes"
         assert overrides["compute_portfolio"] == "15 minutes"
 
+    @pytest.mark.asyncio
+    async def test_overrides_encode_as_jsonb_object_not_scalar(self) -> None:
+        """H-0773: the JSONB-scalar prod bug.
+
+        The fix dropped json.dumps() because passing a stringified dict to
+        PostgREST encodes as a JSONB *scalar* (a JSON string), and the RPC's
+        jsonb_object_keys(p_per_kind_overrides) then raises
+        'cannot call jsonb_object_keys on a scalar'. The isinstance(dict)
+        check above proves the Python type, but NOT the over-the-wire JSON
+        shape that actually trips Postgres.
+
+        PostgREST serializes RPC params with json.dumps. We replay that
+        serialization on the exact object passed and assert the encoded form
+        round-trips to a JSON OBJECT (`{...}`), not a JSON string scalar
+        (`"{...}"`). A regression that re-wraps the dict in json.dumps()
+        before the RPC call makes this fail because the param would encode
+        as a double-escaped string scalar.
+        """
+        import json
+
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=0)
+        mock_supabase.rpc.return_value = chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            await watchdog_tick()
+
+        params = mock_supabase.rpc.call_args.args[1]
+        param_value = params["p_per_kind_overrides"]
+
+        # Emulate the PostgREST wire encoding of the RPC body.
+        encoded = json.dumps({"p_per_kind_overrides": param_value})
+        decoded = json.loads(encoded)["p_per_kind_overrides"]
+
+        # Decoded back to a dict (JSONB object) — NOT a str (JSONB scalar)
+        # which is what json.dumps()-then-send would produce.
+        assert isinstance(decoded, dict), (
+            "p_per_kind_overrides must encode as a JSON object so Postgres "
+            "stores a JSONB object; a stringified dict encodes as a JSON "
+            "string scalar and trips jsonb_object_keys() in the RPC."
+        )
+        # The raw JSON fragment for this key must open with '{', not '\"' —
+        # i.e. an object literal, not a quoted string.
+        key_pos = encoded.index('"p_per_kind_overrides"')
+        colon_pos = encoded.index(":", key_pos)
+        first_non_space = encoded[colon_pos + 1:].lstrip()[0]
+        assert first_non_space == "{", (
+            f"JSONB value must be an object literal; got leading {first_non_space!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # daily_enqueue_tick
@@ -399,36 +471,241 @@ class TestShutdown:
     async def test_dispatch_loop_exits_on_shutdown(self) -> None:
         from main_worker import dispatch_loop, SHUTDOWN
 
-        # Clear from any prior test state
-        SHUTDOWN.clear()
+        # H-0774: SHUTDOWN is a module-GLOBAL asyncio.Event. This test sets
+        # it mid-body; if the body raised between set() and the cleanup
+        # clear() (e.g. asyncio.wait timing out, an internal assertion),
+        # SHUTDOWN would stay set and EVERY downstream test whose code awaits
+        # a *_loop would exit immediately — an invisible, test-order-dependent
+        # cross-contamination. try/finally guarantees restoration on any exit
+        # path (assertion failure, CancelledError, KeyboardInterrupt).
+        SHUTDOWN.clear()  # start from a known-clear state
+        try:
+            mock_supabase = MagicMock()
+            chain = MagicMock()
+            chain.execute.return_value = MagicMock(data=[])
+            mock_supabase.rpc.return_value = chain
 
-        mock_supabase = MagicMock()
-        chain = MagicMock()
-        chain.execute.return_value = MagicMock(data=[])
-        mock_supabase.rpc.return_value = chain
+            async def _set_shutdown_soon():
+                await asyncio.sleep(0.05)
+                SHUTDOWN.set()
 
-        async def _set_shutdown_soon():
-            await asyncio.sleep(0.05)
-            SHUTDOWN.set()
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=AsyncMock()):
+                # Run the loop with a very short interval so it ticks fast
+                loop_task = asyncio.create_task(
+                    dispatch_loop("test-worker", interval=0.01)
+                )
+                shutdown_task = asyncio.create_task(_set_shutdown_soon())
 
-        with patch("main_worker.get_supabase", return_value=mock_supabase), \
-             patch("main_worker.dispatch", new=AsyncMock()):
-            # Run the loop with a very short interval so it ticks fast
-            loop_task = asyncio.create_task(
-                dispatch_loop("test-worker", interval=0.01)
+                # The loop must finish within a reasonable window
+                done, pending = await asyncio.wait(
+                    {loop_task, shutdown_task}, timeout=2.0
+                )
+                for p in pending:
+                    p.cancel()
+
+            assert loop_task.done(), "dispatch_loop did not exit within timeout"
+        finally:
+            # Guaranteed restoration so a failure above can't leave the
+            # global SHUTDOWN set for the rest of the suite.
+            SHUTDOWN.clear()
+
+
+# ---------------------------------------------------------------------------
+# Loop-level failure isolation + daily_enqueue_loop shutdown (M-1003)
+# ---------------------------------------------------------------------------
+
+class TestLoopFailureIsolation:
+    """M-1003 (audit-2026-05-07 / reverify-2026-05-25).
+
+    The three worker loops (dispatch_loop / watchdog_loop / daily_enqueue_loop)
+    each wrap their tick in `try/except Exception` (`# noqa: BLE001`) so a
+    single tick failure is logged but does NOT crash the gather — the worker
+    must survive a transient DB blip and keep ticking. The tick functions
+    themselves are covered (TestDispatchTick etc.) and dispatch_loop's
+    SHUTDOWN exit is covered (TestShutdown), but the loop-level failure
+    ISOLATION and daily_enqueue_loop's SHUTDOWN exit / initial-tick-failure
+    paths were untested. A regression that let a tick exception escape the
+    loop body (e.g. narrowing the except, or moving the wait_for outside the
+    try) would crash the whole worker on the first transient error.
+
+    Each test uses a near-zero interval and arms SHUTDOWN so the infinite loop
+    terminates deterministically without sleeping a real interval.
+
+    SHUTDOWN is a module-GLOBAL `asyncio.Event` created at import time, so it
+    binds to the FIRST event loop that awaits it. pytest-asyncio gives each
+    test a fresh loop, so a second SHUTDOWN-awaiting test on a new loop hits
+    `RuntimeError: bound to a different event loop`. To keep these tests loop-
+    isolated, each one swaps `main_worker.SHUTDOWN` with a fresh Event created
+    inside its own running loop (via `_fresh_shutdown()`), and restores the
+    original module global in `finally`. The loops read `main_worker.SHUTDOWN`
+    by module attribute at await-time, so the swap takes effect for the loop
+    task launched after it.
+    """
+
+    @staticmethod
+    def _fresh_shutdown():
+        """Install a fresh asyncio.Event() (bound to the current running loop)
+        as main_worker.SHUTDOWN and return (new_event, restore_fn)."""
+        import main_worker
+
+        original = main_worker.SHUTDOWN
+        new_event = asyncio.Event()
+        main_worker.SHUTDOWN = new_event
+
+        def restore() -> None:
+            main_worker.SHUTDOWN = original
+
+        return new_event, restore
+
+    @pytest.mark.asyncio
+    async def test_dispatch_loop_survives_a_tick_exception_then_exits_on_shutdown(self) -> None:
+        from main_worker import dispatch_loop
+
+        shutdown, restore = self._fresh_shutdown()
+        try:
+            call_count = 0
+
+            async def _flaky_tick(_worker_id: str) -> None:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    # First tick raises — the loop MUST log + isolate it and
+                    # proceed to the wait_for branch instead of crashing.
+                    raise RuntimeError("transient DB blip")
+                # Second tick onward: arm shutdown so the loop terminates after
+                # proving it survived the first failure.
+                shutdown.set()
+
+            with patch("main_worker.dispatch_tick", new=_flaky_tick):
+                loop_task = asyncio.create_task(
+                    dispatch_loop("test-worker", interval=0.01)
+                )
+                done, pending = await asyncio.wait({loop_task}, timeout=2.0)
+                for p in pending:
+                    p.cancel()
+
+            assert loop_task.done(), "dispatch_loop hung after a tick exception"
+            # The loop did NOT crash on the first raise: the tick ran at least
+            # twice (the failing tick + the survivor that armed shutdown).
+            assert call_count >= 2, (
+                f"dispatch_loop did not continue past the failing tick "
+                f"(call_count={call_count})"
             )
-            shutdown_task = asyncio.create_task(_set_shutdown_soon())
-
-            # The loop must finish within a reasonable window
-            done, pending = await asyncio.wait(
-                {loop_task, shutdown_task}, timeout=2.0
+            # The exception did not propagate out of the loop coroutine.
+            assert loop_task.exception() is None, (
+                f"tick exception escaped the loop: {loop_task.exception()!r}"
             )
-            for p in pending:
-                p.cancel()
+        finally:
+            restore()
 
-        assert loop_task.done(), "dispatch_loop did not exit within timeout"
-        # Clean up for next test
-        SHUTDOWN.clear()
+    @pytest.mark.asyncio
+    async def test_watchdog_loop_survives_a_tick_exception_then_exits_on_shutdown(self) -> None:
+        from main_worker import watchdog_loop
+
+        shutdown, restore = self._fresh_shutdown()
+        try:
+            call_count = 0
+
+            async def _flaky_tick() -> None:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise RuntimeError("reclaim RPC blip")
+                shutdown.set()
+
+            with patch("main_worker.watchdog_tick", new=_flaky_tick):
+                loop_task = asyncio.create_task(watchdog_loop(interval=0.01))
+                done, pending = await asyncio.wait({loop_task}, timeout=2.0)
+                for p in pending:
+                    p.cancel()
+
+            assert loop_task.done(), "watchdog_loop hung after a tick exception"
+            assert call_count >= 2, (
+                f"watchdog_loop did not continue past the failing tick "
+                f"(call_count={call_count})"
+            )
+            assert loop_task.exception() is None, (
+                f"tick exception escaped watchdog_loop: {loop_task.exception()!r}"
+            )
+        finally:
+            restore()
+
+    @pytest.mark.asyncio
+    async def test_daily_enqueue_loop_initial_tick_failure_does_not_crash_and_exits_on_shutdown(self) -> None:
+        # daily_enqueue_loop runs an INITIAL tick on startup (outside the
+        # while-loop) before entering the wait/tick cycle. That initial tick
+        # has its own try/except; if it raised unguarded the worker's
+        # asyncio.gather would crash at startup. Verify: initial tick raises →
+        # loop still reaches the wait_for branch → SHUTDOWN exits it cleanly,
+        # with no exception escaping.
+        from main_worker import daily_enqueue_loop
+
+        shutdown, restore = self._fresh_shutdown()
+        # Arm shutdown immediately so the post-initial-tick wait_for returns at
+        # once. The initial tick still fires (and raises) before the while.
+        shutdown.set()
+        try:
+            ticks = 0
+
+            async def _failing_initial_tick() -> None:
+                nonlocal ticks
+                ticks += 1
+                raise RuntimeError("startup enqueue RPC down")
+
+            with patch("main_worker.daily_enqueue_tick", new=_failing_initial_tick):
+                loop_task = asyncio.create_task(
+                    daily_enqueue_loop(interval=0.01)
+                )
+                done, pending = await asyncio.wait({loop_task}, timeout=2.0)
+                for p in pending:
+                    p.cancel()
+
+            assert loop_task.done(), "daily_enqueue_loop hung after initial tick failure"
+            assert ticks >= 1, "initial tick was never attempted"
+            # The initial-tick exception was isolated, not propagated.
+            assert loop_task.exception() is None, (
+                f"initial-tick exception escaped daily_enqueue_loop: "
+                f"{loop_task.exception()!r}"
+            )
+        finally:
+            restore()
+
+    @pytest.mark.asyncio
+    async def test_daily_enqueue_loop_exits_on_shutdown(self) -> None:
+        # The SHUTDOWN-exit path for daily_enqueue_loop was untested (only
+        # dispatch_loop's was). With a healthy initial tick and SHUTDOWN armed,
+        # the loop must run the initial tick then return promptly via the
+        # wait_for(SHUTDOWN.wait()) branch — not block for a full `interval`.
+        from main_worker import daily_enqueue_loop
+
+        shutdown, restore = self._fresh_shutdown()
+        shutdown.set()
+        try:
+            ticks = 0
+
+            async def _ok_tick() -> None:
+                nonlocal ticks
+                ticks += 1
+
+            with patch("main_worker.daily_enqueue_tick", new=_ok_tick):
+                # interval is deliberately HUGE — if the loop ignored SHUTDOWN
+                # and waited the interval, the 2s asyncio.wait timeout below
+                # would leave the task pending and the assertion would fail.
+                loop_task = asyncio.create_task(
+                    daily_enqueue_loop(interval=3600.0)
+                )
+                done, pending = await asyncio.wait({loop_task}, timeout=2.0)
+                for p in pending:
+                    p.cancel()
+
+            assert loop_task.done(), (
+                "daily_enqueue_loop did not honor SHUTDOWN within the timeout "
+                "(it waited the full interval instead of the wait_for race)"
+            )
+            assert ticks == 1, f"expected exactly one initial tick, got {ticks}"
+        finally:
+            restore()
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +766,47 @@ class TestClaimDedupe:
         assert rpc_names.count("mark_compute_job_failed") == 0
 
     @pytest.mark.asyncio
+    async def test_partial_batch_forwards_the_survivor_row_to_dispatch(self) -> None:
+        """Audit closure M-1125: the test above asserts dispatch is awaited
+        ONCE but never that the SURVIVOR row is what reached dispatch. If
+        dispatch_tick had a bug indexing the claim result wrong (e.g. forwarded
+        a stale/empty dict after dedupe), `assert_awaited_once()` still passes.
+        Bind the IDENTITY of the forwarded job: dispatch must receive the exact
+        survivor dict (id='rescore-survivor'), not just be called once."""
+        survivor = {
+            "id": "rescore-survivor",
+            "kind": "rescore_allocator",
+            "allocator_id": "alloc-shared",
+        }
+        mock_supabase = MagicMock()
+        claim_chain = MagicMock()
+        claim_chain.execute.return_value = MagicMock(data=[survivor])
+        mark_chain = MagicMock()
+        mark_chain.execute.return_value = MagicMock(data=None)
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return claim_chain
+            return mark_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ) as mock_dispatch:
+            await dispatch_tick("worker-dedupe-survivor-id")
+
+        # The job forwarded to dispatch must BE the survivor (first positional).
+        mock_dispatch.assert_awaited_once()
+        forwarded_job = mock_dispatch.await_args.args[0]
+        assert forwarded_job["id"] == "rescore-survivor", (
+            f"dispatch received the wrong job after dedupe: {forwarded_job!r}"
+        )
+        assert forwarded_job == survivor
+
+    @pytest.mark.asyncio
     async def test_empty_claim_after_dedupe_no_dispatch(self) -> None:
         """If dedupe + concurrent locks reduce the batch to zero rows
         (worker A locks the partition winner, worker B's claim returns
@@ -506,6 +824,62 @@ class TestClaimDedupe:
         mock_dispatch.assert_not_awaited()
         rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
         assert rpc_names == ["claim_compute_jobs_with_priority"]
+
+
+# ---------------------------------------------------------------------------
+# Audit closure M-0739 — every dispatch_tick test uses kind='sync_trades'.
+# After the migration 086 RPC swap + phase12 backfill, dispatch_tick handles
+# compute_analytics-kind jobs (priority='low'). The PER-KIND HANDLER routing
+# (compute_analytics → run_compute_analytics_job) is already covered in
+# test_job_worker.py::test_dispatch_routes_compute_analytics. The gap THIS
+# test fills is at the dispatch_tick layer: dispatch_tick must forward a
+# compute_analytics-kind row to dispatch() UNCHANGED — it must not silently
+# filter/drop non-sync_trades kinds from the claim batch (which would no-op
+# the entire backfill while sync_trades tests stay green).
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchTickKindAgnostic:
+    @pytest.mark.asyncio
+    async def test_compute_analytics_job_is_forwarded_to_dispatch(self) -> None:
+        """A claimed compute_analytics-kind job reaches dispatch() with its
+        kind intact — dispatch_tick is kind-agnostic and must not drop it."""
+        job = {
+            "id": "ca-job-1",
+            "kind": "compute_analytics",
+            "strategy_id": "strat-backfill",
+        }
+        mock_supabase = MagicMock()
+        claim_chain = MagicMock()
+        claim_chain.execute.return_value = MagicMock(data=[job])
+        mark_chain = MagicMock()
+        mark_chain.execute.return_value = MagicMock(data=None)
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return claim_chain
+            return mark_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ) as mock_dispatch:
+            await dispatch_tick("worker-compute-analytics")
+
+        mock_dispatch.assert_awaited_once()
+        forwarded = mock_dispatch.await_args.args[0]
+        assert forwarded["kind"] == "compute_analytics", (
+            f"dispatch_tick mangled or dropped the compute_analytics kind: "
+            f"{forwarded!r}"
+        )
+        assert forwarded["id"] == "ca-job-1"
+        # Success path: exactly one mark_done, no mark_failed.
+        rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert rpc_names.count("mark_compute_job_done") == 1
+        assert rpc_names.count("mark_compute_job_failed") == 0
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +958,40 @@ class TestWatchdogInvariant:
                 f"value greater than {handler_minutes:.1f} minutes — "
                 "otherwise the watchdog reclaims the still-running job "
                 "and any caller polling for terminal status hangs."
+            )
+
+    def test_watchdog_threshold_has_sane_upper_bound(self) -> None:
+        """H-0777: the watchdog override is a free-form human-typed string
+        (`"60 minutes"`). The lower-bound invariant above only stops a
+        watchdog SHORTER than the handler timeout. But a maintainer typo —
+        e.g. `"60 minutes"` intended as `"60 seconds"`, or a stray extra
+        digit — produces an absurdly large watchdog window. A 60x window
+        means a genuinely-stuck job sits reclaimable-but-unreclaimed for an
+        hour, the very stall the watchdog exists to break.
+
+        Observed ratios across all current overrides are 1.17x–2.0x of the
+        handler timeout. Cap at 4x: comfortably above every legitimate
+        value yet far below the 60x a unit-vs-unit typo would yield. A
+        deliberate larger window must update this bound (and justify why a
+        stuck job should sit that long), which is the point — make the
+        decision explicit instead of letting a typo through silently."""
+        from main_worker import WATCHDOG_PER_KIND_OVERRIDES
+        from services.job_worker import TIMEOUT_PER_KIND
+
+        MAX_RATIO = 4.0
+        for kind, watchdog_str in WATCHDOG_PER_KIND_OVERRIDES.items():
+            handler_seconds = TIMEOUT_PER_KIND[kind]
+            handler_minutes = handler_seconds / 60
+            watchdog_minutes = _parse_minutes(watchdog_str)
+            ratio = watchdog_minutes / handler_minutes
+            assert ratio <= MAX_RATIO, (
+                f"Kind {kind!r}: watchdog threshold {watchdog_minutes}m is "
+                f"{ratio:.1f}x its {handler_minutes:.1f}m handler timeout — "
+                f"above the {MAX_RATIO}x sanity cap. This smells like a "
+                "unit typo (e.g. '60 minutes' where '60 seconds' was meant). "
+                "A genuinely-stuck job would sit unreclaimed far too long. "
+                "If the large window is intentional, raise MAX_RATIO and "
+                "document why."
             )
 
 

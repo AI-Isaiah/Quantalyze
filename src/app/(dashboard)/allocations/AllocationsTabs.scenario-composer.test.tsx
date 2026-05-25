@@ -21,6 +21,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { renderToString } from "react-dom/server";
 import type { ReadonlyURLSearchParams } from "next/navigation";
 
 // --- next/navigation mocks -------------------------------------------------
@@ -394,5 +395,58 @@ describe("AllocationsTabs — scenario panel v2 branching (Plan 06b Task 2)", ()
       await screen.findByTestId("scenario-stub-body"),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("scenario-composer-body")).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // M-0041 (pr-test-analyzer) — true SSR-pass equivalence. T_AT10 above
+  // mounts in jsdom (a client render) twice and asserts the useEffect-driven
+  // flag flip settles. That does NOT exercise the actual hydration-mismatch
+  // bug class: server renders with `isUiV2 = useState(true)` (the SSR-stable
+  // default) and React requires the client's FIRST synchronous render to
+  // match byte-for-byte. The synchronous render is what `renderToString`
+  // captures — it runs render() but NOT effects. The contract being pinned:
+  //
+  //   `renderToString(<AllocationsTabs … />)` must render the V2 (composer)
+  //   branch EVEN WHEN localStorage["allocations.ui_v2"] === "false",
+  //   because the initial useState value never reads localStorage. A
+  //   regression that re-introduces an inline read in initial state — e.g.
+  //   `useState(() => readUiV2Flag() === "explicit-false" ? false : true)`
+  //   — would, in jsdom (where window IS defined), render the legacy stub on
+  //   the server pass while the SSR-equivalent default-true client first
+  //   render renders V2, producing the React #418 mismatch. T_AT10 cannot
+  //   catch that because it never runs a synchronous-only (no-effect) render
+  //   with the opt-out flag pre-seeded.
+  it("M-0041 SSR pass renders the V2 (composer) branch even with localStorage opt-out flag set", () => {
+    // Pre-seed the explicit opt-out flag. In jsdom, window is defined, so a
+    // buggy inline-read initial state WOULD return the stub on the
+    // synchronous render. The correct `useState(true)` ignores it.
+    lsStore.set("allocations.ui_v2", "false");
+    setSearchParams("tab=scenario");
+
+    const html = renderToString(<AllocationsTabs {...STUB_PROPS} />);
+
+    // The synchronous render must NOT have flipped to the legacy stub —
+    // the effect that reads localStorage has not run during renderToString.
+    expect(html).not.toContain("SCENARIO_STUB_BODY");
+    expect(html).not.toContain("scenario-stub-body");
+    // The scenario tabpanel container is always rendered (hidden toggles via
+    // `activeTab`); on the scenario tab it is the visible panel. The V2
+    // branch is what the initial-state default-true must select.
+    expect(html).toContain('id="panel-scenario"');
+  });
+
+  it("M-0041 SSR pass with clean localStorage also renders the V2 branch (parity baseline)", () => {
+    // The inverse control: with NO opt-out flag, the SSR pass must equally
+    // select V2 — so the assertion above is not vacuously true (i.e. the V2
+    // branch is reachable at all in renderToString, not suppressed by the
+    // dynamic ssr:false wrapper for an unrelated reason).
+    lsStore.clear();
+    setSearchParams("tab=scenario");
+
+    const html = renderToString(<AllocationsTabs {...STUB_PROPS} />);
+
+    expect(html).not.toContain("SCENARIO_STUB_BODY");
+    expect(html).not.toContain("scenario-stub-body");
+    expect(html).toContain('id="panel-scenario"');
   });
 });

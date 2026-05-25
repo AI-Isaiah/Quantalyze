@@ -210,6 +210,48 @@ describe("computeScenario — edge cases", () => {
     expect(metrics.equity_curve.length).toBeGreaterThan(0);
   });
 
+  // M-0481 — Pitfall 1 contract pin (cumulative-RETURN vs wealth form).
+  //
+  // queries.ts::liveBaselineMetricsFromHoldings feeds per-holding returns into
+  // computeScenario and then converts the result to wealth form with
+  // `value: p.value + 1` (the "EquityChart expects wealth-form" fix). That +1
+  // is correct ONLY because computeScenario emits cumulative RETURN values
+  // (0.0-based: `cumulative[i] - 1`). If a future scenario.ts refactor emitted
+  // wealth-form directly (1.0-based), the +1 in queries.ts would silently
+  // double-count and the live-baseline equity series would start near 2.0
+  // instead of 1.0 — visible only in the production drawer. This test pins the
+  // contract the caller depends on so that drift fails here, loudly.
+  it("[REGRESSION PIN: M-0481] equity_curve emits cumulative-RETURN form (0-based), not wealth (1.0-based)", () => {
+    const dates = buildDates("2024-01-02", 30);
+    const r = 0.01; // +1% every day
+    const strategies = [constantReturnStrategy("a", dates, r)];
+    const cache = buildDateMapCache(strategies);
+    const metrics = computeScenario(strategies, defaultState(strategies), cache);
+
+    expect(metrics.equity_curve.length).toBeGreaterThan(0);
+
+    // First emitted point is at i=0 → cumulative after the first day's return,
+    // expressed as a RETURN: (1 + r) - 1 = r ≈ 0.01. In wealth form it would
+    // be ≈ 1.01. The distinction is the whole point of the +1 in queries.ts.
+    const first = metrics.equity_curve[0];
+    expect(first.value).toBeCloseTo(r, 4);
+    expect(first.value).toBeLessThan(0.5); // NOT ~1.0 wealth form
+
+    // Last point: cumulative compounded return over the full window, which
+    // (in return form) equals the reported TWR. If the curve were wealth-form
+    // the final point would be twr + 1, breaking this identity.
+    const last = metrics.equity_curve[metrics.equity_curve.length - 1];
+    expect(last.value).toBeCloseTo(metrics.twr as number, 4);
+    // Compounded return is well above the first day's single-period return.
+    expect(last.value).toBeGreaterThan(first.value);
+
+    // Applying the queries.ts wealth-form conversion (p.value + 1) must yield
+    // a series that STARTS at ~1.0+, proving the +1 is the correct bridge.
+    const wealth = metrics.equity_curve.map((p) => p.value + 1);
+    expect(wealth[0]).toBeCloseTo(1 + r, 4);
+    expect(wealth[0]).toBeGreaterThan(1.0);
+  });
+
   it("single-strategy identity: composite TWR matches (1+r)^n for a constant-return strategy", () => {
     // 252 business days of a constant +0.1% daily return.
     const dates = buildDates("2024-01-02", 252);

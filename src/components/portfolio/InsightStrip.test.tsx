@@ -1,12 +1,35 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { InsightStrip } from "./InsightStrip";
 import type { PortfolioAnalytics } from "@/lib/types";
+import type { PortfolioInsight } from "@/lib/portfolio-insights";
+import * as insightsModule from "@/lib/portfolio-insights";
 
 // next/link renders as a plain <a> in tests; mock to avoid router context errors
 vi.mock("next/link", () => ({
   default: ({ href, children, className }: { href: string; children: React.ReactNode; className?: string }) => (
     <a href={href} className={className}>{children}</a>
+  ),
+}));
+
+// Mock BridgeTrigger to a thin shell that still renders the real "Find
+// Replacement" affordance and its children, so the InsightStrip tests stay
+// unit-level (no ReplacementPanel / fetch / usage-events wiring) while still
+// asserting that the strip wires the trigger in for the right insights.
+vi.mock("./BridgeTrigger", () => ({
+  BridgeTrigger: ({
+    insight,
+    portfolioId,
+    children,
+  }: {
+    insight: PortfolioInsight;
+    portfolioId: string;
+    children: React.ReactNode;
+  }) => (
+    <span data-testid="bridge-trigger" data-portfolio-id={portfolioId} data-strategy-id={insight.strategy_id ?? ""}>
+      {children}
+      <button type="button">Find Replacement</button>
+    </span>
   ),
 }));
 
@@ -178,5 +201,108 @@ describe("InsightStrip — Phase 09 flaggedCount line (LIVE-02, D-07)", () => {
     const firstInsight = screen.getByText(/below peak/);
     // compareDocumentPosition: DOCUMENT_POSITION_FOLLOWING = 4 means firstInsight comes after flagged
     expect(flagged.compareDocumentPosition(firstInsight) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// H-1083 — BridgeTrigger integration (isBridgeable predicate + composite key)
+// ---------------------------------------------------------------------------
+//
+// The strip wraps an underperformance insight in <BridgeTrigger> only when
+// (key === "underperformance") AND (insight.strategy_id is set) AND
+// (portfolioId is truthy). It also keys each <li> by `${key}:${strategy_id}`
+// so two underperformance insights targeting DIFFERENT strategies both render
+// instead of React silently deduping on a bare `key` collision.
+//
+// We drive computeAllInsights directly (via a spy) so the predicate and the
+// keying are exercised in isolation from the rule heuristics.
+
+function underperf(strategyId: string, name: string): PortfolioInsight {
+  return {
+    key: "underperformance",
+    severity: "medium",
+    sentence: `${name} has trailed the portfolio baseline by 4.20% over the trailing window.`,
+    strategy_id: strategyId,
+    strategy_name: name,
+  };
+}
+
+const DRAWDOWN_INSIGHT: PortfolioInsight = {
+  key: "biggest_risk_drawdown",
+  severity: "high",
+  sentence: "You're still 20% below peak. Worth asking whether the top contributor can carry the recovery.",
+};
+
+describe("InsightStrip — H-1083 BridgeTrigger integration", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("wraps an underperformance insight in BridgeTrigger when portfolioId AND strategy_id are present", () => {
+    vi.spyOn(insightsModule, "computeAllInsights").mockReturnValue([
+      underperf("s-1", "Alpha"),
+    ]);
+
+    render(<InsightStrip analytics={buildAnalytics()} portfolioId="p-1" />);
+
+    const button = screen.getByRole("button", { name: /Find Replacement/i });
+    expect(button).toBeInTheDocument();
+    // The trigger received the portfolio + strategy ids from the strip.
+    const trigger = screen.getByTestId("bridge-trigger");
+    expect(trigger).toHaveAttribute("data-portfolio-id", "p-1");
+    expect(trigger).toHaveAttribute("data-strategy-id", "s-1");
+    // The original sentence still renders inside the trigger.
+    expect(screen.getByText(/Alpha has trailed/)).toBeInTheDocument();
+  });
+
+  it("does NOT render Find Replacement when portfolioId is null", () => {
+    vi.spyOn(insightsModule, "computeAllInsights").mockReturnValue([
+      underperf("s-1", "Alpha"),
+    ]);
+
+    render(<InsightStrip analytics={buildAnalytics()} portfolioId={null} />);
+
+    expect(screen.queryByRole("button", { name: /Find Replacement/i })).toBeNull();
+    expect(screen.queryByTestId("bridge-trigger")).toBeNull();
+    // The sentence still renders — just without the bridge affordance.
+    expect(screen.getByText(/Alpha has trailed/)).toBeInTheDocument();
+  });
+
+  it("does NOT render Find Replacement when strategy_id is missing", () => {
+    vi.spyOn(insightsModule, "computeAllInsights").mockReturnValue([
+      { ...underperf("s-1", "Alpha"), strategy_id: null },
+    ]);
+
+    render(<InsightStrip analytics={buildAnalytics()} portfolioId="p-1" />);
+
+    expect(screen.queryByRole("button", { name: /Find Replacement/i })).toBeNull();
+  });
+
+  it("does NOT render Find Replacement on a non-underperformance insight", () => {
+    vi.spyOn(insightsModule, "computeAllInsights").mockReturnValue([
+      DRAWDOWN_INSIGHT,
+    ]);
+
+    render(<InsightStrip analytics={buildAnalytics()} portfolioId="p-1" />);
+
+    expect(screen.getByText(/below peak/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Find Replacement/i })).toBeNull();
+  });
+
+  it("renders TWO underperformance insights for different strategies without a key collision", () => {
+    // Regression guard for the composite `${key}:${strategy_id}` list key. A
+    // key-by-`insight.key`-only refactor would silently dedupe these two rows.
+    vi.spyOn(insightsModule, "computeAllInsights").mockReturnValue([
+      underperf("s-1", "Alpha"),
+      underperf("s-2", "Beta"),
+    ]);
+
+    render(<InsightStrip analytics={buildAnalytics()} portfolioId="p-1" max={5} />);
+
+    const items = screen.getByRole("list").querySelectorAll("li");
+    expect(items).toHaveLength(2);
+    expect(screen.getByText(/Alpha has trailed/)).toBeInTheDocument();
+    expect(screen.getByText(/Beta has trailed/)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /Find Replacement/i })).toHaveLength(2);
   });
 });

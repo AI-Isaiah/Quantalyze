@@ -361,6 +361,79 @@ describe("buildStrategyForBuilderSet — B4 lookup-map signature", () => {
   });
 });
 
+// H-0132 — the adapter only projects server→client (holdings + lookups →
+// StrategyForBuilder[] + ScenarioState). There is NO inverse adapter for the
+// post-edit ScenarioState → commit payload (ScenarioCommitDiff[]); the
+// composer builds that payload inline in handleCommit (ScenarioComposer.tsx
+// ~576-642) with `size_at_decision_usd = weight * scenarioAum`. The full
+// server→client→commit round-trip therefore cannot be pinned at the adapter
+// layer (there is no function to call). What CAN be pinned losslessly here is
+// the forward derivation the commit math depends on: the adapter's default
+// weight is `value_usd / totalValue`, so multiplying that weight back by the
+// AUM (= totalValue) must reproduce the original per-holding value_usd. If the
+// adapter's weight derivation drifts, every downstream `weight * aum`
+// size_at_decision_usd lands wrong — this test is the pin for that contract.
+// FLAGGED: a true lossless State→CommitDiff[] round-trip needs a production
+// inverse adapter (handleCommit's inline construction extracted into
+// scenario-adapter.ts); that is a production change, out of scope for a test.
+describe("H-0132 — forward weight→size round-trip (commit payload derivation pin)", () => {
+  it("weight * totalValue reproduces each holding's value_usd (size_at_decision_usd = weight*aum losslessness)", () => {
+    const totalValue = HOLDINGS_2.reduce((s, h) => s + h.value_usd, 0);
+    const result = buildStrategyForBuilderSet(
+      HOLDINGS_2,
+      new Set<string>(),
+      [],
+      {
+        "holding:binance:BTC:spot": RETURNS_60D,
+        "holding:binance:ETH:spot": RETURNS_60D,
+      },
+      {},
+      {},
+    );
+
+    // For each holding, reconstruct value_usd from the adapter's weight × AUM
+    // exactly as handleCommit derives size_at_decision_usd = weight * aum.
+    for (const h of HOLDINGS_2) {
+      const ref = `holding:binance:${h.symbol}:spot`;
+      const weight = result.state.weights[ref];
+      const reconstructedUsd = weight * totalValue;
+      expect(reconstructedUsd).toBeCloseTo(h.value_usd, 6);
+    }
+  });
+
+  it("a partially-disabled scenario keeps enabled-row weights summing to the enabled value share (no silent weight inflation)", () => {
+    // Disable BTC; ETH stays. The adapter does NOT renormalize on disable
+    // (selected=false but weight is still value_usd/total) — pin that the
+    // disabled row's weight is preserved, not folded into ETH. This is the
+    // shape the composer reads before applying its own overrides, so a drift
+    // to "renormalize-on-disable in the adapter" would double-apply with the
+    // composer's post-adapter renormalization.
+    const totalValue = HOLDINGS_2.reduce((s, h) => s + h.value_usd, 0);
+    const result = buildStrategyForBuilderSet(
+      HOLDINGS_2,
+      new Set(["holding:binance:BTC:spot"]),
+      [],
+      {
+        "holding:binance:BTC:spot": RETURNS_60D,
+        "holding:binance:ETH:spot": RETURNS_60D,
+      },
+      {},
+      {},
+    );
+    expect(result.state.selected["holding:binance:BTC:spot"]).toBe(false);
+    // BTC's weight is still its raw value share (60000/100000 = 0.6), NOT 0.
+    expect(result.state.weights["holding:binance:BTC:spot"]).toBeCloseTo(
+      HOLDINGS_2[0].value_usd / totalValue,
+      9,
+    );
+    // ETH's weight is unchanged (0.4) — the adapter did not inflate it to 1.0.
+    expect(result.state.weights["holding:binance:ETH:spot"]).toBeCloseTo(
+      HOLDINGS_2[1].value_usd / totalValue,
+      9,
+    );
+  });
+});
+
 describe("H5 brand — compile-time guards", () => {
   it("T16 hand-rolled StrategyForBuilder literal CANNOT be passed where AddedStrategy is expected", () => {
     // The @ts-expect-error directive is the assertion. We never actually invoke
@@ -393,5 +466,34 @@ describe("H5 brand — compile-time guards", () => {
     // @ts-expect-error — H5 brand: unbranded string cannot index Record<StrategyForBuilderId, ...>
     lookup["unbranded-string"] = [];
     expect(Object.keys(lookup).length).toBeGreaterThan(0);
+  });
+
+  // M-0149 (pr-test-analyzer) — T15/T16/T17 are compile-time guards: their
+  // real assertion is the `@ts-expect-error` directive (enforced by
+  // `tsc --noEmit`, NOT by vitest), and the `expect(typeof _compileOnly).
+  // toBe("function")` line is a tautology that runs but cannot catch a type
+  // regression. (The protection is genuine — removing the brand makes the
+  // `@ts-expect-error` "unused", a tsc error — but it lives in the type
+  // checker, not here.) This adds the missing RUNTIME-behavioral counterpart
+  // vitest CAN catch: the H5 brand must be a zero-cost phantom type —
+  // `string & { __brand }` — that is fully erased at runtime, so a branded id
+  // is `===` its underlying string and indexes a plain-object lookup
+  // identically. If the brand were ever reified into a runtime wrapper
+  // (boxing the string), every `Record<StrategyForBuilderId, ...>` lookup the
+  // adapter performs would silently miss. This pins that invariant.
+  it("M-0149: StrategyForBuilderId brand is runtime-erased — branded id indexes a plain lookup identically to its raw string", () => {
+    const RAW = "00000000-0000-0000-0000-000000000001";
+    const branded = RAW as StrategyForBuilderId;
+    // Brand is compile-only: at runtime the value is the unchanged string.
+    expect(branded).toBe(RAW);
+    expect(typeof branded).toBe("string");
+
+    // A branded write is readable via the raw string key (and vice-versa),
+    // proving the brand adds no runtime key transformation.
+    const lookup: Record<StrategyForBuilderId, DailyPoint[]> = {};
+    const sentinel: DailyPoint[] = [{ date: "2026-01-01", value: 1 }];
+    lookup[branded] = sentinel;
+    expect((lookup as Record<string, DailyPoint[]>)[RAW]).toBe(sentinel);
+    expect(Object.keys(lookup)).toEqual([RAW]);
   });
 });

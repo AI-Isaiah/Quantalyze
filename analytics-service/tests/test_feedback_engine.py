@@ -1556,3 +1556,146 @@ async def test_full_scoring_propagation(monkeypatch):
         f"Expected W_PORTFOLIO_FIT {expected_port}, got {actual_port} "
         f"(diff {abs(actual_port - expected_port)})"
     )
+
+
+# ===========================================================================
+# Audit closure M-0737 — malformed-input robustness for the two pure helpers
+# _success_value and _attribute_dimension. The existing suite never feeds NaN
+# deltas, non-numeric delta strings, or None-valued score_breakdown entries.
+# These tests pin the documented/defensible behavior where it holds, and
+# SURFACE (xfail strict) the two places where production lacks a guard and
+# crashes the whole feedback computation.
+# ===========================================================================
+
+
+@pytest.mark.skipif(not IMPORTS_OK, reason="feedback_engine not importable")
+class TestSuccessValueMalformedDeltas:
+    """_success_value(outcome) — delta robustness (feedback_engine.py:171-181)."""
+
+    def test_nan_string_delta_is_treated_as_failure(self):
+        """delta_180d='NaN' (the JSON-deserialized NaN form) → float('NaN')
+        is not > 0, so success=0 (failure). This is defensible: a NaN delta
+        means 'no measurable improvement', which is a failure, not a crash."""
+        from services.feedback_engine import _success_value
+        outcome = _make_outcome(kind="allocated", delta_180d="NaN")
+        assert _success_value(outcome) == 0
+
+    def test_float_nan_delta_is_treated_as_failure(self):
+        """delta_180d=float('nan') → nan > 0 is False → success=0."""
+        from services.feedback_engine import _success_value
+        outcome = _make_outcome(kind="allocated", delta_180d=float("nan"))
+        assert _success_value(outcome) == 0
+
+    def test_positive_delta_still_succeeds_after_nan_guard_logic(self):
+        """Sanity: a real positive delta still scores success=1 (proves the
+        NaN handling above isn't blanket-zeroing everything)."""
+        from services.feedback_engine import _success_value
+        outcome = _make_outcome(kind="allocated", delta_180d=0.05)
+        assert _success_value(outcome) == 1
+
+    def test_non_numeric_string_delta_does_not_crash(self):
+        """A garbage delta string must NOT raise — it should degrade to a
+        failure (0), not abort the allocator's whole feedback pass."""
+        from services.feedback_engine import _success_value
+        outcome = _make_outcome(kind="allocated", delta_180d="not-a-number")
+        assert _success_value(outcome) == 0
+
+    def test_corrupt_most_mature_delta_falls_through_to_positive_less_mature(self):
+        """review-A Finding 3: a corrupt MOST-mature delta (delta_180d) is
+        skipped (logged, no signal) and the engine falls through to the next
+        maturity. Here delta_90d is NULL, so the real positive delta_30d=0.05
+        becomes authoritative → success=1. This is the load-bearing assertion
+        for the change from `return 0` to `continue` in the except handler:
+        with `return 0` it would wrongly score this as a failure."""
+        from services.feedback_engine import _success_value
+        outcome = _make_outcome(
+            kind="allocated",
+            delta_180d="not-a-number",
+            delta_90d=None,
+            delta_30d=0.05,
+        )
+        assert _success_value(outcome) == 1
+
+    def test_corrupt_most_mature_delta_falls_through_to_negative_less_mature(self):
+        """Fall-through to a less-mature delta still applies the >0 rule: a
+        corrupt delta_180d is skipped and the real delta_30d=-0.03 (≤ 0) is
+        authoritative → success=0. Confirms fall-through doesn't blanket-pass."""
+        from services.feedback_engine import _success_value
+        outcome = _make_outcome(
+            kind="allocated",
+            delta_180d="corrupt",
+            delta_90d=None,
+            delta_30d=-0.03,
+        )
+        assert _success_value(outcome) == 0
+
+    def test_corrupt_most_mature_delta_stops_at_first_valid_maturity(self):
+        """Precedence: iteration is (180d, 90d, 30d) and the FIRST non-NULL
+        parseable delta wins. A corrupt delta_180d is skipped, but a VALID
+        positive delta_90d=0.04 is authoritative and the engine returns 1
+        WITHOUT consulting the negative delta_30d=-0.02 below it. Pins that
+        fall-through stops at the most-mature usable signal, not the least."""
+        from services.feedback_engine import _success_value
+        outcome = _make_outcome(
+            kind="allocated",
+            delta_180d="not-a-number",
+            delta_90d=0.04,
+            delta_30d=-0.02,
+        )
+        assert _success_value(outcome) == 1
+
+
+@pytest.mark.skipif(not IMPORTS_OK, reason="feedback_engine not importable")
+class TestAttributeDimensionMalformedBreakdown:
+    """_attribute_dimension — score_breakdown robustness (engine:184-210)."""
+
+    def test_well_formed_breakdown_picks_dominant_dimension(self):
+        """Baseline: a normal numeric breakdown returns the single max dim."""
+        from services.feedback_engine import _attribute_dimension
+        sb = {
+            "portfolio_fit": 0.9,
+            "preference_fit": 0.1,
+            "track_record": 0.2,
+            "capacity_fit": 0.3,
+        }
+        result = _attribute_dimension({"kind": "allocated"}, sb)
+        assert result == ("W_PORTFOLIO_FIT",)
+
+    def test_none_breakdown_uses_uniform_fallback(self):
+        """score_breakdown=None → D-07 uniform fallback (all dimensions)."""
+        from services.feedback_engine import _attribute_dimension, ALL_DIMENSIONS
+        result = _attribute_dimension({"kind": "allocated"}, None)
+        assert result == ALL_DIMENSIONS
+
+    def test_empty_breakdown_uses_uniform_fallback(self):
+        """score_breakdown={} → no candidate keys → uniform fallback."""
+        from services.feedback_engine import _attribute_dimension, ALL_DIMENSIONS
+        result = _attribute_dimension({"kind": "allocated"}, {})
+        assert result == ALL_DIMENSIONS
+
+    def test_mixed_none_breakdown_values_do_not_crash(self):
+        """A breakdown with some None values must attribute to the best
+        NUMERIC dimension, not raise TypeError on the None comparison."""
+        from services.feedback_engine import _attribute_dimension
+        sb = {
+            "portfolio_fit": None,
+            "preference_fit": 0.5,
+            "track_record": None,
+            "capacity_fit": 0.3,
+        }
+        result = _attribute_dimension({"kind": "allocated"}, sb)
+        # preference_fit (0.5) is the highest non-None score.
+        assert result == ("W_PREFERENCE_FIT",)
+
+    def test_all_none_breakdown_values_fall_back_to_uniform(self):
+        """All-None breakdown → no usable numeric dim → uniform fallback,
+        not a crash."""
+        from services.feedback_engine import _attribute_dimension, ALL_DIMENSIONS
+        sb = {
+            "portfolio_fit": None,
+            "preference_fit": None,
+            "track_record": None,
+            "capacity_fit": None,
+        }
+        result = _attribute_dimension({"kind": "allocated"}, sb)
+        assert result == ALL_DIMENSIONS

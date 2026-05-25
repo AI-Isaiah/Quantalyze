@@ -252,6 +252,31 @@ describe("collectUserExportBundle — mocked client", () => {
     expect(serializedBytes).toBeLessThanOrEqual(
       EXPORT_SIZE_CAP_BYTES + 1_000_000,
     );
+
+    // M-0011: the `>= 6` assertion above is coupled to the magic 0.95 sizing
+    // fudge — if the envelope JSON overhead grows (a new schema_version field,
+    // a per-row metadata block), the chosen rowBytes could silently flip the
+    // outcome between 5 and 6 rows and the test would flake or quietly weaken.
+    // Encode the WHY of binary search instead: the kept prefix must be
+    // MAXIMAL — fitting one MORE full row would breach the cap. We derive the
+    // per-row serialized cost from the bundle's OWN trimmed rows (not the
+    // guessed constant), so this holds regardless of envelope-shape drift.
+    const keptRows = trimmedTable!.rows as Array<{ id: string; blob: string }>;
+    expect(keptRows.length).toBe(trimmedTable!.row_count);
+    // Marginal cost of one more row of the same shape: ", " separator +
+    // the JSON-serialized row object. Use the largest kept row as an upper
+    // bound so we never UNDER-estimate the marginal cost (which would make
+    // the maximality assertion spuriously strict).
+    const maxRowCost = Math.max(
+      ...keptRows.map(
+        (r) => new TextEncoder().encode(JSON.stringify(r) + ",").byteLength,
+      ),
+    );
+    // Adding one more row would push the serialized bundle past the cap
+    // (allowing the same 1MB envelope grace the cap-enforcement uses). A
+    // halving-only loop that stopped early would leave headroom > maxRowCost
+    // and fail this — which is exactly the I3 regression under guard.
+    expect(serializedBytes + maxRowCost).toBeGreaterThan(EXPORT_SIZE_CAP_BYTES);
   });
 
   it("returns zero rows for a user with no data (happy empty path)", async () => {
@@ -297,7 +322,6 @@ describe("collectUserExportBundle — C-0021 ownership assertion (audit-2026-05-
 
   it("accepts a valid UUID and proceeds to fetch (regression guard against over-strict regex)", async () => {
     const mock = makeMockClient({});
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const bundle = await collectUserExportBundle(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       mock as any,
@@ -1602,6 +1626,39 @@ describe("GDPR export — live DB integration", () => {
           .insert({ user_id: userId, name: "Export test portfolio" });
         if (pErr) throw new Error(`portfolios seed: ${pErr.message}`);
 
+        // H-0016: the pre-this seed only covered api_keys + portfolios +
+        // auto-created profiles (3 of 15+ manifest tables). A migration
+        // that DROPS or RENAMES one of the other ~12 manifest entries'
+        // backing table (or its user_column) would not be caught at the
+        // live layer — only at the unit mock layer, which fabricates the
+        // data shape and so cannot detect real-schema drift. Seed more
+        // manifest tables against the REAL schema so a column/table
+        // rename surfaces as an insert error here AND a missing-rows
+        // assertion below. We seed across both `direct` (strategies,
+        // user_notes) and `indirect` (user_favorites via strategies)
+        // manifest kinds. All chosen tables ON DELETE CASCADE from
+        // auth.users / profiles, so the existing userIds cleanup (plus
+        // strategyIds) tears them down with no extra cleanup wiring.
+        const { data: strategyRow, error: sErr } = await admin
+          .from("strategies")
+          .insert({ user_id: userId, name: "Export test strategy" })
+          .select("id")
+          .single();
+        if (sErr || !strategyRow) {
+          throw new Error(`strategies seed: ${sErr?.message}`);
+        }
+        cleanup.strategyIds.push(strategyRow.id);
+
+        const { error: noteErr } = await admin
+          .from("user_notes")
+          .insert({ user_id: userId, content: "export-test note" });
+        if (noteErr) throw new Error(`user_notes seed: ${noteErr.message}`);
+
+        const { error: favErr } = await admin
+          .from("user_favorites")
+          .insert({ user_id: userId, strategy_id: strategyRow.id });
+        if (favErr) throw new Error(`user_favorites seed: ${favErr.message}`);
+
         // Call the assembler directly (not through the HTTP route,
         // which would hit storage + rate-limiter).
         const bundle = await collectUserExportBundle(
@@ -1620,8 +1677,33 @@ describe("GDPR export — live DB integration", () => {
         );
         expect(portfoliosTableRow?.row_count).toBeGreaterThanOrEqual(1);
 
+        // H-0016: the newly-seeded manifest tables must round-trip
+        // through the real schema. A row_count of 0 (or a missing entry)
+        // means the manifest's table/user_column no longer matches the
+        // live schema — exactly the drift the unit-mock layer cannot see.
+        const strategiesTableRow = bundle.tables.find(
+          (t) => t.table === "strategies",
+        );
+        expect(strategiesTableRow).toBeDefined();
+        expect(strategiesTableRow?.row_count).toBe(1);
+
+        const userNotesTableRow = bundle.tables.find(
+          (t) => t.table === "user_notes",
+        );
+        expect(userNotesTableRow).toBeDefined();
+        expect(userNotesTableRow?.row_count).toBe(1);
+
+        const userFavoritesTableRow = bundle.tables.find(
+          (t) => t.table === "user_favorites",
+        );
+        expect(userFavoritesTableRow).toBeDefined();
+        expect(userFavoritesTableRow?.row_count).toBe(1);
+
         // Truncation flag should be FALSE for a minimal seed
         expect(bundle.truncated_at_size_cap).toBe(false);
+        // A complete seed must not flag the bundle partial — proves none
+        // of the seeded manifest tables faulted against the real schema.
+        expect(bundle.partial).toBe(false);
       } finally {
         await cleanupLiveDbRow(admin, cleanup);
       }

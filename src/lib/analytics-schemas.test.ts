@@ -5,6 +5,8 @@ import {
   GetUserComputeJobsRowSchema,
   RecomputeMatchResponseSchema,
   TickJobsResponseSchema,
+  BridgeFitLabelSchema,
+  BridgeResponseSchema,
 } from "./analytics-schemas";
 
 /**
@@ -408,5 +410,101 @@ describe("RecomputeMatchResponseSchema", () => {
     expect(parsed.status).toBe("ok");
     expect(parsed.reason).toBe("future_field");
     expect(parsed.processed).toBe(12);
+  });
+});
+
+/**
+ * H-1078 — /api/portfolio-bridge response contract.
+ *
+ * BridgeResponseSchema validates the Python bridge service response. A
+ * regression in the Python router (sharpe_delta coerced to a string, a
+ * dropped field, a mistyped fit_label tier) crashes the panel with a
+ * generic Zod error. These tests pin the contract:
+ *   - BridgeFitLabelSchema accepts ONLY the 4 canonical tiers (case-exact).
+ *   - BridgeCandidateSchema requires all 7 fields with their exact types.
+ *   - BridgeResponseSchema is .passthrough() — the service's extra
+ *     top-level fields (status, portfolio_id, ...) must NOT throw. If a
+ *     future PR makes it .strict(), this test fails loudly.
+ */
+const VALID_CANDIDATE = {
+  strategy_id: "strat-a",
+  strategy_name: "Strategy A",
+  sharpe_delta: 0.1,
+  dd_delta: -0.05,
+  corr_delta: -0.03,
+  composite_score: 0.5,
+  fit_label: "Strong fit" as const,
+};
+
+describe("BridgeFitLabelSchema", () => {
+  it.each([["Strong fit"], ["Good fit"], ["Moderate fit"], ["Weak fit"]])(
+    "accepts the canonical tier %s",
+    (tier) => {
+      expect(BridgeFitLabelSchema.parse(tier)).toBe(tier);
+    },
+  );
+
+  it("rejects a mis-cased tier ('Strong Fit' vs 'Strong fit')", () => {
+    // The Record<BridgeFitLabel,…> lookups in ReplacementCard rely on the
+    // exact lowercase-second-word casing; a contract drift would slip a
+    // bad enum value past parse and break the styling lookup.
+    expect(() => BridgeFitLabelSchema.parse("Strong Fit")).toThrow();
+  });
+
+  it("rejects a tier outside the 4 allowed values", () => {
+    expect(() => BridgeFitLabelSchema.parse("Excellent fit")).toThrow();
+  });
+});
+
+describe("BridgeResponseSchema", () => {
+  it("parses a valid candidates array", () => {
+    const parsed = BridgeResponseSchema.parse({ candidates: [VALID_CANDIDATE] });
+    expect(parsed.candidates).toHaveLength(1);
+    expect(parsed.candidates[0]).toMatchObject(VALID_CANDIDATE);
+  });
+
+  it("parses an empty candidates array", () => {
+    expect(BridgeResponseSchema.parse({ candidates: [] }).candidates).toEqual([]);
+  });
+
+  it("rejects a fit_label outside the 4 allowed enum values", () => {
+    const result = BridgeResponseSchema.safeParse({
+      candidates: [{ ...VALID_CANDIDATE, fit_label: "Strong Fit" }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects when sharpe_delta is a string (no numeric coercion)", () => {
+    // Python returning "0.1" instead of 0.1 must fail loud, not coerce.
+    const result = BridgeResponseSchema.safeParse({
+      candidates: [{ ...VALID_CANDIDATE, sharpe_delta: "0.1" }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a candidate missing strategy_name (all 7 fields required)", () => {
+    const { strategy_name: _omit, ...withoutName } = VALID_CANDIDATE;
+    const result = BridgeResponseSchema.safeParse({ candidates: [withoutName] });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a candidate missing composite_score", () => {
+    const { composite_score: _omit, ...withoutScore } = VALID_CANDIDATE;
+    const result = BridgeResponseSchema.safeParse({ candidates: [withoutScore] });
+    expect(result.success).toBe(false);
+  });
+
+  it("passes through extra top-level fields (status, portfolio_id, underperformer_strategy_id)", () => {
+    // .passthrough() is intentional — the Python service ships extra
+    // envelope fields. Flipping to .strict() would 500 the panel.
+    const parsed = BridgeResponseSchema.parse({
+      candidates: [VALID_CANDIDATE],
+      status: "ok",
+      portfolio_id: "pf-1",
+      underperformer_strategy_id: "strat-z",
+    }) as Record<string, unknown>;
+    expect(parsed.status).toBe("ok");
+    expect(parsed.portfolio_id).toBe("pf-1");
+    expect(parsed.underperformer_strategy_id).toBe("strat-z");
   });
 });

@@ -212,6 +212,76 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
     ).toBeNull();
   });
 
+  // ---------------------------------------------------------------------------
+  // M-0085 — non-finite (NaN / Infinity) inputs to the per-cell formatters.
+  // The Sharpe + Avg ρ cells route through formatNumber, which guards with
+  // `!Number.isFinite` → renders "—" (safe). The YTD TWR + Max DD cells route
+  // through formatPercent, and AUM through formatCurrency — NEITHER guards
+  // non-finite, so a NaN leaks as "NaN%" / "$NaN" into the allocator's KPI
+  // strip. The correct behaviour is the em-dash degrade used everywhere else;
+  // the leak is a production bug in the shared formatters (src/lib/utils.ts),
+  // surfaced here for a follow-up fix.
+  // ---------------------------------------------------------------------------
+  it("M-0085: Sharpe + Avg ρ degrade to em-dash for NaN/Infinity (formatNumber is finite-guarded)", () => {
+    const { rerender } = render(
+      <KpiStrip
+        analytics={{ sharpe: NaN, avg_correlation: NaN }}
+        metrics={EMPTY_METRICS}
+        timeframe="ALL"
+        aum={1_000_000}
+        snapshotCount={30}
+      />,
+    );
+    // Both NaN-fed numeric cells collapse to em-dash; "NaN" never renders.
+    expect(screen.queryByText(/NaN/)).toBeNull();
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+
+    rerender(
+      <KpiStrip
+        analytics={{ sharpe: Infinity, avg_correlation: Infinity }}
+        metrics={EMPTY_METRICS}
+        timeframe="ALL"
+        aum={1_000_000}
+        snapshotCount={30}
+      />,
+    );
+    expect(screen.queryByText(/Infinity/)).toBeNull();
+  });
+
+  it(
+    "M-0085: YTD TWR / Max DD with NaN SHOULD degrade to em-dash but formatPercent leaks 'NaN%' — fix in follow-up (guard formatPercent for non-finite in src/lib/utils.ts)",
+    () => {
+      render(
+        <KpiStrip
+          analytics={{ ytd_twr: NaN, max_drawdown_12m: NaN }}
+          metrics={EMPTY_METRICS}
+          timeframe="ALL"
+          aum={1_000_000}
+          snapshotCount={30}
+        />,
+      );
+      // CORRECT behaviour: no "NaN%" anywhere — the percent cells degrade to
+      // em-dash like every other null/invalid path.
+      expect(screen.queryByText(/NaN/)).toBeNull();
+    },
+  );
+
+  it(
+    "M-0085: AUM with NaN SHOULD degrade to em-dash but formatCurrency leaks '$NaN' — fix in follow-up (guard formatCurrency for non-finite in src/lib/utils.ts)",
+    () => {
+      render(
+        <KpiStrip
+          analytics={null}
+          metrics={EMPTY_METRICS}
+          timeframe="ALL"
+          aum={NaN}
+          snapshotCount={30}
+        />,
+      );
+      expect(screen.queryByText(/NaN/)).toBeNull();
+    },
+  );
+
   it("AUM is exempt from warmup helper (Phase 07 / 07-03 f9 invariant)", () => {
     render(
       <KpiStrip

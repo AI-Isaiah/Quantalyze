@@ -112,6 +112,95 @@ describe("BridgeWidget — empty state (no breaches, with outcomes)", () => {
     );
   });
 
+  // ---------------------------------------------------------------------------
+  // L-0069 — formatRelativeDate boundary buckets. The existing cases cover
+  // days 0, 1, 2, 3. The if-chain (BridgeWidget.tsx:64-77) has transitions at
+  // exactly 7 ("a week ago"), 14 ("2 weeks ago"), 60 ("2 months ago"), 365
+  // (absolute date), and a negative-elapsed (future timestamp → "today")
+  // branch that are unpinned. A refactor that swapped Math.floor for
+  // Math.round, or flipped a `<` to `<=`, would silently mis-bucket the
+  // boundary day with zero test failures.
+  // ---------------------------------------------------------------------------
+  it("L-0069 — day 7 boundary → 'a week ago' (NOT '1 weeks ago')", () => {
+    render(
+      <BridgeWidget
+        flaggedHoldings={[]}
+        matchDecisionsByHoldingRef={{}}
+        outcomes={[makeOutcome(7)]}
+      />,
+    );
+    expect(screen.getByTestId("bridge-empty-last-reviewed").textContent).toBe(
+      "a week ago",
+    );
+  });
+
+  it("L-0069 — day 14 boundary → '2 weeks ago'", () => {
+    render(
+      <BridgeWidget
+        flaggedHoldings={[]}
+        matchDecisionsByHoldingRef={{}}
+        outcomes={[makeOutcome(14)]}
+      />,
+    );
+    expect(screen.getByTestId("bridge-empty-last-reviewed").textContent).toBe(
+      "2 weeks ago",
+    );
+  });
+
+  it("L-0069 — day 60 boundary → '2 months ago' (60/30 = 2)", () => {
+    render(
+      <BridgeWidget
+        flaggedHoldings={[]}
+        matchDecisionsByHoldingRef={{}}
+        outcomes={[makeOutcome(60)]}
+      />,
+    );
+    expect(screen.getByTestId("bridge-empty-last-reviewed").textContent).toBe(
+      "2 months ago",
+    );
+  });
+
+  it("L-0069 — 366 days ago → absolute toLocaleDateString form (>= 1 year boundary)", () => {
+    const outcome = makeOutcome(366);
+    // The absolute branch formats `new Date(Date.parse(created_at))` via
+    // toLocaleDateString("en-US", {month:'short', day:'numeric', year:'numeric'}).
+    // Derive the expected string from the SAME timestamp the component parses,
+    // so this never hardcodes a locale-/TZ-fragile literal.
+    const expected = new Date(
+      Date.parse(outcome.created_at),
+    ).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+    render(
+      <BridgeWidget
+        flaggedHoldings={[]}
+        matchDecisionsByHoldingRef={{}}
+        outcomes={[outcome]}
+      />,
+    );
+    const text = screen.getByTestId("bridge-empty-last-reviewed").textContent;
+    expect(text).toBe(expected);
+    // Sanity: the absolute branch must NOT collapse to a relative phrase.
+    expect(text).not.toMatch(/ago/);
+  });
+
+  it("L-0069 — future timestamp (negative elapsed) clamps to 'today'", () => {
+    // makeOutcome(-1) → created_at is one day in the FUTURE relative to
+    // FIXED_NOW, so elapsedMs < 0 and `days` is negative.
+    render(
+      <BridgeWidget
+        flaggedHoldings={[]}
+        matchDecisionsByHoldingRef={{}}
+        outcomes={[makeOutcome(-1)]}
+      />,
+    );
+    expect(screen.getByTestId("bridge-empty-last-reviewed").textContent).toBe(
+      "today",
+    );
+  });
+
   it("shows a singular review count when only one outcome is on file", () => {
     render(
       <BridgeWidget

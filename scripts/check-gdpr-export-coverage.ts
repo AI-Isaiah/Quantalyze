@@ -524,10 +524,42 @@ export function extractUserTablesFromMigration(
   filename: string,
   declarations: Map<string, string> = new Map(),
 ): Map<string, string> {
+  // H-1019 (audit 2026-05-25): strip SQL comments BEFORE scanning. The
+  // user-column regex previously ran against the raw CREATE TABLE body,
+  // so a "-- ..." line that merely DOCUMENTED a sibling table's
+  // "user_id UUID REFERENCES auth.users(id)" FK made the regex match
+  // even though the table has no real user column — a phantom coverage
+  // gap. We strip line comments and block comments up-front so only
+  // real DDL is scanned.
+  const scrubbed = stripSqlComments(content);
+
   // BEST-EFFORT — see the limitation block on
   // `scanMigrationsForUserTables`.
+  //
+  // H-1020 (audit 2026-05-25): the table identifier was matched only as
+  // a bare `([a-z0-9_]+)`, which does NOT match a DOUBLE-QUOTED
+  // identifier (`CREATE TABLE "foo" (...)`). A quoted table therefore
+  // escaped detection → omitted from required GDPR-export coverage → a
+  // potential user-data leak. We now match an OPTIONAL double-quoted
+  // form: group 1 is the quoted name (quotes stripped by the capture),
+  // group 2 the bare name; the column body shifts to group 3. The name
+  // is taken from whichever alternative matched and keyed unquoted (the
+  // capture already excludes the quotes), matching how the rest of the
+  // script keys tables.
+  //
+  // Finding 4 (red-team, 2026-05-25): the prior fix only handled a bare
+  // `public.` schema prefix OR a quoted bare name — NOT a quoted and/or
+  // schema-qualified name. So `CREATE TABLE "public"."secret_data" (...)`
+  // and `CREATE TABLE app."secret5" (...)` still escaped the gate. We
+  // replace the `(?:public\.)?` prefix with a generalized OPTIONAL
+  // schema-qualifier that matches a quoted OR bare schema name followed
+  // by a dot. CRITICAL: the schema-qualifier is fully NON-capturing
+  // (`(?:...)`), so the table-name capture groups (1 = quoted name, 2 =
+  // bare name) and the body group (3) DO NOT shift — every downstream
+  // `match[1] ?? match[2]` / `match[3]` consumer is unaffected. The
+  // captured table name remains the unqualified, unquoted name.
   const createTableRe =
-    /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?([a-z0-9_]+)\s*\(([\s\S]*?)\n\s*\)\s*;/gi;
+    /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"[a-z0-9_]+"|[a-z0-9_]+)\.)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s*\(([\s\S]*?)\n\s*\)\s*;/gi;
 
   // A column declaration that references profiles(id) or auth.users(id).
   // Covers: user_id, allocator_id, uploaded_by, created_by, invited_by.
@@ -538,9 +570,11 @@ export function extractUserTablesFromMigration(
 
   createTableRe.lastIndex = 0;
   let match: RegExpExecArray | null;
-  while ((match = createTableRe.exec(content)) !== null) {
-    const tableName = match[1];
-    const body = match[2];
+  while ((match = createTableRe.exec(scrubbed)) !== null) {
+    // H-1020: group 1 = quoted-form name, group 2 = bare name, group 3 =
+    // column body. Take the name from whichever alternative matched.
+    const tableName = match[1] ?? match[2];
+    const body = match[3];
 
     if (tableName in EXCLUDED_TABLES) continue;
     if (declarations.has(tableName)) continue; // first decl wins
@@ -550,7 +584,58 @@ export function extractUserTablesFromMigration(
     }
   }
 
+  // H-1019 (audit 2026-05-25): a table can become user-owned LATER via
+  // "ALTER TABLE <t> ADD COLUMN user_id UUID ... REFERENCES auth.users".
+  // The CREATE TABLE sweep above misses that — so a late-added user
+  // column escaped the coverage gate and the Art. 15 export silently
+  // omitted the table's rows. Scan ALTER TABLE ... ADD COLUMN for the
+  // same user-id-FK columns. We match the column spec up to the
+  // statement terminator (";") so the userColumnRe match sees the full
+  // column definition.
+  // H-1020 (audit 2026-05-25): same double-quoted-identifier escape
+  // vector as createTableRe above — `ALTER TABLE "foo" ADD COLUMN
+  // user_id UUID REFERENCES auth.users(id)` was missed. Match an
+  // OPTIONAL double-quoted form: group 1 = quoted name, group 2 = bare
+  // name, group 3 = the column spec (shifted from group 2).
+  //
+  // Finding 4 (red-team, 2026-05-25): same quoted/schema-qualified
+  // escape vector as createTableRe — `ALTER TABLE "public"."x" ADD
+  // COLUMN ...` and `ALTER TABLE app."x" ADD COLUMN ...` escaped. The
+  // `(?:public\.)?` prefix is replaced with the same generalized OPTIONAL
+  // schema-qualifier (quoted OR bare schema name + dot). It is fully
+  // NON-capturing, so the table-name groups (1 quoted, 2 bare) and the
+  // column-spec group (3) DO NOT shift.
+  const alterAddColumnRe =
+    /ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:(?:"[a-z0-9_]+"|[a-z0-9_]+)\.)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([\s\S]*?);/gi;
+  alterAddColumnRe.lastIndex = 0;
+  while ((match = alterAddColumnRe.exec(scrubbed)) !== null) {
+    // H-1020: take the table name from whichever alternative matched
+    // (quoted group 1 or bare group 2); the column spec is now group 3.
+    const tableName = match[1] ?? match[2];
+    const columnSpec = match[3];
+
+    if (tableName in EXCLUDED_TABLES) continue;
+    if (declarations.has(tableName)) continue; // first decl wins
+
+    if (userColumnRe.test(columnSpec)) {
+      declarations.set(tableName, filename);
+    }
+  }
+
   return declarations;
+}
+
+/**
+ * H-1019 (audit 2026-05-25): strip SQL comments so DDL-scanning regexes
+ * don't match reference phrases that only appear in documentation
+ * comments. Removes line comments (to end of line) and block comments.
+ * Block comments are replaced with a newline so line-anchored regexes
+ * elsewhere keep their line structure.
+ */
+function stripSqlComments(content: string): string {
+  const BLOCK_COMMENT = new RegExp("/\\*[\\s\\S]*?\\*/", "g");
+  const LINE_COMMENT = /--[^\n]*/g;
+  return content.replace(BLOCK_COMMENT, "\n").replace(LINE_COMMENT, "");
 }
 
 /**

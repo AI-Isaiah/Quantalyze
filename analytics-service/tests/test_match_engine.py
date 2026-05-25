@@ -1295,6 +1295,83 @@ def test_v1_to_v2_golden_snapshot():
     )
 
 
+# --- H-0755: independent sanity guard on the committed golden fixture --------
+def test_v2_golden_fixture_passes_sanity_invariants():
+    """The match_engine_v2 golden is a single-line minified blob extracted
+    verbatim from engine output — a human cannot read it to validate the math,
+    and REGENERATE_GOLDEN=1 overwrites it with NO sanity check (unlike
+    test_feedback_engine's golden, which fails if ceiling/floor regen to {}).
+
+    This test reads the COMMITTED fixture and asserts engine-independent
+    range/structural invariants that any correct score composition MUST satisfy.
+    It is the sanity oracle the regen path lacks: a silent math drift that
+    produced an out-of-range score, a NaN/inf, an impossible sub-score, or a
+    broken rank ordering would be frozen as the new 'expected' by a naive regen
+    — but it would fail HERE, because these bounds come from the spec, not from
+    re-running the engine.
+    """
+    import json
+    import math
+
+    data = json.loads((FIXTURES_DIR / "match_engine_v2_golden.json").read_text())
+
+    # Structural shape that a non-empty, non-{} regen must preserve.
+    assert isinstance(data, dict) and data, "golden regenerated to empty/non-dict"
+    assert data["engine_version"] == ENGINE_VERSION, (
+        f"golden engine_version {data['engine_version']!r} != current "
+        f"{ENGINE_VERSION!r} — regen forgot the version bump, or vice versa"
+    )
+    assert data["weights_version"] == WEIGHTS_VERSION
+    candidates = data["candidates"]
+    assert isinstance(candidates, list) and len(candidates) == 3, (
+        "golden must hold the deterministic 3-candidate universe"
+    )
+
+    SUBSCORE_KEYS = (
+        "capacity_fit",
+        "mandate_fit_score",
+        "preference_fit",
+        "track_record",
+    )
+
+    prev_score = None
+    seen_ranks = []
+    for c in candidates:
+        score = c["score"]
+        # Composite score is a 0..100 percentage. A drift that pushed it out of
+        # band (e.g. a missing /total renormalization, or a *100 applied twice)
+        # would be invisible in the minified blob but caught here.
+        assert isinstance(score, (int, float)) and math.isfinite(score), (
+            f"score {score!r} is non-finite — NaN/inf leaked into the golden"
+        )
+        assert 0.0 <= score <= 100.0, f"score {score} out of [0,100]"
+        assert c["score_error"] is False, "golden froze a score_error=True row"
+
+        bd = c["score_breakdown"]
+        for k in SUBSCORE_KEYS:
+            v = bd[k]
+            assert isinstance(v, (int, float)) and math.isfinite(v), (
+                f"sub-score {k}={v!r} non-finite"
+            )
+            # Each component sub-score is a normalized 0..1 weight.
+            assert 0.0 <= v <= 1.0, f"sub-score {k}={v} out of [0,1]"
+
+        seen_ranks.append(c["rank"])
+        # rank 1 is the best; score must be monotonically non-increasing as rank
+        # increases (the engine sorts descending by score).
+        if prev_score is not None:
+            assert score <= prev_score + 1e-9, (
+                f"rank {c['rank']} score {score} exceeds the better-ranked "
+                f"score {prev_score} — ranking/score ordering is inconsistent"
+            )
+        prev_score = score
+
+    # Ranks are a dense 1..N permutation — no gaps, no dupes.
+    assert sorted(seen_ranks) == list(range(1, len(candidates) + 1)), (
+        f"ranks {seen_ranks} are not a dense 1..N sequence"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Phase 09 / D-17: ENGINE_VERSION bump assertion
 # ---------------------------------------------------------------------------

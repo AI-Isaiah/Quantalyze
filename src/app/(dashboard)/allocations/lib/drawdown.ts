@@ -31,7 +31,7 @@ export function deriveSnapshotDrawdowns(
 /**
  * 09.1-REVIEW WR-05 — fallback Max DD over a cumulative-RETURN curve.
  *
- * The MyAllocationClient client-side fallback emits points where
+ * Callers emit cumulative-return points where
  * `value = wealth - 1` (return form). Computing drawdown directly on
  * the return form via `(value - peakValue) / (1 + peakValue)` blows up
  * when peakValue approaches -1 (catastrophic-loss windows on

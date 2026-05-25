@@ -285,6 +285,25 @@ async function handleExportRequest(
   const rateLimitKey = `export:${user.id}`;
   const rl = await checkLimit(exportLimiter, rateLimitKey);
   if (!rl.success) {
+    // H-0015 (audit 2026-05-25): a throttled export must leave a
+    // forensic trail. Pre-fix the 429 short-circuited before any
+    // logAuditEvent call, so a credential-export probing storm
+    // (repeated 429s) produced NO audit signal for SecOps. Emit a
+    // dedicated `account.export_rate_limited` event before returning,
+    // carrying the request fingerprint so the source of a probe is
+    // reconstructable. Same fire-and-forget shape as the other emits
+    // in this route.
+    const fingerprint = readRequestFingerprint(req);
+    logAuditEvent(supabase, {
+      action: "account.export_rate_limited",
+      entity_type: "user",
+      entity_id: user.id,
+      metadata: {
+        retry_after: rl.retryAfter,
+        ip: fingerprint.ip,
+        user_agent: fingerprint.user_agent,
+      },
+    });
     return NextResponse.json(
       { error: "Export limit reached — try again later." },
       {

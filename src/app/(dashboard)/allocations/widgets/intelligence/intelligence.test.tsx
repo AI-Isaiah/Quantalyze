@@ -1,10 +1,44 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MorningBriefing } from "./MorningBriefing";
 import { RegimeDetector } from "./RegimeDetector";
 import { ConcentrationRisk } from "./ConcentrationRisk";
 
 const baseProps = { timeframe: "YTD", width: 6, height: 3 };
+
+// Build a daily-return series of `len` points starting 2024-01-01, where
+// `valueAt(i)` supplies each day's return. Shared by the deterministic
+// regime fixtures below.
+function makeReturns(
+  len: number,
+  valueAt: (i: number) => number,
+): Array<{ date: string; value: number }> {
+  const out: Array<{ date: string; value: number }> = [];
+  const start = new Date("2024-01-01");
+  for (let i = 0; i < len; i++) {
+    const d = new Date(start);
+    d.setDate(d.getDate() + i);
+    out.push({ date: d.toISOString().slice(0, 10), value: valueAt(i) });
+  }
+  return out;
+}
+
+function renderRegime(dailyReturns: Array<{ date: string; value: number }>) {
+  return render(
+    <RegimeDetector
+      data={{
+        strategies: [
+          {
+            strategy: {
+              strategy_analytics: { daily_returns: dailyReturns },
+            },
+          },
+        ],
+      }}
+      {...baseProps}
+    />,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // MorningBriefing
@@ -32,6 +66,119 @@ describe("MorningBriefing", () => {
       screen.getByText("Portfolio briefing not yet generated."),
     ).toBeInTheDocument();
   });
+
+  // M-0173 — the header date is produced by `new Date().toLocaleDateString
+  // ("en-US", {...})` at render. Pin the clock so the formatted output is
+  // deterministic. We set the system time to mid-UTC-day (12:00Z) so the
+  // assertion is stable regardless of the runner's timezone (a date near
+  // 00:00Z would print a different calendar day in UTC- offsets). The
+  // 'en-US' locale string is locale-stable; this test locks BOTH the format
+  // (weekday, long-month, numeric-day, year) and that the date is rendered.
+  describe("M-0173 — header date formatting (deterministic clock)", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("renders today's date in 'Weekday, Month D, YYYY' en-US form", () => {
+      vi.useFakeTimers();
+      // 2026-03-15 is a Sunday. Noon UTC keeps the calendar day stable
+      // across runner timezones from UTC-11 to UTC+11.
+      vi.setSystemTime(new Date("2026-03-15T12:00:00Z"));
+
+      render(<MorningBriefing data={{}} {...baseProps} />);
+
+      // Re-derive the expected string the same way the component does, so the
+      // assertion tracks the component's exact Intl formatting (no hardcoded
+      // string that would drift if the option set changes) yet remains
+      // deterministic under the fixed clock.
+      const expected = new Date().toLocaleDateString("en-US", {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      });
+      expect(expected).toContain("2026");
+      expect(screen.getByText(expected)).toBeInTheDocument();
+    });
+  });
+
+  // M-0891 — `splitNarrative` is the entire reason this widget exists: it
+  // parses one ". "-joined narrative string into four semantic buckets via
+  // sentence-prefix regex (monthly / recommendation / headline / context).
+  // The prior coverage only fed a single sentence ("Markets are up today.")
+  // which lands in `context` and renders the same as any other text — so it
+  // never proves the split. These tests pin each bucket's classification AND
+  // its distinctive chrome (the "Monthly breakdown" label, the recommendation
+  // pill) so any future regex tweak surfaces immediately.
+  describe("M-0891 — splitNarrative bucket classification", () => {
+    function renderNarrative(narrative: string) {
+      return render(
+        <MorningBriefing
+          data={{ analytics: { narrative_summary: narrative } }}
+          {...baseProps}
+        />,
+      );
+    }
+
+    it("'In <Month>, … returned +N%' sentences render under a 'Monthly breakdown' section", () => {
+      renderNarrative(
+        "Your portfolio returned +2.3% MTD. In April 2026, portfolio returned +1.2%. Alpha drove 50% of the gain.",
+      );
+      // The label only renders when the `monthly` bucket is non-empty.
+      expect(screen.getByText("Monthly breakdown")).toBeInTheDocument();
+      // The monthly sentence is emitted as a list item (with trailing period).
+      expect(
+        screen.getByText("In April 2026, portfolio returned +1.2%."),
+      ).toBeInTheDocument();
+    });
+
+    it("classifies NEGATIVE-return months as monthly, not context (regex matches the '-' sign)", () => {
+      // The production regex is /returned [+-]?\d/ — the sign group is
+      // OPTIONAL, so a negative month must still bucket as monthly. A
+      // regression that narrowed it to /returned \+\d/ (plus-only) would
+      // push this sentence into `context` and drop the "Monthly breakdown"
+      // label — this test fails loudly if that happens.
+      renderNarrative(
+        "Your portfolio returned -1.5% MTD. In April 2026, portfolio returned -2.0%.",
+      );
+      expect(screen.getByText("Monthly breakdown")).toBeInTheDocument();
+      expect(
+        screen.getByText("In April 2026, portfolio returned -2.0%."),
+      ).toBeInTheDocument();
+    });
+
+    it("'If you trim …' sentence renders in the recommendation pill (rgba(27,107,90,0.06) background)", () => {
+      renderNarrative(
+        "Your portfolio returned +2.3% MTD. If you trim Beta and redistribute to Gamma, expected Sharpe moves from 1.2 to 1.5.",
+      );
+      const rec = screen.getByText(
+        "If you trim Beta and redistribute to Gamma, expected Sharpe moves from 1.2 to 1.5.",
+      );
+      expect(rec).toBeInTheDocument();
+      // The pill is the recommendation sentence's wrapper div, styled with
+      // the teal-tint background that distinguishes it from the plain
+      // headline/context paragraphs.
+      const pill = rec.parentElement;
+      expect(pill).not.toBeNull();
+      expect(pill?.style.backgroundColor).toBe("rgba(27, 107, 90, 0.06)");
+    });
+
+    it("correlation/risk sentences fall through to the context bucket (no Monthly label, no pill)", () => {
+      renderNarrative(
+        "Your portfolio returned +0.8% MTD. Correlation has tightened to 0.65 — diversification quality is degrading.",
+      );
+      // The context sentence renders as ordinary copy …
+      expect(
+        screen.getByText(
+          /Correlation has tightened to 0\.65 — diversification quality is degrading\./,
+        ),
+      ).toBeInTheDocument();
+      // … and neither the monthly section nor the recommendation pill mounts,
+      // proving the sentence wasn't misrouted into those buckets.
+      expect(screen.queryByText("Monthly breakdown")).toBeNull();
+      expect(screen.queryByText(/If you trim/)).toBeNull();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -51,38 +198,54 @@ describe("RegimeDetector", () => {
     ).toBeInTheDocument();
   });
 
-  it("detects a regime from sufficient data", () => {
-    // Build 300 days of uptrending returns for a bullish crossover
-    const dailyReturns: Array<{ date: string; value: number }> = [];
-    const startDate = new Date("2024-01-01");
-    for (let i = 0; i < 300; i++) {
-      const d = new Date(startDate);
-      d.setDate(d.getDate() + i);
-      dailyReturns.push({
-        date: d.toISOString().slice(0, 10),
-        value: 0.002, // consistent positive return
-      });
-    }
+  // M-0177 — the prior test accepted ANY of three regime labels via
+  // `.some(queryByText)`, which would also pass vacuously if NO label
+  // rendered (e.g. the widget degraded to the insufficient-data state) or if
+  // a 4th unexpected label appeared. These tests pin the EXACT label for a
+  // deterministic input AND assert the insufficient-data empty state is
+  // absent, so a math regression that flips the regime — or silently drops to
+  // empty — fails visibly.
+  it("M-0177: constant-positive series (no MA crossover) renders exactly 'Range-bound', not the empty state", () => {
+    // 300 days of constant +0.002 → strictly convex cumulative curve → the
+    // 50d MA never crosses the 200d MA → zero crossovers → neutral regime.
+    renderRegime(makeReturns(300, () => 0.002));
 
-    render(
-      <RegimeDetector
-        data={{
-          strategies: [
-            {
-              strategy: {
-                strategy_analytics: { daily_returns: dailyReturns },
-              },
-            },
-          ],
-        }}
-        {...baseProps}
-      />,
-    );
+    expect(screen.getByText("Range-bound")).toBeInTheDocument();
+    // The OTHER labels must be absent — proves a single, specific regime.
+    expect(screen.queryByText("Bull Market")).toBeNull();
+    expect(screen.queryByText("Bear Market")).toBeNull();
+    // And the insufficient-data path must NOT be the thing that rendered.
+    expect(
+      screen.queryByText(/Insufficient data for regime detection/),
+    ).toBeNull();
+  });
 
-    // Should show one of the valid regime labels
-    const validRegimes = ["Bull Market", "Bear Market", "Range-bound"];
-    const found = validRegimes.some((r) => screen.queryByText(r));
-    expect(found).toBe(true);
+  it("M-0177: down-then-up series produces a bullish crossover → exactly 'Bull Market'", () => {
+    // 250 mildly-declining days then 100 strongly-rising days drives the fast
+    // MA from below the slow MA to above it → a single bullish crossover.
+    const bull = makeReturns(350, (i) => (i < 250 ? -0.001 : 0.02));
+    renderRegime(bull);
+
+    expect(screen.getByText("Bull Market")).toBeInTheDocument();
+    expect(screen.queryByText("Bear Market")).toBeNull();
+    expect(screen.queryByText("Range-bound")).toBeNull();
+    expect(
+      screen.queryByText(/Insufficient data for regime detection/),
+    ).toBeNull();
+  });
+
+  it("M-0177: up-then-down series produces a bearish crossover → exactly 'Bear Market'", () => {
+    // 250 rising days then 100 sharply-falling days drives the fast MA below
+    // the slow MA → a single bearish crossover.
+    const bear = makeReturns(350, (i) => (i < 250 ? 0.001 : -0.02));
+    renderRegime(bear);
+
+    expect(screen.getByText("Bear Market")).toBeInTheDocument();
+    expect(screen.queryByText("Bull Market")).toBeNull();
+    expect(screen.queryByText("Range-bound")).toBeNull();
+    expect(
+      screen.queryByText(/Insufficient data for regime detection/),
+    ).toBeNull();
   });
 });
 

@@ -16,6 +16,7 @@ import {
 import { FLAG_COMPOSITE_THRESHOLD } from "./flag-threshold";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
+import { Constants } from "@/lib/database.types";
 
 const SAMPLE: FlaggedHolding = {
   venue: "binance",
@@ -153,6 +154,44 @@ describe("toVoluntaryAddDecision (D-11)", () => {
       original_strategy_id: null,
       suggested_strategy_id: "00000000-0000-0000-0000-000000000001",
     });
+  });
+});
+
+// M-0145 (pr-test-analyzer) — T_VR1/T_VR2/T_VA1 above assert object-literal
+// equality against the same constants the constructors emit (schema-sync
+// tautology). They prove the constructor builds what it builds, but NOT that
+// the `kind` discriminator stays in lockstep with the server-side enum
+// (migration 20260426131718_match_decisions_kind_enum). The DB enum is the
+// shared cross-file contract: if a server rename drops "voluntary_remove" or
+// renames it (e.g. to "manual_remove"), the synthetic shape's literal would
+// silently diverge from what the match_decisions row insert accepts. Pin the
+// `kind` literals against the generated DB enum (Constants.public.Enums) so a
+// rename on either side fails here instead of at runtime against the RPC.
+describe("M-0145 — synthetic decision `kind` parity with match_decision_kind DB enum", () => {
+  const DB_KINDS: readonly string[] =
+    Constants.public.Enums.match_decision_kind;
+
+  it("voluntary_remove synthetic kind is a member of the match_decision_kind enum", () => {
+    const result = toVoluntaryRemoveDecision({
+      venue: "binance",
+      symbol: "BTC",
+      holding_type: "spot",
+    });
+    expect(DB_KINDS).toContain(result.kind);
+  });
+
+  it("voluntary_add synthetic kind is a member of the match_decision_kind enum", () => {
+    const result = toVoluntaryAddDecision(
+      "00000000-0000-0000-0000-000000000001",
+    );
+    expect(DB_KINDS).toContain(result.kind);
+  });
+
+  it("the DB enum still carries both voluntary kinds (guards a server-side rename)", () => {
+    // Belt + braces: if migration 080 ever drops or renames either voluntary
+    // kind, this fails and forces the adapter literals to be revisited.
+    expect(DB_KINDS).toContain("voluntary_remove");
+    expect(DB_KINDS).toContain("voluntary_add");
   });
 });
 

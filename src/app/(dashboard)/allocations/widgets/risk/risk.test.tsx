@@ -118,16 +118,46 @@ describe("Risk Widgets — render without crash", () => {
     expect(screen.getByTestId("correlation-matrix")).toBeInTheDocument();
   });
 
-  it("CorrelationOverTime renders (or shows empty state for short data)", () => {
+  // M-0220 — the prior `if (chart) {...} else {empty}` branch passed
+  // vacuously whether the chart rendered OR silently degraded to empty.
+  // Split into two deterministically-tuned cases so each outcome is pinned.
+  it("M-0220: CorrelationOverTime renders the chart with >= 90 aligned days, 2+ strategies (chart MUST appear)", () => {
     render(<CorrelationOverTime {...WIDGET_PROPS} />);
-    // With 200 days and 90-day window, there should be data OR empty state
-    const chart = screen.queryByTestId("correlation-over-time");
-    if (chart) {
-      expect(chart).toBeInTheDocument();
-    } else {
-      // Empty state is acceptable for insufficient data
-      expect(screen.getByText(/Insufficient data/i)).toBeInTheDocument();
-    }
+    // MOCK_STRATEGIES carry 200 aligned, non-flat daily returns → > the
+    // 90-day rolling window with non-zero variance, so the chart MUST
+    // render. The insufficient-data empty state MUST be absent.
+    expect(screen.getByTestId("correlation-over-time")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Insufficient data for rolling correlation/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("M-0220: CorrelationOverTime shows the empty state below the 90-day window (empty MUST appear)", () => {
+    // Two strategies but only 50 aligned days — strictly below the 90-day
+    // ROLLING_WINDOW, so no rolling-correlation points exist and the chart
+    // MUST collapse to the insufficient-data state.
+    const shortStrategies = MOCK_STRATEGIES.slice(0, 2).map((s, i) => ({
+      ...s,
+      strategy: {
+        ...s.strategy,
+        strategy_analytics: {
+          ...s.strategy.strategy_analytics,
+          daily_returns: makeDailyReturns(50, 0.001 + i * 0.001, 42 + i),
+        },
+      },
+    }));
+    render(
+      <CorrelationOverTime
+        data={{ strategies: shortStrategies, analytics: null }}
+        timeframe="YTD"
+        width={4}
+        height={3}
+      />,
+    );
+    expect(screen.queryByTestId("correlation-over-time")).toBeNull();
+    expect(
+      screen.getByText(/Insufficient data for rolling correlation/i),
+    ).toBeInTheDocument();
   });
 
   it("VarExpectedShortfall renders", () => {
@@ -140,16 +170,58 @@ describe("Risk Widgets — render without crash", () => {
     expect(screen.getByTestId("risk-decomposition")).toBeInTheDocument();
   });
 
-  it("TailRisk renders", () => {
-    render(<TailRisk {...WIDGET_PROPS} />);
-    // Tail risk depends on returns below -2%. Our mock has wide noise range
-    // so should have some events, but we accept empty state too
-    const chart = screen.queryByTestId("tail-risk");
-    if (chart) {
-      expect(chart).toBeInTheDocument();
-    } else {
-      expect(screen.getByText(/No extreme loss/i)).toBeInTheDocument();
-    }
+  // M-0220 — same vacuous-branch fix as CorrelationOverTime. TailRisk
+  // renders the histogram iff >= 3 composite returns fall below -2%, else
+  // the "No extreme loss events" empty state. Pin both outcomes with
+  // explicit compositeReturns fixtures.
+  it("M-0220: TailRisk renders the histogram when >= 3 returns are below -2% (chart MUST appear)", () => {
+    // Six returns below -2% guarantees the >= 3 tail-event threshold.
+    const compositeReturns = [
+      { date: "2024-01-01", value: -0.03 },
+      { date: "2024-01-02", value: -0.04 },
+      { date: "2024-01-03", value: -0.05 },
+      { date: "2024-01-04", value: -0.025 },
+      { date: "2024-01-05", value: -0.06 },
+      { date: "2024-01-06", value: -0.035 },
+      { date: "2024-01-07", value: 0.01 },
+      { date: "2024-01-08", value: 0.02 },
+    ];
+    render(
+      <TailRisk
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        data={{ strategies: [], analytics: null, compositeReturns } as any}
+        timeframe="YTD"
+        width={4}
+        height={3}
+      />,
+    );
+    expect(screen.getByTestId("tail-risk")).toBeInTheDocument();
+    expect(screen.getByText(/6 events/)).toBeInTheDocument();
+    expect(screen.queryByText(/No extreme loss/i)).toBeNull();
+  });
+
+  it("M-0220: TailRisk shows the empty state when no return breaches -2% (empty MUST appear)", () => {
+    // All returns above the -2% tail threshold → zero tail events.
+    const compositeReturns = [
+      { date: "2024-01-01", value: 0.01 },
+      { date: "2024-01-02", value: -0.005 },
+      { date: "2024-01-03", value: 0.012 },
+      { date: "2024-01-04", value: -0.018 },
+      { date: "2024-01-05", value: 0.003 },
+    ];
+    render(
+      <TailRisk
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        data={{ strategies: [], analytics: null, compositeReturns } as any}
+        timeframe="YTD"
+        width={4}
+        height={3}
+      />,
+    );
+    expect(screen.queryByTestId("tail-risk")).toBeNull();
+    expect(
+      screen.getByText(/No extreme loss events detected/i),
+    ).toBeInTheDocument();
   });
 
   it("TrackingError renders", () => {

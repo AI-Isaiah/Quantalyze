@@ -196,6 +196,17 @@ export function assertTradeMixBucketCount(expected: {
         );
       }
     }
+    // M-0527: the D-15 contract is EXACTLY these 4 buckets — reject extras
+    // (e.g. a stray 2-bucket `long` key) so a malformed fixture fails loud
+    // instead of silently miscounting on the dashboard.
+    for (const k of keys) {
+      if (!expected4.includes(k)) {
+        throw new Error(
+          `4-bucket Trade Mix has unexpected key: ${k}. Got ${keys.join(", ")}. ` +
+            "Fixture pin reports is_maker available; expected EXACTLY 4 buckets.",
+        );
+      }
+    }
   } else {
     const expected2 = ["long", "short"];
     for (const k of expected2) {
@@ -203,6 +214,17 @@ export function assertTradeMixBucketCount(expected: {
         throw new Error(
           `2-bucket fallback missing key: ${k}. Got ${keys.join(", ")}. ` +
             "Fixture pin reports is_maker unavailable; expected 2 buckets.",
+        );
+      }
+    }
+    // M-0527: the D-15 fallback contract is EXACTLY {long, short} — reject
+    // extras (e.g. a stray maker/taker key) so a malformed fixture fails
+    // loud instead of silently miscounting on the dashboard.
+    for (const k of keys) {
+      if (!expected2.includes(k)) {
+        throw new Error(
+          `2-bucket fallback has unexpected key: ${k}. Got ${keys.join(", ")}. ` +
+            "Fixture pin reports is_maker unavailable; expected EXACTLY 2 buckets.",
         );
       }
     }

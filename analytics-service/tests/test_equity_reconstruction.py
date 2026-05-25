@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import ccxt.async_support as ccxt
 import pytest
@@ -1995,7 +1995,7 @@ async def test_stale_snapshots_replaced_on_new_key_when_no_siblings(monkeypatch)
     read-only key; allocator has NO OTHER api_keys. A fresh reconstruct
     MUST replace the stale rows with the new computed values."""
     fake_supabase = FakeSupabaseClient()
-    _install_fake_audit(monkeypatch)
+    audit_mock = _install_fake_audit(monkeypatch)
 
     end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
     start_date = end_date - timedelta(days=9)
@@ -2085,6 +2085,24 @@ async def test_stale_snapshots_replaced_on_new_key_when_no_siblings(monkeypatch)
         f"got {stored!r}"
     )
 
+    # H-1184: the user-actionable observability signal is the
+    # `stale_snapshots_purged` audit field on reconstruct_complete. The
+    # sole-source purge fired and deleted all 10 stale rows, so the audit
+    # trail MUST report 10. A regression that wipes the table but emits
+    # purged=0 (or vice-versa) silently breaks the operator's only window
+    # into "we replaced N stale rows vs touched nothing".
+    complete_calls = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.reconstruct_complete"
+    ]
+    assert complete_calls, audit_mock.call_args_list
+    meta = complete_calls[-1].kwargs.get("metadata") or {}
+    assert meta.get("stale_snapshots_purged") == 10, (
+        "sole-source purge wiped 10 stale rows but the audit field "
+        f"reported {meta.get('stale_snapshots_purged')!r}; the user-actionable "
+        f"observability signal is broken. metadata={meta!r}"
+    )
+
 
 @pytest.mark.asyncio
 async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
@@ -2096,7 +2114,7 @@ async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
     per migration 075 a disconnected key cannot produce new data and must
     not block the sole-source purge.)"""
     fake_supabase = FakeSupabaseClient()
-    _install_fake_audit(monkeypatch)
+    audit_mock = _install_fake_audit(monkeypatch)
 
     end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
     start_date = end_date - timedelta(days=9)
@@ -2174,6 +2192,22 @@ async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
         f"got {len(prior_survivors)} survivors: {stored!r}"
     )
 
+    # H-1184: a connected sibling means the purge MUST NOT fire — the
+    # audit field must report stale_snapshots_purged=0. If a regression
+    # let the purge run anyway (over-correction) the table assertion above
+    # would still pass on the multi-key path's collisions, but this catches
+    # the inverse: the observability signal must agree that nothing was wiped.
+    complete_calls = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.reconstruct_complete"
+    ]
+    assert complete_calls, audit_mock.call_args_list
+    meta = complete_calls[-1].kwargs.get("metadata") or {}
+    assert meta.get("stale_snapshots_purged") == 0, (
+        "sibling exists → purge must NOT fire → stale_snapshots_purged must "
+        f"be 0; got {meta.get('stale_snapshots_purged')!r}. metadata={meta!r}"
+    )
+
 
 @pytest.mark.asyncio
 async def test_stale_snapshots_replaced_when_sibling_is_disconnected(monkeypatch):
@@ -2193,7 +2227,7 @@ async def test_stale_snapshots_replaced_when_sibling_is_disconnected(monkeypatch
     FAILS without the `.is_("disconnected_at", "null")` filter on the
     sibling-count query."""
     fake_supabase = FakeSupabaseClient()
-    _install_fake_audit(monkeypatch)
+    audit_mock = _install_fake_audit(monkeypatch)
 
     end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
     start_date = end_date - timedelta(days=9)
@@ -2278,6 +2312,22 @@ async def test_stale_snapshots_replaced_when_sibling_is_disconnected(monkeypatch
     )
     # And the fresh reconstruct's rows must now be present.
     assert stored, "Fresh reconstruct wrote zero rows — upstream regression"
+
+    # H-1184: disconnected sibling is not a live contributor, so the
+    # sole-source purge fires and wipes all 10 stale rows. The audit field
+    # MUST report 10 — this is the operator-visible proof that the
+    # disconnected-sibling recovery path actually purged rather than no-op'd.
+    complete_calls = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.reconstruct_complete"
+    ]
+    assert complete_calls, audit_mock.call_args_list
+    meta = complete_calls[-1].kwargs.get("metadata") or {}
+    assert meta.get("stale_snapshots_purged") == 10, (
+        "disconnected sibling → purge fires on 10 stale rows → "
+        f"stale_snapshots_purged must be 10; got "
+        f"{meta.get('stale_snapshots_purged')!r}. metadata={meta!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -2651,6 +2701,78 @@ def test_v0_15_4_2_defensive_backward_compat_with_synthetic_fixtures():
     )
     assert recovered == pytest.approx(10.0, abs=0.001), (
         f"Fixture compat broken. Got {recovered}"
+    )
+    assert source == _PerpAmtSource.COST_DIV_PRICE, source
+
+
+# ---------------------------------------------------------------------------
+# Audit closure M-1035 — the contract-size regression block only covered ETH
+# (ctVal=0.1). The CHANGELOG names BTC-USDT-SWAP among the affected perps and
+# the per-symbol OKX_PERP_CONTRACT_SIZE table has DISTINCT scales (BTC 0.01,
+# SOL 1.0, DOGE 1000.0). A regression that hard-coded ETH-style scaling, or
+# that broke the per-symbol table lookup for a different ctVal, would pass the
+# ETH test but silently corrupt BTC/SOL base-unit recovery. These pin the
+# recovery for two more scales: BTC (broken cost → ctVal table fires) and SOL
+# (ctVal=1 → no distortion, cost/price already correct).
+# Values hand-derived against the production table in equity_reconstruction.py
+# (BTC/USDT:USDT → 0.01, SOL/USDT:USDT → 1.0) and the 5% divergence threshold.
+# ---------------------------------------------------------------------------
+
+
+def test_okx_contract_size_btc_perp_ctval_0_01_no_inflation():
+    """BTC/USDT:USDT ctVal=0.01. A 0.5 BTC position lands as amount=50
+    contracts. When safe_trade fails to apply contractSize the broken
+    cost = 50 × 70000 = 3,500,000, so cost/price = 50 — contract COUNT, a
+    100x inflation. The defensive ctVal table must recover 50 × 0.01 = 0.5
+    BTC (real base units) via CTVAL_TABLE."""
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
+
+    contracts = 0.5 / 0.01  # 50 contracts for a 0.5 BTC position
+    broken_cost = contracts * 70_000.0  # ctVal NOT applied (production bug shape)
+    recovered, source, _drift = _resolve_perp_amt_base(
+        "BTC/USDT:USDT", amount=contracts, price=70_000.0, cost=broken_cost,
+        inst_type="SWAP", venue="okx",
+    )
+    assert recovered == pytest.approx(0.5, abs=1e-6), (
+        f"BTC ctVal table must recover 0.5 BTC from the broken-cost shape; "
+        f"got {recovered}. If this equals 50 the table didn't fire and BTC "
+        f"perps are back to the 100x contract-count inflation bug."
+    )
+    assert source == _PerpAmtSource.CTVAL_TABLE, source
+
+
+def test_okx_contract_size_btc_perp_proper_cost_path_unchanged():
+    """BTC with safe_trade correctly applying contractSize (cost = amount ×
+    price × ctVal) → cost/price already in base units; the defensive layer
+    must NOT corrupt this case."""
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
+
+    contracts = 0.5 / 0.01
+    proper_cost = contracts * 70_000.0 * 0.01
+    recovered, source, _drift = _resolve_perp_amt_base(
+        "BTC/USDT:USDT", amount=contracts, price=70_000.0, cost=proper_cost,
+        inst_type="SWAP", venue="okx",
+    )
+    assert recovered == pytest.approx(0.5, abs=1e-6), recovered
+    assert source == _PerpAmtSource.COST_DIV_PRICE, source
+
+
+def test_okx_contract_size_sol_perp_ctval_1_no_distortion():
+    """SOL/USDT:USDT ctVal=1.0 — amount IS already base units, so cost/price
+    and the ctVal table agree (relative_err=0, below the 5% threshold). The
+    defensive layer must leave it on the cost/price path with no scaling
+    distortion. A regression that blanket-multiplied by a non-1 ctVal for all
+    OKX perps would wrongly rescale SOL."""
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
+
+    sol_contracts = 10.0 / 1.0  # 10 contracts == 10 SOL
+    cost = sol_contracts * 150.0  # ctVal=1 → cost == amount × price already
+    recovered, source, _drift = _resolve_perp_amt_base(
+        "SOL/USDT:USDT", amount=sol_contracts, price=150.0, cost=cost,
+        inst_type="SWAP", venue="okx",
+    )
+    assert recovered == pytest.approx(10.0, abs=1e-6), (
+        f"SOL ctVal=1 must not distort base units; got {recovered}"
     )
     assert source == _PerpAmtSource.COST_DIV_PRICE, source
 

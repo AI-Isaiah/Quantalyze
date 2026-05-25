@@ -41,16 +41,16 @@ def golden_returns() -> pd.Series:
     - Contains a drawdown period (days 200-250) and a recovery
     - Mix of positive and negative days (~55% positive)
     """
-    np.random.seed(42)
+    rng = np.random.default_rng(42)
     n_days = 500
     dates = pd.bdate_range("2023-01-01", periods=n_days)
 
     # Normal returns with slight positive drift
-    base_returns = np.random.normal(0.0005, 0.015, n_days)
+    base_returns = rng.normal(0.0005, 0.015, n_days)
 
     # Inject a drawdown period (days 200-250)
-    base_returns[200:230] = np.random.normal(-0.015, 0.02, 30)
-    base_returns[230:250] = np.random.normal(0.005, 0.01, 20)
+    base_returns[200:230] = rng.normal(-0.015, 0.02, 30)
+    base_returns[230:250] = rng.normal(0.005, 0.01, 20)
 
     return pd.Series(base_returns, index=dates, name="returns")
 
@@ -78,10 +78,10 @@ def empty_returns() -> pd.Series:
 @pytest.fixture
 def benchmark_returns() -> pd.Series:
     """BTC-like benchmark returns aligned with golden_returns dates."""
-    np.random.seed(123)
+    rng = np.random.default_rng(123)
     dates = pd.bdate_range("2023-01-01", periods=500)
     return pd.Series(
-        np.random.normal(0.0003, 0.025, 500),
+        rng.normal(0.0003, 0.025, 500),
         index=dates,
         name="BTC",
     )

@@ -683,7 +683,64 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
 
     const retryAfter = res.headers.get("retry-after");
     expect(retryAfter).toBe("86400");
+
+    // H-0015 (fixed 2026-05-25): the 429 path now emits a dedicated
+    // `account.export_rate_limited` audit event before returning, so a
+    // credential-export probing storm leaves a forensic trail for
+    // SecOps. The route returns early at the rate-limit gate but emits
+    // the audit FIRST. Drain the microtask queue so the deferred emit
+    // lands before we assert.
+    await Promise.resolve();
+    await Promise.resolve();
+    const rlCall = logAuditRpcMock.mock.calls.find(
+      (c) =>
+        (c as unknown as [string, { p_action?: string }])[0] ===
+          "log_audit_event" &&
+        (c as unknown as [string, { p_action?: string }])[1]?.p_action ===
+          "account.export_rate_limited",
+    );
+    expect(rlCall).toBeDefined();
   });
+
+  // H-0015 (SURFACED): abuse-pattern signals (429 storms) should be
+  // audited so SecOps can detect credential-export probing. The route
+  // currently returns 429 WITHOUT emitting any audit event — a security
+  // observability gap. This assertion encodes the desired behavior (a
+  // dedicated `account.export_rate_limited` audit event on the 429
+  // path) and FAILS today because the route short-circuits before any
+  // logAuditEvent call. Promote to `it(...)` once the route emits a
+  // rate-limit audit event. Production fix required in
+  // src/app/api/account/export/route.ts (the 429 branch) — flagged, not
+  // applied here (test files only).
+  it(
+    "H-0015: emits an audit event on the 429 rate-limit path (SURFACED — route does not audit 429s)",
+    async () => {
+      checkLimitMock.mockResolvedValueOnce({
+        success: false,
+        retryAfter: 86_400,
+      });
+
+      const { POST } = await loadRoute();
+      const res = await POST(makeRequest());
+      expect(res.status).toBe(429);
+
+      // Drain the deferred-emit microtask queue.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // A rate-limit refusal must leave a forensic trail so a probing
+      // storm is detectable. Expect a dedicated rate-limit audit action.
+      const rlCall = logAuditRpcMock.mock.calls.find(
+        (c) =>
+          (c as unknown as [string, { p_action?: string }])[0] ===
+            "log_audit_event" &&
+          (c as unknown as [string, { p_action?: string }])[1]?.p_action ===
+            "account.export_rate_limited",
+      );
+      expect(rlCall).toBeDefined();
+    },
+  );
 
   it("429 short-circuits before collectUserExportBundle or upload (wasted-compute guard)", async () => {
     checkLimitMock.mockResolvedValueOnce({

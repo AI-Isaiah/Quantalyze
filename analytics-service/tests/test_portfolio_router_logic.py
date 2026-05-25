@@ -6,11 +6,8 @@ level before importing the router, so the alert logic can be tested in isolation
 """
 
 import sys
-import types
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
-
-import pytest
 
 
 def _install_stubs():
@@ -39,8 +36,28 @@ def _install_stubs():
     # fastapi.APIRouter needs prefix/tags kwargs
     mock_router = MagicMock()
     sys.modules["fastapi"].APIRouter = MagicMock(return_value=mock_router)
-    sys.modules["fastapi"].HTTPException = Exception
+    # H-0805: stub HTTPException as a REAL Exception SUBCLASS, not bare
+    # `Exception`. Aliasing it to `Exception` collapsed the type so that
+    # `except HTTPException: raise` in the router would catch every
+    # ValueError/KeyError/TypeError, and any `pytest.raises(HTTPException)`
+    # would match unrelated exceptions — a total loss of specificity vs
+    # production. A subclass that accepts the (status_code, detail) kwargs
+    # the router constructs preserves the production control flow.
+    sys.modules["fastapi"].HTTPException = _StubHTTPException
     sys.modules["fastapi"].Request = MagicMock()
+
+
+class _StubHTTPException(Exception):
+    """Minimal stand-in for fastapi.HTTPException for the local (no-fastapi)
+    test env. Accepts the same status_code/detail kwargs the router passes so
+    `raise HTTPException(status_code=..., detail=...)` works, and — crucially —
+    is a DISTINCT subclass of Exception so `except HTTPException` does not
+    swallow plain ValueError/KeyError/TypeError (H-0805)."""
+
+    def __init__(self, status_code: int | None = None, detail: object = None, **kwargs):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(detail)
 
 
 _install_stubs()
@@ -140,6 +157,115 @@ class TestGenerateAlerts:
         sb.table.return_value.insert.return_value.execute.side_effect = RuntimeError("DB down")
         # Should NOT propagate the exception
         _generate_alerts(sb, "portfolio-1", max_drawdown=-0.25, avg_pairwise_corr=0.80)
+
+    # ── H-0804: NaN inputs must not fire alerts ──────────────────────────
+    def test_nan_drawdown_no_alert(self):
+        """H-0804(a): max_drawdown=NaN must NOT trigger a drawdown alert.
+
+        `nan < -0.10` is False in IEEE-754, so the threshold check is
+        silently skipped. The correct behaviour is no insert — a NaN is a
+        computation gap, not a -10%+ breach. If a regression replaced the
+        `<` with a not-`>=` style guard, NaN would slip through and fire a
+        spurious alert; this asserts it does not.
+        """
+        sb = self._make_supabase_mock()
+        _generate_alerts(
+            sb, "portfolio-1", max_drawdown=float("nan"), avg_pairwise_corr=0.2
+        )
+        sb.table.return_value.insert.assert_not_called()
+
+    def test_nan_correlation_no_alert(self):
+        """H-0804(b): avg_pairwise_corr=NaN must NOT trigger a correlation
+        spike. `nan > 0.70` is False, so no alert should be inserted."""
+        sb = self._make_supabase_mock()
+        _generate_alerts(
+            sb, "portfolio-1", max_drawdown=-0.05, avg_pairwise_corr=float("nan")
+        )
+        sb.table.return_value.insert.assert_not_called()
+
+    def test_both_nan_no_alert(self):
+        """H-0804: both inputs NaN → no alerts, no crash."""
+        sb = self._make_supabase_mock()
+        _generate_alerts(
+            sb, "portfolio-1", max_drawdown=float("nan"), avg_pairwise_corr=float("nan")
+        )
+        sb.table.return_value.insert.assert_not_called()
+
+    def test_drawdown_message_formats_negative_percent(self):
+        """H-0804(c): the drawdown message must render the negative sign, e.g.
+        -22.5% (f-string `{md*100:.1f}%`), not a stripped-magnitude '22.5%'."""
+        sb = self._make_supabase_mock()
+        _generate_alerts(sb, "portfolio-1", max_drawdown=-0.225, avg_pairwise_corr=0.2)
+        alert = sb.table.return_value.insert.call_args[0][0]
+        assert alert["message"] == "Portfolio drawdown has reached -22.5%."
+
+    def test_alert_payload_matches_db_check_constraint_shape(self):
+        """H-0804(d): every inserted alert's alert_type and severity must be a
+        value permitted by the portfolio_alerts CHECK constraints, otherwise
+        the production INSERT would be rejected even though the mocked test
+        accepts anything.
+
+        Valid sets pinned from the migrations (latest CHECK definitions):
+          alert_type IN (drawdown, correlation_spike, sync_failure,
+            status_change, optimizer_suggestion, regime_shift,
+            underperformance, concentration_creep, rebalance_drift)
+          severity IN (critical, high, medium, low)
+        A typo like 'mediuml' or a renamed alert_type would fail this.
+        """
+        valid_alert_types = {
+            "drawdown",
+            "correlation_spike",
+            "sync_failure",
+            "status_change",
+            "optimizer_suggestion",
+            "regime_shift",
+            "underperformance",
+            "concentration_creep",
+            "rebalance_drift",
+        }
+        valid_severities = {"critical", "high", "medium", "low"}
+
+        sb = self._make_supabase_mock()
+        # Fire both drawdown (high) and correlation_spike (medium) at once.
+        _generate_alerts(sb, "portfolio-1", max_drawdown=-0.30, avg_pairwise_corr=0.90)
+
+        insert_calls = sb.table.return_value.insert.call_args_list
+        assert len(insert_calls) == 2
+        for call in insert_calls:
+            payload = call[0][0]
+            # Required field shape.
+            assert set(payload.keys()) >= {
+                "portfolio_id",
+                "alert_type",
+                "severity",
+                "message",
+            }
+            assert payload["alert_type"] in valid_alert_types, payload["alert_type"]
+            assert payload["severity"] in valid_severities, payload["severity"]
+            assert payload["portfolio_id"] == "portfolio-1"
+            assert isinstance(payload["message"], str) and payload["message"]
+
+    def test_httpexception_stub_is_distinct_from_base_exception(self):
+        """H-0805: the fastapi.HTTPException stub must be a proper Exception
+        SUBCLASS, not an alias of `Exception`. Otherwise `except HTTPException`
+        in the router would swallow ValueError/KeyError/TypeError and any
+        `pytest.raises(HTTPException)` would lose all specificity.
+
+        Asserts: HTTPException is a strict subclass of Exception, is NOT the
+        base Exception itself, and a plain ValueError is NOT an instance of it.
+        """
+        import fastapi
+
+        http_exc = fastapi.HTTPException
+        assert issubclass(http_exc, Exception)
+        assert http_exc is not Exception
+        # Specificity: a generic error must not be caught as an HTTPException.
+        assert not isinstance(ValueError("boom"), http_exc)
+        # And it must accept the kwargs the router constructs it with.
+        instance = http_exc(status_code=404, detail="not found")
+        assert isinstance(instance, http_exc)
+        assert instance.status_code == 404
+        assert instance.detail == "not found"
 
 
 class TestGenerateRebalanceDriftAlert:

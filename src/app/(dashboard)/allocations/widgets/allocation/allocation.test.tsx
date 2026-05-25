@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 
 import AllocationDonut from "./AllocationDonut";
 import AllocationByStyleWidget from "./AllocationByStyleWidget";
@@ -89,6 +89,54 @@ describe("AllocationDonut", () => {
       />,
     );
     expect(screen.getByText("Allocation data unavailable.")).toBeTruthy();
+  });
+
+  // M-0165 — AllocationDonut owns a `hiddenIds` Set toggled via the
+  // `toggle()` callback it threads into AllocationPie. The prior coverage
+  // only asserted render + empty state, so a regression that broke the
+  // toggle handler (e.g. dropping the setHiddenIds call) shipped green.
+  // AllocationPie renders one legend <button> per slice with
+  // aria-pressed={!hidden}; clicking flips the slice into hiddenIds and the
+  // percent cell switches from "N.N%" to the "---" hidden marker. These
+  // tests drive that real interaction.
+  describe("M-0165 — slice toggle (hiddenIds round-trip)", () => {
+    it("clicking a visible legend slice hides it (aria-pressed flips true→false, % → '---')", () => {
+      render(<AllocationDonut {...widgetProps} />);
+      // The Alpha Seeker legend button starts visible (aria-pressed='true').
+      const alphaBtn = screen.getByRole("button", { name: /Alpha Seeker/ });
+      expect(alphaBtn.getAttribute("aria-pressed")).toBe("true");
+      // Its percent cell reads a real percentage, NOT the hidden marker.
+      expect(within(alphaBtn).queryByText("---")).toBeNull();
+
+      fireEvent.click(alphaBtn);
+
+      // After the click the same slice's strategy_id is in hiddenIds, so the
+      // button now reports aria-pressed='false' and its percent cell shows
+      // the "---" hidden marker.
+      const alphaAfter = screen.getByRole("button", { name: /Alpha Seeker/ });
+      expect(alphaAfter.getAttribute("aria-pressed")).toBe("false");
+      expect(within(alphaAfter).getByText("---")).toBeInTheDocument();
+      // The OTHER slices remain visible — toggle is per-id, not global.
+      expect(
+        screen
+          .getByRole("button", { name: /Beta Neutral/ })
+          .getAttribute("aria-pressed"),
+      ).toBe("true");
+    });
+
+    it("clicking the same slice twice toggles it back to visible (delete from Set)", () => {
+      render(<AllocationDonut {...widgetProps} />);
+      const gammaBtn = () =>
+        screen.getByRole("button", { name: /Gamma Scalper/ });
+
+      fireEvent.click(gammaBtn());
+      expect(gammaBtn().getAttribute("aria-pressed")).toBe("false");
+
+      fireEvent.click(gammaBtn());
+      // Back to visible: id removed from hiddenIds, marker gone.
+      expect(gammaBtn().getAttribute("aria-pressed")).toBe("true");
+      expect(within(gammaBtn()).queryByText("---")).toBeNull();
+    });
   });
 });
 

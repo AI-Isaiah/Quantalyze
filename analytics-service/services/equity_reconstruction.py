@@ -2265,9 +2265,14 @@ class EquityCurveBuilder:
 
         all_positions: list[dict] = []
         for symbol, fills in positions_by_symbol.items():
-            matched = _match_positions_fifo(
-                symbol, fills, strategy_id="<in-memory>"
-            )
+            # Explicit decision (review): a corrupt zero/non-finite-entry
+            # position dropped by _match_positions_fifo IS surfaced — it emits
+            # an unconditional logger.warning. This in-memory equity path has no
+            # persisted data_quality_flags channel (unlike the DB-backed
+            # reconstruct_positions in position_reconstruction.py), so we
+            # deliberately do NOT thread a dropped_flags accumulator here — it
+            # would be write-only state that nothing reads.
+            matched = _match_positions_fifo(symbol, fills, strategy_id="<in-memory>")
             all_positions.extend(matched)
 
         # Attach mark prices to open positions (BACKBONE-06).

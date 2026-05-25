@@ -155,6 +155,69 @@ describe("Sidebar workspace — admin view", () => {
   });
 });
 
+/**
+ * M-0414 (audit-2026-05-07) — the ADMIN nav section itself.
+ *
+ * Prior tests pass isAdmin={true} only to assert the workspace surfaces
+ * (My Allocation + Strategies + Portfolios). None of them assert the
+ * admin-only section spread on Sidebar.tsx:89-100 (`...(isAdmin ? [...]
+ * : [])`). A regression that flips that guard to `!isAdmin` — leaking
+ * admin routes to every user, or hiding them from admins — would slip
+ * past the existing suite. These pin both directions.
+ */
+describe("Sidebar ADMIN section RBAC gate (M-0414)", () => {
+  // The five admin-only destinations from the section spread. "Dashboard"
+  // is deliberately excluded from the assertion set: its label is generic
+  // and could collide; the other four are unambiguous admin routes.
+  const ADMIN_ONLY_LABELS = [
+    "Users",
+    "Deletion requests",
+    "Match queue",
+    "For-quants leads",
+  ] as const;
+
+  it("renders the ADMIN heading and admin-only links when isAdmin=true", () => {
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} />);
+    expect(screen.getByText("ADMIN")).toBeInTheDocument();
+    for (const label of ADMIN_ONLY_LABELS) {
+      const node = screen.getByText(label);
+      expect(node).toBeInTheDocument();
+    }
+    // The admin Match-queue link points at /admin/match (not the public route).
+    expect(screen.getByText("Match queue").closest("a")).toHaveAttribute(
+      "href",
+      "/admin/match",
+    );
+  });
+
+  it("does NOT render the ADMIN section for a non-admin allocator", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    expect(screen.queryByText("ADMIN")).toBeNull();
+    for (const label of ADMIN_ONLY_LABELS) {
+      expect(screen.queryByText(label)).toBeNull();
+    }
+  });
+
+  it("does NOT render the ADMIN section for a non-admin manager", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isManager={true} isAllocator={false} />,
+    );
+    expect(screen.queryByText("ADMIN")).toBeNull();
+    expect(screen.queryByText("Deletion requests")).toBeNull();
+  });
+
+  it("an admin who is also an allocator still gets My Allocation AND the ADMIN section", () => {
+    // The isAdmin+isAllocator combination must light up both the allocator
+    // workspace and the admin section — neither flag suppresses the other.
+    render(
+      <Sidebar populatedSlugs={[]} isAdmin={true} isAllocator={true} />,
+    );
+    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("ADMIN")).toBeInTheDocument();
+    expect(screen.getByText("Deletion requests")).toBeInTheDocument();
+  });
+});
+
 describe("Sidebar workspace — no role flags (defense-in-depth)", () => {
   it("renders NO workspace items when isAllocator + isManager + isAdmin are all unset", () => {
     // Issue #8 follow-up: the workspace flags are now explicit. A user

@@ -87,6 +87,33 @@ describe("WatchlistTabs", () => {
     expect(screen.queryByTestId("watchlist-count-badge")).toBeNull();
   });
 
+  // M-0880 (audit-2026-05-07 / reverify-2026-05-25): the ArrowRight/Left
+  // focus-traversal tests above prove the handler imperatively calls
+  // `.focus()` on the ref (JSDOM does not synthesize native arrow-key focus
+  // traversal). They do NOT pin the roving-tabindex contract that lets a
+  // real keyboard user Tab INTO the tablist and land on the active tab:
+  // the active tab carries tabIndex=0, the inactive tab tabIndex=-1
+  // (WatchlistTabs.tsx:58, :76). A regression that hardcoded both to 0 (two
+  // tab stops) or both to -1 (tablist unreachable by Tab) would slip past
+  // every focus/onScopeChange assertion — those only fire after the tab is
+  // already focused. tabIndex is driven by the `scope` prop, so it is pinned
+  // statically per scope state, independent of any keydown handler.
+  it("roving tabindex: active tab is tabIndex=0, inactive tab is tabIndex=-1 (scope='all')", () => {
+    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />);
+    const allTab = screen.getByRole("tab", { name: /^All$/ });
+    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    expect(allTab.getAttribute("tabindex")).toBe("0");
+    expect(watchTab.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("roving tabindex: active tab is tabIndex=0, inactive tab is tabIndex=-1 (scope='watchlist')", () => {
+    render(<WatchlistTabs scope="watchlist" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />);
+    const allTab = screen.getByRole("tab", { name: /^All$/ });
+    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    expect(allTab.getAttribute("tabindex")).toBe("-1");
+    expect(watchTab.getAttribute("tabindex")).toBe("0");
+  });
+
   it("ArrowRight on focused All tab moves focus to My Watchlist AND activates the scope (automatic activation)", () => {
     const onScopeChange = vi.fn();
     render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={0} idBase="t" panelId="p" />);

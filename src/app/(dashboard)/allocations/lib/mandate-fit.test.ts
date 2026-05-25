@@ -158,6 +158,66 @@ describe("computeMandateFitApprox — Phase 10 Plan 05 / D-08 / Pitfall 7", () =
     expect(tier).toBe<MandateFitTier>("red");
   });
 
+  // M-0148 (pr-test-analyzer) — T4 only proves the excluded-type for-loop
+  // returns red on a MATCH. The fall-through (excluded list non-empty, but no
+  // strategy_type in it) is the branch that lets a strategy proceed to the
+  // market-overlap computation — never directly pinned. A regression that
+  // (e.g.) returned red on a non-empty excluded list regardless of membership
+  // would pass every existing test but wrongly hard-red strategies.
+  it("M-0148: excluded_strategy_types non-empty but no match → for-loop falls through to market fit (green)", () => {
+    const tier = computeMandateFitApprox(
+      STRAT({ markets: ["binance", "okx"], strategy_types: ["momentum"] }),
+      MANDATE({
+        preferred_markets: ["binance", "okx"],
+        // Non-empty exclusion list, but "momentum" is not in it → must NOT
+        // hard-red; full market overlap → green.
+        excluded_strategy_types: ["arbitrage", "market-making"],
+      }),
+    );
+    expect(tier).toBe<MandateFitTier>("green");
+  });
+
+  it("M-0148: multiple strategy_types, only the LAST matches an exclusion → red (loop scans all)", () => {
+    const tier = computeMandateFitApprox(
+      STRAT({
+        markets: ["binance", "okx"],
+        strategy_types: ["momentum", "trend", "arbitrage"],
+      }),
+      MANDATE({
+        preferred_markets: ["binance", "okx"],
+        excluded_strategy_types: ["arbitrage"],
+      }),
+    );
+    // A regression that only checked strategy_types[0] would return green.
+    expect(tier).toBe<MandateFitTier>("red");
+  });
+
+  // M-0148 (c) — the existing boundary tests use round 0.7/0.4/0.3 fractions.
+  // Pin the IMMEDIATELY-below-threshold non-round fractions so an off-by-one
+  // comparator flip (>= → >) is caught.
+  it("M-0148: fraction immediately below 0.7 (8/12 ≈ 0.6667) → yellow, not green", () => {
+    const markets = [
+      "m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7",
+      "miss1", "miss2", "miss3", "miss4",
+    ];
+    const prefs = ["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7"]; // 8/12 = 0.6667
+    const tier = computeMandateFitApprox(
+      STRAT({ markets, strategy_types: ["momentum"] }),
+      MANDATE({ preferred_markets: prefs, excluded_strategy_types: [] }),
+    );
+    expect(tier).toBe<MandateFitTier>("yellow");
+  });
+
+  it("M-0148: fraction immediately below 0.4 (3/8 = 0.375) → red, not yellow", () => {
+    const markets = ["m0", "m1", "m2", "miss1", "miss2", "miss3", "miss4", "miss5"];
+    const prefs = ["m0", "m1", "m2"]; // 3/8 = 0.375
+    const tier = computeMandateFitApprox(
+      STRAT({ markets, strategy_types: ["momentum"] }),
+      MANDATE({ preferred_markets: prefs, excluded_strategy_types: [] }),
+    );
+    expect(tier).toBe<MandateFitTier>("red");
+  });
+
   it("T5a — mandate is null → yellow (informational fallback)", () => {
     const tier = computeMandateFitApprox(STRAT(), null);
     expect(tier).toBe<MandateFitTier>("yellow");

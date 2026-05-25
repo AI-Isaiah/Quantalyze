@@ -117,6 +117,52 @@ describe("<CorrelationHeatmap>", () => {
       expect.stringContaining("10 strategies"),
     );
   });
+
+  // M-0437 (audit-2026-05-07) — the count-only assertion above would still
+  // pass for a regression that kept the FIRST 10 lexicographically instead
+  // of the top 10 by |avg corr|. This pins WHICH 10 survive: inject an
+  // 11-strategy matrix where the highest-correlation strategy sorts LAST
+  // lexicographically and the lowest-correlation strategy sorts FIRST, so a
+  // lexicographic-first-10 regression would keep the wrong one.
+  it("keeps the 10 highest-avg-|corr| strategies, dropping the lowest (not lexicographic)", () => {
+    // 11 strategies. "aa_low" has near-zero correlation with everyone (must
+    // be DROPPED despite sorting first alphabetically). "zz_high" has near-1
+    // correlation with everyone (must be KEPT despite sorting last).
+    const HIGH = "zz_high";
+    const LOW = "aa_low";
+    const mids = Array.from({ length: 9 }, (_, i) => `mid_${i}`);
+    const ids = [LOW, ...mids, HIGH];
+
+    const matrix: Record<string, Record<string, number>> = {};
+    for (const a of ids) {
+      matrix[a] = {};
+      for (const b of ids) {
+        if (a === b) {
+          matrix[a][b] = 1;
+        } else if (a === LOW || b === LOW) {
+          matrix[a][b] = 0.05; // LOW is barely correlated with anyone
+        } else if (a === HIGH || b === HIGH) {
+          matrix[a][b] = 0.99; // HIGH is near-perfectly correlated
+        } else {
+          matrix[a][b] = 0.5; // mids sit comfortably above LOW
+        }
+      }
+    }
+    const names = Object.fromEntries(ids.map((id) => [id, id]));
+    render(
+      <CorrelationHeatmap correlationMatrix={matrix} strategyNames={names} />,
+    );
+
+    // 11 → 10 kept.
+    expect(screen.getByRole("figure")).toHaveAttribute(
+      "aria-label",
+      expect.stringContaining("10 strategies"),
+    );
+    // The high-corr strategy survives; its label renders (row + column → ≥1).
+    expect(screen.getAllByText(HIGH).length).toBeGreaterThan(0);
+    // The low-corr strategy was truncated out — its label must NOT render.
+    expect(screen.queryByText(LOW)).toBeNull();
+  });
 });
 
 // ---------- WCAG contrast audit ----------

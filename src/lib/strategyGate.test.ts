@@ -129,6 +129,54 @@ describe("checkStrategyGate", () => {
     expect(result.detail).toBeNull();
   });
 
+  it("rejects just below the 7-day boundary (6.99 days) — pins < STRATEGY_GATE_MIN_DAYS", () => {
+    // M-0572: the historic inline gate used `< 7`; the helper uses
+    // `< STRATEGY_GATE_MIN_DAYS`. A future tweak to `<=` would silently
+    // shift the threshold by a day, so pin 6.99 days as a rejection.
+    const earliest = new Date("2026-04-01T00:00:00Z");
+    const latest = new Date(
+      earliest.getTime() + 6.99 * 24 * 60 * 60 * 1000,
+    );
+    const result = checkStrategyGate({
+      ...BASE,
+      earliestTradeAt: earliest,
+      latestTradeAt: latest,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("INSUFFICIENT_DAYS");
+    expect(result.detail?.days).toBe(6.99);
+  });
+
+  it("passes just above the 7-day boundary (7.01 days)", () => {
+    const earliest = new Date("2026-04-01T00:00:00Z");
+    const latest = new Date(
+      earliest.getTime() + 7.01 * 24 * 60 * 60 * 1000,
+    );
+    const result = checkStrategyGate({
+      ...BASE,
+      earliestTradeAt: earliest,
+      latestTradeAt: latest,
+    });
+    expect(result.passed).toBe(true);
+  });
+
+  it("skips the day-span check when latest < earliest (computeSpanDays returns null on negative delta)", () => {
+    // M-0572: a corrupt trades table where latestTradeAt < earliestTradeAt
+    // yields a negative delta → computeSpanDays returns null → the
+    // `spanDays !== null` guard SKIPS the day check entirely. With analytics
+    // complete + enough trades, the gate currently PASSES (no temporal
+    // validation). This pins the documented current behavior so a future
+    // change (e.g. a new code that rejects corrupt timestamps) is a
+    // deliberate, test-visible decision rather than a silent drift.
+    const result = checkStrategyGate({
+      ...BASE,
+      earliestTradeAt: new Date("2026-04-10T00:00:00Z"),
+      latestTradeAt: new Date("2026-04-01T00:00:00Z"), // earlier than earliest
+    });
+    expect(result.passed).toBe(true);
+    expect(result.code).toBeNull();
+  });
+
   it("skips day-span check when trade timestamps are missing", () => {
     // A strategy with >= 5 trades reported by count but no timestamps
     // should still pass if analytics are complete. This handles the

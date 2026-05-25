@@ -221,3 +221,133 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
     expect(group.getAttribute("aria-label")).toBe("Equity series visibility");
   });
 });
+
+// ---------------------------------------------------------------------------
+// H-0165 — Pitfall 1 (cumulative RETURN vs cumulative WEALTH) for the
+// EquityChart scenario overlay.
+//
+// The existing S14b suite only feeds WEALTH-form fixtures (makeWealthSeries
+// starts at 1.0), so the wealth-vs-return contract violation can't surface.
+// Investigating the actual render reveals WHY a chart-level negative test
+// cannot fail here: EquityChart re-anchors every overlay to 1.0 at the
+// visible window's first positive value (EquityChart.tsx:382-410 via
+// `ov / baseValue`). That re-anchoring absorbs the +1 wealth offset, so a
+// monotonic return-form series renders the SAME path as its wealth-form
+// twin. The overlay therefore always departs from the 0% baseline — the
+// chart is robust to the Pitfall-1 mistake by construction.
+//
+// What we CAN pin (correct-behavior assertions):
+//   (1) a WEALTH-form scenario overlay departs from the same y-baseline as
+//       the live line (both start at 100% / 0%), and
+//   (2) the chart's internal re-anchoring makes a return-form twin render
+//       identically — documenting the absorption so a future refactor that
+//       removes the `ov / baseValue` re-anchoring (and thus re-exposes the
+//       Pitfall-1 footgun) breaks this test.
+//
+// The actual load-bearing +1 conversion for the live baseline lives in
+// `liveBaselineMetricsFromHoldings` (queries.ts:1706,1716). That function is
+// NOT exported, so a regression test on it would require a production export
+// change — FLAGGED as out of scope for this test-only task.
+// ---------------------------------------------------------------------------
+
+describe("EquityChart — H-0165 Pitfall 1 scenario overlay anchoring", () => {
+  // First Y-coordinate of an SVG path's initial "M x,y" command.
+  function firstY(d: string | null): number {
+    const m = (d ?? "").match(/^M[\d.]+,([\d.]+)/);
+    return m ? Number(m[1]) : NaN;
+  }
+
+  function scenarioOverlayD(container: HTMLElement): string | null {
+    return container
+      .querySelector('[data-testid="equity-chart-scenario-overlay"]')
+      ?.getAttribute("d") ?? null;
+  }
+
+  function liveLineD(container: HTMLElement): string | null {
+    const live = Array.from(
+      container.querySelectorAll(
+        'svg path[stroke="var(--color-chart-strategy)"]',
+      ),
+    ).find(
+      (p) =>
+        p.getAttribute("fill") === "none" && !p.hasAttribute("data-testid"),
+    );
+    return live?.getAttribute("d") ?? null;
+  }
+
+  it("(1) WEALTH-form scenario overlay departs from the SAME baseline as the live line (starts at 100%)", () => {
+    const live = makeWealthSeries(60, 1.0, 0.001);
+    const scenario = makeWealthSeries(60, 1.0, 0.003);
+    const { container } = render(
+      <EquityChart
+        equityDailyPoints={live}
+        scenarioSeries={scenario}
+        initialPeriod="ALL"
+      />,
+    );
+    const oY = firstY(scenarioOverlayD(container));
+    const lY = firstY(liveLineD(container));
+    expect(Number.isFinite(oY)).toBe(true);
+    expect(Number.isFinite(lY)).toBe(true);
+    // Both anchored to 1.0 at the window start ⇒ identical first y-pixel.
+    // A regression that fails to anchor the scenario overlay to 100% would
+    // start it at a different y than the live baseline.
+    expect(Math.abs(oY - lY)).toBeLessThan(0.01);
+  });
+
+  it("(2) chart re-anchoring absorbs the +1 offset: a RETURN-form twin renders a visually-equivalent overlay (no Pitfall-1 divergence at the chart)", () => {
+    const live = makeWealthSeries(60, 1.0, 0.001);
+    const wealth = makeWealthSeries(60, 1.0, 0.003);
+    // Return form = wealth - 1 (the un-converted 0.0-start shape the caller
+    // is contractually required to +1 before passing — Pitfall 1).
+    const returnForm: DailyPoint[] = wealth.map((p) => ({
+      date: p.date,
+      value: p.value - 1,
+    }));
+
+    const wealthRender = render(
+      <EquityChart
+        equityDailyPoints={live}
+        scenarioSeries={wealth}
+        initialPeriod="ALL"
+      />,
+    );
+    const wealthPath = scenarioOverlayD(wealthRender.container);
+    wealthRender.unmount();
+
+    const returnRender = render(
+      <EquityChart
+        equityDailyPoints={live}
+        scenarioSeries={returnForm}
+        initialPeriod="ALL"
+      />,
+    );
+    const returnPath = scenarioOverlayD(returnRender.container);
+
+    expect(wealthPath).not.toBeNull();
+    expect(returnPath).not.toBeNull();
+
+    // Parse both paths into (x,y) vertex pairs.
+    function vertices(d: string): Array<[number, number]> {
+      return [...d.matchAll(/[ML]([\d.]+),([\d.]+)/g)].map((m) => [
+        Number(m[1]),
+        Number(m[2]),
+      ]);
+    }
+    const wv = vertices(wealthPath!);
+    const rv = vertices(returnPath!);
+
+    // The `ov / baseValue` re-anchoring (EquityChart.tsx:382-410) normalizes
+    // BOTH forms to the same shape, so the two overlays coincide to within
+    // sub-pixel float drift (NOT byte-identical — the different baseValue
+    // divisor introduces ~0.01px rounding). Same vertex count, and every
+    // vertex within 0.05px. A refactor that removes the re-anchoring (re-
+    // exposing the Pitfall-1 footgun) would shift the return-form overlay
+    // wholesale — far beyond this tolerance — and fail this assertion.
+    expect(rv.length).toBe(wv.length);
+    for (let i = 0; i < wv.length; i++) {
+      expect(Math.abs(rv[i][0] - wv[i][0])).toBeLessThan(0.05);
+      expect(Math.abs(rv[i][1] - wv[i][1])).toBeLessThan(0.05);
+    }
+  });
+});

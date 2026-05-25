@@ -241,4 +241,135 @@ describe("QuickActions", () => {
     const link = screen.getByText("Export PDF").closest("a");
     expect(link).toHaveAttribute("href", "/api/portfolio-pdf/abc");
   });
+
+  // M-0183 — the Export PDF link guards against a missing portfolioId:
+  // `href={portfolioId ? `/api/portfolio-pdf/${portfolioId}` : "#"}` plus a
+  // spread `{...(!portfolioId && { "aria-disabled": true })}`. The prior
+  // coverage only exercised the happy path (a real id → real href), so a
+  // regression that dropped the fallback (shipping `href="/api/portfolio-pdf/undefined"`
+  // or losing the aria-disabled flag) would never be caught. These pin the
+  // disabled branch.
+  describe("M-0183 — Export PDF disabled fallback when portfolioId is absent", () => {
+    it("renders href='#' AND aria-disabled='true' when data.portfolio is missing", () => {
+      render(<QuickActions data={{}} {...baseProps} />);
+      const link = screen.getByText("Export PDF").closest("a")!;
+      expect(link).toHaveAttribute("href", "#");
+      expect(link).toHaveAttribute("aria-disabled", "true");
+    });
+
+    it("treats an empty-string portfolio.id as missing (falsy) → href='#' + aria-disabled", () => {
+      // The `portfolioId ? … : "#"` ternary treats "" as falsy, so an empty
+      // id collapses to the disabled state rather than producing the
+      // malformed href "/api/portfolio-pdf/" (a 404 surface). Pin that intent.
+      render(
+        <QuickActions data={{ portfolio: { id: "" } }} {...baseProps} />,
+      );
+      const link = screen.getByText("Export PDF").closest("a")!;
+      expect(link).toHaveAttribute("href", "#");
+      expect(link).toHaveAttribute("aria-disabled", "true");
+    });
+
+    it("does NOT carry aria-disabled when a real portfolioId is present", () => {
+      // Complements the happy-path href test above: the spread guard must
+      // omit aria-disabled entirely (not render aria-disabled='false') when
+      // the link is live.
+      render(
+        <QuickActions data={{ portfolio: { id: "abc" } }} {...baseProps} />,
+      );
+      const link = screen.getByText("Export PDF").closest("a")!;
+      expect(link.hasAttribute("aria-disabled")).toBe(false);
+    });
+  });
+
+  // M-0182 — handleShare clipboard write + "Copied!" transition + 2s revert.
+  // The prior coverage only asserted the static "Share" label at mount.
+  describe("M-0182 — Share clipboard interaction", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    });
+
+    it("writes window.location.href to the clipboard and flips the label to 'Copied!'", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText },
+      });
+
+      render(
+        <QuickActions data={{ portfolio: { id: "p1" } }} {...baseProps} />,
+      );
+      const shareBtn = screen.getByText("Share").closest("button")!;
+      await act(async () => {
+        fireEvent.click(shareBtn);
+      });
+
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect((writeText.mock.calls[0] as unknown[])[0]).toBe(
+        window.location.href,
+      );
+      expect(await screen.findByText("Copied!")).toBeInTheDocument();
+      expect(screen.queryByText("Share")).toBeNull();
+    });
+
+    it("reverts the label back to 'Share' after the 2s timeout", async () => {
+      vi.useFakeTimers();
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText },
+      });
+
+      render(
+        <QuickActions data={{ portfolio: { id: "p1" } }} {...baseProps} />,
+      );
+      const shareBtn = screen.getByText("Share").closest("button")!;
+      // The click handler awaits writeText, so flush the resolved promise
+      // microtask before advancing the timer.
+      await act(async () => {
+        fireEvent.click(shareBtn);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByText("Copied!")).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(screen.getByText("Share")).toBeInTheDocument();
+      expect(screen.queryByText("Copied!")).toBeNull();
+    });
+
+    it("on clipboard rejection, the catch swallows the error and 'Copied!' never appears", async () => {
+      const writeText = vi
+        .fn()
+        .mockRejectedValue(new Error("clipboard blocked"));
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText },
+      });
+
+      render(
+        <QuickActions data={{ portfolio: { id: "p1" } }} {...baseProps} />,
+      );
+      const shareBtn = screen.getByText("Share").closest("button")!;
+      await act(async () => {
+        fireEvent.click(shareBtn);
+      });
+
+      expect(writeText).toHaveBeenCalledTimes(1);
+      // Rejection path: state never flips, label stays "Share".
+      expect(screen.getByText("Share")).toBeInTheDocument();
+      expect(screen.queryByText("Copied!")).toBeNull();
+    });
+
+    it("disabled Recompute button carries cursor:not-allowed", () => {
+      render(
+        <QuickActions data={{ portfolio: { id: "p1" } }} {...baseProps} />,
+      );
+      const btn = screen.getByText("Recompute").closest("button")!;
+      expect(btn).toBeDisabled();
+      expect(btn.style.cursor).toBe("not-allowed");
+    });
+  });
 });

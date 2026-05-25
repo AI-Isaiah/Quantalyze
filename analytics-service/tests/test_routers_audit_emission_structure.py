@@ -40,6 +40,7 @@ deployment's runtime audit_log observation.
 from __future__ import annotations
 
 import ast
+import asyncio
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -73,7 +74,17 @@ for name in _STUBS:
         continue
     sys.modules[name] = MagicMock()
 
-_real_slowapi_available = _importlib_util.find_spec("slowapi") is not None
+# Decide real-vs-stub WITHOUT calling find_spec() on the sys.modules slot.
+# Another test (e.g. test_portfolio_router_logic) may have inserted a bare
+# MagicMock for "slowapi" for isolation, and find_spec() on a spec-less mock
+# raises ValueError ("slowapi.__spec__ is not set"), which would abort
+# collection for the WHOLE run under any non-alphabetical ordering (sharding,
+# pytest-randomly, or a targeted two-file run).
+_slowapi_mod = sys.modules.get("slowapi")
+if _slowapi_mod is None:
+    _real_slowapi_available = _importlib_util.find_spec("slowapi") is not None
+else:
+    _real_slowapi_available = not isinstance(_slowapi_mod, MagicMock)
 if not _real_slowapi_available:
     sys.modules["slowapi"].Limiter = MagicMock(return_value=MagicMock())
     sys.modules["slowapi.util"].get_remote_address = MagicMock()
@@ -352,3 +363,170 @@ def test_every_audit_emission_is_AFTER_compute_and_BEFORE_return():
             f"{emission_line} has no `return` statement at or after it — the "
             f"emission may be unreachable or trapped in a dead branch."
         )
+
+
+# ---------------------------------------------------------------------------
+# H-0815 (final) — behavioral coverage of the emitter+caller contract.
+#
+# The structural tests above prove the emission call EXISTS in the right place
+# with the right shape, but they never RUN the handler. This block drives
+# portfolio_bridge end-to-end with a table-routing Supabase double to pin the
+# availability contract.
+#
+# log_audit_event implements a deliberate P907+P908 typed dispatch: it SWALLOWS
+# transient httpx blips itself, and for the serious classes (permission_denied
+# / unknown) it Sentry-captures + writes a structured error log BEFORE it
+# re-raises. Because ops visibility is already guaranteed by that capture, the
+# happy-path router emit is WRAPPED in try/except (matching
+# services/job_worker.py::_emit_audit): a successful compute must still return
+# its 200 even when the audit emit raises — otherwise a single audit-path
+# regression (e.g. an RLS denial) would 500 EVERY successful bridge/simulator
+# run, a total outage for no added visibility (the serious error is already in
+# Sentry + logs). These tests assert the handler returns its result when the
+# emit raises, and guard against dropping the wrap.
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402 — kept local to the behavioral block
+
+
+def _make_chain(execute_result):
+    """A Supabase query-builder double: every fluent method returns self,
+    and `.execute()` returns the pre-baked result for this table."""
+    chain = MagicMock()
+    for method in (
+        "select", "eq", "in_", "not_", "is_", "order", "limit", "single",
+    ):
+        getattr(chain, method).return_value = chain
+    # `.not_.in_(...)` chains off the `not_` attribute too.
+    chain.not_.in_.return_value = chain
+    chain.not_.is_.return_value = chain
+    chain.execute.return_value = MagicMock(data=execute_result)
+    return chain
+
+
+def _make_bridge_supabase(*, candidates_present: bool):
+    """Route .table(name) to a per-table chain so portfolio_bridge reaches its
+    happy-path audit emit. When candidates_present is False we steer through
+    the empty-candidates fast-path (emit @ line ~1711); when True, through the
+    full scoring path (emit @ line ~1740)."""
+    PORTFOLIO_ID = "11111111-1111-1111-1111-111111111111"
+    UNDERPERF_ID = "22222222-2222-2222-2222-222222222222"
+    CANDIDATE_ID = "33333333-3333-3333-3333-333333333333"
+
+    series_records = [
+        {"date": "2024-01-02", "value": 0.01},
+        {"date": "2024-01-03", "value": -0.02},
+        {"date": "2024-01-04", "value": 0.015},
+    ]
+
+    # strategy_analytics is queried twice (portfolio members, then candidates).
+    # The router calls .in_(strategy_ids) the first time and .in_(candidate_ids)
+    # the second; a single chain whose execute() returns the portfolio member
+    # series both times is fine because candidate_returns is built from rows
+    # whose strategy_id matches candidate_ids — so for the empty-candidates
+    # path we return NO candidate rows by returning rows keyed only to the
+    # portfolio member. We disambiguate via a stateful side_effect below.
+    sa_call_count = {"n": 0}
+
+    def _sa_execute():
+        sa_call_count["n"] += 1
+        if sa_call_count["n"] == 1:
+            # portfolio members: one member with a usable series
+            return MagicMock(data=[
+                {"strategy_id": UNDERPERF_ID, "returns_series": series_records},
+            ])
+        # candidates query
+        if candidates_present:
+            return MagicMock(data=[
+                {"strategy_id": CANDIDATE_ID, "returns_series": series_records},
+            ])
+        return MagicMock(data=[])  # empty → fast-path
+
+    tables: dict[str, MagicMock] = {}
+    tables["portfolios"] = _make_chain([{"id": PORTFOLIO_ID}])
+    tables["portfolio_strategies"] = _make_chain([
+        {"strategy_id": UNDERPERF_ID, "current_weight": 1.0},
+    ])
+    sa_chain = _make_chain(None)
+    sa_chain.execute.side_effect = _sa_execute
+    tables["strategy_analytics"] = sa_chain
+    tables["strategies"] = _make_chain(
+        [{"id": CANDIDATE_ID, "name": "Cand"}] if candidates_present else []
+    )
+
+    supabase = MagicMock()
+    supabase.table.side_effect = lambda name: tables[name]
+    return supabase, PORTFOLIO_ID, UNDERPERF_ID
+
+
+def _reset_bridge_rate_limiter():
+    """Clear the per-user bridge attempt cache so repeated test runs don't trip
+    the 10/hour per-user limiter (which would 429 before the emit)."""
+    from routers import portfolio as portfolio_router
+
+    portfolio_router._bridge_user_attempts.clear()
+
+
+def _call_undecorated(handler, *args, **kwargs):
+    """Invoke the route handler bypassing the slowapi @limiter decorator."""
+    fn = getattr(handler, "__wrapped__", handler)
+    return asyncio.run(fn(*args, **kwargs))
+
+
+@pytest.mark.parametrize("candidates_present", [False, True])
+def test_bridge_returns_result_when_audit_emit_raises(
+    monkeypatch, candidates_present
+):
+    """Availability contract (H-0815 final): a successful bridge compute must
+    still return its 200 payload even when the happy-path audit emit raises.
+
+    log_audit_event Sentry-captures + logs the serious classes
+    (permission_denied / unknown) BEFORE re-raising, so the router can safely
+    wrap-and-swallow the re-raise: ops still sees the regression, and one
+    audit-path failure does not 500 every successful run. A RuntimeError
+    (Branch 3, unknown) raised by the emit must NOT escape the handler. Covers
+    BOTH the empty-candidates fast-path and the full-scoring path. Guards
+    against dropping the try/except wrap."""
+    from routers import portfolio as portfolio_router
+    from models.schemas import BridgeRequest
+
+    _reset_bridge_rate_limiter()
+
+    supabase, portfolio_id, underperf_id = _make_bridge_supabase(
+        candidates_present=candidates_present
+    )
+    monkeypatch.setattr(portfolio_router, "get_supabase", lambda: supabase)
+
+    # The audit emit raises an UNEXPECTED error (not transient / not 42501) —
+    # the class the emitter re-raises after Sentry-capturing it. The router's
+    # wrap must swallow it so the successful compute still returns.
+    def _raising_emit(**_kwargs):
+        raise RuntimeError("unexpected audit RPC failure")
+
+    monkeypatch.setattr(portfolio_router, "log_audit_event", _raising_emit)
+
+    # find_replacement_candidates is imported lazily inside the handler from
+    # services.bridge_scoring; for the candidates_present path, stub it so we
+    # don't depend on real scoring math (orthogonal to the audit contract).
+    if candidates_present:
+        import services.bridge_scoring as bs
+
+        monkeypatch.setattr(
+            bs,
+            "find_replacement_candidates",
+            lambda *a, **k: [{"strategy_id": "33333333-3333-3333-3333-333333333333"}],
+        )
+
+    req = BridgeRequest(
+        portfolio_id=portfolio_id,
+        underperformer_strategy_id=underperf_id,
+        user_id="44444444-4444-4444-4444-444444444444",
+    )
+    request = MagicMock()  # slowapi is bypassed via __wrapped__
+
+    # Audit emit raised, but the compute succeeded → handler returns its 200
+    # payload (the wrap swallowed the re-raise; the emitter already alerted).
+    result = _call_undecorated(portfolio_router.portfolio_bridge, request, req)
+    assert result["ok"] is True
+    assert result["status"] == "complete"
+    assert result["portfolio_id"] == portfolio_id

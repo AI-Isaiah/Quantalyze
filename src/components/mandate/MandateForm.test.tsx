@@ -264,6 +264,53 @@ describe("MandateForm", () => {
     expect(bodies[0].style_exclusions).toEqual(["Trend Following"]);
     expect(bodies[1].style_exclusions).toEqual(["Trend Following", "Momentum"]);
   });
+
+  // M-0420 (audit-2026-05-07) — document the NO-DEBOUNCE contract for chip
+  // toggles. The "rapid successive clicks" tests above assert two immediate
+  // POSTs without advancing any timer, silently locking in the assumption
+  // that chip toggles bypass useMandateAutoSave's debounce. This test makes
+  // that contract explicit: under fake timers, a single chip toggle must
+  // fire its POST WITHOUT any timer advancement. If a future change adds a
+  // debounce window to chip toggles (sensible UX), this test fails loudly
+  // and on purpose — forcing the contract change to be deliberate rather
+  // than a silent break of the cumulative-save tests.
+  it("M-0420: chip toggle POSTs synchronously — no debounce window (contract)", () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({ success: true }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<MandateForm initial={BLANK_PREFS} />);
+      const longOnly = screen.getByRole("checkbox", { name: "Long-Only" });
+
+      fireEvent.click(longOnly);
+
+      // The POST must already have been issued — BEFORE any timer advances.
+      // If chip saves were debounced, the fetch would still be queued behind
+      // a setTimeout and this assertion would be 0.
+      const immediateCalls = fetchMock.mock.calls.filter(
+        (c) => c[0] === "/api/preferences",
+      );
+      expect(immediateCalls).toHaveLength(1);
+      expect(JSON.parse(immediateCalls[0][1].body as string)).toEqual({
+        preferred_strategy_types: ["Long-Only"],
+      });
+
+      // Advancing timers issues NO additional POST — there is no trailing
+      // debounced save to flush.
+      vi.advanceTimersByTime(5000);
+      expect(
+        fetchMock.mock.calls.filter((c) => c[0] === "/api/preferences"),
+      ).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("MandateSlider keyboard debounce (W-09 regression)", () => {

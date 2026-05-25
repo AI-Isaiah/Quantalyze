@@ -110,13 +110,31 @@ function findMutations(file: string, src: string): Mutation[] {
     const mutationMatch = /^\s*\.(insert|update|delete|upsert)\s*\(/.exec(line);
     if (!mutationMatch) continue;
 
-    // Walk back up to 5 lines to find the `.from(` that anchors this chain.
+    // M-0004 (audit 2026-05-25): anchor the lookback to the chain head
+    // instead of a flat 5-line window. A supabase chain can stack many
+    // modifier lines between `.from(...)` and the terminal mutation
+    // (e.g. `.from(x).select(...).eq(...).eq(...).order(...).insert(...)`
+    // formatted one-method-per-line). The terminal mutation line and
+    // every intervening modifier are chain-continuation lines (trimmed
+    // form starts with `.`). Walk back across the contiguous run of
+    // continuation lines — regardless of how many there are — and find
+    // the `.from(` that anchors the chain. A blank line is tolerated; a
+    // non-`.` statement line ends the chain, so we never cross into an
+    // unrelated statement. This keeps the previous false-positive guard
+    // (a mutation NOT part of a supabase `.from(...)` chain is still
+    // skipped) while no longer dropping wide chains the 5-line window
+    // missed.
     let fromIdx = -1;
-    for (let j = Math.max(0, i - 5); j < i; j++) {
+    for (let j = i - 1; j >= 0; j--) {
+      const trimmed = lines[j].trim();
+      if (trimmed === "") continue; // tolerate blank lines inside the chain
       if (/\.from\(/.test(lines[j])) {
         fromIdx = j;
         break;
       }
+      // Still a chain-continuation line? Keep walking. Otherwise the
+      // mutation isn't anchored to a `.from(...)` — bail out.
+      if (!trimmed.startsWith(".")) break;
     }
     if (fromIdx < 0) continue;
 
@@ -230,20 +248,35 @@ function findRpcMutations(file: string, src: string): Mutation[] {
 }
 
 /**
- * Strip `//`-prefixed comment content so a comment mentioning
- * `logAuditEvent` (e.g., "// TODO: add logAuditEvent here") does not
- * falsely satisfy the coverage check. /review follow-up (T4-M2).
+ * Strip comment content so a comment mentioning `logAuditEvent` (e.g.,
+ * "// TODO: add logAuditEvent here", or "/* logAuditEvent(...) *\/")
+ * does not falsely satisfy the coverage check. /review follow-up
+ * (T4-M2).
  *
- * Conservative: only strips `// …` to end of line. Doesn't attempt to
- * parse `/* … *\/` block comments or JSX comments — in practice the
- * route files don't use block comments around logAuditEvent mentions,
- * and single-line comments are where the false-positive risk lives.
- * If this ever matters more, switch to a proper tokenizer.
+ * H-0004 (audit 2026-05-25): previously only `// …` line comments were
+ * stripped. A mutation whose ONLY `logAuditEvent` mention sat inside a
+ * `/* … *\/` block comment (or a JSX `{/* … *\/}` comment) was falsely
+ * reported COVERED — a real audit-coverage blind spot. We now also
+ * strip same-line block comments and JSX-wrapped block comments before
+ * the line comment pass. The JSX wrapper (`{/* … *\/}`) is stripped
+ * with its surrounding braces so the brace-balance walk in `isCovered`
+ * isn't thrown off by the comment's braces.
+ *
+ * Same-line scope: route files (and these fixtures) keep a block
+ * comment on one line where a stray `logAuditEvent` mention would
+ * falsely satisfy coverage. A truly multi-line block comment spanning
+ * a `logAuditEvent` mention is out of this per-line helper's scope;
+ * if that ever matters, switch to a proper tokenizer.
  */
 function stripLineComment(line: string): string {
-  const idx = line.indexOf("//");
-  if (idx < 0) return line;
-  return line.slice(0, idx);
+  // JSX comment `{/* … */}` — strip wrapper braces too so brace-balance
+  // accounting stays correct.
+  let out = line.replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, "");
+  // Plain same-line block comment `/* … */`.
+  out = out.replace(/\/\*[\s\S]*?\*\//g, "");
+  const idx = out.indexOf("//");
+  if (idx < 0) return out;
+  return out.slice(0, idx);
 }
 
 /**
@@ -509,6 +542,182 @@ describe("audit-coverage helpers — P692/P694 regression fixtures", () => {
     const check = isCovered(mutation, lines);
     expect(check.covered).toBe(true);
     expect(check.reason).toBe("pragma");
+  });
+});
+
+describe("audit-coverage helpers — H-0004/H-0005 audit gap fixtures", () => {
+  // H-0004 — stripLineComment only strips `// …`. A block comment
+  // `/* … logAuditEvent(…) … */` mentioning logAuditEvent, or a JSX
+  // comment `{/* … */}`, is NOT parsed, so the regex /logAuditEvent\s*\(/
+  // matches against the comment body and FALSELY satisfies coverage. The
+  // CORRECT behavior: a mutation whose ONLY logAuditEvent mention lives
+  // inside a block comment must be reported uncovered (the comment is not
+  // an emission). We assert correct behavior; it currently fails because
+  // stripLineComment doesn't strip block comments.
+  it(
+    "H-0004: block-comment logAuditEvent mention must NOT satisfy coverage — fix stripLineComment/isCovered in follow-up (test-helper, not production)",
+    () => {
+      const lines = [
+        "export async function POST() {",
+        "  const admin = createAdminClient();",
+        "  const { error } = await admin.from('x').insert({ a: 1 });",
+        "  if (error) return Response.json({ error: 'fail' }, { status: 500 });",
+        "  /* TODO: add a logAuditEvent(client, {...}) call here later. */",
+        "  return Response.json({ ok: true });",
+        "}",
+      ];
+      const mutation: Mutation = {
+        file: "synthetic.ts",
+        line: 3,
+        chainStart: 3,
+        snippet: lines[2].trim(),
+      };
+      // The block comment is the only logAuditEvent mention; no real
+      // emission fires. Correct coverage verdict is `false`.
+      expect(isCovered(mutation, lines).covered).toBe(false);
+    },
+  );
+
+  it(
+    "H-0004: JSX-style {/* logAuditEvent(...) */} comment must NOT satisfy coverage — fix in follow-up",
+    () => {
+      const lines = [
+        "export async function POST() {",
+        "  const { error } = await admin.from('x').update({ a: 1 }).eq('id', 'z');",
+        "  if (error) return Response.json({ error: 'fail' }, { status: 500 });",
+        "  return ( {/* logAuditEvent(client, {action:'x'}) lives here someday */} );",
+        "}",
+      ];
+      const mutation: Mutation = {
+        file: "synthetic.ts",
+        line: 2,
+        chainStart: 2,
+        snippet: lines[1].trim(),
+      };
+      expect(isCovered(mutation, lines).covered).toBe(false);
+    },
+  );
+
+  // Control: a single-line `//` comment IS stripped, so it correctly
+  // does NOT satisfy coverage. This proves the test exercises the real
+  // isCovered path (not a tautology) — only the block-comment arm is the
+  // surfaced gap.
+  it("control: single-line // logAuditEvent comment does NOT satisfy coverage (stripLineComment works for //)", () => {
+    const lines = [
+      "export async function POST() {",
+      "  const { error } = await admin.from('x').insert({ a: 1 });",
+      "  // TODO: add a logAuditEvent(client, {...}) call here later.",
+      "  return Response.json({ ok: true });",
+      "}",
+    ];
+    const mutation: Mutation = {
+      file: "synthetic.ts",
+      line: 2,
+      chainStart: 2,
+      snippet: lines[1].trim(),
+    };
+    expect(isCovered(mutation, lines).covered).toBe(false);
+  });
+
+  // M-0004 — findMutations walks back only 5 lines from a `.insert/.update/
+  // .delete/.upsert` method line to find its anchoring `.from(`. A supabase
+  // chain with 6+ intervening modifier lines (e.g.
+  // `.from(x).schema(...).select(...).eq(...).eq(...).order(...).insert(...)`)
+  // therefore goes UNDETECTED — the mutation ships completely outside the
+  // coverage gate's view, defeating the test's regression-pressure purpose.
+  // CORRECT behavior: the mutation IS a supabase mutation and must be
+  // detected (so it can then be checked for an audit emit / pragma). It
+  // currently fails because the lookback is too tight. SURFACE marker pending
+  // a test-helper fix (widen/anchor the lookback to the chain head, not a
+  // flat 5-line window). Test-helper only — NOT production code.
+  it(
+    "M-0004: a supabase mutation whose `.from(` is 6+ lines above the .insert MUST still be detected — widen findMutations lookback in follow-up (test-helper, not production)",
+    () => {
+      const src = [
+        "export async function POST() {",
+        "  const { error } = await admin",
+        "    .from('audit_log')",
+        "    .schema('public')",
+        "    .select('id')",
+        "    .eq('a', 1)",
+        "    .eq('b', 2)",
+        "    .order('created_at')",
+        "    .insert({ user_id: 'x' });",
+        "  return Response.json({ ok: true });",
+        "}",
+      ].join("\n");
+      const mutations = findMutations("synthetic.ts", src);
+      // The chain IS a real mutation; a complete detector finds exactly one.
+      expect(mutations.length).toBeGreaterThanOrEqual(1);
+    },
+  );
+
+  // Control for M-0004: the SAME chain with the `.from(` within the 5-line
+  // window IS detected — proving the detector works and the gap is purely the
+  // lookback distance, not the mutation shape.
+  it("control: a supabase mutation whose `.from(` is within 5 lines of .insert IS detected", () => {
+    const src = [
+      "export async function POST() {",
+      "  const { error } = await admin",
+      "    .from('audit_log')",
+      "    .select('id')",
+      "    .insert({ user_id: 'x' });",
+      "  return Response.json({ ok: true });",
+      "}",
+    ].join("\n");
+    const mutations = findMutations("synthetic.ts", src);
+    expect(mutations.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // H-0005 — findMutations + findHelperMutations + findRpcMutations are
+  // the only detectors. findHelperMutations scans ONLY the hardcoded
+  // HELPER_MUTATORS allowlist (one module). A NEW helper that wraps a
+  // `.from(...).update(...)` chain in another module — e.g.,
+  // `softDeleteRow()` — is invisible to all three detectors when called
+  // from a route, so the route mutates with no audit and NO failure
+  // signal. We assert the CORRECT behavior: such a route must be flagged
+  // as an uncovered mutation. It currently fails because no detector sees
+  // the helper call.
+  it.fails(
+    "H-0005: route calling an UNREGISTERED mutator helper must be flagged uncovered — needs import-graph/registration enforcement in follow-up",
+    () => {
+      const src = [
+        "import { softDeleteRow } from '@/lib/danger-helpers';",
+        "export async function DELETE() {",
+        "  await softDeleteRow(admin, 'user', id);",
+        "  return Response.json({ ok: true });",
+        "}",
+      ].join("\n");
+      const lines = src.split("\n");
+      const mutations = [
+        ...findMutations("synthetic.ts", src),
+        ...findHelperMutations("synthetic.ts", src),
+        ...findRpcMutations("synthetic.ts", src),
+      ];
+      // The unregistered helper performs a DB mutation with no audit
+      // emission. A complete detector would surface exactly one
+      // uncovered mutation here. Today: zero mutations are even detected.
+      const uncovered = mutations.filter((m) => !isCovered(m, lines).covered);
+      expect(uncovered.length).toBeGreaterThanOrEqual(1);
+    },
+  );
+
+  // Control for H-0005: the REGISTERED helper IS detected and, lacking an
+  // audit emit, IS flagged uncovered. This proves findHelperMutations
+  // works for allowlisted modules — the gap is purely the missing
+  // out-of-band registration enforcement for NEW helpers.
+  it("control: REGISTERED mutator helper (markLeadProcessed) without an audit emit IS flagged uncovered", () => {
+    const src = [
+      "import { markLeadProcessed } from '@/lib/for-quants-leads-admin';",
+      "export async function POST() {",
+      "  await markLeadProcessed(admin, leadId);",
+      "  return Response.json({ ok: true });",
+      "}",
+    ].join("\n");
+    const lines = src.split("\n");
+    const helperMutations = findHelperMutations("synthetic.ts", src);
+    expect(helperMutations.length).toBe(1);
+    expect(isCovered(helperMutations[0], lines).covered).toBe(false);
   });
 });
 

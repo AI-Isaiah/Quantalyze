@@ -42,9 +42,26 @@ const supabaseState = vi.hoisted(
     // C-0121: capture log_audit_event RPC calls so the rollup contract
     // (one event per upload, NOT one per batch) is observable.
     rpcCalls: Array<{ name: string; args: Record<string, unknown> }>;
+    // M-0356(d): error returned on the Nth (0-indexed) trades.insert call.
+    // -1 = never error. Lets a test fail the SECOND batch after the first
+    // succeeds, exercising the partial-`inserted`-count 500 branch.
+    insertErrorOnBatch: number;
+    // M-0356(e): when true, the log_audit_event RPC throws (transient infra
+    // blip) — proving the fire-and-forget audit never fails the 200.
+    auditRpcThrows: boolean;
   } => ({
     insertedBatches: [],
     rpcCalls: [],
+    insertErrorOnBatch: -1,
+    auditRpcThrows: false,
+  }),
+);
+
+// M-0356(f): togglable rate-limit result. Hoisted so the module-level mock
+// can read it; toggled per test (keys/sync pattern).
+const rateLimitState = vi.hoisted(
+  (): { result: { success: boolean; retryAfter: number } } => ({
+    result: { success: true, retryAfter: 0 },
   }),
 );
 
@@ -61,6 +78,10 @@ vi.mock("@/lib/supabase/server", () => ({
     // is asserted, not just stubbed.
     rpc: async (name: string, args: Record<string, unknown>) => {
       supabaseState.rpcCalls.push({ name, args });
+      if (name === "log_audit_event" && supabaseState.auditRpcThrows) {
+        // Transient-class failure — emit() swallows it (no rethrow).
+        throw new TypeError("fetch failed");
+      }
       return { data: null, error: null };
     },
   }),
@@ -89,7 +110,13 @@ vi.mock("@/lib/supabase/admin", () => ({
       if (table === "trades") {
         return {
           insert: (batch: Record<string, unknown>[]) => {
+            const idx = supabaseState.insertedBatches.length;
             supabaseState.insertedBatches.push(batch);
+            if (idx === supabaseState.insertErrorOnBatch) {
+              return {
+                error: { message: "duplicate key value violates unique constraint" },
+              };
+            }
             return { error: null };
           },
         };
@@ -101,7 +128,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: null,
-  checkLimit: async () => ({ success: true, retryAfter: 0 }),
+  checkLimit: async () => rateLimitState.result,
 }));
 
 function makeRequest(
@@ -119,6 +146,9 @@ describe("POST /api/trades/upload — cross-user write protection", () => {
   beforeEach(() => {
     supabaseState.insertedBatches = [];
     supabaseState.rpcCalls = [];
+    supabaseState.insertErrorOnBatch = -1;
+    supabaseState.auditRpcThrows = false;
+    rateLimitState.result = { success: true, retryAfter: 0 };
   });
 
   it("rejects requests without auth (CSRF check fires first)", async () => {
@@ -214,6 +244,119 @@ describe("POST /api/trades/upload — cross-user write protection", () => {
     expect(supabaseState.insertedBatches).toHaveLength(1);
     expect(supabaseState.insertedBatches[0]).toHaveLength(2);
   });
+
+  // ── M-0356: validation + partial-failure + rate-limit branches ────────
+  it("M-0356(a) — returns 400 when trades.length > 5000", async () => {
+    const trades = Array.from({ length: 5001 }, () => ({
+      timestamp: "2024-01-01T00:00:00Z",
+      symbol: "BTC",
+      side: "buy",
+      price: 100,
+      quantity: 1,
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ strategy_id: ownedStrategyId, trades }));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/5,?000/);
+    // The cap rejects BEFORE the ownership query / inserts.
+    expect(supabaseState.insertedBatches).toHaveLength(0);
+  });
+
+  it("M-0356(b) — returns 400 when a row is an array (not an object)", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        strategy_id: ownedStrategyId,
+        // sanitizeTradeRow rejects Array.isArray rows (route.ts:34).
+        trades: [[1, 2, 3]],
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/Invalid trade at index 0/);
+    expect(supabaseState.insertedBatches).toHaveLength(0);
+  });
+
+  it("M-0356(c) — returns 400 when a row has no timestamp", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        strategy_id: ownedStrategyId,
+        // No timestamp → sanitizeTradeRow returns null (route.ts:53).
+        trades: [{ symbol: "BTC", side: "buy", price: 100, quantity: 1 }],
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/at least a timestamp/);
+    expect(supabaseState.insertedBatches).toHaveLength(0);
+  });
+
+  it("M-0356(d) — returns 500 with the partial `inserted` count when a later batch insert errors", async () => {
+    // 600 rows → 2 batches at batchSize=500. Fail the SECOND batch (index 1)
+    // after the first (500 rows) succeeded. The route must return 500 with
+    // inserted=500 (the partial count), NOT swallow the error.
+    supabaseState.insertErrorOnBatch = 1;
+    const trades = Array.from({ length: 600 }, (_, i) => ({
+      timestamp: new Date(2024, 0, 1 + (i % 28)).toISOString(),
+      symbol: "BTC",
+      side: "buy",
+      price: 100 + i,
+      quantity: 1,
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ strategy_id: ownedStrategyId, trades }));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    // First batch (500) committed before the second errored.
+    expect(body.inserted).toBe(500);
+    expect(body.error).toMatch(/Insert failed at row 500/);
+    // No rollup audit on a failed upload (the emit is below the loop).
+    expect(
+      supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event"),
+    ).toHaveLength(0);
+  });
+
+  it("M-0356(e) — a failing (fire-and-forget) audit RPC must NOT fail the 200 OK upload", async () => {
+    supabaseState.auditRpcThrows = true;
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        strategy_id: ownedStrategyId,
+        trades: [
+          { timestamp: "2024-01-01T00:00:00Z", symbol: "BTC", side: "buy", price: 100, quantity: 1 },
+        ],
+      }),
+    );
+    // Insert succeeded; audit is fire-and-forget → response stays 200.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.inserted).toBe(1);
+    // The audit emission WAS attempted (and threw inside emit()).
+    expect(
+      supabaseState.rpcCalls.some((c) => c.name === "log_audit_event"),
+    ).toBe(true);
+  });
+
+  it("M-0356(f) — returns 429 with Retry-After when the rate limiter denies the request", async () => {
+    rateLimitState.result = { success: false, retryAfter: 30 };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        strategy_id: ownedStrategyId,
+        trades: [
+          { timestamp: "2024-01-01T00:00:00Z", symbol: "BTC", side: "buy", price: 100, quantity: 1 },
+        ],
+      }),
+    );
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    const body = await res.json();
+    expect(body.error).toBe("Too many requests");
+    // Rate-limit short-circuits before any insert.
+    expect(supabaseState.insertedBatches).toHaveLength(0);
+  });
 });
 
 // ─── C-0121: trades.upload rollup audit emission ───────────────────────
@@ -230,6 +373,9 @@ describe("POST /api/trades/upload — C-0121 rollup audit emission", () => {
   beforeEach(() => {
     supabaseState.insertedBatches = [];
     supabaseState.rpcCalls = [];
+    supabaseState.insertErrorOnBatch = -1;
+    supabaseState.auditRpcThrows = false;
+    rateLimitState.result = { success: true, retryAfter: 0 };
   });
 
   it("emits exactly ONE trades.upload audit row regardless of batch count", async () => {

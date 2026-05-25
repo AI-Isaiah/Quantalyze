@@ -476,6 +476,106 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
     30_000,
   );
 
+  // ---------------------------------------------------------------------------
+  // M-0018 — TRUE single-tx rollback: row-0 INSERTs, row-1 fails AFTER it.
+  //
+  // T_RPC_SINGLE_TX_ROLLBACK (above) injects the failure via an UN-OWNED
+  // holding_ref, which the per-row ownership probe rejects BEFORE any INSERT
+  // executes — so it proves "pre-flight validation works", NOT "an executed
+  // INSERT was rolled back". This case constructs a batch where row-0 is a
+  // fully valid bridge_recommended that DOES INSERT a match_decision + a
+  // bridge_outcome, and row-1 reuses the SAME (allocator, holding, strategy)
+  // tuple. Per the M7 reuse logic, row-1 reuses row-0's match_decision_id and
+  // then attempts a SECOND bridge_outcomes INSERT for the same
+  // (allocator_id, match_decision_id) → violates
+  // bridge_outcomes_allocator_match_decision_unique (23505) AFTER row-0's
+  // INSERTs already ran. The single-tx guarantee requires row-0's committed
+  // INSERTs to be rolled back, leaving counts unchanged. THIS exercises the
+  // executed-INSERT-rollback path the pre-flight failure cannot reach.
+  // ---------------------------------------------------------------------------
+  it.skipIf(!HAS_LIVE_DB)(
+    "M-0018: row-1 unique-violation AFTER row-0's INSERT rolls BOTH back (true single-tx atomicity, not pre-flight)",
+    async () => {
+      // Start from a clean slate for the M7 tuple so row-0 is genuinely new.
+      await admin
+        .from("bridge_outcomes")
+        .delete()
+        .eq("allocator_id", allocatorAId)
+        .eq("strategy_id", STRATEGY_M7);
+      await admin
+        .from("match_decisions")
+        .delete()
+        .eq("allocator_id", allocatorAId)
+        .eq("strategy_id", STRATEGY_M7);
+
+      const beforeMd = await admin
+        .from("match_decisions")
+        .select("id", { count: "exact", head: true })
+        .eq("allocator_id", allocatorAId)
+        .eq("strategy_id", STRATEGY_M7);
+      const beforeMdCount = beforeMd.count ?? 0;
+      const beforeBo = await admin
+        .from("bridge_outcomes")
+        .select("id", { count: "exact", head: true })
+        .eq("allocator_id", allocatorAId)
+        .eq("strategy_id", STRATEGY_M7);
+      const beforeBoCount = beforeBo.count ?? 0;
+
+      const { data, error } = await userClientA.rpc(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        "commit_scenario_batch" as any,
+        {
+          p_allocator_id: allocatorAId,
+          p_diffs: [
+            // row-0: valid bridge_recommended → INSERTs md + bridge_outcome.
+            {
+              kind: "bridge_recommended",
+              holding_ref: "holding:binance:BTC:spot",
+              strategy_id: STRATEGY_M7,
+              percent_allocated: 4,
+            },
+            // row-1: SAME tuple → reuses row-0's md, then a 2nd bridge_outcome
+            // INSERT for the same (allocator_id, match_decision_id) → 23505,
+            // raised AFTER row-0's INSERTs already executed in this tx.
+            {
+              kind: "bridge_recommended",
+              holding_ref: "holding:binance:BTC:spot",
+              strategy_id: STRATEGY_M7,
+              percent_allocated: 6,
+            },
+          ],
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      );
+
+      // The batch must FAIL (RAISE surfaced as PG error, or an ok=false
+      // envelope) — a partial success would mean row-0 leaked.
+      expect(
+        error !== null ||
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ((data as any)?.ok === false && (data as any)?.errors?.length > 0),
+      ).toBe(true);
+
+      // CRITICAL: row-0's executed INSERTs must be rolled back. Counts for the
+      // M7 tuple return to baseline — NOT baseline+1. If the RPC committed
+      // row-0 before row-1 failed (no single-tx guarantee) these would be
+      // beforeCount+1.
+      const afterMd = await admin
+        .from("match_decisions")
+        .select("id", { count: "exact", head: true })
+        .eq("allocator_id", allocatorAId)
+        .eq("strategy_id", STRATEGY_M7);
+      expect(afterMd.count).toBe(beforeMdCount);
+      const afterBo = await admin
+        .from("bridge_outcomes")
+        .select("id", { count: "exact", head: true })
+        .eq("allocator_id", allocatorAId)
+        .eq("strategy_id", STRATEGY_M7);
+      expect(afterBo.count).toBe(beforeBoCount);
+    },
+    30_000,
+  );
+
   it.skipIf(!HAS_LIVE_DB)(
     "T_RPC_OWNERSHIP_GUARD_BLOCKS: cross-tenant holding_ref → RAISE; nothing inserted",
     async () => {

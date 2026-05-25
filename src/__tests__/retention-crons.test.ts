@@ -77,14 +77,22 @@ const EXPECTED_CRON_JOBS: Array<{ name: string; schedule: string }> = [
 async function fetchCronJob(
   admin: ReturnType<typeof createLiveAdminClient>,
   jobname: string,
-): Promise<{ jobname: string; schedule: string; command: string } | null> {
+): Promise<{
+  jobname: string;
+  schedule: string;
+  command: string;
+  active: boolean;
+} | null> {
   // cron.job lives in the `cron` schema. supabase-js can target
   // cross-schema via the `schema()` modifier on PostgREST.
+  // H-0030: select `active` too — a job that is registered but disabled
+  // (active=false) would silently never fire. The schedule/command
+  // substring checks alone cannot catch that.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const schemaScoped = (admin as any).schema("cron");
   const { data, error } = await schemaScoped
     .from("job")
-    .select("jobname, schedule, command")
+    .select("jobname, schedule, command, active")
     .eq("jobname", jobname)
     .maybeSingle();
   if (error) {
@@ -125,6 +133,11 @@ describe("Migration 056 — retention cron job registration", () => {
         expected: string;
         actual: string;
       }> = [];
+      // H-0030: a job registered with active=false would never fire — the
+      // production cron silently no-ops nightly. Track disabled jobs so a
+      // regression that unschedules-by-disabling (rather than dropping)
+      // trips CI.
+      const disabled: string[] = [];
 
       for (const expected of EXPECTED_CRON_JOBS) {
         const row = await fetchCronJob(admin, expected.name);
@@ -139,10 +152,15 @@ describe("Migration 056 — retention cron job registration", () => {
             actual: row.schedule,
           });
         }
+        if (row.active !== true) {
+          disabled.push(expected.name);
+        }
       }
 
       expect(missing).toEqual([]);
       expect(scheduleMismatches).toEqual([]);
+      // Every retention/reminder cron must be ENABLED, not just present.
+      expect(disabled).toEqual([]);
     },
     30_000,
   );
@@ -453,6 +471,51 @@ describe("Migration 056 — api_key_rotation_reminder capture semantics", () => 
       }
     },
     60_000,
+  );
+
+  // H-0028 / H-0029 / H-0030 — END-TO-END cron-body firing.
+  //
+  // The arms above assert registration + schedule + active state +
+  // command-string substrings. They do NOT fire the registered SQL body
+  // and assert its EFFECT (e.g. seed a compute_jobs row >30d old, force
+  // the cron, assert the row is gone; or seed a 91d API key, force the
+  // reminder cron, assert exactly one notification_dispatches row appears
+  // from the cron's OWN SELECT/JOIN — not a TS re-implementation).
+  //
+  // Why these are SKIPPED rather than implemented here
+  // ---------------------------------------------------
+  // 1. There is no force-execute helper RPC for the 5 retention crons or
+  //    the api_key_rotation_reminder cron. Only migration 057's
+  //    `test_force_hot_to_cold_move` exists. Firing a cron body in
+  //    isolation, transactionally, requires a SECURITY DEFINER,
+  //    service_role-only `test_force_<job>()` RPC PER cron — a PRODUCTION
+  //    migration change, out of scope for a test-only gap-fill.
+  // 2. The retention crons run GLOBAL `DELETE ... WHERE created_at < now()
+  //    - interval 'N'` statements with no per-test scoping. Re-running
+  //    that DELETE against a shared test DB would purge OTHER tests'
+  //    aged rows — a destructive cross-test side effect. A scoped
+  //    force-execute RPC (operating only on a marker-tagged seed) is the
+  //    only safe way to fire these end-to-end.
+  // 3. Re-implementing the cron's INSERT/DELETE in TS (the current
+  //    api_key_rotation_reminder approach, H-0029) proves the TARGET
+  //    TABLE accepts the write, not that the CRON'S SELECT/JOIN/cutoff
+  //    produces it — a migration that breaks the cron's JOIN to
+  //    api_keys/profiles would still pass. We do NOT add more such
+  //    tautological re-implementations.
+  //
+  // FLAGGED — production follow-up required (cannot be closed in a
+  // test-only change): add per-cron `test_force_*()` SECURITY DEFINER
+  // RPCs (mirroring test_force_hot_to_cold_move) that fire each cron's
+  // EXACT registered SQL body against marker-scoped seed rows, then
+  // replace this skip with seed-on-both-sides-of-cutoff behavioral
+  // assertions.
+  it.skip(
+    "FLAGGED (H-0028/H-0029/H-0030): fire each retention cron body end-to-end — needs per-cron test_force_*() SECURITY DEFINER RPCs (production migration, out of scope)",
+    () => {
+      // Intentionally not implemented. See the block comment above for the
+      // production follow-up. This skip keeps the gap visible in the suite
+      // rather than silently absent.
+    },
   );
 
   it("advertises skip reason when live DB is unavailable", () => {

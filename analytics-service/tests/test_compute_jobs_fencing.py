@@ -38,6 +38,7 @@ Verification of "test fails without the migration":
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import uuid
@@ -774,6 +775,117 @@ def test_mark_done_without_token_back_compat(admin, strategy_id):
         assert row["status"] == "done"
     finally:
         admin.table("compute_jobs").delete().eq("id", job_id).execute()
+
+
+# ----------------------------------------------------------------------------
+# H-1246: concurrent claim under SKIP LOCKED — disjoint result sets.
+# ----------------------------------------------------------------------------
+# Migration 090's docstring (lines 53-57) asserts a non-trivial concurrency
+# property: "Two concurrent workers see the same dedupe winners (the inner
+# CTE is deterministic) and SKIP LOCKED partitions the locked subset." The
+# headline P97 fence + dedupe tests are all single-threaded; none drove two
+# parallel claim RPC calls. This test does: a thread-pool of two admin
+# clients fires claim_compute_jobs_with_priority simultaneously and the
+# union must be disjoint — FOR UPDATE SKIP LOCKED must hand each claimable
+# row to EXACTLY ONE worker (never zero via a lost row, never two via a
+# double claim).
+#
+# Partitioning note (from the finding): the dedupe CTE collapses rows sharing
+# (kind, strategy_id|allocator_id|...), so to get a meaningful contention
+# surface we seed across FOUR DISTINCT strategies — four distinct partitions,
+# four independently-claimable rows. A single-strategy seed would dedupe to
+# one survivor and the disjointness assertion would be vacuous.
+# ----------------------------------------------------------------------------
+
+
+def _insert_pending_sync_trades(admin, strategy_id: str) -> str:
+    """Insert a pending sync_trades row and return its id."""
+    res = admin.table("compute_jobs").insert({
+        "strategy_id": strategy_id,
+        "kind": "sync_trades",
+        "status": "pending",
+        "priority": "normal",
+        "exchange": "okx",
+        "next_attempt_at": "2020-01-01T00:00:00Z",
+    }).execute()
+    return res.data[0]["id"]
+
+
+def _make_strategy(admin) -> str:
+    """Create a throwaway strategy (own partition) and return its id."""
+    user_id = _seed_user_id(admin)
+    res = admin.table("strategies").insert({
+        "user_id": user_id,
+        "name": f"h1246-conc-{uuid.uuid4().hex[:8]}",
+        "status": "pending_review",
+        "source": "okx",
+        "strategy_types": [],
+        "subtypes": [],
+        "markets": [],
+        "supported_exchanges": [],
+    }).execute()
+    return res.data[0]["id"]
+
+
+def test_concurrent_claim_disjoint_under_skip_locked(admin):
+    """Migration 090 concurrency contract: two concurrent
+    claim_compute_jobs_with_priority calls return DISJOINT row sets via
+    FOR UPDATE SKIP LOCKED, and every claimable row is handed to exactly
+    one worker (the union covers all four seeded rows — no row lost, none
+    double-claimed).
+
+    Pre-SKIP-LOCKED (or if a refactor drops it): two concurrent batch
+    UPDATEs over the same ready pool either deadlock, block, or BOTH claim
+    the same row — surfacing as an overlapping result set here.
+    """
+    # Four distinct strategies → four distinct dedupe partitions → four
+    # independently-claimable rows.
+    strategy_ids = [_make_strategy(admin) for _ in range(4)]
+    job_ids: list[str] = []
+    try:
+        for sid in strategy_ids:
+            job_ids.append(_insert_pending_sync_trades(admin, sid))
+
+        def _claim_batch(worker: str) -> set[str]:
+            res = admin.rpc("claim_compute_jobs_with_priority", {
+                "p_batch_size": 4,
+                "p_worker_id": worker,
+                "p_unified_backbone_active": False,
+            }).execute()
+            return {row["id"] for row in (res.data or [])}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            f1 = ex.submit(_claim_batch, "h1246-conc-A")
+            f2 = ex.submit(_claim_batch, "h1246-conc-B")
+            a, b = f1.result(), f2.result()
+
+        # Scope to the rows we seeded — the shared test project may carry
+        # unrelated pending rows that either worker legitimately claims.
+        ours = set(job_ids)
+        a_ours = a & ours
+        b_ours = b & ours
+
+        # 1. No row claimed by BOTH workers (the headline SKIP LOCKED
+        #    property — never two).
+        assert a_ours.isdisjoint(b_ours), (
+            f"two workers got overlapping claims for seeded rows: "
+            f"{a_ours & b_ours}"
+        )
+        # 2. No seeded row lost — every one was handed to exactly one
+        #    worker (never zero). FOR UPDATE SKIP LOCKED partitions the set;
+        #    it must not drop a claimable row on the floor.
+        assert (a_ours | b_ours) == ours, (
+            f"seeded rows not fully claimed across both workers: missing "
+            f"{ours - (a_ours | b_ours)}"
+        )
+    finally:
+        if job_ids:
+            admin.table("compute_jobs").delete().in_("id", job_ids).execute()
+        for sid in strategy_ids:
+            try:
+                admin.table("strategies").delete().eq("id", sid).execute()
+            except Exception:
+                pass
 
 
 # ----------------------------------------------------------------------------

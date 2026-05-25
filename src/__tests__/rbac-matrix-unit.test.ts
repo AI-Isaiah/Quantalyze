@@ -208,6 +208,8 @@ vi.mock("next/server", async (orig) => {
 
 import { withRole, APP_ROLES } from "@/lib/auth";
 import { NextRequest, NextResponse } from "next/server";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 
 function makeRequest(
   body: unknown = {},
@@ -485,6 +487,90 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     expect(userAppRolesInsertMock).not.toHaveBeenCalled();
   });
 
+  // M-0016 — the single `role: "super_admin"` case above only exercises ONE
+  // branch of the BODY_SCHEMA (z.object({ action: enum, role: enum })). These
+  // cases pin the other failure shapes the parser must reject so a future
+  // schema refactor (e.g. swapping z.enum for z.string, or dropping a field)
+  // can't silently widen the accepted surface. Each asserts the route returns
+  // 400 AND never touches the mutation path.
+  it.each([
+    {
+      label: "invalid action ('demote')",
+      body: { action: "demote", role: "allocator" },
+    },
+    {
+      label: "missing role field",
+      body: { action: "grant" },
+    },
+    {
+      label: "missing action field",
+      body: { role: "allocator" },
+    },
+    {
+      label: "both fields missing (empty object)",
+      body: {},
+    },
+    {
+      label: "non-string role (number)",
+      body: { action: "grant", role: 123 },
+    },
+    {
+      label: "non-string action (boolean)",
+      body: { action: true, role: "allocator" },
+    },
+    {
+      label: "JSON-injection object as role",
+      body: { action: "grant", role: { $injection: true } },
+    },
+    {
+      label: "array as role",
+      body: { action: "grant", role: ["allocator"] },
+    },
+    {
+      label: "null role",
+      body: { action: "grant", role: null },
+    },
+  ])(
+    "M-0016: rejects $label with 400 and does not mutate",
+    async ({ body }) => {
+      const { POST } = await loadRoute();
+      const req = makeRequest(body);
+      const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
+      expect(res.status).toBe(400);
+      expect(userAppRolesInsertMock).not.toHaveBeenCalled();
+      expect(userAppRolesDeleteMock).not.toHaveBeenCalled();
+    },
+  );
+
+  // M-0016: BODY_SCHEMA is a plain z.object (NOT .strict()), so unknown keys
+  // are STRIPPED, not rejected. A well-formed body carrying an extra field
+  // must therefore still SUCCEED on the valid (action, role) pair — and the
+  // stripped extra must not reach the mutation row. Asserting CORRECT
+  // (lenient) behavior so a future tightening to .strict() is a deliberate,
+  // test-visible change rather than an accidental 400 regression.
+  it("M-0016: tolerates and strips an extra unknown field (non-strict object), still grants", async () => {
+    adminUserAppRolesSelectMock.mockResolvedValue({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+    const { POST } = await loadRoute();
+    const req = makeRequest({
+      action: "grant",
+      role: "allocator",
+      injected_extra: "should-be-stripped",
+    });
+    const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
+    expect(res.status).toBe(200);
+    expect(userAppRolesInsertMock).toHaveBeenCalledTimes(1);
+    const [row] = userAppRolesInsertMock.mock.calls[0];
+    // The stripped extra must NOT be persisted on the row.
+    expect(row).not.toHaveProperty("injected_extra");
+    expect(row).toMatchObject({
+      user_id: "target-user-id",
+      role: "allocator",
+    });
+  });
+
   it("rejects missing target user id with 400", async () => {
     const { POST } = await loadRoute();
     const req = makeRequest(
@@ -497,5 +583,190 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     const res = await POST(req, makeParamsCtx({ id: "" }));
     expect(res.status).toBe(400);
     expect(userAppRolesInsertMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * H-0025 — registration-enforcement grep test.
+ *
+ * The mock-based matrix above proves `withRole`'s OR-semantics in
+ * ISOLATION; the sibling integration file proves ONE pilot route end-to-
+ * end. Neither asserts that EVERY admin route is actually behind a role
+ * gate. A future `src/app/api/admin/<x>/route.ts` shipped WITHOUT any
+ * guard (`withRole` / `withAdminAuth` / `requireAdmin` / `isAdminUser`)
+ * would be invisible to both layers — an unauthenticated admin endpoint
+ * that no test fails on. This source-scan test closes that gap: it
+ * enumerates every admin route file and asserts each references at least
+ * one canonical admin-guard token. It is a structural smoke test (it
+ * does not prove the guard is reached on every code path — that's the
+ * per-route handler tests' job), but it catches the dominant regression:
+ * a brand-new admin route with no RBAC wrapper at all.
+ */
+describe("H-0025: every admin route registers an RBAC guard", () => {
+  const ADMIN_API_DIR = join(process.cwd(), "src", "app", "api", "admin");
+  // Canonical admin-gate tokens. A route is considered guarded if its
+  // source references AT LEAST ONE. `isAdminUser` counts because several
+  // routes call it directly as an inline 403 gate (e.g. the match/* and
+  // allocators/[id]/holdings routes) rather than via a wrapper.
+  const GUARD_TOKENS = [
+    "withRole",
+    "withAdminAuth",
+    "requireAdmin",
+    "isAdminUser",
+  ];
+
+  /** Recursively collect every `route.ts` under the admin API tree. */
+  function collectRouteFiles(dir: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        out.push(...collectRouteFiles(full));
+      } else if (entry.name === "route.ts") {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  const routeFiles = collectRouteFiles(ADMIN_API_DIR);
+
+  it("discovers admin route files (guard against an empty/mis-globbed scan)", () => {
+    // If this drops to 0 the test below would vacuously pass — pin a
+    // floor so a future refactor that moves the admin tree fails loud
+    // instead of silently covering nothing.
+    expect(routeFiles.length).toBeGreaterThanOrEqual(15);
+  });
+
+  for (const file of routeFiles) {
+    const rel = file.slice(file.indexOf("src/"));
+    it(`${rel} references an admin guard`, () => {
+      const src = readFileSync(file, "utf8");
+      const matched = GUARD_TOKENS.filter((t) => src.includes(t));
+      if (matched.length === 0) {
+        throw new Error(
+          `${rel} references NO admin guard token (${GUARD_TOKENS.join(
+            " / ",
+          )}). A new admin route MUST be behind a role gate — wrap the ` +
+            `handler in withRole/withAdminAuth or call requireAdmin/isAdminUser ` +
+            `before any privileged work.`,
+        );
+      }
+      expect(matched.length).toBeGreaterThan(0);
+    });
+  }
+});
+
+/**
+ * H-0026 / H-0027 — RLS-regression observability through the REAL
+ * requireRole error-discrimination logic.
+ *
+ * The N×N matrix above mocks `userRolesQueryMock` to ALWAYS resolve a
+ * clean `{ data: [{ role }], error: null }`. That blind happy-path mock
+ * makes an RLS regression invisible: if the `user_app_roles` SELECT
+ * policy broke and started returning a permission error (or the table
+ * vanished), the matrix would still pass because it never feeds an error
+ * shape through the wrapper.
+ *
+ * These tests drive the error shapes the live DB would actually emit
+ * through the REAL `getUserRolesResult`/`requireRole` logic in
+ * src/lib/auth.ts (NOT a re-implementation), pinning the contract:
+ *
+ *   - A 42501 (RLS insufficient_privilege) denial is the EXPECTED
+ *     "no visible roles" path → the caller is treated as role-less →
+ *     403 (not a 500). This is by design: from the caller's vantage an
+ *     RLS denial means "you have no roles I can see".
+ *   - Any OTHER error (timeout, schema drift, a dropped `user_app_roles`
+ *     table → 42P01) is a REAL fault → 500, NOT a silent 403. Pre-fix,
+ *     auth.ts swallowed every error to `[]` and mis-translated outages
+ *     into authorization denials (audit Finding 5). A 500 here is the
+ *     "fail loud" contract that lets on-call see the real signal.
+ *
+ * Together these prove the wrapper does NOT blindly trust the query
+ * result the way the happy-path matrix mock implies.
+ */
+describe("H-0026/H-0027: withRole surfaces user_app_roles RLS/DB faults (not silent trust)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    assertSameOriginMock.mockReturnValue(null);
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "caller-id", email: "e@t.com" } },
+    });
+  });
+
+  it("treats a 42501 RLS denial as 'no visible roles' → 403 (admin route)", async () => {
+    // The user_app_roles owner-read RLS policy denied the SELECT. From
+    // the wrapper's vantage this means "no visible roles" → forbidden.
+    userRolesQueryMock.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied for table user_app_roles" },
+    });
+    const handler = vi.fn(
+      async () => new NextResponse(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    const wrapped = withRole("allocator")(handler as never);
+    const res = await wrapped(makeRequest() as never);
+    expect(res.status).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("surfaces an UNEXPECTED DB fault (e.g. 42P01 table-missing) as 500 — NOT a silent 403", async () => {
+    // A dropped/renamed user_app_roles table (or its SELECT policy
+    // breaking in a non-RLS way) emits 42P01 (undefined_table). This is
+    // a real outage, NOT an authorization decision. The wrapper MUST
+    // return 500 so on-call sees the fault instead of users getting a
+    // misleading "you're not authorized".
+    userRolesQueryMock.mockResolvedValue({
+      data: null,
+      error: { code: "42P01", message: 'relation "user_app_roles" does not exist' },
+    });
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const handler = vi.fn(
+      async () => new NextResponse(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    const wrapped = withRole("allocator")(handler as never);
+    const res = await wrapped(makeRequest() as never);
+    expect(res.status).toBe(500);
+    expect(handler).not.toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("a statement-timeout (57014) on the roles query is a fault → 500 (masking-outage regression guard)", async () => {
+    userRolesQueryMock.mockResolvedValue({
+      data: null,
+      error: { code: "57014", message: "canceling statement due to statement timeout" },
+    });
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const handler = vi.fn();
+    const wrapped = withRole("admin")(handler as never);
+    const res = await wrapped(makeRequest() as never);
+    // For an 'admin' request, requireRole would fall through to the
+    // isAdminUser union ONLY when roles fetched OK and lacked admin.
+    // Here the fetch FAULTED, so requireRole short-circuits to 500
+    // BEFORE the admin-union fallback — a real fault must never be
+    // re-interpreted as an admin grant or a 403.
+    expect(res.status).toBe(500);
+    expect(handler).not.toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("an admin caller whose roles SELECT cleanly returns [] (RLS hides own row) → 403, not crash", async () => {
+    // H-0027 RLS-shape probe: the policy returns an empty set (not an
+    // error) — the owner_read predicate changed and stopped matching the
+    // caller's own rows. requireRole('admin') then consults the
+    // isAdminUser union; with profiles.is_admin=false (the makeUserClient
+    // default) the caller is NOT admin → 403. This exercises the real
+    // empty-result + admin-union fallback path instead of the matrix's
+    // pre-seeded role array.
+    userRolesQueryMock.mockResolvedValue({ data: [], error: null });
+    const handler = vi.fn();
+    const wrapped = withRole("admin")(handler as never);
+    const res = await wrapped(makeRequest() as never);
+    expect(res.status).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
   });
 });

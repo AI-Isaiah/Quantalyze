@@ -439,7 +439,16 @@ export function newWizardSessionId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  const ts = Date.now().toString(16);
-  const rnd = Math.random().toString(16).slice(2);
-  return `${ts}-${rnd}`;
+  // M-0590: emit a canonical UUID-v4-shaped string (8-4-4-4-12 hex) so the
+  // value passes the server-side UUID_RE in /api/strategies/create-with-key.
+  // The prior `${ts}-${rnd}` fallback had a single dash and 400'd. This is a
+  // telemetry-correlation id, not a security token — Math.random entropy is
+  // adequate; the only contract that matters is the regex shape.
+  const hex = (count: number) =>
+    Array.from({ length: count }, () =>
+      Math.floor(Math.random() * 16).toString(16),
+    ).join("");
+  // Version nibble = 4; variant nibble ∈ {8,9,a,b}.
+  const variant = (8 + Math.floor(Math.random() * 4)).toString(16);
+  return `${hex(8)}-${hex(4)}-4${hex(3)}-${variant}${hex(3)}-${hex(12)}`;
 }

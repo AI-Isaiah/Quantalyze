@@ -322,6 +322,115 @@ describe("migration 081 — bridge_outcomes voluntary-kind relaxation (live-DB)"
   );
 
   // ---------------------------------------------------------------------------
+  // M-0007 — POSITIVE test for the relaxation's RAISON D'ÊTRE.
+  //
+  // T_BO_DOUBLE_INSERT_BLOCKED proves the NEW (allocator_id, match_decision_id)
+  // unique blocks dups; T_BO_OLD_UNIQUE_GONE proves the legacy
+  // (allocator_id, strategy_id, COALESCE(original_holding_ref,'')) unique is
+  // gone. But neither exercises the actual scenario migration 081 existed to
+  // enable: MULTIPLE bridge_outcomes for the SAME (allocator_id, strategy_id)
+  // pair via DIFFERENT match_decision_ids. Under the old unique that pattern
+  // was forbidden; under the new schema both rows must round-trip. This is the
+  // load-bearing positive assertion the dup-rejection test cannot encode.
+  // ---------------------------------------------------------------------------
+  it.skipIf(!HAS_LIVE_DB)(
+    "T_BO_SAME_STRATEGY_TWO_DECISIONS: two bridge_outcomes for the SAME (allocator_id, strategy_id) via DIFFERENT match_decision_ids both succeed (the pattern migration 081 enabled)",
+    async () => {
+      // Two distinct match_decisions on the SAME strategy. decision='snoozed'
+      // has no per-(allocator, strategy) unique index, so two such rows for
+      // STRATEGY_PHASE10_BO are themselves allowed — the assertion under test
+      // is on bridge_outcomes, not match_decisions.
+      const { data: md1, error: md1Err } = await admin
+        .from("match_decisions")
+        .insert({
+          allocator_id: allocatorId,
+          strategy_id: STRATEGY_PHASE10_BO,
+          decision: "snoozed",
+          decided_by: allocatorId,
+          original_strategy_id: null,
+          original_holding_ref: null,
+          kind: "voluntary_add",
+        })
+        .select("id, strategy_id")
+        .single();
+      expect(md1Err).toBeNull();
+      if (md1?.id) createdMatchDecisionIds.push(md1.id as string);
+
+      const { data: md2, error: md2Err } = await admin
+        .from("match_decisions")
+        .insert({
+          allocator_id: allocatorId,
+          strategy_id: STRATEGY_PHASE10_BO,
+          decision: "snoozed",
+          decided_by: allocatorId,
+          original_strategy_id: null,
+          original_holding_ref: null,
+          kind: "voluntary_add",
+        })
+        .select("id, strategy_id")
+        .single();
+      expect(md2Err).toBeNull();
+      if (md2?.id) createdMatchDecisionIds.push(md2.id as string);
+
+      const today = new Date().toISOString().slice(0, 10);
+
+      // First bridge_outcome for the (allocator, strategy) pair via md1.
+      const bo1 = await admin
+        .from("bridge_outcomes")
+        .insert({
+          allocator_id: allocatorId,
+          match_decision_id: md1!.id,
+          strategy_id: md1!.strategy_id,
+          kind: "allocated",
+          percent_allocated: 8,
+          allocated_at: today,
+        })
+        .select("id, strategy_id, match_decision_id")
+        .single();
+      expect(bo1.error).toBeNull();
+      if (bo1.data?.id) createdBridgeOutcomeIds.push(bo1.data.id as string);
+
+      // Second bridge_outcome for the SAME (allocator, strategy) pair via the
+      // DIFFERENT match_decision md2. Under the legacy
+      // bridge_outcomes_unique_per_strategy(_holding) index this would have
+      // been a 23505; under migration 081's schema it MUST succeed.
+      const bo2 = await admin
+        .from("bridge_outcomes")
+        .insert({
+          allocator_id: allocatorId,
+          match_decision_id: md2!.id,
+          strategy_id: md2!.strategy_id,
+          kind: "allocated",
+          percent_allocated: 9,
+          allocated_at: today,
+        })
+        .select("id, strategy_id, match_decision_id")
+        .single();
+      expect(bo2.error).toBeNull();
+      if (bo2.data?.id) createdBridgeOutcomeIds.push(bo2.data.id as string);
+
+      // Both rows persist, same strategy_id, distinct match_decision_ids.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const r1 = bo1.data as any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const r2 = bo2.data as any;
+      expect(r1?.strategy_id).toBe(STRATEGY_PHASE10_BO);
+      expect(r2?.strategy_id).toBe(STRATEGY_PHASE10_BO);
+      expect(r1?.match_decision_id).not.toBe(r2?.match_decision_id);
+
+      const { data: persisted, error: selErr } = await admin
+        .from("bridge_outcomes")
+        .select("id")
+        .eq("allocator_id", allocatorId)
+        .eq("strategy_id", STRATEGY_PHASE10_BO)
+        .in("match_decision_id", [md1!.id, md2!.id]);
+      expect(selErr).toBeNull();
+      expect((persisted ?? []).length).toBe(2);
+    },
+    30_000,
+  );
+
+  // ---------------------------------------------------------------------------
   // T_BO_LIVE_ROUNDTRIP — H1 hard verification
   //
   // Builds the EXACT shape Plan 07's POST /api/allocator/scenario/commit route

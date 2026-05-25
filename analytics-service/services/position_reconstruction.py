@@ -248,11 +248,18 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
 
     all_positions: list[dict] = []
     aggregated_data_quality_flags: dict[str, Any] = {}
+    # Audit H-0812: counters for positions DROPPED inside FIFO (corrupt input,
+    # e.g. zero_entry_price_dropped). Accumulated across symbols, then merged
+    # into the strategy-level flags below — the dropped positions are not in
+    # the returned list to carry their own per-position flag.
+    fifo_dropped_flags: dict[str, Any] = {}
 
     for (symbol, _exchange), symbol_fills in fills_by_key.items():
         # Sort by timestamp within bucket (per-symbol-per-exchange).
         symbol_fills.sort(key=lambda f: f.get("timestamp", ""))
-        positions = _match_positions_fifo(symbol, symbol_fills, strategy_id)
+        positions = _match_positions_fifo(
+            symbol, symbol_fills, strategy_id, dropped_flags=fifo_dropped_flags
+        )
         # Audit G12.C.4: collect transient data_quality_flags from
         # in-memory position dicts BEFORE we strip them for DB persistence.
         for pos in positions:
@@ -277,6 +284,23 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
             fills_dropped_no_symbol
         )
 
+    # Audit H-0812: merge FIFO drop counters (e.g. zero_entry_price_dropped)
+    # into the strategy-level flags, using the SAME bool-OR / int-sum / else-
+    # replace rule as the per-position aggregation above so the two merges
+    # cannot diverge (review). Only int counters flow through today, but the
+    # mirrored shape future-proofs a bool drop-flag against a mis-merge.
+    for k, v in fifo_dropped_flags.items():
+        if isinstance(v, bool):
+            aggregated_data_quality_flags[k] = (
+                aggregated_data_quality_flags.get(k, False) or v
+            )
+        elif isinstance(v, (int, float)):
+            aggregated_data_quality_flags[k] = (
+                aggregated_data_quality_flags.get(k, 0) + v
+            )
+        else:
+            aggregated_data_quality_flags[k] = v
+
     await _attribute_funding(strategy_id, all_positions, supabase)
 
     # Audit-2026-05-07 G12.C.1/C.2: atomic DELETE+INSERT via RPC. The RPC
@@ -299,6 +323,16 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
 
     # Compute trade_metrics
     closed = [p for p in all_positions if p.get("status") == "closed"]
+    # Audit M-0709: `all_positions` is built by iterating `fills_by_key`
+    # (a dict keyed by (symbol, exchange)) whose insertion order tracks the
+    # input fill order, so the persisted `realized_pnl_per_trade` list — and
+    # the chronological-first-N truncation slice below — would otherwise
+    # depend on which symbol's fills the caller happened to pass first. Sort
+    # by closed_at ASC so the persisted list contract is deterministic and
+    # input-order insensitive (downstream SQN / profit-factor sums are
+    # already order-insensitive; the LIST contract was not). Positions with a
+    # missing closed_at sort last but keep their relative order (stable sort).
+    closed.sort(key=lambda p: (p.get("closed_at") is None, p.get("closed_at") or ""))
 
     # Audit-2026-05-07 round-2 / P1994: avg_winning_trade and
     # avg_losing_trade must be DOLLAR sums (realized_pnl), not ratio
@@ -606,7 +640,10 @@ FLIP_EPS_FACTOR = 1e-9
 # directly to avoid touching the DB-side tested primitive. Future API
 # cleanup may rename without underscore once the equity-curve seam is stable.
 def _match_positions_fifo(
-    symbol: str, fills: list[dict], strategy_id: str
+    symbol: str,
+    fills: list[dict],
+    strategy_id: str,
+    dropped_flags: dict[str, Any] | None = None,
 ) -> list[dict]:
     """FIFO position matching for a single symbol.
 
@@ -614,6 +651,13 @@ def _match_positions_fifo(
     For shorts: sell increases, buy decreases.
     Uses posSide from raw_data when available (OKX hedge mode).
     When net crosses zero -> position closed.
+
+    `dropped_flags`, when supplied, accumulates strategy-level data-quality
+    counters for positions that were DROPPED (not returned) because their
+    input was corrupt — e.g. `zero_entry_price_dropped`. The caller merges
+    it into the aggregated strategy data_quality_flags. Dropped positions
+    are excluded from the returned list so corrupt input cannot pollute
+    win_rate / avg_roi / expectancy as a fabricated flat trade.
     """
     positions: list[dict] = []
     net_qty = 0.0
@@ -842,29 +886,51 @@ def _match_positions_fifo(
                         position_quality_flags.get("duration_parse_errors", 0) + 1
                     )
 
-            position_dict: dict[str, Any] = {
-                "strategy_id": strategy_id,
-                "symbol": symbol,
-                "side": position_side,
-                "status": "closed",
-                "entry_price_avg": round(entry_avg, 8),
-                "exit_price_avg": round(exit_avg, 8),
-                "size_base": round(total_entry_qty, 8),
-                "size_peak": round(peak_qty, 8),
-                "realized_pnl": round(realized_pnl, 4),
-                "fee_total": round(total_fees, 4),
-                "roi": round(roi, 6),
-                "duration_days": duration_days,
-                "duration_seconds": duration_seconds,
-                "opened_at": position_open_time,
-                "closed_at": close_time,
-                "fill_count": len(entry_fills) + 1,  # +1 for closing fill
-                # Default 0; _attribute_funding sums in-window funding_fees rows before insert.
-                "funding_pnl": 0,
-            }
-            if position_quality_flags:
-                position_dict["data_quality_flags"] = dict(position_quality_flags)
-            positions.append(position_dict)
+            # Audit H-0812/M-0751: a zero, negative, or NON-FINITE (NaN/Inf)
+            # average entry price is nonsensical input — exchange/parser
+            # corruption. The roi=0 it would yield (notional<=0 → the
+            # divide-by-zero guard returns 0) silently pollutes win_rate /
+            # avg_roi / expectancy as if it were a real flat trade. DROP the
+            # corrupt position (do not record it) and surface a strategy-level
+            # `zero_entry_price_dropped` counter via `dropped_flags`, so the
+            # corruption is not silent — the same drop-and-count pattern used
+            # for `fills_dropped_no_symbol`. (review-5: the non-finite check
+            # mirrors the H-0769 math.isfinite guard — `Inf <= 0` is False.)
+            if not math.isfinite(entry_avg) or entry_avg <= 0:
+                if dropped_flags is not None:
+                    dropped_flags["zero_entry_price_dropped"] = (
+                        dropped_flags.get("zero_entry_price_dropped", 0) + 1
+                    )
+                logger.warning(
+                    "Dropping zero-entry-price position (corrupt input) "
+                    "strategy=%s symbol=%s side=%s exit_avg=%s size=%s",
+                    strategy_id, symbol, position_side, exit_avg,
+                    total_entry_qty,
+                )
+            else:
+                position_dict: dict[str, Any] = {
+                    "strategy_id": strategy_id,
+                    "symbol": symbol,
+                    "side": position_side,
+                    "status": "closed",
+                    "entry_price_avg": round(entry_avg, 8),
+                    "exit_price_avg": round(exit_avg, 8),
+                    "size_base": round(total_entry_qty, 8),
+                    "size_peak": round(peak_qty, 8),
+                    "realized_pnl": round(realized_pnl, 4),
+                    "fee_total": round(total_fees, 4),
+                    "roi": round(roi, 6),
+                    "duration_days": duration_days,
+                    "duration_seconds": duration_seconds,
+                    "opened_at": position_open_time,
+                    "closed_at": close_time,
+                    "fill_count": len(entry_fills) + 1,  # +1 for closing fill
+                    # Default 0; _attribute_funding sums in-window funding_fees rows before insert.
+                    "funding_pnl": 0,
+                }
+                if position_quality_flags:
+                    position_dict["data_quality_flags"] = dict(position_quality_flags)
+                positions.append(position_dict)
 
             # If overshot (net != 0), start a new position with remainder
             if remainder > 1e-12:
@@ -904,31 +970,46 @@ def _match_positions_fifo(
     # Record any open position
     if abs(net_qty) > 1e-12 and position_side and total_entry_qty > 0:
         entry_avg = total_entry_cost / total_entry_qty
-        open_dict: dict[str, Any] = {
-            "strategy_id": strategy_id,
-            "symbol": symbol,
-            "side": position_side,
-            "status": "open",
-            "entry_price_avg": round(entry_avg, 8),
-            "exit_price_avg": None,
-            "size_base": round(total_entry_qty, 8),
-            "size_peak": round(peak_qty, 8),
-            "realized_pnl": None,
-            "fee_total": round(total_fees, 4),
-            "roi": None,
-            "duration_days": None,
-            # Audit G12.C.9: also write duration_seconds (NULL while open).
-            "duration_seconds": None,
-            "opened_at": position_open_time,
-            "closed_at": None,
-            "fill_count": len(entry_fills),
-            # Default 0; _attribute_funding sums funding_fees rows up to now
-            # for open positions (closed_at=None → window-end = now).
-            "funding_pnl": 0,
-        }
-        if position_quality_flags:
-            open_dict["data_quality_flags"] = dict(position_quality_flags)
-        positions.append(open_dict)
+        # review-5: same corrupt-input guard as the closed path above. A zero /
+        # negative / non-finite entry on an OPEN position would persist
+        # entry_price_avg=0 and feed a fabricated unrealized_pnl (mark*qty) to
+        # the equity reconstructor. Drop + count it instead of recording it.
+        if not math.isfinite(entry_avg) or entry_avg <= 0:
+            if dropped_flags is not None:
+                dropped_flags["zero_entry_price_dropped"] = (
+                    dropped_flags.get("zero_entry_price_dropped", 0) + 1
+                )
+            logger.warning(
+                "Dropping zero-entry-price OPEN position (corrupt input) "
+                "strategy=%s symbol=%s side=%s size=%s",
+                strategy_id, symbol, position_side, total_entry_qty,
+            )
+        else:
+            open_dict: dict[str, Any] = {
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "side": position_side,
+                "status": "open",
+                "entry_price_avg": round(entry_avg, 8),
+                "exit_price_avg": None,
+                "size_base": round(total_entry_qty, 8),
+                "size_peak": round(peak_qty, 8),
+                "realized_pnl": None,
+                "fee_total": round(total_fees, 4),
+                "roi": None,
+                "duration_days": None,
+                # Audit G12.C.9: also write duration_seconds (NULL while open).
+                "duration_seconds": None,
+                "opened_at": position_open_time,
+                "closed_at": None,
+                "fill_count": len(entry_fills),
+                # Default 0; _attribute_funding sums funding_fees rows up to now
+                # for open positions (closed_at=None → window-end = now).
+                "funding_pnl": 0,
+            }
+            if position_quality_flags:
+                open_dict["data_quality_flags"] = dict(position_quality_flags)
+            positions.append(open_dict)
 
     return positions
 

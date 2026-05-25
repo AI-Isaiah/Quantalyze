@@ -294,12 +294,25 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
     # Sprint 6 Task 7.1b — audit the simulator run. entity is the
     # portfolio the ADD scenario targeted; user_id carried in the
     # request shape (SimulatorRequest.user_id).
-    log_audit_event(
-        user_id=req.user_id,
-        action="simulator.run",
-        entity_type="simulator_run",
-        entity_id=req.portfolio_id,
-        metadata={"candidate_strategy_id": req.candidate_strategy_id},
-    )
+    # H-0815 (final): wrap the happy-path emit. log_audit_event already
+    # Sentry-captures + logs the serious classes (permission_denied / unknown)
+    # before re-raising (audit.py P907/P908), so swallowing here does NOT hide
+    # the regression from ops — it only prevents one audit-path failure from
+    # 500-ing every successful simulation. Matches job_worker._emit_audit. (The
+    # failure-path emit above is also wrapped, additionally so an audit failure
+    # there cannot mask the original raised exception.)
+    try:
+        log_audit_event(
+            user_id=req.user_id,
+            action="simulator.run",
+            entity_type="simulator_run",
+            entity_id=req.portfolio_id,
+            metadata={"candidate_strategy_id": req.candidate_strategy_id},
+        )
+    except Exception as audit_exc:  # noqa: BLE001
+        logger.error(
+            "simulator run audit emit failed (run still succeeded): %s",
+            audit_exc, exc_info=True,
+        )
 
     return result

@@ -32,11 +32,13 @@ import { describe, it, expect } from "vitest";
 import { createClient } from "@supabase/supabase-js";
 import {
   HAS_LIVE_DB,
+  HAS_INTROSPECTION,
   LIVE_DB_URL,
   LIVE_DB_SERVICE_ROLE_KEY,
   createLiveAdminClient,
   createTestUser,
   cleanupLiveDbRow,
+  runIntrospectionSql,
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
 
@@ -71,12 +73,43 @@ async function deleteAuditRowDirectSql(
   admin: ReturnType<typeof createLiveAdminClient>,
   rowId: string,
 ): Promise<void> {
-  // Direct delete via service-role — this SHOULD fail under the REVOKE,
-  // but we clean up via a raw SQL RPC in case a prior test fails the
-  // migration and the row would otherwise leak. In the happy case the
-  // migration holds and this no-ops silently; the row is a __test_ row
-  // so it's clearly discardable.
+  // M-0006: this cleanup used to call the EXACT operation the test asserts is
+  // DENIED (`admin.from('audit_log').delete()`) and swallowed the result —
+  // a circular dependency. Two silent failure modes hid here:
+  //   (a) if the deny invariant is CORRECT, this PostgREST delete is a no-op
+  //       and the __test_ row LEAKS into audit_log permanently;
+  //   (b) if the deny is BROKEN, the delete silently succeeds and the test's
+  //       own teardown masks the regression the suite exists to catch.
+  // Make cleanup observable AND independent of the operation under test:
+  // attempt the PostgREST delete (best-effort), then if the row survives
+  // (expected, because the REVOKE holds), purge it via the Management API
+  // superuser path (bypasses RLS + REVOKE) when introspection creds exist.
+  // If neither path removes it, WARN loudly so the leak is visible rather
+  // than silent.
   await admin.from("audit_log").delete().eq("id", rowId);
+
+  const { data: survivor } = await admin
+    .from("audit_log")
+    .select("id")
+    .eq("id", rowId)
+    .maybeSingle();
+  if (!survivor) return; // PostgREST delete worked (or row already gone).
+
+  // Row survived the service-role delete — exactly what the deny invariant
+  // predicts. Purge via the superuser Management API so the fixture row does
+  // not leak. This path does NOT exercise the denied operation.
+  if (HAS_INTROSPECTION) {
+    await runIntrospectionSql(
+      `DELETE FROM public.audit_log WHERE id = '${rowId}'`,
+    );
+    return;
+  }
+  console.warn(
+    `[audit-log-rls] M-0006: __test_ audit_log row ${rowId} could not be ` +
+      "cleaned up via service-role (deny invariant holds) and no " +
+      "SUPABASE_ACCESS_TOKEN/PROJECT_REF is set for a superuser purge — the " +
+      "row will leak. Set introspection creds to enable teardown.",
+  );
 }
 
 describe("Migration 049 — audit_log deny policies", () => {

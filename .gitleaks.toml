@@ -55,6 +55,11 @@ description = "Known test fixtures and placeholder env samples"
 # - analytics-service/tests/cassettes/: VCR-recorded HTTP fixtures. PII
 #   already scrubbed at record time via conftest_vcr.py three-layer filter;
 #   any high-entropy value remaining is a public response payload.
+# - src/__tests__/gitleaks-allowlist.test.ts: the H-0017 meta-test for THIS
+#   allowlist config. Embeds the canonical jwt.io tutorial JWT fixture
+#   (JWT_FIXTURE) to drive a real gitleaks scan asserting the allowlist
+#   suppresses an allowlisted path and detects a non-allowlisted one. The
+#   literal in the test source trips the default `jwt` rule. Not a real token.
 paths = [
   '''(^|/)\.env\.example$''',
   '''(^|/)src/lib/admin/pii-scrub\.test\.ts$''',
@@ -73,4 +78,5 @@ paths = [
   # .planning/ rule above). The root-level file is now gitignored;
   # this allowlist line also suppresses leftover historical commits.
   '''(^|/)fix-list\.md$''',
+  '''(^|/)src/__tests__/gitleaks-allowlist\.test\.ts$''',
 ]

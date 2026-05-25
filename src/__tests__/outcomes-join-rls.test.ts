@@ -170,6 +170,11 @@ describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", (
       // audit-2026-05-07 H-0960: kind set explicitly (mig 20260516160600
       // dropped the DEFAULT). bridge_recommended shape: strategy_id NOT NULL
       // + exactly one of original_* NOT NULL (original_strategy_id here).
+      // H-0024: capture each allocator's seeded outcome id so we can assert
+      // SET-MEMBERSHIP isolation (alloc1's returned outcomes must NOT contain
+      // alloc2's outcome id, and vice versa) rather than the trivially-true
+      // `o2.id !== o1.id`.
+      const seededOutcomeByAlloc: Record<string, string> = {};
       for (const allocId of [alloc1, alloc2]) {
         const { data: decision, error: decisionErr } = await admin
           .from("match_decisions")
@@ -206,7 +211,10 @@ describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", (
         if (outcomeErr || !outcome)
           throw outcomeErr ?? new Error("no outcome");
         toCleanup.outcomeIds.push((outcome as { id: string }).id);
+        seededOutcomeByAlloc[allocId] = (outcome as { id: string }).id;
       }
+      const alloc1OutcomeId = seededOutcomeByAlloc[alloc1];
+      const alloc2OutcomeId = seededOutcomeByAlloc[alloc2];
 
       // Call getMyAllocationDashboard for allocator 1 — sign in as alloc1
       // first so the H-0502 auth backstop passes.
@@ -227,8 +235,26 @@ describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", (
       authMock.userId = alloc2;
       const result2 = await getMyAllocationDashboard(alloc2);
       expect(result2.outcomes.length).toBeGreaterThanOrEqual(1);
-      const o2 = result2.outcomes[0];
-      expect(o2.id).not.toBe(o1.id); // different outcome id
+
+      // H-0023 / H-0024: This codepath uses the ADMIN client (service-role,
+      // RLS-bypassing — queries.ts: "match_decisions has no allocator-self-
+      // SELECT RLS policy"). The isolation contract is therefore the inline
+      // `.eq("allocator_id", userId)` ownership filter (Pattern D), NOT a row-
+      // level security policy. The previous assertion `o2.id !== o1.id` was
+      // trivially true (each allocator seeded its own row) and would still
+      // pass if the `.eq` filter were dropped and the query returned ALL
+      // allocators' outcomes. We now assert real SET-MEMBERSHIP isolation:
+      //   - alloc1's returned outcome ids EXCLUDE alloc2's seeded outcome
+      //   - alloc2's returned outcome ids EXCLUDE alloc1's seeded outcome
+      //   - each allocator's OWN seeded outcome IS present
+      // A regression that drops/typos the .eq("allocator_id", userId) filter
+      // leaks the other tenant's row into the set and trips these checks.
+      const result1Ids = result1.outcomes.map((o) => o.id);
+      const result2Ids = result2.outcomes.map((o) => o.id);
+      expect(result1Ids).toContain(alloc1OutcomeId);
+      expect(result1Ids).not.toContain(alloc2OutcomeId);
+      expect(result2Ids).toContain(alloc2OutcomeId);
+      expect(result2Ids).not.toContain(alloc1OutcomeId);
 
       // Phase B pr-test-analyzer F3 — cross-tenant exfiltration probe.
       // alloc2 (signed in) tries to call getMyAllocationDashboard(alloc1).

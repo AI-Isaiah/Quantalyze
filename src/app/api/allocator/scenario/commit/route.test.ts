@@ -219,6 +219,43 @@ describe("T_R1 — auth gate", () => {
 });
 
 // ===========================================================================
+// T_R1b — auth gate short-circuits the handler (H-0243)
+// ===========================================================================
+//
+// H-0243 flagged T_R1 as tautological: `expect(res.status).toBe(401)` is
+// satisfied by ANY 401, including one a future refactor returns by
+// accident after the handler has already done work. The withAuth mock is
+// a pass-through, so the REAL Origin/CSRF/auth gate cannot be exercised
+// offline (it needs Supabase) — that integration belongs in
+// withAllocatorAuth.test.ts. What we CAN pin here, without the antipattern,
+// is the load-bearing wiring property: when the wrapper denies (401), the
+// handler body MUST NOT run — no rate-limit, no RPC, no audit. A
+// regression that invoked the handler before the gate (or ignored the
+// gate's deny) would do real work on an unauthenticated request and fail
+// this test even though the bare status check still passed.
+
+describe("T_R1b — 401 short-circuits the handler body (H-0243)", () => {
+  it("does not reach rate-limit, RPC, or audit when withAllocatorAuth denies", async () => {
+    withAuthShouldFail = true;
+    const res = await POST(mkReq({ diffs: [VALID_VR] }));
+    expect(res.status).toBe(401);
+    // The handler body must be fully short-circuited by the gate.
+    expect(checkLimit).not.toHaveBeenCalled();
+    expect(mockRpc).not.toHaveBeenCalled();
+    expect(logAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("does not reach RPC or audit when the allocator-role gate denies (403)", async () => {
+    allocatorGateShouldFail = true;
+    const res = await POST(mkReq({ diffs: [VALID_VR] }));
+    expect(res.status).toBe(403);
+    expect(checkLimit).not.toHaveBeenCalled();
+    expect(mockRpc).not.toHaveBeenCalled();
+    expect(logAuditEvent).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
 // T_R2 / T_R3 / T_R15 — zod
 // ===========================================================================
 
@@ -493,6 +530,80 @@ describe("T_R8 — M7 reuse-or-create (RPC level)", () => {
     const body2 = await res2.json();
     expect(body2.recorded).toBe(1);
     expect(body2.results[0].match_decision_id).toBe("md-br-new");
+  });
+
+  // H-0244: the assertion above (`body2...toBe('md-br-new')`) is
+  // tautological — it asserts the mock returned the value the test fed it,
+  // and would pass verbatim even if the RPC body were gutted to always
+  // INSERT. The reuse-or-create LOGIC lives in the SQL function
+  // (migration 082) and can only be proven against a live DB (see
+  // FLAG/SKIP below). What the ROUTE actually owns — and what this test
+  // pins non-tautologically — is that BOTH commits of the same logical
+  // diff forward the IDENTICAL reuse tuple (allocator_id + holding_ref +
+  // strategy_id + kind) to the RPC. That identical tuple is the
+  // PRECONDITION the RPC's reuse SELECT keys on; if the route mangled,
+  // dropped, or re-derived any of those fields between calls, the RPC
+  // could never match the existing row and would duplicate-INSERT. This
+  // test inspects mockRpc.mock.calls[0] vs [1] for that contract.
+  it("forwards the IDENTICAL reuse tuple to the RPC on both commits of the same diff (route-level precondition for migration-082 reuse)", async () => {
+    const okEnvelope = (mdId: string, boId: string) => ({
+      data: {
+        ok: true,
+        recorded: [
+          {
+            index: 0,
+            match_decision_id: mdId,
+            bridge_outcome_id: boId,
+            kind: "bridge_recommended",
+          },
+        ],
+      },
+      error: null,
+    });
+    mockRpc.mockResolvedValueOnce(okEnvelope("md-br-new", "bo-br-1"));
+    await POST(mkReq({ diffs: [VALID_BR] }));
+    mockRpc.mockResolvedValueOnce(okEnvelope("md-br-new", "bo-br-2"));
+    await POST(mkReq({ diffs: [VALID_BR] }));
+
+    expect(mockRpc).toHaveBeenCalledTimes(2);
+    const call0 = mockRpc.mock.calls[0] as unknown as [
+      string,
+      { p_allocator_id: string; p_diffs: Array<Record<string, unknown>> },
+    ];
+    const call1 = mockRpc.mock.calls[1] as unknown as [
+      string,
+      { p_allocator_id: string; p_diffs: Array<Record<string, unknown>> },
+    ];
+
+    // Same allocator on both calls (sourced from withAuth, not the body).
+    expect(call0[1].p_allocator_id).toBe("alloc-A");
+    expect(call1[1].p_allocator_id).toBe(call0[1].p_allocator_id);
+
+    // The reuse-key tuple the RPC SELECTs on must be byte-identical
+    // across both forwards. Pin the three fields that compose migration
+    // 082's (allocator_id, original_holding_ref, strategy_id,
+    // kind='bridge_recommended') unique tuple.
+    const d0 = call0[1].p_diffs[0];
+    const d1 = call1[1].p_diffs[0];
+    expect(d0.kind).toBe("bridge_recommended");
+    expect(d1.kind).toBe("bridge_recommended");
+    expect(d1.holding_ref).toBe(d0.holding_ref);
+    expect(d1.strategy_id).toBe(d0.strategy_id);
+    expect(d0.holding_ref).toBe(VALID_BR.holding_ref);
+    expect(d0.strategy_id).toBe(VALID_BR.strategy_id);
+  });
+
+  // H-0244 FLAG/SKIP: the INSERT-then-REUSE proof itself (first commit
+  // INSERTs a new match_decision_id, second commit REUSEs that same id by
+  // SELECTing the existing tuple instead of INSERTing) lives entirely
+  // inside the commit_scenario_batch SQL function (migration 082) and
+  // cannot be verified with a mocked RPC — the mock cannot run the
+  // SELECT-or-INSERT branch. It requires a seeded live DB. Skipped offline
+  // and FLAGGED for a live-DB integration test (e.g. alongside
+  // src/__tests__/update-allocator-mandates-rpc.test.ts).
+  it.skip("[live-DB] second bridge_recommended commit REUSEs the first match_decision_id via the RPC's SELECT-or-INSERT (migration 082) — requires seeded Supabase", () => {
+    // Intentionally empty — see FLAG note above. The reuse-or-create
+    // branch is SQL-side and needs a real Postgres transaction.
   });
 });
 

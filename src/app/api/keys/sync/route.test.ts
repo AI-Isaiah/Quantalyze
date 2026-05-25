@@ -28,6 +28,13 @@ const {
   mockLogAuditEvent,
   rateLimitResult,
   ownershipResult,
+  // H-0275: capture what the user-scoped ownership query actually touched
+  // so the mock can FAIL when a regression points it at the wrong table or
+  // drops a filter — the "mock so deep it can't fail" trap (Rule 9).
+  ownershipQuery,
+  // H-0306: the auth boundary. Flipped to null in the unauthed test so the
+  // REAL withAuth (this route does NOT mock it) hits its 401 branch.
+  authState,
 } = vi.hoisted(() => ({
   TEST_USER: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" },
   mockRpc: vi.fn(),
@@ -41,6 +48,13 @@ const {
   ownershipResult: {
     data: null as Record<string, string> | null,
   },
+  ownershipQuery: {
+    table: null as string | null,
+    selectCols: null as string | null,
+    // Filters captured as [column, value] pairs from each .eq() link.
+    filters: [] as Array<[string, unknown]>,
+  },
+  authState: { user: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" } as { id: string } | null },
 }));
 
 const TEST_STRATEGY_ID = "11111111-1111-1111-1111-111111111111";
@@ -51,17 +65,32 @@ const TEST_JOB_ID = "22222222-2222-2222-2222-222222222222";
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: {
-      getUser: async () => ({ data: { user: TEST_USER }, error: null }),
+      getUser: async () => ({ data: { user: authState.user }, error: null }),
     },
-    from: () => ({
-      select: () => ({
-        eq: () => ({
-          eq: () => ({
-            single: async () => ownershipResult,
-          }),
-        }),
-      }),
-    }),
+    // H-0275: the mock now introspects the table name + select columns +
+    // every .eq() filter, recording them on `ownershipQuery`. Tests assert
+    // the route hit `from("strategies").select("id, user_id")` filtered by
+    // BOTH `id` and `user_id` — so a regression that swaps the table to
+    // `api_keys`, drops the `user_id` filter, or selects the wrong columns
+    // is observable instead of silently passing.
+    from: (table: string) => {
+      ownershipQuery.table = table;
+      // A chainable builder where each link records its observable side
+      // effect and returns `this`. `single()` is the terminal that resolves
+      // the configured ownership result.
+      const builder = {
+        select: (cols: string) => {
+          ownershipQuery.selectCols = cols;
+          return builder;
+        },
+        eq: (col: string, val: unknown) => {
+          ownershipQuery.filters.push([col, val]);
+          return builder;
+        },
+        single: async () => ownershipResult,
+      };
+      return builder;
+    },
   }),
 }));
 
@@ -135,6 +164,10 @@ describe("POST /api/keys/sync", () => {
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
     ownershipResult.data = { id: TEST_STRATEGY_ID, user_id: TEST_USER.id };
+    ownershipQuery.table = null;
+    ownershipQuery.selectCols = null;
+    ownershipQuery.filters = [];
+    authState.user = { id: TEST_USER.id };
     delete process.env.USE_COMPUTE_JOBS_QUEUE;
 
     // Default mock implementations
@@ -389,5 +422,119 @@ describe("POST /api/keys/sync", () => {
     // Nothing audit-worthy happened — the request never reached either
     // sync branch.
     expect(mockLogAuditEvent).not.toHaveBeenCalled();
+  });
+
+  // ── H-0306: unmocked withAuth auth boundary → 401 ──────────────────
+  // This route wraps the handler in the REAL withAuth (it does NOT mock
+  // it), so a missing session must short-circuit at 401 BEFORE any
+  // rate-limit, ownership, RPC, or after() work runs. Rule 9: the auth
+  // boundary is the single most important invariant on a mutation route;
+  // pin that the unauthed branch actually executes.
+  it("H-0306 — returns 401 when the session is missing (real withAuth boundary)", async () => {
+    authState.user = null;
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toBe("Unauthorized");
+
+    // Nothing past the auth gate should have run.
+    expect(ownershipQuery.table).toBeNull();
+    expect(mockRpc).not.toHaveBeenCalled();
+    expect(mockAfter).not.toHaveBeenCalled();
+    expect(mockUpsert).not.toHaveBeenCalled();
+    expect(mockLogAuditEvent).not.toHaveBeenCalled();
+  });
+
+  // ── H-0275: ownership query targets the right table + filters ──────
+  // The mock used to return the same select.eq.eq.single chain for ANY
+  // table/filter combination, so a regression that pointed the ownership
+  // check at `api_keys`, dropped the `user_id` filter, or selected the
+  // wrong columns would still pass (Rule 9 — "mock so deep it can't
+  // fail"). The mock now records the table/cols/filters; this test pins
+  // the contract: from("strategies").select("id, user_id") filtered by
+  // BOTH `id`=strategy_id AND `user_id`=user.id.
+  it("H-0275 — ownership check queries strategies by id AND user_id", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+    expect(res.status).toBe(202);
+
+    // The check must hit the strategies table — NOT api_keys or any other.
+    expect(ownershipQuery.table).toBe("strategies");
+    // It must select the ownership columns the route relies on.
+    expect(ownershipQuery.selectCols).toBe("id, user_id");
+    // Both filters must be present: id scopes the row, user_id is the
+    // ownership fence. Dropping user_id would let any authenticated user
+    // sync any strategy.
+    expect(ownershipQuery.filters).toContainEqual(["id", TEST_STRATEGY_ID]);
+    expect(ownershipQuery.filters).toContainEqual(["user_id", TEST_USER.id]);
+  });
+
+  // ── H-0277: legacy after() failure → compensating 'failed' upsert ──
+  // The after() background block has the critical compensating-write path:
+  // if fetchTrades / computeAnalytics throws, it MUST upsert
+  // {computation_status:'failed', computation_error:<msg>} so SyncPreviewStep
+  // stops polling and renders GATE_ANALYTICS_FAILED. A regression that
+  // dropped this upsert (or wrote the wrong status) would leave the client
+  // polling forever on "still computing". This test drives the catch branch
+  // by rejecting computeAnalytics, invokes the captured after() callback,
+  // and asserts the failure upsert payload.
+  it("H-0277 — after() catch-branch upserts computation_status='failed' with the error message", async () => {
+    // Flag OFF — exercise the legacy after() path.
+    const FAILURE_MESSAGE = "Railway compute timed out after 300s";
+    mockComputeAnalytics.mockRejectedValueOnce(new Error(FAILURE_MESSAGE));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+    expect(res.status).toBe(202);
+
+    // The route registered exactly one after() callback (the bg sync).
+    expect(mockAfter).toHaveBeenCalledTimes(1);
+    const afterCb = mockAfter.mock.calls[0][0] as () => Promise<void>;
+
+    // First upsert was the entry 'computing' status (legacy path).
+    expect(mockUpsert).toHaveBeenCalledTimes(1);
+
+    // Drive the background block. computeAnalytics rejects → catch branch
+    // fires the compensating failure upsert.
+    await afterCb();
+
+    // The catch branch must have issued a SECOND upsert with the failed
+    // status + the propagated error message.
+    expect(mockUpsert).toHaveBeenCalledTimes(2);
+    const failurePayload = mockUpsert.mock.calls[1][0] as Record<string, unknown>;
+    expect(failurePayload).toMatchObject({
+      strategy_id: TEST_STRATEGY_ID,
+      computation_status: "failed",
+      computation_error: FAILURE_MESSAGE,
+    });
+
+    consoleSpy.mockRestore();
+  });
+
+  // ── H-0277 (sibling): a successful after() run does NOT write 'failed' ──
+  // Belt-and-braces so the failure assertion above can't pass vacuously:
+  // when computeAnalytics resolves, the catch branch must NOT run, so the
+  // only upsert is the entry 'computing' write.
+  it("H-0277 — after() success path issues no compensating 'failed' upsert", async () => {
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    mockFetchTrades.mockResolvedValueOnce({ trades_fetched: 7 });
+    mockComputeAnalytics.mockResolvedValueOnce({ status: "complete" });
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+    expect(res.status).toBe(202);
+
+    const afterCb = mockAfter.mock.calls[0][0] as () => Promise<void>;
+    await afterCb();
+
+    // Only the entry 'computing' upsert — no 'failed' write.
+    expect(mockUpsert).toHaveBeenCalledTimes(1);
+    const onlyPayload = mockUpsert.mock.calls[0][0] as Record<string, unknown>;
+    expect(onlyPayload.computation_status).toBe("computing");
+    consoleSpy.mockRestore();
   });
 });

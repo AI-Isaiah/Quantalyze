@@ -133,3 +133,54 @@ def test_risk_decomposition_zero_volatility():
     result = compute_risk_decomposition(weights, cov)
     assert all(r["marginal_risk_pct"] == 0 for r in result)
     assert all(r["standalone_vol"] == 0 for r in result)
+
+
+def test_risk_decomposition_negative_variance_collapses_to_zeros():
+    """M-0706: `port_var = w @ cov @ w; port_vol = sqrt(port_var) if
+    port_var > 0 else 0`. A non-PSD covariance matrix (numerical
+    instability / a near-singular cov produced by float arithmetic) can
+    yield port_var < 0. The `if port_var > 0 else 0` guard must collapse
+    port_vol to 0 so the function returns flat zero entries rather than
+    taking sqrt of a negative (→ NaN). Tests only ever fed positive-definite
+    cov + the all-zero-weight case before; the negative-variance branch
+    was unexercised.
+    """
+    # Non-PSD matrix: eigenvalues 3 and -1. With w=[0.5, -0.5],
+    # w @ cov @ w = -0.5 < 0.
+    cov_non_psd = np.array([[1.0, 2.0], [2.0, 1.0]])
+    weights = [0.5, -0.5]
+    assert (np.array(weights) @ cov_non_psd @ np.array(weights)) < 0
+    result = compute_risk_decomposition(weights, cov_non_psd)
+    # Negative port_var → port_vol == 0 → the zero-vol branch returns flat
+    # zero entries (no NaN from sqrt of a negative number).
+    assert len(result) == 2
+    assert all(r["marginal_risk_pct"] == 0 for r in result)
+    assert all(r["standalone_vol"] == 0 for r in result)
+    assert all(r["component_var"] == 0 for r in result)
+
+
+def test_attribution_empty_weights_returns_empty_list():
+    """M-0705: compute_attribution with n=0 (empty weights/twrs) → the
+    `equal_weight = 1.0/n if n > 0 else 0` guard avoids divide-by-zero and
+    the empty range yields []. Only the 3-weight happy path was tested
+    before; the n=0 boundary was unexercised.
+    """
+    assert compute_attribution([], [], 0.0) == []
+
+
+def test_attribution_all_equal_weights_zero_allocation_effect():
+    """M-0705 (c): when every weight equals the equal-weight baseline
+    (1/n), the `(weights[i] - equal_weight)` factor is 0 for every
+    strategy → allocation_effect == 0 across the board, regardless of the
+    twr spread. Pins that allocation_effect measures DEVIATION from equal
+    weight, not absolute return.
+    """
+    n = 4
+    weights = [1.0 / n] * n  # exactly equal-weight
+    twrs = [0.10, -0.05, 0.20, 0.02]
+    portfolio_twr = sum(w * t for w, t in zip(weights, twrs))
+    result = compute_attribution(weights, twrs, portfolio_twr)
+    assert len(result) == n
+    assert all(r["allocation_effect"] == pytest.approx(0.0) for r in result), (
+        "equal weights → zero allocation effect for every strategy"
+    )

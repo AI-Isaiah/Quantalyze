@@ -64,6 +64,29 @@ export function useMandateAutoSave(
     });
   }, []);
 
+  // Release a field from the in-flight set (no-op if absent). Every terminal
+  // outcome routes through here so the per-field saving spinner can never stick.
+  const removeSavingField = useCallback((fieldName: string) => {
+    setSavingFields((prev) => {
+      if (!prev.has(fieldName)) return prev;
+      const next = new Set(prev);
+      next.delete(fieldName);
+      return next;
+    });
+  }, []);
+
+  // Terminal failure for a field: surface the inline error, flip the form-level
+  // banner to "error", and release the in-flight marker. Centralising the trio
+  // guarantees savingFields is always cleared on a terminal outcome.
+  const failTerminal = useCallback(
+    (fieldName: string, message: string) => {
+      setFieldErrors((prev) => ({ ...prev, [fieldName]: message }));
+      setSaveState("error");
+      removeSavingField(fieldName);
+    },
+    [removeSavingField],
+  );
+
   const save = useCallback(
     async (fieldName: string, value: unknown): Promise<void> => {
       const gen = (generationRef.current[fieldName] ?? 0) + 1;
@@ -103,36 +126,41 @@ export function useMandateAutoSave(
             continue;
           }
           if (generationRef.current[fieldName] === gen) {
-            setFieldErrors((prev) => ({ ...prev, [fieldName]: "Couldn't save." }));
-            setSaveState("error");
-            setSavingFields((prev) => {
-              const n = new Set(prev);
-              n.delete(fieldName);
-              return n;
-            });
+            failTerminal(fieldName, "Couldn't save.");
           }
           return;
         } finally {
           clearTimeout(timeout);
         }
 
-        // Drop stale response for an older generation of this field.
+        // Drop stale response for an older generation of this field. We do NOT
+        // release savingFields here: a newer save() bumped the generation and
+        // now owns the in-flight marker, so it will clear it on its own terminal
+        // outcome. Clearing here would wrongly hide the newer save's spinner.
         if (generationRef.current[fieldName] !== gen) return;
 
         if (res.ok) {
           setLastSavedAt(new Date());
           setSaveState("saved");
-          setSavingFields((prev) => {
-            const n = new Set(prev);
-            n.delete(fieldName);
-            return n;
-          });
+          removeSavingField(fieldName);
           clearError(fieldName); // WR-01: clear any stale 429-retry error on retried success
           return;
         }
 
         if (res.status === 429) {
           const retryAfter = Number(res.headers.get("Retry-After") ?? "5");
+          // Budget exhausted: terminate cleanly. Falling through the loop would
+          // leave the field pinned in savingFields and a message falsely
+          // promising a retry that will never run.
+          if (attempt >= MAX_ATTEMPTS) {
+            if (generationRef.current[fieldName] === gen) {
+              failTerminal(
+                fieldName,
+                "Saving too fast. Please wait a moment and try again.",
+              );
+            }
+            return;
+          }
           setFieldErrors((prev) => ({
             ...prev,
             [fieldName]: `Saving too fast. Will retry in ${retryAfter}s.`,
@@ -146,16 +174,7 @@ export function useMandateAutoSave(
         if (res.status === 400 || res.status === 401) {
           const body = await res.json().catch(() => ({}));
           const msg = (body?.error as string | undefined) ?? "Couldn't save";
-          setFieldErrors((prev) => ({
-            ...prev,
-            [fieldName]: `${msg}. Try again.`,
-          }));
-          setSaveState("error");
-          setSavingFields((prev) => {
-            const n = new Set(prev);
-            n.delete(fieldName);
-            return n;
-          });
+          failTerminal(fieldName, `${msg}. Try again.`);
           return;
         }
 
@@ -167,18 +186,12 @@ export function useMandateAutoSave(
         }
 
         if (generationRef.current[fieldName] === gen) {
-          setFieldErrors((prev) => ({ ...prev, [fieldName]: "Couldn't save." }));
-          setSaveState("error");
-          setSavingFields((prev) => {
-            const n = new Set(prev);
-            n.delete(fieldName);
-            return n;
-          });
+          failTerminal(fieldName, "Couldn't save.");
         }
         return;
       }
     },
-    [clearError],
+    [clearError, failTerminal, removeSavingField],
   );
 
   return { saveState, fieldErrors, lastSavedAt, savingFields, save, clearError };

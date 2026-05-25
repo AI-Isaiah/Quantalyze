@@ -25,6 +25,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { createClient } from "@supabase/supabase-js";
 import {
   HAS_LIVE_DB,
   createLiveAdminClient,
@@ -32,6 +33,16 @@ import {
   cleanupLiveDbRow,
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
+
+// H-0031: the non-service-role-caller negative test needs an anon-key
+// client to prove the EXECUTE grant (migration 055 REVOKEs from
+// PUBLIC/anon/authenticated, GRANTs only to service_role) actually
+// blocks a non-privileged caller. Gate on the anon key separately so a
+// CI lane with the service key but no anon key skips just that one case
+// rather than failing.
+const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const HAS_ANON = Boolean(ANON_KEY && SUPABASE_URL);
 
 async function seedApiKey(
   admin: ReturnType<typeof createLiveAdminClient>,
@@ -131,6 +142,151 @@ describe("Migration 055 — sanitize_user RPC", () => {
           .single();
         expect(profileAfter?.display_name).toBe("[deleted]");
         expect(profileAfter?.email).toBeNull();
+      } finally {
+        await cleanupLiveDbRow(admin, cleanup);
+      }
+    },
+    60_000,
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "H-0032: idempotent re-run across the PURGE/ANONYMIZE matrix — second call is FALSE and re-mutates nothing",
+    async () => {
+      // H-0032: the minimal idempotency test above only seeds an
+      // api_key. A regression in the re-run guard (e.g. the sentinel
+      // probe `display_name = '[deleted]'` flips to `IS DISTINCT FROM`,
+      // or the early FALSE return is dropped) would still pass that test
+      // because there's only one row and nothing left to re-mutate on
+      // the second call. This test seeds across SEVERAL of the per-table
+      // matrix rows — PURGE (api_keys, user_favorites, user_notes,
+      // investor_attestations, user_app_roles) AND ANONYMIZE
+      // (strategies) — then double-calls and asserts:
+      //   1. First call → TRUE, profile sentinel set, PURGE tables empty.
+      //   2. Second call → FALSE (the re-run guard fires) with NO error
+      //      (the per-table DELETE/UPDATE guards are not re-entered in a
+      //      way that throws), and the state is byte-identical to after
+      //      the first call. A re-fire of the PURGE statements would
+      //      still "succeed" against empty tables, so the load-bearing
+      //      assertion is the FALSE return + no error: proof the guard
+      //      short-circuits BEFORE the per-table mutations on re-run.
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const cleanup: {
+        userIds: string[];
+        strategyIds: string[];
+      } = { userIds: [], strategyIds: [] };
+
+      try {
+        const userId = await createTestUser(
+          admin,
+          `sanitize-idem-matrix-${ts}@test.sec`,
+        );
+        cleanup.userIds.push(userId);
+
+        // PURGE-matrix seeds.
+        await seedApiKey(admin, userId, "idem-matrix-key");
+
+        const { data: strat, error: stratErr } = await admin
+          .from("strategies")
+          .insert({ user_id: userId, name: "Idem matrix strategy" })
+          .select("id")
+          .single();
+        if (stratErr || !strat) {
+          throw new Error(`strategies seed: ${stratErr?.message}`);
+        }
+        cleanup.strategyIds.push(strat.id);
+
+        const { error: favErr } = await admin
+          .from("user_favorites")
+          .insert({ user_id: userId, strategy_id: strat.id });
+        if (favErr) throw new Error(`user_favorites seed: ${favErr.message}`);
+
+        const { error: noteErr } = await admin
+          .from("user_notes")
+          .insert({ user_id: userId, content: "idem matrix note" });
+        if (noteErr) throw new Error(`user_notes seed: ${noteErr.message}`);
+
+        const { error: attErr } = await admin
+          .from("investor_attestations")
+          .insert({ user_id: userId, version: "v1" });
+        if (attErr) throw new Error(`investor_attestations seed: ${attErr.message}`);
+
+        const { error: roleErr } = await admin
+          .from("user_app_roles")
+          .insert({ user_id: userId, role: "allocator" });
+        if (roleErr) throw new Error(`user_app_roles seed: ${roleErr.message}`);
+
+        // First call — anonymize.
+        const { data: first, error: firstErr } = await admin.rpc(
+          "sanitize_user",
+          { p_user_id: userId },
+        );
+        expect(firstErr).toBeNull();
+        expect(first).toBe(true);
+
+        // Helper: count rows in a PURGE table for this user.
+        const countFor = async (
+          table: string,
+          col = "user_id",
+        ): Promise<number | null> => {
+          const { count } = await admin
+            .from(table)
+            .select(col, { count: "exact", head: true })
+            .eq(col, userId);
+          return count;
+        };
+
+        // PURGE tables emptied after the first call.
+        expect(await countFor("api_keys")).toBe(0);
+        expect(await countFor("user_favorites")).toBe(0);
+        expect(await countFor("user_notes")).toBe(0);
+        expect(await countFor("investor_attestations")).toBe(0);
+        expect(await countFor("user_app_roles")).toBe(0);
+
+        // Strategy ANONYMIZED (row survives, name scrubbed).
+        const { data: stratAfter } = await admin
+          .from("strategies")
+          .select("id, name")
+          .eq("id", strat.id)
+          .single();
+        expect(stratAfter?.id).toBe(strat.id);
+        expect(stratAfter?.name).not.toBe("Idem matrix strategy");
+
+        const { data: profile } = await admin
+          .from("profiles")
+          .select("display_name")
+          .eq("id", userId)
+          .single();
+        expect(profile?.display_name).toBe("[deleted]");
+
+        // Second call — the re-run guard MUST short-circuit to FALSE with
+        // no error. If the guard regressed, the per-table mutations would
+        // re-enter; the FALSE return is the proof they did not.
+        const { data: second, error: secondErr } = await admin.rpc(
+          "sanitize_user",
+          { p_user_id: userId },
+        );
+        expect(secondErr).toBeNull();
+        expect(second).toBe(false);
+
+        // State is unchanged after the no-op second call.
+        expect(await countFor("api_keys")).toBe(0);
+        expect(await countFor("user_favorites")).toBe(0);
+        expect(await countFor("user_notes")).toBe(0);
+        expect(await countFor("investor_attestations")).toBe(0);
+        expect(await countFor("user_app_roles")).toBe(0);
+        const { data: stratAfter2 } = await admin
+          .from("strategies")
+          .select("id, name")
+          .eq("id", strat.id)
+          .single();
+        expect(stratAfter2?.name).toBe(stratAfter?.name);
+        const { data: profileAfter2 } = await admin
+          .from("profiles")
+          .select("display_name")
+          .eq("id", userId)
+          .single();
+        expect(profileAfter2?.display_name).toBe("[deleted]");
       } finally {
         await cleanupLiveDbRow(admin, cleanup);
       }
@@ -399,6 +555,107 @@ describe("Migration 055 — sanitize_user RPC", () => {
       }
     },
     60_000,
+  );
+
+  // ----------------------------------------------------------------
+  // H-0031 — negative-path / "what should fail" coverage.
+  //
+  // The five tests above all exercise the happy path (seed → sanitize →
+  // assert). Rule 9 (tests encode intent, including what SHOULD fail)
+  // was unanswered: there was no test for NULL input, a non-existent
+  // user, or an unauthorized (non-service-role) caller. The migration
+  // body pins the CORRECT behavior for each:
+  //   - NULL p_user_id     → RAISE EXCEPTION (ERRCODE invalid_parameter_value).
+  //   - non-existent user  → no error, RETURN FALSE (nothing to anonymize).
+  //   - non-service caller → permission denied (EXECUTE granted to
+  //                          service_role only; REVOKEd from anon/authenticated).
+  // ----------------------------------------------------------------
+  it.skipIf(!HAS_LIVE_DB)(
+    "H-0031: NULL p_user_id raises an error (does NOT silently succeed)",
+    async () => {
+      const admin = createLiveAdminClient();
+      const { data, error } = await admin.rpc("sanitize_user", {
+        p_user_id: null,
+      });
+      // The RPC RAISEs 'sanitize_user: p_user_id is required'. A silent
+      // success (or a benign FALSE) on NULL input would be a contract
+      // regression — sanitize must never be a no-op on a malformed call
+      // that an orchestrator could misread as "done".
+      expect(error).not.toBeNull();
+      expect(error?.message ?? "").toMatch(/p_user_id is required/i);
+      // No boolean result on the error path.
+      expect(data).toBeNull();
+    },
+    30_000,
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "H-0031: a random non-existent user_id returns FALSE with no error (no-op, not a crash)",
+    async () => {
+      const admin = createLiveAdminClient();
+      // A UUID that has no profiles row. The probe finds no row →
+      // v_already_sanitized IS NULL → RETURN FALSE. This MUST be a clean
+      // no-op (FALSE, no error), not an exception — an Art. 17 worker
+      // re-driving a deleted request must not crash on a vanished user.
+      const ghostId = crypto.randomUUID();
+      const { data, error } = await admin.rpc("sanitize_user", {
+        p_user_id: ghostId,
+      });
+      expect(error).toBeNull();
+      expect(data).toBe(false);
+    },
+    30_000,
+  );
+
+  it.skipIf(!(HAS_LIVE_DB && HAS_ANON))(
+    "H-0031: a non-service-role (anon) caller is denied EXECUTE on sanitize_user",
+    async () => {
+      // Migration 055 REVOKEs EXECUTE from PUBLIC/anon/authenticated and
+      // GRANTs only to service_role. An anon-key client (no privileged
+      // grant) MUST be rejected — proving the SECURITY DEFINER function
+      // cannot be invoked to anonymize an arbitrary user by an
+      // unprivileged caller. We use a freshly-seeded real user as the
+      // target so the denial is about the CALLER's privilege, not a
+      // missing target.
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const cleanup: { userIds: string[] } = { userIds: [] };
+      try {
+        const userId = await createTestUser(
+          admin,
+          `sanitize-anon-deny-${ts}@test.sec`,
+        );
+        cleanup.userIds.push(userId);
+
+        const anon = createClient(SUPABASE_URL!, ANON_KEY!, {
+          auth: { autoRefreshToken: false, persistSession: false },
+        });
+        const { error } = await anon.rpc("sanitize_user", {
+          p_user_id: userId,
+        });
+        // PostgREST surfaces the missing EXECUTE grant as a permission
+        // error (42501 / "permission denied for function"). The exact
+        // code can vary by PostgREST version, so we assert an error IS
+        // present and that it reads as a privilege/permission denial —
+        // never a success.
+        expect(error).not.toBeNull();
+        expect(
+          `${error?.code ?? ""} ${error?.message ?? ""}`.toLowerCase(),
+        ).toMatch(/permission denied|not.*(allowed|permitted)|42501|pgrst/i);
+
+        // Belt-and-suspenders: the target user must NOT have been
+        // sanitized by the denied call (display_name unchanged).
+        const { data: profile } = await admin
+          .from("profiles")
+          .select("display_name")
+          .eq("id", userId)
+          .single();
+        expect(profile?.display_name).not.toBe("[deleted]");
+      } finally {
+        await cleanupLiveDbRow(admin, cleanup);
+      }
+    },
+    30_000,
   );
 
   it.skipIf(HAS_LIVE_DB)(

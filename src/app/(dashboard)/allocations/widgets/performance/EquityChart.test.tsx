@@ -2,7 +2,7 @@ import { render, fireEvent } from "@testing-library/react";
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
-import { EquityChart, type OverlaySeries } from "./EquityChart";
+import { EquityChart, type OverlaySeries, type Period } from "./EquityChart";
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / Task 3 — EquityChart test suite.
@@ -352,6 +352,177 @@ describe("EquityChart", () => {
       "var(--color-chart-benchmark)",
     );
   });
+
+  // M-0202 — the suite covered the empty series (warm-up) but not the
+  // degenerate-value and sparse-data inputs. EquityChart's f7 anchor
+  // (`anchorFromFirstPositive` finds the first value > 0, divides through)
+  // plus the M-1063 basePort guard (non-finite / ≤0 → warm-up) define the
+  // contract for these. These tests pin that contract so a regression that
+  // dropped a guard (and rendered an off-screen NaN path) fails here.
+  describe("M-0202 — degenerate values and sparse series", () => {
+    it("a single positive point still renders an SVG (composite.length === 1, not the warm-up empty state)", () => {
+      const { container, queryByText } = render(
+        <EquityChart
+          equityDailyPoints={[{ date: "2024-01-01", value: 1.0 }]}
+          initialPeriod="ALL"
+        />,
+      );
+      // composite.length === 1 (not 0) → the chart mounts an <svg>, not the
+      // "Equity data warming up" placeholder.
+      expect(container.querySelector("svg")).not.toBeNull();
+      expect(queryByText(/Equity data warming up/i)).toBeNull();
+    });
+
+    it("two positive points render a portfolio line with both vertices", () => {
+      const { container } = render(
+        <EquityChart
+          equityDailyPoints={[
+            { date: "2024-01-01", value: 1.0 },
+            { date: "2024-01-02", value: 1.05 },
+          ]}
+          initialPeriod="ALL"
+        />,
+      );
+      const paths = Array.from(container.querySelectorAll("svg path"));
+      const portfolioLine = paths.find((p) => {
+        const stroke = p.getAttribute("stroke");
+        const fill = p.getAttribute("fill");
+        return Boolean(stroke) && fill === "none";
+      });
+      expect(portfolioLine).toBeDefined();
+      const d = portfolioLine?.getAttribute("d") ?? "";
+      // Exactly two anchored vertices (M + L) for a 2-point series.
+      const vertexCount = (d.match(/[ML]/g) || []).length;
+      expect(vertexCount).toBe(2);
+    });
+
+    it("an all-NaN series falls back to the warm-up state (firstPositive finds nothing) — no broken SVG", () => {
+      const { container, getByLabelText } = render(
+        <EquityChart
+          equityDailyPoints={[
+            { date: "2024-01-01", value: Number.NaN },
+            { date: "2024-01-02", value: Number.NaN },
+          ]}
+          initialPeriod="ALL"
+        />,
+      );
+      // findIndex(p => p.value > 0) never matches NaN → anchored = [] →
+      // composite.length === 0 → warm-up placeholder, no <svg>.
+      expect(getByLabelText("Equity chart")).toBeTruthy();
+      expect(container.textContent).toMatch(/Equity data warming up/i);
+      expect(container.querySelector("svg")).toBeNull();
+    });
+
+    // M-0202 (SURFACED BUG) — the y-range computation filters non-finite
+    // normalized values out of yMin/yMax (line ~503-516), but the line/area
+    // path builder `toPath` (line ~639) only skips `null`, NOT Infinity/NaN
+    // numbers. So an Infinity equity point projects to `y(Infinity)` =
+    // -Infinity and leaks a literal "-Infinity" coordinate into the SVG `d`
+    // attribute → an invalid/off-screen portfolio line with no diagnostic.
+    // CORRECT behavior: a single corrupt point should be skipped (like null),
+    // leaving a finite path. This documents the bug; the fix belongs in
+    // production (`toPath` should treat non-finite the same as null).
+    it(
+      "M-0202: a single Infinity equity point leaks '-Infinity' into the portfolio path coords — toPath lacks a finite guard (fix in follow-up)",
+      () => {
+        const { container } = render(
+          <EquityChart
+            equityDailyPoints={[
+              { date: "2024-01-01", value: 1.0 },
+              { date: "2024-01-02", value: Number.POSITIVE_INFINITY },
+              { date: "2024-01-03", value: 1.1 },
+            ]}
+            initialPeriod="ALL"
+          />,
+        );
+        expect(container.querySelector("svg")).not.toBeNull();
+        const paths = Array.from(container.querySelectorAll("svg path"));
+        const portfolioLine = paths.find(
+          (p) =>
+            Boolean(p.getAttribute("stroke")) &&
+            p.getAttribute("fill") === "none",
+        );
+        const d = portfolioLine?.getAttribute("d") ?? "";
+        // No literal "NaN"/"Infinity" should leak into the path coordinates.
+        expect(d).not.toMatch(/NaN|Infinity/);
+      },
+    );
+
+    it("a leading-negative-then-positive series anchors at the first positive value (negatives before the anchor are skipped)", () => {
+      const { container } = render(
+        <EquityChart
+          equityDailyPoints={[
+            { date: "2024-01-01", value: -0.5 },
+            { date: "2024-01-02", value: 1.0 },
+            { date: "2024-01-03", value: 1.2 },
+          ]}
+          initialPeriod="ALL"
+        />,
+      );
+      const paths = Array.from(container.querySelectorAll("svg path"));
+      const portfolioLine = paths.find(
+        (p) => Boolean(p.getAttribute("stroke")) && p.getAttribute("fill") === "none",
+      );
+      expect(portfolioLine).toBeDefined();
+      const d = portfolioLine?.getAttribute("d") ?? "";
+      // firstPositiveIdx = 1 → only the 2 post-anchor points are plotted.
+      const vertexCount = (d.match(/[ML]/g) || []).length;
+      expect(vertexCount).toBe(2);
+      expect(d).not.toMatch(/NaN|Infinity/);
+    });
+  });
+
+  // M-0203 — benchmark overlay rendering was covered for an equal-length,
+  // same-date benchmark only. Production aligns the benchmark to the
+  // composite BY DATE (a `date → value` Map, then `visible.map(p =>
+  // m.get(p.date) ?? null)`), so a shorter benchmark or a non-overlapping
+  // date range is a real code path. These pin that date-join behavior.
+  describe("M-0203 — benchmark length / date-range mismatch", () => {
+    it("a benchmark covering only a SUBSET of the portfolio dates still renders the dashed line (date-joined, missing days dropped)", () => {
+      const portfolio = makeSeries(60);
+      // Benchmark shares the FIRST 30 portfolio dates only (half the length).
+      const benchmark = portfolio.slice(0, 30);
+      const { container } = render(
+        <EquityChart
+          equityDailyPoints={portfolio}
+          benchmark={benchmark}
+          initialPeriod="ALL"
+        />,
+      );
+      // At least the matching-date portion produces the dashed benchmark path.
+      const dashed = container.querySelectorAll('svg path[stroke-dasharray="3 3"]');
+      expect(dashed.length).toBeGreaterThanOrEqual(1);
+      const d = (dashed[0] as SVGPathElement).getAttribute("d") ?? "";
+      expect(d).not.toMatch(/NaN|Infinity/);
+    });
+
+    it("a benchmark whose dates NEVER overlap the portfolio renders NO benchmark line (baseBench is null → normalized series is null)", () => {
+      const portfolio = makeSeries(30); // 2024-01-01 .. 2024-01-30
+      // Build a benchmark anchored in a completely different month so no
+      // date key matches any composite date.
+      const farFuture: DailyPoint[] = [];
+      const d = new Date(Date.UTC(2025, 5, 1));
+      let cumulative = 1.0;
+      for (let i = 0; i < 30; i++) {
+        farFuture.push({ date: d.toISOString().slice(0, 10), value: cumulative });
+        cumulative *= 1.001;
+        d.setUTCDate(d.getUTCDate() + 1);
+      }
+      const { container } = render(
+        <EquityChart
+          equityDailyPoints={portfolio}
+          benchmark={farFuture}
+          initialPeriod="ALL"
+        />,
+      );
+      // Every `m.get(p.date)` misses → all-null benchmark → baseBench null →
+      // visibleBenchmarkNormalized null → no dashed path mounts. The
+      // portfolio line is unaffected (still rendered).
+      const dashed = container.querySelectorAll('svg path[stroke-dasharray="3 3"]');
+      expect(dashed.length).toBe(0);
+      expect(container.querySelector("svg")).not.toBeNull();
+    });
+  });
 });
 
 describe("EquityChart — audit-2026-05-07 safety guards", () => {
@@ -393,6 +564,160 @@ describe("EquityChart — audit-2026-05-07 safety guards", () => {
   // tests) — see the source-comment in EquityChart.tsx around the
   // `satisfied` flag. Not exercising it here would require manufacturing
   // data the runtime cannot actually produce.
+});
+
+// ───────────────────────────────────────────────────────────────────
+// M-1057 — yTicks MIN_TICKS=5 floor. PR4 #4 rewrote the y-tick walker to
+// pick the LARGEST nice candidate that still yields >= 5 ticks (accepting
+// sub-1% steps on tight ranges). The prior assertion only required >= 2
+// ticks (passes even with the old 3-tick collapse). These tests pin >= 5
+// ticks for both a narrow and a wide range so a revert to the round-UP
+// picker (which collapsed narrow ranges to 3 labels) fails.
+// ───────────────────────────────────────────────────────────────────
+
+// Collect the y-axis percentage tick labels (e.g. "+0%", "-0.5%").
+function pctTickLabels(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll("svg text"))
+    .map((t) => t.textContent ?? "")
+    .filter((s) => /^[+-]?\d+(\.\d+)?%$/.test(s));
+}
+
+describe("EquityChart — M-1057 yTicks MIN_TICKS floor", () => {
+  it("narrow sub-1% range still yields >= 5 percentage ticks", () => {
+    // Values oscillate in a sub-1% band around 1.0 — the exact tight range
+    // the MIN_TICKS floor exists to keep dense. After period-start
+    // normalization the span stays well under 1%, so a round-UP picker
+    // would collapse to ~3 ticks; the floor must hold it at >= 5.
+    const series: DailyPoint[] = [];
+    const d = new Date(Date.UTC(2024, 0, 1));
+    for (let i = 0; i < 120; i++) {
+      series.push({
+        date: d.toISOString().slice(0, 10),
+        // 0.997 .. 1.003 — a ~0.65% normalized span. The pre-PR4 round-UP
+        // picker collapses this to 3 ticks; the MIN_TICKS=5 floor must hold
+        // it at >= 5 (verified: NEW picker = 7 ticks, OLD picker = 3).
+        value: 1 + Math.sin(i * 0.5) * 0.003,
+      });
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    const { container } = render(
+      <EquityChart equityDailyPoints={series} initialPeriod="ALL" />,
+    );
+    expect(pctTickLabels(container).length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("wide range yields >= 5 percentage ticks (picker selects a larger step, not the smallest)", () => {
+    // A ~60% span (0.7 .. 1.3 after normalization) — the walker should pick
+    // a coarse step (e.g. 10%) that STILL clears 5 ticks, proving it selects
+    // the largest qualifying candidate rather than flooding with tiny steps.
+    const series: DailyPoint[] = [];
+    const d = new Date(Date.UTC(2024, 0, 1));
+    for (let i = 0; i < 120; i++) {
+      // Linear ramp from ~0.7 up to ~1.3 so normalized range is wide.
+      series.push({
+        date: d.toISOString().slice(0, 10),
+        value: 0.7 + (0.6 * i) / 119,
+      });
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    const { container } = render(
+      <EquityChart equityDailyPoints={series} initialPeriod="ALL" />,
+    );
+    const labels = pctTickLabels(container);
+    expect(labels.length).toBeGreaterThanOrEqual(5);
+    // Sanity: the walker did NOT flood the axis with hundreds of tiny ticks
+    // (the >50-tick safety cap should never have to fire here).
+    expect(labels.length).toBeLessThanOrEqual(50);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// M-1058 — controlled-state escape hatch (period / onPeriodChange). PR4 #1
+// added a controlled-or-uncontrolled pattern: when `period` is supplied,
+// it is the source of truth, setPeriod fires onPeriodChange AND skips the
+// internal state update. The existing suite only covers the uncontrolled
+// path ("clicking 1M switches the active tab"). These tests cover the
+// controlled path so a regression that swallows the wrapper value (chart
+// desyncs from the card-header toggle) fails.
+// ───────────────────────────────────────────────────────────────────
+
+describe("EquityChart — M-1058 controlled period mode", () => {
+  it("forwards clicks to onPeriodChange and does NOT mutate internal active tab", () => {
+    const onPeriodChange = vi.fn();
+    const { getByRole, rerender } = render(
+      <EquityChart
+        equityDailyPoints={makeSeries(200)}
+        period="1M"
+        onPeriodChange={onPeriodChange}
+      />,
+    );
+    // Controlled: '1M' is active because the prop says so.
+    expect(getByRole("tab", { name: "1M" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+
+    // Click '3M' — handler fires with '3M', but the chart must NOT flip its
+    // own active tab (the wrapper owns the value and hasn't updated yet).
+    fireEvent.click(getByRole("tab", { name: "3M" }));
+    expect(onPeriodChange).toHaveBeenCalledTimes(1);
+    expect((onPeriodChange.mock.calls[0] as unknown as [Period])[0]).toBe("3M");
+    // Still '1M' — controlled value unchanged.
+    expect(getByRole("tab", { name: "1M" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    expect(getByRole("tab", { name: "3M" }).getAttribute("aria-selected")).toBe(
+      "false",
+    );
+
+    // Wrapper now propagates the new value back as a prop — active flips.
+    rerender(
+      <EquityChart
+        equityDailyPoints={makeSeries(200)}
+        period="3M"
+        onPeriodChange={onPeriodChange}
+      />,
+    );
+    expect(getByRole("tab", { name: "3M" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    expect(getByRole("tab", { name: "1M" }).getAttribute("aria-selected")).toBe(
+      "false",
+    );
+  });
+
+  it("CUSTOM apply forwards the range through onCustomRangeChange + onPeriodChange without internal state", () => {
+    const onPeriodChange = vi.fn();
+    const onCustomRangeChange = vi.fn();
+    const { getByRole, queryByRole } = render(
+      <EquityChart
+        equityDailyPoints={makeSeries(200)}
+        period="6M"
+        onPeriodChange={onPeriodChange}
+        customRange={null}
+        onCustomRangeChange={onCustomRangeChange}
+      />,
+    );
+    // Open the picker.
+    fireEvent.click(getByRole("tab", { name: "CUSTOM" }));
+    const dialog = queryByRole("dialog", { name: "Custom date range" });
+    expect(dialog).not.toBeNull();
+
+    // Apply a range via the picker's Apply control. The two date inputs are
+    // seeded; set explicit values then Apply.
+    const inputs = dialog!.querySelectorAll('input[type="date"]');
+    expect(inputs.length).toBeGreaterThanOrEqual(2);
+    fireEvent.change(inputs[0], { target: { value: "2024-02-01" } });
+    fireEvent.change(inputs[1], { target: { value: "2024-03-01" } });
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+
+    // Controlled mode: both callbacks fire; the chart never set its own
+    // internal customRange/period.
+    expect(onCustomRangeChange).toHaveBeenCalledTimes(1);
+    expect(
+      (onCustomRangeChange.mock.calls[0] as unknown as [unknown])[0],
+    ).toEqual({ start: "2024-02-01", end: "2024-03-01" });
+    expect(onPeriodChange).toHaveBeenCalledWith("CUSTOM");
+  });
 });
 
 // Re-export to silence a "vi unused" lint nit on jsdom-only test env.

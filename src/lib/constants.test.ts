@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { canonicalizeExchange, canonicalizeExchangeList } from "./constants";
+import {
+  canonicalizeExchange,
+  canonicalizeExchangeList,
+  DISCOVERY_CATEGORIES,
+} from "./constants";
 
 // Regression: /qa 2026-05-21 ISSUE-004. The wizard's
 // create_wizard_strategy seeded strategies.supported_exchanges with
@@ -76,5 +80,59 @@ describe("canonicalizeExchangeList", () => {
 
   it("returns an empty array for empty input", () => {
     expect(canonicalizeExchangeList([])).toEqual([]);
+  });
+});
+
+// M-0507 — DISCOVERY_CATEGORIES `group` field data integrity.
+//
+// Sidebar.tsx buckets categories by `cat.group`:
+//   let bucket = discoveryGroups.find((g) => g.label === cat.group);
+//   if (!bucket) { bucket = { label: cat.group, items: [] }; ... }
+//
+// A 6th entry added without a `group` field would build a bucket with
+// `label: undefined`, rendering an empty-label sub-section header. A typo
+// like `group: 'TradeFi'` would silently create a phantom 3rd section
+// between Digital Assets and TradFi. The Sidebar render tests assert
+// display labels, but nothing asserts the constant-level data integrity
+// that the sidebar's grouping logic depends on. These tests are that gate.
+describe("DISCOVERY_CATEGORIES — `group` field integrity (M-0507)", () => {
+  // The only two groups the Sidebar sub-section logic expects to render.
+  const KNOWN_GROUPS = new Set(["Digital Assets", "TradFi"]);
+
+  it("every entry has a non-empty string `group` field", () => {
+    // A missing/empty group ⇒ Sidebar builds { label: undefined/'' , items }
+    // ⇒ empty sub-section header.
+    for (const cat of DISCOVERY_CATEGORIES) {
+      expect(typeof cat.group).toBe("string");
+      expect(cat.group.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("every `group` is one of the two known sidebar sections (catches typos like 'TradeFi')", () => {
+    for (const cat of DISCOVERY_CATEGORIES) {
+      expect(KNOWN_GROUPS.has(cat.group)).toBe(true);
+    }
+  });
+
+  it("exposes exactly the two known groups (no phantom 3rd section)", () => {
+    const present = new Set(DISCOVERY_CATEGORIES.map((c) => c.group));
+    expect(present).toEqual(KNOWN_GROUPS);
+  });
+
+  it("every slug is non-empty and unique (downstream find(c => c.slug === slug) contract)", () => {
+    const slugs = DISCOVERY_CATEGORIES.map((c) => c.slug);
+    for (const slug of slugs) {
+      expect(typeof slug).toBe("string");
+      expect(slug.length).toBeGreaterThan(0);
+    }
+    expect(new Set(slugs).size).toBe(slugs.length);
+  });
+
+  it("first-seen group order is Digital Assets → TradFi (sidebar renders groups in first-appearance order)", () => {
+    const orderedGroups: string[] = [];
+    for (const cat of DISCOVERY_CATEGORIES) {
+      if (!orderedGroups.includes(cat.group)) orderedGroups.push(cat.group);
+    }
+    expect(orderedGroups).toEqual(["Digital Assets", "TradFi"]);
   });
 });

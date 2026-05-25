@@ -26,8 +26,8 @@
  *
  * Fixture math:
  *   anchor = today - 31d
- *   returns_series: { date: anchor + i, value: 1.0 + 0.30 * i / 180 } for i in [0, 180]
- *   At i=30: value = 1.0 + 0.05 → realized 30d delta = (1.05/1.0) - 1 = 0.05
+ *   returns_series: { date: anchor + i, value: 1.0 + 0.30 * i / 200 } for i in [0, 200]
+ *   At i=30: value = 1.0 + 0.045 → realized 30d delta = (1.045/1.0) - 1 = 0.045
  *
  * Gate: requires NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY.
  */
@@ -221,19 +221,9 @@ describe("migration 080 — voluntary_add cron branch (live-DB / H2)", () => {
       const today = new Date().toISOString().slice(0, 10);
       const yesterday = addDays(today, -1);
 
-      // Ensure the strategy returns_series doesn't cover yesterday + 30d
-      // by definition the test fixture anchors 31 days ago — yesterday is +30
-      // from anchor, so the value AT yesterday IS in the series, but yesterday + 30d
-      // (i = +60 from anchor) is also in the series. To guarantee NULL we'd need
-      // to use a fresh strategy with NO series. Instead: reuse the existing fixture
-      // and rely on the fact that yesterday + 30d IS in the series → delta would be
-      // populated. Switch test to assert the branch does the RIGHT thing in either case
-      // — actually compute the expected delta and assert it matches. This still
-      // proves "no spurious fills outside the model" because the value is correct.
-      //
-      // Spec interpretation: T_CRON_LEAVES_NULL_FOR_FRESH proves "if data is missing
-      // for the +30d window, delta stays NULL". The cleanest way to demonstrate this
-      // is a separate strategy with returns_series = [] (no data at all).
+      // A fresh strategy with an empty returns_series has no data for the +30d
+      // window, so every delta must stay NULL — proving the cron writes no
+      // spurious fills when the model has nothing to compute.
 
       const FRESH_STRATEGY = "00000000-0000-0000-0000-000000001083";
       await admin.from("strategies").upsert(
@@ -304,6 +294,106 @@ describe("migration 080 — voluntary_add cron branch (live-DB / H2)", () => {
         .delete()
         .eq("strategy_id", FRESH_STRATEGY);
       await admin.from("strategies").delete().eq("id", FRESH_STRATEGY);
+    },
+    30_000,
+  );
+
+  // ---------------------------------------------------------------------------
+  // H-0011 — T_CRON_WINDOW_NOT_COVERED: the genuinely-distinct "no return-series
+  // window yet" case the docstring (lines 23-25) originally claimed.
+  //
+  // T_CRON_LEAVES_NULL_FOR_FRESH above proves "EMPTY series → NULL", which is a
+  // DIFFERENT failure mode than "series exists but doesn't yet reach
+  // allocated_at + 30d". extract_delta (migration 20260418074935 STEP 2) returns
+  // NULL when EITHER endpoint is missing; this test pins the second endpoint
+  // case specifically: the series HAS a value at allocated_at (so the cron's
+  // first guard passes) but has NO value at allocated_at + 30d, so delta_30d
+  // MUST stay NULL. Without this, a regression that populates delta_30d from a
+  // partial series (e.g. interpolating, or falling back to the last point) when
+  // the cron fires on a recent allocated_at would go uncaught — exactly the
+  // "fresh allocated_at" regression class the original docstring guarded.
+  // ---------------------------------------------------------------------------
+  it.skipIf(!HAS_LIVE_DB)(
+    "T_CRON_WINDOW_NOT_COVERED: voluntary_add row whose series covers allocated_at but NOT allocated_at+30d → delta_30d stays NULL (distinct from empty-series)",
+    async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      // Anchor 10 days ago so allocated_at IS in the series but allocated_at+30d
+      // (today + 20) is BEYOND the 10-day series → second endpoint absent.
+      const anchor = addDays(today, -10);
+
+      const PARTIAL_STRATEGY = "00000000-0000-0000-0000-000000001084";
+      await admin.from("strategies").upsert(
+        [
+          {
+            id: PARTIAL_STRATEGY,
+            user_id: allocatorId,
+            name: "Phase10 voluntary_add partial-window strategy",
+          },
+        ],
+        { onConflict: "id" },
+      );
+      // Non-empty series of 11 points (anchor .. anchor+10). Contains a value
+      // AT the anchor (cron's first guard passes) but nothing at anchor+30.
+      const partialSeries = buildLinearReturns(anchor, 10);
+      await admin
+        .from("strategy_analytics")
+        .upsert(
+          { strategy_id: PARTIAL_STRATEGY, returns_series: partialSeries },
+          { onConflict: "strategy_id" },
+        );
+
+      const { data: md, error: mdErr } = await admin
+        .from("match_decisions")
+        .insert({
+          allocator_id: allocatorId,
+          strategy_id: PARTIAL_STRATEGY,
+          decision: "sent_as_intro",
+          decided_by: allocatorId,
+          original_strategy_id: null,
+          original_holding_ref: null,
+          kind: "voluntary_add",
+        })
+        .select("id")
+        .single();
+      expect(mdErr).toBeNull();
+      if (md?.id) createdMatchDecisionIds.push(md.id as string);
+
+      const { data: bo, error: boErr } = await admin
+        .from("bridge_outcomes")
+        .insert({
+          allocator_id: allocatorId,
+          match_decision_id: md!.id,
+          strategy_id: PARTIAL_STRATEGY,
+          kind: "allocated",
+          percent_allocated: 7,
+          allocated_at: anchor,
+          needs_recompute: true,
+          delta_30d: null,
+        })
+        .select("id")
+        .single();
+      expect(boErr).toBeNull();
+      if (bo?.id) createdBridgeOutcomeIds.push(bo.id as string);
+
+      await admin.rpc("compute_bridge_outcome_deltas");
+
+      const { data: row } = await admin
+        .from("bridge_outcomes")
+        .select("delta_30d, delta_90d, delta_180d")
+        .eq("id", bo!.id)
+        .single();
+      // anchor present, anchor+30/90/180 absent → extract_delta returns NULL
+      // for all windows → COALESCE keeps NULL. Proves "partial-window, not
+      // empty-series" leaves deltas unfilled.
+      expect(row?.delta_30d).toBeNull();
+      expect(row?.delta_90d).toBeNull();
+      expect(row?.delta_180d).toBeNull();
+
+      await admin
+        .from("strategy_analytics")
+        .delete()
+        .eq("strategy_id", PARTIAL_STRATEGY);
+      await admin.from("strategies").delete().eq("id", PARTIAL_STRATEGY);
     },
     30_000,
   );

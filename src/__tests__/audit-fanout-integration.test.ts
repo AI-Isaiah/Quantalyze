@@ -117,18 +117,42 @@ beforeEach(() => {
   STATE.isAdmin = true;
 });
 
-async function drain() {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
-}
-
 function findAudit(action: string) {
   return STATE.rpcCalls.find(
     (c) =>
       (c.name === "log_audit_event" ||
         c.name === "log_audit_event_service") &&
       c.args.p_action === action,
+  );
+}
+
+/**
+ * H-0008 fix — bounded polling wait for the audit emission, replacing the
+ * brittle fixed 3-tick `drain()`. The emit path (`audit.ts`) schedules the
+ * RPC via `after()` (mocked to call synchronously) but the inner `emit()`
+ * is async and performs an RPC round-trip whose microtask count is NOT a
+ * fixed constant — a connection-pool acquire or an extra `await` would add
+ * ticks. A fixed 3× `await Promise.resolve()` could return BEFORE the RPC
+ * lands, surfacing as a confusing `expect(audit).toBeDefined()` failure
+ * rather than a clear "no audit emission" timeout.
+ *
+ * `vi.waitFor` polls until the assertion passes or the bounded timeout
+ * elapses, then fails LOUDLY (mirrors rbac-matrix.test.ts). Returns the
+ * matched audit call so callers can assert on its args without a second
+ * lookup that could race.
+ */
+async function waitForAudit(
+  action: string,
+): Promise<{ name: string; args: Record<string, unknown> }> {
+  return vi.waitFor(
+    () => {
+      const audit = findAudit(action);
+      if (!audit) {
+        throw new Error(`no audit emission for action="${action}" yet`);
+      }
+      return audit;
+    },
+    { timeout: 1000, interval: 5 },
   );
 }
 
@@ -213,13 +237,10 @@ describe("POST /api/portfolio-alerts PATCH — alert.acknowledge emission", () =
     const res = await PATCH(req);
     expect([200, 204]).toContain(res.status);
 
-    await drain();
-
-    const audit = findAudit("alert.acknowledge");
-    expect(audit).toBeDefined();
-    expect(audit!.args.p_entity_type).toBe("alert");
-    expect(audit!.args.p_entity_id).toBe(ALERT_ID);
-    expect((audit!.args.p_metadata as Record<string, unknown>).source).toBe(
+    const audit = await waitForAudit("alert.acknowledge");
+    expect(audit.args.p_entity_type).toBe("alert");
+    expect(audit.args.p_entity_id).toBe(ALERT_ID);
+    expect((audit.args.p_metadata as Record<string, unknown>).source).toBe(
       "in_app_list",
     );
   });
@@ -294,12 +315,10 @@ describe("PATCH /api/notes — user_note.portfolio.update emission", () => {
     const res = await PATCH(req);
     expect(res.status).toBe(200);
 
-    await drain();
-    const audit = findAudit("user_note.portfolio.update");
-    expect(audit).toBeDefined();
-    expect(audit!.args.p_entity_type).toBe("user_note");
-    expect(audit!.args.p_entity_id).toBe(PORTFOLIO_ID);
-    const meta = audit!.args.p_metadata as Record<string, unknown>;
+    const audit = await waitForAudit("user_note.portfolio.update");
+    expect(audit.args.p_entity_type).toBe("user_note");
+    expect(audit.args.p_entity_id).toBe(PORTFOLIO_ID);
+    const meta = audit.args.p_metadata as Record<string, unknown>;
     expect(meta.scope_kind).toBe("portfolio");
     expect(meta.scope_ref).toBe(PORTFOLIO_ID);
     expect(meta.content_length).toBe("portfolio note".length);
@@ -367,13 +386,11 @@ describe("PATCH /api/notes — user_note.holding.update emission", () => {
     const res = await PATCH(req);
     expect(res.status).toBe(200);
 
-    await drain();
-    const audit = findAudit("user_note.holding.update");
-    expect(audit).toBeDefined();
-    expect(audit!.args.p_entity_type).toBe("user_note");
+    const audit = await waitForAudit("user_note.holding.update");
+    expect(audit.args.p_entity_type).toBe("user_note");
     // Finding #8: holding has no single aggregate row → caller's user_id.
-    expect(audit!.args.p_entity_id).toBe(STATE.authUser.id);
-    const meta = audit!.args.p_metadata as Record<string, unknown>;
+    expect(audit.args.p_entity_id).toBe(STATE.authUser.id);
+    const meta = audit.args.p_metadata as Record<string, unknown>;
     expect(meta.scope_kind).toBe("holding");
     expect(meta.scope_ref).toBe(SCOPE_REF);
     expect(meta.content_length).toBe("holding note".length);
@@ -435,12 +452,10 @@ describe("PATCH /api/notes — user_note.bridge_outcome.update emission", () => 
     const res = await PATCH(req);
     expect(res.status).toBe(200);
 
-    await drain();
-    const audit = findAudit("user_note.bridge_outcome.update");
-    expect(audit).toBeDefined();
-    expect(audit!.args.p_entity_type).toBe("user_note");
-    expect(audit!.args.p_entity_id).toBe(OUTCOME_ID);
-    const meta = audit!.args.p_metadata as Record<string, unknown>;
+    const audit = await waitForAudit("user_note.bridge_outcome.update");
+    expect(audit.args.p_entity_type).toBe("user_note");
+    expect(audit.args.p_entity_id).toBe(OUTCOME_ID);
+    const meta = audit.args.p_metadata as Record<string, unknown>;
     expect(meta.scope_kind).toBe("bridge_outcome");
     expect(meta.scope_ref).toBe(OUTCOME_ID);
     expect(meta.content).toBeUndefined();
@@ -512,12 +527,10 @@ describe("PATCH /api/notes — user_note.strategy.update emission", () => {
     const res = await PATCH(req);
     expect(res.status).toBe(200);
 
-    await drain();
-    const audit = findAudit("user_note.strategy.update");
-    expect(audit).toBeDefined();
-    expect(audit!.args.p_entity_type).toBe("user_note");
-    expect(audit!.args.p_entity_id).toBe(STRATEGY_ID);
-    const meta = audit!.args.p_metadata as Record<string, unknown>;
+    const audit = await waitForAudit("user_note.strategy.update");
+    expect(audit.args.p_entity_type).toBe("user_note");
+    expect(audit.args.p_entity_id).toBe(STRATEGY_ID);
+    const meta = audit.args.p_metadata as Record<string, unknown>;
     expect(meta.scope_kind).toBe("strategy");
     expect(meta.scope_ref).toBe(STRATEGY_ID);
     expect(meta.content).toBeUndefined();
@@ -558,11 +571,9 @@ describe("POST /api/attestation — attestation.accept emission", () => {
     const res = await POST(req);
     expect(res.status).toBe(200);
 
-    await drain();
-    const audit = findAudit("attestation.accept");
-    expect(audit).toBeDefined();
-    expect(audit!.args.p_entity_type).toBe("investor_attestation");
-    expect(audit!.args.p_entity_id).toBe(STATE.authUser.id);
+    const audit = await waitForAudit("attestation.accept");
+    expect(audit.args.p_entity_type).toBe("investor_attestation");
+    expect(audit.args.p_entity_id).toBe(STATE.authUser.id);
   });
 });
 
@@ -598,15 +609,13 @@ describe("POST /api/admin/match/kill-switch — admin.kill_switch emission", () 
     const res = await POST(req);
     expect(res.status).toBe(200);
 
-    await drain();
-    const audit = findAudit("admin.kill_switch");
-    expect(audit).toBeDefined();
-    expect(audit!.args.p_entity_type).toBe("system_flag");
+    const audit = await waitForAudit("admin.kill_switch");
+    expect(audit.args.p_entity_type).toBe("system_flag");
     expect(
-      (audit!.args.p_metadata as Record<string, unknown>).flag,
+      (audit.args.p_metadata as Record<string, unknown>).flag,
     ).toBe("match_engine_enabled");
     expect(
-      (audit!.args.p_metadata as Record<string, unknown>).new_value,
+      (audit.args.p_metadata as Record<string, unknown>).new_value,
     ).toBe(false);
   });
 });
@@ -653,11 +662,9 @@ describe("POST /api/admin/allocator-approve — allocator.approve emission", () 
     const res = await POST(req);
     expect(res.status).toBe(200);
 
-    await drain();
-    const audit = findAudit("allocator.approve");
-    expect(audit).toBeDefined();
-    expect(audit!.args.p_entity_type).toBe("user");
-    expect(audit!.args.p_entity_id).toBe(TARGET_USER);
+    const audit = await waitForAudit("allocator.approve");
+    expect(audit.args.p_entity_type).toBe("user");
+    expect(audit.args.p_entity_id).toBe(TARGET_USER);
   });
 });
 
@@ -777,11 +784,9 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
     const res = await POST(req);
     expect(res.status).toBe(200);
 
-    await drain();
-    const audit = findAudit("strategy.approve");
-    expect(audit).toBeDefined();
-    expect(audit!.args.p_entity_type).toBe("strategy");
-    expect(audit!.args.p_entity_id).toBe(STRATEGY_ID);
+    const audit = await waitForAudit("strategy.approve");
+    expect(audit.args.p_entity_type).toBe("strategy");
+    expect(audit.args.p_entity_id).toBe(STRATEGY_ID);
   });
 });
 
@@ -889,17 +894,15 @@ describe("POST /api/admin/partner-import — admin.partner_import emission", () 
       allocators_created: 1,
     });
 
-    await drain();
-    const audit = findAudit("admin.partner_import");
-    expect(audit).toBeDefined();
-    expect(audit!.args.p_entity_type).toBe("partner_import");
+    const audit = await waitForAudit("admin.partner_import");
+    expect(audit.args.p_entity_type).toBe("partner_import");
     // Audit-2026-05-07 C-0056: entity_id is now a real RFC 4122 v4
     // UUID via crypto.randomUUID() — variant nybble is one of [89ab],
     // version nybble pinned to '4'.
-    expect(audit!.args.p_entity_id).toMatch(
+    expect(audit.args.p_entity_id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
-    const meta = audit!.args.p_metadata as Record<string, unknown>;
+    const meta = audit.args.p_metadata as Record<string, unknown>;
     expect(meta.partner_tag).toBe("acme-pilot");
     expect(meta.managers_created).toBe(2);
     expect(meta.strategies_created).toBe(2);
@@ -998,15 +1001,13 @@ describe("POST /api/alerts/ack — alert.acknowledge emission (email path)", () 
     // Email-ack redirects on success — 303 to /allocations?ack=success.
     expect(res.status).toBe(303);
 
-    await drain();
-    const audit = findAudit("alert.acknowledge");
-    expect(audit).toBeDefined();
+    const audit = await waitForAudit("alert.acknowledge");
     // Email path uses the service-role RPC variant for attribution.
-    expect(audit!.name).toBe("log_audit_event_service");
-    expect(audit!.args.p_user_id).toBe(OWNER_ID);
-    expect(audit!.args.p_entity_type).toBe("alert");
-    expect(audit!.args.p_entity_id).toBe(ALERT_ID);
-    const meta = audit!.args.p_metadata as Record<string, unknown>;
+    expect(audit.name).toBe("log_audit_event_service");
+    expect(audit.args.p_user_id).toBe(OWNER_ID);
+    expect(audit.args.p_entity_type).toBe("alert");
+    expect(audit.args.p_entity_id).toBe(ALERT_ID);
+    const meta = audit.args.p_metadata as Record<string, unknown>;
     expect(meta.source).toBe("email");
     expect(meta.alert_type).toBe("drawdown");
   });

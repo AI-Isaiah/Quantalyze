@@ -402,4 +402,63 @@ describe("WidgetGrid", () => {
     fireEvent.keyDown(dragHandle, { key: "Escape" });
     expect(liveRegion.textContent).toContain("Reorder mode exited");
   });
+
+  // ────────────────────────────────────────────────────────────────────
+  // M-0118 — Tab / Shift+Tab traversal across cells. Native Tab focus
+  // movement is browser behaviour that jsdom does NOT implement, and
+  // @testing-library/user-event (which simulates .tab()) is intentionally
+  // not installed (see header note). Faking it with manual .focus() would be
+  // a tautology. Instead we pin the PRECONDITION that makes native Tab work:
+  // every interactive chrome control across every cell is a real, enabled
+  // <button> with no positive tabIndex, so they all participate in natural
+  // document tab order — and they appear in DOM order matching cell order
+  // (so Tab walks them left-to-right, cell by cell). A regression that added
+  // tabIndex={-1} to a control (removing it from the tab sequence) or
+  // reordered cells would fail here.
+  // ────────────────────────────────────────────────────────────────────
+  it("M-0118: chrome controls across all cells are tabbable buttons (no positive/negative tabIndex), in cell DOM order", () => {
+    const props = makeProps();
+    const { container } = render(<WidgetGrid {...props} />);
+    const cells = Array.from(
+      container.querySelectorAll<HTMLDivElement>(".widget-cell"),
+    );
+    expect(cells.length).toBe(TILES.length);
+
+    // Walk cells in DOM order; each must carry the chrome's focusable controls
+    // in their natural order: SizeStepper widths, reorder handle, remove, ⋯.
+    const seenWidgetIds: string[] = [];
+    for (const cell of cells) {
+      seenWidgetIds.push(cell.getAttribute("data-widget-id") ?? "");
+      const chrome = cell.querySelector(".widget-chrome");
+      expect(chrome).not.toBeNull();
+      const buttons = Array.from(
+        (chrome as HTMLElement).querySelectorAll<HTMLButtonElement>("button"),
+      );
+      // SizeStepper (4) + reorder + remove + overflow = at least 7 controls.
+      expect(buttons.length).toBeGreaterThanOrEqual(7);
+      for (const btn of buttons) {
+        // A real button with no tabIndex (or tabIndex=0) is in the natural
+        // tab sequence; a positive/negative value would break Tab order.
+        const ti = btn.getAttribute("tabindex");
+        expect(ti === null || ti === "0").toBe(true);
+        // Enabled controls are reachable by Tab; the SizeStepper + handles are
+        // never disabled here.
+        expect(btn.disabled).toBe(false);
+      }
+      // The reorder handle, remove, and overflow buttons appear in that order
+      // within the chrome (matching the visual + tab sequence).
+      const labelled = buttons
+        .map((b) => b.getAttribute("aria-label") ?? "")
+        .filter((l) =>
+          /^(Reorder widget|Remove .* widget|Widget options)$/.test(l),
+        );
+      expect(labelled).toEqual([
+        "Reorder widget",
+        `Remove ${cell.getAttribute("data-widget-id")} widget`,
+        "Widget options",
+      ]);
+    }
+    // Cells themselves are in tile order (so Tab walks them L→R).
+    expect(seenWidgetIds).toEqual(TILES.map((t) => t.k));
+  });
 });

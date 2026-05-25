@@ -154,11 +154,14 @@ export function CustomRangePicker({
 
   function pickDay(d: Date) {
     if (d < min || d > max) return;
-    if (pickMode === "start" || (start && end && d < start)) {
+    if (pickMode === "start") {
       setStart(d);
       setEnd(d);
       setPickMode("end");
     } else {
+      // Completing the range. If the end pick lands before the current start,
+      // swap them so the result is a forward range rather than collapsing to a
+      // degenerate single day.
       if (d < start) {
         setStart(d);
         setEnd(start);

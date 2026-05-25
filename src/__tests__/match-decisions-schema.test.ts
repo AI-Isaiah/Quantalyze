@@ -81,37 +81,39 @@ describe("migration 064 — match_decisions.original_strategy_id schema smoke", 
     30_000,
   );
 
-  it.skipIf(!HAS_LIVE_DB)(
+  // H-0021 — Case 4 previously soft-skipped (`expect(error).toBeTruthy()`) when
+  // PostgREST could not introspect the FK delete_rule, turning a coverage gap
+  // into a passing assertion: a future migration that switched the FK to CASCADE
+  // would NOT have failed this test. The Management API (runIntrospectionSqlLegacy)
+  // is NOT subject to PostgREST's information_schema restriction, so we read the
+  // delete_rule directly. Gated on HAS_INTROSPECTION (not HAS_LIVE_DB) because
+  // the introspection path is the only one that can actually verify this.
+  it.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION_LEGACY)(
     "Case 4: FK on match_decisions.original_strategy_id uses ON DELETE RESTRICT (Voice-D3)",
     async () => {
-      const admin = createLiveAdminClient();
-      // information_schema.referential_constraints joined with
-      // key_column_usage — use PostgREST embedded join.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data, error } = await (admin as any)
-        .from("information_schema.key_column_usage")
-        .select(
-          "constraint_name, table_name, column_name, referential_constraints:information_schema_referential_constraints!inner(delete_rule)",
-        )
-        .eq("table_name", "match_decisions")
-        .eq("column_name", "original_strategy_id");
-      // Soft-skip when PostgREST cannot expose this join (some projects
-      // restrict information_schema); fall back to RPC sql if needed.
-      if (error) {
-        console.warn(
-          "[match-decisions-schema] Case 4 couldn't introspect via PostgREST join — consider adding an RPC wrapper.",
-          error.message,
-        );
-        expect(error).toBeTruthy();
-        return;
-      }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rows = data as any[];
-      expect(Array.isArray(rows) && rows.length).toBeGreaterThan(0);
-      const deleteRule =
-        rows[0]?.referential_constraints?.delete_rule ??
-        rows[0]?.delete_rule;
-      expect(deleteRule).toBe("RESTRICT");
+      // Join referential_constraints → key_column_usage to find the delete_rule
+      // for the FK that covers match_decisions.original_strategy_id. The FK is
+      // declared inline in migration 064 (auto-named *_fkey), so we match by
+      // table + column rather than by constraint name.
+      const rows = await runIntrospectionSqlLegacy<{
+        constraint_name: string;
+        delete_rule: string;
+      }>(
+        `SELECT rc.constraint_name, rc.delete_rule
+         FROM information_schema.referential_constraints rc
+         JOIN information_schema.key_column_usage kcu
+           ON kcu.constraint_name = rc.constraint_name
+          AND kcu.constraint_schema = rc.constraint_schema
+         WHERE kcu.table_schema = 'public'
+           AND kcu.table_name = 'match_decisions'
+           AND kcu.column_name = 'original_strategy_id'`,
+      );
+      // The FK MUST exist (no soft-skip): exactly one referential constraint
+      // covers this column.
+      expect(rows.length).toBeGreaterThan(0);
+      // And its delete_rule MUST be RESTRICT — a switch to CASCADE/SET NULL
+      // now fails here instead of silently passing.
+      expect(rows[0].delete_rule).toBe("RESTRICT");
     },
     30_000,
   );
@@ -554,6 +556,84 @@ describePhase10(
           return true; // unknown kind
         });
         expectPhase10(violators.length).toBe(0);
+      },
+      30_000,
+    );
+
+    // -------------------------------------------------------------------------
+    // M-0014 — DB-AUTHORITATIVE companion to T_L1_ALL_PASS_CHECKS.
+    //
+    // T_L1 (above) re-implements the four per-kind CHECK predicates IN
+    // JAVASCRIPT. That encodes the rules a SECOND time: if a migration loosens
+    // or tightens a CHECK (e.g. admits voluntary_modify with strategy_id NOT
+    // NULL for a new sub-case), the JS predicate would need the same edit or
+    // the test silently passes (no rows violate the OLD JS rules) while the DB
+    // enforces NEW rules — classic test/schema drift.
+    //
+    // This case lets POSTGRES be the single source of truth: it reads each
+    // CHECK constraint's OWN expression via pg_get_constraintdef, strips the
+    // `CHECK (...)` wrapper, and EXECUTEs a `count(*) ... WHERE NOT (<expr>)`
+    // per constraint inside a DO block — so the predicate is NEVER re-typed in
+    // JS. Any drift between the JS T_L1 and the live constraints surfaces here.
+    // Gated on HAS_INTROSPECTION (Management API) since pg_get_constraintdef
+    // lives in pg_catalog, which PostgREST does not expose.
+    // -------------------------------------------------------------------------
+    itPhase10.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
+      "M-0014: zero rows violate any per-kind CHECK using the DB's OWN constraint expressions (no JS re-implementation)",
+      async () => {
+        // The DO block iterates every CHECK constraint on match_decisions,
+        // counts rows that violate it using the constraint's live predicate,
+        // and returns one row per constraint as { conname, violations }.
+        const sql = `
+          DO $$
+          DECLARE
+            c RECORD;
+            v_count BIGINT;
+            v_expr TEXT;
+          BEGIN
+            DROP TABLE IF EXISTS _md_check_violations;
+            CREATE TEMP TABLE _md_check_violations (conname TEXT, violations BIGINT);
+            FOR c IN
+              SELECT conname, pg_get_constraintdef(oid) AS def
+              FROM pg_constraint
+              WHERE conrelid = 'public.match_decisions'::regclass
+                AND contype = 'c'
+            LOOP
+              -- pg_get_constraintdef returns 'CHECK ((<expr>))'. Strip the
+              -- leading 'CHECK (' and the trailing ')' to get the bare expr.
+              v_expr := regexp_replace(c.def, '^CHECK \\((.*)\\)$', '\\1');
+              EXECUTE format(
+                'SELECT count(*) FROM public.match_decisions WHERE NOT (%s)',
+                v_expr
+              ) INTO v_count;
+              INSERT INTO _md_check_violations VALUES (c.conname, v_count);
+            END LOOP;
+          END $$;
+          SELECT conname, violations FROM _md_check_violations ORDER BY conname;
+        `;
+        const rows = await runIntrospectionSql<{
+          conname: string;
+          violations: number | string;
+        }>(sql);
+
+        // There must be at least the four documented per-kind CHECKs.
+        expectPhase10(rows.length).toBeGreaterThanOrEqual(4);
+        // The four named per-kind constraints (migration 080-series) must each
+        // be present in the result — proves we actually evaluated them, not an
+        // empty constraint set that would vacuously pass.
+        const names = rows.map((r) => r.conname);
+        for (const expected of [
+          "match_decisions_kind_bridge_recommended",
+          "match_decisions_kind_voluntary_remove",
+          "match_decisions_kind_voluntary_add",
+          "match_decisions_kind_voluntary_modify",
+        ]) {
+          expectPhase10(names).toContain(expected);
+        }
+        // Every constraint reports ZERO violations against the live data.
+        for (const r of rows) {
+          expectPhase10(Number(r.violations)).toBe(0);
+        }
       },
       30_000,
     );

@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readdirSync, readFileSync, lstatSync, realpathSync } from "fs";
+import { join, resolve } from "path";
 import {
   formatKeyError,
   gateFailureToWizardError,
@@ -12,6 +14,7 @@ import {
   formatColumnInDataframeMessage,
   type WizardErrorCode,
 } from "./wizardErrors";
+import type { GateFailureCode } from "./strategyGate";
 
 describe("wizardErrors", () => {
   describe("WIZARD_ERROR_COPY table shape", () => {
@@ -407,5 +410,138 @@ describe("wizardErrors", () => {
       expect(rewritten).toContain("trade_qty");
       expect(rewritten).not.toContain("daily_return");
     });
+  });
+});
+
+// M-0591 — UNKNOWN-fallback typo blindspot.
+//
+// formatKeyError() falls through to the UNKNOWN entry for any code not in
+// WIZARD_ERROR_COPY. Direct string-literal call sites
+// (`setErrorCode("KEY_HAS_TRADING_PERMS")`) are type-checked against the
+// WizardErrorCode union, but two leak paths remain unguarded by the type
+// system:
+//   1. `gateFailureToWizardError` MAPS a GateFailureCode → WizardErrorCode by
+//      string return; a typo there ('GATE_INSUFICIENT_TRADES') compiles
+//      because the function's declared return type is the union, and the typo
+//      would render UNKNOWN copy at runtime instead of failing the build.
+//   2. Any `setErrorCode("LITERAL")` / `formatKeyError("LITERAL")` literal
+//      that was cast (`as WizardErrorCode`) or otherwise escaped the union
+//      check.
+//
+// These two tests are the runtime safety net the type system can't provide.
+
+describe("M-0591 — every reachable error code resolves to real (non-UNKNOWN) copy", () => {
+  it("gateFailureToWizardError maps every GateFailureCode to a key present in WIZARD_ERROR_COPY", () => {
+    // Exhaustive over the GateFailureCode union. ANALYTICS_MISSING/PENDING/
+    // COMPUTING are transient UI states that intentionally map to UNKNOWN
+    // (callers should poll, not render an error) — assert that explicitly so
+    // a future code that should have a terminal mapping isn't silently
+    // swallowed.
+    const allGateCodes: GateFailureCode[] = [
+      "NO_DATA_SOURCE",
+      "INSUFFICIENT_TRADES",
+      "INSUFFICIENT_DAYS",
+      "ANALYTICS_MISSING",
+      "ANALYTICS_PENDING",
+      "ANALYTICS_COMPUTING",
+      "ANALYTICS_FAILED",
+    ];
+    const intentionallyTransient = new Set<GateFailureCode>([
+      "ANALYTICS_MISSING",
+      "ANALYTICS_PENDING",
+      "ANALYTICS_COMPUTING",
+    ]);
+
+    for (const code of allGateCodes) {
+      const mapped = gateFailureToWizardError(code);
+      // The mapped code MUST be a real key in the copy table (UNKNOWN counts
+      // as a key, but for terminal codes we additionally require non-UNKNOWN).
+      expect(Object.keys(WIZARD_ERROR_COPY)).toContain(mapped);
+      if (!intentionallyTransient.has(code)) {
+        expect(mapped).not.toBe("UNKNOWN");
+        // And the copy it resolves to must NOT be the UNKNOWN fallback copy.
+        expect(formatKeyError(mapped).title).not.toBe(
+          WIZARD_ERROR_COPY.UNKNOWN.title,
+        );
+      }
+    }
+  });
+
+  it("every error-code string literal passed to setErrorCode()/formatKeyError() in src/** exists in WIZARD_ERROR_COPY", () => {
+    // Codebase scan. Catches a typo'd literal (`KEY_HAS_TRADING_PERM` missing
+    // the S) that escaped the type union via an `as` cast or a loosely-typed
+    // call site, which would otherwise silently render UNKNOWN copy with no
+    // test failure.
+    const SRC_ROOT = resolve(__dirname, "..");
+    const validCodes = new Set(Object.keys(WIZARD_ERROR_COPY));
+
+    function walk(dir: string, seen: Set<string> = new Set()): string[] {
+      const canonical = (() => {
+        try {
+          return realpathSync(dir);
+        } catch {
+          return dir;
+        }
+      })();
+      if (seen.has(canonical)) return [];
+      seen.add(canonical);
+      const out: string[] = [];
+      for (const entry of readdirSync(dir)) {
+        if (
+          entry === "node_modules" ||
+          entry === ".next" ||
+          entry === "dist" ||
+          entry.endsWith(".test.ts") ||
+          entry.endsWith(".test.tsx")
+        ) {
+          continue;
+        }
+        const full = join(dir, entry);
+        const s = (() => {
+          try {
+            return lstatSync(full);
+          } catch {
+            return null;
+          }
+        })();
+        if (!s) continue;
+        if (s.isDirectory() || s.isSymbolicLink()) {
+          out.push(...walk(full, seen));
+        } else if (
+          entry.endsWith(".ts") ||
+          entry.endsWith(".tsx")
+        ) {
+          out.push(full);
+        }
+      }
+      return out;
+    }
+
+    // Match `setErrorCode("LITERAL")` and `formatKeyError("LITERAL"...)` with
+    // a STRING-LITERAL first argument only. Calls with a variable
+    // (`setErrorCode(code)`, `setErrorCode(wizardCode)`) are skipped — those
+    // flow through the typed union or gateFailureToWizardError (covered
+    // above). `null` literal is also skipped (clears the error state).
+    const LITERAL_RE =
+      /\b(?:setErrorCode|formatKeyError)\s*\(\s*["'`]([A-Z0-9_]+)["'`]/g;
+
+    const files = walk(SRC_ROOT);
+    const offenders: Array<{ file: string; code: string }> = [];
+    for (const file of files) {
+      const text = readFileSync(file, "utf-8");
+      for (const m of text.matchAll(LITERAL_RE)) {
+        const code = m[1];
+        if (!validCodes.has(code)) {
+          offenders.push({ file: file.replace(SRC_ROOT, "src"), code });
+        }
+      }
+    }
+
+    expect(
+      offenders,
+      `Found error-code literals not present in WIZARD_ERROR_COPY (would render UNKNOWN copy):\n${offenders
+        .map((o) => `  ${o.code} @ ${o.file}`)
+        .join("\n")}`,
+    ).toEqual([]);
   });
 });

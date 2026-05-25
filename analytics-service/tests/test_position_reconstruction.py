@@ -8,12 +8,19 @@ All tests mock supabase via MagicMock — no real DB calls.
 """
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+# H-0811: all imports from the module under test are hoisted to the top
+# (PEP-8) so test ordering / module splits can't surface a confusing
+# mid-file ImportError. `compute_exposure_metrics` / `compute_turnover_series`
+# were previously imported mid-file as a TDD ("RED tests") artifact.
 from services.position_reconstruction import (
     _match_positions_fifo,
+    compute_exposure_metrics,
+    compute_turnover_series,
     reconstruct_positions,
 )
 
@@ -190,6 +197,39 @@ class TestMatchPositionsFIFO:
         open_pos = [p for p in positions if p["status"] == "open"]
         assert len(open_pos) >= 1
 
+    def test_partial_fills_exact_position_counts(self) -> None:
+        """Audit closure M-0753: the prior test_partial_fills asserts only
+        `len(open_pos) >= 1`, a one-sided check that ALSO passes if the
+        reconstructor emits phantom positions (the P1100 case it is meant to
+        guard). Pin the EXACT counts: 3 buys + 2 sells of 1 unit each, all on
+        the same long side, must reconstruct to a SINGLE position that stays
+        open (FIFO tracks NET quantity; the two reducing sells never cross the
+        long through zero, so no close fires and no flip leg is created).
+
+        Hand-derived from the FIFO net-tracking contract in
+        _match_positions_fifo: buy→net=1→2→3, sell→net=2→1; net never reaches
+        0, so exactly one open position and zero closed positions.
+        """
+        fills = [
+            _make_fill(side="buy", price=100.0, quantity=1.0, timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="buy", price=105.0, quantity=1.0, timestamp="2024-01-02T00:00:00+00:00"),
+            _make_fill(side="buy", price=110.0, quantity=1.0, timestamp="2024-01-03T00:00:00+00:00"),
+            _make_fill(side="sell", price=115.0, quantity=1.0, timestamp="2024-01-04T00:00:00+00:00"),
+            _make_fill(side="sell", price=120.0, quantity=1.0, timestamp="2024-01-05T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+
+        open_pos = [p for p in positions if p["status"] == "open"]
+        closed_pos = [p for p in positions if p["status"] == "closed"]
+        # Exactly one position total — no phantom flip legs (catches "too many").
+        assert len(positions) == 1, (
+            f"expected exactly 1 position, got {len(positions)}: "
+            f"{[(p['status'], p.get('size_base')) for p in positions]}"
+        )
+        assert len(open_pos) == 1
+        assert len(closed_pos) == 0
+        assert open_pos[0]["side"] == "long"
+
     def test_weighted_average_entry(self) -> None:
         """buy 1@100, buy 2@200 -> avg entry = (100 + 400) / 3 = 166.67."""
         fills = [
@@ -237,16 +277,87 @@ class TestMatchPositionsFIFO:
         assert positions == []
 
     def test_zero_entry_guard(self) -> None:
-        """Fill with price=0 should not cause ZeroDivisionError in ROI calc."""
+        """Fill with price=0 must not raise (ZeroDivisionError) AND must not be
+        recorded as a trade. A zero-entry position is corrupt input that is now
+        dropped (H-0812) rather than kept with a fabricated roi=0 that would
+        pollute win_rate / avg_roi / expectancy."""
         fills = [
             _make_fill(side="buy", price=0.0, quantity=1.0, timestamp="2024-01-01T00:00:00+00:00"),
             _make_fill(side="sell", price=100.0, quantity=1.0, timestamp="2024-01-02T00:00:00+00:00"),
         ]
-        # Should not raise
+        # Should not raise; the corrupt zero-entry position is dropped.
         positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+        assert len(positions) == 0
+
+    def test_zero_entry_price_position_is_dropped(self) -> None:
+        """CORRECT contract (H-0812): a price=0 entry fill is nonsensical
+        input (exchange/parser corruption). The position must be DROPPED —
+        not recorded with a fabricated roi=0 that pollutes downstream
+        win_rate / avg_roi / expectancy as if it were a real flat trade.
+
+        A clean buy 0->100 then a normal buy 100->110 trade. Only the
+        normal trade should survive; the zero-entry one must not appear."""
+        fills = [
+            # Corrupted zero-entry position (buy@0 closed by sell@100).
+            _make_fill(side="buy", price=0.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="sell", price=100.0, quantity=1.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+            # A real, well-formed trade after it.
+            _make_fill(side="buy", price=100.0, quantity=1.0,
+                       timestamp="2024-01-03T00:00:00+00:00"),
+            _make_fill(side="sell", price=110.0, quantity=1.0,
+                       timestamp="2024-01-04T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+        # Only the well-formed trade should survive; the corrupted
+        # zero-entry one must be dropped (so no fabricated roi=0 leaks
+        # into win_rate / avg_roi).
         assert len(positions) == 1
-        # ROI when entry_avg is 0: the code returns 0 (guards against division by zero)
-        assert positions[0]["roi"] == 0
+        assert positions[0]["entry_price_avg"] == 100.0
+        assert positions[0]["exit_price_avg"] == 110.0
+
+    def test_zero_entry_price_position_sets_data_quality_flag(self) -> None:
+        """CORRECT contract (M-0751, resolved alongside H-0812): the corrupt
+        zero-entry position is DROPPED from the returned trades (so its
+        fabricated roi=0 cannot pollute win_rate / avg_roi / expectancy), and
+        the drop is surfaced — not silent — via a strategy-level
+        `zero_entry_price_dropped` counter accumulated in `dropped_flags`
+        (the same drop-and-count channel used for fills_dropped_no_symbol)."""
+        fills = [
+            _make_fill(side="buy", price=0.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="sell", price=100.0, quantity=1.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+        ]
+        dropped_flags: dict[str, object] = {}
+        positions = _match_positions_fifo(
+            "BTCUSDT", fills, "strat-1", dropped_flags=dropped_flags
+        )
+        # Corrupt position dropped, not recorded as a trade...
+        assert len(positions) == 0
+        # ...but surfaced via the strategy-level counter.
+        assert dropped_flags.get("zero_entry_price_dropped") == 1, (
+            f"zero-entry drop must be surfaced via dropped_flags; got "
+            f"{dropped_flags!r}"
+        )
+
+    def test_zero_entry_price_open_position_is_dropped(self) -> None:
+        """review-5: an OPEN position with a zero entry price (a single buy@0
+        that never closes) is corrupt input on the OPEN path too. It must be
+        dropped — not persisted with entry_price_avg=0, which would feed a
+        fabricated unrealized_pnl (mark*qty) to the equity reconstructor — and
+        counted via dropped_flags, the same as the closed path."""
+        fills = [
+            _make_fill(side="buy", price=0.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+        ]
+        dropped_flags: dict[str, object] = {}
+        positions = _match_positions_fifo(
+            "BTCUSDT", fills, "strat-1", dropped_flags=dropped_flags
+        )
+        assert len(positions) == 0
+        assert dropped_flags.get("zero_entry_price_dropped") == 1
 
     def test_roi_net_of_fees_classifies_fee_only_loser_as_loser(self) -> None:
         """KPI-17 follow-up regression. The prior ROI formula was
@@ -285,6 +396,109 @@ class TestMatchPositionsFIFO:
         assert len(positions) == 1
         # 10 hours of 24 = 0.4167 days
         assert abs(positions[0]["duration_days"] - 10 / 24) < 0.001
+
+
+class TestFIFOPhantomPositionScenarios:
+    """H-0808 / P1100: the 'phantom positions' bug class reproduces when
+    fills arrive with timestamp ambiguity (duplicate timestamps), out of
+    order, or re-imported with a colliding timestamp from an overlapping
+    backfill window. A phantom is a spurious zero-size or zero-duration
+    position whose entry/exit collapse to a single fill price and that
+    never reflects a real open exposure. These tests pin the absence of
+    phantoms across the under-covered scenarios.
+
+    All numeric expectations are hand-computed from the fills, not echoed
+    from any mock return value.
+    """
+
+    def test_duplicate_timestamp_buy_then_sell_one_clean_position(self) -> None:
+        """Two fills carrying the SAME timestamp (tie-break ambiguity) must
+        still match into ONE closed position — no phantom open leg. buy 1@100
+        and sell 1@110 at identical ts → 1 closed long, duration 0 (same ts),
+        no second 'shadow' position."""
+        fills = [
+            _make_fill(side="buy", price=100.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="sell", price=110.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+        assert len(positions) == 1, (
+            f"duplicate-timestamp pair must close to exactly 1 position, "
+            f"got {len(positions)} (phantom shadow position?)"
+        )
+        pos = positions[0]
+        assert pos["status"] == "closed"
+        assert pos["side"] == "long"
+        assert pos["entry_price_avg"] == 100.0
+        assert pos["exit_price_avg"] == 110.0
+        # Same timestamp → zero duration, NOT a negative or phantom value.
+        assert pos["duration_days"] == 0.0
+        assert pos["duration_seconds"] == 0
+
+    @pytest.mark.asyncio
+    async def test_out_of_order_arrival_sorted_before_matching(self) -> None:
+        """Fills supplied out of timestamp order (sell row first, buy row
+        second) must be sorted by timestamp inside reconstruct_positions so
+        FIFO sees buy→sell. A regression dropping the per-symbol sort would
+        treat the sell as opening a short and the buy as opening a long,
+        producing two phantom opens instead of one closed long."""
+        # Provided sell-first, but timestamps say buy (Jan 1) precedes
+        # sell (Jan 2).
+        fills = [
+            _make_fill(side="sell", price=110.0, quantity=1.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+            _make_fill(side="buy", price=100.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+            await reconstruct_positions("strat-1", mock_supabase)
+
+        rows = mock_supabase.rpc_calls[0][1]["p_positions"]
+        assert len(rows) == 1, (
+            f"out-of-order fills must sort to one closed position, got "
+            f"{len(rows)} (sort regressed → phantom opens?)"
+        )
+        pos = rows[0]
+        assert pos["status"] == "closed"
+        assert pos["side"] == "long", (
+            "sorted FIFO must see buy(Jan1)→sell(Jan2): a long, not a short"
+        )
+        assert pos["entry_price_avg"] == 100.0
+        assert pos["exit_price_avg"] == 110.0
+
+    def test_reimported_overlapping_buy_same_timestamp_aggregates_not_phantom(
+        self,
+    ) -> None:
+        """An overlapping backfill re-import delivers a SECOND buy with a
+        timestamp identical to the original buy. FIFO must aggregate them
+        into one weighted-average long of size 2 (entry 100), then close
+        cleanly against a sell of 2 — NOT spawn a zero-duration phantom
+        whose opened_at == closed_at."""
+        fills = [
+            _make_fill(side="buy", price=100.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            # Re-imported colliding-timestamp buy.
+            _make_fill(side="buy", price=100.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="sell", price=110.0, quantity=2.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+        assert len(positions) == 1, (
+            f"overlapping re-import must aggregate to 1 position, got "
+            f"{len(positions)} (phantom from colliding timestamp?)"
+        )
+        pos = positions[0]
+        assert pos["status"] == "closed"
+        assert pos["side"] == "long"
+        assert pos["size_base"] == 2.0
+        assert pos["entry_price_avg"] == 100.0
+        assert pos["exit_price_avg"] == 110.0
+        # No phantom: opened_at strictly precedes closed_at.
+        assert pos["opened_at"] != pos["closed_at"]
+        assert pos["duration_seconds"] > 0
 
 
 # ---------------------------------------------------------------------------
@@ -382,8 +596,6 @@ class TestReconstructPositions:
 # Helpers
 # ---------------------------------------------------------------------------
 
-import asyncio
-
 
 async def _run_sync(fn):
     """Run a synchronous function in a thread, matching db_execute's contract."""
@@ -391,17 +603,13 @@ async def _run_sync(fn):
 
 
 # ---------------------------------------------------------------------------
-# Phase 12 / Plan 04 — METRICS-05, METRICS-06 — RED tests
+# Phase 12 / Plan 04 — METRICS-05, METRICS-06
 # ---------------------------------------------------------------------------
 # METRICS-05: compute_exposure_metrics persists per-date exposure_series
 #             alongside aggregates (refactor lines 461-487 — was discarded).
 # METRICS-06: compute_turnover_series with explicit Pitfall #19 docstring
 #             contract (turnover = abs(Δposition × price) / nav).
-
-from services.position_reconstruction import (
-    compute_exposure_metrics,
-    compute_turnover_series,
-)
+# (H-0811: imports hoisted to the top of the module.)
 
 
 def _make_exposure_snapshots_mock(snapshots: list[dict]) -> MagicMock:
@@ -650,6 +858,119 @@ class TestAtomicRebuildRPC:
         assert not mock_supabase.table_positions.insert.called, (
             "regression: legacy positions.insert() PostgREST path was invoked"
         )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_same_strategy_reconstructs_are_serialized(
+        self,
+    ) -> None:
+        """H-0807 (Python caller layer / P1101): two concurrent
+        ``reconstruct_positions(strategy_id=X)`` callers must NOT both run
+        their atomic-rebuild RPC in parallel. The per-strategy in-memory
+        ``_RECONSTRUCT_LOCKS`` asyncio.Lock serializes them — one waits for
+        the other. We widen the RPC critical section with a real sleep and
+        track the max observed in-flight count; serialized → max == 1.
+
+        NOTE: this exercises the in-memory caller-side serialization only.
+        The SQL-side ``pg_advisory_xact_lock`` inside migration 113's RPC
+        body is a cross-process defense that cannot be exercised with a
+        mocked supabase client — see the FLAGGED note in the batch report.
+        """
+        import threading
+        import time
+
+        fills = [
+            _make_fill(side="buy", price=100.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="sell", price=110.0, quantity=1.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+        ]
+
+        in_flight = 0
+        max_in_flight = 0
+        counter_lock = threading.Lock()
+
+        def _make_serialization_tracking_supabase():
+            mock = _make_mock_supabase(fills=fills)
+            original_rpc = mock.rpc
+
+            def _tracking_rpc(name, payload=None):
+                nonlocal in_flight, max_in_flight
+                handle = original_rpc(name, payload)
+                if name == "reconstruct_positions_atomic":
+                    # Runs inside db_execute's worker thread (_run_sync).
+                    real_execute = handle.execute
+
+                    def _execute_with_tracking():
+                        nonlocal in_flight, max_in_flight
+                        with counter_lock:
+                            in_flight += 1
+                            max_in_flight = max(max_in_flight, in_flight)
+                        try:
+                            # Widen the window so a parallel caller would
+                            # overlap if the lock failed to serialize.
+                            time.sleep(0.05)
+                            return real_execute()
+                        finally:
+                            with counter_lock:
+                                in_flight -= 1
+
+                    handle.execute = _execute_with_tracking
+                return handle
+
+            mock.rpc = _tracking_rpc
+            return mock
+
+        mock_a = _make_serialization_tracking_supabase()
+        mock_b = _make_serialization_tracking_supabase()
+
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+            # SAME strategy_id for both callers — must serialize.
+            await asyncio.gather(
+                reconstruct_positions("strat-shared", mock_a),
+                reconstruct_positions("strat-shared", mock_b),
+            )
+
+        assert max_in_flight == 1, (
+            "concurrent same-strategy reconstructs overlapped in the "
+            f"atomic-rebuild RPC (max_in_flight={max_in_flight}); the "
+            "per-strategy lock failed to serialize — a parallel DELETE+INSERT "
+            "race (P1101) is possible"
+        )
+        # Both still completed (the lock serialized, did not drop one).
+        assert len(mock_a.rpc_calls) == 1
+        assert len(mock_b.rpc_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_different_strategies_lock_independently(self) -> None:
+        """H-0807: the serialization lock is keyed per-strategy. Two
+        reconstructs for DIFFERENT strategies must each acquire their own
+        ``_RECONSTRUCT_LOCKS`` entry — a single global lock would be a
+        throughput regression and would mean the lock is not actually
+        scoped to the racing entity (the strategy)."""
+        import services.position_reconstruction as pr_mod
+
+        fills = [
+            _make_fill(side="buy", price=100.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="sell", price=110.0, quantity=1.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+        ]
+        mock_a = _make_mock_supabase(fills=fills)
+        mock_b = _make_mock_supabase(fills=fills)
+
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+            await asyncio.gather(
+                reconstruct_positions("strat-A", mock_a),
+                reconstruct_positions("strat-B", mock_b),
+            )
+
+        # Distinct lock objects registered, one per strategy_id.
+        assert "strat-A" in pr_mod._RECONSTRUCT_LOCKS
+        assert "strat-B" in pr_mod._RECONSTRUCT_LOCKS
+        assert (
+            pr_mod._RECONSTRUCT_LOCKS["strat-A"]
+            is not pr_mod._RECONSTRUCT_LOCKS["strat-B"]
+        ), "per-strategy lock collapsed into a shared object"
 
 
 class TestFlipFillFeeProration:
@@ -1992,6 +2313,189 @@ class TestReconstructIdempotency:
             "Lock not released after CancelledError — future reconstructs "
             "for this strategy_id will deadlock."
         )
+
+
+# ---------------------------------------------------------------------------
+# M-0709 — idempotency at the RPC-payload level + producer order-insensitivity
+# ---------------------------------------------------------------------------
+
+
+class TestReconstructPayloadIdempotency:
+    """M-0709: the existing ``test_delete_and_reinsert_idempotent`` asserts
+    only ``result1 == result2`` (a dict equality on the RETURNED payload). It
+    does NOT assert that the atomic-rebuild RPC was called with an IDENTICAL
+    ``p_positions`` payload on both runs, nor that the producer is
+    order-INSENSITIVE to the input fill ordering. The diff that added
+    ``realized_pnl_per_trade`` (a LIST of dicts) makes the equality fragile:
+    a non-deterministic list order holds the assertion only while both runs
+    share the same non-determinism.
+    """
+
+    @staticmethod
+    def _f(symbol, side, price, qty, ts):
+        return {
+            "symbol": symbol, "side": side, "price": price, "quantity": qty,
+            "fee": 0.0, "timestamp": ts, "raw_data": {}, "is_fill": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_same_input_yields_identical_rpc_payload(self) -> None:
+        """Stronger than ``result1 == result2``: the atomic-rebuild RPC must
+        be invoked with the SAME ``p_positions`` payload on run 1 and run 2
+        for identical inputs. Pins that the persisted payload — not just the
+        returned aggregate dict — is deterministic across runs.
+        """
+        fills = [
+            self._f("BTCUSDT", "buy", 100.0, 1.0, "2024-01-01T00:00:00+00:00"),
+            self._f("BTCUSDT", "sell", 110.0, 1.0, "2024-01-05T00:00:00+00:00"),
+            self._f("ETHUSDT", "buy", 50.0, 1.0, "2024-01-02T00:00:00+00:00"),
+            self._f("ETHUSDT", "sell", 45.0, 1.0, "2024-01-03T00:00:00+00:00"),
+        ]
+
+        with patch(
+            "services.position_reconstruction.db_execute", side_effect=_run_sync
+        ):
+            mock1 = _make_mock_supabase(fills=list(fills))
+            await reconstruct_positions("strat-pay-1", mock1)
+            mock2 = _make_mock_supabase(fills=list(fills))
+            await reconstruct_positions("strat-pay-1", mock2)
+
+        def _atomic_payload(mock):
+            calls = [
+                c for c in mock.rpc_calls
+                if c[0] == "reconstruct_positions_atomic"
+            ]
+            assert calls, "atomic-rebuild RPC was not called"
+            return calls[0][1]["p_positions"]
+
+        assert _atomic_payload(mock1) == _atomic_payload(mock2), (
+            "identical inputs must produce an identical p_positions RPC "
+            "payload across runs, not merely an equal returned aggregate."
+        )
+
+    @pytest.mark.asyncio
+    async def test_realized_pnl_per_trade_is_input_order_insensitive(self) -> None:
+        """Two runs over the SAME fills in DIFFERENT input order must yield
+        the SAME realized_pnl_per_trade list. Two symbols close on different
+        dates; closed-position iteration order should be deterministic
+        (e.g. by closed_at), independent of which symbol's fills the caller
+        happened to pass first.
+        """
+        base = [
+            self._f("BTCUSDT", "buy", 100.0, 1.0, "2024-01-01T00:00:00+00:00"),
+            self._f("BTCUSDT", "sell", 110.0, 1.0, "2024-01-05T00:00:00+00:00"),
+            self._f("ETHUSDT", "buy", 50.0, 1.0, "2024-01-02T00:00:00+00:00"),
+            self._f("ETHUSDT", "sell", 45.0, 1.0, "2024-01-03T00:00:00+00:00"),
+        ]
+        # Reordered: the ETH round-trip is presented BEFORE the BTC one.
+        shuffled = [base[2], base[3], base[0], base[1]]
+
+        with patch(
+            "services.position_reconstruction.db_execute", side_effect=_run_sync
+        ):
+            mock_a = _make_mock_supabase(fills=base)
+            result_a = await reconstruct_positions("strat-ord-1", mock_a)
+            mock_b = _make_mock_supabase(fills=shuffled)
+            result_b = await reconstruct_positions("strat-ord-1", mock_b)
+
+        assert (
+            result_a["realized_pnl_per_trade"]
+            == result_b["realized_pnl_per_trade"]
+        ), (
+            "realized_pnl_per_trade must be deterministic w.r.t. input fill "
+            "order; got "
+            f"{result_a['realized_pnl_per_trade']} vs "
+            f"{result_b['realized_pnl_per_trade']}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Audit H-0812: the zero-entry drop COUNTER must thread through
+# reconstruct_positions and be MERGED (summed across symbols) into the
+# strategy-level data_quality_flags.
+# ---------------------------------------------------------------------------
+class TestZeroEntryDropFlagMergedAcrossSymbols:
+    """H-0812 integration coverage gap (pr-test HIGH).
+
+    `test_zero_entry_price_position_sets_data_quality_flag` only proves
+    the COUNTER is set when `_match_positions_fifo` is called directly
+    (and asserts ``== 1``). It exercises neither (a) the
+    `dropped_flags=fifo_dropped_flags` thread-through from
+    `_reconstruct_positions_inner` into the per-symbol FIFO call, nor (b)
+    the merge loop that SUMS that counter across every symbol bucket into
+    the strategy-level ``out["data_quality_flags"]`` (position_reconstruction.py
+    ~lines 255-261, 287-295). If that merge loop were deleted — or the
+    summing ``+ v`` replaced with a bare assignment — no existing test
+    would fail.
+
+    This drives the full `reconstruct_positions` path (mirroring the
+    harness of ``test_realized_pnl_per_trade_is_input_order_insensitive``:
+    `_make_mock_supabase` + db_execute patched to `_run_sync`, reading the
+    returned dict) with a corrupt zero-entry position on TWO different
+    symbols plus a clean trade, and asserts the strategy-level result
+    surfaces ``zero_entry_price_dropped == 2`` (summed, not last-wins) AND
+    the clean trade survives.
+    """
+
+    @pytest.mark.asyncio
+    async def test_zero_entry_drops_summed_across_two_symbols(self) -> None:
+        # Corrupt zero-entry position on BTCUSDT (buy@0 closed by sell@100),
+        # corrupt zero-entry position on ETHUSDT (buy@0 closed by sell@50),
+        # plus ONE clean, well-formed BTCUSDT round-trip that must survive.
+        fills = [
+            # --- BTCUSDT: corrupt zero-entry (must be dropped + counted) ---
+            _make_fill(symbol="BTCUSDT", side="buy", price=0.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(symbol="BTCUSDT", side="sell", price=100.0, quantity=1.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+            # --- BTCUSDT: a real, well-formed trade that must survive ---
+            _make_fill(symbol="BTCUSDT", side="buy", price=100.0, quantity=1.0,
+                       timestamp="2024-01-03T00:00:00+00:00"),
+            _make_fill(symbol="BTCUSDT", side="sell", price=110.0, quantity=1.0,
+                       timestamp="2024-01-04T00:00:00+00:00"),
+            # --- ETHUSDT: corrupt zero-entry (must be dropped + counted) ---
+            _make_fill(symbol="ETHUSDT", side="buy", price=0.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(symbol="ETHUSDT", side="sell", price=50.0, quantity=1.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+
+        with patch(
+            "services.position_reconstruction.db_execute", side_effect=_run_sync
+        ):
+            result = await reconstruct_positions("strat-zed-1", mock_supabase)
+
+        # The per-symbol drop counters (1 for BTC, 1 for ETH) must be
+        # MERGED by SUMMING into the strategy-level flag — not overwritten
+        # last-wins. Deleting the merge loop (or replacing `+ v` with `= v`)
+        # makes this assertion fail.
+        flags = result.get("data_quality_flags") or {}
+        assert flags.get("zero_entry_price_dropped") == 2, (
+            "zero-entry drops on two symbols must SUM to 2 at the "
+            f"strategy level; got flags={flags!r} (merge loop deleted or "
+            "summing replaced by assignment?)"
+        )
+
+        # The clean BTCUSDT round-trip must survive the reconstruction:
+        # exactly one closed position persisted via the atomic rebuild RPC,
+        # and the returned aggregate reflects it.
+        assert result["total_positions"] == 1
+        assert result["closed_positions"] == 1
+        atomic = [
+            c for c in mock_supabase.rpc_calls
+            if c[0] == "reconstruct_positions_atomic"
+        ]
+        assert atomic, "atomic-rebuild RPC was not called"
+        rows = atomic[0][1]["p_positions"]
+        assert len(rows) == 1, (
+            f"only the clean trade should persist, got {len(rows)} rows"
+        )
+        survivor = rows[0]
+        assert survivor["symbol"] == "BTCUSDT"
+        assert survivor["status"] == "closed"
+        assert survivor["entry_price_avg"] == 100.0
+        assert survivor["exit_price_avg"] == 110.0
 
 
 # ---------------------------------------------------------------------------

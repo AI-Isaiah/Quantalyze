@@ -157,3 +157,165 @@ describe("POST /api/admin/match/kill-switch (C-0045)", () => {
     });
   });
 });
+
+/**
+ * M-0278 (testgap API2) — body-validation + GET-handler branches the
+ * happy-path audit test never reaches. The kill switch is a
+ * security-critical flag, so every guard deserves a test:
+ *   - POST: 401 (null user), non-boolean body.enabled → 400, invalid JSON
+ *     → 400, system_flags update error → 500 (+ no audit emitted).
+ *   - GET:  401/403 split, 503 migration-011 hint when the select errors,
+ *     and the enabled=true fallback when no row exists (data null).
+ *
+ * Uses vi.resetModules() + vi.doMock so the admin client can be tuned per
+ * test (the module-level mock above only models the POST happy path).
+ */
+describe("kill-switch — M-0278 validation + GET branches", () => {
+  beforeEach(() => {
+    userState.current = null;
+    adminFlag.isAdmin = false;
+    auditEmissions.length = 0;
+    vi.resetModules();
+  });
+
+  /** Admin client whose system_flags update resolves to `updateError`. */
+  function mockAdminUpdate(updateError: { message: string } | null): void {
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: () => ({
+          update: () => ({ eq: async () => ({ error: updateError }) }),
+        }),
+      }),
+    }));
+  }
+
+  /** Admin client whose system_flags select resolves to {data, error}. */
+  function mockAdminSelect(
+    data: { enabled: boolean; updated_at?: string } | null,
+    error: { message: string } | null,
+  ): void {
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: () => ({
+          select: () => ({
+            eq: () => ({ maybeSingle: async () => ({ data, error }) }),
+          }),
+        }),
+      }),
+    }));
+  }
+
+  // ── POST validation ─────────────────────────────────────────────────
+  it("POST returns 401 when there is no authenticated user", async () => {
+    userState.current = null;
+    mockAdminUpdate(null);
+    const { POST } = await import("./route");
+    const res = await POST(makePostReq({ enabled: true }));
+    expect(res.status).toBe(401);
+    expect(auditEmissions).toHaveLength(0);
+  });
+
+  it("POST returns 400 when body.enabled is not a boolean", async () => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    mockAdminUpdate(null);
+    const { POST } = await import("./route");
+    const res = await POST(makePostReq({ enabled: "yes" }));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("enabled (boolean) required");
+    // Validation failure must not flip the flag → no audit.
+    expect(auditEmissions).toHaveLength(0);
+  });
+
+  it("POST returns 400 when body.enabled is missing entirely", async () => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    mockAdminUpdate(null);
+    const { POST } = await import("./route");
+    const res = await POST(makePostReq({}));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("enabled (boolean) required");
+    expect(auditEmissions).toHaveLength(0);
+  });
+
+  it("POST returns 400 on invalid JSON body", async () => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    mockAdminUpdate(null);
+    const { POST } = await import("./route");
+    const req = new NextRequest(
+      "http://localhost:3000/api/admin/match/kill-switch",
+      { method: "POST", headers: VALID_ORIGIN, body: "{not json" },
+    );
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("Invalid request body");
+    expect(auditEmissions).toHaveLength(0);
+  });
+
+  it("POST returns 500 (no audit) when the system_flags update errors", async () => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    mockAdminUpdate({ message: "update conflict" });
+    const { POST } = await import("./route");
+    const res = await POST(makePostReq({ enabled: false }));
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toBe("Failed to update flag");
+    // The flip failed at the DB → the audit row must NOT be emitted.
+    expect(auditEmissions).toHaveLength(0);
+  });
+
+  // ── GET branches ────────────────────────────────────────────────────
+  it("GET returns 401 when there is no authenticated user", async () => {
+    userState.current = null;
+    mockAdminSelect(null, null);
+    const { GET } = await import("./route");
+    const res = await GET();
+    expect(res.status).toBe(401);
+  });
+
+  it("GET returns 403 when the authenticated caller is not an admin", async () => {
+    userState.current = { id: "user-1" };
+    adminFlag.isAdmin = false;
+    mockAdminSelect(null, null);
+    const { GET } = await import("./route");
+    const res = await GET();
+    expect(res.status).toBe(403);
+  });
+
+  it("GET returns 503 with the migration-011 hint when the system_flags select errors", async () => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    mockAdminSelect(null, { message: "relation system_flags does not exist" });
+    const { GET } = await import("./route");
+    const res = await GET();
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toMatch(/migration 011/i);
+  });
+
+  it("GET falls back to enabled=true when no system_flags row exists (data null)", async () => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    mockAdminSelect(null, null);
+    const { GET } = await import("./route");
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // No row → the engine is treated as enabled (fail-open default).
+    expect(body.enabled).toBe(true);
+  });
+
+  it("GET reflects the persisted enabled=false flag when a row exists", async () => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    mockAdminSelect({ enabled: false, updated_at: "2026-05-01T00:00:00Z" }, null);
+    const { GET } = await import("./route");
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.enabled).toBe(false);
+    expect(body.updated_at).toBe("2026-05-01T00:00:00Z");
+  });
+});

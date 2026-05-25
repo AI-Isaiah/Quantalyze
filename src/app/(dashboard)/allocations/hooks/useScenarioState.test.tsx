@@ -474,4 +474,136 @@ describe("useScenarioState", () => {
     // toggle-off renormalization side-effects, so they MUST NOT count.
     expect(result.current.diffCount).toBe(1);
   });
+
+  // H-0124 — pins the CONSERVATIVE M8 contract the source documents
+  // (useScenarioState.ts:174-189): diffCount counts toggle changes + added
+  // strategies + ONLY user-explicit weight overrides tracked via the optional
+  // `userWeightOverrides` field. The `setWeightOverride` mutator writes to
+  // `weightOverrides` (the renormalizable map), NOT `userWeightOverrides`, so
+  // by design a direct weight drag does NOT increment diffCount under Plan 01's
+  // current draft shape. This is intended behavior — the footer chip showing
+  // "No changes yet" after a manual weight edit is the documented conservative
+  // stance, since toggle-off renormalization also writes the entire weights map
+  // and the two cannot be distinguished at this layer. T_USE13 only covers the
+  // toggle path; this pins the weight-override path that the hook reads but the
+  // existing suite never wrote.
+  it("H-0124 — setWeightOverride alone does NOT increment diffCount (conservative M8 contract; userWeightOverrides absent in Plan 01 shape)", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+    expect(result.current.diffCount).toBe(0);
+
+    act(() => {
+      // User explicitly drags BTC's weight to 0.9. weightOverrides updates,
+      // but the draft carries no `userWeightOverrides` field (Plan 01 shape),
+      // so diffCount stays 0 by design.
+      result.current.setWeightOverride(REF_BTC, 0.9);
+    });
+
+    // The weight DID change in the draft...
+    expect(result.current.draft.weightOverrides[REF_BTC]).toBeCloseTo(0.9, 9);
+    // ...but diffCount stays 0 (no toggle change, no added strategy, and the
+    // weight change is not a tracked user-explicit override).
+    expect(result.current.diffCount).toBe(0);
+  });
+
+  // H-0124 (companion) — prove the diffCount math DOES read userWeightOverrides
+  // when the field is present, so the conservative-zero above is genuinely
+  // "field absent" and not "diffCount ignores weights entirely". A persisted
+  // draft carrying userWeightOverrides that differs from the default weight by
+  // > 1e-9 contributes exactly one to diffCount (source lines 200-207).
+  it("H-0124 — diffCount counts a user-explicit weight override when userWeightOverrides IS present on the persisted draft", () => {
+    const fp = computeHoldingsFingerprint(HOLDINGS_2);
+    // Default weights for HOLDINGS_2 are BTC 0.6 / ETH 0.4. Persist a draft
+    // whose userWeightOverrides[BTC] diverges from the default 0.6.
+    const persisted = {
+      schema_version: 1,
+      init_holdings_fingerprint: fp,
+      toggleByScopeRef: { [REF_BTC]: true, [REF_ETH]: true },
+      addedStrategies: [],
+      weightOverrides: { [REF_BTC]: 0.9, [REF_ETH]: 0.1 },
+      userWeightOverrides: { [REF_BTC]: 0.9 },
+      lastEditedAt: "2026-04-25T00:00:00.000Z",
+    };
+    store.set(scenarioStorageKey(ALLOCATOR_A), JSON.stringify(persisted));
+
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+
+    // BTC's 0.9 user override differs from the default 0.6 → counts as 1.
+    expect(result.current.diffCount).toBe(1);
+  });
+
+  // M-0136 (pr-test-analyzer) — the prior suite covers single mutators but
+  // not (a) rapid concurrent edits within one render pass nor (b) the
+  // documented cross-tab limitation.
+
+  // (a) Every mutator uses a FUNCTIONAL setDraft updater (setDraft((d) => …)),
+  // so a burst of edits queued in a single act() must all compose — none
+  // dropped by a stale closure over `draft`. A regression that switched any
+  // mutator to a value-form setState (setDraft(fn(draft))) would lose all but
+  // the last edit of the burst; this pins that they accumulate.
+  it("M-0136: rapid concurrent edits in one render pass all compose (no stale-closure drop)", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+
+    // Burst: toggle BTC off, add two strategies, override ETH weight — all
+    // before React flushes a re-render.
+    act(() => {
+      result.current.toggleHolding(REF_BTC);
+      result.current.addStrategyBrowse(STRAT_A);
+      result.current.addStrategyBrowse(STRAT_B_FIXTURE);
+      result.current.setWeightOverride(REF_ETH, 0.5);
+    });
+
+    // All four edits survived the burst.
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(false);
+    const addedIds = result.current.draft.addedStrategies.map((s) => s.id);
+    expect(addedIds).toContain(STRAT_A.id);
+    expect(addedIds).toContain(STRAT_B_FIXTURE.id);
+    // setWeightOverride is the last edit in the burst — its value persists.
+    expect(result.current.draft.weightOverrides[REF_ETH]).toBeCloseTo(0.5, 9);
+    // The two adds are not deduped into one (distinct ids).
+    expect(addedIds.length).toBe(2);
+  });
+
+  // (b) The hook installs NO `storage` event listener (useScenarioState.ts —
+  // only the persist effect + auth-change clear). A second browser tab editing
+  // the SAME allocator's draft writes to localStorage and dispatches a
+  // `storage` event, but tab A's hook does NOT subscribe, so its in-memory
+  // draft is unchanged — and tab A's next persist will overwrite tab B's
+  // write. This is a real two-tab race for a long-form scenario builder. The
+  // test pins the CURRENT (no-cross-tab-sync) contract so a future change that
+  // adds a listener surfaces here intentionally rather than silently.
+  it("M-0136: cross-tab write does NOT propagate — hook installs no `storage` listener (pins the known limitation)", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+
+    // Baseline: BTC enabled.
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(true);
+
+    // Simulate ANOTHER tab persisting an edited draft for the SAME allocator
+    // and the browser firing the cross-tab `storage` event.
+    const scopedKey = scenarioStorageKey(ALLOCATOR_A);
+    const otherTabDraft: ScenarioDraft = {
+      ...defaultDraftFromHoldings(HOLDINGS_2, computeHoldingsFingerprint(HOLDINGS_2)),
+      toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: true },
+    };
+    act(() => {
+      store.set(scopedKey, JSON.stringify(otherTabDraft));
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: scopedKey,
+          newValue: JSON.stringify(otherTabDraft),
+        }),
+      );
+    });
+
+    // No listener → tab A's draft is unchanged (still BTC enabled). This is the
+    // documented limitation, not a bug fix.
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(true);
+  });
 });

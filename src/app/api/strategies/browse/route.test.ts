@@ -544,4 +544,70 @@ describe("GET /api/strategies/browse", () => {
     expect(cols).toContain("codename");
     expect(cols).toContain("name");
   });
+
+  // ============================================================
+  // H-0300 — response-payload allow-list / forbidden-key fence
+  //
+  // The route co-fetches `disclosure_tier` (and could, after a future
+  // copy-paste, co-fetch backtest stats) purely to drive the name-
+  // redaction projection. The PROJECTION must strip everything except
+  // the five BrowseStrategyRow keys. The existing T12 tests pin the
+  // NAME redaction, but none asserts the response object's key SET — so
+  // a regression that spread `...row` (or added `disclosure_tier` /
+  // `backtest_returns` to the emitted object) would leak silently. These
+  // tests pin the exhaustive allow-list and the forbidden-key absence.
+  // ============================================================
+  it("H-0300a — emitted strategy objects expose ONLY the BrowseStrategyRow allow-list", async () => {
+    STATE.strategyRows = [
+      {
+        id: "88888888-8888-4888-8888-888888888888",
+        name: "Two Sigma Equity",
+        codename: "TS-Eq",
+        disclosure_tier: "institutional",
+        markets: ["equity"],
+        strategy_types: ["long-short"],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies).toHaveLength(1);
+
+    const ALLOWED = ["id", "name", "codename", "markets", "strategy_types"].sort();
+    expect(Object.keys(body.strategies[0]).sort()).toEqual(ALLOWED);
+    // Explicit forbidden-key fence — disclosure_tier is fetched but must
+    // never reach the wire.
+    expect(body.strategies[0]).not.toHaveProperty("disclosure_tier");
+  });
+
+  it("H-0300b — an extra sensitive column on the source row does NOT leak into the response", async () => {
+    // Model a future copy-paste that adds `backtest_returns` (and a stray
+    // `user_id`) to the SELECT. Because the route projects an explicit
+    // allow-list rather than spreading the row, these MUST be dropped. If
+    // a regression switched to `{ ...row, name: safeLabel }`, this fails.
+    STATE.strategyRows = [
+      {
+        id: "99999999-9999-4999-8999-999999999999",
+        name: "Citadel Wellington",
+        codename: "W-1",
+        disclosure_tier: "institutional",
+        markets: ["multi"],
+        strategy_types: ["multi-strategy"],
+        backtest_returns: [0.12, 0.34, 0.56],
+        user_id: "secret-owner-uuid",
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.strategies[0]).not.toHaveProperty("backtest_returns");
+    expect(body.strategies[0]).not.toHaveProperty("user_id");
+    expect(body.strategies[0]).not.toHaveProperty("disclosure_tier");
+    // Whole-payload sweep — none of the sensitive values appear anywhere.
+    expect(JSON.stringify(body)).not.toContain("secret-owner-uuid");
+    expect(JSON.stringify(body)).not.toContain("0.34");
+  });
 });

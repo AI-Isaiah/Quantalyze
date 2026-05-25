@@ -13,6 +13,7 @@ P2025 (backfill enqueue per-row exception capture):
 """
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -240,3 +241,102 @@ class TestDeployIncompleteOnBackfillFail:
         captured = capsys.readouterr()
         assert rc == 0
         assert "Phase 12 deploy: complete" in captured.out
+
+
+# --- H-0604: cross-step abort contract for .env.test + os.environ ----------
+
+
+class TestDeployAbortStepWriteContract:
+    """H-0604: Step 1 writes .env.test AND mutates os.environ
+    TRADE_MIX_HAS_MAKER_TAKER BEFORE Step 2's SQL probe runs. If the probe
+    fails (or the kill-switch returns non-zero), main() returns early — the
+    orchestrator is NOT atomic across steps. These tests make that contract
+    EXPLICIT (the finding noted it was unresolved):
+
+      * The value written to .env.test is ALWAYS the audited TODOS.md flag,
+        never a stale/wrong value — so even though Step 1's write is not rolled
+        back on a later-step abort, CI never sources a WRONG flag (the write
+        only ever reflects the audited source-of-truth).
+      * Steps 3 (kill-switch) and 4 (backfill) are NOT reached on a probe abort.
+
+    If a future change makes .env.test contain something OTHER than the audited
+    flag on abort, these tests fail — surfacing the "stale .env.test" bug class
+    the finding flagged.
+    """
+
+    @pytest.mark.asyncio
+    async def test_probe_failure_leaves_audited_flag_in_env_test(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        # Real TODOS.md with an explicit audited flag + real (empty) .env.test
+        # target so we observe the ACTUAL _write_env_test side effect.
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("TRADE_MIX_HAS_MAKER_TAKER = true\n")
+        env_test = tmp_path / ".env.test"
+        monkeypatch.setattr(dep, "TODOS_PATH", todos)
+        monkeypatch.setattr(dep, "ENV_TEST_PATH", env_test)
+        # Isolate the process env mutation from the rest of the suite.
+        monkeypatch.delenv("TRADE_MIX_HAS_MAKER_TAKER", raising=False)
+
+        # Step 2 probe FAILS.
+        def _failing_probe():
+            raise RuntimeError("DATABASE_URL unreachable")
+
+        monkeypatch.setattr(dep, "_run_sql_probe", _failing_probe)
+
+        # Spy on Steps 3 + 4 to prove they are NOT reached after the abort.
+        ks = AsyncMock(return_value=0)
+        bf = AsyncMock(return_value=0)
+        with patch("scripts.phase12_deploy.phase12_kill_switch.main", new=ks):
+            with patch(
+                "scripts.phase12_deploy.phase12_backfill_enqueue.main", new=bf
+            ):
+                rc = await dep.main()
+
+        # Abort: returns 1.
+        assert rc == 1
+        # Step 1 already shipped .env.test — it is NOT rolled back (documents
+        # the non-atomic contract).
+        assert env_test.exists(), (
+            ".env.test was not written — Step 1 ordering changed"
+        )
+        contents = env_test.read_text()
+        # Crucially: the value is the AUDITED flag, never stale/wrong.
+        assert "TRADE_MIX_HAS_MAKER_TAKER=true" in contents
+        assert "TRADE_MIX_HAS_MAKER_TAKER=false" not in contents
+        # os.environ mirrors the audited flag (Step 1 set it before the probe).
+        assert os.environ.get("TRADE_MIX_HAS_MAKER_TAKER") == "true"
+        # Downstream steps must NOT run after a probe abort.
+        ks.assert_not_awaited()
+        bf.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_nonzero_aborts_before_backfill(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """The finding also calls out the kill-switch non-zero path (Step 3):
+        backfill (Step 4) must be skipped, but .env.test has already shipped
+        with the audited flag — same non-atomic-but-correct-value contract."""
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("TRADE_MIX_HAS_MAKER_TAKER = false\n")
+        env_test = tmp_path / ".env.test"
+        monkeypatch.setattr(dep, "TODOS_PATH", todos)
+        monkeypatch.setattr(dep, "ENV_TEST_PATH", env_test)
+        monkeypatch.delenv("TRADE_MIX_HAS_MAKER_TAKER", raising=False)
+        monkeypatch.setattr(dep, "_run_sql_probe", lambda: (100.0, 1))
+
+        # Step 3 kill-switch returns non-zero → abort before Step 4.
+        ks = AsyncMock(return_value=2)
+        bf = AsyncMock(return_value=0)
+        with patch("scripts.phase12_deploy.phase12_kill_switch.main", new=ks):
+            with patch(
+                "scripts.phase12_deploy.phase12_backfill_enqueue.main", new=bf
+            ):
+                rc = await dep.main()
+
+        assert rc == 2  # kill-switch rc propagated
+        assert env_test.read_text().strip().endswith("TRADE_MIX_HAS_MAKER_TAKER=false")
+        assert os.environ.get("TRADE_MIX_HAS_MAKER_TAKER") == "false"
+        ks.assert_awaited_once()
+        # Backfill (Step 4) must NOT run after a non-zero kill-switch.
+        bf.assert_not_awaited()

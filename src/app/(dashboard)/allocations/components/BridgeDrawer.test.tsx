@@ -239,6 +239,115 @@ describe("BridgeDrawer — Phase 09.1 Plan 09 / D-15 / D-16", () => {
     expect(screen.getByText("No candidates available.")).toBeInTheDocument();
   });
 
+  // -------------------------------------------------------------------------
+  // H-0081 — state-machine error paths missing: thrown helper, network-error
+  // rejection, and concurrent click double-fire.
+  // -------------------------------------------------------------------------
+
+  // H-0081 fix is in place: handleSendIntro now wraps `await sendBridgeIntro`
+  // in try/catch + finally. A rejected helper must be caught, the submit button
+  // re-enabled (finally), AND the error surfaced via setError (catch), mirroring
+  // the resolved {ok:false} path. This test pins BOTH halves of that contract.
+  it(
+    "H-0081: sendBridgeIntro that REJECTS (throws) re-enables the button AND surfaces the rejection message for retry",
+    async () => {
+      mockSendBridgeIntro.mockRejectedValueOnce(new Error("network exploded"));
+      const onClose = vi.fn();
+      render(
+        <BridgeDrawer
+          isOpen
+          onClose={onClose}
+          flaggedHoldings={[FLAGGED_A]}
+          matchDecisionsByHoldingRef={{}}
+        />,
+      );
+      fireEvent.click(
+        screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /Send intro/ }));
+
+      // CORRECT behaviour assertion: the button should recover to "Send intro"
+      // (no longer submitting) so the allocator can retry.
+      await waitFor(() => {
+        const btn = screen.getByRole("button", { name: /Send intro|Sending/ });
+        expect(btn).not.toBeDisabled();
+        expect(btn).toHaveTextContent("Send intro");
+      });
+      // The rejection's message must be SURFACED to the allocator — not just the
+      // button recovered. The catch block does TWO things (finally re-enables
+      // the button AND setError shows the failure); a partial revert that kept
+      // the finally but dropped the setError would still pass the recovery
+      // assertion above yet leave the allocator with a stuck-looking failure and
+      // no message. Mirror the sibling {ok:false} case's role="alert" assertion.
+      expect(screen.getByRole("alert")).toHaveTextContent("network exploded");
+      // And the drawer must not have silently closed on a failed send.
+      expect(onClose).not.toHaveBeenCalled();
+    },
+  );
+
+  it("H-0081: resolved {ok:false} (network-error message) surfaces the error and re-enables the button for retry", async () => {
+    mockSendBridgeIntro.mockResolvedValueOnce({
+      ok: false,
+      error: "Network error — could not reach server",
+    });
+    const onClose = vi.fn();
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={onClose}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Send intro/ }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Network error — could not reach server",
+      );
+    });
+    // Button is re-enabled so the allocator can retry; drawer stays open.
+    const btn = screen.getByRole("button", { name: /Send intro/ });
+    expect(btn).not.toBeDisabled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("H-0081: concurrent double-click on Send intro fires the helper only once (disabled guard)", () => {
+    // Helper stays pending so `submitting` remains true after the first click;
+    // the button's disabled guard must swallow the second click.
+    let resolveIntro: ((v: { ok: boolean }) => void) | null = null;
+    mockSendBridgeIntro.mockImplementationOnce(
+      () =>
+        new Promise<{ ok: boolean }>((resolve) => {
+          resolveIntro = resolve;
+        }),
+    );
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={vi.fn()}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    const sendBtn = screen.getByRole("button", { name: /Send intro/ });
+    fireEvent.click(sendBtn);
+    // Second click while the first is in flight (button now disabled/"Sending…").
+    fireEvent.click(sendBtn);
+
+    expect(mockSendBridgeIntro).toHaveBeenCalledTimes(1);
+
+    // Drain the pending promise so the test doesn't leak. Cast at the call
+    // site — TS narrows the closure-assigned binding to its initial `null`.
+    (resolveIntro as unknown as (v: { ok: boolean }) => void)?.({ ok: true });
+  });
+
   it("D-16 invariant — drawer never calls fetch directly; routes through sendBridgeIntro", async () => {
     const fs = await import("node:fs/promises");
     const path = await import("node:path");
@@ -434,4 +543,103 @@ describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () 
     expect(sendBtn.className).toMatch(/bg-accent/);
     expect(addBtn.className).toMatch(/bg-accent/);
   });
+
+  // ---------------------------------------------------------------------------
+  // M-0055 — the "Add to scenario" handler is wrapped in try/finally
+  // (BridgeDrawer.tsx:148-157, explicitly added as a review-pass P2 fix) so
+  // that `onClose` ALWAYS runs even when the host callback throws
+  // synchronously. Without the finally, an exception in onAddToScenario would
+  // strand the drawer open with no dismiss path. The T_AS* cases only cover
+  // the happy path; this case pins the defensive contract.
+  // ---------------------------------------------------------------------------
+  it("M-0055 — onAddToScenario throwing still fires onClose (try/finally guard)", () => {
+    const onAddToScenario = vi.fn(() => {
+      throw new Error("host blew up");
+    });
+    const onClose = vi.fn();
+    // React 19 routes an exception thrown inside an event handler through its
+    // own dispatch + window `error` event (reportError) rather than re-throwing
+    // synchronously to fireEvent. Install a capturing listener that swallows
+    // the reported error so it doesn't surface as an unhandled rejection /
+    // false-positive test failure — the production behaviour under test is
+    // "onClose runs anyway via the finally", not the throw itself.
+    const captured: ErrorEvent[] = [];
+    const handler = (e: ErrorEvent) => {
+      if (e.error instanceof Error && e.error.message === "host blew up") {
+        captured.push(e);
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("error", handler);
+    try {
+      render(
+        <BridgeDrawer
+          isOpen
+          onClose={onClose}
+          flaggedHoldings={[FLAGGED_A]}
+          matchDecisionsByHoldingRef={{}}
+          onAddToScenario={onAddToScenario}
+        />,
+      );
+      fireEvent.click(
+        screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+      );
+      fireEvent.click(screen.getByTestId("bridge-add-to-scenario"));
+    } finally {
+      window.removeEventListener("error", handler);
+    }
+    // The callback threw, but the `finally` in handleAddToScenario fired
+    // onClose first — so the drawer never strands open on a host exception.
+    expect(onAddToScenario).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // And the thrown error genuinely propagated (proving the finally ran in
+    // the presence of a real exception, not because the callback succeeded).
+    expect(captured.length).toBeGreaterThan(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // M-0057 — the "← Back to candidates" button is a state-machine transition.
+  // The existing "Back button → returns to browse stage" case only asserts the
+  // happy-path stage flip. It does NOT pin whether a previously-surfaced error
+  // (set on a failed Send intro) is cleared when the allocator backs out and
+  // re-enters the confirm stage. The CORRECT behaviour is that backing out
+  // clears the transient error so a stale "server fell over" alert never
+  // re-appears on the next confirm view.
+  // ---------------------------------------------------------------------------
+  it(
+    "M-0057: error surfaced on a failed Send intro is NOT cleared when going Back then re-entering confirm — fix in follow-up (Back handler should setError(null))",
+    async () => {
+      mockSendBridgeIntro.mockResolvedValueOnce({
+        ok: false,
+        error: "server fell over",
+      });
+      render(
+        <BridgeDrawer
+          isOpen
+          onClose={vi.fn()}
+          flaggedHoldings={[FLAGGED_A]}
+          matchDecisionsByHoldingRef={{}}
+        />,
+      );
+      // Enter confirm, trigger a failing send → error alert appears.
+      fireEvent.click(
+        screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /Send intro/ }));
+      await waitFor(() => {
+        expect(screen.getByRole("alert")).toHaveTextContent("server fell over");
+      });
+
+      // Back out to browse, then re-enter confirm for the same candidate.
+      fireEvent.click(
+        screen.getByRole("button", { name: /Back to candidates/ }),
+      );
+      fireEvent.click(
+        screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+      );
+
+      // CORRECT behaviour: the confirm stage should be clean — no stale alert.
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    },
+  );
 });
