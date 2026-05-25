@@ -182,6 +182,78 @@ class TestClassifyException:
         kind, msg = classify_exception(exc)
         assert kind == "unknown"
 
+    # --- H-1247: 4xx/5xx bracket boundary stress -------------------------
+    # The 4xx classifier hinges on `400 <= status < 500` (job_worker.py
+    # case arm). Tests above only cover a contiguous 400/422 block plus the
+    # explicit 403/404/408/429 carve-outs. These pin the bracket *edges*
+    # and unusual-but-real codes so an off-by-one (`400 < status`) or a
+    # later "transient 5xx" carve-out can't slip past unnoticed.
+
+    def test_http_exception_401_is_permanent(self) -> None:
+        """401 Unauthorized is a plain 4xx (not in the 408/429 transient or
+        403/404 deploy-blip sets) → permanent. FastAPI auth deps raise this
+        and no retry fixes a genuinely-unauthenticated caller."""
+        exc = HTTPException(status_code=401, detail="Not authenticated")
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+        assert "401" in msg
+
+    def test_http_exception_499_is_permanent(self) -> None:
+        """Upper edge of the 4xx bracket (`status < 500`). 499 is inside the
+        permanent range; if a refactor flipped the comparison to
+        `status <= 500` or `400 < status` the boundary semantics would drift
+        and this fires."""
+        exc = HTTPException(status_code=499, detail="client closed request")
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+        assert "499" in msg
+
+    def test_http_exception_399_falls_through_to_unknown(self) -> None:
+        """Lower edge: 399 is below the 4xx bracket so it falls through every
+        4xx arm to the catch-all unknown branch."""
+        exc = HTTPException(status_code=399, detail="odd sub-4xx code")
+        kind, _ = classify_exception(exc)
+        assert kind == "unknown"
+
+    def test_http_exception_503_is_unknown_retry(self) -> None:
+        """5xx is retried by default — pin 503 (not just 500) so a future
+        'transient bracket for network-flavored 5xx' refactor doesn't
+        silently reclassify without a test failure."""
+        exc = HTTPException(status_code=503, detail="upstream unavailable")
+        kind, _ = classify_exception(exc)
+        assert kind == "unknown"
+
+    # --- H-1248: HTTPException detail truncation (480 cap + 500 total) ----
+
+    def test_http_exception_long_detail_is_truncated(self) -> None:
+        """The HTTPException branch truncates the detail (480 cap in
+        _format_http_detail) and the whole message to 500, leaving headroom
+        for the '{status}: ' prefix. This is a SEPARATE cap from the generic
+        500-char RuntimeError cap covered by test_message_is_truncated — if a
+        refactor unified them the per-branch headroom guarantee would vanish
+        with no other test biting."""
+        long_detail = "y" * 5000
+        exc = HTTPException(status_code=400, detail=long_detail)
+        _, msg = classify_exception(exc)
+        assert len(msg) <= 500, f"HTTPException message must be <=500 chars, got {len(msg)}"
+        assert msg.startswith("400: "), "HTTPException message must start with status prefix"
+
+    # --- H-1249: non-string HTTPException.detail (None / dict) ------------
+
+    def test_http_exception_none_detail_is_permanent(self) -> None:
+        """FastAPI defaults detail to a status reason phrase when None is
+        passed, but the classifier's _format_http_detail also explicitly
+        maps detail is None → "". Either way the classifier must not crash
+        and must still classify by status. 400 → permanent, prefix intact."""
+        exc = HTTPException(status_code=400)
+        exc.detail = None  # exercise the explicit None branch in _format_http_detail
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+        assert "400" in msg
+        # The literal string 'None' must NOT leak into the stored message —
+        # _format_http_detail returns "" for None rather than str(None).
+        assert "None" not in msg
+
     def test_message_is_truncated(self) -> None:
         """Error strings longer than 500 chars must be truncated so admin UI
         rows don't blow up. Uses a generic RuntimeError to test the cap
@@ -350,6 +422,125 @@ class TestDispatchRouting:
             result = await dispatch(job)
         mock_handler.assert_awaited_once_with(job)
         assert result.outcome == DispatchOutcome.DONE
+
+    # --- H-0775: routing coverage for the remaining production kinds -----
+    # dispatch_tick (main_worker) mocks `dispatch` wholesale, so handler
+    # routing is ONLY exercised here. Prior to these tests, six live kinds
+    # had no routing assertion: a typo in the elif chain (e.g.
+    # `compute_analytics_from_csv` accidentally falling to the
+    # `compute_analytics` arm) would route jobs to the wrong handler with no
+    # test failure. These pin each kind → handler edge, including the three
+    # lazily-imported handlers which must be patched at their SOURCE module
+    # (dispatch does `from services.X import run_Y` inside the elif arm).
+
+    @pytest.mark.asyncio
+    async def test_dispatch_routes_compute_analytics_from_csv(self) -> None:
+        """Phase 19.1: compute_analytics_from_csv must route to its own
+        CSV handler, NOT the trades-based run_compute_analytics_job."""
+        job = {"id": "job-csv", "kind": "compute_analytics_from_csv", "strategy_id": "s-csv"}
+        with patch(
+            "services.job_worker.run_compute_analytics_from_csv_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+        ) as mock_csv, patch(
+            "services.job_worker.run_compute_analytics_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+        ) as mock_trades, patch(
+            "services.job_worker.sync_strategy_analytics_status",
+            new=AsyncMock(return_value=None),
+        ):
+            await dispatch(job)
+        mock_csv.assert_awaited_once_with(job)
+        mock_trades.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_routes_sync_funding(self) -> None:
+        job = {"id": "job-fund", "kind": "sync_funding", "strategy_id": "s-fund"}
+        with patch(
+            "services.job_worker.run_sync_funding_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+        ) as mock_handler, patch(
+            "services.job_worker.sync_strategy_analytics_status",
+            new=AsyncMock(return_value=None),
+        ):
+            await dispatch(job)
+        mock_handler.assert_awaited_once_with(job)
+
+    @pytest.mark.asyncio
+    async def test_dispatch_routes_reconcile_strategy(self) -> None:
+        job = {"id": "job-rec", "kind": "reconcile_strategy", "strategy_id": "s-rec"}
+        with patch(
+            "services.job_worker.run_reconcile_strategy_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+        ) as mock_handler, patch(
+            "services.job_worker.sync_strategy_analytics_status",
+            new=AsyncMock(return_value=None),
+        ):
+            await dispatch(job)
+        mock_handler.assert_awaited_once_with(job)
+
+    @pytest.mark.asyncio
+    async def test_dispatch_routes_rescore_allocator(self) -> None:
+        """rescore_allocator is allocator-scoped (no strategy_id) — the
+        status bridge must NOT fire."""
+        job = {"id": "job-rescore", "kind": "rescore_allocator", "allocator_id": "a-1"}
+        with patch(
+            "services.job_worker.run_rescore_allocator_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+        ) as mock_handler, patch(
+            "services.job_worker.sync_strategy_analytics_status",
+            new=AsyncMock(return_value=None),
+        ) as mock_bridge:
+            await dispatch(job)
+        mock_handler.assert_awaited_once_with(job)
+        mock_bridge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_routes_poll_allocator_positions(self) -> None:
+        job = {"id": "job-apos", "kind": "poll_allocator_positions", "allocator_id": "a-2"}
+        with patch(
+            "services.job_worker.run_poll_allocator_positions_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+        ) as mock_handler:
+            await dispatch(job)
+        mock_handler.assert_awaited_once_with(job)
+
+    @pytest.mark.asyncio
+    async def test_dispatch_routes_reconstruct_allocator_history(self) -> None:
+        """Lazily imported handler — dispatch does
+        `from services.equity_reconstruction import run_reconstruct_allocator_history_job`
+        inside the elif arm, so the patch target is the SOURCE module."""
+        job = {"id": "job-recon", "kind": "reconstruct_allocator_history", "allocator_id": "a-3"}
+        with patch(
+            "services.equity_reconstruction.run_reconstruct_allocator_history_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+        ) as mock_handler:
+            await dispatch(job)
+        mock_handler.assert_awaited_once_with(job)
+
+    @pytest.mark.asyncio
+    async def test_dispatch_routes_refresh_allocator_equity_daily(self) -> None:
+        job = {"id": "job-eqd", "kind": "refresh_allocator_equity_daily", "allocator_id": "a-4"}
+        with patch(
+            "services.equity_reconstruction.run_refresh_allocator_equity_daily_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+        ) as mock_handler:
+            await dispatch(job)
+        mock_handler.assert_awaited_once_with(job)
+
+    @pytest.mark.asyncio
+    async def test_dispatch_routes_process_key_long(self) -> None:
+        """Phase 19 / BACKBONE-09 — lazily imported from
+        services.ingestion.long_fetch."""
+        job = {"id": "job-long", "kind": "process_key_long", "strategy_id": "s-long"}
+        with patch(
+            "services.ingestion.long_fetch.run_process_key_long_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+        ) as mock_handler, patch(
+            "services.job_worker.sync_strategy_analytics_status",
+            new=AsyncMock(return_value=None),
+        ):
+            await dispatch(job)
+        mock_handler.assert_awaited_once_with(job)
 
     @pytest.mark.asyncio
     async def test_dispatch_unknown_kind_returns_permanent_failed(self) -> None:

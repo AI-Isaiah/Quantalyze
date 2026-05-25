@@ -102,6 +102,14 @@ class TestDispatchTick:
         assert rpc_names.count("claim_compute_jobs_with_priority") == 1
         assert rpc_names.count("mark_compute_job_done") == 3
         assert "mark_compute_job_failed" not in rpc_names
+        # H-0776: make the call_count bookkeeping load-bearing instead of
+        # dead scaffolding. The side-effect fires once per supabase.rpc()
+        # call, so 1 claim + 3 mark_done = 4 — this pins that dispatch_tick
+        # issues exactly one mark RPC per dispatched job (no extra probes,
+        # no missed marks) independently of the name-count assertions above.
+        assert call_count == 4, (
+            f"expected 1 claim + 3 mark RPC calls = 4, got {call_count}"
+        )
 
     @pytest.mark.asyncio
     async def test_dispatch_raising_exception_marks_failed(self) -> None:
@@ -184,18 +192,26 @@ class TestDispatchTick:
         chain.execute.return_value = MagicMock(data=[])
         mock_supabase.rpc.return_value = chain
 
-        main_worker_healthz.LAST_TICK_AT = 0.0
-        before = main_worker_healthz.LAST_TICK_AT
+        # M-0738: LAST_TICK_AT is a module global read by healthz-probe code
+        # elsewhere. Snapshot + restore in try/finally so this test's
+        # mutation can't leak test-order-dependent state into downstream
+        # tests (or other files) that read the same global.
+        _saved_tick = main_worker_healthz.LAST_TICK_AT
+        try:
+            main_worker_healthz.LAST_TICK_AT = 0.0
+            before = main_worker_healthz.LAST_TICK_AT
 
-        with patch("main_worker.get_supabase", return_value=mock_supabase), \
-             patch("main_worker.dispatch", new=AsyncMock()):
-            await dispatch_tick("worker-test-idle")
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=AsyncMock()):
+                await dispatch_tick("worker-test-idle")
 
-        after = main_worker_healthz.LAST_TICK_AT
-        assert after > before, (
-            "dispatch_tick with zero claimed jobs must still update "
-            "LAST_TICK_AT; otherwise healthz lies about liveness."
-        )
+            after = main_worker_healthz.LAST_TICK_AT
+            assert after > before, (
+                "dispatch_tick with zero claimed jobs must still update "
+                "LAST_TICK_AT; otherwise healthz lies about liveness."
+            )
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved_tick
 
     @pytest.mark.asyncio
     async def test_non_empty_claim_bumps_healthz_last_tick(self) -> None:
@@ -209,18 +225,23 @@ class TestDispatchTick:
         chain.execute.return_value = MagicMock(data=jobs)
         mock_supabase.rpc.return_value = chain
 
-        main_worker_healthz.LAST_TICK_AT = 0.0
-        before = main_worker_healthz.LAST_TICK_AT
+        # M-0738: snapshot + restore the global (see idle test above).
+        _saved_tick = main_worker_healthz.LAST_TICK_AT
+        try:
+            main_worker_healthz.LAST_TICK_AT = 0.0
+            before = main_worker_healthz.LAST_TICK_AT
 
-        with patch("main_worker.get_supabase", return_value=mock_supabase), \
-             patch(
-                 "main_worker.dispatch",
-                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
-             ):
-            await dispatch_tick("worker-test-busy")
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch(
+                     "main_worker.dispatch",
+                     new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+                 ):
+                await dispatch_tick("worker-test-busy")
 
-        after = main_worker_healthz.LAST_TICK_AT
-        assert after > before
+            after = main_worker_healthz.LAST_TICK_AT
+            assert after > before
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved_tick
 
     # METRICS-14 / Plan 12-07: priority-aware claim path. The throttle MUST
     # live in the claim path (dispatch_tick), not in dispatch() — by the time
@@ -361,6 +382,57 @@ class TestWatchdogTick:
         assert overrides["poll_positions"] == "5 minutes"
         assert overrides["compute_portfolio"] == "15 minutes"
 
+    @pytest.mark.asyncio
+    async def test_overrides_encode_as_jsonb_object_not_scalar(self) -> None:
+        """H-0773: the JSONB-scalar prod bug.
+
+        The fix dropped json.dumps() because passing a stringified dict to
+        PostgREST encodes as a JSONB *scalar* (a JSON string), and the RPC's
+        jsonb_object_keys(p_per_kind_overrides) then raises
+        'cannot call jsonb_object_keys on a scalar'. The isinstance(dict)
+        check above proves the Python type, but NOT the over-the-wire JSON
+        shape that actually trips Postgres.
+
+        PostgREST serializes RPC params with json.dumps. We replay that
+        serialization on the exact object passed and assert the encoded form
+        round-trips to a JSON OBJECT (`{...}`), not a JSON string scalar
+        (`"{...}"`). A regression that re-wraps the dict in json.dumps()
+        before the RPC call makes this fail because the param would encode
+        as a double-escaped string scalar.
+        """
+        import json
+
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=0)
+        mock_supabase.rpc.return_value = chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            await watchdog_tick()
+
+        params = mock_supabase.rpc.call_args.args[1]
+        param_value = params["p_per_kind_overrides"]
+
+        # Emulate the PostgREST wire encoding of the RPC body.
+        encoded = json.dumps({"p_per_kind_overrides": param_value})
+        decoded = json.loads(encoded)["p_per_kind_overrides"]
+
+        # Decoded back to a dict (JSONB object) — NOT a str (JSONB scalar)
+        # which is what json.dumps()-then-send would produce.
+        assert isinstance(decoded, dict), (
+            "p_per_kind_overrides must encode as a JSON object so Postgres "
+            "stores a JSONB object; a stringified dict encodes as a JSON "
+            "string scalar and trips jsonb_object_keys() in the RPC."
+        )
+        # The raw JSON fragment for this key must open with '{', not '\"' —
+        # i.e. an object literal, not a quoted string.
+        key_pos = encoded.index('"p_per_kind_overrides"')
+        colon_pos = encoded.index(":", key_pos)
+        first_non_space = encoded[colon_pos + 1:].lstrip()[0]
+        assert first_non_space == "{", (
+            f"JSONB value must be an object literal; got leading {first_non_space!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # daily_enqueue_tick
@@ -399,36 +471,44 @@ class TestShutdown:
     async def test_dispatch_loop_exits_on_shutdown(self) -> None:
         from main_worker import dispatch_loop, SHUTDOWN
 
-        # Clear from any prior test state
-        SHUTDOWN.clear()
+        # H-0774: SHUTDOWN is a module-GLOBAL asyncio.Event. This test sets
+        # it mid-body; if the body raised between set() and the cleanup
+        # clear() (e.g. asyncio.wait timing out, an internal assertion),
+        # SHUTDOWN would stay set and EVERY downstream test whose code awaits
+        # a *_loop would exit immediately — an invisible, test-order-dependent
+        # cross-contamination. try/finally guarantees restoration on any exit
+        # path (assertion failure, CancelledError, KeyboardInterrupt).
+        SHUTDOWN.clear()  # start from a known-clear state
+        try:
+            mock_supabase = MagicMock()
+            chain = MagicMock()
+            chain.execute.return_value = MagicMock(data=[])
+            mock_supabase.rpc.return_value = chain
 
-        mock_supabase = MagicMock()
-        chain = MagicMock()
-        chain.execute.return_value = MagicMock(data=[])
-        mock_supabase.rpc.return_value = chain
+            async def _set_shutdown_soon():
+                await asyncio.sleep(0.05)
+                SHUTDOWN.set()
 
-        async def _set_shutdown_soon():
-            await asyncio.sleep(0.05)
-            SHUTDOWN.set()
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=AsyncMock()):
+                # Run the loop with a very short interval so it ticks fast
+                loop_task = asyncio.create_task(
+                    dispatch_loop("test-worker", interval=0.01)
+                )
+                shutdown_task = asyncio.create_task(_set_shutdown_soon())
 
-        with patch("main_worker.get_supabase", return_value=mock_supabase), \
-             patch("main_worker.dispatch", new=AsyncMock()):
-            # Run the loop with a very short interval so it ticks fast
-            loop_task = asyncio.create_task(
-                dispatch_loop("test-worker", interval=0.01)
-            )
-            shutdown_task = asyncio.create_task(_set_shutdown_soon())
+                # The loop must finish within a reasonable window
+                done, pending = await asyncio.wait(
+                    {loop_task, shutdown_task}, timeout=2.0
+                )
+                for p in pending:
+                    p.cancel()
 
-            # The loop must finish within a reasonable window
-            done, pending = await asyncio.wait(
-                {loop_task, shutdown_task}, timeout=2.0
-            )
-            for p in pending:
-                p.cancel()
-
-        assert loop_task.done(), "dispatch_loop did not exit within timeout"
-        # Clean up for next test
-        SHUTDOWN.clear()
+            assert loop_task.done(), "dispatch_loop did not exit within timeout"
+        finally:
+            # Guaranteed restoration so a failure above can't leave the
+            # global SHUTDOWN set for the rest of the suite.
+            SHUTDOWN.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +664,40 @@ class TestWatchdogInvariant:
                 f"value greater than {handler_minutes:.1f} minutes — "
                 "otherwise the watchdog reclaims the still-running job "
                 "and any caller polling for terminal status hangs."
+            )
+
+    def test_watchdog_threshold_has_sane_upper_bound(self) -> None:
+        """H-0777: the watchdog override is a free-form human-typed string
+        (`"60 minutes"`). The lower-bound invariant above only stops a
+        watchdog SHORTER than the handler timeout. But a maintainer typo —
+        e.g. `"60 minutes"` intended as `"60 seconds"`, or a stray extra
+        digit — produces an absurdly large watchdog window. A 60x window
+        means a genuinely-stuck job sits reclaimable-but-unreclaimed for an
+        hour, the very stall the watchdog exists to break.
+
+        Observed ratios across all current overrides are 1.17x–2.0x of the
+        handler timeout. Cap at 4x: comfortably above every legitimate
+        value yet far below the 60x a unit-vs-unit typo would yield. A
+        deliberate larger window must update this bound (and justify why a
+        stuck job should sit that long), which is the point — make the
+        decision explicit instead of letting a typo through silently."""
+        from main_worker import WATCHDOG_PER_KIND_OVERRIDES
+        from services.job_worker import TIMEOUT_PER_KIND
+
+        MAX_RATIO = 4.0
+        for kind, watchdog_str in WATCHDOG_PER_KIND_OVERRIDES.items():
+            handler_seconds = TIMEOUT_PER_KIND[kind]
+            handler_minutes = handler_seconds / 60
+            watchdog_minutes = _parse_minutes(watchdog_str)
+            ratio = watchdog_minutes / handler_minutes
+            assert ratio <= MAX_RATIO, (
+                f"Kind {kind!r}: watchdog threshold {watchdog_minutes}m is "
+                f"{ratio:.1f}x its {handler_minutes:.1f}m handler timeout — "
+                f"above the {MAX_RATIO}x sanity cap. This smells like a "
+                "unit typo (e.g. '60 minutes' where '60 seconds' was meant). "
+                "A genuinely-stuck job would sit unreclaimed far too long. "
+                "If the large window is intentional, raise MAX_RATIO and "
+                "document why."
             )
 
 

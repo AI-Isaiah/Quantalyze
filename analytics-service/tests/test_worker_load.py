@@ -17,6 +17,8 @@ RPC name.
 """
 from __future__ import annotations
 
+import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -66,12 +68,54 @@ class TestWorkerLoadDrain:
 
         mock_supabase.rpc.side_effect = _rpc_side_effect
 
-        mock_dispatch = AsyncMock(
-            return_value=DispatchResult(outcome=DispatchOutcome.DONE)
-        )
+        # M-0756: fresh DispatchResult per call. A single shared
+        # return_value instance leaks state across all 100 awaits — if a
+        # refactor gives DispatchResult mutable fields (e.g.
+        # `metrics: dict = field(default_factory=dict)`) or the caller
+        # mutates the result in place, every call sees the same object and a
+        # cross-call corruption bug would pass spuriously. side_effect
+        # constructs a new instance per invocation. We also track in-flight
+        # concurrency here (H-0818).
+        in_flight = 0
+        max_in_flight = 0
 
+        async def _dispatch_side_effect(job: dict) -> DispatchResult:
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            try:
+                # Yield control so that if dispatch_tick ever launched jobs
+                # concurrently (e.g. asyncio.gather over the batch), overlap
+                # would register in max_in_flight. With the current
+                # sequential `await dispatch(job)` loop, in_flight returns to
+                # 0 before the next job starts.
+                await asyncio.sleep(0)
+                return DispatchResult(outcome=DispatchOutcome.DONE)
+            finally:
+                in_flight -= 1
+
+        mock_dispatch = AsyncMock(side_effect=_dispatch_side_effect)
+
+        # H-0817: patch is_unified_backbone_active. The real implementation
+        # is awaited every tick to populate p_unified_backbone_active. Under
+        # the MagicMock supabase it would read .data.get('value') off a
+        # MagicMock (truthy garbage) and cache the result — making the load
+        # test depend on accidental mock behavior rather than a controlled
+        # flag, and masking a regression that makes the flag fetch raise per
+        # tick (it fail-softs to False, so throughput silently degrades with
+        # no test failure). Pin it to a real boolean and assert it's used.
         with patch("main_worker.get_supabase", return_value=mock_supabase), \
-             patch("main_worker.dispatch", new=mock_dispatch):
+             patch("main_worker.dispatch", new=mock_dispatch), \
+             patch(
+                 "main_worker.is_unified_backbone_active",
+                 new=AsyncMock(return_value=True),
+             ) as mock_flag:
+            # H-0818: wall-clock budget. A regression that serializes the
+            # drain down to e.g. 1 job/sec (a blocking sync call landing in
+            # the hot loop) would blow far past this. The mocked path is
+            # pure in-memory async, so 100 jobs across 25 ticks must finish
+            # in well under a second on any CI box; 10s is generous slack.
+            start = time.monotonic()
             # Run dispatch_tick enough times to drain all 100 jobs
             # 100 jobs / 5 per batch = 20 ticks + 1 empty tick
             for _ in range(25):
@@ -80,6 +124,7 @@ class TestWorkerLoadDrain:
                     # One more tick to get the final batch processed,
                     # then a final empty one to confirm drain
                     pass
+            elapsed = time.monotonic() - start
 
         # All 100 jobs should have been dispatched
         assert mock_dispatch.await_count == total_jobs
@@ -91,3 +136,52 @@ class TestWorkerLoadDrain:
         assert len(pending) == 0
         # Verify unique job IDs — no duplicates
         assert len(set(done_ids)) == total_jobs
+
+        # --- H-0817: the unified-backbone flag is read every dispatch tick.
+        # 25 ticks → at least the 21 non-empty-then-empty ticks call it once
+        # each (the function itself caches, but dispatch_tick awaits it every
+        # tick). Assert it was actually exercised and that the claimed flag
+        # propagates into the claim RPC params.
+        assert mock_flag.await_count >= 21, (
+            f"is_unified_backbone_active must be read every tick; "
+            f"got {mock_flag.await_count} awaits across 25 ticks"
+        )
+        claim_calls = [
+            c for c in mock_supabase.rpc.call_args_list
+            if c.args[0] == "claim_compute_jobs_with_priority"
+        ]
+        assert claim_calls, "claim RPC never called"
+        for c in claim_calls:
+            assert c.args[1]["p_unified_backbone_active"] is True, (
+                "the per-tick flag value must flow into the claim RPC params"
+            )
+
+        # --- H-0818: in-flight concurrency characterization. dispatch_tick
+        # processes a claimed batch with a sequential `await dispatch(job)`
+        # loop, so at most ONE job is ever in flight at a time. Pin that:
+        # a refactor to asyncio.gather(batch) (intended speedup) or an
+        # accidental fire-and-forget would push max_in_flight above 1 and
+        # break the claim-token/late-mark ordering assumptions. If a future
+        # PR deliberately parallelizes, this assertion is the forcing
+        # function to revisit the fence semantics.
+        assert max_in_flight == 1, (
+            f"dispatch_tick must process its batch sequentially "
+            f"(one job in flight at a time); saw max_in_flight={max_in_flight}"
+        )
+
+        # --- H-0818: wall-clock budget — the drain is not silently
+        # serialized into a slow path.
+        assert elapsed < 10.0, (
+            f"draining 100 mocked jobs took {elapsed:.2f}s; a regression "
+            "has serialized the dispatch loop into a slow/blocking path"
+        )
+
+        # --- H-0818: no job left un-terminal. Every claimed job must reach a
+        # terminal mark (done or failed); none may be silently dropped
+        # mid-batch (the docstring's 'no jobs stuck in running' promise,
+        # previously unasserted).
+        terminal_ids = set(done_ids) | set(failed_ids)
+        assert terminal_ids == {j["id"] for j in all_jobs}, (
+            "every claimed job must reach a terminal mark — none left in "
+            "an implicit 'running' state"
+        )
