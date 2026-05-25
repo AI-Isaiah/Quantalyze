@@ -146,20 +146,23 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       );
     }
 
+    // encryptKey() validates the response against EncryptKeyResponseSchema
+    // (Zod) before returning — the fields below are already correctly typed
+    // by the schema; no runtime casts needed (H-0308).
     const encrypted = await encryptKey(
       exchangeNormalized,
       api_key,
       api_secret,
       passphraseOrNull ?? undefined,
-    ) as Record<string, unknown>;
+    );
 
     // Railway returns the encrypted payload using DB-native column
     // names (api_key_encrypted, api_secret_encrypted, etc.).
-    const api_key_encrypted = encrypted.api_key_encrypted as string | undefined;
-    const api_secret_encrypted = encrypted.api_secret_encrypted as string | undefined;
-    const passphrase_encrypted = (encrypted.passphrase_encrypted ?? null) as string | null;
-    const dek_encrypted = (encrypted.dek_encrypted ?? null) as string | null;
-    const nonce = (encrypted.nonce ?? null) as string | null;
+    const api_key_encrypted = encrypted.api_key_encrypted;
+    const api_secret_encrypted = encrypted.api_secret_encrypted ?? null;
+    const passphrase_encrypted = encrypted.passphrase_encrypted ?? null;
+    const dek_encrypted = encrypted.dek_encrypted ?? null;
+    const nonce = encrypted.nonce ?? null;
     const kek_version =
       typeof encrypted.kek_version === "number"
         ? encrypted.kek_version
