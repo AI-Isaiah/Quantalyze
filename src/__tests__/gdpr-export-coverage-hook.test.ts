@@ -342,7 +342,7 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
   // behaviour; both currently FAIL against the buggy regex, so they are
   // `it.fails` SURFACE markers pending a production-code fix.
 
-  it.fails(
+  it(
     "H-1019: a table whose ONLY `user_id ... REFERENCES auth.users` text is in a SQL COMMENT must NOT be flagged user-owned",
     () => {
       // `userColumnRe.test(body)` runs against the ENTIRE CREATE TABLE
@@ -366,7 +366,7 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     },
   );
 
-  it.fails(
+  it(
     "H-1019 (also-flagged security): a user_id FK added via ALTER TABLE ADD COLUMN must be discovered",
     () => {
       // The scan only inspects CREATE TABLE bodies. A migration that

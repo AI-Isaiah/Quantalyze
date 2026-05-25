@@ -256,7 +256,14 @@ describe("POST /api/account/export — audit-2026-05-07 cluster A", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("3600");
     expect(res.headers.get("cache-control")).toBe("private, no-store");
-    expect(auditEmissions).toHaveLength(0);
+    // H-0015 (audit 2026-05-25): a throttled export now emits a dedicated
+    // `account.export_rate_limited` audit event before returning so a
+    // credential-export probing storm leaves a forensic trail. Exactly
+    // one emission on this path, carrying retry_after.
+    expect(auditEmissions).toHaveLength(1);
+    expect(auditEmissions[0].action).toBe("account.export_rate_limited");
+    expect(auditEmissions[0].entity_type).toBe("user");
+    expect(auditEmissions[0].metadata.retry_after).toBe(3600);
   });
 
   it("C-0022 / C-0023 sanitize-loop: 403 when display_name='[deleted]', no audit, no bundle assembly", async () => {

@@ -524,6 +524,15 @@ export function extractUserTablesFromMigration(
   filename: string,
   declarations: Map<string, string> = new Map(),
 ): Map<string, string> {
+  // H-1019 (audit 2026-05-25): strip SQL comments BEFORE scanning. The
+  // user-column regex previously ran against the raw CREATE TABLE body,
+  // so a "-- ..." line that merely DOCUMENTED a sibling table's
+  // "user_id UUID REFERENCES auth.users(id)" FK made the regex match
+  // even though the table has no real user column — a phantom coverage
+  // gap. We strip line comments and block comments up-front so only
+  // real DDL is scanned.
+  const scrubbed = stripSqlComments(content);
+
   // BEST-EFFORT — see the limitation block on
   // `scanMigrationsForUserTables`.
   const createTableRe =
@@ -538,7 +547,7 @@ export function extractUserTablesFromMigration(
 
   createTableRe.lastIndex = 0;
   let match: RegExpExecArray | null;
-  while ((match = createTableRe.exec(content)) !== null) {
+  while ((match = createTableRe.exec(scrubbed)) !== null) {
     const tableName = match[1];
     const body = match[2];
 
@@ -550,7 +559,43 @@ export function extractUserTablesFromMigration(
     }
   }
 
+  // H-1019 (audit 2026-05-25): a table can become user-owned LATER via
+  // "ALTER TABLE <t> ADD COLUMN user_id UUID ... REFERENCES auth.users".
+  // The CREATE TABLE sweep above misses that — so a late-added user
+  // column escaped the coverage gate and the Art. 15 export silently
+  // omitted the table's rows. Scan ALTER TABLE ... ADD COLUMN for the
+  // same user-id-FK columns. We match the column spec up to the
+  // statement terminator (";") so the userColumnRe match sees the full
+  // column definition.
+  const alterAddColumnRe =
+    /ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:public\.)?([a-z0-9_]+)\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([\s\S]*?);/gi;
+  alterAddColumnRe.lastIndex = 0;
+  while ((match = alterAddColumnRe.exec(scrubbed)) !== null) {
+    const tableName = match[1];
+    const columnSpec = match[2];
+
+    if (tableName in EXCLUDED_TABLES) continue;
+    if (declarations.has(tableName)) continue; // first decl wins
+
+    if (userColumnRe.test(columnSpec)) {
+      declarations.set(tableName, filename);
+    }
+  }
+
   return declarations;
+}
+
+/**
+ * H-1019 (audit 2026-05-25): strip SQL comments so DDL-scanning regexes
+ * don't match reference phrases that only appear in documentation
+ * comments. Removes line comments (to end of line) and block comments.
+ * Block comments are replaced with a newline so line-anchored regexes
+ * elsewhere keep their line structure.
+ */
+function stripSqlComments(content: string): string {
+  const BLOCK_COMMENT = new RegExp("/\\*[\\s\\S]*?\\*/", "g");
+  const LINE_COMMENT = /--[^\n]*/g;
+  return content.replace(BLOCK_COMMENT, "\n").replace(LINE_COMMENT, "");
 }
 
 /**
