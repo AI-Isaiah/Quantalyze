@@ -422,7 +422,7 @@ describe("EquityChart", () => {
     // CORRECT behavior: a single corrupt point should be skipped (like null),
     // leaving a finite path. This documents the bug; the fix belongs in
     // production (`toPath` should treat non-finite the same as null).
-    it.fails(
+    it(
       "M-0202: a single Infinity equity point leaks '-Infinity' into the portfolio path coords — toPath lacks a finite guard (fix in follow-up)",
       () => {
         const { container } = render(

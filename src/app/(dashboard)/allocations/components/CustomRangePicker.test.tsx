@@ -331,7 +331,7 @@ describe("CustomRangePicker", () => {
     });
   });
 
-  it.fails(
+  it(
     "M-1099 — clicking Apr 20 then Apr 10 (reverse) SHOULD swap to {2024-04-10, 2024-04-20} but the dead swap branch collapses it to {Apr10, Apr10} — fix in follow-up (the `|| d < start` clause in the first branch shadows the swap branch)",
     () => {
       const onApply = vi.fn();

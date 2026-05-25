@@ -168,7 +168,7 @@ describe("assertTradeMixBucketCount (P2005 cross-runtime contract)", () => {
       long: { count: 1, total_notional: 100 }, // stray 2-bucket key
     };
 
-    it.fails(
+    it(
       "M-0527: 2-bucket fixture with a stray long_maker key should fail loud — fix in follow-up",
       () => {
         // Correct behavior: a 2-bucket fixture must contain EXACTLY {long, short}.
@@ -178,7 +178,7 @@ describe("assertTradeMixBucketCount (P2005 cross-runtime contract)", () => {
       },
     );
 
-    it.fails(
+    it(
       "M-0527: 4-bucket fixture with a stray `long` key should fail loud — fix in follow-up",
       () => {
         // Correct behavior: a 4-bucket fixture must contain EXACTLY the four
@@ -189,16 +189,16 @@ describe("assertTradeMixBucketCount (P2005 cross-runtime contract)", () => {
       },
     );
 
-    it("documents present (lax) behavior: stray keys are silently tolerated", () => {
-      // Factual pin of the CURRENT behavior so the follow-up fix is a visible
-      // change. (Not a weakened version of the contract above — a separate,
-      // explicit observation that today the extras pass.)
+    it("post-fix: stray keys are now rejected (no-extras contract enforced)", () => {
+      // M-0527 fix landed: the lax behavior (extras silently tolerated) is
+      // gone. A stray maker/taker key on a 2-bucket fixture and a stray
+      // 2-bucket key on a 4-bucket fixture both throw the no-extras error.
       expect(() =>
         assertTradeMixBucketCount(buildExpected(false, STRAY_ON_TWO)),
-      ).not.toThrow();
+      ).toThrow(/unexpected key/);
       expect(() =>
         assertTradeMixBucketCount(buildExpected(true, STRAY_ON_FOUR)),
-      ).not.toThrow();
+      ).toThrow(/unexpected key/);
     });
   });
 });

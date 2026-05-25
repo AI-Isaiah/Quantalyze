@@ -5,7 +5,7 @@ export function formatPercent(
   decimals = 2,
   options?: { signed?: boolean },
 ): string {
-  if (value == null) return "—";
+  if (value == null || !Number.isFinite(value)) return "—";
   const signed = options?.signed ?? true;
   const sign = signed && value >= 0 ? "+" : "";
   return `${sign}${(value * 100).toFixed(decimals)}%`;
@@ -30,7 +30,7 @@ export function formatNumber(value: number | null | undefined, decimals = 2): st
 }
 
 export function formatCurrency(value: number | null | undefined): string {
-  if (value == null) return "—";
+  if (value == null || !Number.isFinite(value)) return "—";
   if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `$${(value / 1_000).toFixed(0)}K`;
   return `$${value.toFixed(0)}`;

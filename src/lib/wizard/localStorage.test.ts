@@ -480,7 +480,7 @@ describe("newWizardSessionId — server-side UUID_RE compatibility (M-0590)", ()
   // sessions started on those browsers silently 400 on the
   // wizard_session_id check. Fix in follow-up: polyfill randomUUID or emit a
   // UUID-shaped fallback. Until then this guard fails loud.
-  it.fails(
+  it(
     "M-0590: fallback session id is NOT a valid UUID and would 400 server-side — fix in follow-up",
     () => {
       // Force the fallback branch by removing randomUUID.
@@ -500,11 +500,10 @@ describe("newWizardSessionId — server-side UUID_RE compatibility (M-0590)", ()
     },
   );
 
-  it("fallback currently produces a non-UUID hex-with-one-dash string (documents present behavior)", () => {
-    // Pin the present (buggy) shape so the follow-up fix is an intentional,
-    // visible change rather than a silent one. Asserts the CURRENT output
-    // is exactly the non-UUID form (NOT a weakened version of the contract
-    // above — this is a separate, factual observation of the broken path).
+  it("post-fix: fallback now produces a canonical UUID-v4-shaped string", () => {
+    // M-0590 fix landed: the fallback (no crypto.randomUUID) now emits a
+    // canonical 8-4-4-4-12 hex UUID-v4 shape that passes the server-side
+    // UUID_RE, instead of the prior `${ts}-${rnd}` single-dash form.
     const realCrypto = globalThis.crypto;
     vi.stubGlobal("crypto", {
       ...realCrypto,
@@ -512,9 +511,10 @@ describe("newWizardSessionId — server-side UUID_RE compatibility (M-0590)", ()
     } as unknown as Crypto);
 
     const id = newWizardSessionId();
-    // Single dash, hex on both sides, and crucially NOT a canonical UUID.
-    expect(id).toMatch(/^[0-9a-f]+-[0-9a-f]+$/);
-    expect(UUID_RE.test(id)).toBe(false);
+    expect(UUID_RE.test(id)).toBe(true);
+    // Version nibble is 4; variant nibble ∈ {8,9,a,b}.
+    expect(id[14]).toBe("4");
+    expect(id[19]).toMatch(/[89ab]/);
 
     vi.unstubAllGlobals();
   });

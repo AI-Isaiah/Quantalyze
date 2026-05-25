@@ -641,7 +641,11 @@ export function EquityChart({
     let first = true;
     for (let i = 0; i < arr.length; i++) {
       const v = arr[i];
-      if (v == null) {
+      // M-0202: skip non-finite points (Infinity/NaN) the same as null, else
+      // y(Infinity) = -Infinity leaks a literal "-Infinity" coordinate into
+      // the SVG path `d`, producing an invalid/off-screen line with no
+      // diagnostic. A break in the path (first=true) is the correct degrade.
+      if (v == null || !Number.isFinite(v)) {
         first = true;
         continue;
       }

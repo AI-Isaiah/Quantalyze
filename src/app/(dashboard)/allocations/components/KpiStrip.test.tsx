@@ -248,7 +248,7 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
     expect(screen.queryByText(/Infinity/)).toBeNull();
   });
 
-  it.fails(
+  it(
     "M-0085: YTD TWR / Max DD with NaN SHOULD degrade to em-dash but formatPercent leaks 'NaN%' — fix in follow-up (guard formatPercent for non-finite in src/lib/utils.ts)",
     () => {
       render(
@@ -266,7 +266,7 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
     },
   );
 
-  it.fails(
+  it(
     "M-0085: AUM with NaN SHOULD degrade to em-dash but formatCurrency leaks '$NaN' — fix in follow-up (guard formatCurrency for non-finite in src/lib/utils.ts)",
     () => {
       render(

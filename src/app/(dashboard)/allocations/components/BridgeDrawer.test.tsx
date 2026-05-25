@@ -249,7 +249,7 @@ describe("BridgeDrawer — Phase 09.1 Plan 09 / D-15 / D-16", () => {
   // entire vitest run (not just this case). The bug is tracked in
   // SURFACED-ISSUES.md; the follow-up that wraps the await in try/catch should
   // un-skip this and flip it to a normal passing test.
-  it.skip(
+  it(
     "H-0081: sendBridgeIntro that REJECTS (throws) leaves the button stuck on 'Sending…' with no error surfaced — fix in follow-up (wrap await in try/catch)",
     async () => {
       // Correct behaviour: a thrown/rejected helper should be caught, the
@@ -605,7 +605,7 @@ describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () 
   // clears the transient error so a stale "server fell over" alert never
   // re-appears on the next confirm view.
   // ---------------------------------------------------------------------------
-  it.fails(
+  it(
     "M-0057: error surfaced on a failed Send intro is NOT cleared when going Back then re-entering confirm — fix in follow-up (Back handler should setError(null))",
     async () => {
       mockSendBridgeIntro.mockResolvedValueOnce({

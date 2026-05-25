@@ -119,16 +119,25 @@ export function BridgeDrawer({
     if (!selected) return;
     setSubmitting(true);
     setError(null);
-    const result = await sendBridgeIntro({
-      holdingRef: buildHoldingRef(selected),
-      topCandidateStrategyId: selected.top_candidate_strategy_id,
-    });
-    setSubmitting(false);
-    if (!result.ok) {
-      setError(result.error);
-      return;
+    try {
+      const result = await sendBridgeIntro({
+        holdingRef: buildHoldingRef(selected),
+        topCandidateStrategyId: selected.top_candidate_strategy_id,
+      });
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+      onClose();
+    } catch (e) {
+      // A rejected helper (network failure, thrown error) must surface like
+      // the resolved {ok:false} path: re-enable the button and show an error
+      // so the allocator can retry. Without this, the await rejection escapes
+      // as an unhandled promise rejection and the button strands on "Sending…".
+      setError(e instanceof Error ? e.message : "Failed to send intro");
+    } finally {
+      setSubmitting(false);
     }
-    onClose();
   }
 
   /**
@@ -349,7 +358,12 @@ export function BridgeDrawer({
             )}
             <button
               type="button"
-              onClick={() => setStage("browse")}
+              onClick={() => {
+                // Clear any prior Send-intro error so a stale alert never
+                // re-appears when the allocator re-enters the confirm stage.
+                setError(null);
+                setStage("browse");
+              }}
               className="self-start text-xs text-text-muted hover:text-text-primary"
             >
               ← Back to candidates
