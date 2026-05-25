@@ -478,17 +478,17 @@ class TestHappyPathAndWeightNormalisation:
         assert "equity_curve_current" in body
         assert "equity_curve_proposed" in body
 
-    def test_happy_path_propagates_when_audit_emit_raises(
+    def test_happy_path_returns_200_when_audit_emit_raises(
         self, client, supabase_mock, monkeypatch
     ):
-        """H-0815 (re-resolved) fail-loud contract: the happy-path
-        ``simulator.run`` audit emit is UNWRAPPED, so a SERIOUS audit error
+        """H-0815 (final) availability contract: the happy-path
+        ``simulator.run`` audit emit is WRAPPED, so a serious audit error
         (permission_denied / unknown — the classes ``log_audit_event``
-        re-raises) must PROPAGATE out of ``portfolio_simulator`` rather than
-        being swallowed into a successful 200. A blanket try/except here would
-        mask an auth regression on every successful simulation. This guards
-        against re-introducing that swallow. (The emitter swallows transient
-        blips itself, so a flaky audit RPC still won't fail a real run.)"""
+        re-raises AFTER Sentry-capturing + logging them) must NOT fail a
+        successful simulation. The wrap swallows the re-raise; ops still sees
+        the error via Sentry + logs. Matches ``job_worker._emit_audit`` and
+        avoids one audit-path regression 500-ing every run. Guards against
+        dropping the wrap."""
         self._stage_happy(supabase_mock, portfolio_strategies_data=[
             {"strategy_id": "s-1", "current_weight": 0.6},
             {"strategy_id": "s-2", "current_weight": 0.4},
@@ -501,11 +501,11 @@ class TestHappyPathAndWeightNormalisation:
             "routers.simulator.log_audit_event", _raising_emit
         )
 
-        # TestClient(raise_server_exceptions=True, the default) re-raises an
-        # unhandled handler exception into the test, so a swallowed emit would
-        # turn this into a 200 and fail the pytest.raises.
-        with pytest.raises(RuntimeError, match="unexpected audit RPC failure"):
-            _post(client)
+        # Audit emit raised, but the simulation succeeded → 200, not a 500.
+        # (A dropped wrap would let the re-raise escape and TestClient — default
+        # raise_server_exceptions=True — would surface it instead of a 200.)
+        r = _post(client)
+        assert r.status_code == 200, r.text
 
     def test_weights_dont_sum_to_one_are_renormalised(
         self, client, supabase_mock

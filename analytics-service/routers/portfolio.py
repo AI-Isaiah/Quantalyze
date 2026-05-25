@@ -1708,22 +1708,33 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     # the non-empty branch; the empty branch reports candidate_count=0
     # and returns a 200 with an empty list.
     if not candidate_returns:
-        # H-0815 (re-resolved): emit UNWRAPPED. log_audit_event's P907/P908
-        # typed dispatch already swallows transient httpx blips (a flaky audit
-        # RPC will NOT 500 a successful run) and deliberately re-raises
-        # permission_denied (auth regression) + unknown errors as hard,
-        # fail-loud events. A blanket except here would re-bury exactly those
-        # serious errors behind a 200 — defeating the emitter's contract.
-        log_audit_event(
-            user_id=req.user_id,
-            action="bridge.score_candidates",
-            entity_type="bridge_run",
-            entity_id=req.portfolio_id,
-            metadata={
-                "underperformer_strategy_id": req.underperformer_strategy_id,
-                "candidate_count": 0,
-            },
-        )
+        # H-0815 (final): wrap the happy-path emit. log_audit_event already
+        # Sentry-captures + writes a structured error log for the serious
+        # classes (permission_denied / unknown) BEFORE it re-raises
+        # (services/audit.py P907/P908 Branch 1 & 3), so swallowing the
+        # re-raise here does NOT hide the regression from ops — it only
+        # prevents one audit-path failure (e.g. an RLS regression) from
+        # 500-ing EVERY successful bridge run (a total-outage risk for no added
+        # visibility). Matches services/job_worker.py::_emit_audit, the
+        # established "an audit drop must never fail the compute path" pattern.
+        # (Transient blips are already swallowed inside the emitter; this catch
+        # covers the re-raised serious classes for availability.)
+        try:
+            log_audit_event(
+                user_id=req.user_id,
+                action="bridge.score_candidates",
+                entity_type="bridge_run",
+                entity_id=req.portfolio_id,
+                metadata={
+                    "underperformer_strategy_id": req.underperformer_strategy_id,
+                    "candidate_count": 0,
+                },
+            )
+        except Exception as audit_exc:  # noqa: BLE001
+            logger.error(
+                "bridge audit emit failed (run still succeeded): %s",
+                audit_exc, exc_info=True,
+            )
         return {
             "ok": True,
             "status": "complete",
@@ -1743,19 +1754,26 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     # Sprint 6 Task 7.1b — audit the bridge scoring. entity is the
     # portfolio the bridge was run against; user_id is carried in the
     # request shape (BridgeRequest.user_id).
-    # H-0815 (re-resolved): emit UNWRAPPED — see the empty-candidates branch
-    # above. The emitter's P907/P908 dispatch swallows transient errors and
-    # re-raises serious ones (permission_denied / unknown); honor that here.
-    log_audit_event(
-        user_id=req.user_id,
-        action="bridge.score_candidates",
-        entity_type="bridge_run",
-        entity_id=req.portfolio_id,
-        metadata={
-            "underperformer_strategy_id": req.underperformer_strategy_id,
-            "candidate_count": len(candidates),
-        },
-    )
+    # H-0815 (final): wrap the happy-path emit — see the empty-candidates
+    # branch above for the full rationale (emitter already Sentry-captures +
+    # logs serious errors before re-raising; matches job_worker._emit_audit;
+    # avoids a single audit-path regression 500-ing every successful run).
+    try:
+        log_audit_event(
+            user_id=req.user_id,
+            action="bridge.score_candidates",
+            entity_type="bridge_run",
+            entity_id=req.portfolio_id,
+            metadata={
+                "underperformer_strategy_id": req.underperformer_strategy_id,
+                "candidate_count": len(candidates),
+            },
+        )
+    except Exception as audit_exc:  # noqa: BLE001
+        logger.error(
+            "bridge audit emit failed (run still succeeded): %s",
+            audit_exc, exc_info=True,
+        )
 
     return {
         "ok": True,

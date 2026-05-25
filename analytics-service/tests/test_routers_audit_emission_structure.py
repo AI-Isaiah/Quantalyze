@@ -366,24 +366,24 @@ def test_every_audit_emission_is_AFTER_compute_and_BEFORE_return():
 
 
 # ---------------------------------------------------------------------------
-# H-0815 (re-resolved) — behavioral coverage of the emitter+caller contract.
+# H-0815 (final) — behavioral coverage of the emitter+caller contract.
 #
 # The structural tests above prove the emission call EXISTS in the right place
 # with the right shape, but they never RUN the handler. This block drives
 # portfolio_bridge end-to-end with a table-routing Supabase double to pin the
-# FAIL-LOUD contract.
+# availability contract.
 #
 # log_audit_event implements a deliberate P907+P908 typed dispatch: it SWALLOWS
-# transient httpx blips itself (so a flaky audit RPC does NOT fail a successful
-# run) and RE-RAISES the serious classes — permission_denied (SQLSTATE 42501,
-# an auth/RLS regression) and unknown exceptions (Branch 3, fail-loud per
-# Rule 12). The happy-path router emit sites are therefore intentionally
-# UNWRAPPED: wrapping them in a blanket try/except (as an earlier H-0815
-# attempt did) would re-bury exactly those serious errors behind a successful
-# 200, masking an auth regression on every successful bridge/simulator run.
-# The correct behavior is the OPPOSITE of swallow — a serious audit error must
-# PROPAGATE out of the handler. These tests assert that propagation and guard
-# against anyone re-adding the swallow.
+# transient httpx blips itself, and for the serious classes (permission_denied
+# / unknown) it Sentry-captures + writes a structured error log BEFORE it
+# re-raises. Because ops visibility is already guaranteed by that capture, the
+# happy-path router emit is WRAPPED in try/except (matching
+# services/job_worker.py::_emit_audit): a successful compute must still return
+# its 200 even when the audit emit raises — otherwise a single audit-path
+# regression (e.g. an RLS denial) would 500 EVERY successful bridge/simulator
+# run, a total outage for no added visibility (the serious error is already in
+# Sentry + logs). These tests assert the handler returns its result when the
+# emit raises, and guard against dropping the wrap.
 # ---------------------------------------------------------------------------
 
 import pytest  # noqa: E402 — kept local to the behavioral block
@@ -474,19 +474,19 @@ def _call_undecorated(handler, *args, **kwargs):
 
 
 @pytest.mark.parametrize("candidates_present", [False, True])
-def test_bridge_propagates_when_audit_emit_raises(
+def test_bridge_returns_result_when_audit_emit_raises(
     monkeypatch, candidates_present
 ):
-    """Fail-loud contract (H-0815 re-resolved): a SERIOUS audit-emit error must
-    PROPAGATE out of portfolio_bridge, not be swallowed into a successful 200.
+    """Availability contract (H-0815 final): a successful bridge compute must
+    still return its 200 payload even when the happy-path audit emit raises.
 
-    log_audit_event swallows transient blips itself and re-raises only the
-    serious classes (permission_denied / unknown). The router emit is UNWRAPPED
-    so it honors that — it must NOT wrap-and-swallow, which would mask an auth
-    regression on every successful run. A RuntimeError (Branch 3, unknown)
-    raised by the emit must escape the handler. Covers BOTH the empty-
-    candidates fast-path and the full-scoring path. Guards against anyone
-    re-introducing the blanket try/except swallow."""
+    log_audit_event Sentry-captures + logs the serious classes
+    (permission_denied / unknown) BEFORE re-raising, so the router can safely
+    wrap-and-swallow the re-raise: ops still sees the regression, and one
+    audit-path failure does not 500 every successful run. A RuntimeError
+    (Branch 3, unknown) raised by the emit must NOT escape the handler. Covers
+    BOTH the empty-candidates fast-path and the full-scoring path. Guards
+    against dropping the try/except wrap."""
     from routers import portfolio as portfolio_router
     from models.schemas import BridgeRequest
 
@@ -497,8 +497,9 @@ def test_bridge_propagates_when_audit_emit_raises(
     )
     monkeypatch.setattr(portfolio_router, "get_supabase", lambda: supabase)
 
-    # The audit emit raises an UNEXPECTED error (not transient / not 42501),
-    # so the wrapper's Branch 3 re-raises it into the caller.
+    # The audit emit raises an UNEXPECTED error (not transient / not 42501) —
+    # the class the emitter re-raises after Sentry-capturing it. The router's
+    # wrap must swallow it so the successful compute still returns.
     def _raising_emit(**_kwargs):
         raise RuntimeError("unexpected audit RPC failure")
 
@@ -523,7 +524,9 @@ def test_bridge_propagates_when_audit_emit_raises(
     )
     request = MagicMock()  # slowapi is bypassed via __wrapped__
 
-    # Serious audit errors must fail loud: the handler propagates the error
-    # rather than swallowing it into a successful 200 payload.
-    with pytest.raises(RuntimeError, match="unexpected audit RPC failure"):
-        _call_undecorated(portfolio_router.portfolio_bridge, request, req)
+    # Audit emit raised, but the compute succeeded → handler returns its 200
+    # payload (the wrap swallowed the re-raise; the emitter already alerted).
+    result = _call_undecorated(portfolio_router.portfolio_bridge, request, req)
+    assert result["ok"] is True
+    assert result["status"] == "complete"
+    assert result["portfolio_id"] == portfolio_id
