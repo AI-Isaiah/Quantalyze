@@ -29,6 +29,12 @@ import * as path from "node:path";
  *      trigger noisy false positives. P692/P694 extension.
  *   c) Indirect mutations via helper modules listed in
  *      HELPER_MUTATORS (Task 7.1b /review T4-C1).
+ *   d) Indirect mutations via ANY local helper export that performs a DB
+ *      mutation, discovered by a one-hop import-graph walk
+ *      (findImportedMutatorCalls). H-0005 (audit 2026-05-25) — closes the
+ *      gap where a NEW, unregistered mutator helper module escaped classes
+ *      a–c entirely (no detector saw the call, so the route mutated with
+ *      no audit AND no failure signal).
  *
  * Window tightening (P694): the previous flat 60-line lookahead could
  * incorrectly match a mutation in one function to an audit emit in the
@@ -55,6 +61,12 @@ import * as path from "node:path";
 // ../../src/app/api, which only worked by accident because path.resolve
 // collapsed the redundant src prefix against the test runner's cwd.
 const API_DIR = path.resolve(__dirname, "../app/api");
+
+// H-0005 (audit 2026-05-25): `src` root, for resolving `@/…` import
+// specifiers to disk when walking the import graph one hop into local
+// helper modules. `__dirname` is `src/__tests__` at test time, so `..`
+// is `src`.
+const SRC_DIR = path.resolve(__dirname, "..");
 
 interface Mutation {
   file: string;
@@ -443,6 +455,212 @@ function findHelperMutations(file: string, src: string): Mutation[] {
 }
 
 /**
+ * H-0005 (audit 2026-05-25) — net brace delta of a line, counting ONLY
+ * braces outside string/template/regex literals.
+ *
+ * `braceDelta` (used by isCovered's audit-window walk) counts raw braces
+ * and deliberately tolerates the rare string-brace skew there. But
+ * `moduleExportMutates` bounds an EXPORT body by brace balance, and a
+ * single unbalanced `{`/`}` inside a string literal (`'a { b'`) or a regex
+ * char-class (`/[{]/`) would drift the balance — making the capture bleed
+ * forward and swallow the NEXT export, which could misattribute that
+ * export's mutation to a pure helper (a false-positive that would throw
+ * the live scan). So here we blank out literal CONTENT before counting.
+ * Comments are stripped first via stripLineComment. Multi-line template
+ * literals with unbalanced braces remain a theoretical edge, backstopped
+ * by the unconditional next-`export` break in moduleExportMutates.
+ */
+function bracesOutsideLiterals(line: string): number {
+  const s = stripLineComment(line)
+    .replace(/'(?:\\.|[^'\\])*'/g, "''")
+    .replace(/"(?:\\.|[^"\\])*"/g, '""')
+    .replace(/`(?:\\.|[^`\\])*`/g, "``")
+    .replace(/\/(?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\n])+\//g, "//");
+  let d = 0;
+  for (const ch of s) {
+    if (ch === "{") d++;
+    else if (ch === "}") d--;
+  }
+  return d;
+}
+
+/**
+ * H-0005 (audit 2026-05-25) — does a SPECIFIC export of a module perform
+ * a DB mutation?
+ *
+ * Locates the `export … <name>` declaration in `moduleSrc`, captures its
+ * body by brace balance (counting braces OUTSIDE string/regex literals via
+ * `bracesOutsideLiterals`), and re-runs the existing mutation detectors
+ * (`findMutations` for `.from(...).insert/update/delete/upsert` chains and
+ * `findRpcMutations` for allowlisted mutating RPCs) against that body. We
+ * scope to the named export — not the whole module — so importing a pure
+ * helper from a module that ALSO exports a mutator does not falsely flag
+ * the route.
+ *
+ * The capture ALWAYS breaks at the next top-level `export` (a top-level
+ * `export` can't appear inside another export's body, so this never
+ * truncates the current body — it just hard-stops any residual
+ * brace-balance drift from bleeding into the following export). Brace-less
+ * (concise-body arrow) exports, which never open a `{`, are bounded by the
+ * same break.
+ */
+function moduleExportMutates(moduleSrc: string, exportName: string): boolean {
+  const lines = moduleSrc.split("\n");
+  const declRe = new RegExp(
+    `export\\s+(?:async\\s+)?(?:function\\s+${exportName}\\b|(?:const|let|var)\\s+${exportName}\\b)`,
+  );
+  for (let i = 0; i < lines.length; i++) {
+    if (!declRe.test(lines[i])) continue;
+    let depth = 0;
+    let started = false;
+    const bodyLines: string[] = [];
+    for (let j = i; j < lines.length && j - i <= 500; j++) {
+      // The next top-level `export` ends this export's body unconditionally
+      // — a backstop against any literal-brace drift bleeding the capture
+      // into (and misattributing) the following export.
+      if (j > i && /^\s*export\s/.test(lines[j])) break;
+      bodyLines.push(lines[j]);
+      depth += bracesOutsideLiterals(lines[j]);
+      if (depth > 0) started = true;
+      if (started && depth <= 0) break;
+    }
+    const body = bodyLines.join("\n");
+    if (
+      findMutations("<resolved-module>", body).length > 0 ||
+      findRpcMutations("<resolved-module>", body).length > 0
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * H-0005 (audit 2026-05-25) — one-hop import-graph mutator enforcement.
+ *
+ * The three primary detectors only see (a) inline supabase chains,
+ * (b) allowlisted mutating RPCs, and (c) calls to the HARDCODED
+ * HELPER_MUTATORS allowlist. A NEW helper module that wraps a
+ * `.from(...).update(...)` chain — e.g. `@/lib/danger-helpers` exporting
+ * `softDeleteRow` — is invisible to all three: a route can import + call
+ * it and mutate the DB with NO audit emission and NO failure signal.
+ *
+ * This detector closes that gap WITHOUT a manual registry. For every
+ * named import from a LOCAL module (`@/…`, `./…`, `../…`), it resolves
+ * the module source (via the injected `resolveModule`, which reads disk
+ * in the live scan) and checks whether the SPECIFIC imported export
+ * mutates. If so, every call site of that binding in the route is
+ * synthesized as a mutation that must be audited or `@audit-skip`-ped —
+ * the same contract inline mutations obey.
+ *
+ * Scope/limits:
+ *   - One hop. A helper that itself calls a deeper unaudited mutator is
+ *     out of scope (would need full call-graph analysis); one hop catches
+ *     the direct route→helper case that is the surfaced gap.
+ *   - Only the named export is analyzed (false-positive control — a pure
+ *     import from a module that also exports a mutator is NOT flagged).
+ *   - Bare (node_modules) and non-local specifiers are never followed:
+ *     `resolveModule` returns null for them.
+ *   - Default/namespace import forms (`import Foo, { bar }`) are not
+ *     parsed; named-import helpers (the idiom here) are. A default-import
+ *     mutator helper would still be caught the moment it is registered in
+ *     HELPER_MUTATORS, the pre-existing class-(c) path.
+ *
+ * `resolveModule(spec, fromFile)` returns the module's source text, or
+ * null when the spec is non-local / unresolvable. Injectable so unit
+ * fixtures drive it deterministically without touching disk.
+ */
+function findImportedMutatorCalls(
+  file: string,
+  src: string,
+  resolveModule: (spec: string, fromFile: string) => string | null,
+): Mutation[] {
+  const lines = src.split("\n");
+  const out: Mutation[] = [];
+
+  const importRe =
+    /import\s*(?:type\s+)?\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/g;
+  const mutatorBindings = new Set<string>();
+  for (const m of src.matchAll(importRe)) {
+    // Whole-statement type imports (`import type { Foo } from …`) bind no
+    // runtime value, so they can't be called — skip them. (The inline
+    // `import { type Foo }` form is handled per-segment below.)
+    if (/^\s*import\s+type\b/.test(m[0])) continue;
+    const spec = m[2];
+    if (
+      !(spec.startsWith("@/") || spec.startsWith("./") || spec.startsWith("../"))
+    ) {
+      continue; // non-local specifier — never follow
+    }
+    const moduleSrc = resolveModule(spec, file);
+    if (moduleSrc == null) continue;
+    for (const part of m[1].split(",")) {
+      const seg = part.trim();
+      // `type`-only named imports can't be called at runtime.
+      if (!seg || seg.startsWith("type ")) continue;
+      const [orig, alias] = seg.split(/\s+as\s+/).map((s) => s.trim());
+      const local = (alias || orig).trim();
+      if (!local || !orig) continue;
+      if (moduleExportMutates(moduleSrc, orig)) mutatorBindings.add(local);
+    }
+  }
+  if (mutatorBindings.size === 0) return out;
+
+  for (const local of mutatorBindings) {
+    const callRe = new RegExp(`\\b${local}\\s*\\(`);
+    for (let i = 0; i < lines.length; i++) {
+      if (/^\s*import\s/.test(lines[i])) continue;
+      if (!callRe.test(stripLineComment(lines[i]))) continue;
+      out.push({
+        file,
+        line: i + 1,
+        chainStart: i + 1,
+        snippet: lines[i].trim(),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * H-0005 — the live-scan resolver for findImportedMutatorCalls. Resolves
+ * a local import specifier to its source text on disk. `@/…` maps to
+ * `SRC_DIR`; `./…`/`../…` resolve relative to the importing file. Tries
+ * `.ts`, `.tsx`, and `index.*` barrels. Returns null for non-local or
+ * unresolvable specifiers (treated as "don't follow").
+ */
+function diskResolveModule(spec: string, fromFile: string): string | null {
+  let base: string;
+  if (spec.startsWith("@/")) base = path.resolve(SRC_DIR, spec.slice(2));
+  else if (spec.startsWith("./") || spec.startsWith("../")) {
+    base = path.resolve(path.dirname(fromFile), spec);
+  } else return null;
+
+  for (const cand of [
+    `${base}.ts`,
+    `${base}.tsx`,
+    path.join(base, "index.ts"),
+    path.join(base, "index.tsx"),
+  ]) {
+    // Narrow the swallow (silent-failure-hunter Item 4): a missing /
+    // unstatable candidate is expected — try the next one. But once a
+    // candidate IS confirmed present, a readFileSync failure is a real
+    // coverage blind spot (a present mutator helper silently downgraded
+    // to "no mutation" would reopen the H-0005 gap with no signal), so we
+    // do NOT catch the read — let it throw and fail the test loudly.
+    let isFile = false;
+    try {
+      isFile = fs.existsSync(cand) && fs.statSync(cand).isFile();
+    } catch {
+      isFile = false; // candidate not present/statable — expected, next
+    }
+    if (!isFile) continue;
+    return fs.readFileSync(cand, "utf8");
+  }
+  return null;
+}
+
+/**
  * P692/P694 — synthetic regression cases. We test the helpers against
  * in-memory source fixtures so the grep extensions can fail loudly
  * even when the live src/app/api/ tree happens to be fully instrumented.
@@ -669,17 +887,21 @@ describe("audit-coverage helpers — H-0004/H-0005 audit gap fixtures", () => {
     expect(mutations.length).toBeGreaterThanOrEqual(1);
   });
 
-  // H-0005 — findMutations + findHelperMutations + findRpcMutations are
-  // the only detectors. findHelperMutations scans ONLY the hardcoded
-  // HELPER_MUTATORS allowlist (one module). A NEW helper that wraps a
-  // `.from(...).update(...)` chain in another module — e.g.,
-  // `softDeleteRow()` — is invisible to all three detectors when called
-  // from a route, so the route mutates with no audit and NO failure
-  // signal. We assert the CORRECT behavior: such a route must be flagged
-  // as an uncovered mutation. It currently fails because no detector sees
-  // the helper call.
-  it.fails(
-    "H-0005: route calling an UNREGISTERED mutator helper must be flagged uncovered — needs import-graph/registration enforcement in follow-up",
+  // H-0005 (FIXED 2026-05-25) — findMutations + findHelperMutations +
+  // findRpcMutations only see inline chains, allowlisted RPCs, and the
+  // HARDCODED HELPER_MUTATORS allowlist. A NEW helper that wraps a
+  // `.from(...).update(...)` chain in an UNregistered module — e.g.,
+  // `softDeleteRow()` — used to be invisible to all three, so the route
+  // mutated with no audit and NO failure signal.
+  //
+  // findImportedMutatorCalls closes that gap: a one-hop import-graph walk
+  // resolves the helper's source and detects that the imported export
+  // mutates, synthesizing an uncovered mutation. The resolver is injected
+  // here so the fixture is deterministic; the live scan uses
+  // diskResolveModule. This was `it.fails` while deferred; the detector
+  // now makes it pass.
+  it(
+    "H-0005: route calling an UNREGISTERED mutator helper is flagged uncovered (one-hop import-graph enforcement)",
     () => {
       const src = [
         "import { softDeleteRow } from '@/lib/danger-helpers';",
@@ -689,18 +911,61 @@ describe("audit-coverage helpers — H-0004/H-0005 audit gap fixtures", () => {
         "}",
       ].join("\n");
       const lines = src.split("\n");
+      // The injected resolver reveals what a disk walk would see: the
+      // helper's body performs a `.from(...).update(...)` mutation.
+      const resolveModule = (spec: string): string | null =>
+        spec === "@/lib/danger-helpers"
+          ? [
+              "export async function softDeleteRow(admin: any, table: string, id: string) {",
+              "  const { error } = await admin",
+              "    .from(table)",
+              "    .update({ deleted_at: new Date().toISOString() })",
+              "    .eq('id', id);",
+              "  return error;",
+              "}",
+            ].join("\n")
+          : null;
       const mutations = [
         ...findMutations("synthetic.ts", src),
         ...findHelperMutations("synthetic.ts", src),
         ...findRpcMutations("synthetic.ts", src),
+        ...findImportedMutatorCalls("synthetic.ts", src, resolveModule),
       ];
       // The unregistered helper performs a DB mutation with no audit
-      // emission. A complete detector would surface exactly one
-      // uncovered mutation here. Today: zero mutations are even detected.
+      // emission — exactly one uncovered mutation must now be surfaced.
       const uncovered = mutations.filter((m) => !isCovered(m, lines).covered);
       expect(uncovered.length).toBeGreaterThanOrEqual(1);
     },
   );
+
+  // Control for H-0005 (false-positive guard): the import-graph detector
+  // scopes to the SPECIFIC imported export. A route that imports a PURE
+  // (non-mutating) helper — even from a module that also exports a
+  // mutator — must NOT be flagged. This proves findImportedMutatorCalls
+  // doesn't degenerate into "flag every imported call."
+  it("control: route calling a NON-mutator imported helper is NOT flagged (import-graph scopes to actual mutators)", () => {
+    const src = [
+      "import { formatLabel } from '@/lib/mixed-helpers';",
+      "export async function GET() {",
+      "  const label = formatLabel('x');",
+      "  return Response.json({ label });",
+      "}",
+    ].join("\n");
+    // The module exports BOTH a pure helper (imported) and a mutator
+    // (not imported here). Only the imported `formatLabel` is analyzed.
+    const resolveModule = (spec: string): string | null =>
+      spec === "@/lib/mixed-helpers"
+        ? [
+            "export function formatLabel(s: string) { return s.toUpperCase(); }",
+            "export async function purgeRow(admin: any, id: string) {",
+            "  await admin.from('x').delete().eq('id', id);",
+            "}",
+          ].join("\n")
+        : null;
+    expect(
+      findImportedMutatorCalls("synthetic.ts", src, resolveModule),
+    ).toEqual([]);
+  });
 
   // Control for H-0005: the REGISTERED helper IS detected and, lacking an
   // audit emit, IS flagged uncovered. This proves findHelperMutations
@@ -735,6 +1000,10 @@ describe("audit coverage: every mutation site in src/app/api must emit or skip",
     for (const file of routeFiles) {
       const src = fs.readFileSync(file, "utf8");
       const lines = src.split("\n");
+      // Dedup by file:line — findHelperMutations (hardcoded allowlist)
+      // and findImportedMutatorCalls (auto-discovered import graph) can
+      // both flag the same call site; we must not double-report it.
+      const seen = new Set<string>();
       const mutations = [
         ...findMutations(file, src),
         // /review follow-up (T4-C1): helper-indirection coverage.
@@ -745,7 +1014,17 @@ describe("audit coverage: every mutation site in src/app/api must emit or skip",
         // is in MUTATING_RPC_NAMES; route authors adding a new mutating
         // RPC must add it there as part of the audit checklist.
         ...findRpcMutations(file, src),
-      ];
+        // H-0005 (audit 2026-05-25): one-hop import-graph enforcement.
+        // Catches calls to ANY local helper export that mutates the DB,
+        // not just the HELPER_MUTATORS allowlist — so a NEW unregistered
+        // mutator helper can no longer escape the coverage gate.
+        ...findImportedMutatorCalls(file, src, diskResolveModule),
+      ].filter((mm) => {
+        const key = `${mm.file}:${mm.line}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
       for (const m of mutations) {
         const check = isCovered(m, lines);
         if (!check.covered) {
