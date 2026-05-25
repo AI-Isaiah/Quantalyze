@@ -254,25 +254,41 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       api_key_id: row.api_key_id,
     });
   } catch (err) {
+    // Log the raw message server-side only — never forward it to the client.
+    // Raw Railway/exchange strings can contain partial secrets or internal
+    // service details (H-0305).
     const message = err instanceof Error ? err.message : "Validation failed";
     console.error("[strategies/create-with-key] caught exception:", message);
 
-    // Classify the error into a wizardErrors code so the client never
-    // sees the raw Railway message.
+    // Classify into a stable wizardErrors code so the client never sees the
+    // raw Railway message. HTTP status distinguishes client faults (400) from
+    // upstream faults (502/503) so dashboards/SLO consumers can tell 'bad key'
+    // from 'analytics-service unavailable' (H-0310).
     const lower = message.toLowerCase();
     let code = "UNKNOWN";
+    let status = 500;
     if (lower.includes("signature") || lower.includes("invalid secret")) {
+      // Client supplied a wrong secret — their fault, 400.
       code = "KEY_INVALID_SIGNATURE";
+      status = 400;
     } else if (lower.includes("ip") && lower.includes("allow")) {
+      // Exchange IP-allowlist rejection — upstream policy, 502.
       code = "KEY_IP_ALLOWLIST";
+      status = 502;
     } else if (lower.includes("rate") || lower.includes("429")) {
+      // Exchange or Railway rate-limit — upstream throttle, 503.
       code = "KEY_RATE_LIMIT";
+      status = 503;
     } else if (lower.includes("timeout") || lower.includes("etimedout")) {
+      // Network timeout reaching analytics-service — upstream unavailable, 502.
       code = "KEY_NETWORK_TIMEOUT";
+      status = 502;
     } else if (lower.includes("trading") || lower.includes("withdraw")) {
+      // Should have been caught by the read_only check above; defensive 400.
       code = "KEY_HAS_TRADING_PERMS";
+      status = 400;
     }
 
-    return NextResponse.json({ code, error: message }, { status: 400 });
+    return NextResponse.json({ code }, { status });
   }
 });
