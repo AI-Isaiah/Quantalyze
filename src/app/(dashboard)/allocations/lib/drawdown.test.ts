@@ -7,7 +7,7 @@ import {
 // ===========================================================================
 // 09.1-REVIEW WR-05 — computeMaxDDFromReturnCurve
 //
-// MyAllocationClient.tsx imports this helper for the fallback Max DD KPI.
+// This helper computes the fallback Max DD KPI over a cumulative-return curve.
 // The previous inline implementation divided by `(1 + peak_value)` where
 // peak_value is in return form (`wealth - 1`); when wealth approached 0
 // the denominator approached 0 and the formula produced ±Infinity. The
