@@ -252,6 +252,31 @@ describe("collectUserExportBundle — mocked client", () => {
     expect(serializedBytes).toBeLessThanOrEqual(
       EXPORT_SIZE_CAP_BYTES + 1_000_000,
     );
+
+    // M-0011: the `>= 6` assertion above is coupled to the magic 0.95 sizing
+    // fudge — if the envelope JSON overhead grows (a new schema_version field,
+    // a per-row metadata block), the chosen rowBytes could silently flip the
+    // outcome between 5 and 6 rows and the test would flake or quietly weaken.
+    // Encode the WHY of binary search instead: the kept prefix must be
+    // MAXIMAL — fitting one MORE full row would breach the cap. We derive the
+    // per-row serialized cost from the bundle's OWN trimmed rows (not the
+    // guessed constant), so this holds regardless of envelope-shape drift.
+    const keptRows = trimmedTable!.rows as Array<{ id: string; blob: string }>;
+    expect(keptRows.length).toBe(trimmedTable!.row_count);
+    // Marginal cost of one more row of the same shape: ", " separator +
+    // the JSON-serialized row object. Use the largest kept row as an upper
+    // bound so we never UNDER-estimate the marginal cost (which would make
+    // the maximality assertion spuriously strict).
+    const maxRowCost = Math.max(
+      ...keptRows.map(
+        (r) => new TextEncoder().encode(JSON.stringify(r) + ",").byteLength,
+      ),
+    );
+    // Adding one more row would push the serialized bundle past the cap
+    // (allowing the same 1MB envelope grace the cap-enforcement uses). A
+    // halving-only loop that stopped early would leave headroom > maxRowCost
+    // and fail this — which is exactly the I3 regression under guard.
+    expect(serializedBytes + maxRowCost).toBeGreaterThan(EXPORT_SIZE_CAP_BYTES);
   });
 
   it("returns zero rows for a user with no data (happy empty path)", async () => {

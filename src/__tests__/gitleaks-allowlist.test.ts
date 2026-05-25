@@ -175,6 +175,34 @@ describe(".gitleaks.toml allowlist", () => {
     expect(malformed).toEqual([]);
   });
 
+  // M-0012 — `allowlistCovers` silently `continue`s past a malformed regex
+  // (try/catch). On its own that's fine ONLY because the "every pattern is
+  // valid" test above guarantees no malformed pattern survives. But the two
+  // checks are decoupled: if the validity test were ever weakened, the
+  // coverage check's silent skip would let a malformed pattern sit in the
+  // production .gitleaks.toml unnoticed (covered-by-another-pattern fixtures
+  // would still report covered). This case pins the LINKAGE: the number of
+  // compilable patterns must EQUAL the total pattern count, so the
+  // silent-continue branch in allowlistCovers is provably never taken for the
+  // real config. A single malformed entry fails HERE even if a sibling valid
+  // pattern would otherwise mask it in the coverage check.
+  it("M-0012: no allowlist pattern is silently skipped as malformed during coverage evaluation", () => {
+    const patterns = parseAllowlistPaths(readGitleaksConfig());
+    expect(patterns.length).toBeGreaterThan(0);
+    const compilable = patterns.filter((pat) => {
+      try {
+        new RegExp(pat);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    // Every pattern must compile — otherwise allowlistCovers would silently
+    // skip it, and the "covered" verdict for some fixture could rest on a
+    // DIFFERENT pattern while the malformed one rots in the config.
+    expect(compilable.length).toBe(patterns.length);
+  });
+
   for (const fixture of EXPECTED_ALLOWLIST_FIXTURES) {
     it(`allowlists ${fixture.label} at ${fixture.relPath}`, () => {
       const patterns = parseAllowlistPaths(readGitleaksConfig());

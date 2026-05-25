@@ -586,6 +586,56 @@ describe("audit-coverage helpers — H-0004/H-0005 audit gap fixtures", () => {
     expect(isCovered(mutation, lines).covered).toBe(false);
   });
 
+  // M-0004 — findMutations walks back only 5 lines from a `.insert/.update/
+  // .delete/.upsert` method line to find its anchoring `.from(`. A supabase
+  // chain with 6+ intervening modifier lines (e.g.
+  // `.from(x).schema(...).select(...).eq(...).eq(...).order(...).insert(...)`)
+  // therefore goes UNDETECTED — the mutation ships completely outside the
+  // coverage gate's view, defeating the test's regression-pressure purpose.
+  // CORRECT behavior: the mutation IS a supabase mutation and must be
+  // detected (so it can then be checked for an audit emit / pragma). It
+  // currently fails because the lookback is too tight. SURFACE marker pending
+  // a test-helper fix (widen/anchor the lookback to the chain head, not a
+  // flat 5-line window). Test-helper only — NOT production code.
+  it.fails(
+    "M-0004: a supabase mutation whose `.from(` is 6+ lines above the .insert MUST still be detected — widen findMutations lookback in follow-up (test-helper, not production)",
+    () => {
+      const src = [
+        "export async function POST() {",
+        "  const { error } = await admin",
+        "    .from('audit_log')",
+        "    .schema('public')",
+        "    .select('id')",
+        "    .eq('a', 1)",
+        "    .eq('b', 2)",
+        "    .order('created_at')",
+        "    .insert({ user_id: 'x' });",
+        "  return Response.json({ ok: true });",
+        "}",
+      ].join("\n");
+      const mutations = findMutations("synthetic.ts", src);
+      // The chain IS a real mutation; a complete detector finds exactly one.
+      expect(mutations.length).toBeGreaterThanOrEqual(1);
+    },
+  );
+
+  // Control for M-0004: the SAME chain with the `.from(` within the 5-line
+  // window IS detected — proving the detector works and the gap is purely the
+  // lookback distance, not the mutation shape.
+  it("control: a supabase mutation whose `.from(` is within 5 lines of .insert IS detected", () => {
+    const src = [
+      "export async function POST() {",
+      "  const { error } = await admin",
+      "    .from('audit_log')",
+      "    .select('id')",
+      "    .insert({ user_id: 'x' });",
+      "  return Response.json({ ok: true });",
+      "}",
+    ].join("\n");
+    const mutations = findMutations("synthetic.ts", src);
+    expect(mutations.length).toBeGreaterThanOrEqual(1);
+  });
+
   // H-0005 — findMutations + findHelperMutations + findRpcMutations are
   // the only detectors. findHelperMutations scans ONLY the hardcoded
   // HELPER_MUTATORS allowlist (one module). A NEW helper that wraps a

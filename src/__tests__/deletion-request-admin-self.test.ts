@@ -328,10 +328,20 @@ describe("POST /api/admin/deletion-requests/[id]/approve — self-action guard (
     const res = await POST(req, makeParamsCtx({ id: "req-audit" }));
     expect(res.status).toBe(200);
 
-    // Drain the after()/queueMicrotask scheduling used by logAuditEvent.
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    // M-0008: bounded poll for the after()/queueMicrotask-deferred audit
+    // emission instead of a fixed 3-tick Promise.resolve drain. A change in
+    // audit.ts that adds a fourth scheduling tick would silently break a
+    // fixed-tick drain with a confusing "expect undefined"; vi.waitFor fails
+    // loudly with a timeout that names the missing emission.
+    await vi.waitFor(() =>
+      expect(
+        logAuditRpcMock.mock.calls.find(
+          (c) =>
+            c[0] === "log_audit_event" &&
+            c[1]?.p_action === "deletion.request.approve",
+        ),
+      ).toBeDefined(),
+    );
 
     const approveAudit = logAuditRpcMock.mock.calls.find(
       (c) => c[0] === "log_audit_event" && c[1]?.p_action === "deletion.request.approve",
@@ -383,9 +393,16 @@ describe("POST /api/admin/deletion-requests/[id]/approve — self-action guard (
     const body = (await res.json()) as { was_first_run: boolean };
     expect(body.was_first_run).toBe(false);
 
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    // M-0008: bounded poll (see note above) — fail-loud on a missing emission.
+    await vi.waitFor(() =>
+      expect(
+        logAuditRpcMock.mock.calls.find(
+          (c) =>
+            c[0] === "log_audit_event" &&
+            c[1]?.p_action === "account.sanitize",
+        ),
+      ).toBeDefined(),
+    );
 
     const sanitizeAudit = logAuditRpcMock.mock.calls.find(
       (c) => c[0] === "log_audit_event" && c[1]?.p_action === "account.sanitize",
@@ -623,9 +640,16 @@ describe("POST /api/admin/deletion-requests/[id]/reject — self-action guard (C
     const res = await POST(req, makeParamsCtx({ id: "req-reject-audit" }));
     expect(res.status).toBe(200);
 
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    // M-0008: bounded poll (see note above) — fail-loud on a missing emission.
+    await vi.waitFor(() =>
+      expect(
+        logAuditRpcMock.mock.calls.find(
+          (c) =>
+            c[0] === "log_audit_event" &&
+            c[1]?.p_action === "deletion.request.reject",
+        ),
+      ).toBeDefined(),
+    );
 
     const rejectAudit = logAuditRpcMock.mock.calls.find(
       (c) => c[0] === "log_audit_event" && c[1]?.p_action === "deletion.request.reject",
@@ -660,9 +684,16 @@ describe("POST /api/admin/deletion-requests/[id]/reject — self-action guard (C
     const res = await POST(req, makeParamsCtx({ id: "req-no-reason" }));
     expect(res.status).toBe(200);
 
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    // M-0008: bounded poll (see note above) — fail-loud on a missing emission.
+    await vi.waitFor(() =>
+      expect(
+        logAuditRpcMock.mock.calls.find(
+          (c) =>
+            c[0] === "log_audit_event" &&
+            c[1]?.p_action === "deletion.request.reject",
+        ),
+      ).toBeDefined(),
+    );
 
     const rejectAudit = logAuditRpcMock.mock.calls.find(
       (c) => c[0] === "log_audit_event" && c[1]?.p_action === "deletion.request.reject",

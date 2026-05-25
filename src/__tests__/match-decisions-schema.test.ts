@@ -559,5 +559,83 @@ describePhase10(
       },
       30_000,
     );
+
+    // -------------------------------------------------------------------------
+    // M-0014 — DB-AUTHORITATIVE companion to T_L1_ALL_PASS_CHECKS.
+    //
+    // T_L1 (above) re-implements the four per-kind CHECK predicates IN
+    // JAVASCRIPT. That encodes the rules a SECOND time: if a migration loosens
+    // or tightens a CHECK (e.g. admits voluntary_modify with strategy_id NOT
+    // NULL for a new sub-case), the JS predicate would need the same edit or
+    // the test silently passes (no rows violate the OLD JS rules) while the DB
+    // enforces NEW rules — classic test/schema drift.
+    //
+    // This case lets POSTGRES be the single source of truth: it reads each
+    // CHECK constraint's OWN expression via pg_get_constraintdef, strips the
+    // `CHECK (...)` wrapper, and EXECUTEs a `count(*) ... WHERE NOT (<expr>)`
+    // per constraint inside a DO block — so the predicate is NEVER re-typed in
+    // JS. Any drift between the JS T_L1 and the live constraints surfaces here.
+    // Gated on HAS_INTROSPECTION (Management API) since pg_get_constraintdef
+    // lives in pg_catalog, which PostgREST does not expose.
+    // -------------------------------------------------------------------------
+    itPhase10.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
+      "M-0014: zero rows violate any per-kind CHECK using the DB's OWN constraint expressions (no JS re-implementation)",
+      async () => {
+        // The DO block iterates every CHECK constraint on match_decisions,
+        // counts rows that violate it using the constraint's live predicate,
+        // and returns one row per constraint as { conname, violations }.
+        const sql = `
+          DO $$
+          DECLARE
+            c RECORD;
+            v_count BIGINT;
+            v_expr TEXT;
+          BEGIN
+            DROP TABLE IF EXISTS _md_check_violations;
+            CREATE TEMP TABLE _md_check_violations (conname TEXT, violations BIGINT);
+            FOR c IN
+              SELECT conname, pg_get_constraintdef(oid) AS def
+              FROM pg_constraint
+              WHERE conrelid = 'public.match_decisions'::regclass
+                AND contype = 'c'
+            LOOP
+              -- pg_get_constraintdef returns 'CHECK ((<expr>))'. Strip the
+              -- leading 'CHECK (' and the trailing ')' to get the bare expr.
+              v_expr := regexp_replace(c.def, '^CHECK \\((.*)\\)$', '\\1');
+              EXECUTE format(
+                'SELECT count(*) FROM public.match_decisions WHERE NOT (%s)',
+                v_expr
+              ) INTO v_count;
+              INSERT INTO _md_check_violations VALUES (c.conname, v_count);
+            END LOOP;
+          END $$;
+          SELECT conname, violations FROM _md_check_violations ORDER BY conname;
+        `;
+        const rows = await runIntrospectionSql<{
+          conname: string;
+          violations: number | string;
+        }>(sql);
+
+        // There must be at least the four documented per-kind CHECKs.
+        expectPhase10(rows.length).toBeGreaterThanOrEqual(4);
+        // The four named per-kind constraints (migration 080-series) must each
+        // be present in the result — proves we actually evaluated them, not an
+        // empty constraint set that would vacuously pass.
+        const names = rows.map((r) => r.conname);
+        for (const expected of [
+          "match_decisions_kind_bridge_recommended",
+          "match_decisions_kind_voluntary_remove",
+          "match_decisions_kind_voluntary_add",
+          "match_decisions_kind_voluntary_modify",
+        ]) {
+          expectPhase10(names).toContain(expected);
+        }
+        // Every constraint reports ZERO violations against the live data.
+        for (const r of rows) {
+          expectPhase10(Number(r.violations)).toBe(0);
+        }
+      },
+      30_000,
+    );
   },
 );

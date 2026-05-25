@@ -16,7 +16,14 @@
 
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdtempSync, cpSync, mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdtempSync,
+  cpSync,
+  mkdirSync,
+  readdirSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { extractUserTablesFromMigration } from "../../scripts/check-gdpr-export-coverage";
@@ -272,6 +279,59 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("user_notes");
     expect(result.stderr).toContain("20260412094453_user_notes.sql");
+  }, 30_000);
+
+  // M-0009 — same negative scenario as above, but the migration filename is
+  // DERIVED at runtime rather than hardcoded. The hardcoded
+  // "20260412094453_user_notes.sql" assertion encodes WHICH migration, not the
+  // behavior under test (Rule 9): if user_notes is ever squashed/renamed into
+  // a consolidation migration, the hardcoded test fails for the WRONG reason
+  // (a stale filename string) while the hook is still correct. This case
+  // asserts the invariant: the hook names whatever migration ACTUALLY declares
+  // user_notes as a user-owned table — computed by scanning the migrations dir
+  // for the CREATE TABLE statement — so it survives a future rename.
+  it("M-0009: hook reports the migration that ACTUALLY declares user_notes (filename derived, not hardcoded)", () => {
+    // Find the migration whose body CREATEs the user_notes table. This mirrors
+    // the hook's own discovery logic from the test's side, so a rename moves
+    // both in lockstep.
+    const migDir = join(REPO_ROOT, MIGRATIONS_REL);
+    const createUserNotesRe =
+      /create\s+table\s+(?:if\s+not\s+exists\s+)?(?:public\.)?user_notes\b/i;
+    const declaringMigrations = readdirSync(migDir)
+      .filter((f) => f.endsWith(".sql"))
+      .filter((f) => createUserNotesRe.test(readFileSync(join(migDir, f), "utf8")));
+    // Exactly one migration should declare the table; if zero, the WHY of this
+    // test (and the hardcoded sibling) is moot and we want a loud failure.
+    expect(declaringMigrations.length).toBeGreaterThanOrEqual(1);
+    const declaringMigration = declaringMigrations[0];
+
+    const scratch = mkdtempSync(join(tmpdir(), "gdpr-hook-derived-"));
+    mkdirSync(join(scratch, "scripts"), { recursive: true });
+    mkdirSync(join(scratch, "src", "lib"), { recursive: true });
+    mkdirSync(join(scratch, "supabase"), { recursive: true });
+    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-gdpr-export-coverage.ts"));
+    cpSync(join(REPO_ROOT, MIGRATIONS_REL), join(scratch, MIGRATIONS_REL), {
+      recursive: true,
+    });
+
+    const originalManifest = readFileSync(MANIFEST_ABS, "utf8");
+    const mutated = originalManifest.replace(
+      /\{\s*kind:\s*"direct",\s*table:\s*"user_notes",\s*user_column:\s*"user_id"\s*\},?/,
+      "// (user_notes removed by M-0009 coverage-hook test)",
+    );
+    expect(mutated).not.toBe(originalManifest);
+    writeFileSync(join(scratch, MANIFEST_REL), mutated);
+
+    const result = spawnSync(
+      "npx",
+      ["tsx", "scripts/check-gdpr-export-coverage.ts"],
+      { encoding: "utf8", cwd: scratch },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("user_notes");
+    // The hook must point at the migration that ACTUALLY declares the table —
+    // whatever its filename is today.
+    expect(result.stderr).toContain(declaringMigration);
   }, 30_000);
 
   // H-1019 — CREATE TABLE body parser over/under-match bugs. These drive

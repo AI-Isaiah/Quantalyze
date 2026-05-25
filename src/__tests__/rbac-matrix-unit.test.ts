@@ -487,6 +487,90 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     expect(userAppRolesInsertMock).not.toHaveBeenCalled();
   });
 
+  // M-0016 — the single `role: "super_admin"` case above only exercises ONE
+  // branch of the BODY_SCHEMA (z.object({ action: enum, role: enum })). These
+  // cases pin the other failure shapes the parser must reject so a future
+  // schema refactor (e.g. swapping z.enum for z.string, or dropping a field)
+  // can't silently widen the accepted surface. Each asserts the route returns
+  // 400 AND never touches the mutation path.
+  it.each([
+    {
+      label: "invalid action ('demote')",
+      body: { action: "demote", role: "allocator" },
+    },
+    {
+      label: "missing role field",
+      body: { action: "grant" },
+    },
+    {
+      label: "missing action field",
+      body: { role: "allocator" },
+    },
+    {
+      label: "both fields missing (empty object)",
+      body: {},
+    },
+    {
+      label: "non-string role (number)",
+      body: { action: "grant", role: 123 },
+    },
+    {
+      label: "non-string action (boolean)",
+      body: { action: true, role: "allocator" },
+    },
+    {
+      label: "JSON-injection object as role",
+      body: { action: "grant", role: { $injection: true } },
+    },
+    {
+      label: "array as role",
+      body: { action: "grant", role: ["allocator"] },
+    },
+    {
+      label: "null role",
+      body: { action: "grant", role: null },
+    },
+  ])(
+    "M-0016: rejects $label with 400 and does not mutate",
+    async ({ body }) => {
+      const { POST } = await loadRoute();
+      const req = makeRequest(body);
+      const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
+      expect(res.status).toBe(400);
+      expect(userAppRolesInsertMock).not.toHaveBeenCalled();
+      expect(userAppRolesDeleteMock).not.toHaveBeenCalled();
+    },
+  );
+
+  // M-0016: BODY_SCHEMA is a plain z.object (NOT .strict()), so unknown keys
+  // are STRIPPED, not rejected. A well-formed body carrying an extra field
+  // must therefore still SUCCEED on the valid (action, role) pair — and the
+  // stripped extra must not reach the mutation row. Asserting CORRECT
+  // (lenient) behavior so a future tightening to .strict() is a deliberate,
+  // test-visible change rather than an accidental 400 regression.
+  it("M-0016: tolerates and strips an extra unknown field (non-strict object), still grants", async () => {
+    adminUserAppRolesSelectMock.mockResolvedValue({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+    const { POST } = await loadRoute();
+    const req = makeRequest({
+      action: "grant",
+      role: "allocator",
+      injected_extra: "should-be-stripped",
+    });
+    const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
+    expect(res.status).toBe(200);
+    expect(userAppRolesInsertMock).toHaveBeenCalledTimes(1);
+    const [row] = userAppRolesInsertMock.mock.calls[0];
+    // The stripped extra must NOT be persisted on the row.
+    expect(row).not.toHaveProperty("injected_extra");
+    expect(row).toMatchObject({
+      user_id: "target-user-id",
+      role: "allocator",
+    });
+  });
+
   it("rejects missing target user id with 400", async () => {
     const { POST } = await loadRoute();
     const req = makeRequest(

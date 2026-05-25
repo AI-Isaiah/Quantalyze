@@ -67,6 +67,76 @@ function isDailyOrLessFrequent(schedule: string): boolean {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// M-1001 — predicate-level unit coverage for the guardrail itself.
+//
+// The file-level cases below only read the REAL vercel.json, so the suite is
+// its own oracle: if `isDailyOrLessFrequent` were refactored to be permissive
+// (e.g. accidentally accepting "*" as numeric), the real-file cases would keep
+// passing against a clean vercel.json and the guard would silently stop
+// catching the next regression. These cases drive the predicate directly with
+// known-good and known-bad schedules so a permissive refactor fails HERE,
+// before it ships. The `isDailyOrLessFrequent` helper lives in this file, so
+// no production export is needed.
+// ---------------------------------------------------------------------------
+describe("isDailyOrLessFrequent — predicate unit coverage (M-1001)", () => {
+  it.each([
+    "0 0 * * *", // midnight daily — canonical
+    "30 3 * * *", // 03:30 daily
+    "10 3 * * *", // matches retention_notification_dispatches cadence
+    "0 9 * * *", // 09:00 daily
+    "59 23 * * *", // last minute of the day
+  ])("accepts daily-or-less-frequent schedule %j", (schedule) => {
+    expect(isDailyOrLessFrequent(schedule)).toBe(true);
+  });
+
+  it.each([
+    "*/15 * * * *", // every 15 minutes — the flag-monitor cadence (sub-daily)
+    "0 */4 * * *", // every 4 hours
+    "* * * * *", // every minute
+    "0,30 * * * *", // twice hourly (list in minute)
+  ])("rejects sub-daily / multi-fire schedule %j", (schedule) => {
+    expect(isDailyOrLessFrequent(schedule)).toBe(false);
+  });
+
+  it.each([
+    "0 0", // too few fields
+    "0 0 * *", // 4 fields
+    "0 0 * * * *", // 6 fields
+    "", // empty
+  ])("rejects malformed cron string %j (wrong field count)", (schedule) => {
+    expect(isDailyOrLessFrequent(schedule)).toBe(false);
+  });
+
+  it("rejects a wildcard minute (the '*' permissiveness regression M-1001 guards)", () => {
+    // The exact failure mode the finding calls out: a refactor that let "*"
+    // slip through `looksNumeric` would make this pass. /^\d+$/ must reject it.
+    expect(isDailyOrLessFrequent("* 3 * * *")).toBe(false);
+    expect(isDailyOrLessFrequent("0 * * * *")).toBe(false);
+  });
+
+  it("documents the CURRENT predicate's intentional looseness on dow/dom/month", () => {
+    // The predicate only constrains minute+hour to be numeric; it does NOT
+    // examine day-of-month / month / day-of-week. So "0 9 * * 0" (weekly) is
+    // accepted today — it fires at most once a day, which satisfies the
+    // daily-or-less-frequent discipline even though it's not literally daily.
+    // Pinned so a future tightening of the predicate is a deliberate,
+    // test-visible change rather than an accidental behavior shift.
+    expect(isDailyOrLessFrequent("0 9 * * 0")).toBe(true);
+  });
+});
+
+// M-1001 — guard-against-runaway-count: MAX_CRONS_ALLOWED is the soft bound.
+// The real-file case asserts the live vercel.json is within it, but never
+// proves the bound itself is a small, intentional number. A silent bump to
+// 50 (or removal) would weaken the runaway-deployment guard with no test
+// failure. Pin the value so any change is a deliberate, reviewed edit.
+describe("MAX_CRONS_ALLOWED — bound is intentional (M-1001)", () => {
+  it("is the Pro-plan soft bound of 10 (a bump must be a reviewed change)", () => {
+    expect(MAX_CRONS_ALLOWED).toBe(10);
+  });
+});
+
 describe("vercel.json cron quota (Pro plan, soft bound)", () => {
   it(`has at most ${MAX_CRONS_ALLOWED} cron jobs`, () => {
     const crons = loadCrons();

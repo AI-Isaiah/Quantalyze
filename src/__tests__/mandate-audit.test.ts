@@ -81,7 +81,22 @@ describe("MANDATE-08: mandate_preference.update audit coverage", () => {
       expect(data).toHaveLength(1);
       expect(data![0].action).toBe("mandate_preference.update");
       expect(data![0].entity_type).toBe("allocator_preference_mandate");
+      // M-0013: user_id is SERVER-SET by log_audit_event (SECURITY DEFINER,
+      // keyed on auth.uid()), NOT taken from the client payload — the test
+      // never passes p_user_id, so a row whose user_id matches the
+      // authenticated caller proves the function stamps auth.uid() itself.
       expect(data![0].user_id).toBe(testUserId);
+      // M-0013: the audited PAYLOAD (metadata column) is the load-bearing
+      // content — it's what forensic review reads. A regression that drops
+      // {fields, self_edit} from the SECURITY DEFINER body would leave the
+      // four columns above intact but silently empty the audit trail's
+      // detail. Assert the payload round-trips verbatim.
+      const metadata = data![0].metadata as Record<string, unknown> | null;
+      expect(metadata).not.toBeNull();
+      expect(metadata).toMatchObject({
+        fields: ["max_weight"],
+        self_edit: true,
+      });
     },
     60_000,
   );

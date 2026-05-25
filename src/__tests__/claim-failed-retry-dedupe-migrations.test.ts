@@ -223,6 +223,58 @@ describe("Migration 089/090 — offline SQL structural invariants", () => {
   // future migration guards it (e.g. `WHERE attempts < max`) jobs loop forever.
   // The runtime terminal transition is verified in the live-DB block below.
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // M-1130 (offline half) — the apply-time DO blocks in migrations 089/090
+  // self-verify the live function body (pg_get_functiondef LIKE '%...%'), but
+  // those run ONLY at apply time. No standing CI test parses the migration
+  // SOURCE for the two literals the DO blocks guard: the widened failed_retry
+  // filter (mig 089) and the H-B hardened search_path (both). H-1239/H-1241
+  // above already pin `row_number() OVER` + the four `PARTITION BY kind, <col>`
+  // windows; this adds the remaining two so a migration edit that dropped the
+  // failed_retry filter or the search_path hardening fails offline in CI —
+  // not only when a fresh DB apply happens to run the DO block.
+  //
+  // The COMPLEMENTARY live check (pg_get_functiondef on the INSTALLED function
+  // — catches a function silently REPLACED outside the migration tree) is
+  // FLAGGED: it requires a live DB / introspection and is not runnable
+  // offline. See M-1130 in the testgap report.
+  it("M-1130: claim_compute_jobs_with_priority body includes the failed_retry filter in migrations 089 AND 090", () => {
+    for (const file of [MIG_089, MIG_090]) {
+      const block = normalizeWs(
+        extractFunctionBlock(
+          readMigration(file),
+          "claim_compute_jobs_with_priority",
+        ),
+      );
+      // The widened candidate filter (mig 089) — without it, failed_retry rows
+      // whose backoff elapsed are never re-claimed and retry jobs stall.
+      expect(
+        block,
+        `${file}: priority RPC must filter status IN ('pending', 'failed_retry')`,
+      ).toMatch(/status IN \('pending', ?'failed_retry'\)/i);
+    }
+  });
+
+  it("M-1130: both claim RPCs keep the H-B hardened `SET search_path = public, pg_temp` in migrations 089 AND 090", () => {
+    for (const file of [MIG_089, MIG_090]) {
+      const sql = readMigration(file);
+      for (const fnName of [
+        "claim_compute_jobs",
+        "claim_compute_jobs_with_priority",
+      ]) {
+        const block = normalizeWs(extractFunctionBlock(sql, fnName));
+        // H-B hardening (audit): SECURITY DEFINER functions must pin
+        // search_path so an attacker cannot shadow unqualified objects. A
+        // revert to a default / pg_catalog-bearing search_path is the exact
+        // regression the apply-time DO block guards — pin it offline too.
+        expect(
+          block,
+          `${file} ${fnName}: must SET search_path = public, pg_temp`,
+        ).toMatch(/SET search_path = public, pg_temp/i);
+      }
+    }
+  });
+
   it("H-1244: both claim RPCs increment `attempts = attempts + 1` unconditionally in migrations 089 and 090", () => {
     for (const file of [MIG_089, MIG_090]) {
       const sql = readMigration(file);

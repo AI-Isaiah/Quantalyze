@@ -144,4 +144,61 @@ describe("assertTradeMixBucketCount (P2005 cross-runtime contract)", () => {
       }),
     ).not.toThrow();
   });
+
+  // M-0527 — presence-only check tolerates stray buckets. The D-15 contract
+  // says EXACTLY 4 (maker/taker) or EXACTLY 2 (fallback), but
+  // assertTradeMixBucketCount only verifies the REQUIRED keys are PRESENT —
+  // it never rejects EXTRA keys (no `keys.length === expected.length`). So a
+  // 2-bucket fixture carrying a stray `long_maker`, or a 4-bucket fixture
+  // carrying a stray `long`, passes silently. That is the gap between an
+  // analytics rewrite and a silent dashboard miscount. These guards assert
+  // the CORRECT (no-extras) contract and FAIL today, pinning the follow-up
+  // production fix.
+  describe("M-0527 — extra/stray bucket keys must be rejected (fix in follow-up)", () => {
+    const STRAY_ON_TWO = {
+      long: { count: 1, total_notional: 100 },
+      short: { count: 1, total_notional: 100 },
+      long_maker: { count: 1, total_notional: 100 }, // stray maker/taker key
+    };
+    const STRAY_ON_FOUR = {
+      long_maker: { count: 1, total_notional: 100 },
+      long_taker: { count: 1, total_notional: 100 },
+      short_maker: { count: 1, total_notional: 100 },
+      short_taker: { count: 1, total_notional: 100 },
+      long: { count: 1, total_notional: 100 }, // stray 2-bucket key
+    };
+
+    it.fails(
+      "M-0527: 2-bucket fixture with a stray long_maker key should fail loud — fix in follow-up",
+      () => {
+        // Correct behavior: a 2-bucket fixture must contain EXACTLY {long, short}.
+        expect(() =>
+          assertTradeMixBucketCount(buildExpected(false, STRAY_ON_TWO)),
+        ).toThrow();
+      },
+    );
+
+    it.fails(
+      "M-0527: 4-bucket fixture with a stray `long` key should fail loud — fix in follow-up",
+      () => {
+        // Correct behavior: a 4-bucket fixture must contain EXACTLY the four
+        // maker/taker buckets and nothing else.
+        expect(() =>
+          assertTradeMixBucketCount(buildExpected(true, STRAY_ON_FOUR)),
+        ).toThrow();
+      },
+    );
+
+    it("documents present (lax) behavior: stray keys are silently tolerated", () => {
+      // Factual pin of the CURRENT behavior so the follow-up fix is a visible
+      // change. (Not a weakened version of the contract above — a separate,
+      // explicit observation that today the extras pass.)
+      expect(() =>
+        assertTradeMixBucketCount(buildExpected(false, STRAY_ON_TWO)),
+      ).not.toThrow();
+      expect(() =>
+        assertTradeMixBucketCount(buildExpected(true, STRAY_ON_FOUR)),
+      ).not.toThrow();
+    });
+  });
 });

@@ -619,13 +619,59 @@ describe("POST /api/allocator/scenario/commit — live-DB RLS regression (Phase 
       const bClient = createClient(LIVE_DB_URL!, ANON_KEY!, {
         global: { headers: { Authorization: `Bearer ${allocBTokenB}` } },
       });
-      // Query for any of A's match_decisions tracked above
-      if (trackedMatchDecisionIds.length === 0) return; // nothing to compare
-      const { data } = await bClient
+
+      // M-0020: this case previously short-circuited to a silent PASS via
+      // `if (trackedMatchDecisionIds.length === 0) return;` — if T_RLS1/3/10
+      // hadn't run successfully first (e.g. the dev server 500'd), the array
+      // was empty and the cross-tenant assertion never executed, so RLS was
+      // never actually tested. Make the case SELF-CONTAINED: seed a row for A
+      // directly via the admin (service-role) client here, then assert B's
+      // SELECT cannot see it. This no longer depends on prior-test side
+      // effects. The existing tracked-IDs arm is kept as an additional check.
+      const seeded = await admin
         .from("match_decisions")
+        .insert({
+          allocator_id: allocAId,
+          strategy_id: null,
+          decision: "thumbs_down",
+          decided_by: allocAId,
+          original_strategy_id: null,
+          original_holding_ref: "holding:binance:RLS9-SEED:spot",
+          kind: "voluntary_remove",
+        })
         .select("id")
-        .in("id", trackedMatchDecisionIds);
-      expect(data ?? []).toEqual([]);
+        .single();
+      expect(seeded.error).toBeNull();
+      const seededId = (seeded.data as { id: string }).id;
+      trackedMatchDecisionIds.push(seededId);
+
+      try {
+        // B (non-owner) must NOT see A's seeded row — RLS filters it to empty.
+        const { data: bSeesSeed } = await bClient
+          .from("match_decisions")
+          .select("id")
+          .eq("id", seededId);
+        expect(bSeesSeed ?? []).toEqual([]);
+
+        // Defense-in-depth: B also cannot see ANY of A's tracked rows.
+        const { data: bSeesTracked } = await bClient
+          .from("match_decisions")
+          .select("id")
+          .in("id", trackedMatchDecisionIds);
+        expect(bSeesTracked ?? []).toEqual([]);
+
+        // Sanity: the seeded row DOES exist (admin/service-role sees it), so
+        // the empty B result above is RLS filtering, NOT a missing row.
+        const { data: adminSeesSeed } = await admin
+          .from("match_decisions")
+          .select("id")
+          .eq("id", seededId);
+        expect((adminSeesSeed ?? []).length).toBe(1);
+      } finally {
+        await admin.from("match_decisions").delete().eq("id", seededId);
+        const idx = trackedMatchDecisionIds.indexOf(seededId);
+        if (idx >= 0) trackedMatchDecisionIds.splice(idx, 1);
+      }
     },
     30_000,
   );
@@ -783,4 +829,37 @@ describe("POST /api/allocator/scenario/commit — live-DB RLS regression (Phase 
     },
     30_000,
   );
+});
+
+// ---------------------------------------------------------------------------
+// M-0019 — make the silent CI no-op VISIBLE.
+//
+// Every T_RLS* case above is gated on HAS_FULL_LIVE = HAS_LIVE_DB &&
+// HAS_BASE_URL && HAS_ANON_KEY. CI commonly sets HAS_LIVE_DB + HAS_ANON_KEY
+// but NOT SCENARIO_COMMIT_BASE_URL (no dev server in the vitest lane), so the
+// entire route-layer surface (zod cap, M6 enum, audit emission, the body's
+// allocator_id being dropped) skips SILENTLY — green with zero coverage. This
+// always-on case turns that degraded state into a loud, advertised warning so
+// the gap is observable in the test log rather than invisible. It never fails
+// (the gating is by design), but it documents WHY the route surface is
+// unverified and what env var unlocks it. FLAGGED: closing the gap for real
+// requires a CI dev-server (or an in-process route-handler harness) — an
+// infra change outside a test-only edit.
+// ---------------------------------------------------------------------------
+describe("scenario-commit RLS — coverage-gate visibility (M-0019)", () => {
+  it("advertises when the route-layer RLS surface is gated OFF (missing SCENARIO_COMMIT_BASE_URL)", () => {
+    if (HAS_LIVE_DB && HAS_ANON_KEY && !HAS_BASE_URL) {
+      console.warn(
+        "[scenario-commit-rls] M-0019: live DB + anon key are present but " +
+          "SCENARIO_COMMIT_BASE_URL is unset — ALL T_RLS* route-layer cases " +
+          "(zod cap, M6 enum, audit emission, allocator_id-drop) are SKIPPED. " +
+          "Set SCENARIO_COMMIT_BASE_URL to a running dev server to verify them.",
+      );
+    }
+    // Pure visibility check — assert the env-derived gate booleans are
+    // well-formed so a future refactor that breaks the gating logic
+    // (e.g. inverts HAS_BASE_URL) is caught.
+    expect(typeof HAS_FULL_LIVE).toBe("boolean");
+    expect(HAS_FULL_LIVE).toBe(HAS_LIVE_DB && HAS_BASE_URL && HAS_ANON_KEY);
+  });
 });
