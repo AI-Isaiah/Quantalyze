@@ -72,7 +72,14 @@ export interface WidgetMeta {
    */
   defaultH?: number;
   description: string;
-  status: "ready" | "todo";
+  /**
+   * All registered widgets carry status "ready". The "todo" arm has been
+   * removed: the D-08 registry contract prohibits "todo" entries (they
+   * silently disappear from the picker filter which gates on === "ready"),
+   * and the audit confirmed zero "todo" entries exist across all registry
+   * entries. Narrowed from `"ready" | "todo"` per M-0156 / H-0148.
+   */
+  status: "ready";
 }
 
 export interface WidgetProps {
