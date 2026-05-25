@@ -249,6 +249,38 @@ describe("Tweaks — hydration", () => {
     ).toBe("#0E9F84");
   });
 
+  // M-1079 — the displayFont knob's body[data-display-font] effect
+  // (TweaksContext.tsx:243-248) must restore the persisted value on mount,
+  // mirroring the body[data-density] hydration coverage above. The existing
+  // "restores persisted state on mount" test persists displayFont:'sans' but
+  // only asserts data-density + --color-accent — the parallel displayFont
+  // attribute assertion was missing, so a regression that drops the
+  // displayFont effect (the exact bug PR4 #3 fixed) would not fail any test.
+  it("restores persisted displayFont='sans' to body[data-display-font] on mount (M-1079)", () => {
+    window.localStorage.setItem(
+      "allocations.tweaks",
+      JSON.stringify({
+        density: "comfortable",
+        accentIntensity: "muted",
+        displayFont: "sans",
+        bridgeVariant: "full",
+        chartStyle: "area",
+        showBench: true,
+        showOutcomes: true,
+      }),
+    );
+    render(<Harness />);
+    // The provider's displayFont effect runs post-hydration and writes the
+    // restored value to the body attribute.
+    expect(document.body.getAttribute("data-display-font")).toBe("sans");
+  });
+
+  it("restores the default displayFont='serif' to body[data-display-font] when nothing is persisted (M-1079)", () => {
+    // No persisted blob → hydrates to TWEAK_DEFAULTS.displayFont='serif'.
+    render(<Harness />);
+    expect(document.body.getAttribute("data-display-font")).toBe("serif");
+  });
+
   it("falls back to defaults when localStorage contains malformed JSON", () => {
     window.localStorage.setItem("allocations.tweaks", "not-json");
     expect(() =>

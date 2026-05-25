@@ -95,6 +95,63 @@ describe("save/load round-trip", () => {
     const loaded = loadScenarioDraft("alloc-A");
     expect(loaded).toBeNull();
   });
+
+  // H-0134 — the header comment (scenario-state.ts:20-21) describes the
+  // schema_version-mismatch path as "schema_version mismatch → clear", but
+  // loadScenarioDraft (lines 445-457) only RETURNS null on mismatch — it does
+  // NOT removeItem the stale blob. This test pins the ACTUAL contract: a
+  // version-mismatch read is non-destructive. The stale value stays in
+  // localStorage until a subsequent saveScenarioDraft overwrites it. This is
+  // the documented-correct behavior (load is a pure read with no side effect),
+  // so it is asserted positively. If a future fix wires the comment's
+  // clear-on-mismatch semantics, this is the canonical place to flip the
+  // assertion to `expect(store.has(...)).toBe(false)` and assert removeItem.
+  it("H-0134 — schema_version mismatch load does NOT clear the stale blob (load is non-destructive; comment says 'clear' but code only returns null)", () => {
+    const scopedKey = scenarioStorageKey("alloc-A");
+    const stale = {
+      ...defaultDraftFromHoldings(HOLDINGS_2),
+      schema_version: SCENARIO_SCHEMA_VERSION + 1,
+    };
+    const serialized = JSON.stringify(stale);
+    store.set(scopedKey, serialized);
+
+    // First read: mismatch → null.
+    expect(loadScenarioDraft("alloc-A")).toBeNull();
+
+    // The stale value is STILL in localStorage — load did not removeItem.
+    expect(localStorageMock.removeItem).not.toHaveBeenCalled();
+    expect(store.get(scopedKey)).toBe(serialized);
+
+    // A SECOND read sees the same stale blob and again returns null (the
+    // value is never auto-evicted; only a save overwrites it).
+    expect(loadScenarioDraft("alloc-A")).toBeNull();
+    expect(store.get(scopedKey)).toBe(serialized);
+  });
+
+  // H-0134 (migration path) — "old client wrote v(N), new client reads v(N+1)
+  // schema". A save AFTER a mismatched read overwrites the stale blob with the
+  // current schema_version, so a subsequent load succeeds. Pins that recovery
+  // is save-driven (the only thing that evicts a stale blob), not load-driven.
+  it("H-0134 — a save after a version-mismatch read overwrites the stale blob; the next load then succeeds at the current schema_version", () => {
+    const scopedKey = scenarioStorageKey("alloc-A");
+    const stale = {
+      ...defaultDraftFromHoldings(HOLDINGS_2),
+      schema_version: SCENARIO_SCHEMA_VERSION + 1,
+    };
+    store.set(scopedKey, JSON.stringify(stale));
+    expect(loadScenarioDraft("alloc-A")).toBeNull();
+
+    // New client writes a current-schema draft over the stale key.
+    const fresh = defaultDraftFromHoldings(HOLDINGS_2);
+    expect(fresh.schema_version).toBe(SCENARIO_SCHEMA_VERSION);
+    saveScenarioDraft("alloc-A", fresh);
+
+    // Now the load succeeds — the stale blob was overwritten by the save.
+    const loaded = loadScenarioDraft("alloc-A");
+    expect(loaded).not.toBeNull();
+    expect(loaded?.schema_version).toBe(SCENARIO_SCHEMA_VERSION);
+    expect(loaded?.init_holdings_fingerprint).toBe(fresh.init_holdings_fingerprint);
+  });
 });
 
 describe("error handling", () => {
