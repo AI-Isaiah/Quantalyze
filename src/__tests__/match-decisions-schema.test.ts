@@ -81,37 +81,39 @@ describe("migration 064 — match_decisions.original_strategy_id schema smoke", 
     30_000,
   );
 
-  it.skipIf(!HAS_LIVE_DB)(
+  // H-0021 — Case 4 previously soft-skipped (`expect(error).toBeTruthy()`) when
+  // PostgREST could not introspect the FK delete_rule, turning a coverage gap
+  // into a passing assertion: a future migration that switched the FK to CASCADE
+  // would NOT have failed this test. The Management API (runIntrospectionSqlLegacy)
+  // is NOT subject to PostgREST's information_schema restriction, so we read the
+  // delete_rule directly. Gated on HAS_INTROSPECTION (not HAS_LIVE_DB) because
+  // the introspection path is the only one that can actually verify this.
+  it.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION_LEGACY)(
     "Case 4: FK on match_decisions.original_strategy_id uses ON DELETE RESTRICT (Voice-D3)",
     async () => {
-      const admin = createLiveAdminClient();
-      // information_schema.referential_constraints joined with
-      // key_column_usage — use PostgREST embedded join.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data, error } = await (admin as any)
-        .from("information_schema.key_column_usage")
-        .select(
-          "constraint_name, table_name, column_name, referential_constraints:information_schema_referential_constraints!inner(delete_rule)",
-        )
-        .eq("table_name", "match_decisions")
-        .eq("column_name", "original_strategy_id");
-      // Soft-skip when PostgREST cannot expose this join (some projects
-      // restrict information_schema); fall back to RPC sql if needed.
-      if (error) {
-        console.warn(
-          "[match-decisions-schema] Case 4 couldn't introspect via PostgREST join — consider adding an RPC wrapper.",
-          error.message,
-        );
-        expect(error).toBeTruthy();
-        return;
-      }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rows = data as any[];
-      expect(Array.isArray(rows) && rows.length).toBeGreaterThan(0);
-      const deleteRule =
-        rows[0]?.referential_constraints?.delete_rule ??
-        rows[0]?.delete_rule;
-      expect(deleteRule).toBe("RESTRICT");
+      // Join referential_constraints → key_column_usage to find the delete_rule
+      // for the FK that covers match_decisions.original_strategy_id. The FK is
+      // declared inline in migration 064 (auto-named *_fkey), so we match by
+      // table + column rather than by constraint name.
+      const rows = await runIntrospectionSqlLegacy<{
+        constraint_name: string;
+        delete_rule: string;
+      }>(
+        `SELECT rc.constraint_name, rc.delete_rule
+         FROM information_schema.referential_constraints rc
+         JOIN information_schema.key_column_usage kcu
+           ON kcu.constraint_name = rc.constraint_name
+          AND kcu.constraint_schema = rc.constraint_schema
+         WHERE kcu.table_schema = 'public'
+           AND kcu.table_name = 'match_decisions'
+           AND kcu.column_name = 'original_strategy_id'`,
+      );
+      // The FK MUST exist (no soft-skip): exactly one referential constraint
+      // covers this column.
+      expect(rows.length).toBeGreaterThan(0);
+      // And its delete_rule MUST be RESTRICT — a switch to CASCADE/SET NULL
+      // now fails here instead of silently passing.
+      expect(rows[0].delete_rule).toBe("RESTRICT");
     },
     30_000,
   );

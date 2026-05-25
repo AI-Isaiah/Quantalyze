@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -92,5 +92,33 @@ describe("vercel.json cron quota (Pro plan, soft bound)", () => {
     // Stale allowlist entries (cron deleted but allowlist still references it)
     // are technical debt; the suite surfaces them so the next PR can prune.
     expect(stale).toEqual([]);
+  });
+
+  // ---------------------------------------------------------------------------
+  // M-1000 — every cron `path` resolves to a route handler on disk.
+  //
+  // Vercel does NOT validate cron paths against the build output: a typo like
+  // `/api/cron/sync-fundings` (vs `sync-funding`) deploys a cron that 404s
+  // silently, and Vercel only retries a non-2xx 3 times before giving up. The
+  // shape checks above (count + schedule) cannot catch this. Map each path to
+  // `src/app<path>/route.{ts,tsx,js}` and assert the handler exists — this also
+  // fails when a PR deletes a handler without removing its cron entry.
+  // ---------------------------------------------------------------------------
+  it("every cron path resolves to a route handler on disk", () => {
+    const crons = loadCrons();
+    const appRoot = join(process.cwd(), "src", "app");
+
+    const missing: string[] = [];
+    for (const cron of crons) {
+      // Trim any leading slash so join() treats it as relative to src/app.
+      const rel = cron.path.replace(/^\/+/, "");
+      const handlerDir = join(appRoot, rel);
+      const exists = ["route.ts", "route.tsx", "route.js"].some((f) =>
+        existsSync(join(handlerDir, f)),
+      );
+      if (!exists) missing.push(cron.path);
+    }
+
+    expect(missing).toEqual([]);
   });
 });

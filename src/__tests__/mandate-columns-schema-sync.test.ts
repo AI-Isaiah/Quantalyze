@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 // @/lib/admin/match.ts imports "server-only" which throws under vitest+jsdom.
 vi.mock("server-only", () => ({}));
@@ -47,6 +49,71 @@ describe("MANDATE-07: allocator_preferences schema sync", () => {
     expect(EXPECTED_COLUMNS_SET.has("edited_by_user_id")).toBe(true);
     // Phase 3 (migration 062)
     expect(EXPECTED_COLUMNS_SET.has("scoring_weight_overrides")).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // H-0020 — break the tautology: tie the TS constant to MIGRATION CONTENT.
+  //
+  // The static assertions above compare the constant to literals hand-copied
+  // from the same PR — they cannot detect "migration added a column, but neither
+  // the TS constant NOR the test were updated". This test parses the actual
+  // `ADD COLUMN <name>` statements from the mandate migrations (061 + 062) and
+  // asserts EVERY migrated allocator_preferences column appears in
+  // ALLOCATOR_PREFERENCES_COLUMNS. A new column in a future migration that the
+  // PR forgets to add to the constant now FAILS here without anyone having to
+  // remember to update a literal list. Runs offline (file read, no DB).
+  // ---------------------------------------------------------------------------
+  it("every ADD COLUMN in the mandate migrations (061/062) is present in ALLOCATOR_PREFERENCES_COLUMNS", () => {
+    const migrationsDir = path.resolve(__dirname, "..", "..", "supabase", "migrations");
+    // The two migrations that add allocator_preferences columns. Named by
+    // timestamp in this repo; 061 = mandate_columns, 062 = scoring_weight_overrides.
+    const migrationFiles = [
+      "20260418150632_mandate_columns.sql",
+      "20260418194206_scoring_weight_overrides.sql",
+    ];
+
+    // Capture `ADD COLUMN [IF NOT EXISTS] <name>` only while inside an
+    // `ALTER TABLE allocator_preferences` statement (so we don't pick up
+    // columns added to other tables in the same migration, e.g. the
+    // `allocator_id` column added to a different table in migration 062).
+    const addColumnPattern =
+      /\bADD COLUMN\s+(?:IF NOT EXISTS\s+)?([a-z_][a-z0-9_]*)/i;
+    const alterApPattern = /ALTER TABLE\s+(?:public\.)?allocator_preferences\b/i;
+    const alterOtherPattern =
+      /ALTER TABLE\s+(?:public\.)?(?!allocator_preferences\b)\w/i;
+    // A bare statement terminator ends the current ALTER TABLE block.
+    const stmtEndPattern = /;\s*$/;
+
+    const migratedColumns = new Set<string>();
+    for (const file of migrationFiles) {
+      const full = path.join(migrationsDir, file);
+      const sql = fs.readFileSync(full, "utf8");
+      let inAlterAp = false;
+      for (const rawLine of sql.split("\n")) {
+        const line = rawLine.replace(/--.*$/, ""); // strip line comments
+        if (alterApPattern.test(line)) {
+          inAlterAp = true;
+        } else if (alterOtherPattern.test(line)) {
+          inAlterAp = false;
+        }
+        if (inAlterAp) {
+          const matched = line.match(addColumnPattern);
+          if (matched) migratedColumns.add(matched[1].toLowerCase());
+        }
+        if (stmtEndPattern.test(line)) {
+          inAlterAp = false;
+        }
+      }
+    }
+
+    // Sanity: the parser actually found columns (guards against a rename of the
+    // migration files silently turning this into a vacuous pass).
+    expect(migratedColumns.size).toBeGreaterThan(0);
+
+    const missingFromConstant = [...migratedColumns].filter(
+      (col) => !EXPECTED_COLUMNS_SET.has(col),
+    );
+    expect(missingFromConstant).toEqual([]);
   });
 
   it.skipIf(!HAS_LIVE_DB)(
