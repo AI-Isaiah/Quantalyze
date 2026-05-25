@@ -1432,7 +1432,7 @@ def _build_balance_flag_mock_supabase(
                 return r
 
             def _eq_fill(field, value):
-                # Runner fetches raw fills at analytics_runner.py:756 via
+                # Runner fetches raw fills at analytics_runner.py:1009-1011 via
                 # `.select("side, cost, is_maker, timestamp")
                 #   .eq("strategy_id", ...).eq("is_fill", True)`.
                 # Returning data=[] keeps fills_data empty so the runner

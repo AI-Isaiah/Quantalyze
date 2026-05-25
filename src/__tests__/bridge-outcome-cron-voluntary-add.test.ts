@@ -26,8 +26,8 @@
  *
  * Fixture math:
  *   anchor = today - 31d
- *   returns_series: { date: anchor + i, value: 1.0 + 0.30 * i / 180 } for i in [0, 180]
- *   At i=30: value = 1.0 + 0.05 → realized 30d delta = (1.05/1.0) - 1 = 0.05
+ *   returns_series: { date: anchor + i, value: 1.0 + 0.30 * i / 200 } for i in [0, 200]
+ *   At i=30: value = 1.0 + 0.045 → realized 30d delta = (1.045/1.0) - 1 = 0.045
  *
  * Gate: requires NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY.
  */
@@ -221,19 +221,9 @@ describe("migration 080 — voluntary_add cron branch (live-DB / H2)", () => {
       const today = new Date().toISOString().slice(0, 10);
       const yesterday = addDays(today, -1);
 
-      // Ensure the strategy returns_series doesn't cover yesterday + 30d
-      // by definition the test fixture anchors 31 days ago — yesterday is +30
-      // from anchor, so the value AT yesterday IS in the series, but yesterday + 30d
-      // (i = +60 from anchor) is also in the series. To guarantee NULL we'd need
-      // to use a fresh strategy with NO series. Instead: reuse the existing fixture
-      // and rely on the fact that yesterday + 30d IS in the series → delta would be
-      // populated. Switch test to assert the branch does the RIGHT thing in either case
-      // — actually compute the expected delta and assert it matches. This still
-      // proves "no spurious fills outside the model" because the value is correct.
-      //
-      // Spec interpretation: T_CRON_LEAVES_NULL_FOR_FRESH proves "if data is missing
-      // for the +30d window, delta stays NULL". The cleanest way to demonstrate this
-      // is a separate strategy with returns_series = [] (no data at all).
+      // A fresh strategy with an empty returns_series has no data for the +30d
+      // window, so every delta must stay NULL — proving the cron writes no
+      // spurious fills when the model has nothing to compute.
 
       const FRESH_STRATEGY = "00000000-0000-0000-0000-000000001083";
       await admin.from("strategies").upsert(
