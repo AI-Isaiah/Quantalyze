@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { Sidebar } from "./Sidebar";
+import { DashboardChrome } from "./DashboardChrome";
 import {
   AllocationProvider,
   useFlaggedCountStore,
@@ -35,9 +36,16 @@ import {
  *      store so DashboardChrome (above the provider) can read it.
  */
 
+// Mutable pathname so the DashboardChrome tests can exercise both the
+// standard layout and the full-bleed (/admin/match/[id]) branch.
+const navState = { pathname: "/allocations" };
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/allocations",
+  usePathname: () => navState.pathname,
 }));
+
+beforeEach(() => {
+  navState.pathname = "/allocations";
+});
 
 describe("DashboardChrome — sidebar flagged-count badge (prop path)", () => {
   it("does NOT render the badge when flaggedCount is 0", () => {
@@ -111,5 +119,68 @@ describe("DashboardChrome — cross-tree flaggedCount store integration", () => 
     // library wraps the render in act() so effects have flushed.
     expect(screen.getByTestId("store-count").textContent).toBe("5");
     expect(screen.getByText("provider-children")).toBeInTheDocument();
+  });
+});
+
+/**
+ * M-0410 (audit-2026-05-07) — actually render DashboardChrome.
+ *
+ * The tests above all render <Sidebar> directly. None exercise
+ * DashboardChrome's own structure: the `<main aria-label="Dashboard
+ * content">` wrap on the standard layout, and the full-bleed branch
+ * (/admin/match/[id]) which drops both the sidebar wrapper and the
+ * aria-label'd main. These tests pin both.
+ */
+describe("DashboardChrome — standard vs full-bleed layout (M-0410)", () => {
+  it("standard layout wraps content in <main aria-label='Dashboard content'>", () => {
+    navState.pathname = "/allocations";
+    render(
+      <DashboardChrome isAllocator={true} populatedSlugs={[]}>
+        <div data-testid="page-body">page</div>
+      </DashboardChrome>,
+    );
+    const main = screen.getByRole("main", { name: "Dashboard content" });
+    expect(main).toBeInTheDocument();
+    // The children render inside it.
+    expect(main).toContainElement(screen.getByTestId("page-body"));
+  });
+
+  it("standard layout renders the desktop Sidebar (My Allocation visible for allocators)", () => {
+    navState.pathname = "/allocations";
+    render(
+      <DashboardChrome isAllocator={true} populatedSlugs={[]}>
+        <div>page</div>
+      </DashboardChrome>,
+    );
+    // Sidebar emits the allocator workspace link; its presence proves the
+    // desktop sidebar subtree mounted (not the full-bleed branch).
+    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+  });
+
+  it("full-bleed route (/admin/match/[id]) drops the 'Dashboard content' main + desktop sidebar", () => {
+    navState.pathname = "/admin/match/abc-123";
+    render(
+      <DashboardChrome isAdmin={true} populatedSlugs={[]}>
+        <div data-testid="page-body">queue</div>
+      </DashboardChrome>,
+    );
+    // Full-bleed <main> has NO aria-label, so the named query must miss.
+    expect(
+      screen.queryByRole("main", { name: "Dashboard content" }),
+    ).toBeNull();
+    // But the page body still renders (inside the unlabeled full-bleed main).
+    expect(screen.getByTestId("page-body")).toBeInTheDocument();
+  });
+
+  it("the /admin/match/eval route is NOT full-bleed (keeps the standard labeled main)", () => {
+    navState.pathname = "/admin/match/eval";
+    render(
+      <DashboardChrome isAdmin={true} populatedSlugs={[]}>
+        <div>eval</div>
+      </DashboardChrome>,
+    );
+    expect(
+      screen.getByRole("main", { name: "Dashboard content" }),
+    ).toBeInTheDocument();
   });
 });

@@ -178,6 +178,51 @@ describe("<PortfolioImpactPanel>", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
+  // M-0970 (audit-2026-05-07) — the error-state test above asserts the
+  // Retry button is PRESENT but never clicks it. For a non-429 error the
+  // button must be enabled and clicking it must re-fire fetchImpact and
+  // recover. A regression that breaks the useCallback memoization or fails
+  // to re-enable the button would slip past the present-only assertion.
+  it("M-0970: clicking Retry on a 500 re-fires the fetch and recovers", async () => {
+    let call = 0;
+    mockFetch(async () => {
+      call += 1;
+      if (call === 1) {
+        return new Response(
+          JSON.stringify({ error: "Simulator service error" }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify(buildResponse()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Recoverable"
+        onClose={() => {}}
+      />,
+    );
+
+    // First fetch fails → error state with an ENABLED Retry button (non-429).
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).not.toBeDisabled();
+
+    fireEvent.click(retryButton);
+
+    // Second fetch succeeds → the deltas section renders.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("region", { name: "Portfolio impact deltas" }),
+      ).toBeInTheDocument(),
+    );
+    expect(call).toBe(2);
+  });
+
   it("disables the retry button and shows a countdown on 429", async () => {
     mockFetch(async () =>
       new Response(

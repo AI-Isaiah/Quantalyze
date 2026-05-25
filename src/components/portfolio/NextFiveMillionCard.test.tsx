@@ -1,7 +1,28 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { NextFiveMillionCard } from "./NextFiveMillionCard";
 import type { OptimizerSuggestionRow } from "@/lib/types";
+
+/**
+ * Parse the rendered dollar cells back to numbers and sum them. The card
+ * renders each allocation via formatCurrency → "$X.YM" (1-decimal at the
+ * million scale). Each row therefore carries up to ±$50K of display
+ * rounding, so a 3-row sum can drift up to ±$150K from the true total —
+ * but a real math regression (e.g. allocating half the amount, or
+ * dividing by the wrong denominator) would blow far past that tolerance.
+ */
+function sumRenderedAllocations(): number {
+  const list = screen.getByRole("list");
+  const cells = within(list).getAllByText(/^\$[\d.]+[MK]?$/);
+  return cells.reduce((sum, el) => {
+    const txt = el.textContent ?? "";
+    const m = txt.match(/^\$([\d.]+)([MK]?)$/);
+    if (!m) return sum;
+    const n = parseFloat(m[1]);
+    const scale = m[2] === "M" ? 1_000_000 : m[2] === "K" ? 1_000 : 1;
+    return sum + n * scale;
+  }, 0);
+}
 
 function suggestion(
   strategy_id: string,
@@ -61,6 +82,48 @@ describe("<NextFiveMillionCard>", () => {
     );
     const cells = screen.getAllByText("$1.7M");
     expect(cells).toHaveLength(3);
+  });
+
+  // M-0446 (audit-2026-05-07) — the per-row display checks above never
+  // assert the allocations SUM to the deployable amount. A published IC
+  // report that adds to $4.9M or $5.1M is an embarrassment. These pin the
+  // total (within display-rounding tolerance) for both the equal-split and
+  // an uneven 7-strategy score distribution.
+  it("M-0446: equal-split allocations sum to ~$5M", () => {
+    render(
+      <NextFiveMillionCard
+        suggestions={[
+          suggestion("a", "Alpha", 0),
+          suggestion("b", "Beta", 0),
+          suggestion("c", "Gamma", 0),
+        ]}
+      />,
+    );
+    // 3 rows of $1.7M displayed; underlying raw split is exactly 5M/3 each,
+    // summing to 5_000_000. Display rounding tolerance: ±$150K over 3 rows.
+    // Tolerance: ±$50K display rounding per row × 3 rows = ±$150K.
+    expect(Math.abs(sumRenderedAllocations() - 5_000_000)).toBeLessThanOrEqual(150_000);
+  });
+
+  it("M-0446: uneven 7-strategy scores still allocate ~$5M across the top 3", () => {
+    render(
+      <NextFiveMillionCard
+        suggestions={[
+          suggestion("a", "Alpha", 0.42),
+          suggestion("b", "Beta", 0.27),
+          suggestion("c", "Gamma", 0.18),
+          suggestion("d", "Delta", 0.07),
+          suggestion("e", "Epsilon", 0.03),
+          suggestion("f", "Zeta", 0.02),
+          suggestion("g", "Eta", 0.01),
+        ]}
+      />,
+    );
+    // Only the top 3 (Alpha/Beta/Gamma) render; their proportional shares of
+    // $5M sum to exactly $5M before display rounding.
+    expect(screen.queryByText("Delta")).toBeNull();
+    // Tolerance: ±$50K display rounding per row × 3 rows = ±$150K.
+    expect(Math.abs(sumRenderedAllocations() - 5_000_000)).toBeLessThanOrEqual(150_000);
   });
 
   it("respects custom amount", () => {

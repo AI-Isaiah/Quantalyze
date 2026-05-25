@@ -110,6 +110,33 @@ describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
     expect(organizationsIdx).toBeGreaterThan(securityIdx);
   });
 
+  // M-0393 (audit-2026-05-07) — the allocator-only Mandate gate. A
+  // non-allocator who hits /profile?tab=mandate must be coerced to the
+  // Personal tab and must NOT render MandateForm (whose POST to
+  // /api/preferences has only a shallow server-side role check). These
+  // tests pin parseTabParam's mandate branch specifically (the existing
+  // Test 4 only exercises the `security` key).
+  it("M-0393 — non-allocator with ?tab=mandate is coerced to Personal (no MandateForm)", () => {
+    searchParamsState.tab = "mandate";
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={false} />);
+    // MandateForm's ticket-size label must be absent — the tab gate kept it
+    // from mounting and the personal ProfileForm renders instead.
+    expect(
+      screen.queryByLabelText("Typical ticket size (USD)"),
+    ).toBeNull();
+    // The Mandate tab button itself must not even render for non-allocators.
+    expect(screen.queryByRole("button", { name: "Mandate" })).toBeNull();
+  });
+
+  it("M-0393 — allocator with ?tab=mandate DOES render MandateForm", () => {
+    searchParamsState.tab = "mandate";
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+    // The allocator path mounts MandateForm — its ticket-size label appears.
+    expect(
+      screen.getByLabelText("Typical ticket size (USD)"),
+    ).toBeInTheDocument();
+  });
+
   it("Phase 11 IN-06 — activeTab derives per-render from searchParams (back/forward parity)", () => {
     // Mount with ?tab=security — Audit log heading visible.
     searchParamsState.tab = "security";

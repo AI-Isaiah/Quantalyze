@@ -173,5 +173,33 @@ describe("FactsheetPreview", () => {
       );
       expect(screen.queryByText("Verified by Quantalyze")).not.toBeInTheDocument();
     });
+
+    // M-0459 (audit-2026-05-07) — the draft + computedAt interaction.
+    // resolveBadge uses `caption: dateLabel ?? "Computed from your exchange
+    // trades — not yet admin-reviewed"`. When computedAt IS provided,
+    // dateLabel is truthy ("Data from exchange API · <date>"), so the draft
+    // caption is REPLACED by the date label. The existing draft test omits
+    // computedAt and only exercises the fallback caption. This pins the
+    // shipped behavior: the headline stays "Draft preview · pending review"
+    // while the caption surfaces the date label.
+    it("draft + computedAt keeps the draft headline but swaps the caption to the date label", () => {
+      render(
+        <FactsheetPreview
+          strategyName="X"
+          metrics={METRICS}
+          verificationState="draft"
+          computedAt="2026-04-10T00:00:00Z"
+        />,
+      );
+      const badge = screen.getByTestId("factsheet-verification-badge");
+      // Headline unchanged — never "Verified by Quantalyze" on a draft.
+      expect(badge).toHaveTextContent("Draft preview · pending review");
+      expect(badge).toHaveAttribute("data-verification-state", "draft");
+      // Caption is the date label, NOT the not-yet-reviewed fallback.
+      expect(screen.getByText(/Data from exchange API/)).toBeInTheDocument();
+      expect(
+        screen.queryByText(/not yet admin-reviewed/),
+      ).not.toBeInTheDocument();
+    });
   });
 });
