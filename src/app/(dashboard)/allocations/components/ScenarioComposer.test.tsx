@@ -691,6 +691,45 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // M-0097 — T_C15's focus assertion is OR'd with hasAttribute("autoFocus"),
+  // which React compiles AWAY (the JSX `autoFocus` prop never lands as a DOM
+  // attribute — React calls .focus() on mount instead). So the OR weakens the
+  // check: the hasAttribute side is always false, and a regression dropping
+  // the prop could still pass if focus happened to land on the button. This
+  // case pins the strict invariant: on mount, focus IS on "Keep my draft" —
+  // the non-destructive default per UI-SPEC — and NOT on "Reset and start
+  // over". Dropping `autoFocus` makes this fail.
+  // -------------------------------------------------------------------------
+  it("M-0097 fingerprint banner — mount focus lands strictly on 'Keep my draft' (autoFocus), not Reset", () => {
+    lsStore.set(
+      `allocations.scenario_v0_15.${ALLOCATOR_A}`,
+      JSON.stringify({
+        schema_version: 1,
+        init_holdings_fingerprint: "STALE_FINGERPRINT_NOT_MATCHING",
+        toggleByScopeRef: { [REF_BTC]: true },
+        addedStrategies: [],
+        weightOverrides: { [REF_BTC]: 1 },
+        lastEditedAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const keepBtn = screen.getByRole("button", { name: /Keep my draft/i });
+    const resetBtn = screen.getByRole("button", {
+      name: /Reset and start over/i,
+    });
+    // Strict: focus is on the non-destructive default, not the destructive one.
+    expect(document.activeElement).toBe(keepBtn);
+    expect(document.activeElement).not.toBe(resetBtn);
+  });
+
+  // -------------------------------------------------------------------------
   // T_C16 — Compare → for flagged-holding rows
   // -------------------------------------------------------------------------
   it("T_C16 Composition row for a flagged holding renders a Compare → button routing to /compare?ids=...", () => {
@@ -881,6 +920,78 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       // ~0.95 in a brutal drawdown. The +1 conversion is what keeps them
       // from being centered around 0.
       expect(p.value).toBeGreaterThanOrEqual(0.95);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // M-0096 — T_C19's for-loop runs over an EMPTY series (the global adapter
+  // mock returns no strategies → computeScenario yields equity_curve=[]), so
+  // every `expect(p.value >= 0.95)` is skipped and the +1 wealth conversion is
+  // never actually exercised. This case overrides the adapter to return a real
+  // selected strategy with >= 10 daily returns so computeScenario produces a
+  // NON-EMPTY equity_curve, then fails loud if the precondition is unmet AND
+  // pins that every scenarioSeries point is wealth-form (>= 0.95).
+  // -------------------------------------------------------------------------
+  it("M-0096 EquityChart scenarioSeries is NON-EMPTY and wealth-form (+1 conversion genuinely exercised)", () => {
+    // 12 business days of small positive returns → cumulative wealth ~1.0, so
+    // each equity_curve value (cumulative-1) is tiny and +1 → ~1.0 >= 0.95.
+    const dates = [
+      "2026-01-01",
+      "2026-01-02",
+      "2026-01-03",
+      "2026-01-04",
+      "2026-01-05",
+      "2026-01-06",
+      "2026-01-07",
+      "2026-01-08",
+      "2026-01-09",
+      "2026-01-10",
+      "2026-01-11",
+      "2026-01-12",
+    ];
+    const strat = {
+      id: "strat-real-1",
+      name: "Real Strategy",
+      codename: null,
+      disclosure_tier: "verified",
+      strategy_types: ["momentum"],
+      markets: ["binance"],
+      start_date: "2026-01-01",
+      daily_returns: dates.map((date) => ({ date, value: 0.001 })),
+      cagr: 0.1,
+      sharpe: 1.0,
+      volatility: 0.1,
+      max_drawdown: -0.02,
+    };
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [strat],
+      state: {
+        selected: { "strat-real-1": true },
+        weights: { "strat-real-1": 1 },
+        startDates: {},
+      },
+    });
+
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(EquityChart).toHaveBeenCalled();
+    const props = vi.mocked(EquityChart).mock.calls[0][0];
+    const series = (props.scenarioSeries ?? []) as Array<{
+      date: string;
+      value: number;
+    }>;
+    // Fail loud: the +1 conversion check is meaningless without points.
+    expect(series.length).toBeGreaterThan(0);
+    for (const p of series) {
+      expect(p.value).toBeGreaterThanOrEqual(0.95);
+      // Wealth-form (not raw cumulative-return form, which would be ~0.0).
+      expect(p.value).toBeGreaterThan(0.5);
     }
   });
 

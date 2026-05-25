@@ -347,6 +347,51 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     expect(screen.queryByText(/exploratory/i)).not.toBeInTheDocument();
   });
 
+  it("M-0105 — closing the drawer mid-flight ABORTS the in-flight fetch (signal.aborted flips true)", async () => {
+    // T3 only proves the signal is SUPPLIED to fetch — it never proves the
+    // P2-review AbortController actually fires on close/unmount. Here we keep
+    // the fetch pending, capture the signal handed to it, then re-render with
+    // isOpen=false (which runs the effect cleanup → controller.abort()). A
+    // regression that dropped `controller.abort()` from the cleanup would
+    // leave signal.aborted === false and fail this assertion.
+    let capturedSignal: AbortSignal | null = null;
+    const fetchSpy = vi.fn((_url: string, init?: { signal?: AbortSignal }) => {
+      capturedSignal = init?.signal ?? null;
+      // Never resolves — keeps the request "in flight" so the abort is
+      // observable rather than a no-op on an already-settled promise.
+      return new Promise<Response>(() => {});
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { rerender } = render(
+      <StrategyBrowseDrawer
+        isOpen
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        allocatorMandate={MANDATE_BINANCE_OKX}
+        // default fetch path → exercises the real AbortController wiring
+      />,
+    );
+    await flush();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(capturedSignal).not.toBeNull();
+    expect((capturedSignal as unknown as AbortSignal).aborted).toBe(false);
+
+    // Close the drawer → effect cleanup aborts the controller.
+    rerender(
+      <StrategyBrowseDrawer
+        isOpen={false}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        allocatorMandate={MANDATE_BINANCE_OKX}
+      />,
+    );
+    await flush();
+
+    expect((capturedSignal as unknown as AbortSignal).aborted).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
   it("T15 — backdrop click during loading state still calls onClose", async () => {
     // Slow fetcher that never resolves while we click backdrop.
     let resolveFetch: ((rows: StrategyBrowseRow[]) => void) | null = null;

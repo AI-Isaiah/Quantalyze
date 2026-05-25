@@ -365,6 +365,90 @@ describe("Tweaks — retroactive audit-2026-05-16 — parseTweakState union whit
     expect(screen.getByTestId("probe-bridge").textContent).toBe("full");
   });
 
+  // M-0111 — existing cases cover malformed JSON + single-field-invalid
+  // fallbacks, but NOT (1) a partial-shape blob (object present, some keys
+  // simply absent) or (2) a valid blob carrying EXTRA unknown fields. The
+  // field-by-field parse (parseTweakState) must keep present valid keys,
+  // default the absent ones, and silently ignore unknown keys.
+  it("M-0111: partial-shape blob — present valid key retained, absent keys default", () => {
+    // Only `density` is present (and valid); everything else is absent.
+    window.localStorage.setItem(
+      "allocations.tweaks",
+      JSON.stringify({ density: "loose" }),
+    );
+    function Probe() {
+      const { state } = useTweaks();
+      return (
+        <div>
+          <span data-testid="p-density">{state.density}</span>
+          <span data-testid="p-accent">{state.accentIntensity}</span>
+          <span data-testid="p-font">{state.displayFont}</span>
+          <span data-testid="p-bridge">{state.bridgeVariant}</span>
+          <span data-testid="p-chart">{state.chartStyle}</span>
+          <span data-testid="p-bench">{String(state.showBench)}</span>
+          <span data-testid="p-outcomes">{String(state.showOutcomes)}</span>
+        </div>
+      );
+    }
+    render(
+      <TweaksProvider>
+        <Probe />
+      </TweaksProvider>,
+    );
+    // Present valid key retained.
+    expect(screen.getByTestId("p-density").textContent).toBe("loose");
+    // Absent keys fall to TWEAK_DEFAULTS.
+    expect(screen.getByTestId("p-accent").textContent).toBe("muted");
+    expect(screen.getByTestId("p-font").textContent).toBe("serif");
+    expect(screen.getByTestId("p-bridge").textContent).toBe("full");
+    expect(screen.getByTestId("p-chart").textContent).toBe("area");
+    expect(screen.getByTestId("p-bench").textContent).toBe("true");
+    expect(screen.getByTestId("p-outcomes").textContent).toBe("true");
+  });
+
+  it("M-0111: valid blob with EXTRA unknown fields — extras ignored, known fields retained", () => {
+    window.localStorage.setItem(
+      "allocations.tweaks",
+      JSON.stringify({
+        density: "tight",
+        accentIntensity: "full",
+        displayFont: "sans",
+        bridgeVariant: "card",
+        chartStyle: "line",
+        showBench: false,
+        showOutcomes: false,
+        // Unknown keys a future schema version / hand-edit might smuggle in:
+        futureKnob: "experimental",
+        nested: { whatever: true },
+        version: 99,
+      }),
+    );
+    function Probe() {
+      const { state } = useTweaks();
+      // Surface the full state as JSON so we can assert it equals exactly the
+      // known-key projection (no extra keys leaked into typed state).
+      return <div data-testid="p-json">{JSON.stringify(state)}</div>;
+    }
+    render(
+      <TweaksProvider>
+        <Probe />
+      </TweaksProvider>,
+    );
+    const parsed = JSON.parse(screen.getByTestId("p-json").textContent!);
+    expect(parsed).toEqual({
+      density: "tight",
+      accentIntensity: "full",
+      displayFont: "sans",
+      bridgeVariant: "card",
+      chartStyle: "line",
+      showBench: false,
+      showOutcomes: false,
+    });
+    // Extra keys must NOT have leaked into the typed state object.
+    expect(Object.keys(parsed)).not.toContain("futureKnob");
+    expect(Object.keys(parsed)).not.toContain("version");
+  });
+
   it("accentIntensity:null falls back to TWEAK_DEFAULTS.accentIntensity='muted'", () => {
     window.localStorage.setItem(
       "allocations.tweaks",

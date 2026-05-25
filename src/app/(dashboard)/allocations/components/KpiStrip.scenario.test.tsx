@@ -322,6 +322,111 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
     expect(sharpeDelta!.getAttribute("aria-label") ?? "").toMatch(/improved/);
   });
 
+  // ---------------------------------------------------------------------------
+  // M-0083 — live-mode isolation. T1 asserts "no delta pills" in live mode but
+  // never passes scenarioMetrics, so it can't prove the live render is immune
+  // to stray scenario props. This case renders mode="live" (default) WHILE
+  // passing scenarioMetrics + liveMetrics; the primary number must remain the
+  // LIVE value (Sharpe 1.20 from analytics), never the scenario value (1.51).
+  // A regression that let scenarioActive leak when mode !== "scenario" would
+  // surface here.
+  // ---------------------------------------------------------------------------
+  it("M-0083: live mode ignores scenarioMetrics — Sharpe primary stays 1.20, never the scenario 1.51", () => {
+    const { container } = render(
+      <KpiStrip
+        analytics={{
+          ytd_twr: 0.15,
+          sharpe: 1.2,
+          max_drawdown_12m: -0.08,
+          avg_correlation: 0.42,
+        }}
+        metrics={LIVE_METRICS}
+        timeframe="ALL"
+        aum={1_000_000}
+        snapshotCount={30}
+        // mode omitted → defaults to "live". Scenario props are deliberately
+        // passed to prove they do NOT bleed into the live render.
+        scenarioMetrics={SCENARIO_IMPROVEMENT}
+        liveMetrics={LIVE_METRICS}
+      />,
+    );
+    // Live Sharpe (analytics.sharpe = 1.2 → "1.20") is shown.
+    expect(screen.getByText("1.20")).toBeTruthy();
+    // The scenario Sharpe (1.51) must NOT appear anywhere.
+    expect(screen.queryByText("1.51")).toBeNull();
+    // And no delta pills render in live mode.
+    const deltaNodes = container.querySelectorAll('[aria-label*="delta:"]');
+    expect(deltaNodes.length).toBe(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // M-0084 — noise-floor coverage beyond Sharpe. T5 only pins the Sharpe
+  // noise floor. Max DD and YTD TWR each carry their own KPI_NOISE_FLOOR entry
+  // (0.01). A regression that hardcoded the Sharpe threshold for every metric
+  // (or dropped a per-metric entry so it fell to the 0.01 default with the
+  // wrong direction) would ship green. These cases pin the neutral
+  // (text-text-muted / "no change") banding for a sub-floor delta on each.
+  // ---------------------------------------------------------------------------
+  it("M-0084: Max DD sub-noise-floor delta (|Δ| < 0.01) → text-text-muted 'no change'", () => {
+    const noiseLive: ComputedMetrics = { ...LIVE_METRICS, max_drawdown: -0.08 };
+    const noiseScenario: ComputedMetrics = {
+      ...LIVE_METRICS,
+      max_drawdown: -0.085, // delta = -0.085 - (-0.08) = -0.005, abs < 0.01
+    };
+    const { container } = render(
+      <KpiStrip
+        analytics={{
+          ytd_twr: 0.15,
+          sharpe: 1.2,
+          max_drawdown_12m: -0.08,
+          avg_correlation: 0.42,
+        }}
+        metrics={noiseLive}
+        timeframe="ALL"
+        aum={1_000_000}
+        snapshotCount={30}
+        mode="scenario"
+        scenarioMetrics={noiseScenario}
+        liveMetrics={noiseLive}
+      />,
+    );
+    const maxDdDelta = container.querySelector(
+      '[aria-label^="Max DD 12m delta:"]',
+    );
+    expect(maxDdDelta).not.toBeNull();
+    expect(maxDdDelta!.className).toMatch(/text-text-muted/);
+    expect(maxDdDelta!.getAttribute("aria-label") ?? "").toMatch(/no change/);
+  });
+
+  it("M-0084: YTD TWR sub-noise-floor delta (|Δ| < 0.01) → text-text-muted 'no change'", () => {
+    const noiseLive: ComputedMetrics = { ...LIVE_METRICS, twr: 0.15 };
+    const noiseScenario: ComputedMetrics = {
+      ...LIVE_METRICS,
+      twr: 0.155, // delta = 0.005, abs < 0.01
+    };
+    const { container } = render(
+      <KpiStrip
+        analytics={{
+          ytd_twr: 0.15,
+          sharpe: 1.2,
+          max_drawdown_12m: -0.08,
+          avg_correlation: 0.42,
+        }}
+        metrics={noiseLive}
+        timeframe="ALL"
+        aum={1_000_000}
+        snapshotCount={30}
+        mode="scenario"
+        scenarioMetrics={noiseScenario}
+        liveMetrics={noiseLive}
+      />,
+    );
+    const twrDelta = container.querySelector('[aria-label^="YTD TWR delta:"]');
+    expect(twrDelta).not.toBeNull();
+    expect(twrDelta!.className).toMatch(/text-text-muted/);
+    expect(twrDelta!.getAttribute("aria-label") ?? "").toMatch(/no change/);
+  });
+
   it("T10: scenario mode does NOT regress KpiStrip.warmup.test.tsx Test B (snapshotCount=10 default warm-up)", () => {
     // Reproduce KpiStrip.warmup.test.tsx Test B but with mode='scenario' set
     // to prove the warmup branch wins regardless of mode.

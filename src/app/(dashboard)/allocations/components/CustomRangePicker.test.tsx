@@ -412,6 +412,104 @@ describe("CustomRangePicker", () => {
     });
   });
 
+  // ─────────────────────────────────── M-1105 — manual date-input edits
+  //
+  // PR3 wired the Start input's onChange to parse → clampDate → setStart AND
+  // setViewMonth(startOfMonth(c)) (CustomRangePicker.tsx:284-291). The
+  // existing "disables Apply when start > end" case types a value but only
+  // asserts the Apply disabled flag — it never pins the viewMonth advance or
+  // the clamp. A regression that dropped setViewMonth would strand the
+  // calendar on the old month while the user typed a far-away date; a
+  // regression that dropped clampDate would let an out-of-range typed value
+  // escape the [min,max] bound.
+
+  it("M-1105 — typing a Start date advances the visible calendar to that month", () => {
+    const min = new Date(2024, 0, 1); // Jan 2024
+    const max = new Date(2024, 11, 31); // Dec 2024
+    const { container } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={() => {}}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-01-15", end: "2024-12-15" }}
+      />,
+    );
+    // Initially the left grid shows January 2024 (start's month).
+    const startInput = container.querySelectorAll<HTMLInputElement>(
+      'input[type="date"]',
+    )[0];
+    fireEvent.change(startInput, { target: { value: "2024-05-15" } });
+    // viewMonth advanced → left grid = May 2024, right grid = June 2024.
+    const labels = Array.from(container.querySelectorAll("div"))
+      .map((d) => d.textContent ?? "")
+      .filter((t) => /^[A-Z][a-z]+ \d{4}$/.test(t));
+    expect(labels).toEqual(["May 2024", "June 2024"]);
+  });
+
+  it("M-1105 — typing a Start date ABOVE max clamps to maxIso; Apply emits the clamped value, not the typed one", () => {
+    const onApply = vi.fn();
+    const min = new Date(2024, 0, 1); // 2024-01-01
+    const max = new Date(2024, 5, 30); // 2024-06-30
+    const { container, getByRole } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={onApply}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-02-01", end: "2024-06-30" }}
+      />,
+    );
+    const startInput = container.querySelectorAll<HTMLInputElement>(
+      'input[type="date"]',
+    )[0];
+    // jsdom's fireEvent.change bypasses the native max attribute, so the
+    // out-of-range value reaches onChange → clampDate pins it to max.
+    fireEvent.change(startInput, { target: { value: "2099-01-01" } });
+    // Displayed value is the clamped maxIso, NOT the typed 2099 value.
+    expect(startInput.value).toBe("2024-06-30");
+    // start == end == max → valid 1-day range; Apply fires with the clamp,
+    // never 2099.
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+    expect(onApply).toHaveBeenCalledTimes(1);
+    expect(onApply.mock.calls[0][0]).toEqual({
+      start: "2024-06-30",
+      end: "2024-06-30",
+    });
+  });
+
+  it("M-1105 — typing a malformed Start value is a no-op (parseISODate→null; no state change, no crash)", () => {
+    const onApply = vi.fn();
+    const min = new Date(2024, 0, 1);
+    const max = new Date(2024, 5, 30);
+    const { container, getByRole } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={onApply}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-03-01", end: "2024-04-01" }}
+      />,
+    );
+    const startInput = container.querySelectorAll<HTMLInputElement>(
+      'input[type="date"]',
+    )[0];
+    // Empty string → split("-").map(Number) yields [NaN] → parseISODate
+    // returns null → the onChange guard skips setStart/setViewMonth entirely.
+    expect(() =>
+      fireEvent.change(startInput, { target: { value: "" } }),
+    ).not.toThrow();
+    // State unchanged → Apply still emits the original range.
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+    expect(onApply).toHaveBeenCalledWith({
+      start: "2024-03-01",
+      end: "2024-04-01",
+    });
+  });
+
   // ─────────────────────────────────── M-1100 — month-navigation arrows
   function monthLabels(container: HTMLElement): string[] {
     return Array.from(container.querySelectorAll("div"))

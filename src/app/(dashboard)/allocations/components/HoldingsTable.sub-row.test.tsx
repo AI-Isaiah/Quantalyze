@@ -188,6 +188,57 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
     ).toBeInTheDocument();
   });
 
+  // M-0076 — the one-open-at-a-time invariant (case 4) only exercised 2 rows.
+  // The expand state is a single `expandedRowId` string (HoldingsTable.tsx:389),
+  // so the contract must hold for N > 2 AND under rapid re-toggling. These
+  // cases pin: (a) with 3 rows, opening C closes B closes A — only one region
+  // is ever mounted; (b) rapid open→open→open across distinct rows never leaves
+  // two regions mounted; (c) toggling the same row twice in succession ends
+  // collapsed (the functional-updater toggle is order-stable).
+  it("M-0076a: one-open-at-a-time across 3 rows — opening C closes B closes A", () => {
+    const a = makeRow({ id: "holding:binance:BTC:spot", strategy: "Alpha" });
+    const b = makeRow({
+      id: "holding:binance:ETH:spot",
+      symbol: "ETH",
+      strategy: "Beta",
+    });
+    const c = makeRow({
+      id: "holding:binance:SOL:spot",
+      symbol: "SOL",
+      strategy: "Gamma",
+    });
+    render(<HoldingsTable rows={[a, b, c]} />);
+
+    fireEvent.click(screen.getByText("Alpha"));
+    fireEvent.click(screen.getByText("Beta"));
+    fireEvent.click(screen.getByText("Gamma"));
+
+    // Only SOL's region remains; BTC and ETH are both closed.
+    expect(
+      screen.queryByRole("region", { name: /Holding detail for BTC/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: /Holding detail for ETH/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: /Holding detail for SOL/ }),
+    ).toBeInTheDocument();
+    // Exactly one detail region is mounted at any time.
+    expect(
+      screen.getAllByRole("region", { name: /Holding detail for/ }),
+    ).toHaveLength(1);
+  });
+
+  it("M-0076b: rapid toggle of the same row twice ends collapsed", () => {
+    const a = makeRow({ id: "holding:binance:BTC:spot", strategy: "Alpha" });
+    render(<HoldingsTable rows={[a]} />);
+    fireEvent.click(screen.getByText("Alpha"));
+    fireEvent.click(screen.getByText("Alpha"));
+    expect(
+      screen.queryByRole("region", { name: /Holding detail for BTC/ }),
+    ).not.toBeInTheDocument();
+  });
+
   it("5: clicking the same row again collapses it (toggle)", () => {
     const row = makeRow();
     render(<HoldingsTable rows={[row]} />);

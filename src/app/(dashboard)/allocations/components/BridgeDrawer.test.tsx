@@ -542,4 +542,103 @@ describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () 
     expect(sendBtn.className).toMatch(/bg-accent/);
     expect(addBtn.className).toMatch(/bg-accent/);
   });
+
+  // ---------------------------------------------------------------------------
+  // M-0055 — the "Add to scenario" handler is wrapped in try/finally
+  // (BridgeDrawer.tsx:148-157, explicitly added as a review-pass P2 fix) so
+  // that `onClose` ALWAYS runs even when the host callback throws
+  // synchronously. Without the finally, an exception in onAddToScenario would
+  // strand the drawer open with no dismiss path. The T_AS* cases only cover
+  // the happy path; this case pins the defensive contract.
+  // ---------------------------------------------------------------------------
+  it("M-0055 — onAddToScenario throwing still fires onClose (try/finally guard)", () => {
+    const onAddToScenario = vi.fn(() => {
+      throw new Error("host blew up");
+    });
+    const onClose = vi.fn();
+    // React 19 routes an exception thrown inside an event handler through its
+    // own dispatch + window `error` event (reportError) rather than re-throwing
+    // synchronously to fireEvent. Install a capturing listener that swallows
+    // the reported error so it doesn't surface as an unhandled rejection /
+    // false-positive test failure — the production behaviour under test is
+    // "onClose runs anyway via the finally", not the throw itself.
+    const captured: ErrorEvent[] = [];
+    const handler = (e: ErrorEvent) => {
+      if (e.error instanceof Error && e.error.message === "host blew up") {
+        captured.push(e);
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("error", handler);
+    try {
+      render(
+        <BridgeDrawer
+          isOpen
+          onClose={onClose}
+          flaggedHoldings={[FLAGGED_A]}
+          matchDecisionsByHoldingRef={{}}
+          onAddToScenario={onAddToScenario}
+        />,
+      );
+      fireEvent.click(
+        screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+      );
+      fireEvent.click(screen.getByTestId("bridge-add-to-scenario"));
+    } finally {
+      window.removeEventListener("error", handler);
+    }
+    // The callback threw, but the `finally` in handleAddToScenario fired
+    // onClose first — so the drawer never strands open on a host exception.
+    expect(onAddToScenario).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // And the thrown error genuinely propagated (proving the finally ran in
+    // the presence of a real exception, not because the callback succeeded).
+    expect(captured.length).toBeGreaterThan(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // M-0057 — the "← Back to candidates" button is a state-machine transition.
+  // The existing "Back button → returns to browse stage" case only asserts the
+  // happy-path stage flip. It does NOT pin whether a previously-surfaced error
+  // (set on a failed Send intro) is cleared when the allocator backs out and
+  // re-enters the confirm stage. The CORRECT behaviour is that backing out
+  // clears the transient error so a stale "server fell over" alert never
+  // re-appears on the next confirm view.
+  // ---------------------------------------------------------------------------
+  it.fails(
+    "M-0057: error surfaced on a failed Send intro is NOT cleared when going Back then re-entering confirm — fix in follow-up (Back handler should setError(null))",
+    async () => {
+      mockSendBridgeIntro.mockResolvedValueOnce({
+        ok: false,
+        error: "server fell over",
+      });
+      render(
+        <BridgeDrawer
+          isOpen
+          onClose={vi.fn()}
+          flaggedHoldings={[FLAGGED_A]}
+          matchDecisionsByHoldingRef={{}}
+        />,
+      );
+      // Enter confirm, trigger a failing send → error alert appears.
+      fireEvent.click(
+        screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /Send intro/ }));
+      await waitFor(() => {
+        expect(screen.getByRole("alert")).toHaveTextContent("server fell over");
+      });
+
+      // Back out to browse, then re-enter confirm for the same candidate.
+      fireEvent.click(
+        screen.getByRole("button", { name: /Back to candidates/ }),
+      );
+      fireEvent.click(
+        screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+      );
+
+      // CORRECT behaviour: the confirm stage should be clean — no stale alert.
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    },
+  );
 });
