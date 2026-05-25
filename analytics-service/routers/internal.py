@@ -181,7 +181,9 @@ async def get_key_permissions(
     # log them (the prior ordering swallowed those by best-effort), making
     # 404 attempts invisible to the audit trail.
     api_key_row = supabase.table("api_keys").select("*").eq("id", key_id).maybe_single().execute()
-    if not api_key_row.data:
+    # maybe_single().execute() returns None (not an APIResponse) for an unknown
+    # key_id; guard before .data so the intended 404 fires instead of a 500.
+    if not (api_key_row and api_key_row.data):
         raise HTTPException(status_code=404, detail="API key not found")
 
     # Audit: best-effort — never let an audit failure break the call.

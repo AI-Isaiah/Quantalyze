@@ -123,7 +123,16 @@ def _fetch_eligible_outcomes(allocator_id: str) -> list[dict[str, Any]]:
         or o.get("delta_90d") is not None
         or o.get("delta_180d") is not None
     ]
-    return rejected + mature_allocated
+    # Holding-based bridge outcomes (voluntary actions on real holdings) carry
+    # strategy_id=NULL + original_holding_ref, not a platform strategy_id. They
+    # are not attributable to a strategy's score dimensions, so drop them here.
+    # Pre-fix a NULL strategy_id flowed into `sorted({...})` in
+    # compute_adjusted_weights and raised TypeError: '<' not supported between
+    # instances of 'str' and 'NoneType' (Sentry 122529822, cron-recompute).
+    return [
+        o for o in (rejected + mature_allocated)
+        if o.get("strategy_id") is not None
+    ]
 
 
 def _fetch_score_breakdowns(
