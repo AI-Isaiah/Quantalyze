@@ -101,6 +101,84 @@ describe("MorningBriefing", () => {
       expect(screen.getByText(expected)).toBeInTheDocument();
     });
   });
+
+  // M-0891 — `splitNarrative` is the entire reason this widget exists: it
+  // parses one ". "-joined narrative string into four semantic buckets via
+  // sentence-prefix regex (monthly / recommendation / headline / context).
+  // The prior coverage only fed a single sentence ("Markets are up today.")
+  // which lands in `context` and renders the same as any other text — so it
+  // never proves the split. These tests pin each bucket's classification AND
+  // its distinctive chrome (the "Monthly breakdown" label, the recommendation
+  // pill) so any future regex tweak surfaces immediately.
+  describe("M-0891 — splitNarrative bucket classification", () => {
+    function renderNarrative(narrative: string) {
+      return render(
+        <MorningBriefing
+          data={{ analytics: { narrative_summary: narrative } }}
+          {...baseProps}
+        />,
+      );
+    }
+
+    it("'In <Month>, … returned +N%' sentences render under a 'Monthly breakdown' section", () => {
+      renderNarrative(
+        "Your portfolio returned +2.3% MTD. In April 2026, portfolio returned +1.2%. Alpha drove 50% of the gain.",
+      );
+      // The label only renders when the `monthly` bucket is non-empty.
+      expect(screen.getByText("Monthly breakdown")).toBeInTheDocument();
+      // The monthly sentence is emitted as a list item (with trailing period).
+      expect(
+        screen.getByText("In April 2026, portfolio returned +1.2%."),
+      ).toBeInTheDocument();
+    });
+
+    it("classifies NEGATIVE-return months as monthly, not context (regex matches the '-' sign)", () => {
+      // The production regex is /returned [+-]?\d/ — the sign group is
+      // OPTIONAL, so a negative month must still bucket as monthly. A
+      // regression that narrowed it to /returned \+\d/ (plus-only) would
+      // push this sentence into `context` and drop the "Monthly breakdown"
+      // label — this test fails loudly if that happens.
+      renderNarrative(
+        "Your portfolio returned -1.5% MTD. In April 2026, portfolio returned -2.0%.",
+      );
+      expect(screen.getByText("Monthly breakdown")).toBeInTheDocument();
+      expect(
+        screen.getByText("In April 2026, portfolio returned -2.0%."),
+      ).toBeInTheDocument();
+    });
+
+    it("'If you trim …' sentence renders in the recommendation pill (rgba(27,107,90,0.06) background)", () => {
+      renderNarrative(
+        "Your portfolio returned +2.3% MTD. If you trim Beta and redistribute to Gamma, expected Sharpe moves from 1.2 to 1.5.",
+      );
+      const rec = screen.getByText(
+        "If you trim Beta and redistribute to Gamma, expected Sharpe moves from 1.2 to 1.5.",
+      );
+      expect(rec).toBeInTheDocument();
+      // The pill is the recommendation sentence's wrapper div, styled with
+      // the teal-tint background that distinguishes it from the plain
+      // headline/context paragraphs.
+      const pill = rec.parentElement;
+      expect(pill).not.toBeNull();
+      expect(pill?.style.backgroundColor).toBe("rgba(27, 107, 90, 0.06)");
+    });
+
+    it("correlation/risk sentences fall through to the context bucket (no Monthly label, no pill)", () => {
+      renderNarrative(
+        "Your portfolio returned +0.8% MTD. Correlation has tightened to 0.65 — diversification quality is degrading.",
+      );
+      // The context sentence renders as ordinary copy …
+      expect(
+        screen.getByText(
+          /Correlation has tightened to 0\.65 — diversification quality is degrading\./,
+        ),
+      ).toBeInTheDocument();
+      // … and neither the monthly section nor the recommendation pill mounts,
+      // proving the sentence wasn't misrouted into those buckets.
+      expect(screen.queryByText("Monthly breakdown")).toBeNull();
+      expect(screen.queryByText(/If you trim/)).toBeNull();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

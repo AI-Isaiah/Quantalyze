@@ -299,6 +299,33 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     expect(cleanupCall![1]).toEqual({ scroll: false });
   });
 
+  // M-0042 (pr-test-analyzer) — the legacy ?tab=performance strip effect
+  // rebuilds the query string from `new URLSearchParams(searchParams)` and
+  // only deletes the `tab` key (AllocationsTabs.tsx:366-374). The existing
+  // test above only exercises a SOLE `tab=performance` param. This pins the
+  // co-existing-param case: a regression that rebuilds from scratch (e.g.
+  // `router.replace(pathname)`) instead of mutating the existing params
+  // would silently drop `otherParam` from a deep-linked URL.
+  it("?tab=performance&otherParam=value → strips tab but preserves otherParam", () => {
+    setSearchParams("tab=performance&otherParam=value");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    expectOnlyVisibleBody("overview-v2");
+    expect(mockReplace).toHaveBeenCalled();
+    // The cleanup call is the one without a `tab=` segment (the param strip).
+    const cleanupCall = mockReplace.mock.calls.find(
+      (c) => typeof c[0] === "string" && !c[0].includes("tab="),
+    );
+    expect(
+      cleanupCall,
+      "router.replace called with tab param stripped",
+    ).toBeDefined();
+    const url = cleanupCall![0] as string;
+    // otherParam must survive the strip — assert both the key and its value.
+    expect(url).toContain("otherParam=value");
+    expect(url).toContain("/allocations?");
+    expect(cleanupCall![1]).toEqual({ scroll: false });
+  });
+
   it("?tab=xyz (unknown) → Overview silent fallback, no URL cleanup", () => {
     setSearchParams("tab=xyz");
     render(<AllocationsTabs {...STUB_PROPS} />);

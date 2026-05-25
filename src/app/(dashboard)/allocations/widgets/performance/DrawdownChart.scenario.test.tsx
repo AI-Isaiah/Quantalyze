@@ -126,6 +126,41 @@ describe("DrawdownChart — scenarioDailyPoints overlay (10-04)", () => {
     expect(hasLive).toBe(true);
   });
 
+  // M-0200 — T3 above uses `.includes()`, which would also pass on a
+  // near-miss token like `var(--color-chart-strategy-bright)`. Production
+  // (DrawdownChart.tsx) sets the scenario stroke to the EXACT canonical
+  // token `var(--color-chart-strategy)` and the live stroke to
+  // `var(--color-chart-benchmark)`. This stricter variant asserts exact
+  // equality so a future rename to a longer/variant token name fails here
+  // instead of slipping through the substring match.
+  it("M-0200: scenario stroke is EXACTLY 'var(--color-chart-strategy)' and live is EXACTLY 'var(--color-chart-benchmark)' (no variant tokens)", () => {
+    const { container } = render(
+      <DrawdownChart
+        {...baseProps}
+        data={EMPTY_DATA}
+        equityDailyPoints={LIVE_EQUITY}
+        scenarioDailyPoints={SCENARIO_EQUITY}
+      />,
+    );
+    const strokes = Array.from(
+      container.querySelectorAll("path.recharts-area-curve"),
+    ).map((c) => c.getAttribute("stroke") ?? "");
+
+    // Exact-match predicates: a longer token (e.g. "...-strategy-bright")
+    // would fail `===` while still passing the `.includes()` check in T3.
+    expect(strokes).toContain("var(--color-chart-strategy)");
+    expect(strokes).toContain("var(--color-chart-benchmark)");
+    // And neither curve carries a strategy/benchmark variant token.
+    for (const s of strokes) {
+      if (s.includes("color-chart-strategy")) {
+        expect(s).toBe("var(--color-chart-strategy)");
+      }
+      if (s.includes("color-chart-benchmark")) {
+        expect(s).toBe("var(--color-chart-benchmark)");
+      }
+    }
+  });
+
   it("T4: deriveSnapshotDrawdowns is reused — same helper produces equivalent series", () => {
     // Direct call to the exported helper proves the contract; the
     // component is wired to call this same function on scenarioDailyPoints.

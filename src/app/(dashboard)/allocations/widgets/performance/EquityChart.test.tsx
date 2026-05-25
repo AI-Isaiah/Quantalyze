@@ -352,6 +352,177 @@ describe("EquityChart", () => {
       "var(--color-chart-benchmark)",
     );
   });
+
+  // M-0202 — the suite covered the empty series (warm-up) but not the
+  // degenerate-value and sparse-data inputs. EquityChart's f7 anchor
+  // (`anchorFromFirstPositive` finds the first value > 0, divides through)
+  // plus the M-1063 basePort guard (non-finite / ≤0 → warm-up) define the
+  // contract for these. These tests pin that contract so a regression that
+  // dropped a guard (and rendered an off-screen NaN path) fails here.
+  describe("M-0202 — degenerate values and sparse series", () => {
+    it("a single positive point still renders an SVG (composite.length === 1, not the warm-up empty state)", () => {
+      const { container, queryByText } = render(
+        <EquityChart
+          equityDailyPoints={[{ date: "2024-01-01", value: 1.0 }]}
+          initialPeriod="ALL"
+        />,
+      );
+      // composite.length === 1 (not 0) → the chart mounts an <svg>, not the
+      // "Equity data warming up" placeholder.
+      expect(container.querySelector("svg")).not.toBeNull();
+      expect(queryByText(/Equity data warming up/i)).toBeNull();
+    });
+
+    it("two positive points render a portfolio line with both vertices", () => {
+      const { container } = render(
+        <EquityChart
+          equityDailyPoints={[
+            { date: "2024-01-01", value: 1.0 },
+            { date: "2024-01-02", value: 1.05 },
+          ]}
+          initialPeriod="ALL"
+        />,
+      );
+      const paths = Array.from(container.querySelectorAll("svg path"));
+      const portfolioLine = paths.find((p) => {
+        const stroke = p.getAttribute("stroke");
+        const fill = p.getAttribute("fill");
+        return Boolean(stroke) && fill === "none";
+      });
+      expect(portfolioLine).toBeDefined();
+      const d = portfolioLine?.getAttribute("d") ?? "";
+      // Exactly two anchored vertices (M + L) for a 2-point series.
+      const vertexCount = (d.match(/[ML]/g) || []).length;
+      expect(vertexCount).toBe(2);
+    });
+
+    it("an all-NaN series falls back to the warm-up state (firstPositive finds nothing) — no broken SVG", () => {
+      const { container, getByLabelText } = render(
+        <EquityChart
+          equityDailyPoints={[
+            { date: "2024-01-01", value: Number.NaN },
+            { date: "2024-01-02", value: Number.NaN },
+          ]}
+          initialPeriod="ALL"
+        />,
+      );
+      // findIndex(p => p.value > 0) never matches NaN → anchored = [] →
+      // composite.length === 0 → warm-up placeholder, no <svg>.
+      expect(getByLabelText("Equity chart")).toBeTruthy();
+      expect(container.textContent).toMatch(/Equity data warming up/i);
+      expect(container.querySelector("svg")).toBeNull();
+    });
+
+    // M-0202 (SURFACED BUG) — the y-range computation filters non-finite
+    // normalized values out of yMin/yMax (line ~503-516), but the line/area
+    // path builder `toPath` (line ~639) only skips `null`, NOT Infinity/NaN
+    // numbers. So an Infinity equity point projects to `y(Infinity)` =
+    // -Infinity and leaks a literal "-Infinity" coordinate into the SVG `d`
+    // attribute → an invalid/off-screen portfolio line with no diagnostic.
+    // CORRECT behavior: a single corrupt point should be skipped (like null),
+    // leaving a finite path. This documents the bug; the fix belongs in
+    // production (`toPath` should treat non-finite the same as null).
+    it.fails(
+      "M-0202: a single Infinity equity point leaks '-Infinity' into the portfolio path coords — toPath lacks a finite guard (fix in follow-up)",
+      () => {
+        const { container } = render(
+          <EquityChart
+            equityDailyPoints={[
+              { date: "2024-01-01", value: 1.0 },
+              { date: "2024-01-02", value: Number.POSITIVE_INFINITY },
+              { date: "2024-01-03", value: 1.1 },
+            ]}
+            initialPeriod="ALL"
+          />,
+        );
+        expect(container.querySelector("svg")).not.toBeNull();
+        const paths = Array.from(container.querySelectorAll("svg path"));
+        const portfolioLine = paths.find(
+          (p) =>
+            Boolean(p.getAttribute("stroke")) &&
+            p.getAttribute("fill") === "none",
+        );
+        const d = portfolioLine?.getAttribute("d") ?? "";
+        // No literal "NaN"/"Infinity" should leak into the path coordinates.
+        expect(d).not.toMatch(/NaN|Infinity/);
+      },
+    );
+
+    it("a leading-negative-then-positive series anchors at the first positive value (negatives before the anchor are skipped)", () => {
+      const { container } = render(
+        <EquityChart
+          equityDailyPoints={[
+            { date: "2024-01-01", value: -0.5 },
+            { date: "2024-01-02", value: 1.0 },
+            { date: "2024-01-03", value: 1.2 },
+          ]}
+          initialPeriod="ALL"
+        />,
+      );
+      const paths = Array.from(container.querySelectorAll("svg path"));
+      const portfolioLine = paths.find(
+        (p) => Boolean(p.getAttribute("stroke")) && p.getAttribute("fill") === "none",
+      );
+      expect(portfolioLine).toBeDefined();
+      const d = portfolioLine?.getAttribute("d") ?? "";
+      // firstPositiveIdx = 1 → only the 2 post-anchor points are plotted.
+      const vertexCount = (d.match(/[ML]/g) || []).length;
+      expect(vertexCount).toBe(2);
+      expect(d).not.toMatch(/NaN|Infinity/);
+    });
+  });
+
+  // M-0203 — benchmark overlay rendering was covered for an equal-length,
+  // same-date benchmark only. Production aligns the benchmark to the
+  // composite BY DATE (a `date → value` Map, then `visible.map(p =>
+  // m.get(p.date) ?? null)`), so a shorter benchmark or a non-overlapping
+  // date range is a real code path. These pin that date-join behavior.
+  describe("M-0203 — benchmark length / date-range mismatch", () => {
+    it("a benchmark covering only a SUBSET of the portfolio dates still renders the dashed line (date-joined, missing days dropped)", () => {
+      const portfolio = makeSeries(60);
+      // Benchmark shares the FIRST 30 portfolio dates only (half the length).
+      const benchmark = portfolio.slice(0, 30);
+      const { container } = render(
+        <EquityChart
+          equityDailyPoints={portfolio}
+          benchmark={benchmark}
+          initialPeriod="ALL"
+        />,
+      );
+      // At least the matching-date portion produces the dashed benchmark path.
+      const dashed = container.querySelectorAll('svg path[stroke-dasharray="3 3"]');
+      expect(dashed.length).toBeGreaterThanOrEqual(1);
+      const d = (dashed[0] as SVGPathElement).getAttribute("d") ?? "";
+      expect(d).not.toMatch(/NaN|Infinity/);
+    });
+
+    it("a benchmark whose dates NEVER overlap the portfolio renders NO benchmark line (baseBench is null → normalized series is null)", () => {
+      const portfolio = makeSeries(30); // 2024-01-01 .. 2024-01-30
+      // Build a benchmark anchored in a completely different month so no
+      // date key matches any composite date.
+      const farFuture: DailyPoint[] = [];
+      const d = new Date(Date.UTC(2025, 5, 1));
+      let cumulative = 1.0;
+      for (let i = 0; i < 30; i++) {
+        farFuture.push({ date: d.toISOString().slice(0, 10), value: cumulative });
+        cumulative *= 1.001;
+        d.setUTCDate(d.getUTCDate() + 1);
+      }
+      const { container } = render(
+        <EquityChart
+          equityDailyPoints={portfolio}
+          benchmark={farFuture}
+          initialPeriod="ALL"
+        />,
+      );
+      // Every `m.get(p.date)` misses → all-null benchmark → baseBench null →
+      // visibleBenchmarkNormalized null → no dashed path mounts. The
+      // portfolio line is unaffected (still rendered).
+      const dashed = container.querySelectorAll('svg path[stroke-dasharray="3 3"]');
+      expect(dashed.length).toBe(0);
+      expect(container.querySelector("svg")).not.toBeNull();
+    });
+  });
 });
 
 describe("EquityChart — audit-2026-05-07 safety guards", () => {

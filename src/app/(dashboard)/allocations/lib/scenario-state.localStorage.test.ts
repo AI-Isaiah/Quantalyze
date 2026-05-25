@@ -181,6 +181,57 @@ describe("error handling", () => {
     expect(threw).toBe(false);
     expect(loaded).toBeNull();
   });
+
+  // M-0150 (pr-test-analyzer) — T2.5 only covers ONE malformation (syntactic
+  // garbage). loadScenarioDraft (scenario-state.ts:445-457) validates ONLY
+  // `schema_version`; there is no field-shape validation. These pin the
+  // remaining realistic corruption paths so a future refactor that (e.g.)
+  // tightens or loosens the validation surfaces here instead of in prod.
+
+  it("M-0150: valid JSON missing schema_version ({}) → null (undefined !== SCENARIO_SCHEMA_VERSION)", () => {
+    // Parses cleanly, but `parsed.schema_version` is undefined; the strict
+    // `!== SCENARIO_SCHEMA_VERSION` check rejects it. T2.3 only covers
+    // version+1 — the absent-field case is a distinct branch.
+    store.set(scenarioStorageKey("alloc-A"), JSON.stringify({}));
+    expect(loadScenarioDraft("alloc-A")).toBeNull();
+  });
+
+  it("M-0150: valid JSON with schema_version present but wrong-typed fields flows through UNVALIDATED (current contract)", () => {
+    // The load path does NOT shape-validate beyond schema_version. A blob with
+    // toggleByScopeRef as an ARRAY (wrong type) and weightOverrides absent is
+    // returned verbatim. This pins the KNOWN limitation: callers must not
+    // assume loadScenarioDraft sanitizes shape. If a future change adds zod
+    // validation, flip this to assert null + update the comment.
+    const malformed = {
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      init_holdings_fingerprint: "fp-x",
+      toggleByScopeRef: ["not", "an", "object"], // wrong type
+      // weightOverrides + addedStrategies + lastEditedAt absent
+    };
+    store.set(scenarioStorageKey("alloc-A"), JSON.stringify(malformed));
+    const loaded = loadScenarioDraft("alloc-A");
+    expect(loaded).not.toBeNull();
+    // Returned AS-IS — the array survived because there is no field validation.
+    expect(loaded?.toggleByScopeRef).toEqual(["not", "an", "object"]);
+  });
+
+  it("M-0150: valid blob carrying extra unknown keys flows through unchanged (no allowlist)", () => {
+    const draft = defaultDraftFromHoldings(HOLDINGS_2);
+    const withExtras = {
+      ...draft,
+      __injected: "from-a-browser-extension",
+      nested: { evil: true },
+    };
+    store.set(scenarioStorageKey("alloc-A"), JSON.stringify(withExtras));
+    const loaded = loadScenarioDraft("alloc-A") as
+      | (ScenarioDraft & { __injected?: string })
+      | null;
+    expect(loaded).not.toBeNull();
+    // Known fields preserved.
+    expect(loaded?.schema_version).toBe(SCENARIO_SCHEMA_VERSION);
+    // Extra keys are NOT stripped — there is no allowlist on the read path.
+    expect(loaded?.__injected).toBe("from-a-browser-extension");
+  });
 });
 
 describe("clear", () => {

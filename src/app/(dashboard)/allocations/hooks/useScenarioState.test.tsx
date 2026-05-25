@@ -534,4 +534,76 @@ describe("useScenarioState", () => {
     // BTC's 0.9 user override differs from the default 0.6 → counts as 1.
     expect(result.current.diffCount).toBe(1);
   });
+
+  // M-0136 (pr-test-analyzer) — the prior suite covers single mutators but
+  // not (a) rapid concurrent edits within one render pass nor (b) the
+  // documented cross-tab limitation.
+
+  // (a) Every mutator uses a FUNCTIONAL setDraft updater (setDraft((d) => …)),
+  // so a burst of edits queued in a single act() must all compose — none
+  // dropped by a stale closure over `draft`. A regression that switched any
+  // mutator to a value-form setState (setDraft(fn(draft))) would lose all but
+  // the last edit of the burst; this pins that they accumulate.
+  it("M-0136: rapid concurrent edits in one render pass all compose (no stale-closure drop)", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+
+    // Burst: toggle BTC off, add two strategies, override ETH weight — all
+    // before React flushes a re-render.
+    act(() => {
+      result.current.toggleHolding(REF_BTC);
+      result.current.addStrategyBrowse(STRAT_A);
+      result.current.addStrategyBrowse(STRAT_B_FIXTURE);
+      result.current.setWeightOverride(REF_ETH, 0.5);
+    });
+
+    // All four edits survived the burst.
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(false);
+    const addedIds = result.current.draft.addedStrategies.map((s) => s.id);
+    expect(addedIds).toContain(STRAT_A.id);
+    expect(addedIds).toContain(STRAT_B_FIXTURE.id);
+    // setWeightOverride is the last edit in the burst — its value persists.
+    expect(result.current.draft.weightOverrides[REF_ETH]).toBeCloseTo(0.5, 9);
+    // The two adds are not deduped into one (distinct ids).
+    expect(addedIds.length).toBe(2);
+  });
+
+  // (b) The hook installs NO `storage` event listener (useScenarioState.ts —
+  // only the persist effect + auth-change clear). A second browser tab editing
+  // the SAME allocator's draft writes to localStorage and dispatches a
+  // `storage` event, but tab A's hook does NOT subscribe, so its in-memory
+  // draft is unchanged — and tab A's next persist will overwrite tab B's
+  // write. This is a real two-tab race for a long-form scenario builder. The
+  // test pins the CURRENT (no-cross-tab-sync) contract so a future change that
+  // adds a listener surfaces here intentionally rather than silently.
+  it("M-0136: cross-tab write does NOT propagate — hook installs no `storage` listener (pins the known limitation)", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+
+    // Baseline: BTC enabled.
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(true);
+
+    // Simulate ANOTHER tab persisting an edited draft for the SAME allocator
+    // and the browser firing the cross-tab `storage` event.
+    const scopedKey = scenarioStorageKey(ALLOCATOR_A);
+    const otherTabDraft: ScenarioDraft = {
+      ...defaultDraftFromHoldings(HOLDINGS_2, computeHoldingsFingerprint(HOLDINGS_2)),
+      toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: true },
+    };
+    act(() => {
+      store.set(scopedKey, JSON.stringify(otherTabDraft));
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: scopedKey,
+          newValue: JSON.stringify(otherTabDraft),
+        }),
+      );
+    });
+
+    // No listener → tab A's draft is unchanged (still BTC enabled). This is the
+    // documented limitation, not a bug fix.
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(true);
+  });
 });

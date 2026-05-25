@@ -242,6 +242,45 @@ describe("QuickActions", () => {
     expect(link).toHaveAttribute("href", "/api/portfolio-pdf/abc");
   });
 
+  // M-0183 — the Export PDF link guards against a missing portfolioId:
+  // `href={portfolioId ? `/api/portfolio-pdf/${portfolioId}` : "#"}` plus a
+  // spread `{...(!portfolioId && { "aria-disabled": true })}`. The prior
+  // coverage only exercised the happy path (a real id → real href), so a
+  // regression that dropped the fallback (shipping `href="/api/portfolio-pdf/undefined"`
+  // or losing the aria-disabled flag) would never be caught. These pin the
+  // disabled branch.
+  describe("M-0183 — Export PDF disabled fallback when portfolioId is absent", () => {
+    it("renders href='#' AND aria-disabled='true' when data.portfolio is missing", () => {
+      render(<QuickActions data={{}} {...baseProps} />);
+      const link = screen.getByText("Export PDF").closest("a")!;
+      expect(link).toHaveAttribute("href", "#");
+      expect(link).toHaveAttribute("aria-disabled", "true");
+    });
+
+    it("treats an empty-string portfolio.id as missing (falsy) → href='#' + aria-disabled", () => {
+      // The `portfolioId ? … : "#"` ternary treats "" as falsy, so an empty
+      // id collapses to the disabled state rather than producing the
+      // malformed href "/api/portfolio-pdf/" (a 404 surface). Pin that intent.
+      render(
+        <QuickActions data={{ portfolio: { id: "" } }} {...baseProps} />,
+      );
+      const link = screen.getByText("Export PDF").closest("a")!;
+      expect(link).toHaveAttribute("href", "#");
+      expect(link).toHaveAttribute("aria-disabled", "true");
+    });
+
+    it("does NOT carry aria-disabled when a real portfolioId is present", () => {
+      // Complements the happy-path href test above: the spread guard must
+      // omit aria-disabled entirely (not render aria-disabled='false') when
+      // the link is live.
+      render(
+        <QuickActions data={{ portfolio: { id: "abc" } }} {...baseProps} />,
+      );
+      const link = screen.getByText("Export PDF").closest("a")!;
+      expect(link.hasAttribute("aria-disabled")).toBe(false);
+    });
+  });
+
   // M-0182 — handleShare clipboard write + "Copied!" transition + 2s revert.
   // The prior coverage only asserted the static "Share" label at mount.
   describe("M-0182 — Share clipboard interaction", () => {

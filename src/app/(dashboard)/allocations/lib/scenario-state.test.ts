@@ -154,6 +154,31 @@ describe("addStrategyBrowse", () => {
     expect(second.addedStrategies.length).toBe(1);
   });
 
+  // M-0151 (pr-test-analyzer) — the dedupe no-op above asserts via reference
+  // identity (`second).toBe(first)`), which is brittle: a future defensive
+  // clone (`return { ...draft }`) would break the assertion even though the
+  // dedupe SEMANTICS still hold. Pin the behavior independently of reference
+  // identity so the contract survives such a refactor:
+  //   - no new addedStrategies entry (length + ids unchanged),
+  //   - weightOverrides + toggleByScopeRef values unchanged,
+  //   - lastEditedAt unchanged (proves no mutation path ran — a real add
+  //     bumps lastEditedAt via new Date().toISOString()).
+  it("M-0151: addStrategyBrowse dedupe is behaviorally a no-op (independent of reference identity)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const first = addStrategyBrowse(initial, STRAT_A);
+    const second = addStrategyBrowse(first, STRAT_A);
+    // No new strategy pushed — ids set is identical.
+    expect(second.addedStrategies.map((s) => s.id)).toEqual(
+      first.addedStrategies.map((s) => s.id),
+    );
+    // Weight + toggle maps unchanged in VALUE (not just reference).
+    expect(second.weightOverrides).toEqual(first.weightOverrides);
+    expect(second.toggleByScopeRef).toEqual(first.toggleByScopeRef);
+    // lastEditedAt unchanged — the real add path would bump it, so equality
+    // here proves the mutating branch never ran.
+    expect(second.lastEditedAt).toBe(first.lastEditedAt);
+  });
+
   it("T1.4_R1 addStrategyBrowse preserves disabled-row weights (regression — review-pass P2)", () => {
     // Setup: two holdings, BTC at 0.6, ETH at 0.4. Toggle ETH OFF — its
     // 0.4 weight is preserved in weightOverrides (toggleHolding stores the
@@ -212,6 +237,21 @@ describe("addStrategyBridge", () => {
     const second = addStrategyBridge(first, "holding:binance:BTC:spot", STRAT_B);
     expect(second).toBe(first);
     expect(second.addedStrategies.length).toBe(1);
+  });
+
+  // M-0151 (pr-test-analyzer) — behavioral no-op assertion for the Bridge
+  // dedupe path, mirroring the Browse case: survives a defensive-clone
+  // refactor that would break the `.toBe()` reference check.
+  it("M-0151: addStrategyBridge dedupe is behaviorally a no-op (independent of reference identity)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const first = addStrategyBridge(initial, "holding:binance:BTC:spot", STRAT_B);
+    const second = addStrategyBridge(first, "holding:binance:BTC:spot", STRAT_B);
+    expect(second.addedStrategies.map((s) => s.id)).toEqual(
+      first.addedStrategies.map((s) => s.id),
+    );
+    expect(second.weightOverrides).toEqual(first.weightOverrides);
+    expect(second.toggleByScopeRef).toEqual(first.toggleByScopeRef);
+    expect(second.lastEditedAt).toBe(first.lastEditedAt);
   });
 });
 

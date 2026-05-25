@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import PositionsTable from "./PositionsTable";
 import TradingActivityLog from "./TradingActivityLog";
 import TradeVolume from "./TradeVolume";
@@ -123,6 +123,138 @@ describe("PositionsTable", () => {
     const headers = document.querySelectorAll("th button");
     const headerTexts = Array.from(headers).map((h) => h.textContent?.trim());
     expect(headerTexts).not.toContain("CAGR");
+  });
+
+  // M-0213 — the suite only had a 3-strategy fixture. These add the
+  // boundary row-counts and the null-analytics row so an off-by-one in the
+  // row mapping or a crash on missing analytics surfaces.
+  describe("M-0213 — row-count boundaries and null analytics", () => {
+    it("renders a single-strategy fixture without crashing (one data row, no n-1 arithmetic)", () => {
+      const single = {
+        strategies: [
+          makeStrategy({
+            name: "Solo Strat",
+            weight: 1.0,
+            allocated: 100000,
+            cagr: 0.2,
+            sharpe: 1.4,
+          }),
+        ],
+      };
+      render(
+        <PositionsTable data={single} timeframe="YTD" width={800} height={400} />,
+      );
+      expect(screen.getByText("Solo Strat")).toBeInTheDocument();
+      // Exactly one body data row (the <thead> row is excluded by tbody scope).
+      const tbody = document.querySelector("tbody")!;
+      // Each strategy renders one 44px-height <tr>; with no eligible/existing
+      // outcome, no BannerSubRow is appended, so tbody has exactly 1 <tr>.
+      expect(tbody.querySelectorAll("tr").length).toBe(1);
+    });
+
+    it("renders a row with em-dash fallbacks when strategy_analytics is null (no crash)", () => {
+      const nullAnalytics = {
+        strategies: [
+          {
+            strategy_id: "strat-null",
+            current_weight: 0.5,
+            allocated_amount: 50000,
+            alias: null,
+            strategy: {
+              id: "strat-null",
+              name: "No Metrics",
+              codename: null,
+              disclosure_tier: "institutional",
+              strategy_types: [],
+              markets: [],
+              start_date: "2023-01-01",
+              strategy_analytics: null,
+            },
+          },
+        ],
+      };
+      render(
+        <PositionsTable
+          data={nullAnalytics}
+          timeframe="YTD"
+          width={800}
+          height={400}
+        />,
+      );
+      // The row renders (name present) instead of crashing on a null read.
+      expect(screen.getByText("No Metrics")).toBeInTheDocument();
+      // Null analytics cells fall back to the "--" marker (fmtPct/fmtRatio/
+      // fmtUsd return "--" for null). At width >= 600 there are 10 such
+      // metric columns (cagr/sharpe/maxDd/sortino/vol/winRate/calmar/alpha/
+      // beta render "--"; allocated has a value so it doesn't).
+      const dashes = screen.getAllByText("--");
+      expect(dashes.length).toBeGreaterThanOrEqual(9);
+    });
+
+    it("renders 50 strategies — every row mounts (no clipping/truncation)", () => {
+      const many = {
+        strategies: Array.from({ length: 50 }, (_, i) =>
+          makeStrategy({
+            name: `Strat ${i}`,
+            weight: 0.02,
+            allocated: 2000,
+            cagr: 0.1,
+            sharpe: 1.0,
+          }),
+        ),
+      };
+      render(
+        <PositionsTable data={many} timeframe="YTD" width={800} height={400} />,
+      );
+      const tbody = document.querySelector("tbody")!;
+      // No virtualization in this component — all 50 rows are present in the
+      // DOM (one <tr> each, no banner sub-rows for these non-eligible rows).
+      expect(tbody.querySelectorAll("tr").length).toBe(50);
+      // Spot-check the first and last rows actually rendered.
+      expect(screen.getByText("Strat 0")).toBeInTheDocument();
+      expect(screen.getByText("Strat 49")).toBeInTheDocument();
+    });
+  });
+
+  // M-0214 — the existing visibility tests select header cells via
+  // `document.querySelectorAll("th button")`. If the header markup were
+  // refactored (button → div with role="columnheader"), that selector
+  // returns zero nodes and the `.not.toContain(...)` assertions pass
+  // VACUOUSLY. These re-express the column-set assertions via the semantic
+  // `columnheader` role and pin the EXACT visible-column set at two widths.
+  describe("M-0214 — column set via semantic role (refactor-robust)", () => {
+    function visibleColumnNames(): string[] {
+      const table = screen.getByRole("table");
+      return within(table)
+        .getAllByRole("columnheader")
+        .map((th) => th.textContent?.replace(/[↑↓\s]+$/g, "").trim() ?? "")
+        .filter(Boolean);
+    }
+
+    it("at width >= 600 the visible columns are EXACTLY the full 12-column set", () => {
+      render(<PositionsTable {...WIDGET_PROPS} />);
+      expect(visibleColumnNames()).toEqual([
+        "Strategy",
+        "Weight",
+        "Allocated",
+        "CAGR",
+        "Sharpe",
+        "Max DD",
+        "Sortino",
+        "Vol",
+        "Win Rate",
+        "Calmar",
+        "Alpha",
+        "Beta",
+      ]);
+    });
+
+    it("at width 280 the visible columns are EXACTLY ['Strategy', 'Weight'] (not just 'CAGR absent')", () => {
+      render(
+        <PositionsTable data={MOCK_DATA} timeframe="YTD" width={280} height={400} />,
+      );
+      expect(visibleColumnNames()).toEqual(["Strategy", "Weight"]);
+    });
   });
 });
 

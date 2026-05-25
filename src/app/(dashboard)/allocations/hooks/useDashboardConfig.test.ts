@@ -162,6 +162,56 @@ describe("useDashboardConfig (legacy)", () => {
     expect(result.current.config.tiles.length).toBe(before + 1);
   });
 
+  // M-0132 (pr-test-analyzer) — generateTileId (useDashboardConfig.ts:177-187)
+  // computes a candidate `${widgetId}-${n}` from the same-widgetId count, then
+  // WALKS n forward while the candidate `i` already exists. The existing
+  // addTile test only exercises the simple n+1 path (count heuristic hits a
+  // free slot first try). This pins the collision-walk: seed two tiles whose
+  // `i` is "rolling-sharpe-1"/"rolling-sharpe-2" but whose widgetId is NOT
+  // "rolling-sharpe" (so the same-widget count is 0 → n starts at 1 and
+  // collides). The walk must advance to "rolling-sharpe-3", never emit a
+  // duplicate `i`. A regression that drops the while-loop would emit a
+  // duplicate "rolling-sharpe-1" key — a react-grid-layout key collision.
+  it("addTile generateTileId walks past colliding ids → 'rolling-sharpe-3' (no duplicate i)", () => {
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        layoutVersion: LEGACY_LAYOUT_VERSION,
+        timeframe: "YTD",
+        tiles: [
+          // Different widgetId, but their `i` occupies the -1 / -2 slots that
+          // the count heuristic for a brand-new rolling-sharpe would target.
+          { i: "rolling-sharpe-1", widgetId: "tail-risk", x: 0, y: 0, w: 4, h: 3 },
+          {
+            i: "rolling-sharpe-2",
+            widgetId: "var-expected-shortfall",
+            x: 4,
+            y: 0,
+            w: 4,
+            h: 3,
+          },
+        ],
+      }),
+    );
+
+    const { result } = renderHook(() => useDashboardConfig());
+
+    act(() => {
+      result.current.addTile("rolling-sharpe");
+    });
+
+    const added = result.current.config.tiles.find(
+      (t) => t.widgetId === "rolling-sharpe",
+    );
+    expect(added).toBeDefined();
+    // Count heuristic would propose -1, the walk advances past both occupied
+    // ids to -3.
+    expect(added!.i).toBe("rolling-sharpe-3");
+    // Every tile `i` must remain unique (the contract the walk protects).
+    const ids = result.current.config.tiles.map((t) => t.i);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it("removeTile removes the tile and returns it synchronously", () => {
     const { result } = renderHook(() => useDashboardConfig());
 
@@ -689,6 +739,82 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
 
     expect(warnSpy).toHaveBeenCalled();
     expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("parse_failed");
+  });
+
+  // M-0124 (pr-test-analyzer) — version-mismatch is exercised for v3 (legacy)
+  // and v9999 (future) above; a NEGATIVE layoutVersion is a distinct hostile
+  // input (hand-edit / sign-flip bug) that must take the SAME reset branch
+  // (parsed.layoutVersion !== LAYOUT_VERSION → version_reset) rather than
+  // sneaking past the equality check. Pins that negative versions reset to
+  // DEFAULT_LAYOUT without a console.warn (expected drift, not an error).
+  it("loadV2Config: negative layoutVersion (-1) resets to DEFAULT_LAYOUT via version_reset (no warn)", () => {
+    seedV2Blob([{ k: "kpi-strip", w: 4 }], { layoutVersion: -1 });
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("version_reset");
+    expect(result.current.config.layoutVersion).toBe(LAYOUT_VERSION);
+    expect(result.current.config.tiles.length).toBe(expectedDefaultLayout.length);
+  });
+
+  it("loadV2Config: layoutVersion 0 (falsy-but-mismatched) also resets via version_reset", () => {
+    // 0 is a falsy number — a naive `if (!parsed.layoutVersion)` guard would
+    // conflate it with "missing"; the strict `!== LAYOUT_VERSION` check must
+    // still route it to version_reset.
+    seedV2Blob([{ k: "kpi-strip", w: 4 }], { layoutVersion: 0 });
+
+    renderHook(() => useDashboardConfigV2());
+
+    expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("version_reset");
+  });
+
+  // M-0129 (pr-test-analyzer) — the corrupt-JSON catch (line 533) is tested,
+  // but the SYNCHRONOUS shape-rejection branches that run AFTER a successful
+  // JSON.parse are not all covered:
+  //   (b) tiles is a non-array (e.g. the string "not an array") → the
+  //       `!tilesIsArray` branch console.warns "is not an array" + sets
+  //       parse_failed. (Distinct from the corrupt-JSON catch — JSON.parse
+  //       SUCCEEDS here.)
+  //   (c) tiles is an empty array → the preserve-empty-layout branch returns
+  //       `{ tiles: [], ... }` WITHOUT a recovery flag (intentional user
+  //       state, not corruption).
+  it("loadV2Config: tiles is a non-array string → parse_failed + 'is not an array' warn + defaults", () => {
+    // JSON.parse succeeds; tiles is a string, not an array.
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: "not an array",
+        timeframe: "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      }),
+    );
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+
+    expect(
+      warnSpy.mock.calls.some(
+        (c: unknown[]) =>
+          typeof c[0] === "string" && c[0].includes("is not an array"),
+      ),
+    ).toBe(true);
+    expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("parse_failed");
+    expect(result.current.config.tiles.length).toBe(
+      expectedDefaultLayout.length,
+    );
+  });
+
+  it("loadV2Config: empty tiles array → preserves the empty layout, NO recovery flag", () => {
+    seedV2Blob([]); // valid blob, length-0 tiles — an intentional "removed all" state.
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+
+    // Preserve-empty branch: the user's "remove all widgets" choice survives.
+    expect(result.current.config.tiles).toEqual([]);
+    expect(result.current.config.layoutVersion).toBe(LAYOUT_VERSION);
+    // Not corruption — no warn, no recovery flag.
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBeUndefined();
   });
 
   it("persistV2: localStorage.setItem throwing QuotaExceededError surfaces a distinct quota message", () => {

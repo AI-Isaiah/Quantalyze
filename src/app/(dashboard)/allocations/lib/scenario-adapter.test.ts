@@ -467,4 +467,33 @@ describe("H5 brand — compile-time guards", () => {
     lookup["unbranded-string"] = [];
     expect(Object.keys(lookup).length).toBeGreaterThan(0);
   });
+
+  // M-0149 (pr-test-analyzer) — T15/T16/T17 are compile-time guards: their
+  // real assertion is the `@ts-expect-error` directive (enforced by
+  // `tsc --noEmit`, NOT by vitest), and the `expect(typeof _compileOnly).
+  // toBe("function")` line is a tautology that runs but cannot catch a type
+  // regression. (The protection is genuine — removing the brand makes the
+  // `@ts-expect-error` "unused", a tsc error — but it lives in the type
+  // checker, not here.) This adds the missing RUNTIME-behavioral counterpart
+  // vitest CAN catch: the H5 brand must be a zero-cost phantom type —
+  // `string & { __brand }` — that is fully erased at runtime, so a branded id
+  // is `===` its underlying string and indexes a plain-object lookup
+  // identically. If the brand were ever reified into a runtime wrapper
+  // (boxing the string), every `Record<StrategyForBuilderId, ...>` lookup the
+  // adapter performs would silently miss. This pins that invariant.
+  it("M-0149: StrategyForBuilderId brand is runtime-erased — branded id indexes a plain lookup identically to its raw string", () => {
+    const RAW = "00000000-0000-0000-0000-000000000001";
+    const branded = RAW as StrategyForBuilderId;
+    // Brand is compile-only: at runtime the value is the unchanged string.
+    expect(branded).toBe(RAW);
+    expect(typeof branded).toBe("string");
+
+    // A branded write is readable via the raw string key (and vice-versa),
+    // proving the brand adds no runtime key transformation.
+    const lookup: Record<StrategyForBuilderId, DailyPoint[]> = {};
+    const sentinel: DailyPoint[] = [{ date: "2026-01-01", value: 1 }];
+    lookup[branded] = sentinel;
+    expect((lookup as Record<string, DailyPoint[]>)[RAW]).toBe(sentinel);
+    expect(Object.keys(lookup)).toEqual([RAW]);
+  });
 });

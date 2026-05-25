@@ -281,6 +281,60 @@ describe("Tweaks — hydration", () => {
     expect(document.body.getAttribute("data-display-font")).toBe("serif");
   });
 
+  // M-1085 (pr-test-analyzer) — TweaksContext.tsx:209-226 gates the persist
+  // effect behind `if (!hydrated) return;`. Without that gate, the persist
+  // effect fires on the FIRST render (before the hydrate effect has read
+  // localStorage) and writes TWEAK_DEFAULTS — clobbering a concurrent write
+  // from another tab and producing a redundant second write once hydration
+  // completes. The existing "restores persisted state" test seeds storage
+  // and never asserts the WRITE side, so a revert that drops the gate would
+  // pass. These pin the no-overwrite-before-hydration contract by counting
+  // the `allocations.tweaks` setItem writes:
+  //   - clean mount → exactly ONE write (the guard collapses the
+  //     pre-hydration default write; the single write is the post-hydration
+  //     persist of the loaded/default state).
+  //   - first user toggle → exactly one MORE write.
+  // (Empirically verified: removing the guard yields TWO writes on a clean
+  // mount, the first carrying TWEAK_DEFAULTS — the clobber bug.)
+  function tweaksSetItemCount(): number {
+    return (
+      localStorageMock.setItem.mock.calls as unknown as Array<[string, string]>
+    ).filter(([k]) => k === "allocations.tweaks").length;
+  }
+
+  it("M-1085: clean mount writes 'allocations.tweaks' exactly once (no pre-hydration default clobber)", () => {
+    // localStorage is clean (beforeEach clears the store + the setItem spy).
+    act(() => {
+      render(<Harness />);
+    });
+    // Exactly one write — the post-hydration persist. A regression that
+    // drops the `if (!hydrated) return;` guard fires a SECOND, earlier write
+    // carrying TWEAK_DEFAULTS before the hydrate read.
+    expect(tweaksSetItemCount()).toBe(1);
+  });
+
+  it("M-1085: first user toggle adds exactly one more 'allocations.tweaks' write", () => {
+    act(() => {
+      render(<Harness />);
+    });
+    expect(tweaksSetItemCount()).toBe(1);
+    fireEvent.click(
+      screen.getByRole("button", { name: /toggle tweaks panel/i }),
+    );
+    // Opening the panel changes only panelOpen (not persisted state), so no
+    // new tweaks write is triggered by the toggle itself.
+    expect(tweaksSetItemCount()).toBe(1);
+    // A real knob change flips persisted state → exactly one more write.
+    fireEvent.click(screen.getByRole("button", { name: /^Tight$/i }));
+    expect(tweaksSetItemCount()).toBe(2);
+    const lastWrite = (
+      localStorageMock.setItem.mock.calls as unknown as Array<[string, string]>
+    )
+      .filter(([k]) => k === "allocations.tweaks")
+      .at(-1)![1];
+    expect(JSON.parse(lastWrite).density).toBe("tight");
+  });
+
   it("falls back to defaults when localStorage contains malformed JSON", () => {
     window.localStorage.setItem("allocations.tweaks", "not-json");
     expect(() =>
