@@ -167,4 +167,60 @@ describe("scripts/check-banned-packages.mjs", () => {
       expect(result.stderr).toContain(name);
     }
   }, 60_000);
+
+  it("H-0012: exits 1 for every other banned name injected TRANSITIVELY in package-lock.json", () => {
+    // H-0012: the matcher must catch the three non-axios banned
+    // packages on the LOCKFILE surface too, not just direct
+    // package.json deps. Supply-chain attacks land via transitive
+    // lockfile entries (a deep dependency pulling in a malicious
+    // payload), so a banned package buried under
+    // node_modules/some-parent/node_modules/<banned> MUST fail CI even
+    // when package.json itself stays clean. Pre-this-test the transitive
+    // arm was only exercised for axios; the other three were proven for
+    // the direct arm only — leaving the 3×{transitive} corner of the
+    // matrix unguarded.
+    const otherBanned = [
+      "react-native-international-phone-number",
+      "react-native-country-select",
+      "@openclaw-ai/openclawai",
+    ];
+
+    for (const name of otherBanned) {
+      const scratch = prepareScratch();
+
+      const lock = JSON.parse(
+        readFileSync(join(scratch, "package-lock.json"), "utf8"),
+      );
+      if (!lock.packages) {
+        console.warn(
+          "[check-banned-packages.test] skipping transitive arm for " +
+            `${name} — lockfile is not v2/v3 (no \`packages\` map).`,
+        );
+        continue;
+      }
+      // package.json stays clean — only the transitive lockfile entry
+      // carries the banned name. Scoped names (@openclaw-ai/openclawai)
+      // must round-trip through the node_modules path key correctly.
+      lock.packages[`node_modules/some-parent/node_modules/${name}`] = {
+        version: "1.0.0",
+        resolved: `https://registry.npmjs.org/${name}/-/${name}-1.0.0.tgz`,
+        integrity: "sha512-fake",
+      };
+      writeFileSync(
+        join(scratch, "package-lock.json"),
+        JSON.stringify(lock, null, 2),
+        "utf8",
+      );
+
+      const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+        encoding: "utf8",
+        cwd: scratch,
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(name);
+      // Surface prefix must identify the lockfile path so the reviewer
+      // knows this is a transitive (not direct) hit.
+      expect(result.stderr).toContain("package-lock.json:");
+    }
+  }, 60_000);
 });

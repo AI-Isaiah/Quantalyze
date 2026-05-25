@@ -180,6 +180,61 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     expect(result.stderr).toContain("xxx_stale_dangling_entry");
   }, 30_000);
 
+  it("H-0014: scans ALL migrations — a NEW migration adding a user-owned table absent from the manifest fails the hook", () => {
+    // H-0014: the single negative test below only removes `user_notes`
+    // from the manifest. That proves the hook reacts to ONE known
+    // table, but not that its CREATE-TABLE scan actually visits every
+    // migration file. This test proves the scan-breadth from the other
+    // direction: add a BRAND-NEW migration declaring a user-owned table
+    // (user_id UUID REFERENCES auth.users) that the manifest does NOT
+    // list, leave the manifest untouched, and assert the hook discovers
+    // the gap and names the new table. A regression that scanned only a
+    // subset of migrations (e.g. globbed the wrong dir, or stopped at
+    // the first file) would let this slip through with exit 0.
+    const scratch = mkdtempSync(join(tmpdir(), "gdpr-hook-scan-all-"));
+    mkdirSync(join(scratch, "scripts"), { recursive: true });
+    mkdirSync(join(scratch, "src", "lib"), { recursive: true });
+    mkdirSync(join(scratch, "supabase"), { recursive: true });
+
+    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-gdpr-export-coverage.ts"));
+    cpSync(
+      join(REPO_ROOT, MIGRATIONS_REL),
+      join(scratch, MIGRATIONS_REL),
+      { recursive: true },
+    );
+    // Manifest copied VERBATIM — the gap is on the migration side.
+    cpSync(MANIFEST_ABS, join(scratch, MANIFEST_REL));
+
+    // A late-timestamp filename so it sorts after the real migrations;
+    // the table name is unique so it cannot collide with any manifest
+    // or EXCLUDED_TABLES entry. The user_id FK to auth.users is exactly
+    // the codebase convention the scanner keys on.
+    const newMigrationName = "29990101000000_zzz_orphan_user_table.sql";
+    writeFileSync(
+      join(scratch, MIGRATIONS_REL, newMigrationName),
+      [
+        "CREATE TABLE IF NOT EXISTS public.zzz_orphan_user_table (",
+        "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),",
+        "  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,",
+        "  note TEXT",
+        ");",
+        "",
+      ].join("\n"),
+    );
+
+    const result = spawnSync(
+      "npx",
+      ["tsx", "scripts/check-gdpr-export-coverage.ts"],
+      { encoding: "utf8", cwd: scratch },
+    );
+
+    expect(result.status).toBe(1);
+    // The hook must name the offending table AND the migration it was
+    // declared in — proving it actually read that migration file.
+    expect(result.stderr).toContain("zzz_orphan_user_table");
+    expect(result.stderr).toContain(newMigrationName);
+  }, 30_000);
+
   it("exits 1 with a specific error when a user-owned table is missing", () => {
     // Copy the script + manifest + migrations into a scratch dir so we
     // can mutate the manifest without polluting the working tree.
