@@ -7,6 +7,14 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.8.0] - 2026-05-25
+
+**chore(phase-19): production soak gate + robust legacy-write detector for the verification_requests cutover.** The hourly `phase-19-stability.yml` workflow now measures PRODUCTION — it previously checked the test project and no-op-skipped, so its green runs proved nothing. Detection is now robust: a new `verification_requests_post_phase19_audit` trigger (migration `20260525113000`) logs every INSERT/UPDATE/DELETE on the legacy `verification_requests` table to `audit_log`, and the read-only `phase19_soak_status` RPC counts those rows. This replaces a timestamp-column proxy that was blind to UPDATEs and DELETEs (the legacy `public_token` UPDATE in verify-strategy, and GDPR `sanitize_user` deletes). The RPC is `SECURITY DEFINER` returning only scalars and is callable with the prod ANON key, so no service_role key sits in an hourly CI job.
+
+`scripts/verify-no-legacy-writes.sh` is rewritten with fail-loud consistency checks (kill-switch flipped but `flag_flipped_at` unrecorded → fail; rolled back mid-window → fail; view-shim applied without a recorded soak → fail), strict ISO-8601 `flag_flipped_at` validation, and HTTP-status inspection. New `scripts/test-verify-no-legacy-writes.sh` covers all 13 exit-code branches offline.
+
+The destructive view-shim ("PR-D", migration `20260525120000`) is intentionally NOT included here — it is parked in `.planning/phase-19/pr-d-ready/` until the 168h soak passes, carrying a rebuild-safe apply-time gate and the `sanitize_user` GDPR-delete repoint.
+
 ## [0.24.7.4] - 2026-05-25
 
 **chore(PR-Y2): close migration-timestamp drift + re-enable auto-on-push for `supabase-migrate.yml` + add `migration-drift-check.yml` defense.** Two channels were mutating prod's `schema_migrations` table — `supabase db push` (CLI, records the file's timestamp) and MCP `apply_migration` (records its own generated timestamp). Every MCP-applied migration drifted: remote row at one timestamp, local file at another, CLI refused to push. PR-Y1 (2026-05-15) disabled `supabase-migrate.yml`'s auto-on-push trigger to stop the workflow failing on every migration-touching merge. The accumulated drift (5 rows across April-May 2026) had to be reconciled before the trigger could be re-enabled. PR-Y2 closes that loop.

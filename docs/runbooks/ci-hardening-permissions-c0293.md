@@ -78,7 +78,7 @@ Workflow default: `permissions: contents: read`
 
 | Job | Permissions | Justification |
 |-----|-------------|---------------|
-| `check` | (inherits default) | Hourly cron runs `scripts/verify-no-legacy-writes.sh` against the test Supabase project's PostgREST endpoint. No GitHub API surface. |
+| `check` | (inherits default) | Hourly cron runs `scripts/verify-no-legacy-writes.sh` against the **production** Supabase project (`khslejtfbuezsmvmtsdn`) via the read-only `phase19_soak_status` RPC, authenticated with the prod ANON key (`PROD_SUPABASE_*` secrets) — not a service_role key. No GitHub API surface. |
 
 ## Pinned action SHAs
 
