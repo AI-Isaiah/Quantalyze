@@ -280,3 +280,180 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(body.error).toMatch(/no longer awaiting review/i);
   });
 });
+
+/**
+ * M-0285 (testgap API2) — the route refactor collapsed 5 inline approve
+ * error strings into one `Cannot approve: ${gate.reason}` interpolation
+ * (route.ts:94). AdminTabs.tsx renders that string to the founder. A
+ * regression that swapped gate.reason for gate.code (e.g.
+ * "Cannot approve: INSUFFICIENT_TRADES") would degrade admin UX without
+ * any existing test failing — the suites above all mock checkStrategyGate
+ * to { passed: true }, so the real reason-string contract is unpinned.
+ *
+ * This suite vi.doUnmocks @/lib/strategyGate so the REAL gate runs, then
+ * drives the admin client's first-pass gate queries to produce two
+ * distinct failure reasons and asserts the human-readable string lands in
+ * the 400 body verbatim (prefixed with "Cannot approve: ").
+ */
+describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", () => {
+  const url = "http://localhost:3000/api/admin/strategy-review";
+
+  beforeEach(() => {
+    supabaseState.callCount = 0;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    // Shared CSRF/rate-limit suite leaves a denying doMock on ratelimit and
+    // the top-of-file mock on strategyGate. Undo both so the REAL gate runs
+    // and requests aren't 429'd before reaching it.
+    vi.doUnmock("@/lib/ratelimit");
+    vi.doUnmock("@/lib/strategyGate");
+    vi.resetModules();
+  });
+
+  type GateFixture = {
+    apiKeyId: string | null;
+    tradeCount: number;
+    /** ISO timestamps for the earliest/latest trade span. */
+    earliest: string;
+    latest: string;
+    computationStatus:
+      | "pending"
+      | "computing"
+      | "complete"
+      | "failed"
+      | null;
+    computationError: string | null;
+  };
+
+  /**
+   * Admin client that feeds the route's FIVE first-pass gate queries
+   * (strategies.single, trades count head, earliest, latest,
+   * strategy_analytics.single). The gate fails before the TOCTOU re-check
+   * / UPDATE, so those paths are never reached.
+   */
+  function mockGateAdminClient(fx: GateFixture): void {
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: (table: string) => {
+          if (table === "trades") {
+            return {
+              select: (
+                _cols: string,
+                meta?: { count?: "exact"; head?: boolean },
+              ) => ({
+                eq: () => {
+                  if (meta?.head) {
+                    return Promise.resolve({
+                      count: fx.tradeCount,
+                      data: null,
+                      error: null,
+                    });
+                  }
+                  // earliest / latest probes — distinguished by sort dir,
+                  // but for the gate both just need a [0].timestamp.
+                  return {
+                    order: (
+                      _col: string,
+                      opts: { ascending: boolean },
+                    ) => ({
+                      limit: () =>
+                        Promise.resolve({
+                          data: [
+                            {
+                              timestamp: opts.ascending
+                                ? fx.earliest
+                                : fx.latest,
+                            },
+                          ],
+                          error: null,
+                        }),
+                    }),
+                  };
+                },
+              }),
+            };
+          }
+          if (table === "strategy_analytics") {
+            return {
+              select: () => ({
+                eq: () => ({
+                  single: async () => ({
+                    data:
+                      fx.computationStatus === null
+                        ? null
+                        : {
+                            computation_status: fx.computationStatus,
+                            computation_error: fx.computationError,
+                          },
+                    error: null,
+                  }),
+                }),
+              }),
+            };
+          }
+          // strategies — first-pass single() lookup.
+          return {
+            select: () => ({
+              eq: () => ({
+                single: async () => ({
+                  data: {
+                    api_key_id: fx.apiKeyId,
+                    name: "Strat 1",
+                    user_id: "user-1",
+                  },
+                  error: null,
+                }),
+              }),
+            }),
+          };
+        },
+      }),
+    }));
+  }
+
+  async function postApprove(): Promise<Response> {
+    const mod = await import("./route");
+    const req = new NextRequest(url, {
+      method: "POST",
+      headers: { origin: "http://localhost:3000" },
+      body: JSON.stringify({ id: "strat-1", action: "approve" }),
+    });
+    return (mod.POST as (req: NextRequest) => Promise<Response>)(req);
+  }
+
+  it("returns 400 with the INSUFFICIENT_TRADES reason string (not the code) when trade_count=3", async () => {
+    mockGateAdminClient({
+      apiKeyId: "key-1",
+      tradeCount: 3,
+      earliest: "2026-01-01T00:00:00Z",
+      latest: "2026-02-01T00:00:00Z",
+      computationStatus: "complete",
+      computationError: null,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    // Human-readable reason, prefixed by the route's template.
+    expect(body.error).toMatch(/^Cannot approve: /);
+    expect(body.error).toMatch(/only 3 trade/i);
+    // Regression guard: the stable CODE must NOT leak in place of the reason.
+    expect(body.error).not.toContain("INSUFFICIENT_TRADES");
+  });
+
+  it("returns 400 with the ANALYTICS_FAILED reason string when computation_status='failed'", async () => {
+    mockGateAdminClient({
+      apiKeyId: "key-1",
+      tradeCount: 50,
+      earliest: "2026-01-01T00:00:00Z",
+      latest: "2026-03-01T00:00:00Z", // > 7 day span
+      computationStatus: "failed",
+      computationError: null,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/^Cannot approve: /);
+    expect(body.error).toContain("Analytics computation failed");
+    expect(body.error).not.toContain("ANALYTICS_FAILED");
+  });
+});

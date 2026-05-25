@@ -50,6 +50,12 @@ const STATE = vi.hoisted(() => ({
   // H-0255: capture the per-user rate-limit KEY so a test can pin the
   // `bridge_outcome_curves:${userId}` bucket shape (per-user, not global).
   lastLimiterKey: null as string | null,
+  // M-0300: count createAdminClient() instantiations so a test can prove
+  // the admin client is NOT reached when the ownership gate fails.
+  adminClientCreated: 0,
+  // M-0307: when set, the strategy_analytics .in() query resolves with
+  // this error so the route's 500 "Failed to load curves" branch is hit.
+  analyticsError: null as { code?: string; message: string } | null,
 }));
 
 // user-scoped supabase client: returns auth + outcomeRow from bridge_outcomes
@@ -79,35 +85,41 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
-// admin client: serves match_decisions lookup + strategy_analytics
+// admin client: serves match_decisions lookup + strategy_analytics.
+// M-0300: increment a counter on EVERY instantiation so the ownership-gate
+// ordering invariant (admin client only after ownership proof) is assertable.
 vi.mock("@/lib/supabase/admin", () => ({
-  createAdminClient: () => ({
-    from: (table: string) => {
-      if (table === "match_decisions") {
-        return {
-          select: () => ({
-            eq: () => ({
-              maybeSingle: async () => ({
-                data: STATE.decisionRow,
-                error: null,
+  createAdminClient: () => {
+    STATE.adminClientCreated += 1;
+    return {
+      from: (table: string) => {
+        if (table === "match_decisions") {
+          return {
+            select: () => ({
+              eq: () => ({
+                maybeSingle: async () => ({
+                  data: STATE.decisionRow,
+                  error: null,
+                }),
               }),
             }),
-          }),
-        };
-      }
-      if (table === "strategy_analytics") {
-        return {
-          select: () => ({
-            in: async () => ({
-              data: STATE.analyticsRows,
-              error: null,
+          };
+        }
+        if (table === "strategy_analytics") {
+          return {
+            select: () => ({
+              in: async () => ({
+                // M-0307: error injection for the 500 branch.
+                data: STATE.analyticsError ? null : STATE.analyticsRows,
+                error: STATE.analyticsError,
+              }),
             }),
-          }),
-        };
-      }
-      throw new Error(`unexpected from(${table}) on admin client`);
-    },
-  }),
+          };
+        }
+        throw new Error(`unexpected from(${table}) on admin client`);
+      },
+    };
+  },
 }));
 
 // ratelimit mock: both limiters exported; checkLimit captures the limiter it
@@ -173,6 +185,8 @@ beforeEach(() => {
   STATE.checkLimitResult = { success: true };
   STATE.lastLimiterArg = null;
   STATE.lastLimiterKey = null;
+  STATE.adminClientCreated = 0;
+  STATE.analyticsError = null;
 });
 
 afterEach(() => {
@@ -326,5 +340,95 @@ describe("GET /api/bridge/outcome/[id]/curves", () => {
     expect(body).not.toHaveProperty("original");
     expect(body).not.toHaveProperty("replacement");
     expect(body).not.toHaveProperty("allocated_at");
+  });
+
+  it("M-0300 — ownership-gate-FIRST: the admin client is never created when the user-scoped ownership SELECT returns null (404)", async () => {
+    // T-05-01 mitigation: the route docstring promises ownership is proved
+    // FIRST via a user-scoped SELECT, and ONLY AFTER ownership proof does it
+    // hit the admin client. TC2 verifies the 404; this pins the ORDERING
+    // invariant the comment warns about. A refactor that instantiated the
+    // admin client before the ownership check would leave adminClientCreated
+    // > 0 here and fail — exactly the regression class T-05-01 guards.
+    STATE.outcomeRow = null; // user-scoped SELECT returns no owned row
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(OUTCOME_ID));
+    expect(res.status).toBe(404);
+    // The admin client (which bypasses RLS) must NOT have been reached.
+    expect(STATE.adminClientCreated).toBe(0);
+  });
+
+  it("M-0300b — ownership-gate-FIRST: cross-tenant outcome (owned by another allocator) → 404 without ever creating the admin client", async () => {
+    // Companion to TC8: the C-0080 equality check rejects a cross-tenant
+    // outcome UUID. Prove the admin-client hop is skipped on that path too,
+    // so a future reorder that reads strategy_analytics before the tenant
+    // check is caught.
+    STATE.authUser = { id: "00000000-0000-0000-0000-000000000001" };
+    STATE.outcomeRow = {
+      id: OUTCOME_ID,
+      allocator_id: "99999999-9999-4999-8999-999999999999",
+      strategy_id: STRAT_ID,
+      match_decision_id: MATCH_DEC_ID,
+      allocated_at: ALLOCATED_AT,
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(OUTCOME_ID));
+    expect(res.status).toBe(404);
+    expect(STATE.adminClientCreated).toBe(0);
+  });
+
+  it("M-0306 — rebaseToAnchor takes the cumulative-NAV RATIO, never the sum-of-daily-returns", async () => {
+    // route.ts Pitfall 2: series is CUMULATIVE equity, NOT daily returns —
+    // each point is `100 * value / anchorValue`. TC4 only checks the anchor
+    // is 100, which passes even under a sum-of-returns regression. This pins
+    // the full non-trivial sequence so a regression that compounded or summed
+    // the points would produce different navs and fail.
+    //
+    // Anchor value = 50. Ratio rebase → [100, 150, 200] (50→75→100 doubles).
+    // A sum-of-daily-returns regression (100 + Σ deltas) would yield e.g.
+    // [100, 125, 150] or compounded values — all ≠ the ratio output below.
+    STATE.outcomeRow = {
+      id: OUTCOME_ID,
+      allocator_id: "00000000-0000-0000-0000-000000000001",
+      strategy_id: STRAT_ID,
+      match_decision_id: null, // isolate replacement series
+      allocated_at: ALLOCATED_AT,
+    };
+    STATE.analyticsRows = [
+      {
+        strategy_id: STRAT_ID,
+        returns_series: [
+          { date: "2026-01-01", value: 50 }, // anchor
+          { date: "2026-01-15", value: 75 }, // 75/50 = 1.5 → nav 150
+          { date: "2026-03-01", value: 100 }, // 100/50 = 2.0 → nav 200
+        ],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(OUTCOME_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.replacement).toEqual([
+      { date: "2026-01-01", nav: 100 },
+      { date: "2026-01-15", nav: 150 },
+      { date: "2026-03-01", nav: 200 },
+    ]);
+  });
+
+  it("M-0307 — analyticsErr 500 branch: a strategy_analytics fetch error returns 500, NOT a 200 with empty curves", async () => {
+    // route.ts:169-172 returns 500 "Failed to load curves" when the
+    // analytics query errors. No prior TC mutated the analytics mock to
+    // error. Regression class: a refactor that swallowed the error and
+    // returned 200 with empty arrays would make the UI render zero curves —
+    // indistinguishable from a genuinely thin dataset. This proves a fetch
+    // failure surfaces as a server error.
+    STATE.analyticsError = { code: "PGRST301", message: "db timeout" };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(OUTCOME_ID));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body).toEqual({ error: "Failed to load curves" });
+    // Must NOT degrade to an empty-curve 200.
+    expect(body).not.toHaveProperty("original");
+    expect(body).not.toHaveProperty("replacement");
   });
 });

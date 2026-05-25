@@ -53,6 +53,10 @@ const STATE = vi.hoisted(() => ({
   checkLimitResult: { success: true, retryAfter: 0 } as { success: boolean; retryAfter: number },
   csrfResponse: null as ReturnType<typeof import("next/server").NextResponse.json> | null,
   lastCheckLimitArg: null as unknown,
+  // M-0338(b): when set, the log_audit_event RPC throws a TRANSIENT-class
+  // error (network blip) which `emit()` swallows — proving the fire-and-
+  // forget audit path never changes the user-facing 200.
+  auditRpcThrows: false,
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -65,6 +69,11 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
       STATE.rpcCalls.push({ name, args });
+      if (name === "log_audit_event" && STATE.auditRpcThrows) {
+        // Transient-class failure (TypeError: fetch failed) — emit()
+        // swallows it without rethrowing, so no unhandled rejection.
+        throw new TypeError("fetch failed");
+      }
       const outcome = STATE.rpcState[name] ?? { data: null, error: null };
       return outcome;
     },
@@ -112,6 +121,7 @@ beforeEach(() => {
   STATE.checkLimitResult = { success: true, retryAfter: 0 };
   STATE.csrfResponse = null;
   STATE.lastCheckLimitArg = null;
+  STATE.auditRpcThrows = false;
 });
 
 afterEach(() => {
@@ -331,5 +341,112 @@ describe("PUT /api/preferences", () => {
 
     expect(STATE.lastCheckLimitArg).toBe(MANDATE_AUTO_SAVE_LIMITER_SENTINEL);
     expect(STATE.lastCheckLimitArg).not.toBe(USER_ACTION_LIMITER_SENTINEL);
+  });
+
+  it("TC11b — L-0075: an 8-PUT burst all succeed (200) when the 30/min limiter has budget — the route does not self-throttle", async () => {
+    // WR-02 premise: MandateForm fans a single edit into 8+ field-level
+    // PUTs. The 5/min userActionLimiter would 429 the 6th save mid-burst.
+    // TC11 only asserts the limiter IDENTITY (a wiring check). This pins the
+    // BEHAVIOR the user actually experiences: 8 sequential PUTs, each with
+    // the limiter reporting budget, ALL return 200 — the route itself never
+    // drops a save. (The exact 30/60s sliding-window math is enforced inside
+    // Upstash and is covered by the limiter-config FLAG, not unit-testable
+    // offline here.)
+    const { PUT } = await import("./route");
+    STATE.checkLimitResult = { success: true, retryAfter: 0 };
+
+    const statuses: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      const res = await PUT(makeRequest({ max_weight: 0.1 + i * 0.01 }));
+      statuses.push(res.status);
+    }
+    expect(statuses).toEqual([200, 200, 200, 200, 200, 200, 200, 200]);
+    await drainAuditMicrotasks();
+  });
+
+  it("TC12 — M-0338(a): admin-only fields (founder_notes) are stripped before the RPC AND absent from the audit metadata.fields a self-editor can claim", async () => {
+    // pickSelfEditableFields drops founder_notes (an ADMIN_ONLY field). A
+    // self-editor must not be able to smuggle it into the RPC OR have it
+    // appear in the audit row's metadata.fields (which would mis-attribute
+    // an admin-only mutation to a self_edit).
+    const { PUT } = await import("./route");
+
+    const res = await PUT(
+      makeRequest({
+        max_weight: 0.25,
+        founder_notes: "smuggled admin-only note",
+        min_sharpe: 0.9, // another ADMIN_ONLY field
+      }),
+    );
+    expect(res.status).toBe(200);
+    await drainAuditMicrotasks();
+
+    const updateCall = STATE.rpcCalls.find(
+      (c) => c.name === "update_allocator_mandates",
+    );
+    expect(updateCall).toBeDefined();
+    // Only the self-editable field reached the RPC; admin-only keys dropped.
+    expect(updateCall!.args).toEqual({ p_max_weight: 0.25 });
+    expect(updateCall!.args).not.toHaveProperty("p_founder_notes");
+    expect(updateCall!.args).not.toHaveProperty("p_min_sharpe");
+
+    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    expect(auditCall).toBeDefined();
+    const metadata = auditCall!.args.p_metadata as {
+      fields: string[];
+      self_edit: boolean;
+    };
+    // metadata.fields lists ONLY the kept self-editable field — the
+    // self_edit:true claim cannot be paired with an admin-only field name.
+    expect(metadata.fields).toEqual(["max_weight"]);
+    expect(metadata.fields).not.toContain("founder_notes");
+    expect(metadata.fields).not.toContain("min_sharpe");
+    expect(metadata.self_edit).toBe(true);
+  });
+
+  it("TC13 — M-0338(b): a failing (fire-and-forget) audit RPC must NOT fail the 200 OK", async () => {
+    // The audit emission is fire-and-forget via after(). If the
+    // log_audit_event RPC fails (transient infra blip), the user's mandate
+    // save still succeeded at the DB — the response must remain 200, never
+    // a 500 gated on the audit round-trip.
+    STATE.auditRpcThrows = true;
+    const { PUT } = await import("./route");
+
+    const res = await PUT(makeRequest({ max_weight: 0.25 }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    await drainAuditMicrotasks();
+
+    // The mandate RPC succeeded; the audit RPC was attempted (and threw).
+    expect(
+      STATE.rpcCalls.some((c) => c.name === "update_allocator_mandates"),
+    ).toBe(true);
+    expect(STATE.rpcCalls.some((c) => c.name === "log_audit_event")).toBe(true);
+  });
+
+  it("TC14 — M-0338(c): the audit entity_id is pinned to the authenticated user.id and a body-supplied entity_id cannot override it", async () => {
+    // The route never reads entity_id from the body — it always uses
+    // user.id. Pin that contract so a future change that trusted a
+    // client-supplied entity_id (letting one allocator's edit be audited
+    // against another's id) is caught.
+    const { PUT } = await import("./route");
+
+    const res = await PUT(
+      makeRequest({
+        max_weight: 0.25,
+        // Attacker attempts to redirect the audit anchor.
+        entity_id: "99999999-9999-4999-8999-999999999999",
+      }),
+    );
+    expect(res.status).toBe(200);
+    await drainAuditMicrotasks();
+
+    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    expect(auditCall).toBeDefined();
+    expect(auditCall!.args.p_entity_id).toBe(STATE.authUser!.id);
+    expect(auditCall!.args.p_entity_id).not.toBe(
+      "99999999-9999-4999-8999-999999999999",
+    );
   });
 });
