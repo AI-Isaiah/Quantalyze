@@ -277,25 +277,18 @@ class TestMatchPositionsFIFO:
         assert positions == []
 
     def test_zero_entry_guard(self) -> None:
-        """Fill with price=0 should not cause ZeroDivisionError in ROI calc."""
+        """Fill with price=0 must not raise (ZeroDivisionError) AND must not be
+        recorded as a trade. A zero-entry position is corrupt input that is now
+        dropped (H-0812) rather than kept with a fabricated roi=0 that would
+        pollute win_rate / avg_roi / expectancy."""
         fills = [
             _make_fill(side="buy", price=0.0, quantity=1.0, timestamp="2024-01-01T00:00:00+00:00"),
             _make_fill(side="sell", price=100.0, quantity=1.0, timestamp="2024-01-02T00:00:00+00:00"),
         ]
-        # Should not raise
+        # Should not raise; the corrupt zero-entry position is dropped.
         positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
-        assert len(positions) == 1
-        # ROI when entry_avg is 0: the code returns 0 (guards against division by zero)
-        assert positions[0]["roi"] == 0
+        assert len(positions) == 0
 
-    @pytest.mark.xfail(
-        reason="H-0812: zero-entry-price position is recorded with roi=0 "
-        "instead of being dropped with a data_quality_flag "
-        "(zero_entry_price_dropped). The roi=0 then propagates into "
-        "win_rate/avg_roi/expectancy as a real flat trade, distorting "
-        "analytics — fix in follow-up (drop + flag the corrupted position).",
-        strict=True,
-    )
     def test_zero_entry_price_position_is_dropped(self) -> None:
         """CORRECT contract (H-0812): a price=0 entry fill is nonsensical
         input (exchange/parser corruption). The position must be DROPPED —
@@ -325,23 +318,28 @@ class TestMatchPositionsFIFO:
         assert positions[0]["exit_price_avg"] == 110.0
 
     def test_zero_entry_price_position_sets_data_quality_flag(self) -> None:
-        """CORRECT contract (M-0751): even if the team chooses to KEEP the
-        zero-entry position (roi=0) rather than drop it, it must at minimum
-        carry a data_quality_flag so downstream consumers can surface a
-        warning. The same FIFO function already emits data_quality_flags
-        for posSide mismatches and duration-parse errors."""
+        """CORRECT contract (M-0751, resolved alongside H-0812): the corrupt
+        zero-entry position is DROPPED from the returned trades (so its
+        fabricated roi=0 cannot pollute win_rate / avg_roi / expectancy), and
+        the drop is surfaced — not silent — via a strategy-level
+        `zero_entry_price_dropped` counter accumulated in `dropped_flags`
+        (the same drop-and-count channel used for fills_dropped_no_symbol)."""
         fills = [
             _make_fill(side="buy", price=0.0, quantity=1.0,
                        timestamp="2024-01-01T00:00:00+00:00"),
             _make_fill(side="sell", price=100.0, quantity=1.0,
                        timestamp="2024-01-02T00:00:00+00:00"),
         ]
-        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
-        assert len(positions) == 1
-        flags = positions[0].get("data_quality_flags") or {}
-        assert flags.get("zero_entry_price") is True, (
-            f"zero-entry position must carry a data_quality_flag; got "
-            f"flags={flags!r}"
+        dropped_flags: dict[str, object] = {}
+        positions = _match_positions_fifo(
+            "BTCUSDT", fills, "strat-1", dropped_flags=dropped_flags
+        )
+        # Corrupt position dropped, not recorded as a trade...
+        assert len(positions) == 0
+        # ...but surfaced via the strategy-level counter.
+        assert dropped_flags.get("zero_entry_price_dropped") == 1, (
+            f"zero-entry drop must be surfaced via dropped_flags; got "
+            f"{dropped_flags!r}"
         )
 
     def test_roi_net_of_fees_classifies_fee_only_loser_as_loser(self) -> None:
