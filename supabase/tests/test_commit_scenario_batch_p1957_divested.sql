@@ -37,9 +37,9 @@ DECLARE
 BEGIN
   SELECT prosrc INTO v_prosrc
     FROM pg_proc
-   WHERE oid = 'public.commit_scenario_batch(uuid,jsonb)'::regprocedure;
+   WHERE oid = 'public.commit_scenario_batch(uuid,jsonb,text,text)'::regprocedure;
   IF v_prosrc IS NULL THEN
-    RAISE EXCEPTION 'Test 1 failed: commit_scenario_batch(uuid,jsonb) not installed';
+    RAISE EXCEPTION 'Test 1 failed: commit_scenario_batch(uuid,jsonb,text,text) not installed';
   END IF;
 
   -- The guard appears in voluntary_remove, voluntary_modify, and

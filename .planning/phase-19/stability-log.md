@@ -21,7 +21,7 @@ flipped without recording here, or rolled back mid-window.
 
 ## Flag Flip Timestamp
 
-- **flag_flipped_at:** TODO (record from commit (b) timestamp; ISO-8601 UTC, e.g. `2026-05-15T14:00:00Z`)
+- **flag_flipped_at:** 2026-05-25T15:51:07Z
 
 ## Daily Sentry Error-Envelope Rate (15-min tumbling windows averaged daily)
 

@@ -74,13 +74,24 @@ class _BinanceSingleBatchClient:
 
 
 class _BinanceStagnantCursorClient:
-    """Binance stub whose second page repeats the same close_time — forces
-    the `new_cursor <= cursor_ms` terminator (line 52)."""
+    """Binance stub whose pages all repeat the SAME close_time — forces the
+    `new_cursor <= cursor_ms` terminator in `_fetch_from_binance`.
+
+    The page is frozen ONCE in __init__ (the production code opens a single
+    AsyncClient per call and loops .get() inside it, so __init__ runs once per
+    fetch). Every .get() then returns byte-identical close_times. An earlier
+    version called `_recent_binance_page()` per request, which re-derives
+    timestamps from datetime.now(); any wall-clock ms elapsed between requests
+    advanced the last close_time, so `new_cursor > cursor_ms` and the loop kept
+    paginating instead of breaking — a flaky `assert 6 == 4` (or 8, 40, …) that
+    only surfaced under CI scheduling latency. Freezing pins close_time, making
+    the stagnant-cursor break deterministic regardless of inter-request timing.
+    """
 
     _calls = 0
 
     def __init__(self, *args, **kwargs) -> None:
-        pass
+        self._frozen_page = _recent_binance_page()
 
     async def __aenter__(self) -> "_BinanceStagnantCursorClient":
         return self
@@ -90,7 +101,7 @@ class _BinanceStagnantCursorClient:
 
     async def get(self, url: str, params=None):
         _BinanceStagnantCursorClient._calls += 1
-        return _FakeResponse(_recent_binance_page())
+        return _FakeResponse(self._frozen_page)
 
 
 class _CoingeckoClient:

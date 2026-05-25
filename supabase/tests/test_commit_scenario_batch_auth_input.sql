@@ -24,7 +24,10 @@
 -- patch are still regression candidates because mig 128 rewrites the
 -- whole function body.
 --
--- Run order: AFTER migration 128 has been applied.
+-- Run order: AFTER migration 128 AND the later commit_scenario_batch
+-- idempotency hardening (20260515130006 / 20260515210400 / 20260515205431),
+-- which dropped the original 2-arg overload in favour of the 4-arg
+-- (uuid, jsonb, text, text) form this test's privilege assertions probe.
 
 BEGIN;
 
@@ -37,15 +40,21 @@ DECLARE
   v_anon_can BOOLEAN;
   v_pub_can  BOOLEAN;
 BEGIN
+  -- Signature must match the function's identity arguments EXACTLY:
+  -- has_function_privilege resolves by exact arg types, not by callable
+  -- arity. Since the P1956/P1957 idempotency hardening, the function is
+  -- commit_scenario_batch(uuid, jsonb, text DEFAULT NULL, text DEFAULT NULL),
+  -- so the old 2-arg form errors "function ... does not exist". (The PERFORM
+  -- calls below still use 2 args — those resolve fine via the defaults.)
   SELECT has_function_privilege('authenticated',
-           'public.commit_scenario_batch(uuid, jsonb)', 'EXECUTE')
+           'public.commit_scenario_batch(uuid, jsonb, text, text)', 'EXECUTE')
     INTO v_auth_can;
   IF v_auth_can IS NOT TRUE THEN
     RAISE EXCEPTION 'Test 1 failed: authenticated lacks EXECUTE on commit_scenario_batch';
   END IF;
 
   SELECT has_function_privilege('anon',
-           'public.commit_scenario_batch(uuid, jsonb)', 'EXECUTE')
+           'public.commit_scenario_batch(uuid, jsonb, text, text)', 'EXECUTE')
     INTO v_anon_can;
   IF v_anon_can IS TRUE THEN
     RAISE EXCEPTION 'Test 1 failed: anon has EXECUTE on commit_scenario_batch — REVOKE regressed';

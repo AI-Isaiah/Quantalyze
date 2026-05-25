@@ -1003,11 +1003,15 @@ async function main() {
     const { error: dErr } = await supabase.from("match_decisions").insert({
       allocator_id: ALLOCATOR_ACTIVE,
       strategy_id: STRATEGY_UUIDS[0],
-      // Migration 080 added a per-kind CHECK requiring `bridge_recommended`
-      // rows (the default kind) to carry one of original_strategy_id /
-      // original_holding_ref. The seed semantically models "we bridged the
-      // active allocator from strategy[1] to strategy[0]", so populate
+      // `kind` is NOT NULL (enum match_decision_kind) with no DB default, so
+      // it MUST be set explicitly — relying on an implicit default is what
+      // broke this seed once the test project caught up to the current schema.
+      // Migration 080's per-kind CHECK requires a `bridge_recommended` row to
+      // carry exactly one of original_strategy_id / original_holding_ref. The
+      // seed models "we bridged the active allocator from strategy[1] to
+      // strategy[0]", so set kind=bridge_recommended and populate
       // original_strategy_id with strategy[1].
+      kind: "bridge_recommended",
       original_strategy_id: STRATEGY_UUIDS[1],
       decision: "sent_as_intro",
       founder_note: "Historical demo intro (seeded).",

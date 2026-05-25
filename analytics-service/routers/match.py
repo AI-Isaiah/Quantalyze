@@ -93,8 +93,8 @@ def _kill_switch_enabled() -> bool:
         result = supabase.table("system_flags").select("enabled").eq(
             "key", "match_engine_enabled"
         ).maybe_single().execute()
-        if not result.data:
-            return True  # No row = default enabled
+        if not (result and result.data):
+            return True  # No row / null maybe_single response = default enabled
         return bool(result.data.get("enabled", True))
     except Exception as err:
         logger.error(
@@ -336,7 +336,12 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     prefs_result = supabase.table("allocator_preferences").select("*").eq(
         "user_id", allocator_id
     ).maybe_single().execute()
-    preferences = prefs_result.data
+    # postgrest maybe_single().execute() returns None (not an APIResponse with
+    # data=None) when no allocator_preferences row exists. Guard the None before
+    # .data; _score_one_allocator already normalizes None preferences to {}.
+    # Pre-fix this raised AttributeError: 'NoneType' object has no attribute
+    # 'data' on every prefs-less allocator (Sentry 122529812, cron-recompute).
+    preferences = prefs_result.data if prefs_result else None
 
     # Portfolio strategies + weights. Iterate all portfolios owned by this allocator.
     portfolios_result = supabase.table("portfolios").select("id").eq(
