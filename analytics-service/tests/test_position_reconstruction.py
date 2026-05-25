@@ -197,6 +197,39 @@ class TestMatchPositionsFIFO:
         open_pos = [p for p in positions if p["status"] == "open"]
         assert len(open_pos) >= 1
 
+    def test_partial_fills_exact_position_counts(self) -> None:
+        """Audit closure M-0753: the prior test_partial_fills asserts only
+        `len(open_pos) >= 1`, a one-sided check that ALSO passes if the
+        reconstructor emits phantom positions (the P1100 case it is meant to
+        guard). Pin the EXACT counts: 3 buys + 2 sells of 1 unit each, all on
+        the same long side, must reconstruct to a SINGLE position that stays
+        open (FIFO tracks NET quantity; the two reducing sells never cross the
+        long through zero, so no close fires and no flip leg is created).
+
+        Hand-derived from the FIFO net-tracking contract in
+        _match_positions_fifo: buy→net=1→2→3, sell→net=2→1; net never reaches
+        0, so exactly one open position and zero closed positions.
+        """
+        fills = [
+            _make_fill(side="buy", price=100.0, quantity=1.0, timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="buy", price=105.0, quantity=1.0, timestamp="2024-01-02T00:00:00+00:00"),
+            _make_fill(side="buy", price=110.0, quantity=1.0, timestamp="2024-01-03T00:00:00+00:00"),
+            _make_fill(side="sell", price=115.0, quantity=1.0, timestamp="2024-01-04T00:00:00+00:00"),
+            _make_fill(side="sell", price=120.0, quantity=1.0, timestamp="2024-01-05T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+
+        open_pos = [p for p in positions if p["status"] == "open"]
+        closed_pos = [p for p in positions if p["status"] == "closed"]
+        # Exactly one position total — no phantom flip legs (catches "too many").
+        assert len(positions) == 1, (
+            f"expected exactly 1 position, got {len(positions)}: "
+            f"{[(p['status'], p.get('size_base')) for p in positions]}"
+        )
+        assert len(open_pos) == 1
+        assert len(closed_pos) == 0
+        assert open_pos[0]["side"] == "long"
+
     def test_weighted_average_entry(self) -> None:
         """buy 1@100, buy 2@200 -> avg entry = (100 + 400) / 3 = 166.67."""
         fills = [
@@ -2271,6 +2304,114 @@ class TestReconstructIdempotency:
         assert not pr_mod._RECONSTRUCT_LOCKS["strat-cancel"].locked(), (
             "Lock not released after CancelledError — future reconstructs "
             "for this strategy_id will deadlock."
+        )
+
+
+# ---------------------------------------------------------------------------
+# M-0709 — idempotency at the RPC-payload level + producer order-insensitivity
+# ---------------------------------------------------------------------------
+
+
+class TestReconstructPayloadIdempotency:
+    """M-0709: the existing ``test_delete_and_reinsert_idempotent`` asserts
+    only ``result1 == result2`` (a dict equality on the RETURNED payload). It
+    does NOT assert that the atomic-rebuild RPC was called with an IDENTICAL
+    ``p_positions`` payload on both runs, nor that the producer is
+    order-INSENSITIVE to the input fill ordering. The diff that added
+    ``realized_pnl_per_trade`` (a LIST of dicts) makes the equality fragile:
+    a non-deterministic list order holds the assertion only while both runs
+    share the same non-determinism.
+    """
+
+    @staticmethod
+    def _f(symbol, side, price, qty, ts):
+        return {
+            "symbol": symbol, "side": side, "price": price, "quantity": qty,
+            "fee": 0.0, "timestamp": ts, "raw_data": {}, "is_fill": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_same_input_yields_identical_rpc_payload(self) -> None:
+        """Stronger than ``result1 == result2``: the atomic-rebuild RPC must
+        be invoked with the SAME ``p_positions`` payload on run 1 and run 2
+        for identical inputs. Pins that the persisted payload — not just the
+        returned aggregate dict — is deterministic across runs.
+        """
+        fills = [
+            self._f("BTCUSDT", "buy", 100.0, 1.0, "2024-01-01T00:00:00+00:00"),
+            self._f("BTCUSDT", "sell", 110.0, 1.0, "2024-01-05T00:00:00+00:00"),
+            self._f("ETHUSDT", "buy", 50.0, 1.0, "2024-01-02T00:00:00+00:00"),
+            self._f("ETHUSDT", "sell", 45.0, 1.0, "2024-01-03T00:00:00+00:00"),
+        ]
+
+        with patch(
+            "services.position_reconstruction.db_execute", side_effect=_run_sync
+        ):
+            mock1 = _make_mock_supabase(fills=list(fills))
+            await reconstruct_positions("strat-pay-1", mock1)
+            mock2 = _make_mock_supabase(fills=list(fills))
+            await reconstruct_positions("strat-pay-1", mock2)
+
+        def _atomic_payload(mock):
+            calls = [
+                c for c in mock.rpc_calls
+                if c[0] == "reconstruct_positions_atomic"
+            ]
+            assert calls, "atomic-rebuild RPC was not called"
+            return calls[0][1]["p_positions"]
+
+        assert _atomic_payload(mock1) == _atomic_payload(mock2), (
+            "identical inputs must produce an identical p_positions RPC "
+            "payload across runs, not merely an equal returned aggregate."
+        )
+
+    @pytest.mark.xfail(
+        reason=(
+            "M-0709: realized_pnl_per_trade order is NOT input-order "
+            "insensitive — all_positions is built by iterating fills_by_key "
+            "(a dict keyed by (symbol, exchange)) whose insertion order "
+            "tracks the input fill order, so shuffling which symbol's fills "
+            "appear first reorders the persisted realized_pnl_per_trade list. "
+            "The downstream SQN / profit-factor math is order-insensitive "
+            "(they sum), but the persisted LIST contract is not. Production "
+            "fix: sort realized_pnl_per_trade by closed_at ASC in "
+            "position_reconstruction.reconstruct_positions before persisting."
+        ),
+        strict=True,
+    )
+    @pytest.mark.asyncio
+    async def test_realized_pnl_per_trade_is_input_order_insensitive(self) -> None:
+        """Two runs over the SAME fills in DIFFERENT input order must yield
+        the SAME realized_pnl_per_trade list. Two symbols close on different
+        dates; closed-position iteration order should be deterministic
+        (e.g. by closed_at), independent of which symbol's fills the caller
+        happened to pass first.
+        """
+        base = [
+            self._f("BTCUSDT", "buy", 100.0, 1.0, "2024-01-01T00:00:00+00:00"),
+            self._f("BTCUSDT", "sell", 110.0, 1.0, "2024-01-05T00:00:00+00:00"),
+            self._f("ETHUSDT", "buy", 50.0, 1.0, "2024-01-02T00:00:00+00:00"),
+            self._f("ETHUSDT", "sell", 45.0, 1.0, "2024-01-03T00:00:00+00:00"),
+        ]
+        # Reordered: the ETH round-trip is presented BEFORE the BTC one.
+        shuffled = [base[2], base[3], base[0], base[1]]
+
+        with patch(
+            "services.position_reconstruction.db_execute", side_effect=_run_sync
+        ):
+            mock_a = _make_mock_supabase(fills=base)
+            result_a = await reconstruct_positions("strat-ord-1", mock_a)
+            mock_b = _make_mock_supabase(fills=shuffled)
+            result_b = await reconstruct_positions("strat-ord-1", mock_b)
+
+        assert (
+            result_a["realized_pnl_per_trade"]
+            == result_b["realized_pnl_per_trade"]
+        ), (
+            "realized_pnl_per_trade must be deterministic w.r.t. input fill "
+            "order; got "
+            f"{result_a['realized_pnl_per_trade']} vs "
+            f"{result_b['realized_pnl_per_trade']}"
         )
 
 

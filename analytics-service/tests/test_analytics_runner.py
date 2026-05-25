@@ -1042,6 +1042,130 @@ def test_volume_aggregator_computes_correct_values(sample_fills):
     assert abs(result["monthly_turnover_usd"] - 5000.0 / 2) < 1e-6
 
 
+def test_volume_aggregator_malformed_timestamp_kept_in_gross_excluded_from_turnover():
+    """M-0650: the `if not ts or len(ts) < 10: continue` defensive branch
+    drops fills with missing / short timestamps from the daily/monthly
+    turnover buckets while STILL counting their notional in gross_volume +
+    mean_trade_size. A regression that swapped `continue` for `break` (or
+    dropped the notional from gross too) silently changes aggregate
+    semantics — no existing test exercises ts=None or a length-7 prefix.
+    """
+    from services.analytics_runner import _compute_volume_aggregator
+
+    fills = [
+        # Well-formed: contributes to BOTH gross and daily/monthly.
+        {"notional_usd": 1000.0, "filled_at": "2024-01-15T10:00:00+00:00"},
+        # ts is None → skipped from daily/monthly, KEPT in gross.
+        {"notional_usd": 500.0, "filled_at": None},
+        # ts is "2024-01" (length 7 < 10) → skipped from daily/monthly,
+        # KEPT in gross. This is the exact short-prefix case the finding
+        # named.
+        {"notional_usd": 300.0, "filled_at": "2024-01"},
+    ]
+    result = _compute_volume_aggregator(fills)
+    # All three notionals survive into gross + mean.
+    assert result["gross_volume_usd"] == pytest.approx(1800.0)
+    assert result["mean_trade_size_usd"] == pytest.approx(1800.0 / 3)
+    # Only the well-formed fill reaches the daily/monthly buckets → 1 day
+    # carrying 1000.0 → mean over 1 day = 1000.0. If `continue` were
+    # `break`, the loop would have exited and daily would still be 1000;
+    # but if gross also dropped the malformed fills, the assertions above
+    # would catch that. The turnover figure pins the exclusion side.
+    assert result["daily_turnover_usd"] == pytest.approx(1000.0)
+    assert result["monthly_turnover_usd"] == pytest.approx(1000.0)
+
+
+def test_volume_aggregator_uses_created_at_when_filled_at_missing():
+    """M-0650 companion: the `f.get('filled_at') or f.get('created_at')`
+    fallback path is untested because the sample_fills fixture always
+    populates filled_at. A fill with only created_at must still bucket
+    into daily/monthly turnover."""
+    from services.analytics_runner import _compute_volume_aggregator
+
+    fills = [
+        {"notional_usd": 2000.0, "created_at": "2024-02-20T00:00:00+00:00"},
+    ]
+    result = _compute_volume_aggregator(fills)
+    assert result["gross_volume_usd"] == pytest.approx(2000.0)
+    # created_at fallback drove the daily bucket (single day → mean 2000).
+    assert result["daily_turnover_usd"] == pytest.approx(2000.0)
+    assert result["monthly_turnover_usd"] == pytest.approx(2000.0)
+
+
+def test_derived_trade_metrics_sqn_degenerate_variance_returns_none():
+    """M-0648: all-identical R-multiples → sample variance 0 → std_r == 0,
+    so the `if std_r > 0` guard leaves SQN as None (avoids a divide-by-zero
+    blow-up). No prior test exercises this branch — the existing SQN tests
+    all use heterogeneous R-multiples with non-zero variance.
+    """
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    v = {}
+    # Four closed trades, ALL with realized_pnl == 50.0 → every R-multiple
+    # is identical (50/|−10| = 5.0) → variance 0 → std 0 → SQN None.
+    t = {
+        "win_rate": 1.0,
+        "avg_winning_trade": 50.0,
+        "avg_losing_trade": -10.0,
+        "winners_count": 4,
+        "losers_count": 0,
+        "realized_pnl_per_trade": [
+            {"side": "long", "realized_pnl": 50.0} for _ in range(4)
+        ],
+    }
+    result = _compute_derived_trade_metrics(v, t)
+    assert result["sqn"] is None, (
+        "All-identical R-multiples produce zero variance; SQN must be None "
+        "(the `if std_r > 0` guard), not a NaN/Inf from dividing by std=0."
+    )
+
+
+def test_derived_trade_metrics_profit_factor_zero_loss_returns_none_not_inf():
+    """M-0649 / T-12-05-03: a side with gross losses summing to 0 (a
+    long-only winning cohort) must yield profit_factor=None, NOT +Infinity.
+    The existing segmented PF test always has losses on both sides, so the
+    `if gl == 0: return None` branch is unexercised — and an isinstance
+    check would PASS for math.inf (it's a float). Pin the None contract so
+    a regression to `gp / gl if gl else math.inf` is caught: +inf would
+    propagate into Supabase JSONB and break the downstream render.
+    """
+    import math
+
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    v = {}
+    # Long side: only positive pnls (no losing long trade) → gross_loss = 0
+    # → profit_factor_long must be None (NOT inf). Short side keeps a loss
+    # so its PF stays finite — proving the None is the zero-loss branch,
+    # not a global wipe.
+    t = {
+        "win_rate": 1.0,
+        "avg_winning_trade": 50.0,
+        "avg_losing_trade": -10.0,
+        "winners_count": 3,
+        "losers_count": 0,
+        "realized_pnl_per_trade": [
+            {"side": "long", "realized_pnl": 50.0},
+            {"side": "long", "realized_pnl": 30.0},
+            {"side": "long", "realized_pnl": 20.0},
+            {"side": "short", "realized_pnl": -15.0},
+            {"side": "short", "realized_pnl": 40.0},
+        ],
+    }
+    result = _compute_derived_trade_metrics(v, t)
+    assert result["profit_factor_long"] is None, (
+        "Zero-loss long side must yield None, not +Infinity (T-12-05-03). "
+        f"got {result['profit_factor_long']!r}"
+    )
+    # Guard against an isinstance-style regression: must NOT be inf.
+    assert not (
+        isinstance(result["profit_factor_long"], float)
+        and math.isinf(result["profit_factor_long"])
+    )
+    # Short side has a real loss → PF is finite (gp=40 / |gl|=15 ≈ 2.667).
+    assert result["profit_factor_short"] == pytest.approx(40.0 / 15.0)
+
+
 def test_trade_mix_4_bucket(sample_fills_with_maker_taker):
     """METRICS-10: 4-bucket Trade Mix when audit passes (D-15 OK)."""
     from services.analytics_runner import _compute_trade_mix

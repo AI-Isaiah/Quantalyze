@@ -425,6 +425,56 @@ def test_metrics_result_subscript_rejects_sibling_kind_keys():
     assert result.sibling_kinds["rolling_sortino_3m"][0]["value"] == 1.0
 
 
+def test_metrics_result_dict_shim_methods():
+    """M-0686: MetricsResult exposes 5 dict-like proxy methods
+    (__contains__, get, items, keys, values) as a backward-compat shim for
+    legacy callers that treated the bare-dict return shape. None were
+    exercised — only test_metrics_parity uses .metrics_json / .sibling_kinds
+    directly. A regression (e.g. `get` raising instead of returning the
+    default, or a proxy method reaching into sibling_kinds) would break
+    legacy callers silently because they aren't run in CI. All 5 proxy
+    to metrics_json ONLY — sibling_kinds is invisible by design (D-01/D-02).
+    """
+    result = MetricsResult(
+        metrics_json={"sharpe": 1.2, "sortino": 0.9},
+        sibling_kinds={"rolling_alpha": [{"date": "2024-01-01", "value": 0.1}]},
+    )
+    # __contains__ — only metrics_json keys, NOT sibling_kinds.
+    assert "sharpe" in result
+    assert "missing" not in result
+    assert "rolling_alpha" not in result, (
+        "__contains__ must proxy metrics_json only; sibling_kinds is "
+        "invisible under `in` per the split-storage contract."
+    )
+    # get — present key, and default for an absent key (must NOT raise).
+    assert result.get("sharpe") == 1.2
+    assert result.get("nope") is None
+    assert result.get("nope", 42) == 42
+    # keys / values / items proxy metrics_json exactly.
+    assert set(result.keys()) == {"sharpe", "sortino"}
+    assert set(result.values()) == {1.2, 0.9}
+    assert dict(result.items()) == {"sharpe": 1.2, "sortino": 0.9}
+
+
+def test_compute_all_metrics_no_benchmark_rolling_alpha_beta_are_empty_lists(
+    golden_returns,
+):
+    """M-0687: the `_rolling_alpha(...) if has_benchmark else []` conditional
+    (and beta) is a Phase-12 contract — WITHOUT a benchmark the rolling_alpha
+    / rolling_beta sibling kinds must be EMPTY LISTS, not absent and not
+    None. A regression to None or a missing key would crash the downstream
+    batch-RPC consumers that iterate every sibling kind. No prior test calls
+    compute_all_metrics with benchmark_returns=None and asserts this.
+    """
+    result = compute_all_metrics(golden_returns, benchmark_returns=None)
+    # Keys present...
+    assert "rolling_alpha" in result.sibling_kinds
+    assert "rolling_beta" in result.sibling_kinds
+    # ...and they are EMPTY LISTS (the False branch), not None / missing.
+    assert result.sibling_kinds["rolling_alpha"] == []
+    assert result.sibling_kinds["rolling_beta"] == []
+
+
 def test_scalar_sortino_passes_mar_as_rf(golden_returns, monkeypatch):
     """Audit 2026-05-07 H-0725: compute_all_metrics must pass `rf=MAR` to
     `qs.stats.sortino` explicitly. If the call relies on qs's default `rf=0`,
@@ -657,6 +707,62 @@ def test_rolling_alpha_beta_logs_warning_on_qs_failure(
     assert matching, "rolling_greeks failure must emit WARNING with helper name"
 
 
+def test_rolling_alpha_beta_missing_columns_returns_empty_and_logs(
+    golden_returns, benchmark_returns, monkeypatch, caplog
+):
+    """M-0682: when qs.stats.rolling_greeks SUCCEEDS but the returned
+    DataFrame is missing the expected 'alpha'/'beta' columns (a qs version
+    that renames them), the helper must return ([], []) AND emit a WARNING.
+    This is a DISTINCT branch from the qs-raises path — the call returns
+    cleanly, but the columns aren't there. Previously the silent
+    empty-return masked qs column drift.
+    """
+    import services.metrics as metrics_module
+
+    def greeks_without_alpha_beta(returns, _benchmark, _window):
+        # A DataFrame with the right index but the wrong column name.
+        return pd.DataFrame({"gamma": [1.0] * len(returns)}, index=returns.index)
+
+    monkeypatch.setattr(
+        metrics_module.qs.stats, "rolling_greeks", greeks_without_alpha_beta
+    )
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        alpha, beta = _rolling_alpha_beta(golden_returns, benchmark_returns, 90)
+    assert alpha == []
+    assert beta == []
+    matching = [
+        r for r in caplog.records
+        if "missing expected alpha/beta columns" in r.getMessage()
+    ]
+    assert matching, (
+        "missing alpha/beta columns must emit a WARNING so a qs column "
+        "rename is operator-visible, not silently swallowed."
+    )
+
+
+def test_rolling_alpha_beta_none_benchmark_returns_empty():
+    """M-0683: the `if returns is None or benchmark is None: return [], []`
+    guard lumps two independent None conditions. The happy-path tests never
+    call the helper with benchmark=None directly (compute_all_metrics
+    short-circuits at a higher `if has_benchmark` level), so the None
+    branch inside the helper is reachable-but-unverified. Pin both halves.
+    """
+    np.random.seed(73)
+    strat = pd.Series(
+        np.random.normal(0.001, 0.01, 200),
+        index=pd.bdate_range("2024-01-01", periods=200),
+        name="returns",
+    )
+    # benchmark None
+    assert _rolling_alpha_beta(strat, None, 90) == ([], [])
+    # returns None (the other half of the same guard)
+    assert _rolling_alpha_beta(None, strat, 90) == ([], [])
+    # The public wrappers must propagate the empty result.
+    assert _rolling_alpha(strat, None, 90) == []
+    assert _rolling_beta(strat, None, 90) == []
+
+
 def test_rolling_sortino_single_neg_sq_in_compute_all_metrics(
     golden_returns, monkeypatch
 ):
@@ -747,6 +853,15 @@ def test_log_returns_series_preserves_catastrophic_loss():
         "catastrophic-loss day must surface as a very negative cumulative "
         f"log equity; got {result[cat_idx]['value']}"
     )
+
+
+def test_log_returns_series_empty_input(empty_returns):
+    """M-0685: `_log_returns_series` short-circuits on len(returns) == 0 and
+    returns []. `_daily_returns_grid_from_series` has the symmetric
+    `test_daily_returns_grid_empty_input` test but the log helper lacked
+    one — a trivial-but-real coverage gap on a public sibling-kind producer.
+    """
+    assert _log_returns_series(empty_returns) == []
 
 
 # ---------------------------------------------------------------------------

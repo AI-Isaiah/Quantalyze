@@ -131,3 +131,81 @@ def test_golden_returns_values_are_deterministic(golden_returns):
     assert recovery.mean() > drawdown.mean(), (
         "recovery window should be less negative than the drawdown window"
     )
+
+
+# ---------------------------------------------------------------------------
+# Audit closure M-0721 — api_key_row_factory shape contract.
+#
+# The factory's docstring claims the row is "shape-correct" for the worker's
+# preflight, but nothing pins that claim. If a future edit DROPS a key the
+# worker's key-load + credential-decrypt path reads via SUBSCRIPT (not .get(),
+# which is None-tolerant), every test using the factory would KeyError-fail in
+# a confusing place instead of here. This test pins the hard-required column
+# set against the columns the analytics-service code actually subscript-reads
+# off the api_keys row:
+#   - decrypt_credentials (services/encryption.py): encrypted_row["dek_encrypted"]
+#     and encrypted_row["api_key_encrypted"] — hard subscripts, KeyError if absent.
+#   - the worker preflight reads id/user_id/exchange/is_active/last_429_at via
+#     .get(), so those are soft; we still assert they're present because the
+#     factory's whole purpose is a realistic preflight row.
+#
+# NOTE (flagged): this is a TEST-SIDE shape guard. It cannot detect a NEW
+# NON-NULL column added to the live api_keys table by a migration — that needs
+# a generated TypedDict from the Supabase schema, which does not exist on the
+# Python side. The full M-0721 fix (schema-derived validation) is a
+# production/tooling change, out of scope for a test-only edit.
+# ---------------------------------------------------------------------------
+
+# Columns the worker's credential path reads via HARD subscript — missing any
+# of these makes the worker raise KeyError at decrypt time, not return a clean
+# error. The factory MUST provide all of them.
+_API_KEYS_HARD_REQUIRED = frozenset({
+    "dek_encrypted",
+    "api_key_encrypted",
+})
+
+# Columns the preflight reads via .get() — soft, but the factory is meant to be
+# a realistic preflight row, so their presence is part of its contract.
+_API_KEYS_PREFLIGHT_GET = frozenset({
+    "id",
+    "user_id",
+    "exchange",
+    "is_active",
+    "last_429_at",
+    "last_sync_at",
+})
+
+
+def test_api_key_row_factory_provides_hard_required_columns(api_key_row_factory):
+    """The factory row must contain every api_keys column the worker reads via
+    hard subscript (decrypt_credentials), so a dropped key fails HERE with a
+    clear message rather than as a KeyError deep in an unrelated worker test."""
+    row = api_key_row_factory()
+    missing = _API_KEYS_HARD_REQUIRED - set(row.keys())
+    assert not missing, (
+        f"api_key_row_factory dropped hard-required api_keys column(s) "
+        f"{sorted(missing)} that decrypt_credentials subscript-reads — worker "
+        f"tests would KeyError instead of failing here. Restore them in "
+        f"conftest.api_key_row_factory."
+    )
+
+
+def test_api_key_row_factory_provides_preflight_get_columns(api_key_row_factory):
+    """The factory row must also carry the columns the worker preflight reads
+    via .get() (soft, but part of the 'shape-correct preflight row' contract)."""
+    row = api_key_row_factory()
+    missing = _API_KEYS_PREFLIGHT_GET - set(row.keys())
+    assert not missing, (
+        f"api_key_row_factory is missing preflight column(s) {sorted(missing)} "
+        f"— the factory is supposed to model a complete api_keys preflight row."
+    )
+
+
+def test_api_key_row_factory_overrides_take_effect(api_key_row_factory):
+    """Overrides must replace defaults (the factory's documented behavior),
+    proving callers can target specific columns without mutating the default."""
+    row = api_key_row_factory(exchange="okx", is_active=False)
+    assert row["exchange"] == "okx"
+    assert row["is_active"] is False
+    # An un-overridden hard-required column keeps its default.
+    assert row["dek_encrypted"] == "enc"

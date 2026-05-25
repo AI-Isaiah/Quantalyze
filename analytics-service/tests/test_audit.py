@@ -175,6 +175,81 @@ class TestLogAuditEventNullGuards:
 
 
 # ---------------------------------------------------------------------------
+# Audit closure M-0734 — the two null-guard tests above couple to the log COPY
+# ("NULL user_id" / "empty user_id"). A reworded log message would break them
+# with no behavior change, and the substring checks can't distinguish the two
+# branches from their effect. These tests pin the BEHAVIORAL contract (no RPC
+# reaches the wire) for each guard input WITHOUT depending on log wording, and
+# cover edge inputs the substring tests miss (literal "None" string → empty
+# branch; whitespace-only → NOT guarded, reaches the RPC).
+# ---------------------------------------------------------------------------
+
+
+class TestLogAuditEventNullGuardsBehavioral:
+    def test_none_user_id_suppresses_rpc_without_log_copy_coupling(
+        self, monkeypatch
+    ):
+        """user_id=None → the RPC is never invoked (the contract that matters),
+        asserted independent of the log message text."""
+        supabase, rpc = _mock_supabase_with_rpc()
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+        result = log_audit_event(
+            user_id=None,  # type: ignore[arg-type]
+            action="bridge.score_candidates",
+            entity_type="bridge_run",
+            entity_id=DUMMY_ENTITY,
+        )
+        rpc.assert_not_called()
+        assert result is None  # fire-and-forget contract
+
+    def test_empty_string_user_id_suppresses_rpc_without_log_copy_coupling(
+        self, monkeypatch
+    ):
+        """user_id="" → empty-guard branch → no RPC, asserted via behavior."""
+        supabase, rpc = _mock_supabase_with_rpc()
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+        log_audit_event(
+            user_id="",
+            action="bridge.score_candidates",
+            entity_type="bridge_run",
+            entity_id=DUMMY_ENTITY,
+        )
+        rpc.assert_not_called()
+
+    def test_literal_none_string_user_id_hits_empty_guard_no_rpc(
+        self, monkeypatch
+    ):
+        """The empty-guard also catches the literal string "None" (str(None)
+        coercion artefact) via `uid == "None"`. This distinguishes the empty
+        branch from the None branch by INPUT, not by log copy."""
+        supabase, rpc = _mock_supabase_with_rpc()
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+        log_audit_event(
+            user_id="None",
+            action="bridge.score_candidates",
+            entity_type="bridge_run",
+            entity_id=DUMMY_ENTITY,
+        )
+        rpc.assert_not_called()
+
+    def test_whitespace_user_id_is_not_guarded_reaches_rpc(self, monkeypatch):
+        """Current contract: the empty guard checks `not uid or uid == "None"`
+        — it does NOT strip whitespace, so a whitespace-only user_id is treated
+        as a real id and reaches the RPC. Pinning this proves the guard is the
+        narrow None/empty check, not a broader blank-string filter; a future
+        change that started stripping whitespace would have to update this."""
+        supabase, rpc = _mock_supabase_with_rpc()
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+        log_audit_event(
+            user_id="   ",
+            action="bridge.score_candidates",
+            entity_type="bridge_run",
+            entity_id=DUMMY_ENTITY,
+        )
+        rpc.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Phase 18 / FIX-04 — Adversarial revision B3 + redact wire-up.
 # audit.py uses stdlib `logging.getLogger("quantalyze.audit")` (NOT structlog),
 # so the structlog processor pipeline does NOT cover its `logger.error` calls.

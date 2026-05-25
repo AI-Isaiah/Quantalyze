@@ -91,6 +91,71 @@ class TestKillSwitchEnabled:
 
 
 # ---------------------------------------------------------------------------
+# M-0606 — routers/match.py _records_to_series
+# ---------------------------------------------------------------------------
+
+
+class TestRecordsToSeries:
+    """M-0606 — ``_records_to_series`` converts [{date,value},...] JSONB into
+    a DatetimeIndex pd.Series. It is the only adapter feeding
+    ``_load_candidate_universe`` across the whole strategy universe, but had
+    zero direct tests. The `if not isinstance(raw, list) or not raw` guard
+    handles None/empty/non-list, but the per-row dict access (`r['date']`,
+    `r['value']`) is UNGUARDED — a single malformed JSONB row aborts the
+    entire cron for that allocator.
+    """
+
+    def test_none_returns_none(self):
+        from routers.match import _records_to_series
+
+        assert _records_to_series(None) is None
+
+    def test_empty_list_returns_none(self):
+        from routers.match import _records_to_series
+
+        assert _records_to_series([]) is None
+
+    def test_non_list_returns_none(self):
+        from routers.match import _records_to_series
+
+        # A dict / scalar from storage drift hits the `not isinstance(list)`
+        # half of the guard rather than crashing the comprehension.
+        assert _records_to_series({"date": "2026-01-01", "value": 0.01}) is None  # type: ignore[arg-type]
+
+    def test_valid_records_build_datetime_index_series(self):
+        from routers.match import _records_to_series
+        import pandas as pd
+
+        series = _records_to_series(
+            [
+                {"date": "2026-01-01", "value": 0.01},
+                {"date": "2026-01-02", "value": -0.005},
+            ],
+            name="strat-1",
+        )
+        assert series is not None
+        assert isinstance(series.index, pd.DatetimeIndex)
+        assert series.name == "strat-1"
+        assert list(series.values) == [0.01, -0.005]
+
+    def test_malformed_row_missing_date_raises_keyerror(self):
+        """LOCK current behaviour: a row missing the 'date' key raises
+        KeyError because the dict access is unguarded. This crashes
+        ``_load_candidate_universe`` and aborts the cron for that allocator.
+
+        PRODUCTION FOLLOW-UP (cannot fix in a test): consider a per-row
+        try/skip in routers.match._records_to_series so one malformed row
+        is dropped + logged rather than killing the whole allocator's
+        recompute. This test pins the current crash semantics so any change
+        to that contract is deliberate, not accidental.
+        """
+        from routers.match import _records_to_series
+
+        with pytest.raises(KeyError):
+            _records_to_series([{"value": 0.01}])  # missing 'date'
+
+
+# ---------------------------------------------------------------------------
 # POST /api/match/recompute — kill switch + skip + empty universe branches
 # ---------------------------------------------------------------------------
 

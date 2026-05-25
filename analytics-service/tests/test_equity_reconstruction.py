@@ -2706,6 +2706,78 @@ def test_v0_15_4_2_defensive_backward_compat_with_synthetic_fixtures():
 
 
 # ---------------------------------------------------------------------------
+# Audit closure M-1035 — the contract-size regression block only covered ETH
+# (ctVal=0.1). The CHANGELOG names BTC-USDT-SWAP among the affected perps and
+# the per-symbol OKX_PERP_CONTRACT_SIZE table has DISTINCT scales (BTC 0.01,
+# SOL 1.0, DOGE 1000.0). A regression that hard-coded ETH-style scaling, or
+# that broke the per-symbol table lookup for a different ctVal, would pass the
+# ETH test but silently corrupt BTC/SOL base-unit recovery. These pin the
+# recovery for two more scales: BTC (broken cost → ctVal table fires) and SOL
+# (ctVal=1 → no distortion, cost/price already correct).
+# Values hand-derived against the production table in equity_reconstruction.py
+# (BTC/USDT:USDT → 0.01, SOL/USDT:USDT → 1.0) and the 5% divergence threshold.
+# ---------------------------------------------------------------------------
+
+
+def test_okx_contract_size_btc_perp_ctval_0_01_no_inflation():
+    """BTC/USDT:USDT ctVal=0.01. A 0.5 BTC position lands as amount=50
+    contracts. When safe_trade fails to apply contractSize the broken
+    cost = 50 × 70000 = 3,500,000, so cost/price = 50 — contract COUNT, a
+    100x inflation. The defensive ctVal table must recover 50 × 0.01 = 0.5
+    BTC (real base units) via CTVAL_TABLE."""
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
+
+    contracts = 0.5 / 0.01  # 50 contracts for a 0.5 BTC position
+    broken_cost = contracts * 70_000.0  # ctVal NOT applied (production bug shape)
+    recovered, source, _drift = _resolve_perp_amt_base(
+        "BTC/USDT:USDT", amount=contracts, price=70_000.0, cost=broken_cost,
+        inst_type="SWAP", venue="okx",
+    )
+    assert recovered == pytest.approx(0.5, abs=1e-6), (
+        f"BTC ctVal table must recover 0.5 BTC from the broken-cost shape; "
+        f"got {recovered}. If this equals 50 the table didn't fire and BTC "
+        f"perps are back to the 100x contract-count inflation bug."
+    )
+    assert source == _PerpAmtSource.CTVAL_TABLE, source
+
+
+def test_okx_contract_size_btc_perp_proper_cost_path_unchanged():
+    """BTC with safe_trade correctly applying contractSize (cost = amount ×
+    price × ctVal) → cost/price already in base units; the defensive layer
+    must NOT corrupt this case."""
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
+
+    contracts = 0.5 / 0.01
+    proper_cost = contracts * 70_000.0 * 0.01
+    recovered, source, _drift = _resolve_perp_amt_base(
+        "BTC/USDT:USDT", amount=contracts, price=70_000.0, cost=proper_cost,
+        inst_type="SWAP", venue="okx",
+    )
+    assert recovered == pytest.approx(0.5, abs=1e-6), recovered
+    assert source == _PerpAmtSource.COST_DIV_PRICE, source
+
+
+def test_okx_contract_size_sol_perp_ctval_1_no_distortion():
+    """SOL/USDT:USDT ctVal=1.0 — amount IS already base units, so cost/price
+    and the ctVal table agree (relative_err=0, below the 5% threshold). The
+    defensive layer must leave it on the cost/price path with no scaling
+    distortion. A regression that blanket-multiplied by a non-1 ctVal for all
+    OKX perps would wrongly rescale SOL."""
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
+
+    sol_contracts = 10.0 / 1.0  # 10 contracts == 10 SOL
+    cost = sol_contracts * 150.0  # ctVal=1 → cost == amount × price already
+    recovered, source, _drift = _resolve_perp_amt_base(
+        "SOL/USDT:USDT", amount=sol_contracts, price=150.0, cost=cost,
+        inst_type="SWAP", venue="okx",
+    )
+    assert recovered == pytest.approx(10.0, abs=1e-6), (
+        f"SOL ctVal=1 must not distort base units; got {recovered}"
+    )
+    assert source == _PerpAmtSource.COST_DIV_PRICE, source
+
+
+# ---------------------------------------------------------------------------
 # Equity-anchor fix (/investigate 2026-04-24 — v0.15.4.2)
 # ---------------------------------------------------------------------------
 #

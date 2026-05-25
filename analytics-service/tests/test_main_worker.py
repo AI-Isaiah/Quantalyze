@@ -569,6 +569,47 @@ class TestClaimDedupe:
         assert rpc_names.count("mark_compute_job_failed") == 0
 
     @pytest.mark.asyncio
+    async def test_partial_batch_forwards_the_survivor_row_to_dispatch(self) -> None:
+        """Audit closure M-1125: the test above asserts dispatch is awaited
+        ONCE but never that the SURVIVOR row is what reached dispatch. If
+        dispatch_tick had a bug indexing the claim result wrong (e.g. forwarded
+        a stale/empty dict after dedupe), `assert_awaited_once()` still passes.
+        Bind the IDENTITY of the forwarded job: dispatch must receive the exact
+        survivor dict (id='rescore-survivor'), not just be called once."""
+        survivor = {
+            "id": "rescore-survivor",
+            "kind": "rescore_allocator",
+            "allocator_id": "alloc-shared",
+        }
+        mock_supabase = MagicMock()
+        claim_chain = MagicMock()
+        claim_chain.execute.return_value = MagicMock(data=[survivor])
+        mark_chain = MagicMock()
+        mark_chain.execute.return_value = MagicMock(data=None)
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return claim_chain
+            return mark_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ) as mock_dispatch:
+            await dispatch_tick("worker-dedupe-survivor-id")
+
+        # The job forwarded to dispatch must BE the survivor (first positional).
+        mock_dispatch.assert_awaited_once()
+        forwarded_job = mock_dispatch.await_args.args[0]
+        assert forwarded_job["id"] == "rescore-survivor", (
+            f"dispatch received the wrong job after dedupe: {forwarded_job!r}"
+        )
+        assert forwarded_job == survivor
+
+    @pytest.mark.asyncio
     async def test_empty_claim_after_dedupe_no_dispatch(self) -> None:
         """If dedupe + concurrent locks reduce the batch to zero rows
         (worker A locks the partition winner, worker B's claim returns
@@ -586,6 +627,62 @@ class TestClaimDedupe:
         mock_dispatch.assert_not_awaited()
         rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
         assert rpc_names == ["claim_compute_jobs_with_priority"]
+
+
+# ---------------------------------------------------------------------------
+# Audit closure M-0739 — every dispatch_tick test uses kind='sync_trades'.
+# After the migration 086 RPC swap + phase12 backfill, dispatch_tick handles
+# compute_analytics-kind jobs (priority='low'). The PER-KIND HANDLER routing
+# (compute_analytics → run_compute_analytics_job) is already covered in
+# test_job_worker.py::test_dispatch_routes_compute_analytics. The gap THIS
+# test fills is at the dispatch_tick layer: dispatch_tick must forward a
+# compute_analytics-kind row to dispatch() UNCHANGED — it must not silently
+# filter/drop non-sync_trades kinds from the claim batch (which would no-op
+# the entire backfill while sync_trades tests stay green).
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchTickKindAgnostic:
+    @pytest.mark.asyncio
+    async def test_compute_analytics_job_is_forwarded_to_dispatch(self) -> None:
+        """A claimed compute_analytics-kind job reaches dispatch() with its
+        kind intact — dispatch_tick is kind-agnostic and must not drop it."""
+        job = {
+            "id": "ca-job-1",
+            "kind": "compute_analytics",
+            "strategy_id": "strat-backfill",
+        }
+        mock_supabase = MagicMock()
+        claim_chain = MagicMock()
+        claim_chain.execute.return_value = MagicMock(data=[job])
+        mark_chain = MagicMock()
+        mark_chain.execute.return_value = MagicMock(data=None)
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return claim_chain
+            return mark_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ) as mock_dispatch:
+            await dispatch_tick("worker-compute-analytics")
+
+        mock_dispatch.assert_awaited_once()
+        forwarded = mock_dispatch.await_args.args[0]
+        assert forwarded["kind"] == "compute_analytics", (
+            f"dispatch_tick mangled or dropped the compute_analytics kind: "
+            f"{forwarded!r}"
+        )
+        assert forwarded["id"] == "ca-job-1"
+        # Success path: exactly one mark_done, no mark_failed.
+        rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert rpc_names.count("mark_compute_job_done") == 1
+        assert rpc_names.count("mark_compute_job_failed") == 0
 
 
 # ---------------------------------------------------------------------------

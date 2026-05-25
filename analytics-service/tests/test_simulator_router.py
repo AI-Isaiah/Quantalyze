@@ -515,6 +515,122 @@ class TestHappyPathAndWeightNormalisation:
         body = r.json()
         assert body["current"]["concentration"] == pytest.approx(0.5, abs=0.05)
 
+    def test_zero_current_weight_is_falsy_and_treated_as_one(
+        self, client, supabase_mock
+    ):
+        """M-0977 — the router fallback ``float(current_weight) if
+        current_weight else 1.0`` treats a literal ``0.0`` weight as
+        falsy, so a 0%-allocation row is normalised as if it were
+        1.0 (NOT 0). With rows [0.0, 0.5] the raw weights become
+        [1.0, 0.5] → normalised [0.667, 0.333], HHI =
+        0.667² + 0.333² = 0.5556 — NOT the [0.0, 1.0] → HHI=1.0 a
+        naive reader would expect.
+
+        This pins the documented falsy-fallback contract (a 0.0 weight
+        is indistinguishable from missing). If a future change switches
+        the guard to ``if current_weight is not None`` (so a real 0.0
+        survives), this characterisation test fires and forces an
+        explicit decision — exactly the bug-magnet branch the finding
+        flagged as untested.
+        """
+        self._stage_happy(supabase_mock, portfolio_strategies_data=[
+            {"strategy_id": "s-1", "current_weight": 0.0},
+            {"strategy_id": "s-2", "current_weight": 0.5},
+        ])
+
+        r = _post(client)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # 0.0 → falsy → 1.0; 0.5 stays. total=1.5 → [2/3, 1/3].
+        # HHI = (2/3)^2 + (1/3)^2 = 5/9 ≈ 0.5556.
+        assert body["current"]["concentration"] == pytest.approx(
+            5.0 / 9.0, abs=0.02
+        ), (
+            "0.0 current_weight must be treated as falsy (→1.0); a regression "
+            "to `is not None` would give HHI=1.0 and break this contract."
+        )
+
+
+# ---------------------------------------------------------------------------
+# M-0978 — _records_to_series null/empty branches (direct + integration)
+# ---------------------------------------------------------------------------
+
+
+class TestM0978_RecordsToSeriesNullEmpty:
+    """M-0978 — ``_records_to_series`` returns None for both ``raw=None``
+    and ``raw=[]`` (the `not isinstance(list) or not raw` guard). The
+    router uses that None to decide whether to 400 on a missing-candidate
+    analytics row. A regression that returned an empty Series instead of
+    None would cascade PAST the 'No returns data' guard and into
+    simulate_add_candidate — a silent contract change from HTTP 400 to a
+    degenerate empty-portfolio result.
+    """
+
+    def test_records_to_series_none_returns_none(self):
+        from routers.simulator import _records_to_series
+
+        assert _records_to_series(None, name="s-1") is None
+
+    def test_records_to_series_empty_list_returns_none(self):
+        from routers.simulator import _records_to_series
+
+        # Empty list — NOT an empty Series. The `not raw` half of the guard.
+        assert _records_to_series([], name="s-1") is None
+
+    def test_records_to_series_non_list_returns_none(self):
+        """A non-list JSONB shape (e.g. a dict or scalar from storage
+        drift) must hit the `not isinstance(raw, list)` half of the
+        guard and return None rather than crashing in the comprehension."""
+        from routers.simulator import _records_to_series
+
+        assert _records_to_series({"date": "2026-01-01", "value": 0.01}) is None  # type: ignore[arg-type]
+
+    def test_records_to_series_valid_records_build_datetime_index(self):
+        from routers.simulator import _records_to_series
+        import pandas as pd
+
+        series = _records_to_series(
+            [{"date": "2026-01-01", "value": 0.01}], name="s-1"
+        )
+        assert series is not None
+        assert isinstance(series.index, pd.DatetimeIndex)
+        assert series.iloc[0] == 0.01
+
+    @_BODY_PARSER_SKIP
+    def test_candidate_empty_list_returns_series_yields_400(
+        self, client, supabase_mock
+    ):
+        """Integration: when the candidate's strategy_analytics row exists
+        but ``returns_series`` is ``[]`` (an EMPTY LIST, not None),
+        ``_records_to_series`` returns None and the router 400s with
+        'Candidate has no returns history'. This is the branch distinct
+        from the row-missing path (which 400s 'No returns data available
+        for the candidate') — the row IS present, just empty.
+        """
+        _table_router(
+            supabase_mock,
+            portfolio_data={"id": "p-1"},
+            candidate_data={"id": "c-1", "name": "Cand", "status": "published"},
+            portfolio_strategies_data=[
+                {"strategy_id": "s-1", "current_weight": 1.0},
+            ],
+            sa_portfolio_data=[
+                {
+                    "strategy_id": "s-1",
+                    "returns_series": [
+                        {"date": "2026-01-01", "value": 0.01},
+                        {"date": "2026-01-02", "value": -0.005},
+                    ],
+                },
+            ],
+            # Row present, returns_series is an EMPTY LIST (not None).
+            sa_candidate_data={"strategy_id": "c-1", "returns_series": []},
+        )
+
+        r = _post(client)
+        assert r.status_code == 400
+        assert r.json()["detail"] == "Candidate has no returns history"
+
 
 # ---------------------------------------------------------------------------
 # Analytics computation error → 500
