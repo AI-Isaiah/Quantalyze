@@ -222,16 +222,18 @@ describe("<AllocatorMatchQueue> — C-0126 demo read-only", () => {
       />,
     );
 
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        `/api/demo/match/${ALLOCATOR_ID}`,
-      );
-    });
-
-    // The queue should have rendered the candidate from the payload —
-    // proves the GET was honored and the read-only banner did not
-    // suppress the data layer.
-    expect(screen.getByText(/Demo Allocator/i)).toBeInTheDocument();
+    // Wait for the data to actually RENDER. The earlier version waited only
+    // for `fetch` to have been CALLED — which resolves on mount, before the
+    // response is awaited and applied — then synchronously asserted on the
+    // rendered text. getByText has no retry, so under CI worker contention the
+    // render lagged the assertion and the test flaked ("Unable to find element"
+    // at the /Demo Allocator/ line). findByText retries until the render lands,
+    // matching the first test's waitFor budget.
+    expect(await screen.findByText(/Demo Allocator/i)).toBeInTheDocument();
     expect(screen.getByText(/Read-only preview/i)).toBeInTheDocument();
+
+    // The render above proves the GET was honored; confirm it hit the demo
+    // lane (the read-only banner did not suppress the data layer).
+    expect(fetchMock).toHaveBeenCalledWith(`/api/demo/match/${ALLOCATOR_ID}`);
   });
 });
