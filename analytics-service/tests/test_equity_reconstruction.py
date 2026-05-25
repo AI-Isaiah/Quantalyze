@@ -1995,7 +1995,7 @@ async def test_stale_snapshots_replaced_on_new_key_when_no_siblings(monkeypatch)
     read-only key; allocator has NO OTHER api_keys. A fresh reconstruct
     MUST replace the stale rows with the new computed values."""
     fake_supabase = FakeSupabaseClient()
-    _install_fake_audit(monkeypatch)
+    audit_mock = _install_fake_audit(monkeypatch)
 
     end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
     start_date = end_date - timedelta(days=9)
@@ -2085,6 +2085,24 @@ async def test_stale_snapshots_replaced_on_new_key_when_no_siblings(monkeypatch)
         f"got {stored!r}"
     )
 
+    # H-1184: the user-actionable observability signal is the
+    # `stale_snapshots_purged` audit field on reconstruct_complete. The
+    # sole-source purge fired and deleted all 10 stale rows, so the audit
+    # trail MUST report 10. A regression that wipes the table but emits
+    # purged=0 (or vice-versa) silently breaks the operator's only window
+    # into "we replaced N stale rows vs touched nothing".
+    complete_calls = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.reconstruct_complete"
+    ]
+    assert complete_calls, audit_mock.call_args_list
+    meta = complete_calls[-1].kwargs.get("metadata") or {}
+    assert meta.get("stale_snapshots_purged") == 10, (
+        "sole-source purge wiped 10 stale rows but the audit field "
+        f"reported {meta.get('stale_snapshots_purged')!r}; the user-actionable "
+        f"observability signal is broken. metadata={meta!r}"
+    )
+
 
 @pytest.mark.asyncio
 async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
@@ -2096,7 +2114,7 @@ async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
     per migration 075 a disconnected key cannot produce new data and must
     not block the sole-source purge.)"""
     fake_supabase = FakeSupabaseClient()
-    _install_fake_audit(monkeypatch)
+    audit_mock = _install_fake_audit(monkeypatch)
 
     end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
     start_date = end_date - timedelta(days=9)
@@ -2174,6 +2192,22 @@ async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
         f"got {len(prior_survivors)} survivors: {stored!r}"
     )
 
+    # H-1184: a connected sibling means the purge MUST NOT fire — the
+    # audit field must report stale_snapshots_purged=0. If a regression
+    # let the purge run anyway (over-correction) the table assertion above
+    # would still pass on the multi-key path's collisions, but this catches
+    # the inverse: the observability signal must agree that nothing was wiped.
+    complete_calls = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.reconstruct_complete"
+    ]
+    assert complete_calls, audit_mock.call_args_list
+    meta = complete_calls[-1].kwargs.get("metadata") or {}
+    assert meta.get("stale_snapshots_purged") == 0, (
+        "sibling exists → purge must NOT fire → stale_snapshots_purged must "
+        f"be 0; got {meta.get('stale_snapshots_purged')!r}. metadata={meta!r}"
+    )
+
 
 @pytest.mark.asyncio
 async def test_stale_snapshots_replaced_when_sibling_is_disconnected(monkeypatch):
@@ -2193,7 +2227,7 @@ async def test_stale_snapshots_replaced_when_sibling_is_disconnected(monkeypatch
     FAILS without the `.is_("disconnected_at", "null")` filter on the
     sibling-count query."""
     fake_supabase = FakeSupabaseClient()
-    _install_fake_audit(monkeypatch)
+    audit_mock = _install_fake_audit(monkeypatch)
 
     end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
     start_date = end_date - timedelta(days=9)
@@ -2278,6 +2312,22 @@ async def test_stale_snapshots_replaced_when_sibling_is_disconnected(monkeypatch
     )
     # And the fresh reconstruct's rows must now be present.
     assert stored, "Fresh reconstruct wrote zero rows — upstream regression"
+
+    # H-1184: disconnected sibling is not a live contributor, so the
+    # sole-source purge fires and wipes all 10 stale rows. The audit field
+    # MUST report 10 — this is the operator-visible proof that the
+    # disconnected-sibling recovery path actually purged rather than no-op'd.
+    complete_calls = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.reconstruct_complete"
+    ]
+    assert complete_calls, audit_mock.call_args_list
+    meta = complete_calls[-1].kwargs.get("metadata") or {}
+    assert meta.get("stale_snapshots_purged") == 10, (
+        "disconnected sibling → purge fires on 10 stale rows → "
+        f"stale_snapshots_purged must be 10; got "
+        f"{meta.get('stale_snapshots_purged')!r}. metadata={meta!r}"
+    )
 
 
 @pytest.mark.asyncio

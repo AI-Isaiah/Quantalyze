@@ -20,6 +20,7 @@ Contract:
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import MagicMock, patch, call
 
 import pytest
@@ -649,3 +650,240 @@ async def test_funding_excluded_when_symbol_flat_between_positions() -> None:
             f"Position {pos['opened_at']}–{pos['closed_at']} "
             f"incorrectly attributed Jan-3 gap funding: {pos['funding_pnl']}"
         )
+
+
+def _make_mock_supabase_funding_fetch_raises(
+    fills: list[dict], exc: Exception
+) -> MagicMock:
+    """Mock supabase whose funding_fees fetch RAISES on .execute().
+
+    trades/positions behave normally; only the funding_fees range().execute()
+    raises so we can exercise _attribute_funding's swallow-error path.
+    """
+    mock = MagicMock()
+
+    # trades: .select().eq().eq().order().execute()
+    mock_trades = MagicMock()
+    m_sel = MagicMock()
+    m_eq1 = MagicMock()
+    m_eq2 = MagicMock()
+    m_order = MagicMock()
+    m_order.execute.return_value = MagicMock(data=fills)
+    m_eq2.order.return_value = m_order
+    m_eq1.eq.return_value = m_eq2
+    m_sel.eq.return_value = m_eq1
+    mock_trades.select.return_value = m_sel
+
+    # funding_fees: .select().eq().gte().lte().range().execute() RAISES
+    mock_funding = MagicMock()
+    f_sel = MagicMock()
+    f_eq1 = MagicMock()
+    f_gte = MagicMock()
+    f_lte = MagicMock()
+    f_range = MagicMock()
+    f_range.execute.side_effect = exc
+    f_lte.range.return_value = f_range
+    f_gte.lte.return_value = f_lte
+    f_eq1.gte.return_value = f_gte
+    f_sel.eq.return_value = f_eq1
+    mock_funding.select.return_value = f_sel
+
+    # positions delete/insert tolerated.
+    mock_positions = MagicMock()
+    m_del = MagicMock()
+    m_del_eq = MagicMock()
+    m_del_eq.execute.return_value = MagicMock(data=[])
+    m_del.eq.return_value = m_del_eq
+    mock_positions.delete.return_value = m_del
+    m_ins = MagicMock()
+    m_ins.execute.return_value = MagicMock(data=[])
+    mock_positions.insert.return_value = m_ins
+
+    captured_inserts: list[list[dict]] = []
+
+    def _capture_insert(rows):
+        captured_inserts.append(rows if isinstance(rows, list) else [rows])
+        return m_ins
+
+    mock_positions.insert.side_effect = _capture_insert
+
+    def _table(name: str):
+        if name == "trades":
+            return mock_trades
+        if name == "positions":
+            return mock_positions
+        if name == "funding_fees":
+            return mock_funding
+        return MagicMock()
+
+    mock.table = _table
+    mock._captured_inserts = captured_inserts
+
+    def _rpc(name, payload=None):
+        if name == "reconstruct_positions_atomic" and payload:
+            rows = payload.get("p_positions") or []
+            if rows:
+                captured_inserts.append(list(rows))
+        rpc_handle = MagicMock()
+        rpc_handle.execute.return_value = MagicMock(data=[])
+        return rpc_handle
+
+    mock.rpc = _rpc
+    return mock
+
+
+@pytest.mark.asyncio
+async def test_attribute_funding_swallows_funding_fetch_error(caplog) -> None:
+    """H-1093: _attribute_funding wraps the paginated funding_fees fetch in
+    try/except. On failure (e.g. RLS misconfig) it must SWALLOW the error,
+    log a warning, and leave every position's funding_pnl at the default 0 —
+    NOT bubble the exception and block the entire reconstruction.
+
+    This pins the silent-recovery contract in the docstring: a funding-fetch
+    failure degrades to funding_pnl=0, it does not abort position rebuild.
+    """
+    fills = [
+        {
+            "symbol": "BTCUSDT",
+            "side": "buy",
+            "price": 100.0,
+            "quantity": 1.0,
+            "fee": 0.0,
+            "timestamp": "2024-01-01T00:00:00+00:00",
+            "raw_data": {},
+            "is_fill": True,
+        },
+        {
+            "symbol": "BTCUSDT",
+            "side": "sell",
+            "price": 110.0,
+            "quantity": 1.0,
+            "fee": 0.0,
+            "timestamp": "2024-01-02T00:00:00+00:00",
+            "raw_data": {},
+            "is_fill": True,
+        },
+    ]
+    mock_supabase = _make_mock_supabase_funding_fetch_raises(
+        fills, RuntimeError("RLS denied")
+    )
+
+    with caplog.at_level(
+        logging.WARNING, logger="quantalyze.analytics.position_reconstruction"
+    ), patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ):
+        # (a) must return without raising even though funding fetch errors.
+        result = await reconstruct_positions("strat-1", mock_supabase)
+
+    # Reconstruction completed: one closed position persisted.
+    inserted_rows = [
+        row for batch in mock_supabase._captured_inserts for row in batch
+    ]
+    assert len(inserted_rows) == 1, (
+        "position reconstruction must still persist positions when funding "
+        f"fetch fails; got {inserted_rows!r}"
+    )
+    # (b) funding_pnl stays at the default 0 — error did not corrupt the value.
+    assert inserted_rows[0]["funding_pnl"] == 0
+    # Trade metrics still computed (proves reconstruct ran to completion).
+    assert result["total_positions"] == 1
+    assert result["closed_positions"] == 1
+    # (c) a warning was logged naming the funding-fetch failure.
+    assert any(
+        "funding_fees fetch failed" in rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno >= logging.WARNING
+    ), (
+        "expected a WARNING naming the funding_fees fetch failure; "
+        f"got records={[r.getMessage() for r in caplog.records]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_open_position_funding_attributed_through_now() -> None:
+    """M-0933: an OPEN position (status='open', closed_at=None) must attribute
+    funding rows from opened_at to wall-clock now. The closed_at-None branch
+    resolves the window upper bound to now_utc; a regression that collapsed it
+    to closed_at=opened_at (zero window) would silently zero-out funding for
+    live perps.
+
+    Setup: a single buy (no sell) keeps the position open. Funding rows are
+    timestamped after the buy but well before 'now' (year 2024), so they fall
+    inside [opened_at, now]. funding_pnl must equal their sum.
+    """
+    fills = [
+        {
+            "symbol": "BTCUSDT",
+            "side": "buy",
+            "price": 100.0,
+            "quantity": 1.0,
+            "fee": 0.0,
+            "timestamp": "2024-01-01T00:00:00+00:00",
+            "raw_data": {},
+            "is_fill": True,
+        },
+    ]
+    # Three funding events AFTER the buy, all before now (2024 << runtime).
+    # Sum: 0.03 + (-0.01) + 0.005 = 0.025
+    funding_rows = [
+        {
+            "strategy_id": "strat-open",
+            "exchange": "binance",
+            "symbol": "BTCUSDT",
+            "amount": "0.03",
+            "currency": "USDT",
+            "timestamp": "2024-01-01T08:00:00+00:00",
+        },
+        {
+            "strategy_id": "strat-open",
+            "exchange": "binance",
+            "symbol": "BTCUSDT",
+            "amount": "-0.01",
+            "currency": "USDT",
+            "timestamp": "2024-01-02T08:00:00+00:00",
+        },
+        {
+            "strategy_id": "strat-open",
+            "exchange": "binance",
+            "symbol": "BTCUSDT",
+            "amount": "0.005",
+            "currency": "USDT",
+            "timestamp": "2024-01-03T08:00:00+00:00",
+        },
+        # Funding row BEFORE the position opened — must be excluded.
+        {
+            "strategy_id": "strat-open",
+            "exchange": "binance",
+            "symbol": "BTCUSDT",
+            "amount": "99.0",
+            "currency": "USDT",
+            "timestamp": "2023-12-31T00:00:00+00:00",
+        },
+    ]
+
+    mock_supabase = _make_mock_supabase_with_funding(fills, funding_rows)
+
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ):
+        await reconstruct_positions("strat-open", mock_supabase)
+
+    inserted_rows = [
+        row for batch in mock_supabase._captured_inserts for row in batch
+    ]
+    assert len(inserted_rows) == 1
+    pos = inserted_rows[0]
+    assert pos["status"] == "open", (
+        f"expected an open position (no sell fill); got {pos['status']!r}"
+    )
+    assert pos["closed_at"] is None
+    # Window opened_at..now must capture the 3 in-window rows (0.025 total)
+    # and exclude the pre-open row. A collapsed (opened_at..opened_at) window
+    # would yield 0.0.
+    assert pos["funding_pnl"] == pytest.approx(0.025, abs=1e-9), (
+        "open-position funding window collapsed — closed_at=None must "
+        f"resolve to now, not opened_at; got {pos['funding_pnl']}"
+    )
