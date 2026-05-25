@@ -157,14 +157,24 @@ def test_daily_return_accepts_negative_below_minus_one():
 # can fix the unit rather than have it slip into the analytics pipeline
 # and produce nonsense CAGR / Sharpe / Max DD downstream.
 def test_dollar_form_daily_return_caught_by_sentinel():
-    # Median(|x|) ~= 3.0 — well above the 0.5 threshold.
+    # 2026-05-25 update — the original fixture used values like
+    # -3.29 / +1.71 which a 2026-05-25 user explicitly classified as
+    # "percent without the % sign" (1.53 means 1.53%, not $1.53). The
+    # auto-normalizer now divides those by 100 and the file passes.
+    # Genuine dollar-PnL uploads have account-scale magnitudes (max
+    # |x| well over 100), which exceeds the PERCENT_FORM_AUTO_NORM_UPPER
+    # ceiling — the auto-normalizer skips them and the dollar-form
+    # sentinel still rejects.
+    # Median(|x|) ~= 285 — well above the 0.5 threshold AND well
+    # above the 100 ceiling so auto-normalize cannot eat this fixture.
     df = pd.DataFrame({
         "date": pd.date_range("2024-01-02", periods=20, freq="D").strftime(
             "%Y-%m-%d",
         ),
         "daily_return": [
-            -3.29, 1.71, -2.40, 4.10, -1.95, 2.55, -3.10, 1.20, -2.65, 3.85,
-            -1.50, 2.10, -3.45, 4.25, -1.85, 2.95, -3.20, 1.65, -2.85, 3.05,
+            -329.0, 171.0, -240.0, 410.0, -195.0, 255.0, -310.0, 120.0,
+            -265.0, 385.0, -150.0, 210.0, -345.0, 425.0, -185.0, 295.0,
+            -320.0, 165.0, -285.0, 305.0,
         ],
     })
     result = validate_csv(_csv_bytes(df), "daily_returns")
@@ -178,6 +188,10 @@ def test_dollar_form_daily_return_caught_by_sentinel():
         if e["rule"] == "daily_return_dollar_form_sentinel"
     )
     assert "decimal" in msg.lower() or "dollar" in msg.lower()
+    # And no auto-normalize info-flag — the ceiling blocks it.
+    info_flags = result.get("info_flags") or []
+    flag_rules = {f["rule"] for f in info_flags}
+    assert "auto_normalized_percent_form" not in flag_rules
 
 
 def test_dollar_form_sentinel_lets_normal_decimal_returns_through():

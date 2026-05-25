@@ -52,6 +52,26 @@ DEFAULT_RISK_FREE_DAILY = 0.0
 # series and well below any plausible dollar-PnL median.
 DAILY_RETURN_DOLLAR_FORM_MEDIAN_ABS_THRESHOLD = 0.5
 
+# 2026-05-25 prod incident: the `break-momentum` strategy (MM_dailies CSV)
+# slipped through the dollar-form sentinel because the file is ~50%
+# zero-padded (the strategy started with months of no-trade days). The
+# old `_check_dollar_form_sentinel` used `r.dropna().abs().median()` —
+# but dropna() does NOT drop zeros, so the median collapsed to 0 and
+# the 0.5 threshold never triggered. The 2026-05-25 fix:
+#   1. Sentinel switches to the median over **non-zero** values when
+#      enough non-zero samples exist (>= 2 — preserves prior behaviour
+#      on edge cases too small to compute a meaningful non-zero stat).
+#   2. A new auto-normalize pass runs BEFORE the sentinel. If the
+#      non-zero median |x| is in the percent range (> 0.5 AND <= 100)
+#      AND the max |x| is also <= 100, the daily_return column is
+#      divided by 100 in-place and an info-flag is appended to the
+#      envelope so the wizard/factsheet can surface a chip. Genuine
+#      dollar-PnL uploads (max |x| > 100, e.g. raw $5,000/day account
+#      PnL) skip normalization and continue to reject at the sentinel
+#      with the existing actionable error message.
+PERCENT_FORM_AUTO_NORM_LOWER = 0.5
+PERCENT_FORM_AUTO_NORM_UPPER = 100.0
+
 # Phase 15 PII column-name pattern. Matches column NAMES (case-insensitive)
 # that historically carry user-identifying values in CSV exports. The
 # match is on the column name; values are masked to '***' regardless of
@@ -221,12 +241,25 @@ def _check_dollar_form_sentinel(df: pd.DataFrame, fmt: str) -> list[dict[str, An
     can dip below -1.0 on bad days but its median abs is well under
     0.5. A dollar-PnL series with daily $5/$50 moves on a modest
     account has median abs >> 1.0.
+
+    2026-05-25 update: compute the median over **non-zero** values when
+    enough non-zero samples exist (>= 2). Zero-padded prefixes (a
+    strategy's pre-trading period) used to mask the issue when >50% of
+    rows were literal zero, because `dropna()` does NOT drop zeros and
+    the all-rows median collapsed to 0 — see the new
+    PERCENT_FORM_AUTO_NORM_LOWER comment block for the prod incident.
     """
     errors: list[dict[str, Any]] = []
     if fmt == "daily_returns" and "daily_return" in df.columns and len(df) >= 2:
         r = df["daily_return"].dropna()
-        if len(r) >= 2:
-            median_abs = float(r.abs().median())
+        # 2026-05-25 fix: prefer the non-zero subset so zero-padded
+        # files don't drag the median to 0. Fall back to all-rows if
+        # too few non-zero samples exist (preserves prior behaviour on
+        # genuinely tiny files).
+        non_zero = r[r != 0]
+        sample = non_zero if len(non_zero) >= 2 else r
+        if len(sample) >= 2:
+            median_abs = float(sample.abs().median())
             if median_abs > DAILY_RETURN_DOLLAR_FORM_MEDIAN_ABS_THRESHOLD:
                 errors.append({
                     "rule": "daily_return_dollar_form_sentinel",
@@ -241,6 +274,71 @@ def _check_dollar_form_sentinel(df: pd.DataFrame, fmt: str) -> list[dict[str, An
                     ),
                 })
     return errors
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-25 prod incident hotfix — auto-normalize percent-form daily_return.
+#
+# Mutates `df["daily_return"]` in-place by dividing by 100 when the
+# distribution looks like percent-without-sign (median |non-zero x|
+# between PERCENT_FORM_AUTO_NORM_LOWER and PERCENT_FORM_AUTO_NORM_UPPER,
+# AND max |x| <= PERCENT_FORM_AUTO_NORM_UPPER). Returns an info-flag
+# dict the caller appends to the envelope's `info_flags` array.
+#
+# Designed to be conservative:
+#   - Skipped entirely on fmt != "daily_returns" (no decimal/percent
+#     ambiguity on NAV or trades).
+#   - Requires >= 2 non-zero samples — a truly empty or single-trade
+#     file falls back to the pandera schema + sentinel without
+#     speculative mutation.
+#   - Upper ceiling (100) is the only guard against eating genuine
+#     dollar-PnL uploads: $5,000/day account PnL has max |x| of 5000,
+#     well above the ceiling, so it skips normalization and the
+#     post-norm `_check_dollar_form_sentinel` still rejects it with the
+#     existing actionable error.
+# ---------------------------------------------------------------------------
+
+def _maybe_auto_normalize_percent_form(
+    df: pd.DataFrame, fmt: str,
+) -> dict[str, Any] | None:
+    if fmt != "daily_returns" or "daily_return" not in df.columns:
+        return None
+    r = df["daily_return"].dropna()
+    non_zero = r[r != 0]
+    if len(non_zero) < 2:
+        return None
+    median_abs = float(non_zero.abs().median())
+    max_abs = float(r.abs().max()) if len(r) > 0 else 0.0
+    in_percent_band = (
+        median_abs > PERCENT_FORM_AUTO_NORM_LOWER
+        and median_abs <= PERCENT_FORM_AUTO_NORM_UPPER
+    )
+    if not in_percent_band:
+        return None
+    if max_abs > PERCENT_FORM_AUTO_NORM_UPPER:
+        # Looks like dollar-PnL with some percent rows mixed in — let
+        # the post-norm sentinel handle it instead of partial-normalizing
+        # what we can't safely recover.
+        return None
+    df["daily_return"] = df["daily_return"] / 100.0
+    logger.info(
+        "[csv-validator] auto-normalized percent-form daily_return "
+        "(median |non-zero x| = %.4f, max |x| = %.4f)",
+        median_abs, max_abs,
+    )
+    return {
+        "rule": "auto_normalized_percent_form",
+        "factor": 0.01,
+        "non_zero_median_abs_before": round(median_abs, 5),
+        "non_zero_median_abs_after": round(median_abs / 100.0, 5),
+        "max_abs_before": round(max_abs, 5),
+        "message": (
+            f"Detected percent-form daily_return (median |non-zero| = "
+            f"{median_abs:.2f}). Auto-normalized to decimal by dividing "
+            f"every row by 100. If your file was already in decimal "
+            f"form, contact support."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +595,18 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             })
         df_validated = df
 
+    # 2026-05-25 prod incident hotfix — auto-normalize percent-form
+    # daily_return BEFORE the sentinels run. If the file uses percent
+    # convention without a `%` sign (median |non-zero x| > 0.5), mutate
+    # in-place by /100 and emit an info-flag so the wizard can surface
+    # a chip and the analytics worker computes against the normalized
+    # series. Skipped on dollar-PnL uploads (max |x| > 100) so the
+    # post-norm sentinel still rejects those.
+    info_flags: list[dict[str, Any]] = []
+    norm_flag = _maybe_auto_normalize_percent_form(df_validated, fmt)
+    if norm_flag is not None:
+        info_flags.append(norm_flag)
+
     all_errors.extend(_check_sharpe_sentinel(df_validated, fmt))
     all_errors.extend(_check_dollar_form_sentinel(df_validated, fmt))
     # _check_trading_window REMOVED 2026-04-30 (crypto trades 24/7)
@@ -568,4 +678,10 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     }
     if daily_returns_series is not None:
         envelope["daily_returns_series"] = daily_returns_series
+    # 2026-05-25 hotfix: info_flags is a NEW envelope field surfacing
+    # informational events (auto-normalize being the first). Always
+    # present so the wizard's TypeScript consumer can rely on it; empty
+    # array when no info-flag fired (backward-compatible — older wizard
+    # versions that don't read it simply ignore the field).
+    envelope["info_flags"] = info_flags
     return envelope
