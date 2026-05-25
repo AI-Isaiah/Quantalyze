@@ -91,4 +91,38 @@ describe("assertSameOrigin", () => {
       assertSameOrigin(makeRequest({ origin: "https://quantalyze.com" })),
     ).toBeNull();
   });
+
+  // M-0900: NEXT_PUBLIC_VERCEL_URL is read (csrf.ts:60-65) so per-PR
+  // preview deployments don't 403 every allocator/admin POST. Vercel
+  // exposes this WITHOUT a scheme (host only), so the code wraps it in
+  // `https://${vercelUrl}`. These tests pin both the positive match and
+  // the graceful-skip on a malformed value — a regression dropping the
+  // env read (or mis-parsing) would silently re-break preview testing.
+  it("accepts an Origin matching the NEXT_PUBLIC_VERCEL_URL preview host", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("NEXT_PUBLIC_VERCEL_URL", "quantalyze-pr-55-abc123.vercel.app");
+    __resetAllowedHostsForTest();
+    expect(
+      assertSameOrigin(
+        makeRequest({ origin: "https://quantalyze-pr-55-abc123.vercel.app" }),
+      ),
+    ).toBeNull();
+    // A non-preview host is still rejected — VERCEL_URL is not a wildcard.
+    expect(
+      assertSameOrigin(makeRequest({ origin: "https://evil.example.com" }))
+        ?.status,
+    ).toBe(403);
+  });
+
+  it("skips a malformed NEXT_PUBLIC_VERCEL_URL without crashing buildAllowedHosts", async () => {
+    // `https://%%not-a-host%%` is an invalid URL — the try/catch in
+    // buildAllowedHosts must swallow it so the rest of the allowlist
+    // (here, dev localhost) still works and assertSameOrigin never throws.
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("NEXT_PUBLIC_VERCEL_URL", "%%not-a-host%%");
+    expect(() => __resetAllowedHostsForTest()).not.toThrow();
+    const req = makeRequest({ origin: "http://localhost:3000" });
+    expect(() => assertSameOrigin(req)).not.toThrow();
+    expect(assertSameOrigin(req)).toBeNull();
+  });
 });

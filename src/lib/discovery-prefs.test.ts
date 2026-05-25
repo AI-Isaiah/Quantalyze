@@ -286,6 +286,39 @@ describe("discovery-prefs: useDiscoveryPrefs", () => {
     expect(result.current.prefs).toEqual(DEFAULTS);
   });
 
+  it("logs '[discovery-prefs] localStorage write failed:' when setItem throws (M-1150 observability contract)", async () => {
+    // PR #90 v0.17.1.8 replaced a silent `catch {}` with a console.error so
+    // a flood of Safari-private-mode / quota write failures surfaces in the
+    // console. The Map-backed mock never throws, so the catch branch was
+    // unexercised — a revert to `catch {}` would regress silently. Here we
+    // force setItem to throw AFTER hydration and assert the log fires.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { result } = renderHook(() => useDiscoveryPrefs(UID_A, SLUG));
+      await waitFor(() => {
+        expect(result.current.hydrated).toBe(true);
+      });
+      // Swap in a throwing setItem only now (post-hydration) so the write
+      // effect triggered by setPrefs hits the catch branch.
+      setItemSpy.mockImplementationOnce(() => {
+        throw new Error("QuotaExceededError");
+      });
+      errSpy.mockClear();
+
+      act(() => {
+        result.current.setPrefs({ ...DEFAULTS, view: "grid" });
+      });
+
+      await waitFor(() => {
+        expect(errSpy).toHaveBeenCalled();
+      });
+      const firstArg = errSpy.mock.calls[0]?.[0] as unknown;
+      expect(firstArg).toBe("[discovery-prefs] localStorage write failed:");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
   it("setPrefs(...) BEFORE hydration does NOT write the mutated value (case 10 — hydration write gate)", async () => {
     // Contract case 10: a mutator invoked before hydration completes must NOT
     // produce a localStorage write of the mutated value. The impl enforces
