@@ -366,24 +366,24 @@ def test_every_audit_emission_is_AFTER_compute_and_BEFORE_return():
 
 
 # ---------------------------------------------------------------------------
-# H-0815 — behavioral coverage of the wrapper+caller PAIR.
+# H-0815 (re-resolved) — behavioral coverage of the emitter+caller contract.
 #
 # The structural tests above prove the emission call EXISTS in the right place
-# with the right shape, but they never RUN the handler. They cannot catch the
-# runtime failure mode the audit flagged: the fire-and-forget contract says a
-# router's compute path must still return its result when the audit emit
-# raises. After audit-2026-05-07 P907 + P908, log_audit_event RE-RAISES on an
-# unexpected exception (Branch 3, fail-loud). The router happy-path emit sites
-# (routers/portfolio.py::portfolio_bridge line ~1740 / ~1711,
-# routers/simulator.py::portfolio_simulator line ~297) call log_audit_event
-# UNWRAPPED — so an unexpected RPC error there propagates out of the handler
-# AFTER the compute already succeeded, turning a successful bridge run into a
-# 500. That is precisely the "compute path succeeds when audit RPC raises"
-# contract the structural test cannot observe.
+# with the right shape, but they never RUN the handler. This block drives
+# portfolio_bridge end-to-end with a table-routing Supabase double to pin the
+# FAIL-LOUD contract.
 #
-# These tests drive portfolio_bridge end-to-end with a table-routing Supabase
-# double and assert the CORRECT behavior: the handler returns its computed
-# 200 payload even when the audit emit raises.
+# log_audit_event implements a deliberate P907+P908 typed dispatch: it SWALLOWS
+# transient httpx blips itself (so a flaky audit RPC does NOT fail a successful
+# run) and RE-RAISES the serious classes — permission_denied (SQLSTATE 42501,
+# an auth/RLS regression) and unknown exceptions (Branch 3, fail-loud per
+# Rule 12). The happy-path router emit sites are therefore intentionally
+# UNWRAPPED: wrapping them in a blanket try/except (as an earlier H-0815
+# attempt did) would re-bury exactly those serious errors behind a successful
+# 200, masking an auth regression on every successful bridge/simulator run.
+# The correct behavior is the OPPOSITE of swallow — a serious audit error must
+# PROPAGATE out of the handler. These tests assert that propagation and guard
+# against anyone re-adding the swallow.
 # ---------------------------------------------------------------------------
 
 import pytest  # noqa: E402 — kept local to the behavioral block
@@ -474,17 +474,19 @@ def _call_undecorated(handler, *args, **kwargs):
 
 
 @pytest.mark.parametrize("candidates_present", [False, True])
-def test_bridge_returns_result_when_audit_emit_raises(
+def test_bridge_propagates_when_audit_emit_raises(
     monkeypatch, candidates_present
 ):
-    """Fire-and-forget contract: portfolio_bridge must return its 200 payload
-    even when the happy-path log_audit_event raises an unexpected exception.
+    """Fail-loud contract (H-0815 re-resolved): a SERIOUS audit-emit error must
+    PROPAGATE out of portfolio_bridge, not be swallowed into a successful 200.
 
-    This is the runtime failure the AST-only structural test cannot see. The
-    emit site is unwrapped, so under audit-2026-05-07 P907 + P908 (Branch 3
-    re-raises) the exception escapes the handler and the successful compute is
-    lost. Asserting the handler returns proves the contract holds (or SURFACES
-    the violation if it does not)."""
+    log_audit_event swallows transient blips itself and re-raises only the
+    serious classes (permission_denied / unknown). The router emit is UNWRAPPED
+    so it honors that — it must NOT wrap-and-swallow, which would mask an auth
+    regression on every successful run. A RuntimeError (Branch 3, unknown)
+    raised by the emit must escape the handler. Covers BOTH the empty-
+    candidates fast-path and the full-scoring path. Guards against anyone
+    re-introducing the blanket try/except swallow."""
     from routers import portfolio as portfolio_router
     from models.schemas import BridgeRequest
 
@@ -521,9 +523,7 @@ def test_bridge_returns_result_when_audit_emit_raises(
     )
     request = MagicMock()  # slowapi is bypassed via __wrapped__
 
-    result = _call_undecorated(portfolio_router.portfolio_bridge, request, req)
-
-    # Correct behavior: compute succeeded, so the handler returns its payload.
-    assert result["ok"] is True
-    assert result["status"] == "complete"
-    assert result["portfolio_id"] == portfolio_id
+    # Serious audit errors must fail loud: the handler propagates the error
+    # rather than swallowing it into a successful 200 payload.
+    with pytest.raises(RuntimeError, match="unexpected audit RPC failure"):
+        _call_undecorated(portfolio_router.portfolio_bridge, request, req)

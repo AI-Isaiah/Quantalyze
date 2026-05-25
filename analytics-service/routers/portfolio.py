@@ -1708,26 +1708,22 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     # the non-empty branch; the empty branch reports candidate_count=0
     # and returns a 200 with an empty list.
     if not candidate_returns:
-        try:
-            log_audit_event(
-                user_id=req.user_id,
-                action="bridge.score_candidates",
-                entity_type="bridge_run",
-                entity_id=req.portfolio_id,
-                metadata={
-                    "underperformer_strategy_id": req.underperformer_strategy_id,
-                    "candidate_count": 0,
-                },
-            )
-        except Exception as audit_exc:
-            # Fire-and-forget: an audit-emit failure must not turn this
-            # successful run into a 500 (mirror the simulator failure-path
-            # swallow pattern).
-            logger.error(
-                "bridge audit emit failed: %s",
-                audit_exc,
-                exc_info=True,
-            )
+        # H-0815 (re-resolved): emit UNWRAPPED. log_audit_event's P907/P908
+        # typed dispatch already swallows transient httpx blips (a flaky audit
+        # RPC will NOT 500 a successful run) and deliberately re-raises
+        # permission_denied (auth regression) + unknown errors as hard,
+        # fail-loud events. A blanket except here would re-bury exactly those
+        # serious errors behind a 200 — defeating the emitter's contract.
+        log_audit_event(
+            user_id=req.user_id,
+            action="bridge.score_candidates",
+            entity_type="bridge_run",
+            entity_id=req.portfolio_id,
+            metadata={
+                "underperformer_strategy_id": req.underperformer_strategy_id,
+                "candidate_count": 0,
+            },
+        )
         return {
             "ok": True,
             "status": "complete",
@@ -1747,26 +1743,19 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     # Sprint 6 Task 7.1b — audit the bridge scoring. entity is the
     # portfolio the bridge was run against; user_id is carried in the
     # request shape (BridgeRequest.user_id).
-    try:
-        log_audit_event(
-            user_id=req.user_id,
-            action="bridge.score_candidates",
-            entity_type="bridge_run",
-            entity_id=req.portfolio_id,
-            metadata={
-                "underperformer_strategy_id": req.underperformer_strategy_id,
-                "candidate_count": len(candidates),
-            },
-        )
-    except Exception as audit_exc:
-        # Fire-and-forget: an audit-emit failure must not turn this
-        # successful run into a 500 (mirror the simulator failure-path
-        # swallow pattern).
-        logger.error(
-            "bridge audit emit failed: %s",
-            audit_exc,
-            exc_info=True,
-        )
+    # H-0815 (re-resolved): emit UNWRAPPED — see the empty-candidates branch
+    # above. The emitter's P907/P908 dispatch swallows transient errors and
+    # re-raises serious ones (permission_denied / unknown); honor that here.
+    log_audit_event(
+        user_id=req.user_id,
+        action="bridge.score_candidates",
+        entity_type="bridge_run",
+        entity_id=req.portfolio_id,
+        metadata={
+            "underperformer_strategy_id": req.underperformer_strategy_id,
+            "candidate_count": len(candidates),
+        },
+    )
 
     return {
         "ok": True,
