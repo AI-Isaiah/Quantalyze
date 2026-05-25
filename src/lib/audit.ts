@@ -419,6 +419,7 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP: Record<AuditAction, AuditEntityType> 
   "account.sanitize": "user",
   "account.export": "user",
   "account.export_refused": "user",
+  "account.export_rate_limited": "user",
   "account.export_resigned": "user",
   "deletion.request.approve": "data_deletion_request",
   "deletion.request.reject": "data_deletion_request",

@@ -155,13 +155,15 @@ describe("POST /api/strategies/create-with-key — envelope-encryption shape", (
  *   (b) withdraw=true alone          → 400 + KEY_HAS_WITHDRAW_PERMS
  *   (c) both trading + withdraw=true → 400, withdraw classification wins
  *   (d) read_only=true (happy)       → 200 (envelope round-trip)
- *   (e) validateKey throws (network) → 400 + KEY_NETWORK_TIMEOUT
+ *   (e) validateKey throws (network) → 502 + KEY_NETWORK_TIMEOUT
  *
- * (e) reflects the route's actual error-classification block at lines
- * 243-264: a thrown error is caught and bucketed into a wizardErrors
- * code, returning 400 (not 502). The route never returns 502 for a
- * caught validateKey failure — only for an "unexpected" encryption
- * payload shape.
+ * (e) reflects the route's actual error-classification block: a thrown
+ * error is caught and bucketed into a wizardErrors code, then mapped to
+ * an HTTP status by fault class (H-0310). Upstream failures return 5xx
+ * because the caller's request was well-formed — the exchange/upstream
+ * is what failed: KEY_NETWORK_TIMEOUT and KEY_IP_ALLOWLIST → 502,
+ * KEY_RATE_LIMIT → 503. Genuine client faults (e.g. KEY_INVALID_SIGNATURE)
+ * stay 400.
  */
 describe("POST /api/strategies/create-with-key — P467 scope-rejection paths", () => {
   beforeEach(() => {
@@ -261,7 +263,7 @@ describe("POST /api/strategies/create-with-key — P467 scope-rejection paths", 
     expect(rpcMock).toHaveBeenCalledTimes(1);
   });
 
-  it("(e) classifies a network failure during validateKey as KEY_NETWORK_TIMEOUT (400)", async () => {
+  it("(e) classifies a network failure during validateKey as KEY_NETWORK_TIMEOUT (502 upstream)", async () => {
     // The route catches anything thrown from validateKey and bucketizes
     // it into a wizardErrors code. The classifier in route.ts:249-261
     // routes "timeout" / "etimedout" strings to KEY_NETWORK_TIMEOUT.
@@ -275,7 +277,7 @@ describe("POST /api/strategies/create-with-key — P467 scope-rejection paths", 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(502);
     const json = await res.json();
     expect(json.code).toBe("KEY_NETWORK_TIMEOUT");
     // No encryption, no RPC — the validation step short-circuited.
