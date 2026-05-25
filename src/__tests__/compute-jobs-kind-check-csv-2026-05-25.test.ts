@@ -7,7 +7,7 @@ import { describe, it, expect } from "vitest";
 // computation_error = `compute job enqueue failed: new row for relation
 // "compute_jobs" violates check constraint "compute_jobs_kind_check"`.
 //
-// Root cause: migration 20260522120100_compute_analytics_from_csv_kind.sql
+// Root cause: migration 20260522111858_compute_analytics_from_csv_kind.sql
 // (Phase 19.1 / Plan 02) added 'compute_analytics_from_csv' to the
 // `compute_jobs_kind_target_coherence` CHECK constraint but FORGOT the
 // sibling list-form `compute_jobs_kind_check` CHECK on the same table.
@@ -32,7 +32,7 @@ import { describe, it, expect } from "vitest";
 const REPO_ROOT = join(__dirname, "..", "..");
 const MIGRATIONS_DIR = join(REPO_ROOT, "supabase", "migrations");
 const FIX_FILENAME =
-  "20260525130000_compute_jobs_kind_check_extend_csv.sql";
+  "20260525074649_compute_jobs_kind_check_extend_csv.sql";
 const FIX_PATH = join(MIGRATIONS_DIR, FIX_FILENAME);
 
 // Kinds admitted by compute_jobs_kind_check in prod BEFORE this fix,
@@ -105,7 +105,7 @@ describe("compute_jobs_kind_check extends 'compute_analytics_from_csv' (2026-05-
     // If a future migration drops the constraint, it MUST re-add an
     // equivalent or stronger CHECK that includes both 'compute_analytics_from_csv'
     // and every PRIOR_KINDS entry. Mirrors the trades-side-check pattern.
-    const FIX_TS = "20260525130000";
+    const FIX_TS = "20260525074649";
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => /^\d{14}_.*\.sql$/.test(f))
       .filter((f) => f.split("_")[0] > FIX_TS)

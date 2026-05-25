@@ -1504,7 +1504,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
         # .select(...).eq(...).order(...).execute() caps at PostgREST's
         # default 1000-row response on hosted Supabase, but
         # persist_csv_daily_returns accepts up to 5000 rows (migration
-        # 20260522120000:160). A 1001–5000-row CSV persists fine but
+        # 20260522111839:160). A 1001–5000-row CSV persists fine but
         # would silently truncate to the first 1000 rows here, feeding
         # compute_all_metrics a partial series. Composite order_by
         # (date asc) matches the (strategy_id, date) UNIQUE index from
