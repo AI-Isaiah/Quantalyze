@@ -61,11 +61,39 @@ async function deleteColdRowDirect(
   admin: ReturnType<typeof createLiveAdminClient>,
   rowId: string,
 ): Promise<void> {
-  // Cleanup via service-role — the REVOKE will block this, which is
-  // expected. We try anyway; if the row survives, next run's unique
-  // marker prefix avoids interference. In practice a superuser cleanup
-  // hook would need to run; we rely on marker-prefix isolation.
-  await admin.from("audit_log_cold").delete().eq("id", rowId);
+  // H-0010 (FIXED 2026-05-25): route cleanup through the test-only purge
+  // RPC. A direct PostgREST DELETE here is a silent no-op — audit_log_cold
+  // carries the append-only deny policy + REVOKE DELETE (see the
+  // "service-role DELETE is rejected" test), so the row would leak
+  // forever. `test_force_cold_purge` (migration 20260525192740) is
+  // SECURITY DEFINER + service_role-gated and scoped to test-probe rows
+  // only, so it removes the seeded `__cold_test_*` row without weakening
+  // the append-only invariant for real compliance data.
+  //
+  // RESERVED COMBINATION: the RPC only deletes a row when BOTH
+  // entity_type='test_probe' AND action starts with `__cold_test_`. That
+  // pair is reserved for this test suite and must NEVER appear on a
+  // production audit row — it is the only signal that distinguishes a
+  // purgeable probe from a genuine compliance record.
+  //
+  // We warn (not throw) so a cleanup-path regression is visible in the
+  // output without masking the calling test's own assertions in `finally`.
+  // We check BOTH failure modes: an RPC `error`, AND a 0-row return — the
+  // scoped DELETE returns 0 (no error) for a row that falls outside the
+  // reserved combination, which would otherwise re-open the H-0010 leak
+  // silently (silent-failure-hunter Item 1).
+  const { data: purged, error } = await admin.rpc("test_force_cold_purge", {
+    p_id: rowId,
+  });
+  if (error) {
+    console.warn(
+      `[cold-archive cleanup] test_force_cold_purge failed for ${rowId}: ${error.message}`,
+    );
+  } else if (purged === 0) {
+    console.warn(
+      `[cold-archive cleanup] test_force_cold_purge matched 0 rows for ${rowId} — probe row may be leaking (scope mismatch with the reserved test_probe/__cold_test_ combination?)`,
+    );
+  }
 }
 
 describe("Migration 056 — audit_log_cold table + append-only invariant", () => {
@@ -241,6 +269,9 @@ describe("Migration 056 — audit_log_cold table + append-only invariant", () =>
       const ts = Date.now();
       const row: { userIds: string[] } = { userIds: [] };
       const marker = `move-${ts}`;
+      // H-0010: the moved row lands in cold; hoist its id so `finally` can
+      // purge it via the test-only RPC instead of leaking it.
+      let movedColdId: string | null = null;
 
       try {
         const userId = await createTestUser(admin, `cold-mov-${ts}@test.sec`);
@@ -274,6 +305,9 @@ describe("Migration 056 — audit_log_cold table + append-only invariant", () =>
         expect(backdatedInsert).toBeTruthy();
 
         const backdatedId = backdatedInsert!.id as string;
+        // After the move below, this id exists in cold — record it for
+        // `finally` cleanup (H-0010).
+        movedColdId = backdatedId;
 
         // Invoke the test-only RPC that runs the cron's CTE body.
         const { data: moveCount, error: rpcErr } = await admin.rpc(
@@ -312,36 +346,33 @@ describe("Migration 056 — audit_log_cold table + append-only invariant", () =>
         expect(hotReadErr).toBeNull();
         expect(hotAfter).toBeNull();
       } finally {
-        // We can't clean up the cold row via PostgREST (deny policies +
-        // REVOKE), and the test-forced move leaves our seeded row in
-        // cold. Marker-prefix isolation (`__cold_test_move-<ts>`) keeps
-        // runs non-interfering. Production cleanup via the 7y cold purge
-        // cron OR a manual superuser sweep.
+        // H-0010: purge the moved cold row via the test-only RPC so this
+        // test no longer leaks a `__cold_test_*` probe into the archive.
+        // (Before the RPC existed, a PostgREST DELETE here was a deny-
+        // policy no-op and the row leaked forever.)
+        if (movedColdId) await deleteColdRowDirect(admin, movedColdId);
         await cleanupLiveDbRow(admin, { userIds: row.userIds });
       }
     },
     45_000,
   );
 
-  // H-0010 — make the cold-row cleanup LEAK observable instead of silent.
-  // The append-only deny policy + REVOKE on audit_log_cold means a
-  // service-role PostgREST DELETE is a no-op (see the append-only DELETE
-  // test above: `expect(deleted).toEqual([])`). `deleteColdRowDirect`
-  // therefore swallows the failure and leaves the row forever. This is a
-  // real test-DB hygiene problem: __cold_test_* rows accumulate across
-  // runs, and any future probe doing `count(*) ... WHERE entity_type =
-  // 'test_probe'` would false-flag a regression.
+  // H-0010 (FIXED 2026-05-25) — cold-row cleanup must actually remove the
+  // seeded probe row. The append-only deny policy + REVOKE on
+  // audit_log_cold means a service-role PostgREST DELETE is a no-op (see
+  // the append-only DELETE test above: `expect(deleted).toEqual([])`), so
+  // `deleteColdRowDirect` used to swallow the failure and leak the row
+  // forever — `__cold_test_*` rows accumulated across runs and any future
+  // `count(*) ... WHERE entity_type = 'test_probe'` probe would false-flag
+  // a regression.
   //
-  // We assert the CORRECT end-state the cleanup design SHOULD provide:
-  // after attempting cleanup, a seeded cold probe row must be GONE. There
-  // is no test-only purge RPC today (migration 057 only ships
-  // test_force_hot_to_cold_move), so this currently FAILS — surfacing the
-  // leak. FLAGGED for a production follow-up: add a SECURITY DEFINER,
-  // service_role-only `test_force_cold_purge(p_id uuid)` (or marker-prefix
-  // sweep) RPC mirroring test_force_hot_to_cold_move, then route
-  // deleteColdRowDirect through it.
-  it.skipIf(!HAS_LIVE_DB).fails(
-    "H-0010: cold-row cleanup must actually remove the seeded probe row (PostgREST DELETE no-ops under deny policy) — needs test-only purge RPC in follow-up",
+  // The fix ships `test_force_cold_purge(p_id uuid)` (migration
+  // 20260525192740) — a SECURITY DEFINER, service_role-only,
+  // test-probe-scoped RPC — and routes `deleteColdRowDirect` through it.
+  // This test asserts the CORRECT end-state: after cleanup, the seeded
+  // cold probe row is GONE. Was `it.fails` while deferred; now passes.
+  it.skipIf(!HAS_LIVE_DB)(
+    "H-0010: cold-row cleanup actually removes the seeded probe row via the test_force_cold_purge RPC",
     async () => {
       const admin = createLiveAdminClient();
       const ts = Date.now();
@@ -374,14 +405,16 @@ describe("Migration 056 — audit_log_cold table + append-only invariant", () =>
         // Attempt the cleanup path used by every test in this file.
         await deleteColdRowDirect(admin, coldRowId);
 
-        // Correct behavior: the probe row is gone. It is NOT (PostgREST
-        // DELETE is denied → no-op), so this assertion fails and the leak
-        // is surfaced.
-        const { data: reread } = await admin
+        // Correct behavior: the probe row is gone. Assert the re-read
+        // itself did NOT error first, so a failed SELECT can't make
+        // `reread` null-ish and pass this for the wrong reason
+        // (silent-failure-hunter Item 2).
+        const { data: reread, error: rereadErr } = await admin
           .from("audit_log_cold")
           .select("id")
           .eq("id", coldRowId)
           .maybeSingle();
+        expect(rereadErr).toBeNull();
         expect(reread).toBeNull();
       } finally {
         await cleanupLiveDbRow(admin, cleanup);
