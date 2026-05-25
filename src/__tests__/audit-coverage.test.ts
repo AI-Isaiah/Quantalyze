@@ -512,6 +512,132 @@ describe("audit-coverage helpers — P692/P694 regression fixtures", () => {
   });
 });
 
+describe("audit-coverage helpers — H-0004/H-0005 audit gap fixtures", () => {
+  // H-0004 — stripLineComment only strips `// …`. A block comment
+  // `/* … logAuditEvent(…) … */` mentioning logAuditEvent, or a JSX
+  // comment `{/* … */}`, is NOT parsed, so the regex /logAuditEvent\s*\(/
+  // matches against the comment body and FALSELY satisfies coverage. The
+  // CORRECT behavior: a mutation whose ONLY logAuditEvent mention lives
+  // inside a block comment must be reported uncovered (the comment is not
+  // an emission). We assert correct behavior; it currently fails because
+  // stripLineComment doesn't strip block comments.
+  it.fails(
+    "H-0004: block-comment logAuditEvent mention must NOT satisfy coverage — fix stripLineComment/isCovered in follow-up (test-helper, not production)",
+    () => {
+      const lines = [
+        "export async function POST() {",
+        "  const admin = createAdminClient();",
+        "  const { error } = await admin.from('x').insert({ a: 1 });",
+        "  if (error) return Response.json({ error: 'fail' }, { status: 500 });",
+        "  /* TODO: add a logAuditEvent(client, {...}) call here later. */",
+        "  return Response.json({ ok: true });",
+        "}",
+      ];
+      const mutation: Mutation = {
+        file: "synthetic.ts",
+        line: 3,
+        chainStart: 3,
+        snippet: lines[2].trim(),
+      };
+      // The block comment is the only logAuditEvent mention; no real
+      // emission fires. Correct coverage verdict is `false`.
+      expect(isCovered(mutation, lines).covered).toBe(false);
+    },
+  );
+
+  it.fails(
+    "H-0004: JSX-style {/* logAuditEvent(...) */} comment must NOT satisfy coverage — fix in follow-up",
+    () => {
+      const lines = [
+        "export async function POST() {",
+        "  const { error } = await admin.from('x').update({ a: 1 }).eq('id', 'z');",
+        "  if (error) return Response.json({ error: 'fail' }, { status: 500 });",
+        "  return ( {/* logAuditEvent(client, {action:'x'}) lives here someday */} );",
+        "}",
+      ];
+      const mutation: Mutation = {
+        file: "synthetic.ts",
+        line: 2,
+        chainStart: 2,
+        snippet: lines[1].trim(),
+      };
+      expect(isCovered(mutation, lines).covered).toBe(false);
+    },
+  );
+
+  // Control: a single-line `//` comment IS stripped, so it correctly
+  // does NOT satisfy coverage. This proves the test exercises the real
+  // isCovered path (not a tautology) — only the block-comment arm is the
+  // surfaced gap.
+  it("control: single-line // logAuditEvent comment does NOT satisfy coverage (stripLineComment works for //)", () => {
+    const lines = [
+      "export async function POST() {",
+      "  const { error } = await admin.from('x').insert({ a: 1 });",
+      "  // TODO: add a logAuditEvent(client, {...}) call here later.",
+      "  return Response.json({ ok: true });",
+      "}",
+    ];
+    const mutation: Mutation = {
+      file: "synthetic.ts",
+      line: 2,
+      chainStart: 2,
+      snippet: lines[1].trim(),
+    };
+    expect(isCovered(mutation, lines).covered).toBe(false);
+  });
+
+  // H-0005 — findMutations + findHelperMutations + findRpcMutations are
+  // the only detectors. findHelperMutations scans ONLY the hardcoded
+  // HELPER_MUTATORS allowlist (one module). A NEW helper that wraps a
+  // `.from(...).update(...)` chain in another module — e.g.,
+  // `softDeleteRow()` — is invisible to all three detectors when called
+  // from a route, so the route mutates with no audit and NO failure
+  // signal. We assert the CORRECT behavior: such a route must be flagged
+  // as an uncovered mutation. It currently fails because no detector sees
+  // the helper call.
+  it.fails(
+    "H-0005: route calling an UNREGISTERED mutator helper must be flagged uncovered — needs import-graph/registration enforcement in follow-up",
+    () => {
+      const src = [
+        "import { softDeleteRow } from '@/lib/danger-helpers';",
+        "export async function DELETE() {",
+        "  await softDeleteRow(admin, 'user', id);",
+        "  return Response.json({ ok: true });",
+        "}",
+      ].join("\n");
+      const lines = src.split("\n");
+      const mutations = [
+        ...findMutations("synthetic.ts", src),
+        ...findHelperMutations("synthetic.ts", src),
+        ...findRpcMutations("synthetic.ts", src),
+      ];
+      // The unregistered helper performs a DB mutation with no audit
+      // emission. A complete detector would surface exactly one
+      // uncovered mutation here. Today: zero mutations are even detected.
+      const uncovered = mutations.filter((m) => !isCovered(m, lines).covered);
+      expect(uncovered.length).toBeGreaterThanOrEqual(1);
+    },
+  );
+
+  // Control for H-0005: the REGISTERED helper IS detected and, lacking an
+  // audit emit, IS flagged uncovered. This proves findHelperMutations
+  // works for allowlisted modules — the gap is purely the missing
+  // out-of-band registration enforcement for NEW helpers.
+  it("control: REGISTERED mutator helper (markLeadProcessed) without an audit emit IS flagged uncovered", () => {
+    const src = [
+      "import { markLeadProcessed } from '@/lib/for-quants-leads-admin';",
+      "export async function POST() {",
+      "  await markLeadProcessed(admin, leadId);",
+      "  return Response.json({ ok: true });",
+      "}",
+    ].join("\n");
+    const lines = src.split("\n");
+    const helperMutations = findHelperMutations("synthetic.ts", src);
+    expect(helperMutations.length).toBe(1);
+    expect(isCovered(helperMutations[0], lines).covered).toBe(false);
+  });
+});
+
 describe("audit coverage: every mutation site in src/app/api must emit or skip", () => {
   it("every .insert/.update/.delete/.upsert has a logAuditEvent or @audit-skip", () => {
     const routeFiles = collectRouteFiles(API_DIR);

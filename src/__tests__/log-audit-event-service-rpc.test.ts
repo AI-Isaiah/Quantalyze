@@ -216,16 +216,24 @@ describe("Migration 058 — log_audit_event_service RPC runtime gates", () => {
       });
       expect(data).toBeNull();
       expect(error).not.toBeNull();
-      // SQLSTATE 22023 = invalid_parameter_value. supabase-js surfaces
-      // this as `error.code === "22023"` OR embeds it in the message.
+      // H-0018 — STRICT SQLSTATE assertion. The prior OR-chain
+      // (`code === '22023' || msg.includes('required') ||
+      //   msg.includes('invalid_parameter') || msg.includes('p_user_id')`)
+      // conflated the right failure (the RPC's explicit RAISE
+      // EXCEPTION ... ERRCODE 'invalid_parameter_value') with WRONG ones:
+      // a PostgREST schema-cache miss ("column p_user_id missing"), a
+      // typo'd error message, or any unrelated error merely MENTIONING
+      // 'p_user_id' would satisfy the substring arms and masquerade as the
+      // NULL-guard firing. Migration 058 raises SQLSTATE 22023
+      // (invalid_parameter_value) for a NULL p_user_id; we assert exactly
+      // that code so a regression that drops the guard (and instead trips
+      // a NOT NULL constraint = 23502, or a schema-cache miss = PGRST-*)
+      // fails loud.
+      expect(error?.code).toBe("22023");
+      // Message must reference the offending parameter so the guard is the
+      // demonstrable cause (defense-in-depth on top of the code check).
       const msg = (error?.message ?? "").toLowerCase();
-      const code = error?.code ?? "";
-      expect(
-        code === "22023" ||
-          msg.includes("required") ||
-          msg.includes("invalid_parameter") ||
-          msg.includes("p_user_id"),
-      ).toBe(true);
+      expect(msg).toMatch(/p_user_id|required|invalid_parameter/);
     },
     15_000,
   );
@@ -255,6 +263,73 @@ describe("Migration 058 — log_audit_event_service RPC runtime gates", () => {
         expect(error).not.toBeNull();
         const msg = (error?.message ?? "").toLowerCase();
         expect(msg.includes("required") || msg.includes("p_action")).toBe(true);
+      } finally {
+        await cleanupLiveDbRow(admin, cleanup);
+      }
+    },
+    30_000,
+  );
+
+  // H-0019 — the RPC's WIRE-FORMAT constraints (metadata size ceiling)
+  // were only exercised by the SQL-level test
+  // (supabase/tests/test_log_audit_event_service_ceiling.sql), never
+  // through the supabase-js client path the production emitters use.
+  // Migration 20260515113753 (hardened) enforces a 32 KB
+  // octet_length(p_metadata::text) ceiling, raising SQLSTATE 22023. A
+  // regression that shrinks the JSONB column or drops the ceiling would
+  // not be caught by the TS suite. This arm calls the RPC via supabase-js
+  // with a >32 KB metadata payload and asserts the 22023 rejection lands
+  // on the wire — closing the gap at the layer the wrappers run on.
+  it.skipIf(!HAS_LIVE_DB)(
+    "log_audit_event_service rejects >32KB p_metadata with invalid_parameter_value (32 KB ceiling, H-0019)",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const cleanup: { userIds: string[] } = { userIds: [] };
+
+      try {
+        const userId = await createTestUser(
+          admin,
+          `audit-svc-oversize-${ts}@test.sec`,
+        );
+        cleanup.userIds.push(userId);
+
+        // ~40 KB of metadata: well over the 32768-byte octet_length
+        // ceiling. octet_length(p_metadata::text) on this object is
+        // > 40000 bytes.
+        const oversizedMetadata = { blob: "x".repeat(40_000) };
+
+        const { data, error } = await admin.rpc("log_audit_event_service", {
+          p_user_id: userId,
+          p_action: `__audit_svc_oversize_${ts}`,
+          p_entity_type: "test_probe",
+          p_entity_id: crypto.randomUUID(),
+          p_metadata: oversizedMetadata,
+        });
+
+        // The ceiling check raises BEFORE the INSERT, so no row lands.
+        expect(data).toBeNull();
+        expect(error).not.toBeNull();
+        // STRICT SQLSTATE assertion (same rigor as H-0018): the hardened
+        // migration raises ERRCODE 'invalid_parameter_value' (22023) for
+        // the size ceiling. A NOT NULL / column-shrink regression would
+        // surface a DIFFERENT code (e.g. 22001 string_data_right_truncation
+        // or 23502), which must fail this test loudly rather than be
+        // masked by a loose substring match.
+        expect(error?.code).toBe("22023");
+        const msg = (error?.message ?? "").toLowerCase();
+        // Message must reference the ceiling so the size guard is the
+        // demonstrable cause, not an unrelated 22023.
+        expect(msg).toMatch(/32 ?kb|ceiling|exceeds|octet_length/);
+
+        // Defense-in-depth: confirm no audit_log row was written for the
+        // oversized attempt.
+        const { data: probe } = await admin
+          .from("audit_log")
+          .select("id")
+          .eq("action", `__audit_svc_oversize_${ts}`)
+          .limit(1);
+        expect(probe ?? []).toEqual([]);
       } finally {
         await cleanupLiveDbRow(admin, cleanup);
       }
