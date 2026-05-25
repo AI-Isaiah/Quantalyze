@@ -659,6 +659,48 @@ describe.each([
     expect(body).toEqual({ deleted: 2, orphaned_keys_revoked: 1 });
   });
 
+  it("H-1250: treats an api_keys DELETE error as non-fatal (swallow, continue)", async () => {
+    // route.ts:119-125 — `if (keyErr) { console.warn(...); continue; }`. The
+    // symmetric count-check error branch IS tested ("treats a count-check
+    // error as non-fatal") but the DELETE-error branch was not. A regression
+    // converting the `continue` to `return 500` (or flipping the polarity to
+    // `if (!keyErr) continue`) would silently break the whole cron with no
+    // test failure. Best-effort orphan sweep MUST NOT fail the whole cron:
+    // key-a's delete error is swallowed, key-b succeeds → revoked count = 1.
+    const drafts: DraftRow[] = [
+      { id: "draft-a", api_key_id: "key-a" },
+      { id: "draft-b", api_key_id: "key-b" },
+    ];
+    recorders.selectDraftsResponse = { data: drafts, error: null };
+    recorders.deleteDraftsResponse = { count: 2, error: null };
+    recorders.refCountByKey = {
+      "key-a": { count: 0, error: null },
+      "key-b": { count: 0, error: null },
+    };
+    recorders.deleteKeyByKey = {
+      "key-a": { error: { message: "fk violation" } },
+      "key-b": { error: null },
+    };
+
+    const handler = await getHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+
+    // The whole cron stays 200 (no fail-the-batch on a single orphan-key
+    // delete error) and only the succeeding key counts toward the total.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ deleted: 2, orphaned_keys_revoked: 1 });
+
+    // Both keys were attempted (key-a errored, key-b succeeded) — the loop
+    // did not abort after the first failure.
+    const apiKeyDeletes = recorders.deleteCalls.filter(
+      (c) => c.table === "api_keys",
+    );
+    expect(apiKeyDeletes).toHaveLength(2);
+  });
+
   it("falls back to draftIds.length when DELETE returns count=null", async () => {
     // PostgREST may return count:null on certain auth/RLS configurations
     // even when the delete succeeded. The route's `?? draftIds.length`

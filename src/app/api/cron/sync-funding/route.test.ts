@@ -231,4 +231,108 @@ describe.each([
     expect(Array.isArray(body.errors)).toBe(true);
     expect(body.errors[0]).toContain("strat-a");
   });
+
+  // --- H-1090: Promise.allSettled rejected branch (thrown RPC promise) -----
+  //
+  // route.ts:87-91 handles `result.status === "rejected"` — the RPC promise
+  // itself THREW (network blip), distinct from `result.value.error` (the RPC
+  // resolved with a Postgres error). The existing failure tests above only
+  // exercise the resolved-with-error path. This case forces the rpc mock to
+  // REJECT so the route's `result.reason instanceof Error ? ... : String(...)`
+  // message-extraction branch runs and the human-readable reason lands in
+  // errors[] for incident response. Without that branch a thrown rejection
+  // would be invisible to Vercel cron alerting.
+  it("H-1090: collects thrown promise rejections in the errors array", async () => {
+    const strategies = [{ id: "strat-a" }, { id: "strat-b" }];
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: () => ({
+          select: () => ({
+            eq: () => ({
+              in: () => Promise.resolve({ data: strategies, error: null }),
+            }),
+          }),
+        }),
+        // RPC promise itself rejects (e.g. fetch/network failure) — NOT a
+        // resolved {data:null, error} envelope.
+        rpc: vi.fn().mockImplementation(() =>
+          Promise.reject(new Error("network blip")),
+        ),
+      }),
+    }));
+    const handler = await getHandler(_verb);
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    // All N rejected → fail-loud 500 (G14-005), failed=2, and the reason
+    // string is preserved in errors[] (not swallowed / misformatted).
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.enqueued).toBe(0);
+    expect(body.failed).toBe(2);
+    expect(Array.isArray(body.errors)).toBe(true);
+    expect(body.errors[0]).toContain("network blip");
+    expect(body.errors[0]).toContain("strat-a");
+  });
+
+  // --- H-1092: is_active filter + PERP_EXCHANGES IN list + !inner join -----
+  //
+  // The handler pre-filters strategies via
+  //   .eq("api_keys.is_active", true).in("api_keys.exchange", [...PERP])
+  // on a `api_keys!inner(...)` join so revoked keys / unsupported exchanges
+  // never reach the per-row enqueue loop. Each spurious enqueue spends a
+  // compute job (billing-adjacent). The existing mocks ignore eq/in args, so
+  // a regression dropping the is_active filter or widening the IN list would
+  // pass silently. Capture the call args via mockReturnThis spies and assert
+  // the exact contract, including the !inner select string.
+  it("H-1092: asserts is_active filter, PERP_EXCHANGES IN list, and !inner join", async () => {
+    const selectSpy = vi.fn();
+    const eqSpy = vi.fn();
+    const inSpy = vi.fn();
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => {
+        const builder: Record<string, unknown> = {};
+        builder.select = (...args: unknown[]) => {
+          selectSpy(...args);
+          return builder;
+        };
+        builder.eq = (...args: unknown[]) => {
+          eqSpy(...args);
+          return builder;
+        };
+        builder.in = (...args: unknown[]) => {
+          inSpy(...args);
+          // Terminal call — resolve the query with an empty result so the
+          // handler exits early before the enqueue loop.
+          return Promise.resolve({ data: [], error: null });
+        };
+        return {
+          from: () => builder,
+          rpc: vi.fn(),
+        };
+      },
+    }));
+    const handler = await getHandler(_verb);
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    expect(res.status).toBe(200);
+
+    // is_active filter MUST be applied — dropping it would enqueue sync for
+    // revoked keys.
+    expect(eqSpy).toHaveBeenCalledWith("api_keys.is_active", true);
+
+    // IN list MUST cover the supported perp exchanges. Widening it to an
+    // unsupported exchange would crash the downstream worker.
+    expect(inSpy).toHaveBeenCalledWith(
+      "api_keys.exchange",
+      expect.arrayContaining(["binance", "okx", "bybit"]),
+    );
+
+    // The inner-join contract: a future drop of `!inner` (which would let
+    // strategies without an active perp key through) must fail this.
+    expect(selectSpy).toHaveBeenCalledTimes(1);
+    const selectArg = String(selectSpy.mock.calls[0][0]);
+    expect(selectArg).toContain("api_keys!inner");
+  });
 });
