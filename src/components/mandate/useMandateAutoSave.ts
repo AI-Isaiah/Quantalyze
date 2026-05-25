@@ -320,19 +320,17 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
       resolve();
       return;
     }
-    let timer: ReturnType<typeof setTimeout>;
-    const onAbort = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    timer = setTimeout(() => {
-      // Detach on the normal timer-fire path too: { once: true } only
-      // auto-removes the listener if `abort` actually fires, so without this
-      // each completed backoff/retry sleep would leak a no-op listener on the
-      // component-lifetime signal (accumulating across saves within a mount).
+    const onAbort = () => resolve();
+    setTimeout(() => {
+      // Normal timer-fire: detach the abort listener so it cannot accumulate on
+      // the component-lifetime signal across repeated backoff sleeps ({ once:
+      // true } only auto-removes it if `abort` actually fires).
       signal.removeEventListener("abort", onAbort);
       resolve();
     }, ms);
+    // On abort, onAbort resolves immediately — freeing the awaiting save() so its
+    // post-wait `signal.aborted` check returns — and { once: true } detaches the
+    // listener. The pending timer then fires harmlessly into the settled promise.
     signal.addEventListener("abort", onAbort, { once: true });
   });
 }
