@@ -461,6 +461,36 @@ def test_persist_column(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Regression: holding-based outcomes (strategy_id=NULL) must not crash the sort
+# ---------------------------------------------------------------------------
+
+
+def test_null_strategy_id_outcomes_excluded_no_typerror(monkeypatch):
+    """Regression (Sentry 122529822, /api/match/cron-recompute): bridge_outcomes
+    for holding-based voluntary actions carry strategy_id=NULL. Pre-fix these
+    reached ``sorted({o["strategy_id"] for o in outcomes})`` in
+    compute_adjusted_weights and raised
+    TypeError: '<' not supported between instances of 'str' and 'NoneType',
+    crashing the whole match cron (processed=0). _fetch_eligible_outcomes must
+    drop null-strategy outcomes — they are not attributable to any strategy's
+    score dimensions.
+    """
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    # One holding-based outcome (strategy_id=None) mixed with real-strategy rows.
+    allocated = [_make_outcome(strategy_id=None, delta_180d=0.05)] + [
+        _make_outcome(strategy_id=f"strat-{i}", delta_180d=0.05) for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(allocated_rows=allocated)
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    # Must not raise TypeError on the str-vs-None sort; returns a weights dict.
+    result = compute_adjusted_weights("alloc-null-strategy")
+    assert isinstance(result, dict)
+
+
+# ---------------------------------------------------------------------------
 # 04-01-09: Persist NULL on cold-start (zero eligible outcomes)
 # ---------------------------------------------------------------------------
 
