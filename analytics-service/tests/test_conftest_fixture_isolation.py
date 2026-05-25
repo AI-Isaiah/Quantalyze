@@ -47,14 +47,6 @@ def _fingerprint_after_seeded_normal(seed: int, *, loc: float, scale: float, n: 
     return _global_rng_fingerprint()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="H-0749: conftest.golden_returns calls np.random.seed(42) + "
-    "np.random.normal(...) on the PROCESS-GLOBAL RNG, so after the fixture is "
-    "consumed the global generator is pinned to seed-42's trajectory and bleeds "
-    "into downstream tests. Fix in conftest.py: rng = np.random.default_rng(42) "
-    "(a local Generator) leaves np.random untouched.",
-)
 def test_golden_returns_does_not_pin_global_rng_to_seed42(golden_returns):
     """After the fixture is injected, the global numpy RNG must NOT be sitting
     at the position that `np.random.seed(42); np.random.normal(...)` would leave
@@ -91,12 +83,6 @@ def test_golden_returns_does_not_pin_global_rng_to_seed42(golden_returns):
     assert seed42_head is not None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="H-0749: conftest.benchmark_returns calls np.random.seed(123) + "
-    "np.random.normal(...) on the process-global RNG. Fix in conftest.py: use a "
-    "local np.random.default_rng(123) Generator.",
-)
 def test_benchmark_returns_does_not_pin_global_rng_to_seed123(benchmark_returns):
     """Same isolation contract for benchmark_returns (seed 123)."""
     assert len(benchmark_returns) == 500  # touch the fixture
