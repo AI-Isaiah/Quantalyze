@@ -113,7 +113,7 @@ jobs:
             exit 1
           fi
 
-          ADDED_FILES=$(git diff --name-only --diff-filter=A "$BASE_SHA"..HEAD -- 'supabase/migrations/*.sql')
+          ADDED_FILES=$(git diff --name-only --diff-filter=A "$BASE_SHA"..HEAD -- 'supabase/migrations/*.sql' ':(exclude)supabase/migrations/down/**')
           if [ -z "$ADDED_FILES" ]; then
             echo "has_migrations=false" >> "$GITHUB_OUTPUT"
             echo "No newly-added migration files in this PR."
@@ -212,7 +212,7 @@ jobs:
           # No `|| true` — a git-diff failure must fail loud, not silently
           # masquerade as "no changes" and let the PR through. `set -euo
           # pipefail` (top of script) propagates the non-zero exit.
-          ADDED_FILES=$(git diff --name-only --diff-filter=A "$BASE_SHA"..HEAD -- 'supabase/migrations/*.sql')
+          ADDED_FILES=$(git diff --name-only --diff-filter=A "$BASE_SHA"..HEAD -- 'supabase/migrations/*.sql' ':(exclude)supabase/migrations/down/**')
 
           if [ -z "$ADDED_FILES" ]; then
             echo "No newly-added migration files in this PR. Migration policy OK."
