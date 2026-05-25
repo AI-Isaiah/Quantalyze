@@ -74,7 +74,17 @@ for name in _STUBS:
         continue
     sys.modules[name] = MagicMock()
 
-_real_slowapi_available = _importlib_util.find_spec("slowapi") is not None
+# Decide real-vs-stub WITHOUT calling find_spec() on the sys.modules slot.
+# Another test (e.g. test_portfolio_router_logic) may have inserted a bare
+# MagicMock for "slowapi" for isolation, and find_spec() on a spec-less mock
+# raises ValueError ("slowapi.__spec__ is not set"), which would abort
+# collection for the WHOLE run under any non-alphabetical ordering (sharding,
+# pytest-randomly, or a targeted two-file run).
+_slowapi_mod = sys.modules.get("slowapi")
+if _slowapi_mod is None:
+    _real_slowapi_available = _importlib_util.find_spec("slowapi") is not None
+else:
+    _real_slowapi_available = not isinstance(_slowapi_mod, MagicMock)
 if not _real_slowapi_available:
     sys.modules["slowapi"].Limiter = MagicMock(return_value=MagicMock())
     sys.modules["slowapi.util"].get_remote_address = MagicMock()
