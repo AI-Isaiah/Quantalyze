@@ -7,6 +7,10 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.24.8.2] - 2026-05-25
+
+**chore(phase-19): record `flag_flipped_at` so the hourly stability gate reads the real soak-start timestamp.** The Phase 19 unified-backbone kill-switch was flipped on at `2026-05-25T15:51:07Z`, starting the 168h production soak, but `.planning/phase-19/stability-log.md` still held the `TODO` placeholder for `flag_flipped_at`. The hourly `phase-19-stability.yml` CI gate (`scripts/verify-no-legacy-writes.sh`) reads that field to (a) start the window and (b) count post-flip writes to the legacy `verification_requests` table; with the placeholder unparsed it exits 6 (flag on but flip-time unrecorded) and false-alarms every hour. Recording the real ISO-8601 timestamp lets the gate compute the window and verify zero legacy writes. Docs/version only — no production code, migrations, or runtime behavior changed.
+
 ## [0.24.8.1] - 2026-05-25
 
 **fix(tests): repair commit_scenario_batch SQL tests + demo seed unmasked by the test-project schema catch-up.** When the test Supabase project was reconciled to the current migration set (parity with prod, 166 migrations), three SQL self-tests and the demo seed began failing — they had passed only because the test DB ran an older schema. `test_commit_scenario_batch_auth_input.sql`, `_p1956_range.sql`, and `_p1957_divested.sql` referenced the pre-hardening 2-arg `commit_scenario_batch(uuid, jsonb)` signature, but the function gained two defaulted `text` args (P1956/P1957 idempotency hardening) and only the 4-arg identity now exists — so `has_function_privilege` / `regprocedure` lookups errored "function does not exist". `scripts/seed-demo-data.ts` inserted a `match_decisions` row without `kind`, which is now NOT NULL with no default. Fixes update the three tests to the 4-arg signature and set `kind: "bridge_recommended"` (matching the row's `original_strategy_id` per the per-kind CHECK). The CI-skipped live-DB suite `scenario-commit-batch-tx.test.ts` was corrected for the same signature. No production code or migrations changed; verified against the live test project.
