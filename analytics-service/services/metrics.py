@@ -1338,8 +1338,9 @@ def _return_quantiles(
         q = weekly.quantile([0, 0.25, 0.5, 0.75, 1]).tolist()
         result["Weekly"] = [float(v) for v in q]
 
-    # Monthly — reuse caller's pre-computed series when available (NEW-C02-11)
-    # CR-I3: guard all-NaN windows with x.notna().any() (mirrors monthly_rets above).
+    # Monthly — reuse caller's pre-computed series when available (NEW-C02-11).
+    # The fallback path applies the same empty/all-NaN bucket filter as the
+    # caller-side computation (CR-I3 guard via x.notna().any()).
     if monthly_rets is None:
         monthly_rets = (
             returns.resample("ME")

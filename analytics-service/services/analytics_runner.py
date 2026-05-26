@@ -398,8 +398,10 @@ def _compute_position_side_volume_pcts(
         raw_cost = f.get("cost")
         try:
             parsed_cost = abs(float(raw_cost)) if raw_cost is not None else 0.0
-            cost = parsed_cost if math.isfinite(parsed_cost) else 0.0
-            if not math.isfinite(parsed_cost):
+            if math.isfinite(parsed_cost):
+                cost = parsed_cost
+            else:
+                cost = 0.0
                 cost_parse_failed += 1
         except (TypeError, ValueError):
             cost = 0.0
