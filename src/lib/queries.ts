@@ -1196,13 +1196,26 @@ export async function getAllocatorAggregates(userId: string) {
   if (!portfolios?.length) return { portfolios: [], analytics: [] };
 
   const portfolioIds = portfolios.map((p) => p.id);
-  const { data: analytics } = await supabase
+  // NEW-C03-11: collapse to latest analytics row per portfolio to avoid
+  // unbounded result sets when portfolio_analytics accumulates historical
+  // snapshots.  The .order+.limit bounds the DB scan; the Map dedup keeps
+  // only the freshest row per portfolio_id in application code.
+  const { data: analyticsRaw } = await supabase
     .from("portfolio_analytics")
     .select("*")
     .in("portfolio_id", portfolioIds)
-    .order("computed_at", { ascending: false });
+    .order("computed_at", { ascending: false })
+    .limit(portfolioIds.length * 10); // generous upper bound per portfolio
 
-  return { portfolios, analytics: (analytics ?? []) as PortfolioAnalytics[] };
+  // Deduplicate: first occurrence per portfolio_id is the latest (DESC order).
+  const seen = new Set<string>();
+  const analytics = (analyticsRaw ?? []).filter((row) => {
+    if (seen.has(row.portfolio_id)) return false;
+    seen.add(row.portfolio_id);
+    return true;
+  });
+
+  return { portfolios, analytics: analytics as PortfolioAnalytics[] };
 }
 
 // =========================================================================
@@ -2471,14 +2484,21 @@ export const getMyAllocationDashboard = cache(
     }
 
     // Step 2: parallel fetch everything. The admin client is used for
-    // portfolio_analytics and portfolio_strategies (daily_returns is
-    // column-level REVOKE'd from anon/authenticated per migration 010) and
-    // for the match_decisions read — that table does not have an allocator-
-    // self-SELECT RLS policy, so a user-scoped client returns 0 rows even for
-    // the allocator's own intros. The bridge_outcomes and bridge_outcome_dismissals
-    // fan-outs run through the user-scoped client because migration 059 gave
-    // each table an owner-select policy; RLS then enforces the allocator_id
-    // gate as defence-in-depth.
+    // portfolio_analytics and portfolio_strategies because these tables are
+    // owned by service_role with RLS policies that only grant SELECT to the
+    // owning user; the admin client bypasses RLS and an explicit
+    // .eq("portfolio_id", portfolio.id) ownership gate enforces tenancy.
+    // NOTE (NEW-C03-12): the prior comment claimed daily_returns was
+    // "column-level REVOKE'd from authenticated per migration 010" — no such
+    // REVOKE exists in any migration; that claim was stale. The admin-client
+    // usage here is justified solely by the RLS + ownership-gate pattern
+    // above, NOT by a column-level privilege restriction.
+    // The match_decisions read also uses the admin client because that table
+    // does not have an allocator-self-SELECT RLS policy, so a user-scoped
+    // client returns 0 rows even for the allocator's own intros. The
+    // bridge_outcomes and bridge_outcome_dismissals fan-outs run through the
+    // user-scoped client because migration 059 gave each table an owner-select
+    // policy; RLS then enforces the allocator_id gate as defence-in-depth.
     // NOTE: `apiKeys` is already fetched above in the Phase 07 parallel
     // round; we reuse that result here instead of firing a second
     // getUserApiKeys query. Destructure naming is preserved by
