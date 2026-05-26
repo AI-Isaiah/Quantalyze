@@ -1348,11 +1348,14 @@ export type SimulatorStatus =
  *                          (HHI = sum of squared weights; lower = more
  *                           diversified)
  */
+// NEW-C11-01: delta fields are nullable — null means the metric was not
+// computable for one of the operands (e.g. flat-returns leg → Sharpe=None).
+// Rendered as a distinct "not computable" state; never coerced to 0.
 export interface SimulatorDeltas {
-  sharpe_delta: number;
-  dd_delta: number;
-  corr_delta: number;
-  concentration_delta: number;
+  sharpe_delta: number | null;
+  dd_delta: number | null;
+  corr_delta: number | null;
+  concentration_delta: number | null;
 }
 
 export interface SimulatorMetricsSnapshot {

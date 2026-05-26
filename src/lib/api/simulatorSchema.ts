@@ -38,11 +38,16 @@ export const SimulatorMetricsSchema = z.object({
   concentration: z.number().nullable(),
 });
 
+// NEW-C11-01: deltas are nullable — a null means the operand metric was not
+// computable (e.g. flat-returns → Sharpe=None upstream). Nullable deltas
+// render as a distinct "— / not computable" state in the UI rather than a
+// confident "unchanged" neutral chip (±0.000), which was indistinguishable
+// from a real zero-impact result and could mislead allocation decisions.
 export const SimulatorDeltasSchema = z.object({
-  sharpe_delta: z.number(),
-  dd_delta: z.number(),
-  corr_delta: z.number(),
-  concentration_delta: z.number(),
+  sharpe_delta: z.number().nullable(),
+  dd_delta: z.number().nullable(),
+  corr_delta: z.number().nullable(),
+  concentration_delta: z.number().nullable(),
 });
 
 const EquityCurvePointSchema = z.object({
@@ -66,6 +71,11 @@ const SimulatorCommonShape = {
   current: SimulatorMetricsSchema,
 } as const;
 
+// NEW-C11-05: tighten the ok-branch to reject degenerate results that slip
+// through if producer drift allows status="ok" with overlap_days=0 or all-null
+// metrics. overlap_days < 30 on an ok row is incoherent (insufficient_data
+// should have fired). At least one proposed metric must be non-null — an ok
+// result with all nulls would render ±0 chips as a confident projection.
 const SimulatorOkBranch = z
   .object({
     status: z.literal("ok"),
@@ -75,7 +85,22 @@ const SimulatorOkBranch = z
     equity_curve_current: z.array(EquityCurvePointSchema),
     equity_curve_proposed: z.array(EquityCurvePointSchema),
   })
-  .passthrough();
+  .passthrough()
+  .refine((d) => d.overlap_days >= 30, {
+    message: "ok status requires overlap_days >= 30 (insufficient_data should have fired)",
+    path: ["overlap_days"],
+  })
+  .refine(
+    (d) =>
+      d.proposed.sharpe !== null ||
+      d.proposed.max_drawdown !== null ||
+      d.proposed.avg_correlation !== null ||
+      d.proposed.concentration !== null,
+    {
+      message: "ok status requires at least one non-null proposed metric",
+      path: ["proposed"],
+    },
+  );
 
 const SimulatorInsufficientDataBranch = z
   .object({
@@ -120,3 +145,26 @@ export type SimulatorResponse = z.infer<typeof SimulatorResponseSchema>;
  *  present. Narrow via `if (response.status === "ok")` before passing
  *  to components that read those fields. */
 export type SimulatorResponseOk = Extract<SimulatorResponse, { status: "ok" }>;
+
+/**
+ * NEW-C11-06: Single source of truth for delta field units.
+ *
+ * Without this map the unit decision ("ratio" vs "percent") lives in two
+ * independent tables: deltaChips() in PortfolioImpactPanel.tsx and
+ * buildDeltaAnnouncement(). If the producer changes dd_delta to emit
+ * already-in-percent (×100), only the chip table or the announcement gets
+ * updated — the other silently drifts. Co-locating with the schema means
+ * both consumers import the same map, so a drift is a compile-time gap.
+ *
+ * "ratio"   → render as-is (e.g. +0.150 for Sharpe)
+ * "percent" → field is a fraction; multiply ×100 when displaying (e.g. dd_delta)
+ */
+export const DELTA_UNITS: Record<
+  keyof z.infer<typeof SimulatorDeltasSchema>,
+  "ratio" | "percent"
+> = {
+  sharpe_delta: "ratio",
+  dd_delta: "percent",
+  corr_delta: "ratio",
+  concentration_delta: "ratio",
+};

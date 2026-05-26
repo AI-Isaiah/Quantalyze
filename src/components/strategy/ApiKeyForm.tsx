@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
@@ -38,6 +38,19 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
 
   const needsPassphrase = exchange === "okx";
 
+  // NEW-C29-03 / I1: zero out all plaintext credential fields on unmount,
+  // regardless of close path (Cancel button, modal X, Escape key). This bounds
+  // the in-memory lifetime of the plaintext to the time the modal is open.
+  // useState setters are stable references — no refs needed to reach them
+  // from the cleanup closure.
+  useEffect(() => {
+    return () => {
+      setApiKey("");
+      setApiSecret("");
+      setPassphrase("");
+    };
+  }, []);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     // NEW-C37-02: block Enter-key double-submit. `loading` is the
@@ -48,12 +61,13 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
     try {
       await onSubmit({ exchange, label, apiKey, apiSecret, passphrase });
     } finally {
-      // NEW-C37-06: scrub plaintext secrets from component state after the
-      // parent resolves, whether success or failure. On success the form
-      // unmounts shortly after (showForm → false), but on failure it stays
+      // NEW-C37-06 + NEW-C29-03: scrub plaintext secrets from component state
+      // after the parent resolves, whether success or failure. On success the
+      // form unmounts shortly after (showForm → false), but on failure it stays
       // mounted — leaving apiKey/apiSecret/passphrase in state indefinitely
-      // while the user reads the error message. Clear them here so the
-      // longest-lived in-memory plaintext copy is bounded to the call.
+      // while the user reads the error message. Together with the unmount
+      // cleanup and handleCancel scrub above, this bounds the longest-lived
+      // in-memory plaintext copy to the call.
       setApiKey("");
       setApiSecret("");
       setPassphrase("");

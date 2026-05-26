@@ -127,8 +127,14 @@ async function insertCorrelationMapping(
 /**
  * Low-level send primitive. Writes an audit row to `notification_dispatches`
  * (migration 018), calls Resend, and best-effort updates the row with the
- * outcome. Failures in either the audit write or the Resend call are
- * swallowed — the public `notify*` helpers should never crash their callers.
+ * outcome. By default all failures are swallowed — the public `notify*`
+ * helpers should never crash their callers.
+ *
+ * NEW-C33-01: pass `throwOnFailure: true` for the approve-route callers
+ * (notifyUserSignupApproved) that document "surfaces as a 500." Without this
+ * option send() can NEVER throw on delivery failure, so the approve route
+ * returns 200 even when the approval email permanently failed — the docstring
+ * claimed a 500 the implementation could not produce.
  *
  * The `notificationType` parameter is required so operators can filter the
  * audit trail by category (e.g., "manager_intro_request" vs "alert_digest").
@@ -144,8 +150,18 @@ async function send(
   html: string,
   notificationType: NotificationType,
   cc?: string | string[],
+  { throwOnFailure = false }: { throwOnFailure?: boolean } = {},
 ): Promise<void> {
-  if (!to) return;
+  if (!to) {
+    // H1 (red-team): honour throwOnFailure at the empty-recipient guard.
+    // Pre-fix: this returned void unconditionally regardless of throwOnFailure,
+    // silently violating the "throw on any delivery failure" contract for callers
+    // like the approve routes that pass throwOnFailure=true.
+    if (throwOnFailure) {
+      throw new Error("[email] Recipient address is empty — send failed");
+    }
+    return;
+  }
 
   // Audit-2026-05-07 P324: strip CR/LF/comma from the recipient before
   // either auditing or sending. A null result means the address can't
@@ -158,7 +174,62 @@ async function send(
       "[email] recipient rejected by sanitizeEmailRecipient (header-injection guard):",
       JSON.stringify(to),
     );
+    // SF-F2: honour throwOnFailure here too — a rejected address is a
+    // delivery failure from the caller's perspective. Without this, callers
+    // that pass throwOnFailure=true (e.g. approve routes) silently received
+    // a void return even when the address was malformed or injected, while
+    // believing the throw contract was in effect.
+    if (throwOnFailure) {
+      throw new Error(
+        `[email] Recipient address rejected by sanitization guard: ${JSON.stringify(to)}`,
+      );
+    }
     return;
+  }
+
+  // NEW-C33-02: apply the same header-injection guard to cc recipients.
+  // Previously cc was passed raw to Resend and stored verbatim in audit
+  // metadata — asymmetric with the rigorously-guarded `to`. One future
+  // user-controlled cc reintroduces the exact header-injection class
+  // the `to` guard eliminated. Normalize to an array, sanitize each
+  // element, drop any that fail (warn). If ALL cc addresses fail and
+  // throwOnFailure=true, abort the send entirely — otherwise continue
+  // sending to `to` without any cc.
+  let safeCC: string | string[] | undefined;
+  if (cc !== undefined) {
+    const ccArray = Array.isArray(cc) ? cc : [cc];
+    const sanitizedCC: string[] = [];
+    for (const addr of ccArray) {
+      const cleaned = sanitizeEmailRecipient(addr);
+      if (cleaned) {
+        sanitizedCC.push(cleaned);
+      } else {
+        console.warn(
+          "[email] cc recipient rejected by sanitizeEmailRecipient (header-injection guard):",
+          JSON.stringify(addr),
+        );
+      }
+    }
+    if (sanitizedCC.length === 0 && ccArray.length > 0) {
+      // H2 (red-team): the previous comment said "abort entirely if all fail"
+      // but the actual behaviour is "send without cc". Comment corrected to
+      // match implementation. throwOnFailure is honoured here: if all cc
+      // addresses are rejected AND the caller has opted into strict delivery
+      // semantics, treat it as a delivery failure (the intended cc audience
+      // will not receive the message).
+      if (throwOnFailure) {
+        throw new Error(
+          "[email] All cc recipients rejected by sanitization guard — send aborted",
+        );
+      }
+      console.warn("[email] all cc recipients rejected — sending without cc");
+    }
+    safeCC =
+      sanitizedCC.length === 0
+        ? undefined
+        : sanitizedCC.length === 1
+          ? sanitizedCC[0]
+          : sanitizedCC;
   }
 
   const admin = getAuditAdminClient();
@@ -168,7 +239,7 @@ async function send(
     recipient_email: safeTo,
     subject,
     status: "queued" as const,
-    metadata: cc ? { cc } : null,
+    metadata: safeCC ? { cc: safeCC } : null,
   };
 
   let dispatchId: string | undefined;
@@ -197,7 +268,21 @@ async function send(
 
   if (!resend) {
     console.warn("[email] Resend not configured — skipping send to", safeTo);
-    // Fire-and-forget: audit trail updates must never block the caller.
+    // SF-F9: on the throwOnFailure failure path the caller has opted into
+    // strict delivery semantics — await the audit update before throwing so
+    // the dispatch row reliably reflects 'failed' before the exception
+    // propagates. Without this, a void fire-and-forget leaves the row in
+    // 'queued' when the throw races ahead of the update, and operators
+    // querying queued+age>threshold find phantom rows that were never sent.
+    if (throwOnFailure) {
+      await markDispatch(admin, dispatchId, {
+        status: "failed",
+        error: "Resend not configured",
+      });
+      throw new Error("[email] Resend not configured — send failed");
+    }
+    // Fire-and-forget: on the non-throwing path, audit trail updates must
+    // never block the caller.
     void markDispatch(admin, dispatchId, {
       status: "failed",
       error: "Resend not configured",
@@ -225,7 +310,8 @@ async function send(
       const result = await resend.emails.send({
         from: FROM,
         to: safeTo,
-        cc,
+        // NEW-C33-02: use safeCC (sanitized) instead of raw cc.
+        cc: safeCC,
         subject,
         html,
         // Path A (Resend tag round-trip): the webhook handler reads
@@ -260,6 +346,20 @@ async function send(
 
   if (sendError) {
     console.error("[email] Failed to send after all retries:", subject, sendError);
+    // SF-F9: on the throwOnFailure path, await the dispatch update before
+    // throwing so the row reliably transitions to 'failed' before the
+    // exception propagates. See the same pattern in the !resend branch above.
+    if (throwOnFailure) {
+      await markDispatch(admin, dispatchId, {
+        status: "failed",
+        error: errorMessage(sendError),
+      });
+      // NEW-C33-01: surface the failure as a thrown error for callers that
+      // need a 500 when the email permanently fails (e.g. approve routes).
+      throw new Error(
+        `[email] Send failed after ${MAX_ATTEMPTS} attempts: ${errorMessage(sendError)}`,
+      );
+    }
     void markDispatch(admin, dispatchId, {
       status: "failed",
       error: errorMessage(sendError),
@@ -510,6 +610,12 @@ export async function notifyUserSignupApproved(
         };
     }
   })();
+  // NEW-C33-01: pass throwOnFailure=true so a Resend failure surfaces as a
+  // thrown error. The approve routes (allocator-approve / manager-approve)
+  // await this and return 500 on throw — matching the docstring contract.
+  // Previously send() could never throw, so the route returned 200 even when
+  // the approval email permanently failed (admin saw "approved", user never
+  // got the welcome email).
   await send(
     userEmail,
     safeSubject(`Welcome to ${PLATFORM_NAME} — your account is approved`),
@@ -519,6 +625,8 @@ export async function notifyUserSignupApproved(
      <p>If you weren't expecting this, you can safely ignore the email.</p>
      ${SIGNATURE}`,
     "signup_approved",
+    undefined,
+    { throwOnFailure: true },
   );
 }
 
