@@ -7,7 +7,7 @@ import { isValidPartnerTag } from "@/lib/partner";
 import { parseCsv, parseCsvWithSchema } from "@/lib/csv";
 import { ensureAuthUser } from "@/lib/supabase/admin-users";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
-import { capAuditMetadata, logAuditEvent } from "@/lib/audit";
+import { capAuditMetadata, emitAsUser } from "@/lib/audit";
 import {
   validateDisplayName,
   ProfileValidationError,
@@ -109,6 +109,24 @@ class StrategyTierConflictError extends Error {
 // misclassified as a header. The query parameter is now the single source
 // of truth; the parser never sniffs.
 
+// NEW-C28-01: ticket_size_usd invariants (mirrors validateSelfEditableInput in
+// preferences.ts:107-111). Reject rows outside [0, 1e9] at parse boundary.
+const MAX_TICKET_SIZE_USD = 1_000_000_000;
+
+// NEW-C28-02: mandate_archetype length cap (mirrors preferences.ts:105).
+const MAX_MANDATE_ARCHETYPE_CHARS = 500;
+
+// NEW-C28-03: strategy_name length cap (mirrors wizard 1-80 / csv-finalize >80).
+// We enforce the same upper bound here; the lower bound is handled by the
+// !row.strategy_name null-check below.
+const MAX_STRATEGY_NAME_CHARS = 80;
+
+// NEW-C28-04: row count cap to prevent unbounded GoTrue createUser fan-out.
+// 500 rows = ~100 managers × 5 strategies + 500 allocators, well above any
+// realistic single-partner onboarding. Protects against fat-finger paste and
+// deliberate resource exhaustion.
+const MAX_IMPORT_ROWS = 500;
+
 interface ManagerRow {
   manager_email: string;
   strategy_name: string;
@@ -150,6 +168,13 @@ function parseManagerRows(
     ["manager_email", "strategy_name", "disclosure_tier"],
     (row) => {
       if (!row.manager_email || !row.strategy_name) return null;
+      // NEW-C28-03: strategy_name length + control-char guard. Mirrors
+      // validateDisplayName's [\r\n\0] guard and the wizard's 1-80 cap.
+      // Reject (drop) rows with overlong names or embedded control chars
+      // so they surface in the raw-vs-parsed delta (H-0239), not silently
+      // persist as arbitrary-length / control-char-contaminated strings.
+      if (row.strategy_name.length > MAX_STRATEGY_NAME_CHARS) return null;
+      if (/[\r\n\0]/.test(row.strategy_name)) return null;
       const tier = row.disclosure_tier.toLowerCase();
       const disclosure_tier: DisclosureTier =
         tier === "institutional" ? "institutional" : "exploratory";
@@ -174,13 +199,24 @@ function parseAllocatorRows(
     ["allocator_email", "mandate_archetype", "ticket_size_usd"],
     (row) => {
       if (!row.allocator_email || !row.mandate_archetype) return null;
+      // NEW-C28-02: mandate_archetype length cap (mirrors preferences.ts:105).
+      // Reject rows with overlong mandate cells — they surface in the
+      // raw-vs-parsed delta (H-0239) rather than persisting a multi-KB blob.
+      const mandate = row.mandate_archetype.trim();
+      if (mandate.length === 0 || mandate.length > MAX_MANDATE_ARCHETYPE_CHARS) return null;
+      // NEW-C28-01: ticket_size_usd invariants (mirrors validateSelfEditableInput).
+      // sanitizeCsvValue keeps a leading '-', so raw negative values would land
+      // in allocator_preferences; reject rather than clamp (loud failure rule).
       const ticket_size_usd = Number.parseFloat(
         (row.ticket_size_usd || "0").replace(/[,_$]/g, ""),
       );
+      if (!Number.isFinite(ticket_size_usd)) return null;
+      if (ticket_size_usd < 0) return null;
+      if (ticket_size_usd > MAX_TICKET_SIZE_USD) return null;
       return {
         allocator_email: row.allocator_email,
-        mandate_archetype: row.mandate_archetype,
-        ticket_size_usd: Number.isFinite(ticket_size_usd) ? ticket_size_usd : 0,
+        mandate_archetype: mandate,
+        ticket_size_usd,
       };
     },
     hasHeader,
@@ -425,6 +461,26 @@ export async function POST(request: Request): Promise<NextResponse> {
   if (managers.length === 0 && allocators.length === 0) {
     return NextResponse.json(
       { error: "Both CSVs are empty — nothing to import" },
+      { status: 400 },
+    );
+  }
+
+  // NEW-C28-04 (red-team H conf=7): reject requests with too many rows BEFORE
+  // the import phases run. Each row fans out to admin.createUser + 2-3 DB
+  // writes; an unbounded CSV hammers the GoTrue limiter and pins the function.
+  // The adminActionLimiter caps requests/min but not rows-per-request.
+  // Enforce a hard ceiling here so a fat-finger paste or deliberate DoS cannot
+  // spawn unbounded GoTrue calls.
+  const totalRows = managers.length + allocators.length;
+  if (totalRows > MAX_IMPORT_ROWS) {
+    return NextResponse.json(
+      {
+        error: `Import exceeds the maximum of ${MAX_IMPORT_ROWS} rows (managers + allocators combined). Got ${totalRows}. Split into multiple requests.`,
+        code: "too_many_rows",
+        managers_rows: managers.length,
+        allocators_rows: allocators.length,
+        max_rows: MAX_IMPORT_ROWS,
+      },
       { status: 400 },
     );
   }
@@ -754,7 +810,17 @@ export async function POST(request: Request): Promise<NextResponse> {
       strategies_created > 0 ||
       allocators_created > 0;
     if (observedPartialCompletion) {
-      logAuditEvent(supabase, {
+      // NEW-C28-05 (red-team M conf=8): await the audit emit synchronously so
+      // a transient failure surfaces as 5xx rather than producing a completed
+      // import with no forensic anchor. The fire-and-forget wrappers
+      // (logAuditEvent / logAuditEventAsUser) schedule via after() — usable
+      // for read paths, but insufficient for a write-heavy admin import where
+      // the audit row IS the forensic anchor for "which admin imported partner
+      // X, how many rows". NEW-C28-06 (red-team L conf=9): use emitAsUser
+      // (the underlying async emitter) with the admin client so auth.uid()
+      // inside the log_audit_event RPC resolves to user.id correctly — the
+      // documented anti-pattern for service-role routes.
+      await emitAsUser(admin, user.id, {
         action: "admin.partner_import",
         entity_type: "partner_import",
         entity_id: importUuid,
@@ -867,7 +933,10 @@ export async function POST(request: Request): Promise<NextResponse> {
   // shared `buildPartnerImportMetadata` so the success-path surface stays
   // in lockstep with the catch-path surface. H-0239 (red-team c7) raw-
   // row count delta still rides through unchanged.
-  logAuditEvent(supabase, {
+  // NEW-C28-05 / NEW-C28-06: await emitAsUser directly (see catch-path comment
+  // above for rationale). For the success path, a failed audit emit surfaces
+  // as 5xx rather than silently producing a completed import with no record.
+  await emitAsUser(admin, user.id, {
     action: "admin.partner_import",
     entity_type: "partner_import",
     entity_id: importUuid,
