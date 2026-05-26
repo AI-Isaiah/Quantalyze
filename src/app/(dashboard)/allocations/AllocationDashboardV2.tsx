@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
@@ -13,6 +13,10 @@ import {
   FactsheetProvider,
 } from "@/app/factsheet/[id]/v2/factsheet-context";
 import { FactsheetBody } from "@/app/factsheet/[id]/v2/FactsheetView";
+import {
+  consumeDashboardRecoveryFlag,
+  type DashboardRecoveryReason,
+} from "./hooks/useDashboardConfig";
 
 /**
  * Overview = factsheet shell. Full-width blended equity curve mounted at
@@ -43,6 +47,16 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     apiKeys = [],
     allocator_id: allocatorId,
   } = props;
+
+  // NEW-C06-02: drain the one-shot recovery flag set by useDashboardConfigV2
+  // whenever a corrupt blob / version mismatch caused a layout reset. Display
+  // a non-blocking dismissible banner so the allocator knows their
+  // customizations were reset and why — previously this was invisible.
+  const [recoveryReason, setRecoveryReason] = useState<DashboardRecoveryReason | null>(null);
+  useEffect(() => {
+    const reason = consumeDashboardRecoveryFlag();
+    if (reason) setRecoveryReason(reason);
+  }, []);
 
   // Per-API-key include/exclude — display-time filter for Overview
   // aggregates. Excluded keys still ingest server-side (the toggle does
@@ -105,6 +119,37 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
 
   return (
     <div data-ui-v2-shell="true" className="relative">
+      {/* NEW-C06-02: one-shot recovery banner when useDashboardConfigV2 reset
+          the layout due to corruption / version mismatch. Dismissible and
+          non-blocking (the dashboard loads with defaults behind it). */}
+      {recoveryReason != null && (
+        <div
+          role="alert"
+          data-testid="dashboard-recovery-banner"
+          className="mb-3 flex items-center justify-between rounded-md border px-4 py-2 text-sm"
+          style={{
+            background: "color-mix(in srgb, var(--color-warning) 8%, transparent)",
+            borderColor: "color-mix(in srgb, var(--color-warning) 30%, transparent)",
+            color: "var(--color-text-secondary)",
+          }}
+        >
+          <span>
+            {recoveryReason === "version_reset"
+              ? "Your dashboard layout was reset after an app update. Widgets have been restored to defaults."
+              : recoveryReason === "legacy_in_v2_blob"
+              ? "Your saved layout used an older format and was reset to defaults."
+              : "Your dashboard layout could not be loaded and was reset to defaults."}
+          </span>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={() => setRecoveryReason(null)}
+            className="ml-4 shrink-0 text-text-muted hover:text-text-secondary"
+          >
+            ✕
+          </button>
+        </div>
+      )}
       {portfolio != null && <AlertBanner portfolioId={portfolio.id} />}
       <InsightStrip
         analytics={analytics}
