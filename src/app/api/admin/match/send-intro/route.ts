@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
-import { logAuditEventAsUser } from "@/lib/audit";
+import { logAuditEventAsUser, emitAsUser } from "@/lib/audit";
 import {
   adminActionLimiter,
   checkLimit,
@@ -391,8 +391,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         "[api/admin/match/send-intro] strategy lookup failed:",
         strategyLookupErr,
       );
+      // silent-failure-hunter HIGH (review Finding 7): this gate guards an
+      // irreversible PII disclosure path. A DB error here is high-severity and
+      // warrants on-call visibility — not just a console.error. Add Sentry.
+      // silent-failure-hunter MEDIUM (review Finding 11): add stable code field
+      // so the admin UI and log correlation can distinguish this 500 from others.
+      captureToSentry(
+        new Error(`[api/admin/match/send-intro] strategy lookup failed: ${strategyLookupErr.message}`),
+        {
+          tags: { area: "send-intro", gate: "strategy_validation" },
+          extra: { strategy_id: body.strategy_id, code: strategyLookupErr.code },
+          level: "error",
+        },
+      );
       return NextResponse.json(
-        { error: "Failed to verify strategy" },
+        { error: "Failed to verify strategy", code: "strategy_lookup_failed" },
         { status: 500 },
       );
     }
@@ -473,57 +486,82 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const wasAlreadySent = row?.was_already_sent ?? false;
 
   // P692 audit-coverage extension (2026-05-13): admin issuing an intro
-  // decision is a high-signal user-attributable action. Use
-  // logAuditEventAsUser because the route operates with the
-  // service-role admin client but has already validated the acting
-  // admin's JWT (isAdminUser check above). entity_id pins to the
-  // contact_request row created by the RPC.
+  // decision is a high-signal user-attributable action. Use emitAsUser
+  // (awaited, not fire-and-forget) because the route operates with the
+  // service-role admin client but has already validated the acting admin's JWT.
+  // entity_id pins to the contact_request row created by the RPC.
   //
-  // NEW-C34-03 (red-team M conf=8): when was_already_sent=true the RPC
-  // returned the EXISTING row; no new note was applied and no new email was
-  // sent. Logging "intro.send" for a no-op fabricates a fresh-send audit
-  // record — audit_log accumulates multiple intro.send rows for one real
-  // intro and a corrected note is silently dropped. Emit the distinct
-  // "intro.resend_noop" action so forensics can distinguish first-send from
-  // re-send attempts, and surface note_applied:false to the response so the
-  // admin UI can warn that the note was not applied.
+  // silent-failure-hunter HIGH (review Finding 8): intro.send and intro.resend_noop
+  // are PII-disclosing, irreversible, legally-attributable actions. A fire-and-
+  // forget after() audit emit that silently drops means there is no forensic record
+  // that an intro was sent — compliance and forensic investigations cannot be
+  // answered from the audit log. Replace logAuditEventAsUser (fire-and-forget) with
+  // awaited emitAsUser in a try/catch: on failure, return 207 with a warning so the
+  // admin knows the intro committed but the audit record could not be written.
+  //
+  // NEW-C34-03 (red-team M conf=8): when was_already_sent=true the RPC returned
+  // the EXISTING row; no new note was applied and no new email was sent. Emit the
+  // distinct "intro.resend_noop" action so forensics can distinguish first-send
+  // from re-send attempts, and surface note_applied:false to the response.
   if (row?.contact_request_id && user?.id) {
-    if (wasAlreadySent) {
-      logAuditEventAsUser(admin, user.id, {
-        action: "intro.resend_noop",
-        entity_type: "contact_request",
-        entity_id: row.contact_request_id,
-        metadata: {
-          path: "admin",
-          allocator_id: body.allocator_id,
-          strategy_id: body.strategy_id,
-          original_strategy_id: body.original_strategy_id,
-          candidate_id: body.candidate_id,
-          note_applied: false,
-          admin_note_length: body.admin_note.length,
+    const auditEvent = wasAlreadySent
+      ? {
+          action: "intro.resend_noop" as const,
+          entity_type: "contact_request" as const,
+          entity_id: row.contact_request_id as string,
+          metadata: {
+            path: "admin",
+            allocator_id: body.allocator_id,
+            strategy_id: body.strategy_id,
+            original_strategy_id: body.original_strategy_id,
+            candidate_id: body.candidate_id,
+            note_applied: false,
+            admin_note_length: body.admin_note.length,
+          },
+        }
+      : {
+          action: "intro.send" as const,
+          entity_type: "contact_request" as const,
+          entity_id: row.contact_request_id as string,
+          metadata: {
+            path: "admin",
+            allocator_id: body.allocator_id,
+            strategy_id: body.strategy_id,
+            original_strategy_id: body.original_strategy_id,
+            candidate_id: body.candidate_id,
+            was_already_sent: false,
+            match_decision_id: row?.match_decision_id ?? null,
+            // admin_note is bounded by ADMIN_NOTE_MAX above; we record only
+            // the length, not the content, so the audit row stays small AND
+            // doesn't store free-text the founder hasn't approved for the
+            // audit trail. Length lets forensics correlate "intro sent with
+            // an unusually long note" without re-reading the body.
+            admin_note_length: body.admin_note.length,
+          },
+        };
+    try {
+      await emitAsUser(admin, user.id, auditEvent);
+    } catch (auditErr) {
+      console.error("[api/admin/match/send-intro] intro audit emit failed:", auditErr);
+      captureToSentry(
+        new Error(`[api/admin/match/send-intro] intro audit emit failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`),
+        {
+          tags: { area: "send-intro", action: wasAlreadySent ? "intro.resend_noop" : "intro.send" },
+          extra: { strategy_id: body.strategy_id, allocator_id: body.allocator_id },
+          level: "error",
         },
-      });
-    } else {
-      logAuditEventAsUser(admin, user.id, {
-        action: "intro.send",
-        entity_type: "contact_request",
-        entity_id: row.contact_request_id,
-        metadata: {
-          path: "admin",
-          allocator_id: body.allocator_id,
-          strategy_id: body.strategy_id,
-          original_strategy_id: body.original_strategy_id,
-          candidate_id: body.candidate_id,
-          was_already_sent: false,
+      );
+      return NextResponse.json(
+        {
+          success: !wasAlreadySent,
+          was_already_sent: wasAlreadySent,
+          contact_request_id: row.contact_request_id,
           match_decision_id: row?.match_decision_id ?? null,
-          // admin_note is bounded by ADMIN_NOTE_MAX above; we record only
-          // the length, not the content, so the audit row stays small AND
-          // doesn't store free-text the founder hasn't approved for the
-          // audit trail. Length lets forensics correlate "intro sent with
-          // an unusually long note" without re-reading the body.
-          admin_note_length: body.admin_note.length,
+          note_applied: !wasAlreadySent,
+          audit_warning: "Intro committed but the audit record could not be written. Contact support.",
         },
-      });
+        { status: 207 },
+      );
     }
   }
 

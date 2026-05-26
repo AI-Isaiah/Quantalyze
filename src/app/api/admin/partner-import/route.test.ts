@@ -141,6 +141,14 @@ vi.mock("@/lib/csrf", () => ({
 vi.mock("@/lib/ratelimit", () => ({
   adminActionLimiter: {},
   checkLimit: async () => STATE.checkLimitResult,
+  // silent-failure-hunter HIGH fix (Finding 6): the route now calls
+  // isRateLimitMisconfigured to distinguish 503 (Upstash outage) from
+  // 429 (quota exhaustion). Expose it in the mock — returns true only
+  // when reason='ratelimit_misconfigured', mirroring the real implementation.
+  isRateLimitMisconfigured: (
+    rl: { success: boolean; reason?: string },
+  ): boolean =>
+    rl.success === false && rl.reason === "ratelimit_misconfigured",
 }));
 
 vi.mock("@/lib/supabase/admin-users", () => ({

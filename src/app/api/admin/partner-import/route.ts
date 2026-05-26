@@ -6,7 +6,7 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { isValidPartnerTag } from "@/lib/partner";
 import { parseCsv, parseCsvWithSchema } from "@/lib/csv";
 import { ensureAuthUser } from "@/lib/supabase/admin-users";
-import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { adminActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { capAuditMetadata, emitAsUser } from "@/lib/audit";
 import {
   validateDisplayName,
@@ -367,7 +367,15 @@ export async function POST(request: Request): Promise<NextResponse> {
   if (csrfError) return csrfError;
 
   const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  // silent-failure-hunter HIGH (review Finding 3): destructure the error field
+  // so a Supabase network error / JWT failure surfaces as 500, not a silent
+  // 401 indistinguishable from "user not logged in". Without this, an auth
+  // infrastructure outage is invisible in logs and Sentry.
+  const { data: { user }, error: getUserErr } = await supabase.auth.getUser();
+  if (getUserErr) {
+    console.error("[api/admin/partner-import] auth.getUser failed:", getUserErr);
+    return NextResponse.json({ error: "Authentication check failed" }, { status: 500 });
+  }
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -376,8 +384,17 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const rl = await checkLimit(adminActionLimiter, `partner-import:${user!.id}`);
+  const rl = await checkLimit(adminActionLimiter, `partner-import:${user.id}`);
   if (!rl.success) {
+    // silent-failure-hunter HIGH (review Finding 6): mirror the roles route —
+    // distinguish Upstash misconfiguration (503) from genuine quota exhaustion
+    // (429) so an Upstash outage isn't silently collapsed into normal throttling.
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Rate limiter unavailable", code: "ratelimit_misconfigured" },
+        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+      );
+    }
     return NextResponse.json(
       { error: "Too many requests" },
       { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
@@ -820,24 +837,35 @@ export async function POST(request: Request): Promise<NextResponse> {
       // (the underlying async emitter) with the admin client so auth.uid()
       // inside the log_audit_event RPC resolves to user.id correctly — the
       // documented anti-pattern for service-role routes.
-      await emitAsUser(admin, user.id, {
-        action: "admin.partner_import",
-        entity_type: "partner_import",
-        entity_id: importUuid,
-        metadata: capAuditMetadata(
-          buildPartnerImportMetadata({
-            partner_tag,
-            managers_created,
-            strategies_created,
-            strategies_skipped_existing,
-            allocators_created,
-            managers_rows_skipped: managersRowsSkipped,
-            allocators_rows_skipped: allocatorsRowsSkipped,
-            partial_completion: true,
-            error_message: errorMessage,
-          }),
-        ),
-      });
+      // silent-failure-hunter HIGH (review Findings 4 + IMPORTANT-1):
+      // emitAsUser re-throws on permission_denied and unknown RPC errors.
+      // A bare await here lets that throw propagate out of the catch block,
+      // losing the original err context and all partial-completion counters.
+      // Wrap in try/catch — audit failure is non-fatal on the error path;
+      // the structured 500 response below is more important than an audit row.
+      try {
+        await emitAsUser(admin, user.id, {
+          action: "admin.partner_import",
+          entity_type: "partner_import",
+          entity_id: importUuid,
+          metadata: capAuditMetadata(
+            buildPartnerImportMetadata({
+              partner_tag,
+              managers_created,
+              strategies_created,
+              strategies_skipped_existing,
+              allocators_created,
+              managers_rows_skipped: managersRowsSkipped,
+              allocators_rows_skipped: allocatorsRowsSkipped,
+              partial_completion: true,
+              error_message: errorMessage,
+            }),
+          ),
+        });
+      } catch (auditErr) {
+        console.error("[api/admin/partner-import] partial-completion audit emit failed (non-fatal):", auditErr);
+        // Do NOT rethrow — continue with the original error path below.
+      }
     }
 
     // Audit-2026-05-07 red-team R-0003 (HIGH c7): PartnerTagConflictError
@@ -936,23 +964,44 @@ export async function POST(request: Request): Promise<NextResponse> {
   // NEW-C28-05 / NEW-C28-06: await emitAsUser directly (see catch-path comment
   // above for rationale). For the success path, a failed audit emit surfaces
   // as 5xx rather than silently producing a completed import with no record.
-  await emitAsUser(admin, user.id, {
-    action: "admin.partner_import",
-    entity_type: "partner_import",
-    entity_id: importUuid,
-    metadata: capAuditMetadata(
-      buildPartnerImportMetadata({
-        partner_tag,
-        managers_created,
-        strategies_created,
-        strategies_skipped_existing,
-        allocators_created,
-        managers_rows_skipped: managersRowsSkipped,
-        allocators_rows_skipped: allocatorsRowsSkipped,
-        partial_completion: false,
-      }),
-    ),
-  });
+  //
+  // silent-failure-hunter HIGH (review Finding 5): wrap in try/catch so that
+  // when emitAsUser throws (permission_denied / unknown RPC error) the caller
+  // still learns the import SUCCEEDED with all its counters. Without this, a
+  // transient audit RPC failure after a fully-committed import returns a bare
+  // 500 — the operator cannot tell whether the import committed and risks
+  // re-running it (creating duplicate auth users).
+  try {
+    await emitAsUser(admin, user.id, {
+      action: "admin.partner_import",
+      entity_type: "partner_import",
+      entity_id: importUuid,
+      metadata: capAuditMetadata(
+        buildPartnerImportMetadata({
+          partner_tag,
+          managers_created,
+          strategies_created,
+          strategies_skipped_existing,
+          allocators_created,
+          managers_rows_skipped: managersRowsSkipped,
+          allocators_rows_skipped: allocatorsRowsSkipped,
+          partial_completion: false,
+        }),
+      ),
+    });
+  } catch (auditErr) {
+    console.error("[api/admin/partner-import] success-path audit emit failed:", auditErr);
+    return NextResponse.json({
+      managers_created,
+      strategies_created,
+      strategies_skipped_existing,
+      allocators_created,
+      managers_rows_skipped: managersRowsSkipped,
+      allocators_rows_skipped: allocatorsRowsSkipped,
+      partial_completion: false,
+      audit_warning: "Import succeeded but the audit record could not be written. Contact support.",
+    }, { status: 207 });
+  }
 
   return NextResponse.json({
     managers_created,

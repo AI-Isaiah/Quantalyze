@@ -152,6 +152,19 @@ vi.mock("@/lib/audit", () => ({
   ) => {
     auditCalls.push({ userId, event });
   },
+  // silent-failure-hunter HIGH fix (Finding 8): the route now uses
+  // awaited emitAsUser for intro.send / intro.resend_noop instead of
+  // the fire-and-forget logAuditEventAsUser. Expose emitAsUser in the
+  // mock so the route can call it without throwing "no emitAsUser export".
+  // Capture calls in the same auditCalls array so existing audit-
+  // assertion tests can observe both paths with a single check.
+  emitAsUser: async (
+    _client: unknown,
+    userId: string,
+    event: unknown,
+  ) => {
+    auditCalls.push({ userId, event });
+  },
 }));
 
 vi.mock("@/lib/email", () => ({

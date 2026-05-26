@@ -138,15 +138,19 @@ vi.mock("@/lib/supabase/admin", () => ({
           //       `.select("user_id",{count:"exact",head:true}).eq("role","admin").neq("user_id",X)`
           //       (awaited directly — data is array whose .length = survivor count).
           select: (_cols: string, opts?: { count?: string; head?: boolean }) => {
-            // Shape (3): head-only count for surviving role admins
+            // Shape (3): head-only count for surviving role admins.
+            // Supabase head:true → data=null, count in the `count` field.
+            // Pre-fix the mock returned { data: Array.from({length:N}) } which
+            // masked the CRITICAL-1 bug (route used data?.length, always 0 for
+            // real HEAD responses). Fixed mock returns { count: N, data: null }.
             if (opts?.head) {
-              const countArr = adminMockState.lastAdminCountError
+              const countVal = adminMockState.lastAdminCountError
                 ? null
-                : Array.from({ length: adminMockState.survivingRoleAdmins });
+                : adminMockState.survivingRoleAdmins;
               const countErr = adminMockState.lastAdminCountError ?? null;
               return {
                 eq: () => ({
-                  neq: async () => ({ data: countArr, error: countErr }),
+                  neq: async () => ({ data: null, count: countVal, error: countErr }),
                 }),
               };
             }
@@ -190,18 +194,19 @@ vi.mock("@/lib/supabase/admin", () => ({
           //       → awaited directly as { data, error } (head:true → data=null, count in .length)
           // We inspect the first argument to select() to distinguish (A)/(B) from (C).
           select: (cols: string, opts?: { count?: string; head?: boolean }) => {
-            // Shape (C): head-only count query
+            // Shape (C): head-only count query.
+            // Supabase head:true → data=null, count in the `count` field.
+            // Pre-fix the mock returned { data: Array.from({length:N}) } which
+            // masked the CRITICAL-1 bug (route used data?.length, always 0 for
+            // real HEAD responses). Fixed mock returns { count: N, data: null }.
             if (opts?.head) {
-              // Simulates { data: null, error } for head:true queries;
-              // `.length` on data is used by the route (data?.length ?? 0).
-              // We return an array whose length reflects the surviving count.
-              const countArr = adminMockState.lastAdminCountError
+              const countVal = adminMockState.lastAdminCountError
                 ? null
-                : Array.from({ length: adminMockState.survivingProfileAdmins });
+                : adminMockState.survivingProfileAdmins;
               const countErr = adminMockState.lastAdminCountError ?? null;
               return {
                 eq: () => ({
-                  neq: async () => ({ data: countArr, error: countErr }),
+                  neq: async () => ({ data: null, count: countVal, error: countErr }),
                 }),
               };
             }

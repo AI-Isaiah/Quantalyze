@@ -358,8 +358,22 @@ export const POST = withRole<{ id: string }>("admin")(
     // invalidation or role revocation that happened since the initial
     // getUser() is observable. The service-role admin client bypasses all
     // RLS; a just-demoted admin must NOT reach it.
+    //
+    // silent-failure-hunter CRITICAL (review): createClient() must be wrapped
+    // in try/catch that FAILS CLOSED — a network blip, missing env var, or
+    // cookies() failure would throw and skip the re-check entirely, allowing
+    // a just-demoted admin to reach the service-role mutation unchecked.
     {
-      const freshClient = await createClient();
+      let freshClient: Awaited<ReturnType<typeof createClient>>;
+      try {
+        freshClient = await createClient();
+      } catch (err) {
+        console.error("[admin/users/roles] TOCTOU createClient failed:", err);
+        return NextResponse.json(
+          { error: "Authorization re-check unavailable", code: "toctou_check_failed" },
+          { status: 500 },
+        );
+      }
       const toctouGuard = await requireAdmin(freshClient, user, req);
       if (toctouGuard) return toctouGuard;
     }
@@ -728,19 +742,28 @@ export const POST = withRole<{ id: string }>("admin")(
       // audit-2026-05-17 backlog); the guard here closes the immediate
       // foot-gun within acceptable TOCTOU tolerance (admin-facing, low
       // concurrency).
-      const [{ data: profileAdmins, error: profileAdminErr }, { data: roleAdmins, error: roleAdminErr }] =
-        await Promise.all([
-          admin
-            .from("profiles")
-            .select("id", { count: "exact", head: true })
-            .eq("is_admin", true)
-            .neq("id", targetUserId),
-          admin
-            .from("user_app_roles")
-            .select("user_id", { count: "exact", head: true })
-            .eq("role", "admin")
-            .neq("user_id", targetUserId),
-        ]);
+      // code-reviewer CRITICAL / silent-failure-hunter CRITICAL (review):
+      // { count: "exact", head: true } issues a HEAD request — the PostgREST
+      // client returns data=null for every HEAD response; the row count is
+      // in the `count` field, NOT data.length. Using data?.length always
+      // evaluates to undefined (nullish → 0), so survivingAdminCount was
+      // always 0, permanently triggering the 409 for every admin revoke.
+      // Fix: destructure `count` from each result, not `data`.
+      const [
+        { count: profileAdminCount, error: profileAdminErr },
+        { count: roleAdminCount, error: roleAdminErr },
+      ] = await Promise.all([
+        admin
+          .from("profiles")
+          .select("id", { count: "exact", head: true })
+          .eq("is_admin", true)
+          .neq("id", targetUserId),
+        admin
+          .from("user_app_roles")
+          .select("user_id", { count: "exact", head: true })
+          .eq("role", "admin")
+          .neq("user_id", targetUserId),
+      ]);
       if (profileAdminErr || roleAdminErr) {
         const err = profileAdminErr ?? roleAdminErr;
         console.error(
@@ -760,7 +783,7 @@ export const POST = withRole<{ id: string }>("admin")(
       // reports > 0 survivors, the revoke is safe.  If both report 0 we
       // refuse.  This may over-count (false "safe") but NEVER under-count
       // (false "orphan"), which is the correct safety direction.
-      const survivingAdminCount = (profileAdmins?.length ?? 0) + (roleAdmins?.length ?? 0);
+      const survivingAdminCount = (profileAdminCount ?? 0) + (roleAdminCount ?? 0);
       if (survivingAdminCount === 0) {
         return NextResponse.json(
           {
