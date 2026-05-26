@@ -387,8 +387,15 @@ def _resolve_perp_amt_base(
         # contract spec from SHIB ctVal=1000000 to BTC ctVal=0.01).
         # Sizes outside this range are likely contract-count errors —
         # skip with a DQ flag rather than corrupting the replay state.
-        _AMT_FROM_COST_MAX = 1e4
-        _AMT_FROM_COST_MIN = 1e-4
+        # red-team/H-1 (NEW-C01-13 fix): the original bound 1e4 was too tight.
+        # For high-ctVal memecoins (OKX SHIB ctVal=1,000,000, PEPE ctVal≈50M),
+        # cost/price = notional/price can easily exceed 1e4.  Example: SHIB at
+        # $0.00001, cost=$10 → amt_from_cost = 1,000,000 >> 1e4 → fill dropped.
+        # Raise the upper bound to 1e9 (1 billion base units), which covers the
+        # full OKX memecoin ctVal range while still rejecting obviously garbage
+        # values (e.g., a malformed cost field producing 1e15 units).
+        _AMT_FROM_COST_MAX = 1e9
+        _AMT_FROM_COST_MIN = 1e-9
         if not (_AMT_FROM_COST_MIN <= amt_from_cost <= _AMT_FROM_COST_MAX):
             # NEW-C01-13: amt_from_cost out of plausible range — skip and
             # log. DQ flag is propagated via caller's unknown_perp_symbols

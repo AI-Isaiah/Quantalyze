@@ -1178,29 +1178,61 @@ def test_c01_12_canonical_key_reconstruct_vs_refresh_agree_for_usde():
 
 
 def test_c01_13_implausible_size_rejected():
-    """NEW-C01-13: _resolve_perp_amt_base must return (0.0, FALLBACK_AMOUNT)
-    when amt_from_cost falls outside [1e-4, 1e4] — e.g. a hostile cost field
-    inflating an OKX SWAP fill by 100×.
+    """NEW-C01-13 + red-team/H-1: _resolve_perp_amt_base must return
+    (0.0, FALLBACK_AMOUNT) when amt_from_cost falls outside [1e-9, 1e9].
+
+    The bound was raised from 1e4 to 1e9 to accommodate high-ctVal memecoins
+    (OKX SHIB ctVal=1,000,000 → amt_from_cost ≈ 1e6 for a typical trade).
+    The test uses a value > 1e9 to exercise the rejection path.
     """
     from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
 
-    # Simulates an unknown perp (not in ctVal table) with implausible size.
-    # price=40000, cost=8_000_000_000 → amt_from_cost = 2e5 — way above 1e4
+    # Simulates an unknown perp with a garbage cost field producing > 1e9 units.
+    # price=1.0, cost=1e12 → amt_from_cost = 1e12 — above the 1e9 upper bound.
     result_amt, result_src, _ = _resolve_perp_amt_base(
         raw_symbol="NEWCOIN/USDT:USDT",
-        amount=200000.0,     # contracts — impossible for any known crypto perp
-        price=40000.0,
-        cost=8_000_000_000.0,  # 200000 contracts × 40000
+        amount=1e12,
+        price=1.0,
+        cost=1e12,
         inst_type="SWAP",
         venue="okx",
     )
-    # Symbol is not in OKX_PERP_CONTRACT_SIZE, so it falls through to the
-    # plausibility check. amt_from_cost = 8e9/40000 = 2e5 >> 1e4 → rejected.
+    # amt_from_cost = 1e12 / 1.0 = 1e12 >> 1e9 → rejected.
     assert result_amt == 0.0, (
         f"NEW-C01-13: implausible amt_from_cost should yield 0.0, got {result_amt}"
     )
     assert result_src == _PerpAmtSource.FALLBACK_AMOUNT, (
         f"NEW-C01-13: source should be FALLBACK_AMOUNT, got {result_src}"
+    )
+
+
+def test_c01_13_shib_ctval_passes_through():
+    """red-team/H-1: SHIB-scale amt_from_cost must NOT be rejected.
+
+    OKX SHIB-USDT-SWAP has ctVal=1,000,000. For a typical SHIB trade:
+    cost=$10, price=$0.00001 → amt_from_cost = 1,000,000. With the old
+    bound of 1e4 this was rejected, silently dropping all SHIB fills.
+    With the corrected bound of 1e9 it passes through.
+    """
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
+
+    # SHIB unknown perp (not in OKX_PERP_CONTRACT_SIZE): ctVal=1e6, price=1e-5
+    # cost=10 → amt_from_cost = 10 / 1e-5 = 1,000,000 (within [1e-9, 1e9])
+    result_amt, result_src, _ = _resolve_perp_amt_base(
+        raw_symbol="SHIB/USDT:USDT",
+        amount=1_000_000.0,
+        price=0.00001,
+        cost=10.0,
+        inst_type="SWAP",
+        venue="okx",
+    )
+    # Must NOT return FALLBACK_AMOUNT — fill should be accepted.
+    assert result_src != _PerpAmtSource.FALLBACK_AMOUNT, (
+        "red-team/H-1: SHIB amt_from_cost=1e6 must not be rejected "
+        "(old 1e4 bound silently dropped all SHIB fills)"
+    )
+    assert result_amt > 0.0, (
+        f"red-team/H-1: SHIB fill must produce positive amt_base, got {result_amt}"
     )
 
 
