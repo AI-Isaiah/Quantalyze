@@ -2834,8 +2834,14 @@ async def test_v0_15_4_2_anchor_offsets_reconstructed_series_to_exchange_balance
     monkeypatch,
 ):
     """The replay produces last-day value = -2,000 (phantom negative from
-    the genesis-cash hole). Exchange reports $195,493 today. The anchor
-    must lift every row by ~$197,493 so the final row matches.
+    the genesis-cash hole). Exchange reports $195,493 (USDT balance) today.
+    The anchor must lift every row by ~$197,493 so the final row matches
+    the balance total.
+
+    NEW-C01-05: venue is OKX (unified-margin). fetch_balance['total'] already
+    includes unrealised perp PnL, so unrealizedPnl from fetch_positions must
+    NOT be added to the anchor — that would double-count the perp mark-to-
+    market and corrupt the anchor offset for every OKX reconstruction.
     """
     from services.equity_reconstruction import _fetch_and_price_window
 
@@ -2891,11 +2897,24 @@ async def test_v0_15_4_2_anchor_offsets_reconstructed_series_to_exchange_balance
         date(2026, 4, 22), date(2026, 4, 24),
     )
 
-    # Exchange total = 195,493.36 (USDT spot) + 123.45 (perp uPnL) = 195,616.81.
-    # Last row pre-anchor = -2,000. Offset = 195,616.81 - (-2,000) = 197,616.81.
-    expected_anchor = 195_493.36 + 123.45
+    # NEW-C01-05: OKX is a unified-margin venue — fetch_balance['total']
+    # already marks all open perp positions to market (uPnL included).
+    # Adding unrealizedPnl from fetch_positions on top would double-count
+    # the uPnL and lift the entire reconstructed curve by 123.45 via the
+    # anchor offset. The correct anchor is the balance total alone.
+    #
+    # Last row pre-anchor = -2,000.
+    # Correct anchor   = 195,493.36 (USDT balance only, uPnL not additive).
+    # Correct offset   = 195,493.36 - (-2,000) = 197,493.36.
+    # Correct last row = 195,493.36.
+    #
+    # The WRONG (pre-C01-05) anchor would have been:
+    #   195,493.36 + 123.45 = 195,616.81 — a double-count of the perp uPnL
+    #   already embedded in the OKX unified balance.
+    expected_anchor = 195_493.36  # USDT balance; uPnL NOT additive on OKX
     assert rows[-1]["value_usd"] == pytest.approx(expected_anchor, abs=0.05), (
-        f"Anchor must land the last row on exchange-reported equity. "
+        f"OKX anchor must equal fetch_balance total without adding uPnL "
+        f"(unified-margin venue — uPnL already in balance). "
         f"Got {rows[-1]!r}"
     )
     # Historical relative deltas must be preserved (not flattened).

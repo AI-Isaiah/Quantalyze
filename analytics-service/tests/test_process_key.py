@@ -1199,6 +1199,276 @@ def test_process_key_onboard_missing_creds_returns_422(client):
     assert r.status_code == 422
 
 
+# ---------------------------------------------------------------------------
+# NEW-C31-01 — scope gate regression (read_only=False must be rejected)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "error_code,read_only",
+    [
+        ("TRADE_SCOPE", False),
+        ("WITHDRAW_SCOPE", False),
+        # IMP-2: error_code arm must win even when read_only is True — a broker
+        # that reports a scope violation via error_code but doesn't set
+        # read_only=False (incorrect adapter, or future adapter drift) must still
+        # be rejected.  This is a defensive edge case; today all adapters that
+        # set WITHDRAW_SCOPE also set read_only=False (services/exchange.py:636-646).
+        ("WITHDRAW_SCOPE", True),
+    ],
+    ids=["trade_scope", "withdraw_scope", "error_code_wins"],
+)
+def test_process_key_sync_pipeline_rejects_write_capable_key(
+    client, error_code: str, read_only: bool
+):
+    """NEW-C31-01 regression: the synchronous pipeline (teaser / csv) must
+    reject keys where val.read_only is False or error_code is TRADE_SCOPE /
+    WITHDRAW_SCOPE — and must NOT proceed to fetch_raw or encryption.
+
+    Pre-fix: only `not val.valid` was checked after adapter.validate().
+    validate_key_permissions sets valid=True the moment fetch_balance()
+    succeeds, so a trading/withdrawal key sailed past the guard and got
+    KEK-encrypted and published.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-scope")
+
+    write_adapter = MagicMock()
+    write_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,  # fetch_balance succeeded — adapter says "credentials OK"
+            read_only=read_only,
+            error_code=error_code,
+            human_message="Key has trading permissions. Please use a read-only key.",
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=write_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-scope-1",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    # Envelope returns 200 with ok=False per DESIGN-05 — but the key must be rejected.
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == error_code
+
+    # Critical: fetch_raw MUST NOT have been called — no broker round-trip.
+    write_adapter.fetch_raw.assert_not_called()
+
+    # Verification must have been transitioned back to draft.
+    rpc_names = [c.args[0] for c in fake.rpc.call_args_list]
+    assert "transition_strategy_verification" in rpc_names
+    draft_calls = [
+        c for c in fake.rpc.call_args_list
+        if c.args and c.args[0] == "transition_strategy_verification"
+        and c.args[1].get("p_new_status") == "draft"
+    ]
+    assert draft_calls, "Scope rejection must transition verification to draft"
+    errors = draft_calls[0].args[1]["p_metadata"]["errors"]
+    assert errors[0]["code"] == error_code
+
+
+def test_process_key_sync_scope_rejection_uses_validation_unexpected_fallback(client):
+    """SF-2 regression: when read_only=False but error_code is None, the
+    fallback must be 'VALIDATION_UNEXPECTED' (a registered WizardErrorCode)
+    NOT 'VALIDATION_FAILED' (unregistered → blank wizard error state on frontend).
+
+    Pre-fix: the fallback was 'VALIDATION_FAILED', absent from wizardErrors.ts,
+    causing a silent blank error message with no remediation path.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-fallback")
+
+    fallback_adapter = MagicMock()
+    fallback_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=False,
+            error_code=None,  # triggers the fallback path
+            human_message="Write-capable key.",
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=fallback_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-fallback",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    # SF-2: code in the envelope must be the registered fallback, not the bare
+    # unregistered "VALIDATION_FAILED" string.
+    assert body["code"] == "VALIDATION_UNEXPECTED"
+    fallback_adapter.fetch_raw.assert_not_called()
+
+
+def test_process_key_sync_scope_rejection_survives_rpc_failure(client):
+    """SF-3 regression: an RPC failure during the scope-rejection draft
+    transition must NOT raise an unhandled exception — the endpoint must
+    return the correct envelope error (ok=False) regardless of Supabase state.
+
+    Pre-fix: the RPC call was uncaught; a Supabase blip would propagate as a
+    500, leaving the verification in limbo and hiding the security outcome.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    # Use the standard mock (table ops succeed to allow insert → verification_id),
+    # but override the rpc chain to always raise so the scope-rejection RPC fails.
+    rpc_fail_sb = _build_supabase_mock(existing_row=None, insert_id="ver-rpc-fail")
+    failing_rpc = MagicMock()
+    failing_rpc.execute.side_effect = RuntimeError("Supabase unavailable")
+    rpc_fail_sb.rpc.return_value = failing_rpc
+
+    rpc_fail_adapter = MagicMock()
+    rpc_fail_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=False,
+            error_code="TRADE_SCOPE",
+            human_message="Trading-capable key.",
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=rpc_fail_sb,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=rpc_fail_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-rpc-fail",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    # SF-3: even with a failing RPC the endpoint must return the security-
+    # correct envelope error, not an unhandled 500.
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == "TRADE_SCOPE"
+    rpc_fail_adapter.fetch_raw.assert_not_called()
+
+
+def test_process_key_csv_read_only_none_not_rejected_sync(client):
+    """NEW-C31-01 guard: CSV path has read_only=None — must NOT be rejected
+    by the scope gate. Only explicit False is a disqualifier."""
+    from services.ingestion.adapter import (
+        Fingerprint,
+        MetricsSnapshot,
+        ValidationResult,
+    )
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-csv-none")
+
+    csv_adapter = MagicMock()
+    csv_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=None,  # CSV: N/A
+            error_code=None,
+            human_message=None,
+            debug_context={},
+        )
+    )
+    csv_adapter.fetch_raw = AsyncMock(return_value=[])
+    csv_adapter.compute_metrics = MagicMock(
+        return_value=MetricsSnapshot(None, None, None, None, None, 0, None)
+    )
+    csv_adapter.compute_fingerprint = MagicMock(return_value=Fingerprint())
+    csv_adapter.reconstruct_positions = AsyncMock(return_value=[])
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=csv_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "strategy_id": "s-csv-none",
+                    "wizard_session_id": "wiz-csv-none",
+                    "fmt": "trades",
+                    "raw_bytes_base64": "Y29sCjE=",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    # CSV with read_only=None must pass through to fetch_raw.
+    assert r.status_code == 200, r.text
+    csv_adapter.fetch_raw.assert_awaited_once()
+
+
 def test_process_key_shares_main_limiter_instance():
     """API-5 regression: routers.process_key.limiter MUST be the same
     instance as services.rate_limit.limiter (which main.py also imports).

@@ -135,6 +135,16 @@ export const bridgeOutcomeCurvesLimiter = makeLimiter(60, "60 s");
 // stays well under abuse thresholds for the auth-only PUT path.
 export const mandateAutoSaveLimiter = makeLimiter(30, "60 s");
 
+// 60/minute per authenticated user — preferences GET (NEW-C07-05).
+// GET /api/preferences is an unbounded SELECT * on the authenticated
+// user's row with no rate-limit gate. An authenticated allocator can
+// script arbitrary GETs, inflating Supabase egress with no cap. 60/min
+// is well above any legitimate page-load or data-refresh cadence (a
+// typical session loads this once per page mount) while still capping
+// malicious scripted polling at a reasonable ceiling. Read-appropriate:
+// higher than the write limiter since reads are cheaper and idempotent.
+export const preferencesReadLimiter = makeLimiter(60, "60 s");
+
 // 20/minute per authenticated user — Phase 15 / CSV-01..CSV-02 (WR-02).
 // CSV iteration realistically spends 3-5 validations per minute as the
 // user fixes monotonic_dates / nav_non_zero errors and re-uploads. The

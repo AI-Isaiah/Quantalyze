@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { escapeHtml, notifyFounderGeneric } from "@/lib/email";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { assertSameOrigin } from "@/lib/csrf";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
 
@@ -128,7 +129,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // GDPR Art. 17 intake, so a forensic trail is particularly load-bearing
   // ("can we prove the user requested deletion on this date?"). Fire-and-
   // forget; does not gate the response.
-  logAuditEvent(supabase, {
+  //
+  // NEW-C10-01 (audit-2026-05-26 security): switched to logAuditEventAsUser
+  // (service-role, JWT-immune) so the GDPR intake audit row cannot be silently
+  // lost when the user's JWT expires between response flush and after() settle.
+  // `inserted.id` is server-derived so the userId attribution is trusted.
+  logAuditEventAsUser(createAdminClient(), user.id, {
     action: "deletion.request.create",
     entity_type: "data_deletion_request",
     entity_id: inserted.id,

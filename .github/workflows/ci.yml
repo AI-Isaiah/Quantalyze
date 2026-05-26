@@ -52,7 +52,19 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci --prefer-offline --no-audit --no-fund
+      # Retry npm ci on transient registry failures (ECONNRESET / network
+      # aborted) — CI flakiness audit F3. The setup-node npm cache makes
+      # retries cheap (tarball store already warm). No untrusted input is
+      # interpolated; this is a fixed shell retry loop.
+      - name: npm ci (retry transient network failures)
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
       # PR-C: cache TypeScript's incremental build info (tsconfig.json has
       # `incremental: true`, so tsc emits tsconfig.tsbuildinfo in the project
       # root). On unchanged code, tsc skips fully re-checking files whose
@@ -81,7 +93,19 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci --prefer-offline --no-audit --no-fund
+      # Retry npm ci on transient registry failures (ECONNRESET / network
+      # aborted) — CI flakiness audit F3. The setup-node npm cache makes
+      # retries cheap (tarball store already warm). No untrusted input is
+      # interpolated; this is a fixed shell retry loop.
+      - name: npm ci (retry transient network failures)
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
       # PR-C: cache ESLint's per-file result cache. The `lint` script in
       # package.json now passes `--cache --cache-location
       # node_modules/.cache/.eslintcache`. ESLint skips re-linting files
@@ -119,7 +143,19 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci --prefer-offline --no-audit --no-fund
+      # Retry npm ci on transient registry failures (ECONNRESET / network
+      # aborted) — CI flakiness audit F3. The setup-node npm cache makes
+      # retries cheap (tarball store already warm). No untrusted input is
+      # interpolated; this is a fixed shell retry loop.
+      - name: npm ci (retry transient network failures)
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
       # Cache vitest's transform graph. Vite persists per-file TS/JSX
       # transforms here; on a warm cache the transform step is largely a
       # no-op. Key on lockfile + vitest config + the src/tests trees.
@@ -152,7 +188,19 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci --prefer-offline --no-audit --no-fund
+      # Retry npm ci on transient registry failures (ECONNRESET / network
+      # aborted) — CI flakiness audit F3. The setup-node npm cache makes
+      # retries cheap (tarball store already warm). No untrusted input is
+      # interpolated; this is a fixed shell retry loop.
+      - name: npm ci (retry transient network failures)
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
       - name: Check for banned packages (supply-chain)
         run: node scripts/check-banned-packages.mjs
       - name: Check GDPR export coverage (Task 7.3)
@@ -187,7 +235,19 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci --prefer-offline --no-audit --no-fund
+      # Retry npm ci on transient registry failures (ECONNRESET / network
+      # aborted) — CI flakiness audit F3. The setup-node npm cache makes
+      # retries cheap (tarball store already warm). No untrusted input is
+      # interpolated; this is a fixed shell retry loop.
+      - name: npm ci (retry transient network failures)
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
       # Cache .next/cache (Next.js incremental webpack/Turbopack output) keyed
       # on every input that changes how the bundle compiles: lockfile,
       # next.config, tailwind/postcss config, tsconfig, and the full src
@@ -474,19 +534,53 @@ jobs:
           # reads the checked-out tree; the persisted cred is pure
           # attack surface for any third-party action that lands later.
           persist-credentials: false
-      - name: Link-check docs (internal links only)
-        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411  # v2.8.0
+      # CI flakiness audit F4: previously used lycheeverse/lychee-action, which
+      # downloads the lychee release binary at job start with a bare `curl`
+      # (no retry) — a transient release-CDN error surfaced as `curl exit 22`
+      # and failed the whole check, even though the link scan is `--offline`
+      # and cannot itself fail on network. We now (a) cache the pinned binary
+      # so the download is a one-time cost, and (b) retry the download on a
+      # cold cache. Pin keyed on LYCHEE_VERSION so a bump re-downloads.
+      - name: Cache lychee binary
+        id: lychee-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
-          args: >-
-            --offline
-            --no-progress
-            --verbose
-            docs/runbooks/soc2-readiness.md
+          path: ~/.lychee-bin
+          key: lychee-${{ runner.os }}-v0.23.0
+      - name: Install lychee (retry transient download failures)
+        if: steps.lychee-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$HOME/.lychee-bin"
+          url="https://github.com/lycheeverse/lychee/releases/download/lychee-v0.23.0/lychee-x86_64-unknown-linux-gnu.tar.gz"
+          n=0
+          until curl -sSfL "$url" -o /tmp/lychee.tar.gz; do
+            n=$((n+1))
+            if [ "$n" -ge 4 ]; then echo "lychee download failed after $n attempts"; exit 1; fi
+            echo "lychee download attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
+          tar -xzf /tmp/lychee.tar.gz -C "$HOME/.lychee-bin" lychee
+          chmod +x "$HOME/.lychee-bin/lychee"
+      - name: Link-check docs (internal links only)
+        run: |
+          "$HOME/.lychee-bin/lychee" --offline --no-progress --verbose \
+            docs/runbooks/soc2-readiness.md \
             'docs/runbooks/**/*.md'
-          fail: true
 
   python:
     runs-on: ubuntu-latest
+    # Serialize the python job across ALL runs (every PR + every push) against
+    # the SHARED remote Supabase test project. The workflow-level concurrency
+    # group (top of file) only isolates per-PR, so two different PRs' python
+    # jobs could hit the shared test DB simultaneously and race the
+    # compute_jobs fencing/claim tests (CI flakiness audit F2). A repo-wide
+    # group with cancel-in-progress:false QUEUES contending runs instead of
+    # running them concurrently — and crucially does NOT cancel in-flight runs,
+    # so a push-to-main python job still records its required per-SHA green
+    # check (it just waits its turn).
+    concurrency:
+      group: shared-test-db
+      cancel-in-progress: false
     defaults:
       run:
         working-directory: analytics-service
@@ -502,8 +596,23 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: analytics-service/requirements.txt
-      - run: pip install -r requirements.txt pytest pytest-cov pytest-asyncio pytest-mock cryptography mypy
+          # Include requirements-dev.txt so the test/type deps (pytest, mypy,
+          # …) — relocated there — are part of the pip cache key (CI speed
+          # audit F4).
+          cache-dependency-path: |
+            analytics-service/requirements.txt
+            analytics-service/requirements-dev.txt
+      # Retry pip install on transient index/CDN failures (CI flakiness audit
+      # F6). Fixed command; no untrusted input interpolated.
+      - name: pip install (retry transient network failures)
+        run: |
+          n=0
+          until pip install -r requirements.txt -r requirements-dev.txt; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "pip install failed after $n attempts"; exit 1; fi
+            echo "pip install attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
       # Phase 19 / BACKBONE-02 / MC-3 fix: @runtime_checkable Protocol only
       # verifies method *presence* at runtime, not signature shape. mypy
       # --strict scoped to services/ingestion/ catches signature drift
@@ -576,7 +685,19 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci --prefer-offline --no-audit --no-fund
+      # Retry npm ci on transient registry failures (ECONNRESET / network
+      # aborted) — CI flakiness audit F3. The setup-node npm cache makes
+      # retries cheap (tarball store already warm). No untrusted input is
+      # interpolated; this is a fixed shell retry loop.
+      - name: npm ci (retry transient network failures)
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
       # Cache the Playwright browser bundle (~120MB chromium) keyed on the
       # `@playwright/test` package version specifically — not the whole
       # lockfile. Keying on lockfile would bust the cache for every

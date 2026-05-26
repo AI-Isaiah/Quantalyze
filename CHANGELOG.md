@@ -1,11 +1,90 @@
 # Changelog
 
+## [0.24.9.17] - 2026-05-26
+### Changed — CI reliability (flakiness audit fixes)
+- **fencing test HTTP/1.1 (F1):** `test_compute_jobs_fencing` rebuilds the PostgREST session with `http2=False`. supabase-py hardcodes HTTP/2 and the pinned 2.15.1 has no ClientOptions seam; two concurrent claim workers multiplexed over one HTTP/2 connection caused `RemoteProtocolError: ConnectionTerminated` + spurious overlapping-claims failures. The dominant CI flake (~1-in-2 python runs).
+- **shared-test-db concurrency group (F2):** the `python` CI job now serializes across all runs (`cancel-in-progress: false`) so two PRs' jobs can't race the shared remote Supabase test project.
+- **network-step retries (F3/F6):** all 6 `npm ci` and the `pip install` are wrapped in bounded retry loops to absorb transient `ECONNRESET`.
+- **lychee binary cache + retry (F4):** `docs-link-check` caches the pinned lychee binary and retries the download, eliminating the `curl exit 22` release-CDN flake (the link scan itself is offline).
+- **pip cache completeness (speed F4):** python test/type deps (pytest, mypy, …) moved to `requirements-dev.txt` and added to the pip `cache-dependency-path` so they stop re-resolving every run.
+
+
+## [0.24.9.16] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: analytics match + cron router (batch a3)
+- match recompute cron: chunk oversized IN-list fetches (avoids PostgREST URL/row limits) and cap the results array; count actual DELETE rows; log warm-up drops (NEW-C08-02…05, NEW-C32-01/02)
+- match router: role-check enforcement, force-throttle guard, `asyncio.shield` around the critical recompute section, demo_only wiring (NEW-C08-06/07/09/10)
+- review + red-team hardening of the match/cron paths (H-1/H-2/M-1/M-2/M-3/L-1/L-2)
+
+
+## [0.24.9.15] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: analytics runner + risk metrics (batch a2)
+- risk-of-ruin semantics corrected: `p==0.5` (no edge) returns `None` rather than a misleading `1.0`; a `r=0` decay yields a low ruin estimate instead of certain ruin (red-team)
+- metrics hardened with `isfinite` guards; phantom-NaN months no longer leak into monthly-return series; streak computation + test coverage gaps closed (NEW-C02-01…11, C14-metrics)
+- analytics_runner remediation across the C2 + C14 metric findings
+
+
+## [0.24.9.14] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: analytics recon/ingestion silent-failure sweep (batch a1)
+- equity reconstruction: guard `spot_fee` / `realized_pnl` float() against non-numeric exchange fields; only mark `partial_unpriced` on a genuine ticker-fetch failure (not a true zero price); skip anchor when `hit_terminus=True` so unified-margin OKX/Bybit uPnL is not double-counted (F-06/F-08/F-09/F-11, C01-05)
+- exchange layer: Bybit `closed_pnl` inner except re-raises `RateLimitExceeded` instead of swallowing it; OKX partial-failure now re-raises rather than returning a silent truncated page (F-05, C13-04)
+- job worker: log when `_update_cursor` skips the DB write so a stalled/stagnant cursor is observable (F-04)
+- review + red-team hardening across db / funding_fetch / position_reconstruction; equity-curve golden fixtures refreshed to the corrected reconstruction
+
+
+## [0.24.9.13] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: analytics credential + simulator integrity (batch a5)
+- `process_key` and `long_fetch` ingestion now reject write-capable / trade-enabled exchange API keys BEFORE encryption+persistence — a key with withdrawal/trade scope is refused at the boundary instead of being stored (NEW-C31-01)
+- simulator scores the current portfolio's metrics over the aligned (intersection) return window across strategies, not each strategy's full unaligned history — removes look-ahead/coverage skew in the what-if comparison (NEW-C11-03)
+- red-team + review hardening of scope-rejection and window-guard paths (C-1/H-2/H-3/M-1/M-3/L-3)
+
+
+## [0.24.9.12] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: analytics portfolio router IDOR + data integrity (batch a4)
+- `/portfolio-analytics` and `/portfolio-optimizer` now enforce caller ownership: a `user_id` that does not own the portfolio gets a 404 (was IDOR — any authenticated user could read/optimize another user's portfolio) (NEW-C19-01)
+- `portfolio_bridge` surfaces `partial_data` + `computed_from_n_of_m` when strategies are missing returns_series, and returns `status="incumbent_no_data"` (not a misleading empty "complete") when the incumbent has no returns (NEW-C19-02/03)
+- covariance history gate uses pairwise OVERLAP (dropna), not UNION length; AUM collection uses `is not None` so a $0 strategy is counted as a known reporter (NEW-C19-04/06)
+- `portfolio_optimizer` logs dropped strategies at WARNING and surfaces `computed_strategy_count` / `expected_strategy_count`; `_build_normalized_weights` treats `current_weight=0` as explicit 0.0 and warns when all strategies are paused (NEW-C19-05/09, SF-F3)
+
+
+## [0.24.9.11] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: admin security (batch b02)
+- Ghost-admin revoke now actually clears `profiles.is_admin=FALSE` (service-role) before the role DELETE — previously a 409 left the flag TRUE permanently (C17-01, red-team C-01)
+- TOCTOU `requireAdmin` re-check uses a fresh `getUser()` immediately before the DELETE; fail-closed on infra error; last-admin lockout dedup via Set union (C17-05/06, H-01/02)
+- verify-strategy response allowlist prevents credential leak; `metrics_snapshot` sanitized for unauthenticated callers (C35-01, H-04)
+- partner-import input validation + audit hardening (500 not 207 on audit failure); send-intro validates strategy + RPC-shape-drift guard (C28, C34)
+
+
+## [0.24.9.10] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: match claim-dedupe SQL (batch b10)
+- New migration `20260526100000_claim_dedupe_done_pending_children_guard.sql`: `claim_compute_jobs` deduped CTE now excludes candidates when a `running`/`done_pending_children` row exists for the same `(kind, partition_col)`, and the UPDATE re-checks `status IN ('pending','failed_retry')` — closes the 23505 unique-index violation race (NEW-C39-01 + red-team TOCTOU). SECURITY DEFINER/search_path/GRANT-REVOKE preserved vs mig 117; format-agnostic proconfig assertion.
+
+
+## [0.24.9.9] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: auth / audit / preferences (batch b08)
+- Auth: `withRole` requireApproval gate + fail-closed `assertProfileApproved`; `_approvalGate` promise evicts on rejection (was a permanent-503 DoS); `isAdminUser` direct-query delegation (C15-01/04, red-team)
+- Audit: security mutations now use service-scoped `logAuditEventAsUser`; awaited Sentry + central metadata cap + proto-poison guard; explicit 28000/42501 dispatch branches (C10-01/02/03/05/06, red-team)
+- Preferences API: validation + rate-limit (503 on misconfig) + error logging (C07-01..05)
+- New migration `20260526095850_log_audit_event_null_auth_errcode.sql` (ERRCODE-anchored null-auth handling) — auto-applies to prod
+
+
+## [0.24.9.8] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: GDPR export (batch b01)
+- **CRITICAL:** schema-aware export ORDER BY — `getOrderColumn` no longer `.order("id")` on id-less tables that 500'd every Art.15/20 export (NEW-C16-01)
+- Export now covers audit_log_cold archive, positions/position_snapshots, csv_daily_returns; audit-log widened to entity/metadata-target rows (C16-02/03/04/09)
+- Redact cross-party identifiers in match tables + bridge_outcome_dismissals (PII) (C16-05/08)
+- Global stable sort + memory-bounded chunked indirect fetch; admin self-deletion-reject hardening (C16-07/10, C36-01)
+
+
 All notable changes to Quantalyze will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+
+## [0.24.9.7] - 2026-05-26
+
+**fix(analytics-funding): harden funding-attribution observability + corrupt-timestamp handling in position_reconstruction (audit H-1094/H-1097), reviewed by a 3-specialist fan-out + Claude red-team + /simplify + /comment-analyzer.** Two HIGH audit findings fixed at root cause in `analytics-service/services/position_reconstruction.py` `_attribute_funding`; the rest of the batch-3 cluster (analytics_runner.py, exchange.py, audit.py) re-verified as cross-file or closed-stale (no live single-file fix — confirming the remaining analytics HIGHs are now cross-file clusters). **H-1097** — the funding query window was built from the lexical `min/max` of raw `opened_at`/`closed_at` strings injected into PostgREST `.gte/.lte`; a single corrupt `closed_at` (e.g. a space instead of 'T') could be lexically-max yet parse-invalid as TIMESTAMPTZ, 400-ing the whole range scan, which the broad `except` then swallowed — silently zeroing funding for EVERY position. Bounds are now computed from PARSED datetimes via a new `_parse_iso_utc` helper (UTC-normalized; returns None on corrupt); a corrupt `closed_at` falls back to `now` (mirroring the per-position scan) so the fetch window COVERS that position instead of dropping it — a self-review caught that naively dropping it re-introduces a quieter silent-zeroing of LATER positions, and that an all-corrupt-close batch must not `max([])`-crash. **H-1094** — a swallowed funding-fetch failure (RLS / missing table) silently left every `funding_pnl=0` with no signal; it now sets `data_quality_flags['funding_attribution_failed']` (also on the no-parseable-`opened_at` path), which analytics_runner lifts into `strategy_analytics.data_quality_flags` so the dashboard can warn that ROI excludes funding because it could not be LOADED, vs implying none was paid. Two further observability flags added in the same spirit: `funding_window_corrupt_position` (per-POSITION count of corrupt timestamps) and `funding_rows_unparseable` (funding rows dropped from the sum for a corrupt timestamp/amount — a partial under-count). **Tests** — 6 regression tests (corrupt-`closed_at` window not poisoned; all-closes-corrupt → now, no crash; corrupt-open keeps its valid close; `flags=None` no-crash; double-corrupt counts once; corrupt funding-rows counted + excluded); the existing H-1097 test was corrected to assert the fixed cover-to-`now` behaviour rather than the buggy drop. 100 position-reconstruction tests green. The red-team independently confirmed the new tests fail against pre-fix code and that widening the fetch to `now` cannot misattribute funding (the per-position `opened<=ts<=closed` filter re-bounds each position). Deferred to dedicated cross-file batches (the remaining batch-3 HIGHs, all cross-file): float→Decimal money math (H-0735/H-0740/H-0640/H-0742), analytics producer TypedDict/Literal hygiene (H-0638/H-0639/H-0650/H-0651), turnover-key rename TS+Python (H-0635), per-trade info-disclosure cap (H-0737), KEK-rotation snapshot filter (H-0746), exchange symbol-normalization + data migration (H-0668), exchange Decimal precision (H-0669), audit-taxonomy Literal/Pydantic Python↔TS (H-0656/H-0657/M-0660). Analytics-service (Python) only — no schema, migration, or frontend changes; pytest gate green for the touched modules (100 passed incl. 6 new).
 
 ## [0.24.9.6] - 2026-05-26
 

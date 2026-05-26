@@ -154,14 +154,16 @@ export const EXCLUDED_TABLES: Record<string, { reason: string }> = {
   // The new stale-EXCLUDED_TABLES check would fail on it. Removed
   // to restore CI green; if a future migration creates the table,
   // re-add this entry.
-  position_snapshots: {
-    reason:
-      "Portfolio-scoped historical snapshots. Indirect via portfolios; not a direct user table.",
-  },
-  positions: {
-    reason:
-      "Portfolio-scoped holdings. Indirect via portfolios; not a direct user table.",
-  },
+  // NEW-C16-04 (audit 2026-05-26): positions + position_snapshots were
+  // EXCLUDED with a FACTUALLY WRONG rationale ("Portfolio-scoped...
+  // indirect via portfolios"). Both FK `strategy_id NOT NULL REFERENCES
+  // strategies` — the identical indirect shape as trades / funding_fees
+  // / strategy_analytics — so a user's live positions + historical
+  // snapshots (Art. 15 personal trading data) were entirely absent from
+  // the export. They are now IndirectUserTable entries in
+  // USER_EXPORT_TABLES (strategy_id -> strategies.user_id) and covered
+  // by the existing `positions`/`position_snapshots | PRESERVE` rows in
+  // the sanitize_user matrix. Do NOT re-add them here.
   used_ack_tokens: {
     reason:
       "Idempotency guard for alert-ack tokens. System bookkeeping; no user PII.",
@@ -250,6 +252,26 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
     reason:
       "Projection of audit_log (PRESERVE per sanitize matrix). The projected name appears in the manifest for bundle clarity; the sanitize policy is for the source table.",
   },
+  // NEW-C16-03 (audit 2026-05-26): audit_log_cold is the 2yr+ archive
+  // the audit_log_hot_to_cold cron MOVEs rows into (migration
+  // 20260417110539_retention_crons.sql). It mirrors hot audit_log
+  // exactly and is now exported as the `audit_log_cold_for_user`
+  // projection. PRESERVE, mirroring hot. The cold table's erasure
+  // policy lives in the retention-cron migration (audit_log_cold_purge
+  // at 7y) — NOT the sanitize_user matrix the parity scan reads — so
+  // BOTH the bundle name and the source_table are allowlisted here
+  // (the projection-parity check requires both sides covered when they
+  // differ). sanitize_user PRESERVES cold rows for the same reason it
+  // PRESERVES hot: append-only forensic record, no PII left once
+  // profiles is anonymized.
+  audit_log_cold_for_user: {
+    reason:
+      "Projection of audit_log_cold (PRESERVE — 2yr+ archive mirroring hot audit_log). Erasure handled by the audit_log_cold_purge retention cron (7y), not the sanitize_user matrix.",
+  },
+  audit_log_cold: {
+    reason:
+      "Source of the audit_log_cold_for_user projection. PRESERVE (mirrors hot audit_log). Append-only forensic archive; profiles anonymize removes PII. Purged at 7y by the audit_log_cold_purge retention cron.",
+  },
   // allocator_equity_snapshots: user-owned via allocator_id (=
   // api_keys.user_id), the f5 owner-coherence trigger keeps the
   // relationship inviolate. The sanitize_user PURGE on api_keys
@@ -286,6 +308,18 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
   strategy_analytics: {
     reason:
       "Strategy-scoped historical analytics. Strategies are ANONYMIZE per matrix; the child rows survive keyed to the anonymized strategy id. Mirrors the trades ANONYMIZE policy.",
+  },
+  // csv_daily_returns: NEW-C16-09 (audit 2026-05-26) — strategy-scoped
+  // daily-return series added by migration 20260522111839. The table
+  // declares `strategy_id NOT NULL REFERENCES strategies ON DELETE CASCADE`,
+  // so rows are automatically erased when the strategy is deleted / the user
+  // is sanitized (strategies ANONYMIZE → cascade removes child rows). The
+  // sanitize_user migration pre-dates this table (added 4 days ago) so it
+  // has no explicit matrix row; the CASCADE FK is the erasure mechanism.
+  // Mirrors the strategy_analytics allowlist pattern.
+  csv_daily_returns: {
+    reason:
+      "Strategy-scoped CSV daily-return series (migration 20260522111839). ON DELETE CASCADE from strategies ensures erasure when the parent strategy is deleted during sanitize. No explicit sanitize_user matrix row needed; mirrors strategy_analytics policy.",
   },
 };
 
@@ -561,12 +595,28 @@ export function extractUserTablesFromMigration(
   const createTableRe =
     /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"[a-z0-9_]+"|[a-z0-9_]+)\.)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s*\(([\s\S]*?)\n\s*\)\s*;/gi;
 
-  // A column declaration that references profiles(id) or auth.users(id).
-  // Covers: user_id, allocator_id, uploaded_by, created_by, invited_by.
-  // We match on the USER-ID intent columns only — FKs like "strategy_id"
-  // to profiles don't exist in this codebase.
+  // A column declaration that identifies a user.  Two match shapes:
+  //
+  //   1. FK-reference form (any intent column + REFERENCES auth.users|profiles):
+  //      user_id UUID ... REFERENCES auth.users(id)
+  //      allocator_id UUID ... REFERENCES profiles(id)
+  //      etc. — covers the wide set of intent columns.
+  //
+  //   2. Bare-UUID form (user_id / allocator_id + UUID NOT NULL, no inline FK):
+  //      NEW-C16-06 (audit 2026-05-26, MED conf-8): `audit_log` and
+  //      `audit_log_cold` use `user_id UUID NOT NULL` WITHOUT an inline
+  //      REFERENCES clause (the FK is enforced at the DB level, not inline
+  //      in the DDL). The FK-only regex was blind to these tables — a
+  //      user-owned table with a bare user_id escaped the drift guard and
+  //      any future `user_id UUID`-without-inline-FK table would do the
+  //      same. We widen to also match the two canonical bare-uuid owner
+  //      columns; EXCLUDED_TABLES suppresses false positives for audit
+  //      infrastructure tables and other legitimate non-owned bare columns.
+  //
+  // The alternation uses `(?:...|...)` so the overall re is tested once
+  // per body (both shapes are tried before returning false).
   const userColumnRe =
-    /\b(user_id|allocator_id|invited_by|created_by|uploaded_by|decided_by|edited_by_user_id|processed_by|updated_by|granted_by)\s+UUID[^,]*REFERENCES\s+(?:auth\.users|profiles)\b/i;
+    /(?:\b(user_id|allocator_id|invited_by|created_by|uploaded_by|decided_by|edited_by_user_id|processed_by|updated_by|granted_by)\s+UUID[^,]*REFERENCES\s+(?:auth\.users|profiles)\b|\b(user_id|allocator_id)\s+UUID\s+NOT\s+NULL\b)/i;
 
   createTableRe.lastIndex = 0;
   let match: RegExpExecArray | null;

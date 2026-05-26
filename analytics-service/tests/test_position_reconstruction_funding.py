@@ -456,7 +456,12 @@ async def test_attribute_funding_pagination_includes_all_rows() -> None:
         # Monkeypatch: replace _attribute_funding with a version using page_size=2
         original_fn = pr_mod._attribute_funding
 
-        async def _patched_attribute_funding(strategy_id, positions, supabase):
+        async def _patched_attribute_funding(
+            strategy_id, positions, supabase, flags=None
+        ):
+            # `flags` accepted (and ignored) to stay signature-compatible with
+            # the real _attribute_funding after the H-1094/H-1097 DQ-flag plumb;
+            # this page-size variant only exercises pagination.
             # Force page_size=2 by temporarily reducing it via the closure.
             _PAGE_SIZE = 2
             from collections import defaultdict
@@ -801,6 +806,170 @@ async def test_attribute_funding_swallows_funding_fetch_error(caplog) -> None:
 
 
 @pytest.mark.asyncio
+async def test_funding_fetch_failure_sets_data_quality_flag() -> None:
+    """Audit H-1094: when the funding_fees fetch errors, _attribute_funding
+    swallows it and zeros funding_pnl (existing fail-soft contract) — but it
+    must ALSO surface `funding_attribution_failed=True` in the returned
+    trade_metrics `data_quality_flags`. Pre-fix the degradation was completely
+    silent: the dashboard claimed "ROI excludes funding payments" implying the
+    strategy paid none, when in fact funding could not be loaded at all.
+
+    Fails without the fix: pre-fix code logs + returns with no flag, so
+    `result["data_quality_flags"]` either is absent or lacks the key.
+    """
+    fills = [
+        {
+            "symbol": "BTCUSDT",
+            "side": "buy",
+            "price": 100.0,
+            "quantity": 1.0,
+            "fee": 0.0,
+            "timestamp": "2024-01-01T00:00:00+00:00",
+            "raw_data": {},
+            "is_fill": True,
+        },
+        {
+            "symbol": "BTCUSDT",
+            "side": "sell",
+            "price": 110.0,
+            "quantity": 1.0,
+            "fee": 0.0,
+            "timestamp": "2024-01-02T00:00:00+00:00",
+            "raw_data": {},
+            "is_fill": True,
+        },
+    ]
+    mock_supabase = _make_mock_supabase_funding_fetch_raises(
+        fills, RuntimeError("RLS denied")
+    )
+
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ):
+        result = await reconstruct_positions("strat-1", mock_supabase)
+
+    # The reconstruction still completes (fail-soft) ...
+    assert result["closed_positions"] == 1
+    # ... and the funding-fetch failure is no longer silent.
+    dq = result.get("data_quality_flags") or {}
+    assert dq.get("funding_attribution_failed") is True, (
+        "expected funding_attribution_failed=True in data_quality_flags when "
+        f"the funding_fees fetch raises; got data_quality_flags={dq!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_funding_window_bounds_skip_corrupt_closed_at() -> None:
+    """Audit H-1097: a single corrupt closed_at must NOT become the raw
+    lexically-max value injected into PostgREST `.lte('timestamp', ...)`.
+
+    Pre-fix, `max_closed_at = max(raw strings)` would pick the corrupt
+    string (e.g. a space instead of 'T'), PostgREST 400s the whole range
+    scan, the broad `except` swallows it, and EVERY position silently gets
+    funding_pnl=0 (poison-pill). The fix parses the bounds first so a corrupt
+    string can't be injected, counts it in `funding_window_corrupt_position`,
+    and — critically — falls the corrupt-close position's bound back to `now`
+    (mirroring the per-position scan) so the fetch window COVERS it rather than
+    ending at the earlier clean close (which would drop that position's own
+    funding — a quieter recurrence of the same poison-pill).
+
+    Fails without the fix: the captured `max_closed_at` would be the raw
+    corrupt string and `funding_window_corrupt_position` would be absent.
+    """
+    from datetime import datetime
+
+    from services.position_reconstruction import _attribute_funding
+
+    # One clean closed position + one whose closed_at is corrupt (no 'T').
+    # The corrupt string sorts lexically AFTER the clean ISO string, so the
+    # pre-fix raw `max(...)` would have selected it.
+    positions = [
+        {
+            "symbol": "BTCUSDT",
+            "opened_at": "2024-01-01T00:00:00+00:00",
+            "closed_at": "2024-01-02T00:00:00+00:00",
+            "funding_pnl": 0,
+        },
+        {
+            "symbol": "ETHUSDT",
+            "opened_at": "2024-01-03T00:00:00+00:00",
+            # Corrupt: space instead of 'T' — unparseable as TIMESTAMPTZ by
+            # PostgREST, but lexically greater than the clean ISO above.
+            "closed_at": "2024-01-09 not-an-iso",
+            "funding_pnl": 0,
+        },
+    ]
+
+    captured: dict[str, str] = {}
+
+    def _table(name: str):
+        tbl = MagicMock()
+        if name == "funding_fees":
+            f_sel = MagicMock()
+            f_eq = MagicMock()
+            f_gte = MagicMock()
+            f_lte = MagicMock()
+            f_range = MagicMock()
+            f_range.execute.return_value = MagicMock(data=[])
+
+            def _capture_lte(field, value):
+                captured["lte_field"] = field
+                captured["max_closed_at"] = value
+                return f_lte
+
+            def _capture_gte(field, value):
+                captured["min_opened_at"] = value
+                return f_gte
+
+            f_lte.range.return_value = f_range
+            f_gte.lte.side_effect = _capture_lte
+            f_eq.gte.side_effect = _capture_gte
+            f_sel.eq.return_value = f_eq
+            tbl.select.return_value = f_sel
+        return tbl
+
+    mock_supabase = MagicMock()
+    mock_supabase.table = _table
+
+    flags: dict = {}
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ):
+        await _attribute_funding("strat-1", positions, mock_supabase, flags)
+
+    # (a) The corrupt closed_at was NOT injected raw — the bound is a valid,
+    # parseable ISO datetime that excludes the poison row.
+    assert "max_closed_at" in captured, "funding_fees query was not issued"
+    raw_corrupt = "2024-01-09 not-an-iso"
+    assert captured["max_closed_at"] != raw_corrupt, (
+        "corrupt closed_at leaked into the PostgREST .lte bound (poison-pill); "
+        f"got {captured['max_closed_at']!r}"
+    )
+    # The clean position's close (2024-01-02) is NOT the upper bound: the
+    # corrupt-close position (opened 2024-01-03) falls its bound back to `now`,
+    # so the fetch window COVERS it instead of dropping its funding at the
+    # earlier clean close. (Pre-HIGH-fix the corrupt close was dropped and the
+    # bound was the clean 2024-01-02 — the silent-drop bug.)
+    parsed_max = datetime.fromisoformat(captured["max_closed_at"])  # must not raise
+    assert parsed_max > datetime.fromisoformat("2024-01-03T00:00:00+00:00"), (
+        "corrupt-close position must be covered to now, not dropped at the "
+        f"earlier clean close; got max_closed_at={captured['max_closed_at']!r}"
+    )
+    # WEAK-1: the lower bound is the parsed min open, serialized canonically.
+    assert (
+        datetime.fromisoformat(captured["min_opened_at"]).isoformat()
+        == "2024-01-01T00:00:00+00:00"
+    )
+    # (b) The corrupt row is surfaced, not silently dropped.
+    assert flags.get("funding_window_corrupt_position") == 1, (
+        "expected funding_window_corrupt_position=1 for the corrupt closed_at; "
+        f"got flags={flags!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_open_position_funding_attributed_through_now() -> None:
     """M-0933: an OPEN position (status='open', closed_at=None) must attribute
     funding rows from opened_at to wall-clock now. The closed_at-None branch
@@ -885,4 +1054,271 @@ async def test_open_position_funding_attributed_through_now() -> None:
     assert pos["funding_pnl"] == pytest.approx(0.025, abs=1e-9), (
         "open-position funding window collapsed — closed_at=None must "
         f"resolve to now, not opened_at; got {pos['funding_pnl']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_funding_window_all_closed_at_corrupt_defaults_to_now() -> None:
+    """Audit H-1097 (orchestrator follow-up): every closed position has a
+    truthy-but-corrupt closed_at and none is open. Each corrupt close falls the
+    query upper bound back to `now` (mirroring the per-position scan), so the
+    bound is a valid `now` TIMESTAMPTZ that covers every position's window —
+    never the raw corrupt string, and never a `max([])` crash. open_dts is
+    non-empty (valid opens), so the all-opens-corrupt early-return does not fire
+    — this exercises the *close*-bound path with two corrupt-close positions
+    (so the per-position corrupt counter must be 2).
+
+    Fails without the fix: the pre-fix code dropped corrupt closes from the
+    bound (narrowing/emptying it), so the window could end before these
+    positions' funding and/or `max([])` could crash before the DB try/except.
+    """
+    from datetime import datetime, timezone
+
+    from services.position_reconstruction import _attribute_funding
+
+    # Both positions CLOSED with valid opened_at but corrupt closed_at; no open
+    # position contributes `now`, so close_dts is empty after parsing.
+    positions = [
+        {
+            "symbol": "BTCUSDT",
+            "opened_at": "2024-01-01T00:00:00+00:00",
+            "closed_at": "2024-01-02 not-an-iso",
+            "funding_pnl": 0,
+        },
+        {
+            "symbol": "ETHUSDT",
+            "opened_at": "2024-01-03T00:00:00+00:00",
+            "closed_at": "garbage",
+            "funding_pnl": 0,
+        },
+    ]
+
+    captured: dict[str, str] = {}
+
+    def _table(name: str):
+        tbl = MagicMock()
+        if name == "funding_fees":
+            f_sel = MagicMock()
+            f_eq = MagicMock()
+            f_gte = MagicMock()
+            f_lte = MagicMock()
+            f_range = MagicMock()
+            f_range.execute.return_value = MagicMock(data=[])
+
+            def _capture_lte(field, value):
+                captured["max_closed_at"] = value
+                return f_lte
+
+            f_lte.range.return_value = f_range
+            f_gte.lte.side_effect = _capture_lte
+            f_eq.gte.return_value = f_gte
+            f_sel.eq.return_value = f_eq
+            tbl.select.return_value = f_sel
+        return tbl
+
+    mock_supabase = MagicMock()
+    mock_supabase.table = _table
+
+    flags: dict = {}
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ):
+        # Must NOT raise (pre-fix: max([]) ValueError escapes here).
+        await _attribute_funding("strat-1", positions, mock_supabase, flags)
+
+    # The query still issued, with a valid parseable `now`-ish upper bound
+    # (not a corrupt string), and both corrupt closes were counted.
+    assert "max_closed_at" in captured, "funding_fees query was not issued"
+    parsed = datetime.fromisoformat(captured["max_closed_at"])  # must not raise
+    assert parsed.tzinfo is not None
+    assert parsed > datetime(2024, 1, 3, tzinfo=timezone.utc), (
+        "empty close_dts must default the upper bound to now, not a stale value"
+    )
+    assert flags.get("funding_window_corrupt_position") == 2, (
+        f"expected both corrupt closed_at counted; got flags={flags!r}"
+    )
+
+
+def _capture_bounds_table(captured: dict, *, funding_data=None, fetch_exc=None):
+    """Build a `supabase.table` side_effect that captures the funding_fees
+    .gte/.lte bounds (and optionally raises on .execute). Shared by the
+    direct-`_attribute_funding` window-bound tests below."""
+    def _table(name: str):
+        tbl = MagicMock()
+        if name == "funding_fees":
+            f_sel = MagicMock()
+            f_eq = MagicMock()
+            f_gte = MagicMock()
+            f_lte = MagicMock()
+            f_range = MagicMock()
+            if fetch_exc is not None:
+                f_range.execute.side_effect = fetch_exc
+            else:
+                f_range.execute.return_value = MagicMock(data=funding_data or [])
+
+            def _cap_lte(field, value):
+                captured["max_closed_at"] = value
+                return f_lte
+
+            def _cap_gte(field, value):
+                captured["min_opened_at"] = value
+                return f_gte
+
+            f_lte.range.return_value = f_range
+            f_gte.lte.side_effect = _cap_lte
+            f_eq.gte.side_effect = _cap_gte
+            f_sel.eq.return_value = f_eq
+            tbl.select.return_value = f_sel
+        return tbl
+    return _table
+
+
+@pytest.mark.asyncio
+async def test_funding_window_corrupt_open_keeps_valid_close_in_bound() -> None:
+    """pr-test GAP-1: a position with a corrupt opened_at but a VALID closed_at
+    still contributes its valid close to the upper window bound (it is counted
+    corrupt for the lower bound, but its close is usable). Pins the contract so
+    a future regression that `continue`s the whole position on a corrupt open
+    (dropping its valid close) — which would shrink the fetch window and drop a
+    later position's funding — fails loudly.
+    """
+    from datetime import datetime
+    from services.position_reconstruction import _attribute_funding
+
+    positions = [
+        {"symbol": "BTCUSDT", "opened_at": "2024-01-01T00:00:00+00:00",
+         "closed_at": "2024-01-05T00:00:00+00:00", "funding_pnl": 0},  # clean
+        {"symbol": "ETHUSDT", "opened_at": "garbage-open",
+         "closed_at": "2024-01-09T00:00:00+00:00", "funding_pnl": 0},  # corrupt OPEN, valid close
+    ]
+    captured: dict[str, str] = {}
+    mock_supabase = MagicMock()
+    mock_supabase.table = _capture_bounds_table(captured)
+
+    flags: dict = {}
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ):
+        await _attribute_funding("strat-1", positions, mock_supabase, flags)
+
+    # The corrupt-OPEN position's VALID close (01-09) widened the upper bound —
+    # not dropped to the clean position's 01-05.
+    assert (
+        datetime.fromisoformat(captured["max_closed_at"]).isoformat()
+        == "2024-01-09T00:00:00+00:00"
+    ), f"corrupt-open row's valid close was dropped; got {captured!r}"
+    assert (
+        datetime.fromisoformat(captured["min_opened_at"]).isoformat()
+        == "2024-01-01T00:00:00+00:00"
+    )
+    assert flags.get("funding_window_corrupt_position") == 1, f"got {flags!r}"
+
+
+@pytest.mark.asyncio
+async def test_attribute_funding_flags_none_does_not_crash() -> None:
+    """pr-test GAP-2: the legacy 3-arg call (flags omitted → None) must not
+    crash on any DQ-flag-set path. The `if flags is not None` guards make the
+    flag writes no-ops; a regression to unconditional `flags[...] = ...` would
+    raise TypeError (`None[...] = ...`) on a corrupt position or a funding-fetch
+    failure, crashing the whole reconstruction.
+
+    Fails without the guards: corrupt-close counting OR the funding_fetch
+    except would dereference None.
+    """
+    from services.position_reconstruction import _attribute_funding
+
+    positions = [
+        {"symbol": "BTCUSDT", "opened_at": "2024-01-01T00:00:00+00:00",
+         "closed_at": "2024-01-02 not-an-iso", "funding_pnl": 0},  # corrupt close
+    ]
+    captured: dict[str, str] = {}
+    mock_supabase = MagicMock()
+    mock_supabase.table = _capture_bounds_table(
+        captured, fetch_exc=RuntimeError("RLS denied")
+    )
+
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ):
+        # flags omitted (defaults None) — must return without raising even though
+        # there is a corrupt-close position AND the funding fetch fails.
+        await _attribute_funding("strat-1", positions, mock_supabase)
+
+    assert positions[0]["funding_pnl"] == 0
+
+
+@pytest.mark.asyncio
+async def test_funding_window_double_corrupt_position_counts_once() -> None:
+    """pr-test GAP-3 / code-reviewer: a single position with BOTH opened_at and
+    closed_at corrupt is ONE corrupt position, not two. The counter is
+    position-keyed and summed downstream into strategy_analytics, so a
+    per-timestamp double-count over-reports corruption.
+
+    Fails without the per-position counting fix: the both-corrupt position
+    increments the counter twice → 2 instead of 1.
+    """
+    from services.position_reconstruction import _attribute_funding
+
+    positions = [
+        {"symbol": "BTCUSDT", "opened_at": "2024-01-01T00:00:00+00:00",
+         "closed_at": "2024-01-02T00:00:00+00:00", "funding_pnl": 0},  # clean (valid open)
+        {"symbol": "ETHUSDT", "opened_at": "bad-open",
+         "closed_at": "bad-close", "funding_pnl": 0},  # BOTH corrupt
+    ]
+    captured: dict[str, str] = {}
+    mock_supabase = MagicMock()
+    mock_supabase.table = _capture_bounds_table(captured)
+
+    flags: dict = {}
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ):
+        await _attribute_funding("strat-1", positions, mock_supabase, flags)
+
+    assert flags.get("funding_window_corrupt_position") == 1, (
+        "a both-timestamps-corrupt position must count ONCE, not twice; "
+        f"got flags={flags!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_corrupt_funding_rows_counted_and_excluded_from_sum() -> None:
+    """pr-test GAP-4 / silent-failure: funding rows with a corrupt timestamp or
+    non-numeric amount can't be parsed and are dropped from the funding_pnl sum,
+    but the drop must be SURFACED via `funding_rows_unparseable` — a
+    half-corrupt feed otherwise yields a wrong-but-clean-looking ROI.
+
+    Fails without the fix: the bad rows are silently skipped and
+    funding_rows_unparseable is absent from data_quality_flags.
+    """
+    fills = [
+        {"symbol": "BTCUSDT", "side": "buy", "price": 100.0, "quantity": 1.0,
+         "fee": 0.0, "timestamp": "2024-01-01T00:00:00+00:00", "raw_data": {}, "is_fill": True},
+        {"symbol": "BTCUSDT", "side": "sell", "price": 110.0, "quantity": 1.0,
+         "fee": 0.0, "timestamp": "2024-01-05T00:00:00+00:00", "raw_data": {}, "is_fill": True},
+    ]
+    funding_rows = [
+        {"symbol": "BTCUSDT", "amount": "1.5", "timestamp": "2024-01-02T00:00:00+00:00"},  # valid
+        {"symbol": "BTCUSDT", "amount": "2.5", "timestamp": "2024-01-03T00:00:00+00:00"},  # valid
+        {"symbol": "BTCUSDT", "amount": "not-a-number", "timestamp": "2024-01-04T00:00:00+00:00"},  # bad amount
+        {"symbol": "BTCUSDT", "amount": "9.0", "timestamp": "garbage-ts"},  # bad timestamp
+    ]
+    mock_supabase = _make_mock_supabase_with_funding(fills, funding_rows)
+
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ):
+        result = await reconstruct_positions("strat-1", mock_supabase)
+
+    pos = [row for batch in mock_supabase._captured_inserts for row in batch][0]
+    # Only the 2 valid rows summed (both inside [01-01, 01-05]): 1.5 + 2.5 = 4.0.
+    assert pos["funding_pnl"] == pytest.approx(4.0, abs=1e-9)
+    dq = result.get("data_quality_flags") or {}
+    assert dq.get("funding_rows_unparseable") == 2, (
+        f"expected 2 unparseable funding rows surfaced; got data_quality_flags={dq!r}"
     )
