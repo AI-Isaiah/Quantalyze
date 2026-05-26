@@ -1,4 +1,4 @@
-import type { CorrelationRow, DailyReturn, FactsheetPayload, AllocatorPortfolioPayload, QuantilePayload, TrustTierKind } from "./types";
+import type { CorrelationRow, DailyReturn, FactsheetPayload, AllocatorPortfolioPayload, QuantilePayload, TrustTierKind, IngestSource } from "./types";
 import { alignReturns } from "./align";
 import { compute, cumEq, worstDrawdowns } from "./compute";
 import { rollingVol, rollingSharpe, rollingSortino, pickRollingWindow, ROLL_WINDOW_90D, ROLL_WINDOW_30D } from "./rolling";
@@ -37,6 +37,10 @@ export function buildFactsheetPayload(
     markets: string[];
     computedAt: string;
     trustTier: TrustTierKind | null;
+    /** Origin of the daily-return series — "api" (live-ingested) or "csv"
+     *  (user-uploaded). Defaults to "csv" when absent so existing callers
+     *  that don't know the source are conservative. (NEW-C20-01) */
+    ingestSource?: IngestSource;
     description?: string | null;
     subtypes?: string[];
     supportedExchanges?: string[];
@@ -162,6 +166,10 @@ export function buildFactsheetPayload(
   return {
     strategyId: strategy.id,
     strategyName: strategy.name,
+    // Default to "csv" (conservative) when the caller doesn't specify —
+    // avoids rendering non-derivable panels for strategies whose source
+    // isn't explicitly known. (NEW-C20-01)
+    ingestSource: strategy.ingestSource ?? "csv",
     strategyTypes: strategy.types,
     markets: strategy.markets,
     computedAt: strategy.computedAt,

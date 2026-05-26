@@ -297,6 +297,17 @@ export type QuantilePayload = {
 export type TrustTierKind = "api_verified" | "csv_uploaded" | "self_reported";
 
 /**
+ * Ingest source discriminator — whether the strategy's daily-return series
+ * was ingested via live API trade data ("api") or uploaded as a CSV ("csv").
+ *
+ * This drives which analytical panels the factsheet renders: panels that
+ * require fields not derivable from a daily-return series (PeerPercentile,
+ * AllocatorPortfolios, event signatures) should be suppressed for CSV
+ * strategies per the no-invented-data contract. (NEW-C20-01)
+ */
+export type IngestSource = "api" | "csv";
+
+/**
  * Result of picking a rolling-window tier for a given series length.
  *
  * `enough: false` means even the smallest tier in the candidate set
@@ -315,6 +326,13 @@ export type RollWindowPick = {
 export type FactsheetPayload = {
   strategyId: string;
   strategyName: string;
+  /**
+   * Origin of the daily-return series. "api" = live-ingested trade data;
+   * "csv" = user-uploaded daily-return CSV. Drives panel-gating in the view
+   * so non-derivable panels (PeerPercentile, AllocatorPortfolios) are
+   * suppressed for CSV strategies per the no-invented-data contract. (NEW-C20-01)
+   */
+  ingestSource: IngestSource;
   strategyTypes: string[];
   markets: string[];
   computedAt: string;

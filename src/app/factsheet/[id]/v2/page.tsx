@@ -7,7 +7,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
-import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
+import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
 
 /**
@@ -63,6 +63,15 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
   // Both gates have to fall before we render the "still computing"
   // placeholder.
   const dailyReturns = resolveDailyReturnSeries(dailyRaw, analytics?.returns_series);
+  // Ingest source: daily_returns populated by CSV ingest; returns_series by
+  // the analytics-service (live API). If daily_returns resolved we have a
+  // CSV strategy; otherwise it came from the live-data path. (NEW-C20-01)
+  const ingestSource: IngestSource =
+    Array.isArray(dailyRaw) && (dailyRaw as unknown[]).length > 0
+      ? "csv"
+      : typeof dailyRaw === "object" && dailyRaw !== null && !Array.isArray(dailyRaw) && Object.keys(dailyRaw as object).length > 0
+        ? "csv"
+        : "api";
   if (dailyReturns.length === 0) {
     console.warn("[factsheet] fetchAndBuildPayload — no usable return series after normalization + equity-curve fallback", {
       id,
@@ -92,6 +101,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
       markets: strategy.markets ?? [],
       computedAt,
       trustTier: null,
+      ingestSource,
       description: strategy.description ?? null,
       subtypes: strategy.subtypes ?? [],
       supportedExchanges: strategy.supported_exchanges ?? [],

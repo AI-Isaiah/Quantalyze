@@ -247,7 +247,10 @@ export function FactsheetBody({
           <MetricsColumn />
         </div>
 
-        {!hideAllocatorSection && (
+        {/* AllocatorSection uses demo blended portfolios — derivable data only
+            for api-ingested strategies. Suppress for CSV uploads per the
+            no-invented-data contract. (NEW-C20-01) */}
+        {!hideAllocatorSection && payload.ingestSource === "api" && (
           <div id="factsheet-allocator" className="mt-12">
             <LazyMount minHeight={400}>
               <AllocatorSection />
