@@ -1862,7 +1862,19 @@ async def _fetch_current_equity(
 
         try:
             positions = await exchange.fetch_positions()
-        except Exception:  # noqa: BLE001
+        except Exception as _pos_exc:  # noqa: BLE001
+            # silent-failure/F-03: bare except silently dropped the error,
+            # leaving positions=[] with no log entry. For non-unified-margin
+            # venues (Binance), uPnL is additive — missing it understates the
+            # anchor, which shifts the entire reconstructed equity curve.
+            # Log the failure so operators can diagnose auth/network errors
+            # that cause silent anchor undercounts.
+            logger.warning(
+                "_fetch_current_equity: fetch_positions failed venue=%s — "
+                "uPnL excluded from anchor (may understate equity for "
+                "non-unified-margin venues): %s",
+                venue, _pos_exc,
+            )
             positions = []
         if not isinstance(positions, list):
             positions = []
