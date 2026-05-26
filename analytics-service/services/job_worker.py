@@ -1159,10 +1159,19 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # the gate falls through.
     advance_fetched_cursor = (not raw_fills) or phase2_complete
     if advance_fetched_cursor:
+        _new_fetched_ts = datetime.now(timezone.utc).isoformat()
+
         def _update_fetched_cursor() -> None:
+            # NEW-C12-05: monotonic advance — only update if the existing
+            # last_fetched_trade_timestamp is older than the new value.
+            # A preempted/slow W1 arriving after W2 has already advanced
+            # the cursor cannot regress it (split-brain half-open guard).
             ctx.supabase.table("api_keys").update(
-                {"last_fetched_trade_timestamp": datetime.now(timezone.utc).isoformat()}
-            ).eq("id", ctx.key_row["id"]).execute()
+                {"last_fetched_trade_timestamp": _new_fetched_ts}
+            ).eq("id", ctx.key_row["id"]).or_(
+                f"last_fetched_trade_timestamp.is.null,"
+                f"last_fetched_trade_timestamp.lt.{_new_fetched_ts}"
+            ).execute()
 
         try:
             await db_execute(_update_fetched_cursor)
@@ -1176,17 +1185,28 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # so the next run re-fetches the failed daily-PnL window — NEW-C12-02).
     def _update_cursor() -> None:
         update_data: dict = {}
+        _new_sync_ts = datetime.now(timezone.utc).isoformat()
         if not phase1_failed:
             # NEW-C12-02: only advance last_sync_at when Phase-1 actually
             # persisted rows; advancing past an unpersisted window loses the
             # daily-PnL data permanently (the next run's since_ms skips it).
-            update_data["last_sync_at"] = datetime.now(timezone.utc).isoformat()
+            update_data["last_sync_at"] = _new_sync_ts
         if account_balance is not None:
             update_data["account_balance_usdt"] = account_balance
         if update_data:
-            ctx.supabase.table("api_keys").update(update_data).eq(
+            # NEW-C12-05: monotonic advance — add last_sync_at<new_value
+            # condition so a slow W1 finishing after W2 cannot regress the
+            # cursor. account_balance_usdt has no ordering semantics so it's
+            # always updated when present.
+            builder = ctx.supabase.table("api_keys").update(update_data).eq(
                 "id", ctx.key_row["id"]
-            ).execute()
+            )
+            if "last_sync_at" in update_data:
+                builder = builder.or_(
+                    f"last_sync_at.is.null,"
+                    f"last_sync_at.lt.{_new_sync_ts}"
+                )
+            builder.execute()
 
     await db_execute(_update_cursor)
 
