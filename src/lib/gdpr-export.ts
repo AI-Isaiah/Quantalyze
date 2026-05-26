@@ -556,6 +556,31 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
     or_filter: (userId: string) =>
       `user_id.eq.${userId},and(entity_id.eq.${userId},entity_type.eq.user),metadata->>target_user_id.eq.${userId}`,
   },
+  // NEW-C16-03 (audit 2026-05-26, HIGH): audit_log_cold is the 2yr+
+  // archive that the `audit_log_hot_to_cold` cron MOVEs rows into
+  // (migration 20260417110539_retention_crons.sql). It mirrors the hot
+  // audit_log schema exactly (same columns, same owner-read RLS). The
+  // export read ONLY the hot table, so an account >2yr old received an
+  // Art. 15 bundle missing its most forensically-relevant old entries
+  // (early events, old role grants/deletions) with NO `partial` signal
+  // (the rows were never fetched). We UNION the cold archive into the
+  // export as a second projection over the SAME redactor + the SAME
+  // entity/metadata-target widening (NEW-C16-02). Bundle-facing name is
+  // distinct (`audit_log_cold_for_user`) so it does not collide with
+  // the hot projection. Sanitize parity: audit_log_cold is PRESERVE
+  // (mirroring hot) — recorded in SANITIZE_PARITY_ALLOWLIST in
+  // scripts/check-gdpr-export-coverage.ts (the cold table's PRESERVE
+  // policy lives in the same retention-cron migration that creates it,
+  // not the sanitize_user matrix the parity scan reads).
+  {
+    kind: "projected",
+    table: "audit_log_cold_for_user",
+    source_table: "audit_log_cold",
+    user_column: "user_id",
+    project: redactAuditLogForUser,
+    or_filter: (userId: string) =>
+      `user_id.eq.${userId},and(entity_id.eq.${userId},entity_type.eq.user),metadata->>target_user_id.eq.${userId}`,
+  },
   // ------------------------------------------------------------------
   // Indirectly owned (reachable via a parent table)
   // ------------------------------------------------------------------
@@ -1514,9 +1539,15 @@ export const ORDER_COLUMN_OVERRIDES: Readonly<Record<string, string>> = {
  * (see ORDER_COLUMN_OVERRIDES), and by `id` for everything else.
  */
 export function getOrderColumn(spec: UserExportTable): string {
-  // audit_log entries have created_at as their natural time-ordering
-  // field.
-  if (spec.kind === "projected" && spec.source_table === "audit_log") {
+  // audit_log (hot) + audit_log_cold (2yr+ archive, NEW-C16-03) entries
+  // have created_at as their natural time-ordering field — chronological
+  // packing of the size-cap tail. Both lack an `id`-as-sort-key
+  // semantics worth preferring over the temporal axis.
+  if (
+    spec.kind === "projected" &&
+    (spec.source_table === "audit_log" ||
+      spec.source_table === "audit_log_cold")
+  ) {
     return "created_at";
   }
   // NEW-C16-01: the column the SELECT actually orders by is on

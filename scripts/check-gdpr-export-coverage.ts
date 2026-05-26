@@ -252,6 +252,26 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
     reason:
       "Projection of audit_log (PRESERVE per sanitize matrix). The projected name appears in the manifest for bundle clarity; the sanitize policy is for the source table.",
   },
+  // NEW-C16-03 (audit 2026-05-26): audit_log_cold is the 2yr+ archive
+  // the audit_log_hot_to_cold cron MOVEs rows into (migration
+  // 20260417110539_retention_crons.sql). It mirrors hot audit_log
+  // exactly and is now exported as the `audit_log_cold_for_user`
+  // projection. PRESERVE, mirroring hot. The cold table's erasure
+  // policy lives in the retention-cron migration (audit_log_cold_purge
+  // at 7y) — NOT the sanitize_user matrix the parity scan reads — so
+  // BOTH the bundle name and the source_table are allowlisted here
+  // (the projection-parity check requires both sides covered when they
+  // differ). sanitize_user PRESERVES cold rows for the same reason it
+  // PRESERVES hot: append-only forensic record, no PII left once
+  // profiles is anonymized.
+  audit_log_cold_for_user: {
+    reason:
+      "Projection of audit_log_cold (PRESERVE — 2yr+ archive mirroring hot audit_log). Erasure handled by the audit_log_cold_purge retention cron (7y), not the sanitize_user matrix.",
+  },
+  audit_log_cold: {
+    reason:
+      "Source of the audit_log_cold_for_user projection. PRESERVE (mirrors hot audit_log). Append-only forensic archive; profiles anonymize removes PII. Purged at 7y by the audit_log_cold_purge retention cron.",
+  },
   // allocator_equity_snapshots: user-owned via allocator_id (=
   // api_keys.user_id), the f5 owner-coherence trigger keeps the
   // relationship inviolate. The sanitize_user PURGE on api_keys

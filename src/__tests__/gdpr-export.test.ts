@@ -922,10 +922,11 @@ describe("collectUserExportBundle — H-0456 / NEW-C16-01 getOrderColumn per-tab
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await collectUserExportBundle(mock as any, "dddddddd-dddd-dddd-dddd-dddddddddddd");
 
-    // audit_log (the projected source for audit_log_for_user) sorts
-    // by created_at — chronological packing of the size-cap tail.
-    const auditCalls = orderCalls.filter((c) => c.table === "audit_log");
-    expect(auditCalls.length).toBeGreaterThanOrEqual(1);
+    // audit_log (hot) + audit_log_cold (NEW-C16-03 archive) sort by
+    // created_at — chronological packing of the size-cap tail.
+    const auditTables = new Set(["audit_log", "audit_log_cold"]);
+    const auditCalls = orderCalls.filter((c) => auditTables.has(c.table));
+    expect(auditCalls.length).toBeGreaterThanOrEqual(2);
     for (const c of auditCalls) expect(c.col).toBe("created_at");
 
     // NEW-C16-01: the four id-less tables order by their explicit
@@ -948,7 +949,7 @@ describe("collectUserExportBundle — H-0456 / NEW-C16-01 getOrderColumn per-tab
     // Every remaining table (has a UUID PK) sorts by 'id'.
     const idLessTables = new Set(Object.keys(idLessOrderColumns));
     const idTables = orderCalls.filter(
-      (c) => c.table !== "audit_log" && !idLessTables.has(c.table),
+      (c) => !auditTables.has(c.table) && !idLessTables.has(c.table),
     );
     expect(idTables.length).toBeGreaterThan(0);
     for (const c of idTables) expect(c.col).toBe("id");
@@ -1047,6 +1048,82 @@ describe("collectUserExportBundle — NEW-C16-02 audit_log widened to entity/met
     expect((row.metadata as Record<string, unknown>).granted_by).toBe(
       REDACTED_PLACEHOLDER,
     );
+  });
+});
+
+describe("collectUserExportBundle — NEW-C16-03 audit_log_cold archive is exported (HIGH)", () => {
+  it("manifest projects audit_log_cold via the same redactor + entity/metadata widening", () => {
+    const cold = USER_EXPORT_TABLES.find(
+      (t) => t.kind === "projected" && t.source_table === "audit_log_cold",
+    );
+    expect(cold, "audit_log_cold not in USER_EXPORT_TABLES").toBeDefined();
+    if (cold && cold.kind === "projected") {
+      // Distinct bundle name so it does not collide with the hot
+      // projection.
+      expect(cold.table).toBe("audit_log_cold_for_user");
+      expect(cold.user_column).toBe("user_id");
+      // Same redactor as hot — cross-party PII scrub is identical.
+      expect(cold.project).toBe(
+        (
+          USER_EXPORT_TABLES.find(
+            (t) => t.kind === "projected" && t.source_table === "audit_log",
+          ) as { project: unknown }
+        ).project,
+      );
+      // Same entity/metadata-target widening (NEW-C16-02) so old
+      // admin-on-subject rows in the archive are not silently dropped.
+      expect(typeof cold.or_filter).toBe("function");
+      const filter = cold.or_filter!("abc");
+      expect(filter).toContain("user_id.eq.abc");
+      expect(filter).toContain("and(entity_id.eq.abc,entity_type.eq.user)");
+      expect(filter).toContain("metadata->>target_user_id.eq.abc");
+    }
+  });
+
+  it("an archived (cold) row reaches the bundle as audit_log_cold_for_user", async () => {
+    // Pre-fix the export read ONLY the hot table, so an account >2yr old
+    // received a bundle missing its oldest (most forensically-relevant)
+    // entries with no `partial` signal. This drives a mock whose
+    // audit_log_cold source returns one archived row and asserts it lands.
+    const SUBJECT = "77777777-7777-7777-7777-777777777777";
+    const coldRow = {
+      id: "cold-1",
+      user_id: SUBJECT,
+      action: "role.grant",
+      entity_type: "strategy",
+      entity_id: "strat-9",
+      metadata: { role: "manager" },
+      created_at: "2023-01-01T00:00:00Z",
+    };
+    const mock = {
+      from: (table: string) => {
+        const empty = async () => ({ data: [], error: null });
+        const coldRows = async () => ({ data: [coldRow], error: null });
+        const resolver = table === "audit_log_cold" ? coldRows : empty;
+        return {
+          select: () => ({
+            eq: () => ({ order: () => ({ limit: empty }), limit: empty }),
+            or: () => ({
+              order: () => ({ limit: resolver }),
+              limit: resolver,
+            }),
+            in: () => ({ order: () => ({ limit: empty }), limit: empty }),
+          }),
+        };
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, SUBJECT);
+    const coldTable = bundle.tables.find(
+      (t) => t.table === "audit_log_cold_for_user",
+    );
+    expect(coldTable, "audit_log_cold_for_user absent from bundle").toBeDefined();
+    expect(coldTable!.row_count).toBe(1);
+    const out = coldTable!.rows[0] as Record<string, unknown>;
+    expect(out.id).toBe("cold-1");
+    // Subject is the actor here, so user_id is preserved (own data).
+    expect(out.user_id).toBe(SUBJECT);
+    expect(bundle.partial).toBe(false);
   });
 });
 
