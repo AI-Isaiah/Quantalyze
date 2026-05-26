@@ -125,9 +125,10 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
   // Delete the strategies row. Re-apply the source + status filter so a
   // TOCTOU race (e.g., the draft flipped to pending_review between the
   // preflight and now) leaves the row intact rather than silently
-  // clobbering a promoted strategy. ON DELETE CASCADE handles:
-  //   - strategy_analytics (FK with CASCADE per migration 001:72)
-  //   - trades (FK with CASCADE per migration 001:112)
+  // clobbering a promoted strategy. ON DELETE CASCADE on strategy_analytics
+  // + trades wipes the downstream rows automatically (see the initial
+  // schema migration's strategies FK definitions) — same cascade the
+  // cron/cleanup-wizard-drafts sweep relies on.
   const { error: delStrategyErr } = await supabase
     .from("strategies")
     .delete()
@@ -161,11 +162,28 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
   // silently break another strategy that happened to share the same
   // key. Check first, then delete; the check is best-effort.
   if (draft.api_key_id) {
-    const { count: refCount } = await supabase
+    const { count: refCount, error: refCountErr } = await supabase
       .from("strategies")
       .select("id", { count: "exact", head: true })
       .eq("api_key_id", draft.api_key_id);
-    if ((refCount ?? 0) === 0) {
+    // H-0314: a dropped error here is dangerous. On a transient query
+    // failure `count` is null, `(null ?? 0) === 0` is true, and we would
+    // delete the api_keys row even when sibling strategies still
+    // reference it — the FK's ON DELETE SET NULL would then silently
+    // break those siblings' sync. Treat a failed ref-count as "cannot
+    // prove the key is orphaned" and skip the delete (the conservative
+    // direction — never revoke a possibly-shared key on an unproven count).
+    // NOTE: the draft strategy row is already deleted above, and
+    // cron/cleanup-wizard-drafts only discovers keys via STILL-EXISTING draft
+    // rows — so on this rare transient-failure path the key is NOT reclaimed by
+    // that cron and may linger orphaned until a dedicated orphan-key sweep.
+    // Mirrors that cron's own countErr → skip guard.
+    if (refCountErr) {
+      console.warn(
+        "[strategies/draft DELETE] api_keys ref-count check failed (skip cleanup):",
+        refCountErr,
+      );
+    } else if ((refCount ?? 0) === 0) {
       // Capture the api_key_id in a const so TS narrows it inside the
       // audit emission below (the if-guard already established it's
       // non-null, but the closure below loses that narrowing).

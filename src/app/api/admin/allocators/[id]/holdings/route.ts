@@ -3,6 +3,18 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
+import { isUuid } from "@/lib/utils";
+import {
+  adminActionLimiter,
+  checkLimit,
+  isRateLimitMisconfigured,
+} from "@/lib/ratelimit";
+
+// H-0212 (audit-2026-05-07): the holdings payload is per-user portfolio
+// composition. Forbid shared/intermediary caching so a stale or
+// cross-user copy can never be served from a proxy/CDN. Mirrors the
+// NO_STORE_HEADERS contract on the GDPR-export latest route.
+const NO_STORE_HEADERS = { "Cache-Control": "private, no-store" } as const;
 
 // GET /api/admin/allocators/[id]/holdings
 //
@@ -21,6 +33,15 @@ export async function GET(
   if (!allocator_id || typeof allocator_id !== "string") {
     return NextResponse.json({ error: "id required" }, { status: 400 });
   }
+  // M-0261 / H-0212 (audit-2026-05-07): validate UUID shape BEFORE it
+  // reaches `.eq("user_id", allocator_id)`. A non-UUID string otherwise
+  // hits Postgres as a `22P02` invalid-uuid cast and surfaces as an opaque
+  // 500; worse, it widens the enumeration surface flagged in the H-0212
+  // chain. Mirror the `isUuid` guard the sibling
+  // /api/admin/for-quants-leads/process route already applies.
+  if (!isUuid(allocator_id)) {
+    return NextResponse.json({ error: "id must be a UUID" }, { status: 400 });
+  }
 
   // audit-2026-05-07 C-0041 follow-up — same-origin guard on admin
   // GETs that return PII / sensitive operational data. Mirror the
@@ -37,6 +58,35 @@ export async function GET(
   }
   if (!(await isAdminUser(supabase, user))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // H-0211 / H-0212 / H-0213 (audit-2026-05-07): this privacy-sensitive
+  // admin read discloses an arbitrary allocator's holdings keyed by
+  // user_id. Without a limiter a compromised/stolen admin session can walk
+  // every allocator UUID at request rate and exfiltrate the full holdings
+  // graph (each row drives a send-intro decision). Apply the same
+  // adminActionLimiter the sibling GET /api/admin/users/[id]/roles read
+  // path uses, keyed on the acting admin with a `:get` suffix so the read
+  // cadence does not interfere with mutating-route limiter accounting.
+  // Runs AFTER the admin gate so a non-admin can neither consume nor probe
+  // the admin bucket. The read path is deliberately NOT audited (matches
+  // the roles GET and the audit-coverage gate, which only requires
+  // emission on mutations).
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin:${user.id}:allocator-holdings:get`,
+  );
+  if (!rl.success) {
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Rate limiter unavailable", code: "ratelimit_misconfigured" },
+        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+      );
+    }
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
   }
 
   const admin = createAdminClient();
@@ -59,7 +109,7 @@ export async function GET(
 
   if (!portfolio) {
     // No real portfolio yet — allocator has no holdings to point at.
-    return NextResponse.json({ holdings: [] });
+    return NextResponse.json({ holdings: [] }, { headers: NO_STORE_HEADERS });
   }
 
   const portfolioId = (portfolio as { id: string }).id;
@@ -98,5 +148,5 @@ export async function GET(
     };
   });
 
-  return NextResponse.json({ holdings });
+  return NextResponse.json({ holdings }, { headers: NO_STORE_HEADERS });
 }
