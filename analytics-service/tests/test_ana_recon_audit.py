@@ -1020,6 +1020,60 @@ def test_c01_06_sharpe_excludes_terminal_unrealized_bar():
 
 
 # ---------------------------------------------------------------------------
+# silent-failure/F-01 — FALLBACK_AMOUNT must continue + update telemetry
+# ---------------------------------------------------------------------------
+
+
+def test_silentfailure_f01_fallback_amount_continue_and_telemetry():
+    """silent-failure/F-01: _resolve_perp_amt_base FALLBACK_AMOUNT must have an
+    explicit continue in the caller AND must update unknown_perp_symbols.
+
+    Without the continue, a fill with amt_base=0.0 falls through to the
+    position-state update path as a zero-size fill — harmless today but fragile.
+    Without the telemetry update, operators cannot distinguish "all plausible"
+    from "some fills dropped for implausible size".
+    """
+    import inspect
+    from services import equity_reconstruction as er
+
+    import ast as _ast
+    src = inspect.getsource(er._compute_daily_equity)
+    # The FALLBACK_AMOUNT guard must exist at the call site (not just in the callee).
+    assert "amt_src == _PerpAmtSource.FALLBACK_AMOUNT" in src, (
+        "silent-failure/F-01: 'if amt_src == _PerpAmtSource.FALLBACK_AMOUNT:' guard "
+        "must be present in _compute_daily_equity"
+    )
+    # Parse the AST to find the if-block for FALLBACK_AMOUNT and verify it has
+    # both an unknown_perp_symbols reference and a Continue node.
+    tree = _ast.parse(src)
+    found_continue = False
+    found_unknown = False
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.If):
+            continue
+        # Check if this is the `if amt_src == _PerpAmtSource.FALLBACK_AMOUNT:` block.
+        test = node.test
+        if not (isinstance(test, _ast.Compare) and len(test.comparators) == 1):
+            continue
+        # The comparator must reference FALLBACK_AMOUNT.
+        cmp_src = _ast.unparse(test.comparators[0])
+        if "FALLBACK_AMOUNT" not in cmp_src:
+            continue
+        # Found the right if-block. Walk its body.
+        for body_node in _ast.walk(node):
+            if isinstance(body_node, _ast.Continue):
+                found_continue = True
+            if isinstance(body_node, _ast.Name) and body_node.id == "unknown_perp_symbols":
+                found_unknown = True
+    assert found_continue, (
+        "silent-failure/F-01: continue must be inside the FALLBACK_AMOUNT if-block"
+    )
+    assert found_unknown, (
+        "silent-failure/F-01: unknown_perp_symbols must be updated in the FALLBACK_AMOUNT block"
+    )
+
+
+# ---------------------------------------------------------------------------
 # NEW-C01-11 — OKX 90-day terminus stamps pre_terminus_balance_unknown flag
 # ---------------------------------------------------------------------------
 

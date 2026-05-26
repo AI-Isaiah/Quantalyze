@@ -1033,6 +1033,18 @@ def _compute_daily_equity(
                             venue, raw_symbol, amt,
                         )
                         continue
+                    if amt_src == _PerpAmtSource.FALLBACK_AMOUNT:
+                        # silent-failure/F-01 (NEW-C01-13 follow-up): the callee
+                        # already logged a warning. Without this explicit continue
+                        # the fill falls through with amt_base=0.0, silently
+                        # skipping the position-state update while leaving
+                        # unknown_perp_symbols unchanged. Record the symbol in
+                        # the same DQ accumulator as COST_DIV_PRICE unknowns so
+                        # operators can distinguish "all fills plausible" from
+                        # "some fills dropped for implausible size".
+                        if unknown_perp_symbols is not None:
+                            unknown_perp_symbols.add(raw_symbol)
+                        continue
                     if (
                         amt_src == _PerpAmtSource.COST_DIV_PRICE
                         and inst_type
