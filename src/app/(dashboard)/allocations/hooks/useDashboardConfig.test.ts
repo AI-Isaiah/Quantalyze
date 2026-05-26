@@ -709,14 +709,32 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
     expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("parse_failed");
   });
 
-  it("loadV2Config: layoutVersion drift sets version_reset recovery flag without console.warn (expected drift, not error)", () => {
-    seedV2Blob([{ k: "kpi-strip", w: 4 }], { layoutVersion: 9999 }); // future version
+  it("loadV2Config: layoutVersion drift (past version) sets version_reset recovery flag", () => {
+    // layoutVersion < LAYOUT_VERSION = older blob; reset to defaults.
+    seedV2Blob([{ k: "kpi-strip", w: 4 }], { layoutVersion: 1 }); // old version
 
     renderHook(() => useDashboardConfigV2());
 
-    // Drift is expected on version bumps — no console.warn, just the flag.
-    expect(warnSpy).not.toHaveBeenCalled();
     expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("version_reset");
+  });
+
+  it("NEW-C06-09: loadV2Config: future layoutVersion (ahead of this build) loads read-only, no recovery flag", () => {
+    // NEW-C06-09: a newer build wrote a higher layoutVersion. The hook should
+    // NOT clobber the blob with defaults — return wasReset:true (skip persist)
+    // and log a warning. The recovery flag is NOT set because no layout was
+    // destroyed — the user's future-build layout is intact.
+    seedV2Blob([{ k: "kpi-strip", w: 4 }], { layoutVersion: 9999 });
+
+    renderHook(() => useDashboardConfigV2());
+
+    // Warn about forward-compat, but DO NOT set the recovery flag.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("loading read-only"),
+      expect.objectContaining({ persisted: 9999 }),
+    );
+    // No version_reset recovery flag — the user's layout was not wiped.
+    // (sessionStorageMock.getItem returns undefined for unset keys in this mock.)
+    expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBeFalsy();
   });
 
   it("loadV2Config: a v2 blob carrying legacy-shape tiles sets legacy_in_v2_blob recovery flag", () => {

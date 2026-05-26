@@ -418,7 +418,19 @@ function validateAndNormalizeTile(tile: unknown): TileConfig | null {
   // poisoned `k` through to render.
   if (!Object.prototype.hasOwnProperty.call(WIDGET_REGISTRY, k)) return null;
   const w = clampWidth(t.w);
-  const result: TileConfig = { k, w };
+  // NEW-C06-09: spread unknown top-level tile fields through so a newer
+  // build's additive tile fields (e.g. `pinned`, `h`) are preserved on
+  // round-trip rather than silently stripped. The whitelist approach
+  // ({k, w, config}) was destroying legit future fields each time an older
+  // tab loaded a newer-build blob. Poison keys are still excluded below.
+  const KNOWN_TILE_KEYS = new Set(["k", "w", "config"]);
+  const extra: Record<string, unknown> = {};
+  for (const key of Object.keys(t)) {
+    if (KNOWN_TILE_KEYS.has(key)) continue;
+    if (PROTO_POISON_KEYS.has(key)) continue;
+    extra[key] = t[key];
+  }
+  const result: TileConfig = { ...extra, k, w };
   if (
     t.config !== undefined &&
     t.config !== null &&
@@ -480,6 +492,23 @@ function loadV2ConfigResult(): LoadV2Result {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DashboardConfig;
+      // NEW-C06-09: forward-compat — a newer build wrote a higher layoutVersion.
+      // Return the blob read-only (skip persist) rather than down-converting,
+      // so older tabs don't strip future additive fields on every save.
+      if (
+        typeof parsed.layoutVersion === "number" &&
+        parsed.layoutVersion > LAYOUT_VERSION
+      ) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useDashboardConfigV2] persisted layoutVersion is ahead of this build; loading read-only",
+            { persisted: parsed.layoutVersion, thisVersion: LAYOUT_VERSION },
+          );
+        }
+        // Return with wasReset: true so the hook skips the persist effect on
+        // mount (observe-without-write) — the blob's future fields stay intact.
+        return { config: defaultV2Config(), wasReset: true };
+      }
       // Reset on layoutVersion mismatch (Voice-D8 precedent).
       if (parsed.layoutVersion !== LAYOUT_VERSION) {
         // Best-effort: tell the dashboard a layout reset happened so it can
