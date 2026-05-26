@@ -443,14 +443,24 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
   // for the "fresh / stale / old" bucketing.
   const [nowMs] = React.useState(() => Date.now());
   const days = (nowMs - d.getTime()) / 86_400_000;
+  // A future computedAt (days < 0) means the upstream series window is ahead
+  // of now — treat as neutral/suspicious, never "fresh". (NEW-C20-07)
   const tone =
-    !Number.isFinite(days) ? "neutral" : days <= 3 ? "fresh" : days <= 7 ? "stale" : "old";
+    !Number.isFinite(days) ? "neutral"
+    : days < 0 ? "future"
+    : days <= 3 ? "fresh"
+    : days <= 7 ? "stale"
+    : "old";
   const toneColor =
     tone === "fresh" ? "var(--color-positive)" :
     tone === "stale" ? "var(--color-warning, #B45309)" :
     tone === "old" ? "var(--color-negative)" : "var(--color-text-muted)";
   const label =
-    tone === "fresh" ? "fresh" : tone === "stale" ? "stale" : tone === "old" ? "old" : "—";
+    tone === "fresh" ? "fresh"
+    : tone === "stale" ? "stale"
+    : tone === "old" ? "old"
+    : tone === "future" ? "future — check data"
+    : "—";
   return (
     <div>
       <div className="flex items-center justify-end gap-1.5 text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
@@ -459,7 +469,7 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
       </div>
       <p className="mt-1 text-[13px] font-mono tabular-nums text-text-secondary">
         {formatIsoDate(computedAt)}
-        {Number.isFinite(days) && <span className="ml-1 text-text-muted">({Math.round(days)}d)</span>}
+        {Number.isFinite(days) && days >= 0 && <span className="ml-1 text-text-muted">({Math.round(days)}d)</span>}
       </p>
     </div>
   );
