@@ -1,11 +1,31 @@
 # Changelog
 
+## [0.24.9.9] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: auth / audit / preferences (batch b08)
+- Auth: `withRole` requireApproval gate + fail-closed `assertProfileApproved`; `_approvalGate` promise evicts on rejection (was a permanent-503 DoS); `isAdminUser` direct-query delegation (C15-01/04, red-team)
+- Audit: security mutations now use service-scoped `logAuditEventAsUser`; awaited Sentry + central metadata cap + proto-poison guard; explicit 28000/42501 dispatch branches (C10-01/02/03/05/06, red-team)
+- Preferences API: validation + rate-limit (503 on misconfig) + error logging (C07-01..05)
+- New migration `20260526095850_log_audit_event_null_auth_errcode.sql` (ERRCODE-anchored null-auth handling) — auto-applies to prod
+
+
+## [0.24.9.8] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: GDPR export (batch b01)
+- **CRITICAL:** schema-aware export ORDER BY — `getOrderColumn` no longer `.order("id")` on id-less tables that 500'd every Art.15/20 export (NEW-C16-01)
+- Export now covers audit_log_cold archive, positions/position_snapshots, csv_daily_returns; audit-log widened to entity/metadata-target rows (C16-02/03/04/09)
+- Redact cross-party identifiers in match tables + bridge_outcome_dismissals (PII) (C16-05/08)
+- Global stable sort + memory-bounded chunked indirect fetch; admin self-deletion-reject hardening (C16-07/10, C36-01)
+
+
 All notable changes to Quantalyze will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+
+## [0.24.9.7] - 2026-05-26
+
+**fix(analytics-funding): harden funding-attribution observability + corrupt-timestamp handling in position_reconstruction (audit H-1094/H-1097), reviewed by a 3-specialist fan-out + Claude red-team + /simplify + /comment-analyzer.** Two HIGH audit findings fixed at root cause in `analytics-service/services/position_reconstruction.py` `_attribute_funding`; the rest of the batch-3 cluster (analytics_runner.py, exchange.py, audit.py) re-verified as cross-file or closed-stale (no live single-file fix — confirming the remaining analytics HIGHs are now cross-file clusters). **H-1097** — the funding query window was built from the lexical `min/max` of raw `opened_at`/`closed_at` strings injected into PostgREST `.gte/.lte`; a single corrupt `closed_at` (e.g. a space instead of 'T') could be lexically-max yet parse-invalid as TIMESTAMPTZ, 400-ing the whole range scan, which the broad `except` then swallowed — silently zeroing funding for EVERY position. Bounds are now computed from PARSED datetimes via a new `_parse_iso_utc` helper (UTC-normalized; returns None on corrupt); a corrupt `closed_at` falls back to `now` (mirroring the per-position scan) so the fetch window COVERS that position instead of dropping it — a self-review caught that naively dropping it re-introduces a quieter silent-zeroing of LATER positions, and that an all-corrupt-close batch must not `max([])`-crash. **H-1094** — a swallowed funding-fetch failure (RLS / missing table) silently left every `funding_pnl=0` with no signal; it now sets `data_quality_flags['funding_attribution_failed']` (also on the no-parseable-`opened_at` path), which analytics_runner lifts into `strategy_analytics.data_quality_flags` so the dashboard can warn that ROI excludes funding because it could not be LOADED, vs implying none was paid. Two further observability flags added in the same spirit: `funding_window_corrupt_position` (per-POSITION count of corrupt timestamps) and `funding_rows_unparseable` (funding rows dropped from the sum for a corrupt timestamp/amount — a partial under-count). **Tests** — 6 regression tests (corrupt-`closed_at` window not poisoned; all-closes-corrupt → now, no crash; corrupt-open keeps its valid close; `flags=None` no-crash; double-corrupt counts once; corrupt funding-rows counted + excluded); the existing H-1097 test was corrected to assert the fixed cover-to-`now` behaviour rather than the buggy drop. 100 position-reconstruction tests green. The red-team independently confirmed the new tests fail against pre-fix code and that widening the fetch to `now` cannot misattribute funding (the per-position `opened<=ts<=closed` filter re-bounds each position). Deferred to dedicated cross-file batches (the remaining batch-3 HIGHs, all cross-file): float→Decimal money math (H-0735/H-0740/H-0640/H-0742), analytics producer TypedDict/Literal hygiene (H-0638/H-0639/H-0650/H-0651), turnover-key rename TS+Python (H-0635), per-trade info-disclosure cap (H-0737), KEK-rotation snapshot filter (H-0746), exchange symbol-normalization + data migration (H-0668), exchange Decimal precision (H-0669), audit-taxonomy Literal/Pydantic Python↔TS (H-0656/H-0657/M-0660). Analytics-service (Python) only — no schema, migration, or frontend changes; pytest gate green for the touched modules (100 passed incl. 6 new).
 
 ## [0.24.9.6] - 2026-05-26
 
