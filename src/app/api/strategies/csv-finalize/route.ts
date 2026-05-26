@@ -1056,10 +1056,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         // indistinguishable from a genuine "not found" result, so the user
         // received ok:false instead of the correct idempotent ok:true, and
         // the SELECT failure left zero trace in logs.
+        //
+        // RED-TEAM-H1: join through strategies!inner to verify the
+        // requesting user owns the pre-existing row. Without this check,
+        // a replayed wizard_session_id (leaked via log/network sniff) from
+        // a different user returns that user's strategy_id to the attacker.
+        // The admin client bypasses RLS so the query itself is the only
+        // ownership guard on this path.
         const { data: verRow, error: verLookupErr } = await admin
           .from("strategy_verifications")
-          .select("strategy_id")
+          .select("strategy_id, strategies!inner(user_id)")
           .eq("wizard_session_id", wizard_session_id)
+          .eq("strategies.user_id", user.id)
           .maybeSingle();
         if (verLookupErr) {
           console.error(
@@ -1131,7 +1139,27 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       metadataRaw,
       { correlationId: correlation_id },
     );
-    if (metaErrResponse) return metaErrResponse;
+    if (metaErrResponse) {
+      // RED-TEAM-M1: the post-RPC metadata parse failure (defensive case
+      // only — pre-create validation already runs above) leaves an orphan
+      // strategy row (status=pending_review, no metadata) while returning
+      // a 400 to the client. The client receives no strategy_id, so
+      // support cannot find and clean the orphan without a Sentry alert.
+      // Capture the orphan strategy_id explicitly so it is surfaced in
+      // Sentry and traceable via correlation_id.
+      captureToSentry(
+        new Error("Post-RPC metadata validation failed: orphan strategy row created"),
+        {
+          tags: { surface: "csv-finalize", step: "post-rpc-metadata-validation-orphan" },
+          extra: {
+            orphan_strategy_id: newStrategyId,
+            correlation_id,
+            wizard_session_id,
+          },
+        },
+      );
+      return metaErrResponse;
+    }
   }
 
   // Phase 19.1: persist the validated daily-return series via the

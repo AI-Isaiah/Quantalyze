@@ -23,7 +23,10 @@ export type ComputationStatus = StrategyAnalytics["computation_status"];
 const POLL_MAX_ATTEMPTS = 40;
 // After a few initial polls a missing row is treated as a failure so
 // the user sees a recoverable error instead of "Computing…" forever.
-const MISSING_ROW_GRACE_POLLS = 3;
+// RED-TEAM-M2: raised from 3 (9 s) to 10 (30 s) to accommodate Railway
+// cold-start latency (15–30 s typical). The 120 s outer cap (POLL_MAX_ATTEMPTS)
+// is unchanged; this only widens the missing-row grace window.
+const MISSING_ROW_GRACE_POLLS = 10;
 
 export type SyncStatus =
   | "idle"

@@ -165,9 +165,18 @@ export function CsvSubmitStep({
         // NEW-C14-01: re-enable Submit on errors that are safe to retry.
         // The route is now idempotent for wizard_session_id conflicts
         // (23505 → 409), so retrying after CSV_FINALIZE_FAIL is safe.
-        // Keep button disabled only for CSV_PERSIST_FAIL (strategy exists
-        // but series not saved — user should contact support, not retry).
-        if (data.code !== "CSV_PERSIST_FAIL") {
+        // Keep button disabled for:
+        //   CSV_PERSIST_FAIL — strategy exists but series not saved, contact support.
+        //   CSV_DUPLICATE_SESSION — admin lookup failed after 23505; retrying will
+        //     hit 23505 again and loop indefinitely. The error copy already says
+        //     "Refresh the page to see your submitted strategy."
+        //     RED-TEAM-L2: without this guard, Submit was re-enabled and the user
+        //     could trigger an infinite 23505 → lookup-fails → 409 CSV_DUPLICATE_SESSION
+        //     → re-enabled Submit cycle.
+        if (
+          data.code !== "CSV_PERSIST_FAIL" &&
+          data.code !== "CSV_DUPLICATE_SESSION"
+        ) {
           setSubmitting(false);
         }
         return;
