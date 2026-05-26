@@ -162,7 +162,12 @@ function buildFactsheetPayloadCached(
     // whenever FactsheetPayload adds non-optional fields, so unstable_cache
     // entries from the previous shape don't crash readers expecting the new
     // fields. The factsheet-v2:* tags below still revalidate old entries.
-    ["factsheet-v2-payload-v2", id],
+    // Bumped v2→v3: ingestSource field added in this PR. Stale v2 entries
+    // lack the field; deserialized payload would have ingestSource=undefined,
+    // which evaluates !== "api" and silently suppresses all gated panels
+    // (PeerPercentile, AllocatorSection, Signatures) for legitimate API
+    // strategies during the TTL drain window. (RED-TEAM-C1)
+    ["factsheet-v2-payload-v3", id],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],

@@ -453,11 +453,33 @@ function formatUsdCompact(v: number): string {
   return `$${v.toFixed(0)}`;
 }
 
+// Epoch sentinel value used by the server when analytics.computed_at is null.
+// Render "not computed" UI instead of the alarming "Jan 1, 1970" date.
+// (RED-TEAM-M4, FINDING-5)
+const EPOCH_SENTINEL = "1970-01-01T00:00:00Z";
+
 /**
  * Data freshness — institutional buyers reject stale reports.
  * Green ≤ 3d, amber 3-7d, red >7d. Date below.
  */
 function FreshnessChip({ computedAt }: { computedAt: string }) {
+  // Epoch sentinel means analytics.computed_at was null server-side — the
+  // strategy hasn't been computed yet. Render a graceful "not computed" chip
+  // rather than surfacing "Jan 1, 1970 (~20000d)" which looks like a data
+  // bug to institutional viewers. (RED-TEAM-M4)
+  if (computedAt === EPOCH_SENTINEL) {
+    return (
+      <div>
+        <div className="flex items-center justify-end gap-1.5 text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
+          <span aria-hidden className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: "var(--color-text-muted)" }} />
+          Computed · not yet
+        </div>
+        <p className="mt-1 text-[13px] font-mono tabular-nums text-text-secondary">
+          N/A
+        </p>
+      </div>
+    );
+  }
   const d = new Date(computedAt);
   // useState initializer runs once per mount so render stays pure — Date.now()
   // would otherwise be flagged as impure-in-render. Hour resolution is fine

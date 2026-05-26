@@ -391,10 +391,15 @@ export type FactsheetPayload = {
   };
   /** Batch D — style drift (real data, 50/50 split + KS test). */
   styleDrift: StyleDriftPayload | null;
-  /** Batch D — peer percentile (synthesized demo cohort, badge in UI). */
-  peerPercentile: PeerPercentilePayload;
-  /** Batch D — allocator portfolio analysis (demo portfolios, badge in UI). */
-  allocatorPortfolios: AllocatorPortfolioPayload[];
+  /** Batch D — peer percentile (synthesized demo cohort, badge in UI).
+   *  null for csv-ingested strategies — not serialized to avoid RSC payload
+   *  exposure of synthesized figures. Only non-null when ingestSource==="api".
+   *  (RED-TEAM-M2) */
+  peerPercentile: PeerPercentilePayload | null;
+  /** Batch D — allocator portfolio analysis (demo portfolios, badge in UI).
+   *  null for csv-ingested strategies (same RSC payload contract as peerPercentile).
+   *  (RED-TEAM-M2) */
+  allocatorPortfolios: AllocatorPortfolioPayload[] | null;
   /** Consecutive winning/losing day streaks. */
   streaks: StreakPayload;
   /** Per-year Calmar table. */
@@ -409,10 +414,14 @@ export type FactsheetPayload = {
   correlations: CorrelationRow[];
   /** Full pairwise correlation matrix across strategy + all benchmarks. */
   correlationMatrix: CorrelationMatrixPayload;
-  /** Event-study signatures (1d and 7d horizons) driven by STRATEGY events. */
-  eventSignatures: EventSignaturesPayload;
-  /** Same shape, driven by BENCHMARK events — feeds the Cross Signatures overlay. */
-  benchEventSignatures: EventSignaturesPayload;
+  /** Event-study signatures (1d and 7d horizons) driven by STRATEGY events.
+   *  null for csv-ingested strategies — not serialized to avoid RSC payload
+   *  exposure of computed-but-invisible data. Only non-null when ingestSource==="api".
+   *  (RED-TEAM-M3) */
+  eventSignatures: EventSignaturesPayload | null;
+  /** Same shape, driven by BENCHMARK events — feeds the Cross Signatures overlay.
+   *  null for csv-ingested strategies (same contract as eventSignatures). (RED-TEAM-M3) */
+  benchEventSignatures: EventSignaturesPayload | null;
   /** Strategy + benchmark behavior during named market-stress windows. */
   stressWindows: StressWindowPayload;
   /** Quantile box-plot summary on the strategy's daily-return distribution. */

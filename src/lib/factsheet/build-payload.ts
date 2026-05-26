@@ -115,9 +115,18 @@ export function buildFactsheetPayload(
   const iefRet = alignReturns(IEF_DAILY, dates);
 
   const styleDrift = computeStyleDrift(stratRet, dates);
-  const peer = computePeerPercentile(strategyMetrics.sharpe, strategyMetrics.sortino, strategyMetrics.max_dd);
+  // Synthesized/demo data: only compute + ship when ingestSource === "api".
+  // For CSV strategies, null these out so they are absent from the RSC
+  // payload blob — prevents synthesized figures from being scraped from
+  // __RSC_PAYLOAD__ / network devtools even though the rendered UI already
+  // gates them. No-invented-data contract applies at the data layer too.
+  // (RED-TEAM-M2, RED-TEAM-M3)
+  const isApiSource = (strategy.ingestSource ?? "csv") === "api";
+  const peer = isApiSource
+    ? computePeerPercentile(strategyMetrics.sharpe, strategyMetrics.sortino, strategyMetrics.max_dd)
+    : null;
 
-  const allocator: AllocatorPortfolioPayload[] = [
+  const allocator: AllocatorPortfolioPayload[] | null = isApiSource ? [
     {
       key: "sixty_forty",
       name: "60/40 Stocks/Bonds",
@@ -136,7 +145,7 @@ export function buildFactsheetPayload(
       composition: "70% BTC · 30% ETH",
       ...buildAllocatorMetrics(blend([0.7, 0.3], [btcRet, ethRet]), stratRet),
     },
-  ];
+  ] : null;
 
   const correlations: CorrelationRow[] = [
     { name: "BTC", rho: pearsonCorr(stratRet, btcRet) },
@@ -201,12 +210,14 @@ export function buildFactsheetPayload(
       none: noneComparatorBlock,
     },
     styleDrift,
-    peerPercentile: {
-      cohortSize: peer.cohort.length,
-      sharpe: peer.sharpe,
-      sortino: peer.sortino,
-      max_dd: peer.max_dd,
-    },
+    peerPercentile: peer
+      ? {
+          cohortSize: peer.cohort.length,
+          sharpe: peer.sharpe,
+          sortino: peer.sortino,
+          max_dd: peer.max_dd,
+        }
+      : null,
     allocatorPortfolios: allocator,
     streaks: (() => {
       const { wins, losses } = streakLengths(stratRet);
@@ -227,8 +238,11 @@ export function buildFactsheetPayload(
     dailyHeatmap: dailyReturnsByYear(stratRet, dates),
     correlations,
     correlationMatrix: { labels, matrix },
-    eventSignatures: computeEventSignatures(stratRet, btcRet, stratEquity),
-    benchEventSignatures: computeEventSignatures(btcRet, btcRet, cumEq(btcRet)),
+    // Only compute + serialize event-signature data for api-source strategies.
+    // CSV-strategy signatures are zero-population arrays that add payload weight
+    // and expose computed-but-invisible data in the RSC blob. (RED-TEAM-M3)
+    eventSignatures: isApiSource ? computeEventSignatures(stratRet, btcRet, stratEquity) : null,
+    benchEventSignatures: isApiSource ? computeEventSignatures(btcRet, btcRet, cumEq(btcRet)) : null,
     stressWindows: computeStressWindows(dates, stratRet, btcRet, "BTC", strategy.markets),
     quantiles,
   };

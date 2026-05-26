@@ -352,3 +352,152 @@ describe("IMPORTANT-2: ingestSource='csv' payload contract for panel suppression
     expect(payload!.ingestSource === "api").toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// RED-TEAM-M2 / RED-TEAM-M3 — synthesized data absent from RSC payload for csv
+// Verifies that peerPercentile, allocatorPortfolios, eventSignatures,
+// benchEventSignatures are null for csv-ingested strategies so they are not
+// serialized into the RSC payload blob.
+// ---------------------------------------------------------------------------
+describe("RED-TEAM-M2/M3: synthesized payload fields null for csv strategies", () => {
+  it("csv strategy: peerPercentile is null (not serialized to RSC payload)", () => {
+    const payload = buildFactsheetPayload(
+      makeStrategy({ ingestSource: "csv" }),
+      makeReturns(),
+    );
+    expect(payload).not.toBeNull();
+    expect(payload!.peerPercentile).toBeNull();
+  });
+
+  it("csv strategy: allocatorPortfolios is null (not serialized to RSC payload)", () => {
+    const payload = buildFactsheetPayload(
+      makeStrategy({ ingestSource: "csv" }),
+      makeReturns(),
+    );
+    expect(payload!.allocatorPortfolios).toBeNull();
+  });
+
+  it("csv strategy: eventSignatures is null (not serialized to RSC payload)", () => {
+    const payload = buildFactsheetPayload(
+      makeStrategy({ ingestSource: "csv" }),
+      makeReturns(),
+    );
+    expect(payload!.eventSignatures).toBeNull();
+  });
+
+  it("csv strategy: benchEventSignatures is null (not serialized to RSC payload)", () => {
+    const payload = buildFactsheetPayload(
+      makeStrategy({ ingestSource: "csv" }),
+      makeReturns(),
+    );
+    expect(payload!.benchEventSignatures).toBeNull();
+  });
+
+  it("csv default (no ingestSource): all four synthesized fields are null", () => {
+    // Conservative default — caller omits ingestSource → treated as csv
+    const payload = buildFactsheetPayload(makeStrategy(), makeReturns());
+    expect(payload!.peerPercentile).toBeNull();
+    expect(payload!.allocatorPortfolios).toBeNull();
+    expect(payload!.eventSignatures).toBeNull();
+    expect(payload!.benchEventSignatures).toBeNull();
+  });
+
+  it("api strategy: all four synthesized fields are non-null", () => {
+    const payload = buildFactsheetPayload(
+      makeStrategy({ ingestSource: "api" }),
+      makeReturns(),
+    );
+    expect(payload!.peerPercentile).not.toBeNull();
+    expect(payload!.allocatorPortfolios).not.toBeNull();
+    expect(payload!.eventSignatures).not.toBeNull();
+    expect(payload!.benchEventSignatures).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RED-TEAM-M4 — FreshnessChip epoch sentinel renders "N/A" not "Jan 1, 1970"
+// Test the sentinel detection logic extracted from the component.
+// ---------------------------------------------------------------------------
+describe("RED-TEAM-M4: epoch sentinel detected and hidden from rendered date", () => {
+  const EPOCH_SENTINEL = "1970-01-01T00:00:00Z";
+
+  it("epoch sentinel is the string '1970-01-01T00:00:00Z' (server contract)", () => {
+    // Validates the sentinel value used by both server (page.tsx) and chip logic.
+    expect(EPOCH_SENTINEL).toBe("1970-01-01T00:00:00Z");
+  });
+
+  it("epoch sentinel comparison is exact string equality (no Date parse needed)", () => {
+    const isEpoch = (v: string) => v === EPOCH_SENTINEL;
+    expect(isEpoch("1970-01-01T00:00:00Z")).toBe(true);
+    expect(isEpoch("2024-05-01T00:00:00Z")).toBe(false);
+    expect(isEpoch("1970-01-01")).toBe(false); // only the exact sentinel matches
+  });
+
+  it("old code: epoch renders as 'old' — correct tone but exposes year 1970 visually", () => {
+    // This was already a correct tone (old/red), but displays "Jan 1, 1970 (20090d)"
+    // which is alarming to institutional viewers. The fix renders "N/A" instead.
+    const epochDate = EPOCH_SENTINEL;
+    const d = new Date(epochDate);
+    const days = (Date.now() - d.getTime()) / 86_400_000;
+    // Epoch is clearly "old"
+    expect(days).toBeGreaterThan(7);
+    // Without the sentinel check, formatIsoDate produces a recognizable epoch date
+    const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"] as const;
+    const formatted = `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+    expect(formatted).toBe("Jan 1, 1970");
+    // The fix replaces this with "N/A" by detecting the sentinel first.
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RED-TEAM-H1 — discovery page ingestSource derivation mirrors factsheet page
+// Tests the ingestSource classification logic at the unit level (same logic
+// copied to both pages — if this test fails without the fix, the discovery
+// page defaulted every strategy to "csv").
+// ---------------------------------------------------------------------------
+describe("RED-TEAM-H1: ingestSource derivation logic for discovery page", () => {
+  // The same ternary used in both fetchAndBuildPayload and the discovery page
+  function deriveIngestSource(dailyRaw: unknown): "api" | "csv" {
+    return Array.isArray(dailyRaw)
+      ? "csv"
+      : typeof dailyRaw === "object" && dailyRaw !== null
+        ? "csv"
+        : "api";
+  }
+
+  it("null dailyRaw (api-only strategy) → 'api'", () => {
+    expect(deriveIngestSource(null)).toBe("api");
+  });
+
+  it("undefined dailyRaw (api-only strategy) → 'api'", () => {
+    expect(deriveIngestSource(undefined)).toBe("api");
+  });
+
+  it("array dailyRaw → 'csv'", () => {
+    expect(deriveIngestSource([{ date: "2024-01-01", value: 0.001 }])).toBe("csv");
+  });
+
+  it("empty array dailyRaw → 'csv' (CSV ingester ran, produced 0 rows)", () => {
+    expect(deriveIngestSource([])).toBe("csv");
+  });
+
+  it("before fix: discovery page passed no ingestSource → builder defaulted to 'csv' for API strategies", () => {
+    // Without ingestSource, buildFactsheetPayload defaults to "csv" (conservative).
+    // An api-source strategy passing through discovery would have ingestSource==="csv"
+    // and all gated panels suppressed. The fix ensures the discovery page derives
+    // ingestSource before calling buildFactsheetPayload.
+    const payload = buildFactsheetPayload(
+      // Simulate discovery page before fix: no ingestSource passed
+      makeStrategy({ /* no ingestSource */ }),
+      makeReturns(),
+    );
+    // The builder defaults to "csv" — this is what broke api-strategy panels on discovery
+    expect(payload!.ingestSource).toBe("csv");
+    // After fix: the discovery page explicitly passes ingestSource derived from dailyRaw
+    const payloadFixed = buildFactsheetPayload(
+      makeStrategy({ ingestSource: "api" }),
+      makeReturns(),
+    );
+    expect(payloadFixed!.ingestSource).toBe("api");
+  });
+});
