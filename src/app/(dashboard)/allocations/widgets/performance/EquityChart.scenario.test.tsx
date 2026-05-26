@@ -1,8 +1,8 @@
 import { render, fireEvent } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
-import { EquityChart } from "./EquityChart";
+import { EquityChart, toWealth } from "./EquityChart";
 
 // ---------------------------------------------------------------------------
 // Phase 10 / 10-04 Task 2 — EquityChart scenarioSeries overlay + 3-state
@@ -61,7 +61,7 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
     const { container } = render(
       <EquityChart
         equityDailyPoints={makeWealthSeries(60)}
-        scenarioSeries={makeWealthSeries(60, 1.0, 0.002)}
+        scenarioSeries={toWealth(makeWealthSeries(60, 1.0, 0.002))}
         initialPeriod="ALL"
       />,
     );
@@ -80,7 +80,7 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
     const { getByRole, getAllByRole } = render(
       <EquityChart
         equityDailyPoints={makeWealthSeries(60)}
-        scenarioSeries={makeWealthSeries(60, 1.0, 0.002)}
+        scenarioSeries={toWealth(makeWealthSeries(60, 1.0, 0.002))}
         initialPeriod="ALL"
       />,
     );
@@ -96,7 +96,7 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
     const { getByRole, container } = render(
       <EquityChart
         equityDailyPoints={makeWealthSeries(60)}
-        scenarioSeries={makeWealthSeries(60, 1.0, 0.002)}
+        scenarioSeries={toWealth(makeWealthSeries(60, 1.0, 0.002))}
         initialPeriod="ALL"
       />,
     );
@@ -126,7 +126,7 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
     const { getByRole, container } = render(
       <EquityChart
         equityDailyPoints={makeWealthSeries(60)}
-        scenarioSeries={makeWealthSeries(60, 1.0, 0.002)}
+        scenarioSeries={toWealth(makeWealthSeries(60, 1.0, 0.002))}
         initialPeriod="ALL"
       />,
     );
@@ -143,7 +143,7 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
     const { getByRole, container } = render(
       <EquityChart
         equityDailyPoints={makeWealthSeries(60)}
-        scenarioSeries={makeWealthSeries(60, 1.0, 0.002)}
+        scenarioSeries={toWealth(makeWealthSeries(60, 1.0, 0.002))}
         initialPeriod="ALL"
       />,
     );
@@ -213,7 +213,7 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
     const { getByRole } = render(
       <EquityChart
         equityDailyPoints={makeWealthSeries(60)}
-        scenarioSeries={makeWealthSeries(60, 1.0, 0.002)}
+        scenarioSeries={toWealth(makeWealthSeries(60, 1.0, 0.002))}
         initialPeriod="ALL"
       />,
     );
@@ -277,7 +277,7 @@ describe("EquityChart — H-0165 Pitfall 1 scenario overlay anchoring", () => {
 
   it("(1) WEALTH-form scenario overlay departs from the SAME baseline as the live line (starts at 100%)", () => {
     const live = makeWealthSeries(60, 1.0, 0.001);
-    const scenario = makeWealthSeries(60, 1.0, 0.003);
+    const scenario = toWealth(makeWealthSeries(60, 1.0, 0.003));
     const { container } = render(
       <EquityChart
         equityDailyPoints={live}
@@ -297,13 +297,16 @@ describe("EquityChart — H-0165 Pitfall 1 scenario overlay anchoring", () => {
 
   it("(2) chart re-anchoring absorbs the +1 offset: a RETURN-form twin renders a visually-equivalent overlay (no Pitfall-1 divergence at the chart)", () => {
     const live = makeWealthSeries(60, 1.0, 0.001);
-    const wealth = makeWealthSeries(60, 1.0, 0.003);
+    const wealth = toWealth(makeWealthSeries(60, 1.0, 0.003));
     // Return form = wealth - 1 (the un-converted 0.0-start shape the caller
-    // is contractually required to +1 before passing — Pitfall 1).
-    const returnForm: DailyPoint[] = wealth.map((p) => ({
+    // is contractually required to +1 before passing — Pitfall 1). Cast
+    // required because the test intentionally passes invalid (return-form)
+    // data to document that the chart's re-anchoring absorbs the Pitfall-1
+    // mistake — not a real call site, purely a negative-documentation test.
+    const returnForm = wealth.map((p) => ({
       date: p.date,
       value: p.value - 1,
-    }));
+    })) as unknown as import("./EquityChart").WealthPoint[];
 
     const wealthRender = render(
       <EquityChart
@@ -349,5 +352,59 @@ describe("EquityChart — H-0165 Pitfall 1 scenario overlay anchoring", () => {
       expect(Math.abs(rv[i][0] - wv[i][0])).toBeLessThan(0.05);
       expect(Math.abs(rv[i][1] - wv[i][1])).toBeLessThan(0.05);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// red-team M2: toWealth() 0.1 threshold false-positive for >90% drawdown
+//
+// WHY: a strategy down 91% since inception has wealth[0] = 0.09 (correctly
+// converted return –0.91 + 1). The previous 0.1 threshold fired a warn for
+// this legitimate value. The threshold is now 0.05. Assert:
+//   - wealth[0] = 0.09 (i.e. –91% drawdown) → NO warn (was false-positive)
+//   - wealth[0] = 0.04 (i.e. –96% drawdown at t=0) → warn fires (genuine miscall signal)
+//   - wealth[0] = 0.06 (i.e. –94% drawdown, still above 0.05) → NO warn
+// ---------------------------------------------------------------------------
+describe("toWealth — red-team M2: false-positive warn threshold", () => {
+  it("wealth[0]=0.09 (−91% strategy, valid) does NOT trigger a console.warn", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pts: DailyPoint[] = [
+      { date: "2024-01-01", value: 0.09 },
+      { date: "2024-01-02", value: 0.10 },
+    ];
+    toWealth(pts);
+    const tweaksWarns = warnSpy.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].includes("[EquityChart] toWealth"),
+    );
+    expect(tweaksWarns.length).toBe(0);
+    warnSpy.mockRestore();
+  });
+
+  it("wealth[0]=0.06 (−94% strategy, valid, above 0.05 threshold) does NOT trigger a console.warn", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pts: DailyPoint[] = [
+      { date: "2024-01-01", value: 0.06 },
+      { date: "2024-01-02", value: 0.07 },
+    ];
+    toWealth(pts);
+    const tweaksWarns = warnSpy.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].includes("[EquityChart] toWealth"),
+    );
+    expect(tweaksWarns.length).toBe(0);
+    warnSpy.mockRestore();
+  });
+
+  it("wealth[0]=0.04 (implausibly deep at t=0, likely raw return-form) DOES trigger a console.warn", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pts: DailyPoint[] = [
+      { date: "2024-01-01", value: 0.04 },
+      { date: "2024-01-02", value: 0.05 },
+    ];
+    toWealth(pts);
+    const tweaksWarns = warnSpy.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].includes("[EquityChart] toWealth"),
+    );
+    expect(tweaksWarns.length).toBeGreaterThanOrEqual(1);
+    warnSpy.mockRestore();
   });
 });

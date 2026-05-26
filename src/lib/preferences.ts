@@ -112,7 +112,17 @@ export function validateSelfEditableInput(input: Partial<AllocatorPreferences>):
   }
   if (input.excluded_exchanges !== undefined && input.excluded_exchanges !== null) {
     if (!Array.isArray(input.excluded_exchanges)) return "excluded_exchanges must be an array";
-    if (input.excluded_exchanges.some((e) => typeof e !== "string")) return "excluded_exchanges must be string[]";
+    // NEW-C07-01 (audit-2026-05-26 security+red-team): cap count and
+    // per-element length. Without these guards an authenticated allocator
+    // can PUT 500k single-char entries or a handful of multi-MB strings,
+    // inflating the allocator_preferences row to multi-MB TOAST and
+    // making every `getOwnPreferences` SELECT * expensive. The caps mirror
+    // the UI's exchange chip model (≤100 exchange codes, each ≤100 chars).
+    if (input.excluded_exchanges.length > 100) return "excluded_exchanges must have at most 100 entries";
+    for (const e of input.excluded_exchanges) {
+      if (typeof e !== "string") return "excluded_exchanges must be string[]";
+      if (e.length > 100) return "excluded_exchanges entries must be 100 characters or less";
+    }
   }
   // max_weight — Phase 2 (MANDATE-01). 0.05-0.50 per D-17.
   if (input.max_weight !== undefined && input.max_weight !== null) {
@@ -203,11 +213,20 @@ export function validateAdminEditableInput(input: Partial<AllocatorPreferences>)
 }
 
 /**
- * Read the current user's preferences. Returns null if no row exists OR if the
- * `allocator_preferences` table doesn't exist yet (migration 011 not applied).
+ * Read the current user's preferences. Returns null if no row exists yet
+ * (legitimate first-visit: allocator hasn't saved any preferences).
  *
- * The schema-missing path is treated as "no preferences yet" so the page can
- * render the empty form instead of crashing with a 500. Other errors still throw.
+ * NEW-C07-03 (audit-2026-05-26 silent-failure): PGRST205 (table/schema missing
+ * — migration 011 not applied, or a PostgREST schema-reload race) used to be
+ * swallowed as "no preferences yet" and return null. That causes the UI to
+ * render a blank empty form (200 {preferences:null}) instead of surfacing a
+ * fault, so an allocator who saved a full mandate sees it gone with no error.
+ * A subsequent PUT fails the RPC and surfaces a generic 500 — read says "no
+ * preferences", write says "save failed", and neither flags the missing table.
+ *
+ * Fix: distinguish "no row for user" (legit null) from "table/schema missing"
+ * (infra fault). For PGRST205 we log to stderr + Sentry, then throw so the
+ * route's existing catch returns a 500. Other errors still throw directly.
  */
 export async function getOwnPreferences(
   supabase: SupabaseClient,
@@ -219,12 +238,29 @@ export async function getOwnPreferences(
     .eq("user_id", userId)
     .maybeSingle();
   if (error) {
-    // PGRST205 = table not in schema cache (migration 011 not applied yet)
     if (error.code === "PGRST205") {
-      console.warn(
-        "[preferences] allocator_preferences table missing — apply migration 011",
+      // NEW-C07-03: schema-missing is an infra fault, not a "no row yet".
+      // Log loudly so ops is alerted, then throw so the route returns 500.
+      console.error(
+        "[preferences] allocator_preferences table missing in schema cache — apply migration 011",
+        { code: error.code, message: error.message },
       );
-      return null;
+      // F-02 (specialist-review 2026-05-26): the prior `void import(...)` pattern
+      // detaches the Sentry promise before captureException resolves. On a Vercel
+      // cold-finish the lambda can be reaped before Sentry flushes — same failure
+      // mode fixed in audit.ts NEW-C10-03. Await the import chain so the
+      // `waitUntil` window stays open until the capture settles, then throw.
+      await import("@sentry/nextjs").then((Sentry) => {
+        try {
+          Sentry.captureException(
+            new Error("allocator_preferences table missing from PostgREST schema cache (PGRST205)"),
+            { tags: { pgrst_schema_missing: "true" }, extra: { userId } },
+          );
+        } catch {
+          // Sentry SDK threw — swallow so the original throw is not masked.
+        }
+      }).catch(() => {});
+      throw error;
     }
     throw error;
   }

@@ -33,6 +33,7 @@ import {
   redactAuditLogForUser,
   redactApiKeysForUser,
   redactContactRequestForUser,
+  redactAllocatorMatchForUser,
   API_KEYS_REDACTED_COLUMNS,
   REDACTED_PLACEHOLDER,
 } from "@/lib/gdpr-export";
@@ -390,6 +391,14 @@ describe("collectUserExportBundle — audit_log replaced by audit_log_for_user (
               order: () => ({ limit }),
               limit,
             }),
+            // NEW-C16-02: audit_log_for_user now filters via `.or()`
+            // (actor OR entity OR metadata-target). The mock returns the
+            // raw audit rows regardless of predicate; redactAuditLogForUser
+            // is the authoritative retention gate the assertions verify.
+            or: () => ({
+              order: () => ({ limit }),
+              limit,
+            }),
             in: () => ({
               order: () => ({ limit: indirectLimit }),
               limit: indirectLimit,
@@ -489,6 +498,115 @@ describe("collectUserExportBundle — api_keys ciphertext stripped end-to-end (s
   });
 });
 
+/**
+ * NEW-C16-05 (audit 2026-05-26, MED conf-8): match_decisions /
+ * match_candidates / bridge_outcomes carry cross-party identifiers.
+ * Regression suite for `redactAllocatorMatchForUser`.
+ */
+describe("redactAllocatorMatchForUser — cross-party field redaction (NEW-C16-05)", () => {
+  const subject = "allocator-subject-uuid";
+  const adminUuid = "admin-actor-uuid";
+  const managerStrategyId = "manager-strategy-uuid";
+
+  it("blanks strategy_id and original_strategy_id (manager's strategy)", () => {
+    const rows = [
+      {
+        id: "md-1",
+        allocator_id: subject,
+        strategy_id: managerStrategyId,
+        original_strategy_id: "original-manager-strategy-uuid",
+        rank: 1,
+        score: 0.9,
+        decision: "interested",
+      },
+    ];
+    const out = redactAllocatorMatchForUser(rows, subject);
+    expect(out).toHaveLength(1);
+    expect(out[0].strategy_id).toBe(REDACTED_PLACEHOLDER);
+    expect(out[0].original_strategy_id).toBe(REDACTED_PLACEHOLDER);
+    // Subject-owned fields survive.
+    expect(out[0].rank).toBe(1);
+    expect(out[0].score).toBe(0.9);
+    expect(out[0].decision).toBe("interested");
+  });
+
+  it("blanks decided_by when it is an admin UUID (not the subject)", () => {
+    const rows = [
+      {
+        id: "md-2",
+        allocator_id: subject,
+        strategy_id: managerStrategyId,
+        decided_by: adminUuid,
+      },
+    ];
+    const out = redactAllocatorMatchForUser(rows, subject);
+    expect(out).toHaveLength(1);
+    expect(out[0].decided_by).toBe(REDACTED_PLACEHOLDER);
+  });
+
+  it("preserves decided_by when it equals the subject (subject acted themselves)", () => {
+    const rows = [
+      {
+        id: "md-3",
+        allocator_id: subject,
+        strategy_id: managerStrategyId,
+        decided_by: subject,
+      },
+    ];
+    const out = redactAllocatorMatchForUser(rows, subject);
+    expect(out).toHaveLength(1);
+    expect(out[0].decided_by).toBe(subject);
+  });
+
+  it("drops rows where allocator_id !== subject (defense-in-depth)", () => {
+    const rows = [
+      { id: "own", allocator_id: subject, strategy_id: managerStrategyId },
+      { id: "other", allocator_id: "other-allocator-uuid", strategy_id: managerStrategyId },
+    ];
+    const out = redactAllocatorMatchForUser(rows, subject);
+    expect(out).toHaveLength(1);
+    expect(out[0].id).toBe("own");
+  });
+
+  it("emits console.warn when a cross-tenant row is dropped (review: SF-3)", () => {
+    // Regression for b01-silentfailure Finding 3: the defense-in-depth drop must
+    // be observable to operators so SQL predicate drift or RLS bypass is surfaced.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const rows = [
+        { id: "own", allocator_id: subject, strategy_id: managerStrategyId },
+        { id: "alien", allocator_id: "other-allocator-uuid", strategy_id: managerStrategyId },
+      ];
+      redactAllocatorMatchForUser(rows, subject);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toMatch(/defense-in-depth.*other-allocator-uuid/);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("manifest wires match_decisions as projected (not direct) — raw bundle must not contain decided_by admin UUID", () => {
+    const entry = USER_EXPORT_TABLES.find(
+      (t) => t.table === "match_decisions",
+    );
+    expect(entry?.kind).toBe("projected");
+  });
+
+  it("manifest wires match_candidates as projected (not direct)", () => {
+    const entry = USER_EXPORT_TABLES.find(
+      (t) => t.table === "match_candidates",
+    );
+    expect(entry?.kind).toBe("projected");
+  });
+
+  it("manifest wires bridge_outcomes as projected (not direct)", () => {
+    const entry = USER_EXPORT_TABLES.find(
+      (t) => t.table === "bridge_outcomes",
+    );
+    expect(entry?.kind).toBe("projected");
+  });
+});
+
 describe("redactAuditLogForUser — admin-actor UUID redaction (specialist apply, security MED conf-8)", () => {
   const userId = "subject";
   it("redacts granted_by/revoked_by/approved_by/rejected_by/edited_by/admin_user_id in metadata", () => {
@@ -554,5 +672,74 @@ describe("redactAuditLogForUser — admin-actor UUID redaction (specialist apply
     }
     // The safe own-state field (role) survives.
     expect((out[0].metadata as Record<string, unknown>).role).toBe("allocator");
+  });
+});
+
+// ==========================================================================
+// NEW-C16-08 (red-team H conf=9): bridge_outcome_dismissals must be projected
+// ==========================================================================
+describe("NEW-C16-08 — bridge_outcome_dismissals exports strategy_id redacted (H conf=9)", () => {
+  it("manifest wires bridge_outcome_dismissals as projected, not direct", () => {
+    // Pre-fix: `{ kind: "direct", table: "bridge_outcome_dismissals", ... }` —
+    // exported the manager's strategy UUID raw. Any regulator comparing the raw
+    // bundle with a contact_requests bundle could reconstruct the manager's
+    // strategy inventory from the un-blanked FK. This test prevents the
+    // kind from silently reverting to "direct".
+    const entry = USER_EXPORT_TABLES.find(
+      (t) => t.table === "bridge_outcome_dismissals",
+    );
+    expect(entry, "bridge_outcome_dismissals missing from manifest").toBeDefined();
+    expect(entry!.kind).toBe("projected");
+  });
+
+  it("redactAllocatorMatchForUser blanks strategy_id on a bridge_outcome_dismissals row", () => {
+    // Regression: the projection function used by bridge_outcome_dismissals
+    // must blank strategy_id (the manager's cross-party FK). Pre-fix this
+    // row was exported raw.
+    const subject = "aaaa0000-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const managerStrategy = "bbbb1111-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    const rows = [
+      {
+        id: "dism-1",
+        allocator_id: subject,
+        strategy_id: managerStrategy,
+        dismissed_at: "2026-05-01T10:00:00Z",
+        expires_at: "2026-06-01T10:00:00Z",
+      },
+    ];
+    const out = redactAllocatorMatchForUser(rows, subject);
+    expect(out).toHaveLength(1);
+    // strategy_id (manager's FK) is blanked.
+    expect(out[0].strategy_id).toBe(REDACTED_PLACEHOLDER);
+    // allocator's own dismissal metadata is preserved.
+    expect(out[0].dismissed_at).toBe("2026-05-01T10:00:00Z");
+    expect(out[0].expires_at).toBe("2026-06-01T10:00:00Z");
+  });
+});
+
+// ==========================================================================
+// NEW-C16-09 (red-team H conf=8): csv_daily_returns in export manifest
+// ==========================================================================
+describe("NEW-C16-09 — csv_daily_returns present in export manifest (H conf=8)", () => {
+  it("csv_daily_returns appears in USER_EXPORT_TABLES as an indirect entry", () => {
+    // Pre-fix: absent entirely — a user's CSV daily-return series was
+    // silently omitted from every Art. 15 bundle. partial:false was still
+    // reported (no rows = no error signal).
+    const entry = USER_EXPORT_TABLES.find(
+      (t) => t.table === "csv_daily_returns",
+    );
+    expect(entry, "csv_daily_returns missing from manifest — Art. 15 bundle incomplete").toBeDefined();
+    expect(entry!.kind).toBe("indirect");
+  });
+
+  it("csv_daily_returns indirect entry scopes via strategy_id → strategies (user_id)", () => {
+    const entry = USER_EXPORT_TABLES.find(
+      (t) => t.table === "csv_daily_returns" && t.kind === "indirect",
+    );
+    expect(entry).toBeDefined();
+    if (entry?.kind !== "indirect") return;
+    expect(entry.via_column).toBe("strategy_id");
+    expect(entry.parent_table).toBe("strategies");
+    expect(entry.parent_user_column).toBe("user_id");
   });
 });

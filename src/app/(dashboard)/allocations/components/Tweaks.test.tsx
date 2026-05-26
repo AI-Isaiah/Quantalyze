@@ -121,18 +121,20 @@ describe("Tweaks — segmented controls", () => {
     expect(document.body.getAttribute("data-density")).toBe("loose");
   });
 
-  it("flips --color-accent on the document element when Accent = Full", () => {
+  it("sets data-accent-intensity=full on the document element when Accent = Full (NEW-C22-03)", () => {
     render(<Harness />);
     fireEvent.click(
       screen.getByRole("button", { name: /toggle tweaks panel/i }),
     );
     fireEvent.click(screen.getByRole("button", { name: /^Full$/i }));
+    // NEW-C22-03: accent override now driven via CSS attribute, not inline
+    // style properties, so dark factsheet can re-scope the custom properties.
     expect(
-      document.documentElement.style.getPropertyValue("--color-accent"),
-    ).toBe("#0E9F84");
+      document.documentElement.getAttribute("data-accent-intensity"),
+    ).toBe("full");
   });
 
-  it("removes the --color-accent override when Accent = Muted", () => {
+  it("removes the data-accent-intensity attribute when Accent = Muted (NEW-C22-03)", () => {
     render(<Harness />);
     fireEvent.click(
       screen.getByRole("button", { name: /toggle tweaks panel/i }),
@@ -141,8 +143,8 @@ describe("Tweaks — segmented controls", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Full$/i }));
     fireEvent.click(screen.getByRole("button", { name: /^Muted$/i }));
     expect(
-      document.documentElement.style.getPropertyValue("--color-accent"),
-    ).toBe("");
+      document.documentElement.getAttribute("data-accent-intensity"),
+    ).toBeNull();
   });
 
   it("persists bridgeVariant change", () => {
@@ -243,10 +245,10 @@ describe("Tweaks — hydration", () => {
     );
     // body[data-density] should reflect the persisted "loose".
     expect(document.body.getAttribute("data-density")).toBe("loose");
-    // --color-accent override applied because accentIntensity was "full".
+    // NEW-C22-03: accent attribute applied because accentIntensity was "full".
     expect(
-      document.documentElement.style.getPropertyValue("--color-accent"),
-    ).toBe("#0E9F84");
+      document.documentElement.getAttribute("data-accent-intensity"),
+    ).toBe("full");
   });
 
   // M-1079 — the displayFont knob's body[data-display-font] effect
@@ -349,6 +351,36 @@ describe("Tweaks — hydration", () => {
     // provider only sets the attribute, never explicitly removes it on
     // the default path) — assert the persisted state below.
     expect(document.body.getAttribute("data-density")).toBe("comfortable");
+  });
+
+  it("NEW-C22-01: cross-tab storage event updates density in the mounted provider", () => {
+    // Start with "comfortable" (default).
+    act(() => {
+      render(<Harness />);
+    });
+    expect(document.body.getAttribute("data-density")).toBe("comfortable");
+
+    // Simulate another tab writing a new blob with density="tight".
+    const newBlob = JSON.stringify({ ...{
+      density: "tight",
+      accentIntensity: "muted",
+      displayFont: "serif",
+      bridgeVariant: "full",
+      chartStyle: "area",
+      showBench: true,
+      showOutcomes: true,
+    } });
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: "allocations.tweaks",
+          newValue: newBlob,
+        }),
+      );
+    });
+
+    // Provider should have updated body[data-density] to "tight".
+    expect(document.body.getAttribute("data-density")).toBe("tight");
   });
 });
 
@@ -601,6 +633,52 @@ describe("Tweaks — context fallback outside provider", () => {
   it("returns TWEAK_DEFAULTS when consumed outside a TweaksProvider", () => {
     render(<NakedProbe />);
     expect(screen.getByTestId("probe").textContent).toBe("full/area/true");
+  });
+});
+
+describe("Tweaks — red-team C1: cross-tab write-back loop prevention", () => {
+  // WHY this matters: without the fromCrossTabEventRef guard, Tab B receives a
+  // storage event → setState → persist effect fires → writes same JSON back to
+  // localStorage → fires storage event in Tab A → onStorage → setState → …
+  // The loop terminates only when a tab is closed. This test verifies that a
+  // cross-tab storage event does NOT cause a write-back to localStorage, i.e.
+  // localStorage.setItem is NOT called as a result of receiving the event.
+  it("cross-tab storage event updates in-memory state but does NOT write back to localStorage", () => {
+    act(() => {
+      render(<Harness />);
+    });
+    // Count the setItem calls BEFORE the cross-tab event (1 post-hydration write).
+    const writesBefore = (
+      localStorageMock.setItem.mock.calls as unknown as Array<[string, string]>
+    ).filter(([k]) => k === "allocations.tweaks").length;
+
+    const newBlob = JSON.stringify({
+      density: "loose",
+      accentIntensity: "muted",
+      displayFont: "serif",
+      bridgeVariant: "full",
+      chartStyle: "area",
+      showBench: true,
+      showOutcomes: true,
+    });
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: "allocations.tweaks",
+          newValue: newBlob,
+        }),
+      );
+    });
+
+    // In-memory state MUST have updated (cross-tab sync works).
+    expect(document.body.getAttribute("data-density")).toBe("loose");
+
+    // localStorage.setItem MUST NOT have been called again — the write-back
+    // guard (fromCrossTabEventRef) must have suppressed the persist effect.
+    const writesAfter = (
+      localStorageMock.setItem.mock.calls as unknown as Array<[string, string]>
+    ).filter(([k]) => k === "allocations.tweaks").length;
+    expect(writesAfter).toBe(writesBefore);
   });
 });
 

@@ -66,9 +66,15 @@ vi.mock("next/navigation", () => ({
 // N4-pinned vi.mock + vi.mocked technique. Each mock keeps shape-compat with
 // the real component so the composer's prop wiring is the unit-under-test.
 
-vi.mock("../widgets/performance/EquityChart", () => ({
-  EquityChart: vi.fn(() => <div data-testid="equity-chart-mock" />),
-}));
+vi.mock("../widgets/performance/EquityChart", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../widgets/performance/EquityChart")
+  >();
+  return {
+    ...actual,
+    EquityChart: vi.fn(() => <div data-testid="equity-chart-mock" />),
+  };
+});
 
 vi.mock("../widgets/performance/DrawdownChart", () => {
   // DrawdownChart has a default export AND named export; the composer
@@ -168,6 +174,10 @@ const HOLDING_BTC = {
   quantity: 1,
   mark_price_usd: 60_000,
   api_key_id: "key-binance",
+  // NEW-C03-10: required-but-nullable fields
+  side: null as "long" | "short" | "flat" | null,
+  entry_price: null as number | null,
+  unrealized_pnl_usd: null as number | null,
 };
 const HOLDING_ETH = {
   symbol: "ETH",
@@ -177,6 +187,10 @@ const HOLDING_ETH = {
   quantity: 10,
   mark_price_usd: 3_000,
   api_key_id: "key-binance",
+  // NEW-C03-10: required-but-nullable fields
+  side: null as "long" | "short" | "flat" | null,
+  entry_price: null as number | null,
+  unrealized_pnl_usd: null as number | null,
 };
 const HOLDING_SOL = {
   symbol: "SOL",
@@ -186,6 +200,10 @@ const HOLDING_SOL = {
   quantity: 100,
   mark_price_usd: 100,
   api_key_id: "key-binance",
+  // NEW-C03-10: required-but-nullable fields
+  side: null as "long" | "short" | "flat" | null,
+  entry_price: null as number | null,
+  unrealized_pnl_usd: null as number | null,
 };
 const HOLDING_BTC_OKX = {
   symbol: "BTC",
@@ -195,6 +213,10 @@ const HOLDING_BTC_OKX = {
   quantity: 0.33,
   mark_price_usd: 60_000,
   api_key_id: "key-okx",
+  // NEW-C03-10: required-but-nullable fields
+  side: null as "long" | "short" | "flat" | null,
+  entry_price: null as number | null,
+  unrealized_pnl_usd: null as number | null,
 };
 
 const FLAGGED_BTC: FlaggedHolding = {

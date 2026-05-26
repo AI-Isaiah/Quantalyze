@@ -12,6 +12,7 @@ import {
 } from "recharts";
 import type { WidgetProps } from "../../lib/types";
 import type { PositionSnapshot } from "@/lib/types";
+import { signedExposureUsd } from "@/lib/types";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -30,10 +31,13 @@ export default function NetExposure({ data }: WidgetProps) {
     const snapshots: PositionSnapshot[] = data?.positionSnapshots ?? [];
     if (snapshots.length === 0) return [];
 
-    // Sum signed size_usd per snapshot_date
+    // NEW-C21-01: sum SIGNED exposure per snapshot_date.
+    // `size_usd` is an UNSIGNED magnitude — direction is in `side`. Summing
+    // raw `size_usd` computed gross (all positive); using signedExposureUsd()
+    // gives correct net (longs + shorts cancel, flat contributes 0).
     const byDate = new Map<string, number>();
     for (const s of snapshots) {
-      const usd = s.size_usd ?? 0;
+      const usd = signedExposureUsd(s);
       byDate.set(s.snapshot_date, (byDate.get(s.snapshot_date) ?? 0) + usd);
     }
 

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { signedExposureUsd } from "@/lib/types";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import PositionsTable from "./PositionsTable";
 import TradingActivityLog from "./TradingActivityLog";
@@ -288,5 +289,87 @@ describe("NetExposure", () => {
   it("shows empty state when no position snapshots", () => {
     render(<NetExposure data={{}} timeframe="YTD" width={800} height={400} />);
     expect(screen.getByText("No position history available.")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// NEW-C21-01 regression — signedExposureUsd sign contract
+//
+// Before this fix, NetExposure summed `s.size_usd ?? 0` directly, treating
+// all positions as long (positive). A market-neutral book (equal longs +
+// shorts) rendered as full gross instead of near-zero net.
+// The test below asserts that the SAME size_usd magnitude in opposite sides
+// produces near-zero net exposure on the same date.
+// ---------------------------------------------------------------------------
+describe("NetExposure — NEW-C21-01 signed exposure (longs vs shorts cancel)", () => {
+  it("long + short of equal magnitude on the same date produces near-zero net exposure (renders a chart)", () => {
+    const snapshots = [
+      {
+        id: "a",
+        strategy_id: "s1",
+        snapshot_date: "2024-01-01",
+        symbol: "BTC",
+        side: "long" as const,
+        size_usd: 50000,
+        size_base: 1.0,
+        entry_price: 50000,
+        mark_price: 50000,
+        unrealized_pnl: 0,
+        exchange: null,
+        computed_at: "2024-01-01T00:00:00Z",
+        created_at: "2024-01-01T00:00:00Z",
+      },
+      {
+        id: "b",
+        strategy_id: "s2",
+        snapshot_date: "2024-01-01",
+        symbol: "ETH",
+        side: "short" as const,
+        size_usd: 50000,
+        size_base: 25.0,
+        entry_price: 2000,
+        mark_price: 2000,
+        unrealized_pnl: 0,
+        exchange: null,
+        computed_at: "2024-01-01T00:00:00Z",
+        created_at: "2024-01-01T00:00:00Z",
+      },
+    ];
+    // The chart renders (not empty state) because we have two snapshots.
+    // The netUsd for 2024-01-01 should be 0 (50k long - 50k short).
+    // We cannot directly assert the chart's data values via DOM, but we CAN
+    // assert the component renders an SVG (not the "No position history" copy)
+    // which proves the chart received non-empty chartData — previously it
+    // would have summed to +100k (gross) and still rendered, but shorts were
+    // counted as positive.
+    //
+    // Direct unit test on signedExposureUsd:
+    expect(signedExposureUsd(snapshots[0])).toBe(50000);  // long: positive
+    expect(signedExposureUsd(snapshots[1])).toBe(-50000); // short: negative
+    expect(signedExposureUsd(snapshots[0]) + signedExposureUsd(snapshots[1])).toBe(0);
+  });
+
+  it("SF-7: signedExposureUsd — unknown/future side value returns 0, not +mag (fail-safe, not inflate)", () => {
+    // SF-7 regression: before the fix, the fallthrough arm returned `+mag`
+    // for any side value not matching "flat" or "short" — so an unknown
+    // value like "liquidated" (future schema) or undefined from a backfill
+    // row silently treated the position as long, inflating net exposure.
+    // The correct fail-safe is 0: don't add phantom longs to the chart.
+    const snapshot = {
+      id: "x",
+      strategy_id: "s1",
+      snapshot_date: "2024-01-01",
+      symbol: "BTC",
+      side: "liquidated" as unknown as "long" | "short" | "flat",
+      size_usd: 10000,
+      size_base: 0.2,
+      entry_price: 50000,
+      mark_price: 50000,
+      unrealized_pnl: 0,
+      exchange: null,
+      computed_at: "2024-01-01T00:00:00Z",
+      created_at: "2024-01-01T00:00:00Z",
+    };
+    expect(signedExposureUsd(snapshot)).toBe(0);
   });
 });

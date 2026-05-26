@@ -8,6 +8,7 @@ import { isUuid } from "@/lib/utils";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
 import { canonicalizeExchangeList } from "@/lib/constants";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * POST /api/strategies/csv-finalize — Phase 15 / CSV-01.
@@ -156,6 +157,51 @@ export function parseDailyReturnsSeries(raw: unknown): ParsedDailyReturnsSeries 
         debug_context: { row: i },
       };
     }
+    // NEW-C14-09: bound daily_return magnitude. The dollar fields have
+    // MAX_DOLLAR_VALUE to prevent absurd factsheet figures; the load-bearing
+    // return series had no equivalent ceiling. A single 1e30 row drives
+    // cumulative return / TWR / Sharpe to ±Inf on a published "Verified"
+    // factsheet. Reject rows whose |daily_return| is outside the physically
+    // plausible range ~[-1, 10] (a daily return of +1000% is far outside any
+    // real strategy; -100% means total loss in one day).
+    const MAX_DAILY_RETURN = 10; // +1000% per day
+    if (Math.abs(r.daily_return) > MAX_DAILY_RETURN) {
+      return {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        message: `daily_returns_series[${i}].daily_return is non-physical (${r.daily_return}). Values must be in the range [-${MAX_DAILY_RETURN}, ${MAX_DAILY_RETURN}].`,
+        debug_context: { row: i, daily_return: r.daily_return },
+      };
+    }
+    // NEW-C14-10: validate date calendar correctness via a Date.parse
+    // round-trip. The regex /^\d{4}-\d{2}-\d{2}$/ accepts impossible
+    // dates like "2026-13-45" or "2026-02-30" — they pass the regex but
+    // fail Date.parse → NaN, or round-trip to a different date string.
+    // Both signal invalid input. Also reject dates strictly after UTC
+    // today — a future date finalizes a strategy whose factsheet
+    // date_range is nonsensical.
+    const parsedDate = new Date(r.date + "T00:00:00Z");
+    if (
+      isNaN(parsedDate.getTime()) ||
+      parsedDate.toISOString().slice(0, 10) !== r.date
+    ) {
+      return {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        message: `daily_returns_series[${i}].date is not a valid calendar date: ${r.date}.`,
+        debug_context: { row: i, date: r.date },
+      };
+    }
+    const todayUtc = new Date();
+    todayUtc.setUTCHours(23, 59, 59, 999); // allow today
+    if (parsedDate > todayUtc) {
+      return {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        message: `daily_returns_series[${i}].date is in the future: ${r.date}.`,
+        debug_context: { row: i, date: r.date },
+      };
+    }
     // T-19.1-04 / PR #274: surface a duplicate date as a route-boundary
     // 400 so the UNIQUE (strategy_id, date) constraint inside the RPC
     // never has to throw 23505. Defense-in-depth: the RPC's ON CONFLICT
@@ -202,15 +248,46 @@ const MAX_LEVERAGE_RANGE_CHARS = 80;
 // north of 1e12 USD is garbage (a typo, scientific notation, or hostile
 // client) — reject so the public sheet doesn't render absurd numbers.
 const MAX_DOLLAR_VALUE = 1_000_000_000_000;
-const MAX_MONEY_STRING_CHARS = 32;
 
-function parseCsvMetadata(raw: unknown): CsvMetadataPayload | null {
-  if (raw == null || typeof raw !== "object") return null;
+/**
+ * NEW-C14-03 + NEW-C14-05: parseCsvMetadata now returns a discriminated
+ * union so callers can issue a 400 when a field is present-but-invalid.
+ * Pre-fix: bad aum/max_capacity silently dropped to null (parseMoney
+ * returns null for negative/NaN/≥1e12) and the route returned ok:true
+ * with AUM silently absent. Similarly, over-length description/chips were
+ * silently truncated (NEW-C14-05).
+ *
+ * Contract:
+ *   ok: true  → `payload` is safe to pass to buildMetadataUpdatePayload.
+ *   ok: false → `field` + `message` describe which field and why; caller
+ *               returns 400 CSV_INVALID_FORMAT with the message.
+ *
+ * "Omitted" (field absent / null) is still allowed. Only present-but-bad
+ * values trigger ok:false.
+ */
+type ParseCsvMetadataResult =
+  | { ok: true; payload: CsvMetadataPayload | null }
+  | { ok: false; field: string; message: string };
+
+function parseCsvMetadata(raw: unknown): ParseCsvMetadataResult {
+  if (raw == null || typeof raw !== "object") {
+    return { ok: true, payload: null };
+  }
   const obj = raw as Record<string, unknown>;
   const out: CsvMetadataPayload = {};
+
+  // NEW-C14-05: reject over-cap description instead of silently truncating.
   if (typeof obj.description === "string") {
-    out.description = obj.description.slice(0, MAX_DESCRIPTION_CHARS);
+    if (obj.description.length > MAX_DESCRIPTION_CHARS) {
+      return {
+        ok: false,
+        field: "metadata.description",
+        message: `description must be ${MAX_DESCRIPTION_CHARS} characters or fewer (got ${obj.description.length}).`,
+      };
+    }
+    out.description = obj.description;
   }
+
   // /ship specialist review (api-contract): the column is UUID, the
   // wizard sends a UUID, but the route used to accept any string. A
   // typo would trigger Postgres 22P02 inside the metadata UPDATE which
@@ -223,47 +300,76 @@ function parseCsvMetadata(raw: unknown): CsvMetadataPayload | null {
   } else if (typeof obj.category_id === "string" && isUuid(obj.category_id)) {
     out.category_id = obj.category_id;
   }
+
   // /ship specialist review (api-contract): mirror finalize-wizard's
   // canonicalizeExchangeList() call site. A stale wizard or hostile
   // client sending ["bybit", "Bybit"] used to persist verbatim and
   // re-introduce QA ISSUE-004 on the CSV path. The helper dedups
   // case-insensitively and snaps to the canonical EXCHANGES entry.
+  // NEW-C14-05: reject over-cap chip arrays instead of silently truncating.
   for (const key of ["strategy_types", "subtypes", "markets"] as const) {
     const value = obj[key];
     if (Array.isArray(value)) {
-      out[key] = value
-        .filter((v): v is string => typeof v === "string")
-        .slice(0, MAX_CHIP_GROUP_SIZE);
+      const strings = value.filter((v): v is string => typeof v === "string");
+      if (strings.length > MAX_CHIP_GROUP_SIZE) {
+        return {
+          ok: false,
+          field: `metadata.${key}`,
+          message: `${key} must have at most ${MAX_CHIP_GROUP_SIZE} entries (got ${strings.length}).`,
+        };
+      }
+      out[key] = strings;
     }
   }
   if (Array.isArray(obj.supported_exchanges)) {
     const cleaned = obj.supported_exchanges
-      .filter((v): v is string => typeof v === "string")
-      .slice(0, MAX_CHIP_GROUP_SIZE);
+      .filter((v): v is string => typeof v === "string");
+    if (cleaned.length > MAX_CHIP_GROUP_SIZE) {
+      return {
+        ok: false,
+        field: "metadata.supported_exchanges",
+        message: `supported_exchanges must have at most ${MAX_CHIP_GROUP_SIZE} entries (got ${cleaned.length}).`,
+      };
+    }
     out.supported_exchanges = canonicalizeExchangeList(cleaned);
   }
   if (typeof obj.leverage_range === "string") {
     out.leverage_range = obj.leverage_range.slice(0, MAX_LEVERAGE_RANGE_CHARS);
   }
-  if (typeof obj.aum === "string") {
-    out.aum = obj.aum.slice(0, MAX_MONEY_STRING_CHARS);
-  }
-  if (typeof obj.max_capacity === "string") {
-    out.max_capacity = obj.max_capacity.slice(0, MAX_MONEY_STRING_CHARS);
-  }
-  return out;
-}
 
-function parseMoney(value: string | undefined): number | null {
-  if (!value) return null;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) return null;
-  // /ship specialist review (api-contract): mirror finalize-wizard.
-  // `Number("1e20")` is a finite number, but `1e20` USD is garbage —
-  // either a typo or hostile input. Reject so the public sheet doesn't
-  // render absurd values.
-  if (n >= MAX_DOLLAR_VALUE) return null;
-  return n;
+  // NEW-C14-03: reject present-but-unparseable aum / max_capacity instead
+  // of silently dropping to null. Pre-fix: parseMoney returned null for
+  // "-5" / "1e20" / "NaN" and buildMetadataUpdatePayload omitted null
+  // values from the UPDATE → the route returned ok:true but the public
+  // "Verified by Quantalyze" factsheet had AUM absent. Match the
+  // fail-loud H-0325/H-0326 contract from finalize-wizard.
+  //
+  // NEW-C14-05: do NOT truncate the money string before parsing (a truncated
+  // string can silently alter the numeric value). Validate length AFTER
+  // confirming the value is a well-formed number so the error is specific.
+  for (const moneyField of ["aum", "max_capacity"] as const) {
+    const raw = obj[moneyField];
+    if (raw !== undefined && raw !== null && raw !== "") {
+      if (typeof raw !== "string") {
+        return {
+          ok: false,
+          field: `metadata.${moneyField}`,
+          message: `${moneyField} must be a string representation of a non-negative number under ${MAX_DOLLAR_VALUE} (got type ${typeof raw}).`,
+        };
+      }
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0 || n >= MAX_DOLLAR_VALUE) {
+        return {
+          ok: false,
+          field: `metadata.${moneyField}`,
+          message: `${moneyField} must be a finite non-negative number under ${MAX_DOLLAR_VALUE} (got "${raw}").`,
+        };
+      }
+      out[moneyField] = raw;
+    }
+  }
+
+  return { ok: true, payload: out };
 }
 
 /**
@@ -298,10 +404,19 @@ function buildMetadataUpdatePayload(
   if (metadata.leverage_range !== undefined) {
     updatePayload.leverage_range = metadata.leverage_range;
   }
-  const aumNum = parseMoney(metadata.aum);
-  if (aumNum !== null) updatePayload.aum = aumNum;
-  const capacityNum = parseMoney(metadata.max_capacity);
-  if (capacityNum !== null) updatePayload.max_capacity = capacityNum;
+  // NEW-C14-03 / I1: aum/max_capacity are validated strings that
+  // parseCsvMetadata already confirmed are finite, non-negative, and <
+  // MAX_DOLLAR_VALUE. Skip parseMoney on this validated path — parseMoney
+  // returns null for empty-string ("" → !value guard) so the wrapping
+  // null-check was load-bearing only by coincidence. Using Number() directly
+  // removes the implicit second validation layer and makes the intent
+  // unambiguous: the string is known-good and the conversion always succeeds.
+  if (metadata.aum !== undefined) {
+    updatePayload.aum = Number(metadata.aum);
+  }
+  if (metadata.max_capacity !== undefined) {
+    updatePayload.max_capacity = Number(metadata.max_capacity);
+  }
   return updatePayload;
 }
 
@@ -341,6 +456,21 @@ async function persistDailyReturnsOrErrorResponse(
       `${opts.logPrefix} persist_csv_daily_returns error [correlation_id=${opts.correlationId}]:`,
       persistError.code,
       persistError.message,
+    );
+    // NEW-C14-02: write a `failed` strategy_analytics placeholder BEFORE
+    // returning the 500 so the SyncProgress poller can break out with a
+    // recoverable error surface instead of polling forever. Pre-fix: the
+    // persist-fail 500 path returned before any after() was scheduled, so
+    // the orphan strategy sat in pending_review with no analytics row at
+    // all — no 'computing', no 'complete', no 'failed' to break out on.
+    await writeFailedStrategyAnalyticsPlaceholder(
+      strategyId,
+      `persist_csv_daily_returns failed: ${persistError.message ?? "(no message)"}`,
+      {
+        logPrefix: opts.logPrefix,
+        correlationId: opts.correlationId,
+        subcontext: "persist-fail",
+      },
     );
     return NextResponse.json(
       {
@@ -425,6 +555,14 @@ async function writeFailedStrategyAnalyticsPlaceholder(
       console.warn(
         `${opts.logPrefix} ${opts.subcontext} placeholder pre-check SELECT failed (non-blocking) [correlation_id=${opts.correlationId}]: ${selectErr.message}`,
       );
+      // FINDING-7: capture to Sentry so admin-client SELECT failures
+      // (misconfiguration, PostgREST 5xx) are alertable. Without this,
+      // a guard bypass that stomps a 'complete' row with 'failed' leaves
+      // zero trace beyond the console.warn above.
+      captureToSentry(selectErr, {
+        tags: { surface: "csv-finalize", step: "placeholder-precheck" },
+        extra: { strategy_id: strategyId, correlation_id: opts.correlationId },
+      });
       // Best-effort: fall through to upsert anyway. The pre-fix
       // behaviour is preserved on infra fault; the guard only matters
       // when SELECT succeeds and the row is already complete.
@@ -537,28 +675,44 @@ function enqueueCsvAnalyticsAfter(
  * QA ISSUE-010 + /ship specialist review: persist classification
  * metadata via an authenticated UPDATE after the SECURITY DEFINER RPC
  * (or unified router) returns. Gated by `.eq("user_id", user.id)` +
- * the strategies_update RLS policy. Non-fatal: a failure here logs
- * but does NOT 500 the response because the strategy row is already
- * persisted. (Pre-19.1-redteam this comment claimed a unique
- * constraint on wizard_session_id blocked retries; that index is
- * deferred to BACKBONE-07 per migration
- * 20260501055202_strategy_verifications.sql:27, so a naive retry
- * actually creates an additional orphan strategy. The metadata
- * UPDATE is still non-fatal because partial discovery metadata is
- * a better failure mode than rolling back a persisted strategy +
- * persisted daily returns + a leaked support-recovery surface.)
- * Shared between the legacy RPC path and the unified-backbone path
- * so the two stay in lockstep.
+ * the strategies_update RLS policy. Shared between the legacy RPC path
+ * and the unified-backbone path so the two stay in lockstep.
+ *
+ * Returns null on success (or when there is nothing to update).
+ * Returns a 400 NextResponse when parseCsvMetadata signals a
+ * present-but-invalid field (NEW-C14-03 / NEW-C14-05); the caller
+ * decides whether to treat that as fatal (pre-create: return 400) or
+ * defensive (post-create: capture orphan + return 400). The UPDATE
+ * failure path (RLS/22P02) is non-fatal — it logs + captures to Sentry
+ * but returns null so the strategy row already persisted is not rolled
+ * back.
  */
 async function applyCsvMetadataUpdate(
   supabase: SupabaseClient,
   strategyId: string,
   userId: string,
   metadataRaw: unknown,
-): Promise<void> {
-  const metadata = parseCsvMetadata(metadataRaw);
-  const updatePayload = buildMetadataUpdatePayload(metadata);
-  if (Object.keys(updatePayload).length === 0) return;
+  opts: { correlationId: string },
+): Promise<NextResponse | null> {
+  // NEW-C14-03 + NEW-C14-05: parseCsvMetadata now returns a discriminated
+  // union. A present-but-invalid field (bad aum, over-cap description) is
+  // a caller error — surface it as a 400 so the wizard can show a specific
+  // field error instead of silently publishing a bad factsheet.
+  const parsed = parseCsvMetadata(metadataRaw);
+  if (!parsed.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        human_message: parsed.message,
+        debug_context: { field: parsed.field },
+        correlation_id: opts.correlationId,
+      },
+      { status: 400 },
+    );
+  }
+  const updatePayload = buildMetadataUpdatePayload(parsed.payload);
+  if (Object.keys(updatePayload).length === 0) return null;
   // @audit-skip: continuation of the csv-wizard strategy creation
   // flow — finalize_csv_strategy created the row milliseconds ago
   // (SECURITY DEFINER, audit-skipped like create_wizard_strategy +
@@ -570,12 +724,21 @@ async function applyCsvMetadataUpdate(
     .eq("id", strategyId)
     .eq("user_id", userId);
   if (updateError) {
+    // NEW-C14-04: pair console.error with captureToSentry so a metadata
+    // UPDATE failure is alertable and traceable. Pre-fix: only console.error
+    // was called, so a silent RLS/22P02 failure left the strategy with no
+    // category/markets while the user believed everything saved.
     console.error(
       "[strategies/csv-finalize] metadata update non-fatal error:",
       updateError.code,
       updateError.message,
     );
+    captureToSentry(updateError, {
+      tags: { surface: "csv-finalize", step: "metadata-update" },
+      extra: { strategy_id: strategyId, correlation_id: opts.correlationId },
+    });
   }
+  return null;
 }
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
@@ -702,13 +865,17 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       { status: 400 },
     );
   }
-  if (strategy_name.length > MAX_NAME_CHARS) {
+  // NEW-C14-12: check trimmedName.length (not the raw strategy_name.length).
+  // Pre-fix: a name of 79 visible chars + trailing spaces would be rejected
+  // as >80 chars even though the persisted value (trimmed) is ≤80. The user
+  // sees a false error on the read-only review screen with no editable field.
+  if (trimmedName.length > MAX_NAME_CHARS) {
     return NextResponse.json(
       {
         ok: false,
         code: "CSV_INVALID_FORMAT",
         human_message: `strategy_name must be ${MAX_NAME_CHARS} characters or fewer.`,
-        debug_context: { length: strategy_name.length },
+        debug_context: { length: trimmedName.length },
         correlation_id,
       },
       { status: 400 },
@@ -747,6 +914,25 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         human_message:
           "daily_returns_series is required for fmt=daily_returns and fmt=daily_nav (received 0 rows).",
         debug_context: { fmt, row_count: 0 },
+        correlation_id,
+      },
+      { status: 400 },
+    );
+  }
+
+  // NEW-C14-03 + NEW-C14-05: validate metadata BEFORE the RPC so a
+  // present-but-invalid field (bad aum, over-cap description) is caught
+  // as a clean 400 before any strategy row is created. applyCsvMetadataUpdate
+  // also validates, but it runs after RPC — catching it here avoids an
+  // orphan strategy row on validation errors.
+  const preCreateMetadataParsed = parseCsvMetadata(metadataRaw);
+  if (!preCreateMetadataParsed.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        human_message: preCreateMetadataParsed.message,
+        debug_context: { field: preCreateMetadataParsed.field },
         correlation_id,
       },
       { status: 400 },
@@ -823,6 +1009,83 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         { status: 400 },
       );
     }
+    // NEW-C14-01: migration 104 adds a UNIQUE INDEX on wizard_session_id
+    // with a comment declaring "route catches 23505 and returns existing
+    // strategy_id". Pre-fix: 23505 fell through to generic CSV_FINALIZE_FAIL
+    // 500. A double-submit/retry (wizard_session_id is stable in localStorage
+    // across retries) would mint an orphan strategy and the
+    // "click Submit again" copy was permanently broken. Return 409 with the
+    // existing strategy_id so the client can treat the response as success.
+    if (error.code === "23505") {
+      // Fetch the pre-existing strategy_id for this wizard_session_id so the
+      // caller can resume with the correct id. Use admin to bypass RLS —
+      // the session is already user-authenticated (withAuth wrapper).
+      try {
+        const { createAdminClient } = await import("@/lib/supabase/admin");
+        const admin = createAdminClient();
+        // strategy_verifications.wizard_session_id is the UNIQUE-indexed column
+        // (migration 104). strategy_id is the FK to strategies.id.
+        // FINDING-1: destructure error from admin SELECT so a PostgREST
+        // error (PGRST116, PGRST301, RLS misconfiguration, network 5xx) is
+        // logged and captured rather than silently falling through to the
+        // CSV_DUPLICATE_SESSION 409. Pre-fix: {data:null,error:{...}} was
+        // indistinguishable from a genuine "not found" result, so the user
+        // received ok:false instead of the correct idempotent ok:true, and
+        // the SELECT failure left zero trace in logs.
+        //
+        // RED-TEAM-H1: join through strategies!inner to verify the
+        // requesting user owns the pre-existing row. Without this check,
+        // a replayed wizard_session_id (leaked via log/network sniff) from
+        // a different user returns that user's strategy_id to the attacker.
+        // The admin client bypasses RLS so the query itself is the only
+        // ownership guard on this path.
+        const { data: verRow, error: verLookupErr } = await admin
+          .from("strategy_verifications")
+          .select("strategy_id, strategies!inner(user_id)")
+          .eq("wizard_session_id", wizard_session_id)
+          .eq("strategies.user_id", user.id)
+          .maybeSingle();
+        if (verLookupErr) {
+          console.error(
+            `[strategies/csv-finalize] 23505 idempotent-recovery SELECT failed [correlation_id=${correlation_id}]:`,
+            verLookupErr.message,
+          );
+          captureToSentry(verLookupErr, {
+            tags: { surface: "csv-finalize", step: "23505-recovery-lookup" },
+            extra: { correlation_id, wizard_session_id },
+          });
+        }
+        if (verRow?.strategy_id) {
+          return NextResponse.json(
+            {
+              ok: true,
+              strategy_id: verRow.strategy_id,
+              status: "pending_review",
+              idempotent: true,
+              correlation_id,
+            },
+            { status: 409 },
+          );
+        }
+      } catch (lookupErr) {
+        console.error(
+          `[strategies/csv-finalize] 23505 idempotent-recovery lookup threw [correlation_id=${correlation_id}]:`,
+          lookupErr instanceof Error ? lookupErr.message : String(lookupErr),
+        );
+      }
+      // Fallback: 23505 but we couldn't fetch the existing id.
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "CSV_DUPLICATE_SESSION",
+          human_message:
+            "A strategy with this upload session already exists. Refresh the page to see your submitted strategy.",
+          debug_context: {},
+          correlation_id,
+        },
+        { status: 409 },
+      );
+    }
     return NextResponse.json(
       {
         ok: false,
@@ -839,8 +1102,40 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // QA ISSUE-010: persist classification metadata after the SECURITY
   // DEFINER RPC creates the row. Shared helper so the unified-backbone
   // path uses the same code path (and we don't drift).
+  // NEW-C14-03/C14-04/C14-05: applyCsvMetadataUpdate now returns a 400
+  // NextResponse on present-but-invalid fields, and adds captureToSentry
+  // on UPDATE errors. The pre-create validation above already caught bad
+  // fields before the RPC — this second check handles defensive cases
+  // (concurrent middleware mutation, test clients bypassing pre-check).
   if (newStrategyId) {
-    await applyCsvMetadataUpdate(supabase, newStrategyId, user.id, metadataRaw);
+    const metaErrResponse = await applyCsvMetadataUpdate(
+      supabase,
+      newStrategyId,
+      user.id,
+      metadataRaw,
+      { correlationId: correlation_id },
+    );
+    if (metaErrResponse) {
+      // RED-TEAM-M1: the post-RPC metadata parse failure (defensive case
+      // only — pre-create validation already runs above) leaves an orphan
+      // strategy row (status=pending_review, no metadata) while returning
+      // a 400 to the client. The client receives no strategy_id, so
+      // support cannot find and clean the orphan without a Sentry alert.
+      // Capture the orphan strategy_id explicitly so it is surfaced in
+      // Sentry and traceable via correlation_id.
+      captureToSentry(
+        new Error("Post-RPC metadata validation failed: orphan strategy row created"),
+        {
+          tags: { surface: "csv-finalize", step: "post-rpc-metadata-validation-orphan" },
+          extra: {
+            orphan_strategy_id: newStrategyId,
+            correlation_id,
+            wizard_session_id,
+          },
+        },
+      );
+      return metaErrResponse;
+    }
   }
 
   // Phase 19.1: persist the validated daily-return series via the
@@ -1006,12 +1301,15 @@ async function unifiedCsvFinalizeHandler(args: {
   }
   const newStrategyId: string = unifiedBody.strategy_id;
   const supabase = await createClient();
-  await applyCsvMetadataUpdate(
+  // NEW-C14-03/C14-04/C14-05: handle validation error from applyCsvMetadataUpdate.
+  const metaErrResponse = await applyCsvMetadataUpdate(
     supabase,
     newStrategyId,
     args.userId,
     args.metadataRaw,
+    { correlationId: args.correlationId },
   );
+  if (metaErrResponse) return metaErrResponse;
   // Phase 19.1 / Maintainability W-1: shared helper for the persist
   // call so the legacy and unified paths cannot drift. Same
   // CSV_PERSIST_FAIL envelope, same hard-fail rationale.
@@ -1036,14 +1334,21 @@ async function unifiedCsvFinalizeHandler(args: {
     });
   }
   // API C-1 (specialist review 2026-05-22): emit `ok: true` discriminator
-  // on the unified-path success envelope. The /process-key router may or
-  // may not include `ok: true` in its body; merge defensively so we
-  // never double-emit while still guaranteeing the field is present.
-  // API W-1: correlation_id is the route-level UUID, not null.
+  // on the unified-path success envelope.
+  // NEW-C14-07: put `ok: true` and `correlation_id` AFTER the upstream
+  // spread so an upstream `ok: false` in result.body cannot overwrite the
+  // route discriminator. Pre-fix: `{ ok:true, ...(result.body), ... }`
+  // spread AFTER `ok:true` would be stomped by a body that carries
+  // `ok:false`. Also strip upstream `error`/`code` fields on the success
+  // path so callers relying on `body.ok === true` as a success discriminator
+  // don't see contradictory `code`/`error` keys.
+  const upstreamBody = result.body as Record<string, unknown>;
+  const { ok: _ok, error: _error, code: _code, ...upstreamRest } = upstreamBody;
+  void _ok; void _error; void _code; // intentionally discarded on success path
   return NextResponse.json(
     {
+      ...upstreamRest,
       ok: true,
-      ...(result.body as Record<string, unknown>),
       correlation_id: args.correlationId,
     },
     { status: result.status },

@@ -297,6 +297,17 @@ export type QuantilePayload = {
 export type TrustTierKind = "api_verified" | "csv_uploaded" | "self_reported";
 
 /**
+ * Ingest source discriminator — whether the strategy's daily-return series
+ * was ingested via live API trade data ("api") or uploaded as a CSV ("csv").
+ *
+ * This drives which analytical panels the factsheet renders: panels that
+ * require fields not derivable from a daily-return series (PeerPercentile,
+ * AllocatorPortfolios, event signatures) should be suppressed for CSV
+ * strategies per the no-invented-data contract. (NEW-C20-01)
+ */
+export type IngestSource = "api" | "csv";
+
+/**
  * Result of picking a rolling-window tier for a given series length.
  *
  * `enough: false` means even the smallest tier in the candidate set
@@ -315,6 +326,13 @@ export type RollWindowPick = {
 export type FactsheetPayload = {
   strategyId: string;
   strategyName: string;
+  /**
+   * Origin of the daily-return series. "api" = live-ingested trade data;
+   * "csv" = user-uploaded daily-return CSV. Drives panel-gating in the view
+   * so non-derivable panels (PeerPercentile, AllocatorPortfolios) are
+   * suppressed for CSV strategies per the no-invented-data contract. (NEW-C20-01)
+   */
+  ingestSource: IngestSource;
   strategyTypes: string[];
   markets: string[];
   computedAt: string;
@@ -373,10 +391,15 @@ export type FactsheetPayload = {
   };
   /** Batch D — style drift (real data, 50/50 split + KS test). */
   styleDrift: StyleDriftPayload | null;
-  /** Batch D — peer percentile (synthesized demo cohort, badge in UI). */
-  peerPercentile: PeerPercentilePayload;
-  /** Batch D — allocator portfolio analysis (demo portfolios, badge in UI). */
-  allocatorPortfolios: AllocatorPortfolioPayload[];
+  /** Batch D — peer percentile (synthesized demo cohort, badge in UI).
+   *  null for csv-ingested strategies — not serialized to avoid RSC payload
+   *  exposure of synthesized figures. Only non-null when ingestSource==="api".
+   *  (RED-TEAM-M2) */
+  peerPercentile: PeerPercentilePayload | null;
+  /** Batch D — allocator portfolio analysis (demo portfolios, badge in UI).
+   *  null for csv-ingested strategies (same RSC payload contract as peerPercentile).
+   *  (RED-TEAM-M2) */
+  allocatorPortfolios: AllocatorPortfolioPayload[] | null;
   /** Consecutive winning/losing day streaks. */
   streaks: StreakPayload;
   /** Per-year Calmar table. */
@@ -391,10 +414,14 @@ export type FactsheetPayload = {
   correlations: CorrelationRow[];
   /** Full pairwise correlation matrix across strategy + all benchmarks. */
   correlationMatrix: CorrelationMatrixPayload;
-  /** Event-study signatures (1d and 7d horizons) driven by STRATEGY events. */
-  eventSignatures: EventSignaturesPayload;
-  /** Same shape, driven by BENCHMARK events — feeds the Cross Signatures overlay. */
-  benchEventSignatures: EventSignaturesPayload;
+  /** Event-study signatures (1d and 7d horizons) driven by STRATEGY events.
+   *  null for csv-ingested strategies — not serialized to avoid RSC payload
+   *  exposure of computed-but-invisible data. Only non-null when ingestSource==="api".
+   *  (RED-TEAM-M3) */
+  eventSignatures: EventSignaturesPayload | null;
+  /** Same shape, driven by BENCHMARK events — feeds the Cross Signatures overlay.
+   *  null for csv-ingested strategies (same contract as eventSignatures). (RED-TEAM-M3) */
+  benchEventSignatures: EventSignaturesPayload | null;
   /** Strategy + benchmark behavior during named market-stress windows. */
   stressWindows: StressWindowPayload;
   /** Quantile box-plot summary on the strategy's daily-return distribution. */

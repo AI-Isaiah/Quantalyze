@@ -86,18 +86,51 @@ export async function POST(req: NextRequest) {
 
   // PR #266 red-team: notify the user their signup is approved. The
   // /pending-approval page promises this email; previously no helper
-  // existed and the promise was silently broken. `await` so a Resend
-  // outage surfaces as a 500 — admins should see the failure rather
-  // than approving a user who never gets the email.
-  const { data: approvedProfile } = await admin
+  // existed and the promise was silently broken.
+  //
+  // SF-F6: check the SELECT error explicitly — the pre-fix code discarded
+  // the .error field entirely. A Supabase network error or PGRST116 (row
+  // not found) silently skipped the notification and returned 200, while
+  // throwOnFailure=true was set on send() implying reliable delivery.
+  const { data: approvedProfile, error: profileErr } = await admin
     .from("profiles")
     .select("role, email")
     .eq("id", id as string)
     .single();
-  if (approvedProfile?.email && approvedProfile.role) {
+  if (profileErr || !approvedProfile?.email || !approvedProfile.role) {
+    console.error("[allocator-approve] profile lookup failed, notification skipped:", {
+      id,
+      error: profileErr?.message,
+      hasEmail: !!approvedProfile?.email,
+      hasRole: !!approvedProfile?.role,
+    });
+    return NextResponse.json(
+      { success: true, email_warning: "Account approved but notification lookup failed." },
+      { status: 200 },
+    );
+  }
+
+  // C1 / SF-F1: wrap notifyUserSignupApproved in try/catch. The DB approval
+  // is already committed at this point — letting the throw propagate as an
+  // unhandled exception would return a raw 500 to the admin UI, signalling
+  // failure on an operation that SUCCEEDED, causing likely retry and a
+  // duplicate audit row. Catch, log, and return 200 with an email_warning
+  // field so the admin UI can surface "Approved — email failed, check logs"
+  // without re-submitting the approval.
+  try {
     await notifyUserSignupApproved(
       approvedProfile.email as string,
       approvedProfile.role as "allocator" | "manager" | "both",
+    );
+  } catch (emailErr) {
+    console.error("[allocator-approve] notification email failed (approval already committed):", {
+      id,
+      role: approvedProfile.role,
+      error: emailErr instanceof Error ? emailErr.message : String(emailErr),
+    });
+    return NextResponse.json(
+      { success: true, email_warning: "Account approved but notification email failed." },
+      { status: 200 },
     );
   }
 

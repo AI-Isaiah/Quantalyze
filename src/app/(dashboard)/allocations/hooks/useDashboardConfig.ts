@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { captureToSentry } from "@/lib/sentry-capture";
 import type {
   DashboardConfig,
   TileConfig,
@@ -143,6 +144,20 @@ function loadLegacyConfig(): LegacyDashboardConfig {
     if (raw) {
       const parsed = JSON.parse(raw) as LegacyDashboardConfig;
       if (parsed.layoutVersion !== LAYOUT_VERSION_LEGACY) {
+        // SF-3 fix: bring legacy hook's version-mismatch reset to parity with
+        // V2 hook — captureToSentry so engineering sees it if the hook is ever
+        // re-activated. Dormant post-v0.15.7.0 but still exported.
+        captureToSentry(
+          new Error("dashboard layout reset (legacy): version_reset"),
+          {
+            level: "warning",
+            tags: { area: "dashboard-config", reason: "legacy_version_reset" },
+            extra: {
+              persisted: parsed.layoutVersion,
+              expected: LAYOUT_VERSION_LEGACY,
+            },
+          },
+        );
         return { tiles: LEGACY_DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION_LEGACY };
       }
       if (Array.isArray(parsed.tiles) && parsed.tiles.length > 0) {
@@ -156,6 +171,11 @@ function loadLegacyConfig(): LegacyDashboardConfig {
     if (typeof console !== "undefined") {
       console.warn("[useDashboardConfig] loadLegacyConfig failed; falling back to defaults", err);
     }
+    // SF-3 fix: captureToSentry mirrors V2 hook's catch-path treatment.
+    captureToSentry(err ?? new Error("dashboard loadLegacyConfig failed"), {
+      level: "warning",
+      tags: { area: "dashboard-config", reason: "legacy_parse_failed" },
+    });
   }
   return { tiles: LEGACY_DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION_LEGACY };
 }
@@ -403,6 +423,10 @@ function coerceTimeframe(value: unknown): string {
 // any downstream consumer that does `Object.assign(target, tile.config)`
 // or `lodash.merge(defaults, tile.config)` can't be poisoned.
 const PROTO_POISON_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+// NEW-C06-09: known top-level tile keys — extras are passed through for
+// forward-compat (see validateAndNormalizeTile). Declared at module scope so
+// the Set is allocated once rather than on every tile validation call.
+const KNOWN_TILE_KEYS = new Set(["k", "w", "config"]);
 
 function validateAndNormalizeTile(tile: unknown): TileConfig | null {
   if (!tile || typeof tile !== "object") return null;
@@ -417,7 +441,18 @@ function validateAndNormalizeTile(tile: unknown): TileConfig | null {
   // poisoned `k` through to render.
   if (!Object.prototype.hasOwnProperty.call(WIDGET_REGISTRY, k)) return null;
   const w = clampWidth(t.w);
-  const result: TileConfig = { k, w };
+  // NEW-C06-09: spread unknown top-level tile fields through so a newer
+  // build's additive tile fields (e.g. `pinned`, `h`) are preserved on
+  // round-trip rather than silently stripped. The whitelist approach
+  // ({k, w, config}) was destroying legit future fields each time an older
+  // tab loaded a newer-build blob. Poison keys are still excluded below.
+  const extra: Record<string, unknown> = {};
+  for (const key of Object.keys(t)) {
+    if (KNOWN_TILE_KEYS.has(key)) continue;
+    if (PROTO_POISON_KEYS.has(key)) continue;
+    extra[key] = t[key];
+  }
+  const result: TileConfig = { ...extra, k, w };
   if (
     t.config !== undefined &&
     t.config !== null &&
@@ -462,21 +497,64 @@ function defaultV2Config(): DashboardConfig {
   };
 }
 
-function loadV2Config(): DashboardConfig {
+/**
+ * NEW-C06-04: discriminated load result so callers can distinguish a clean
+ * parse from a reset (version mismatch, corrupt blob, all-tiles-invalid).
+ * `wasReset: true` means the returned `config` is the default layout, NOT
+ * the user's persisted layout — callers in cross-tab sync paths skip
+ * adopting a reset result to avoid clobbering valid in-memory state.
+ *
+ * `readOnly: true` is a SEPARATE flag meaning "display the persisted blob
+ * but never write to localStorage" — set only for forward-compat when a
+ * newer build's blob has a higher layoutVersion. Unlike `wasReset`, the
+ * config here IS the user's actual persisted layout (not defaults).
+ */
+type LoadV2Result = { config: DashboardConfig; wasReset: boolean; readOnly?: boolean };
+
+function loadV2ConfigResult(): LoadV2Result {
   if (typeof window === "undefined") {
-    return defaultV2Config();
+    return { config: defaultV2Config(), wasReset: false };
   }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DashboardConfig;
+      // NEW-C06-09: forward-compat — a newer build wrote a higher layoutVersion.
+      // Return the blob read-only (skip persist) rather than down-converting,
+      // so older tabs don't strip future additive fields on every save.
+      if (
+        typeof parsed.layoutVersion === "number" &&
+        parsed.layoutVersion > LAYOUT_VERSION
+      ) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useDashboardConfigV2] persisted layoutVersion is ahead of this build; loading read-only",
+            { persisted: parsed.layoutVersion, thisVersion: LAYOUT_VERSION },
+          );
+        }
+        // C1/SF-1 fix: return the ACTUAL persisted tiles so the user sees their
+        // layout, not empty defaults. readOnly: true suppresses all writes via
+        // the readOnlyMode ref in useDashboardConfigV2, so future-build additive
+        // fields are never stripped by this older tab's persist path.
+        // wasReset is false — the user's layout was NOT reset, just read-only.
+        return { config: parsed as DashboardConfig, wasReset: false, readOnly: true };
+      }
       // Reset on layoutVersion mismatch (Voice-D8 precedent).
       if (parsed.layoutVersion !== LAYOUT_VERSION) {
         // Best-effort: tell the dashboard a layout reset happened so it can
         // surface a one-time toast. The user-facing recovery decision lives
         // in AllocationDashboardV2 — this hook only flags the cause.
+        // NEW-C06-03: Sentry issue so engineering sees layout resets in prod.
+        captureToSentry(new Error("dashboard layout reset: version_reset"), {
+          level: "warning",
+          tags: { area: "dashboard-config", reason: "version_reset" },
+          extra: {
+            persisted: parsed.layoutVersion,
+            expected: LAYOUT_VERSION,
+          },
+        });
         setRecoveryFlag("version_reset");
-        return defaultV2Config();
+        return { config: defaultV2Config(), wasReset: true };
       }
       // Reject legacy-shape tiles and non-array tile blobs. tiles:null is
       // tagged parse_failed (no user opts into a null tiles field); legacy
@@ -493,6 +571,11 @@ function loadV2Config(): DashboardConfig {
       const hasLegacyShape = tilesIsArray && parsed.tiles.some(looksLikeLegacyTile);
       if (!tilesIsArray || hasLegacyShape) {
         if (hasLegacyShape) {
+          // NEW-C06-03: Sentry issue for legacy_in_v2_blob reset.
+          captureToSentry(new Error("dashboard layout reset: legacy_in_v2_blob"), {
+            level: "warning",
+            tags: { area: "dashboard-config", reason: "legacy_in_v2_blob" },
+          });
           setRecoveryFlag("legacy_in_v2_blob");
         } else {
           // !Array.isArray(parsed.tiles)
@@ -502,18 +585,26 @@ function loadV2Config(): DashboardConfig {
               { tiles: parsed.tiles },
             );
           }
+          // NEW-C06-03: Sentry issue for non-array tiles reset.
+          captureToSentry(new Error("dashboard layout reset: tiles not array"), {
+            level: "warning",
+            tags: { area: "dashboard-config", reason: "parse_failed" },
+          });
           setRecoveryFlag("parse_failed");
         }
-        return defaultV2Config();
+        return { config: defaultV2Config(), wasReset: true };
       }
       // Preserve an intentionally empty layout — the dashboard's empty-grid
       // callout already surfaces "Connect a strategy / add a widget" so we
       // never override the user's "remove all widgets" choice with defaults.
       if (parsed.tiles.length === 0) {
         return {
-          tiles: [],
-          timeframe: coerceTimeframe(parsed.timeframe),
-          layoutVersion: LAYOUT_VERSION,
+          config: {
+            tiles: [],
+            timeframe: coerceTimeframe(parsed.timeframe),
+            layoutVersion: LAYOUT_VERSION,
+          },
+          wasReset: false,
         };
       }
       // audit-2026-05-07 (M-0130 / M-0127 / M-1076 / M-0131) — validate
@@ -523,12 +614,30 @@ function loadV2Config(): DashboardConfig {
       // invariants. If every tile is unusable we fall back to defaults
       // and flag the recovery; partial corruption keeps the salvageable
       // tiles to avoid wiping the user's whole layout for one bad entry.
-      const validatedTiles: TileConfig[] = [];
+      const validatedTilesRaw: TileConfig[] = [];
       let droppedCount = 0;
       for (const raw of parsed.tiles) {
         const normalized = validateAndNormalizeTile(raw);
-        if (normalized) validatedTiles.push(normalized);
+        if (normalized) validatedTilesRaw.push(normalized);
         else droppedCount += 1;
+      }
+      // NEW-C06-06: dedup by `k` after validation. validateAndNormalizeTile
+      // runs resolveWidgetId which collapses designer short keys onto registry
+      // ids (e.g. "equity" + "equity-chart" both → "equity-chart"). A
+      // pre-Plan-07 layout round-trips two distinct persisted keys that
+      // normalize to the same id, producing duplicate React keys in the grid,
+      // broken moveWidget (findIndex targets only the first dup), and
+      // removeWidget that deletes both. Dedup preserves first occurrence
+      // (stable load order) and counts the merge towards droppedCount.
+      const seenKeys = new Set<string>();
+      const validatedTiles: TileConfig[] = [];
+      for (const tile of validatedTilesRaw) {
+        if (seenKeys.has(tile.k)) {
+          droppedCount += 1;
+        } else {
+          seenKeys.add(tile.k);
+          validatedTiles.push(tile);
+        }
       }
       if (validatedTiles.length === 0) {
         // Everything was unusable — treat as parse_failed so the dashboard
@@ -539,8 +648,14 @@ function loadV2Config(): DashboardConfig {
             { droppedCount },
           );
         }
+        // NEW-C06-03: Sentry issue so engineering knows a full-layout wipe happened.
+        captureToSentry(new Error("dashboard layout reset: all tiles invalid"), {
+          level: "warning",
+          tags: { area: "dashboard-config", reason: "parse_failed" },
+          extra: { droppedCount },
+        });
         setRecoveryFlag("parse_failed");
-        return defaultV2Config();
+        return { config: defaultV2Config(), wasReset: true };
       }
       if (droppedCount > 0 && typeof console !== "undefined") {
         console.warn(
@@ -549,9 +664,12 @@ function loadV2Config(): DashboardConfig {
         );
       }
       return {
-        tiles: validatedTiles,
-        timeframe: coerceTimeframe(parsed.timeframe),
-        layoutVersion: LAYOUT_VERSION,
+        config: {
+          tiles: validatedTiles,
+          timeframe: coerceTimeframe(parsed.timeframe),
+          layoutVersion: LAYOUT_VERSION,
+        },
+        wasReset: false,
       };
     }
   } catch (err) {
@@ -569,9 +687,20 @@ function loadV2Config(): DashboardConfig {
     if (typeof console !== "undefined") {
       console.warn("[useDashboardConfigV2] loadV2Config failed; falling back to defaults", err);
     }
+    // NEW-C06-03: Sentry issue so engineering sees JSON parse / storage errors.
+    captureToSentry(err ?? new Error("dashboard loadV2Config failed"), {
+      level: "warning",
+      tags: { area: "dashboard-config", reason: "parse_failed" },
+    });
     setRecoveryFlag("parse_failed");
+    return { config: defaultV2Config(), wasReset: true };
   }
-  return defaultV2Config();
+  return { config: defaultV2Config(), wasReset: true };
+}
+
+/** Compat shim used by useState initializer and tests. */
+function loadV2Config(): DashboardConfig {
+  return loadV2ConfigResult().config;
 }
 
 function persistV2(config: DashboardConfig): void {
@@ -584,9 +713,9 @@ function persistV2(config: DashboardConfig): void {
     // "settings reset themselves" complaint. Distinguish the two common
     // cases (quota vs unavailability) and surface either one to the
     // console so the failure has a paper trail.
+    const isQuota =
+      err instanceof DOMException && err.name === "QuotaExceededError";
     if (typeof console !== "undefined") {
-      const isQuota =
-        err instanceof DOMException && err.name === "QuotaExceededError";
       console.warn(
         isQuota
           ? "[useDashboardConfigV2] localStorage write failed (quota exceeded); preferences will not persist"
@@ -594,6 +723,16 @@ function persistV2(config: DashboardConfig): void {
         err,
       );
     }
+    // SF-2 fix: asymmetry with load path fixed — write failures now go to
+    // Sentry so engineering can see "layout resets itself" from quota/private-
+    // mode users, not only from load failures.
+    captureToSentry(err ?? new Error("dashboard persistV2 failed"), {
+      level: "warning",
+      tags: {
+        area: "dashboard-config",
+        reason: isQuota ? "persist_quota" : "persist_failed",
+      },
+    });
   }
 }
 
@@ -641,6 +780,15 @@ export function consumeDashboardRecoveryFlag(): DashboardRecoveryReason | null {
         err,
       );
     }
+    // SF-8 fix: close the observability gap — a corrupt-blob reset sets the
+    // flag, but if sessionStorage is locked (private mode / iframe sandbox)
+    // the read fails silently and the user never sees the recovery banner.
+    // Sentry captures the read failure so engineering knows the full
+    // reset→flag→banner pipeline broke, even when the banner can't appear.
+    captureToSentry(err ?? new Error("dashboard consumeDashboardRecoveryFlag failed"), {
+      level: "warning",
+      tags: { area: "dashboard-config", reason: "recovery_flag_read_failed" },
+    });
     return null;
   }
 }
@@ -668,7 +816,43 @@ export interface UseDashboardConfigV2Return {
 const PERSIST_DEBOUNCE_MS = 150;
 
 export function useDashboardConfigV2(): UseDashboardConfigV2Return {
-  const [config, setConfig] = useState<DashboardConfig>(loadV2Config);
+  // C1/SF-1 fix: call loadV2ConfigResult() directly so we can capture wasReset
+  // at hook init time. The shim loadV2Config() discarded wasReset, causing the
+  // hook to initialise with defaultV2Config() in forward-compat mode — the
+  // user's newer-build layout was thrown away and the next user mutation would
+  // overwrite the newer blob with old-version defaults. Now we:
+  //   (a) initialise config from the actual persisted tiles (not defaults), and
+  //   (b) set readOnlyMode when readOnly is true so NO path ever writes to
+  //       localStorage while in forward-compat mode, preserving all future-build
+  //       additive fields the newer blob contains.
+  //       IMPORTANT (red-team H2): readOnly and wasReset are DISTINCT fields with
+  //       OPPOSITE semantics: wasReset=true means the config fell back to defaults
+  //       (safe to write); readOnly=true means the blob came from a newer build
+  //       (must NOT write, or we'd down-convert the newer blob). We gate on
+  //       readOnly here, NOT wasReset.
+  //
+  // red-team H1 fix: use the LAZY-INITIALIZER form of useState so
+  // loadV2ConfigResult() (which calls localStorage.getItem + JSON.parse +
+  // tile-validation loop) runs ONCE at mount, not on every re-render.
+  // React's useState(value) ignores the initial value after mount but still
+  // evaluates the expression every render. useState(() => expr) evaluates it
+  // only on the first render. We capture readOnly in the same callback so both
+  // derivations share the single mount-time parse.
+  // Single mount-time parse shared by `config` and `readOnly`. The lazy
+  // useState initializer runs ONCE at mount and returns BOTH derivations, so
+  // neither writes nor reads a ref during render (react-hooks/refs forbids ref
+  // access in render). loadV2ConfigResult() (localStorage.getItem + JSON.parse
+  // + tile-validation loop) therefore still runs exactly once.
+  const [initial] = useState<{ config: DashboardConfig; readOnly: boolean }>(() => {
+    const r = loadV2ConfigResult();
+    return { config: r.config, readOnly: r.readOnly === true };
+  });
+  const [config, setConfig] = useState<DashboardConfig>(initial.config);
+  // readOnlyMode: true when we loaded a forward-compat (newer-build) blob.
+  // A ref (not state) so changes don't trigger re-renders — this is a
+  // mount-time invariant that never changes during the hook's lifetime.
+  // Seeded from the single mount-time parse above (plain value, not a ref read).
+  const readOnlyMode = useRef(initial.readOnly);
 
   // Phase A3 — same observe-without-write guard as the legacy hook. Mounting
   // V2 against a v3 (legacy-shape) blob must not overwrite the persisted
@@ -717,6 +901,11 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
       hasMutated.current = true;
       return;
     }
+    // C1/SF-1 fix: never write to localStorage when in forward-compat read-only
+    // mode (a newer build wrote a higher layoutVersion). Writing here would
+    // down-convert the newer blob to this build's LAYOUT_VERSION, silently
+    // stripping fields added by the newer build.
+    if (readOnlyMode.current) return;
     // pendingConfigRef is already synced by the action callback; the
     // effect's job is purely to (re)schedule the debounced write.
     if (persistTimerRef.current !== null) {
@@ -742,6 +931,10 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
   // removeEventListener pair.
   useEffect(() => {
     function flush() {
+      // C1/SF-1 fix: skip the flush entirely in forward-compat read-only mode.
+      // A tab-close while viewing a newer-build layout must not overwrite the
+      // blob — the only correct action is no-op.
+      if (readOnlyMode.current) return;
       if (persistTimerRef.current !== null) {
         clearTimeout(persistTimerRef.current);
         persistTimerRef.current = null;
@@ -773,14 +966,84 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
     function onStorage(e: StorageEvent) {
       if (e.key !== STORAGE_KEY) return;
       if (e.newValue === null) return; // ignore clears
-      const reloaded = loadV2Config();
-      setConfig((prev) => {
-        if (JSON.stringify(prev) === JSON.stringify(reloaded)) return prev;
-        // Keep pendingConfigRef in sync — a cross-tab reload is the new
-        // baseline, not a queued local mutation.
-        pendingConfigRef.current = reloaded;
-        return reloaded;
-      });
+      // NEW-C06-05: ignore blobs whose layoutVersion doesn't match ours.
+      // During a rolling deploy the legacy hook writes a v3 blob to the shared
+      // STORAGE_KEY → fires storage in a V2 tab → onStorage→loadV2Config()
+      // returns defaults → setConfig(defaults) triggers the persist effect →
+      // writes v4-defaults back → fires another storage event in the legacy tab
+      // → ping-pong loop re-arming the recovery toast each cycle.
+      // Gate: parse layoutVersion cheaply without full loadV2Config; bail if
+      // it doesn't match ours so the two-storage-key fix (deferred) is the
+      // long-term remedy and this prevents the runtime loop in the meantime.
+      try {
+        const peeked = JSON.parse(e.newValue) as { layoutVersion?: unknown };
+        if (peeked?.layoutVersion !== LAYOUT_VERSION) return;
+      } catch {
+        return; // malformed newValue — ignore
+      }
+      // red-team M4 fix: a readOnly tab must not adopt cross-tab mutations even
+      // in-memory. If this tab loaded a newer-build blob, it cannot persist any
+      // version of the config. Adopting an old-build write from another tab
+      // would update in-memory config but the persist effect returns early for
+      // readOnlyMode, so the mutation is silently lost on reload. Worse, if the
+      // user then interacts, they see their changes disappear — a confusing
+      // win-then-lose UX. A readOnly tab should only ever display what it loaded
+      // at mount; it is a forward-compat observer, not a participant.
+      if (readOnlyMode.current) return;
+      // NEW-C06-01: if this tab has a pending debounced write, flush it BEFORE
+      // adopting the foreign value. Previously the still-armed timer would fire
+      // after the cross-tab reload, cementing the foreign value a second time
+      // (writing tab B's blob back to storage from tab A's flush). Cancel the
+      // timer first; if we had a genuine pending mutation from this tab, write
+      // it out now — it was the user's most recent local intent.
+      //
+      // red-team M3 fix: when we flushed a local pending write, this tab just
+      // won the race — its mutation is now the newest write in storage. Do NOT
+      // then adopt the foreign config (which was written BEFORE our flush). If
+      // we did, the user's just-added widget would be immediately overwritten by
+      // Tab A's older resize: flush writes config-with-widget → loadV2Config reads
+      // config-A → setConfig(config-A) → widget gone. Return after flushing.
+      if (persistTimerRef.current !== null) {
+        clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+        persistV2(pendingConfigRef.current);
+        // Our write is now the authoritative state in storage. No adopt.
+        return;
+      }
+      // NEW-C06-04: use the discriminated result so we can skip adopting a
+      // reset (version mismatch / corrupt blob) from the foreign tab. If tab B
+      // wrote a blob this tab considers a mismatch or corrupt, loadV2Config
+      // returns defaultV2Config — adopting that would silently replace this
+      // tab's valid in-memory layout with defaults and cause the persist effect
+      // to write those defaults back. Skip on wasReset: true.
+      const loadResult = loadV2ConfigResult();
+      if (loadResult.wasReset) return;
+      const reloaded = loadResult.config;
+      // NEW-C06-10: compute the comparison and assign the ref OUTSIDE the
+      // setState updater. setState updaters must be pure — React invokes them
+      // twice in dev StrictMode and may re-run them during concurrent
+      // rendering. A side-effect inside the updater (pendingConfigRef mutation)
+      // is latently dangerous the moment the assigned value depends on
+      // prev/call-count.
+      //
+      // red-team M1 fix: the previous length+version check missed tile width,
+      // config, and order changes — the primary use cases for cross-tab sync.
+      // Example: Tab A resizes w:2→w:4; tiles.length is unchanged; noChange
+      // was true → Tab B silently ignored the resize. Restore JSON.stringify
+      // on the tiles array for a correct equality check. The layoutVersion
+      // peek above (line ~955) already filters unrelated-key and version-
+      // mismatched events before we get here, so the O(n) cost is paid only
+      // for same-version same-key writes — exactly the cross-tab mutations we
+      // want to detect. The timeframe comparison is subsumed by the full check.
+      const currentPending = pendingConfigRef.current;
+      const noChange =
+        currentPending.timeframe === reloaded.timeframe &&
+        JSON.stringify(currentPending.tiles) === JSON.stringify(reloaded.tiles);
+      if (noChange) return;
+      // Keep pendingConfigRef in sync — a cross-tab reload is the new
+      // baseline, not a queued local mutation.
+      pendingConfigRef.current = reloaded;
+      setConfig(reloaded);
     }
     window.addEventListener("storage", onStorage);
     return () => {
@@ -796,6 +1059,20 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
       // short key (or even an unknown id) is collapsed onto the registry
       // namespace before the idempotent-add check runs.
       const resolved = resolveWidgetId(k);
+      // NEW-C06-07: guard unknown keys at write time. resolveWidgetId returns
+      // `k` unchanged for unknown inputs; `clampWidth(undefined)` returns 2;
+      // the bogus tile is added + persisted but validateAndNormalizeTile drops
+      // it on next load — a write/load invariant asymmetry. Mirror the load
+      // path's guard so write and load agree on what constitutes a valid tile.
+      if (!Object.prototype.hasOwnProperty.call(WIDGET_REGISTRY, resolved)) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useDashboardConfigV2] addWidget: unknown widget id, skipping",
+            { k, resolved },
+          );
+        }
+        return prev;
+      }
       // D-03 idempotent add — designer-bundle/project/src/app.jsx:42-44.
       if (prev.tiles.some((t) => t.k === resolved)) return prev;
       const meta = WIDGET_REGISTRY[resolved];

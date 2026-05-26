@@ -878,5 +878,87 @@ describe("EquityChart — H-0167/M-1059 projection memoized across hover", () =>
   });
 });
 
+// ---------------------------------------------------------------------------
+// NEW-C04-01 regression — interior non-finite portfolio values
+// ---------------------------------------------------------------------------
+describe("EquityChart — NEW-C04-01 non-finite interior portfolio values", () => {
+  it("hoverIdx on a NaN-normalised point suppresses the tooltip (no 'NaN%' in DOM)", () => {
+    // Build a 30-day series where the middle point has value = 0 (after
+    // period-normalisation against visible[0]=1.0 → will produce NaN-adjacent
+    // divide-by-1.0 = 0, but more importantly test with a negative value
+    // that causes the anchor to pick a different base). Use a series where
+    // visible[10] is intentionally 0 to make visibleNormalized[10] = 0.
+    // 0 is finite so we need NaN — inject directly via Infinity/0.
+    // Easiest: build normally then override one value to Infinity so
+    // p.value / basePort = Infinity → non-finite.
+    const pts: DailyPoint[] = [];
+    const d = new Date(Date.UTC(2024, 0, 1));
+    for (let i = 0; i < 30; i++) {
+      pts.push({
+        date: d.toISOString().slice(0, 10),
+        value: i === 15 ? Infinity : 1.0 + i * 0.001,
+      });
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    const { container, queryByText } = render(
+      <EquityChart equityDailyPoints={pts} initialPeriod="ALL" />,
+    );
+    const svg = container.querySelector("svg");
+    expect(svg).not.toBeNull();
+    // Hover over index 15 (the Infinity point)
+    fireEvent.mouseMove(svg!, { clientX: (15 / 29) * 960 + 8, clientY: 40 });
+    // The tooltip must be suppressed — no "NaN%" in the DOM.
+    expect(queryByText(/NaN%/)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// NEW-C04-07 regression — defensive sort for out-of-order input
+// ---------------------------------------------------------------------------
+describe("EquityChart — NEW-C04-07 defensive sort for out-of-order input", () => {
+  it("an appended late-date backfill row still renders the chart (not corrupted window)", () => {
+    // Build a 60-day series then append a point with a VERY EARLY date
+    // (simulating a backfill row appended out of order).
+    const pts = makeSeries(60);
+    pts.push({ date: "2020-01-01", value: 1.1 }); // appended late, earlier date
+    const { container } = render(
+      <EquityChart equityDailyPoints={pts} initialPeriod="ALL" />,
+    );
+    // Chart must still render an SVG (not the warm-up empty state).
+    expect(container.querySelector("svg")).not.toBeNull();
+    // The period return label must not say NaN% or Infinity%.
+    const text = container.textContent ?? "";
+    expect(text).not.toMatch(/NaN%|Infinity%/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// NEW-C04-08 regression — flat-window narrow range annotation
+// ---------------------------------------------------------------------------
+describe("EquityChart — NEW-C04-08 narrow range annotation", () => {
+  it("renders a range annotation badge for a truly-flat equity series", () => {
+    // A flat series: all points equal 1.0 → yMax-yMin=0 → narrowRange=true.
+    const pts: DailyPoint[] = [];
+    const d = new Date(Date.UTC(2024, 0, 1));
+    for (let i = 0; i < 60; i++) {
+      pts.push({ date: d.toISOString().slice(0, 10), value: 1.0 });
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    const { container } = render(
+      <EquityChart equityDailyPoints={pts} initialPeriod="ALL" />,
+    );
+    // The narrow-range badge must be present.
+    expect(container.querySelector('[data-testid="equity-chart-narrow-range"]')).not.toBeNull();
+  });
+
+  it("does NOT render the range annotation badge for a normal trending series", () => {
+    const pts = makeSeries(200); // drifts > ±1%
+    const { container } = render(
+      <EquityChart equityDailyPoints={pts} initialPeriod="ALL" />,
+    );
+    expect(container.querySelector('[data-testid="equity-chart-narrow-range"]')).toBeNull();
+  });
+});
+
 // Re-export to silence a "vi unused" lint nit on jsdom-only test env.
 void vi;

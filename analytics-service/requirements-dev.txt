@@ -14,3 +14,16 @@
 # drops quantstats, the dev-only pin keeps the reference Sharpe assertion
 # working.
 quantstats==0.0.81
+
+# Test + type-check tooling. Relocated here from the inline
+# `pip install -r requirements.txt pytest …` in .github/workflows/ci.yml so
+# the python job's setup-python `cache: pip` (keyed on requirements*.txt) also
+# caches these wheels instead of re-resolving them every run (CI speed audit
+# F4). Left unpinned to exactly preserve the prior install behavior; pin in a
+# later hardening pass if reproducibility drift becomes an issue.
+pytest
+pytest-cov
+pytest-asyncio
+pytest-mock
+cryptography
+mypy

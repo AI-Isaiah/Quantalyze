@@ -59,9 +59,11 @@ const STATE = vi.hoisted(() => ({
   },
   csrfResponse: null as ReturnType<typeof import("next/server").NextResponse.json> | null,
   lastCheckLimitArg: null as unknown,
-  // M-0338(b): when set, the log_audit_event RPC throws a TRANSIENT-class
-  // error (network blip) which `emit()` swallows — proving the fire-and-
-  // forget audit path never changes the user-facing 200.
+  // M-0338(b): when set, the log_audit_event_service RPC throws a TRANSIENT-
+  // class error (network blip) which `emitAsUser()` swallows — proving the
+  // fire-and-forget audit path never changes the user-facing 200. C-2: now
+  // controls the admin-client (service-role) path after the switch to
+  // logAuditEventAsUser.
   auditRpcThrows: false,
 }));
 
@@ -75,9 +77,10 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
       STATE.rpcCalls.push({ name, args });
+      // C-2: log_audit_event_service (admin path) is now used instead.
+      // This branch is kept as a no-op stub in case other test paths call
+      // log_audit_event via the user-scoped client for non-preferences RPCs.
       if (name === "log_audit_event" && STATE.auditRpcThrows) {
-        // Transient-class failure (TypeError: fetch failed) — emit()
-        // swallows it without rethrowing, so no unhandled rejection.
         throw new TypeError("fetch failed");
       }
       const outcome = STATE.rpcState[name] ?? { data: null, error: null };
@@ -86,9 +89,35 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
+// C-2 (red-team 2026-05-26): logAuditEventAsUser now uses the admin client
+// (service-role, JWT-immune). Mock createAdminClient so its rpc calls are
+// captured in STATE.rpcCalls alongside the user-scoped calls, and so
+// auditRpcThrows can exercise the fire-and-forget failure path (TC13).
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      STATE.rpcCalls.push({ name, args });
+      if (name === "log_audit_event_service" && STATE.auditRpcThrows) {
+        // Mirror the user-scoped auditRpcThrows behaviour: a transient
+        // network blip on the service-role audit path must not change the
+        // user-facing 200. emitAsUser() swallows TypeErrors.
+        throw new TypeError("fetch failed");
+      }
+      return { data: null, error: null };
+    },
+  }),
+}));
+
+const PREFERENCES_READ_LIMITER_SENTINEL = {
+  __id: "preferencesReadLimiter",
+  __limit: "60/60s",
+};
+
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: USER_ACTION_LIMITER_SENTINEL,
   mandateAutoSaveLimiter: MANDATE_AUTO_SAVE_LIMITER_SENTINEL,
+  // NEW-C07-05: the GET handler now imports preferencesReadLimiter.
+  preferencesReadLimiter: PREFERENCES_READ_LIMITER_SENTINEL,
   checkLimit: async (limiter: unknown) => {
     STATE.lastCheckLimitArg = limiter;
     return STATE.checkLimitResult;
@@ -168,9 +197,15 @@ describe("PUT /api/preferences", () => {
       p_correlation_ceiling: 0.5,
     });
 
-    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    // C-2 (red-team 2026-05-26): audit now uses log_audit_event_service
+    // (service-role, JWT-immune) via logAuditEventAsUser. Also assert
+    // p_user_id is the acting user's id — the service-role RPC takes it
+    // as an explicit parameter unlike the user-scoped path which derives
+    // it from auth.uid().
+    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event_service");
     expect(auditCall).toBeDefined();
     expect(auditCall!.args).toMatchObject({
+      p_user_id: STATE.authUser!.id,
       p_action: "mandate_preference.update",
       p_entity_type: "allocator_preference_mandate",
       p_entity_id: STATE.authUser!.id,
@@ -200,7 +235,7 @@ describe("PUT /api/preferences", () => {
     // No p_max_weight key
     expect(updateCall!.args).not.toHaveProperty("p_max_weight");
 
-    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event_service");
     expect(auditCall).toBeDefined();
     expect(auditCall!.args.p_metadata).toMatchObject({
       fields: ["max_weight"],
@@ -305,10 +340,19 @@ describe("PUT /api/preferences", () => {
     expect(body.error).not.toMatch(/update_allocator_mandates/);
 
     await drainAuditMicrotasks();
-    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event")).toHaveLength(0);
+    // C-2: audit now uses log_audit_event_service; neither path should fire on error.
+    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event" || c.name === "log_audit_event_service")).toHaveLength(0);
   });
 
-  it("TC7 — 401 from RPC SQLSTATE 28000: Unauthorized, no audit", async () => {
+  it("TC7 — NEW-C07-02: RPC SQLSTATE 28000 after successful getUser returns 500 (infra fault, not unauthenticated)", async () => {
+    // NEW-C07-02 (audit-2026-05-26 silent-failure): the route verifies the
+    // user via auth.getUser() before the RPC. If the RPC then raises 28000
+    // (invalid_authorization_specification), auth.uid() resolved NULL inside
+    // Postgres — an infra fault (JWT did not propagate to PostgREST), not an
+    // unauthenticated request. Pre-fix: the route returned the identical 401
+    // a logged-out user gets, collapsing the two cases and making the infra
+    // fault invisible to ops. Post-fix: 28000-after-getUser returns 500 so
+    // on-call / canary sees the fault rather than a routine 401.
     STATE.rpcState.update_allocator_mandates = {
       data: null,
       error: {
@@ -321,12 +365,14 @@ describe("PUT /api/preferences", () => {
 
     const res = await PUT(makeRequest({ max_weight: 0.25 }));
 
-    expect(res.status).toBe(401);
+    // Must be 500 (infra fault) — NOT 401 (would mask the fault).
+    expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error).toBe("Unauthorized");
+    expect(body.error).toBe("Internal server error");
 
     await drainAuditMicrotasks();
-    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event")).toHaveLength(0);
+    // C-2: audit now uses log_audit_event_service; neither path should fire on error.
+    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event" || c.name === "log_audit_event_service")).toHaveLength(0);
   });
 
   it("TC8 — 500 unknown RPC error: generic message, no audit", async () => {
@@ -344,7 +390,8 @@ describe("PUT /api/preferences", () => {
     expect(body.error).toBe("Failed to save mandate");
 
     await drainAuditMicrotasks();
-    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event")).toHaveLength(0);
+    // C-2: audit now uses log_audit_event_service; neither path should fire on error.
+    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event" || c.name === "log_audit_event_service")).toHaveLength(0);
   });
 
   it("TC9 — CSRF short-circuits before auth/rpc/audit", async () => {
@@ -439,7 +486,7 @@ describe("PUT /api/preferences", () => {
     expect(updateCall!.args).not.toHaveProperty("p_founder_notes");
     expect(updateCall!.args).not.toHaveProperty("p_min_sharpe");
 
-    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event_service");
     expect(auditCall).toBeDefined();
     const metadata = auditCall!.args.p_metadata as {
       fields: string[];
@@ -471,7 +518,8 @@ describe("PUT /api/preferences", () => {
     expect(
       STATE.rpcCalls.some((c) => c.name === "update_allocator_mandates"),
     ).toBe(true);
-    expect(STATE.rpcCalls.some((c) => c.name === "log_audit_event")).toBe(true);
+    // C-2: audit now uses log_audit_event_service (service-role, JWT-immune).
+    expect(STATE.rpcCalls.some((c) => c.name === "log_audit_event_service")).toBe(true);
   });
 
   it("TC14 — M-0338(c): the audit entity_id is pinned to the authenticated user.id and a body-supplied entity_id cannot override it", async () => {
@@ -491,11 +539,172 @@ describe("PUT /api/preferences", () => {
     expect(res.status).toBe(200);
     await drainAuditMicrotasks();
 
-    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    // C-2: audit now uses log_audit_event_service (service-role, JWT-immune).
+    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event_service");
     expect(auditCall).toBeDefined();
     expect(auditCall!.args.p_entity_id).toBe(STATE.authUser!.id);
     expect(auditCall!.args.p_entity_id).not.toBe(
       "99999999-9999-4999-8999-999999999999",
     );
+  });
+
+  // NEW-C07-04 (audit-2026-05-26 code-review): rate-limit token consumed
+  // AFTER body parse + validate. A client retrying on a 400 must NOT burn
+  // a rate-limit token — the limiter caps writes-that-reach-the-RPC, not
+  // validation rejections.
+  it("TC15 — NEW-C07-04: a 400 validation failure does NOT consume a rate-limit token (limiter fires after validate)", async () => {
+    // Send a body that will pass JSON parse but fail validateSelfEditableInput
+    // (max_weight out of range). Pre-fix: checkLimit ran BEFORE body parse,
+    // so the failing request would burn a token and then 400. Post-fix:
+    // checkLimit only runs after validate passes.
+    //
+    // Assert: checkLimit is NOT called for a validation-rejected request
+    // (i.e. the mock is never invoked on the 400 path).
+    const { checkLimit: checkLimitSpy } = await import("@/lib/ratelimit");
+    const spy = vi.spyOn(
+      { checkLimit: checkLimitSpy },
+      "checkLimit",
+    );
+
+    const { PUT } = await import("./route");
+
+    const res = await PUT(makeRequest({ max_weight: 0.99 })); // out-of-range
+
+    expect(res.status).toBe(400);
+    // The mock records calls via STATE.lastCheckLimitArg. On the 400 path
+    // lastCheckLimitArg should NOT be set to the mandate limiter sentinel
+    // because checkLimit should not have been called at all for this body.
+    //
+    // However, because the route test's mock wires `checkLimit` through
+    // STATE.lastCheckLimitArg, we verify via TC5's companion: a 400 from
+    // TS-layer validation fires checkLimit=NEVER, so the previously consumed
+    // STATE.lastCheckLimitArg sentinel must NOT be MANDATE_AUTO_SAVE_LIMITER
+    // after this call (it was reset by beforeEach to null).
+    expect(STATE.lastCheckLimitArg).toBeNull();
+    spy.mockRestore();
+  });
+});
+
+// ============================================================
+// GET /api/preferences — NEW tests (C07-03, C07-05)
+// ============================================================
+vi.mock("@/lib/preferences", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/preferences")>(
+    "@/lib/preferences",
+  );
+  return {
+    ...actual,
+    getOwnPreferences: async () => PREFS_STATE.getOwnPreferencesImpl(),
+  };
+});
+
+const PREFS_STATE = vi.hoisted(() => ({
+  getOwnPreferencesImpl: () =>
+    Promise.resolve<null | { user_id: string }>(null),
+}));
+
+// Re-wire STATE.checkLimitResult for GET tests by reusing STATE.
+// The GET limiter (`preferencesReadLimiter`) is a separate sentinel from
+// the PUT limiter — we drive it via STATE.checkLimitResult so TC-G1/G2
+// can flip the bucket from the same beforeEach reset point.
+// NOTE: the ratelimit mock always returns STATE.checkLimitResult regardless
+// of which limiter object is passed, so GET and PUT share the same budget
+// control in tests. That's fine: we test them in isolation.
+
+function makeGETRequest(): Request {
+  return new Request("http://localhost:3000/api/preferences", {
+    method: "GET",
+    headers: { origin: "http://localhost:3000" },
+  });
+}
+
+describe("GET /api/preferences", () => {
+  beforeEach(() => {
+    PREFS_STATE.getOwnPreferencesImpl = () =>
+      Promise.resolve<null | { user_id: string }>(null);
+  });
+
+  it("TC-G1 — 200 with null preferences when no row exists (first-visit)", async () => {
+    PREFS_STATE.getOwnPreferencesImpl = () => Promise.resolve(null);
+    STATE.checkLimitResult = { success: true, retryAfter: 0 };
+
+    const { GET } = await import("./route");
+    const res = await GET(makeGETRequest() as never);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.preferences).toBeNull();
+  });
+
+  it("TC-G2 — 200 with preferences data when row exists", async () => {
+    PREFS_STATE.getOwnPreferencesImpl = () =>
+      Promise.resolve({ user_id: "00000000-0000-0000-0000-000000000001" });
+    STATE.checkLimitResult = { success: true, retryAfter: 0 };
+
+    const { GET } = await import("./route");
+    const res = await GET(makeGETRequest() as never);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.preferences).toMatchObject({ user_id: expect.any(String) });
+  });
+
+  it("TC-G3 — 401 when not authenticated", async () => {
+    STATE.authUser = null;
+    STATE.checkLimitResult = { success: true, retryAfter: 0 };
+
+    const { GET } = await import("./route");
+    const res = await GET(makeGETRequest() as never);
+
+    expect(res.status).toBe(401);
+  });
+
+  it("TC-G4 — NEW-C07-05: 429 when GET rate-limit exceeded", async () => {
+    // NEW-C07-05 (audit-2026-05-26 code-review): GET had no rate-limit gate.
+    // Post-fix: a rate-limited GET returns 429 with Retry-After.
+    STATE.checkLimitResult = { success: false, retryAfter: 15 };
+
+    const { GET } = await import("./route");
+    const res = await GET(makeGETRequest() as never);
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("15");
+    const body = await res.json();
+    expect(body.error).toBe("Too many requests");
+  });
+
+  it("TC-G5 — NEW-C07-05: 503 when GET rate-limit misconfigured (fail-CLOSED)", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+
+    const { GET } = await import("./route");
+    const res = await GET(makeGETRequest() as never);
+
+    expect(res.status).toBe(503);
+  });
+
+  it("TC-G6 — NEW-C07-03: PGRST205 (schema-missing) returns 500, not silent null", async () => {
+    // NEW-C07-03 (audit-2026-05-26 silent-failure): pre-fix, PGRST205 was
+    // swallowed as "no preferences yet" → {preferences:null} 200 response,
+    // masking the infra fault and making a saved mandate appear gone.
+    // Post-fix: PGRST205 throws → route catch returns 500.
+    STATE.checkLimitResult = { success: true, retryAfter: 0 };
+    PREFS_STATE.getOwnPreferencesImpl = () => {
+      const err = Object.assign(new Error("PGRST205 schema missing"), {
+        code: "PGRST205",
+      });
+      return Promise.reject(err);
+    };
+
+    const { GET } = await import("./route");
+    const res = await GET(makeGETRequest() as never);
+
+    // Must be 500 (infra fault surfaced), NOT 200 with null (fault masked).
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("Failed to load preferences");
   });
 });

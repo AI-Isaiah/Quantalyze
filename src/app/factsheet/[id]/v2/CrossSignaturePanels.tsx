@@ -30,6 +30,10 @@ const TRACE_LEN = WINDOW * 2 + 1;
 export function CrossSignaturesSection() {
   const payload = usePayload();
   const { block: cmp } = useActiveComparator();
+  // eventSignatures / benchEventSignatures are null for csv-ingested strategies;
+  // this component is only rendered when ingestSource === "api" so these guards
+  // are type-safety checks, not runtime branches. (RED-TEAM-M3)
+  if (!payload.eventSignatures || !payload.benchEventSignatures) return null;
   return (
     <section className="flex flex-col gap-10">
       <CrossHorizon

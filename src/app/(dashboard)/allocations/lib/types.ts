@@ -13,8 +13,14 @@ export interface TileConfig {
 export interface DashboardConfig {
   tiles: TileConfig[];
   timeframe: string;
-  /** Layout schema version — when this differs from LAYOUT_VERSION, reset to defaults. */
-  layoutVersion?: number;
+  /**
+   * Layout schema version — when this differs from LAYOUT_VERSION, reset to
+   * defaults. Required (was optional) so a writer that omits it fails to
+   * compile rather than silently producing an omitted version that the hook
+   * treats as `undefined !== LAYOUT_VERSION` → reset on every load.
+   * (NEW-C06-08)
+   */
+  layoutVersion: number;
 }
 
 /**
@@ -36,7 +42,8 @@ export interface LegacyTileConfig {
 export interface LegacyDashboardConfig {
   tiles: LegacyTileConfig[];
   timeframe: string;
-  layoutVersion?: number;
+  /** Required — see DashboardConfig.layoutVersion JSDoc (NEW-C06-08). */
+  layoutVersion: number;
 }
 
 export interface WidgetMeta {

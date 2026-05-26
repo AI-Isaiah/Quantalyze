@@ -7,6 +7,44 @@ import ccxt.async_support as ccxt_async
 from services.exchange import create_exchange, validate_key_permissions
 
 
+def _okx_swap_only(swap_data: list[dict]) -> "AsyncMock":
+    """Return an AsyncMock for ``private_get_trade_fills_history`` that
+    yields ``swap_data`` when called with ``instType=SWAP`` and an empty
+    page for FUTURES/SPOT/MARGIN.
+
+    NEW-C13-02: _fetch_raw_trades_okx fans out across all four instTypes;
+    tests that only want to exercise SWAP fills must return empty pages for
+    the other three to avoid 4× result multiplication.
+    """
+    async def _side_effect(params: dict) -> dict:
+        if params.get("instType") == "SWAP":
+            return {"data": swap_data}
+        return {"data": []}
+    mock = AsyncMock(side_effect=_side_effect)
+    return mock
+
+
+def _okx_swap_only_pages(pages: list[list[dict]]) -> "AsyncMock":
+    """Like ``_okx_swap_only`` but serves a sequence of pages for SWAP
+    (cursor-walk tests) and always returns empty for other instTypes.
+
+    ``pages`` is a list of fill-lists. Page *i* is returned on the *i*-th
+    call with ``instType=SWAP``. Once exhausted, returns empty.
+    """
+    swap_call_idx: dict[str, int] = {"n": 0}
+
+    async def _side_effect(params: dict) -> dict:
+        if params.get("instType") != "SWAP":
+            return {"data": []}
+        idx = swap_call_idx["n"]
+        swap_call_idx["n"] += 1
+        if idx < len(pages):
+            return {"data": pages[idx]}
+        return {"data": []}
+
+    return AsyncMock(side_effect=_side_effect)
+
+
 def _attach_paginated_chain(builder: MagicMock, rows: list[dict]) -> None:
     """Mount a chainable ``.order().range().execute()`` on ``builder`` so it
     behaves like a PostgREST builder that's been drained by
@@ -325,6 +363,147 @@ class TestValidateKeyPermissions:
 
 
 # ---------------------------------------------------------------------------
+# NEW-C13-10: credential / HMAC-signature redaction in logged exceptions
+# ---------------------------------------------------------------------------
+
+
+class TestC1310CredentialRedaction:
+    """NEW-C13-10 — ccxt NetworkError/AuthError for signed requests embed
+    the request URL in str(e), which ends with `&signature=<HMAC-SHA256>`.
+    These exceptions must be scrubbed before logging.
+
+    Pre-fix: validate_key_permissions used logger.exception() passing exc
+    directly, which logs the full traceback (including str(exc)) via the
+    stdlib formatter — bypassing the structlog redact processor.
+
+    Post-fix: every exception log in exchange.py routes str(exc) through
+    scrub_freeform_string so the HMAC is replaced with REDACTED.
+    """
+
+    @pytest.mark.asyncio
+    async def test_auth_error_does_not_log_raw_signature(self, caplog) -> None:
+        """When fetch_balance raises AuthenticationError embedding a
+        &signature= value, the logged message must contain REDACTED,
+        not the raw HMAC.
+        """
+        import logging
+        from services.exchange import validate_key_permissions
+
+        FAKE_HMAC = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234"
+        exc_msg = (
+            f"binance POST https://api.binance.com/api/v3/account"
+            f"?timestamp=1700000000000&signature={FAKE_HMAC}"
+            f" 401 Null APIError"
+        )
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "binance"
+        mock_exchange.load_markets = AsyncMock(return_value={})
+        mock_exchange.fetch_balance = AsyncMock(
+            side_effect=ccxt_async.AuthenticationError(exc_msg)
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await validate_key_permissions(mock_exchange)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "AUTH_FAILED"
+
+        # All captured log records must NOT contain the raw HMAC.
+        for record in caplog.records:
+            assert FAKE_HMAC not in record.getMessage(), (
+                f"Raw HMAC signature leaked into log: {record.getMessage()!r}"
+            )
+
+        # At least one record must contain REDACTED (proof scrubbing fired).
+        assert any(
+            "REDACTED" in record.getMessage()
+            for record in caplog.records
+        ), (
+            "No REDACTED token found in log output — scrub_freeform_string "
+            "was not applied to the AuthenticationError message (NEW-C13-10)."
+        )
+
+    @pytest.mark.asyncio
+    async def test_network_error_does_not_log_raw_signature(self, caplog) -> None:
+        """Same contract as auth error — NetworkError for signed requests
+        also embeds &signature= in str(exc) (observed on Binance SIGNED endpoints).
+        """
+        import logging
+        from services.exchange import validate_key_permissions
+
+        FAKE_HMAC = "deadbeef" * 8
+        exc_msg = (
+            f"GET https://api.binance.com/api/v3/openOrders"
+            f"?timestamp=1700000000000&signature={FAKE_HMAC}"
+            f" connection timeout"
+        )
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "binance"
+        mock_exchange.load_markets = AsyncMock(return_value={})
+        mock_exchange.fetch_balance = AsyncMock(
+            side_effect=ccxt_async.NetworkError(exc_msg)
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await validate_key_permissions(mock_exchange)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "NETWORK_UNAVAILABLE"
+
+        for record in caplog.records:
+            assert FAKE_HMAC not in record.getMessage(), (
+                f"Raw HMAC leaked into log on NetworkError: {record.getMessage()!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_load_markets_failure_does_not_log_raw_signature(self, caplog) -> None:
+        """load_markets exception message is also scrubbed before logging
+        and before being placed into result['markets_error'].
+        """
+        import logging
+        from services.exchange import validate_key_permissions
+
+        FAKE_HMAC = "cafebabe" * 8
+        exc_msg = (
+            f"GET https://api.bybit.com/v5/asset/coin/query-info"
+            f"?api_key=MYKEY&signature={FAKE_HMAC} 403 forbidden"
+        )
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.load_markets = AsyncMock(
+            side_effect=ccxt_async.RateLimitExceeded(exc_msg)
+        )
+        mock_exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 100}})
+
+        with patch(
+            "services.key_permissions.detect_permissions",
+            new=AsyncMock(return_value={
+                "read": True, "trade": False,
+                "withdraw": False, "probe_error": False,
+            }),
+        ):
+            with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+                result = await validate_key_permissions(mock_exchange)
+
+        assert result["valid"] is True  # load_markets failure is swallowed
+        assert result["markets_loaded"] is False
+        markets_error = result.get("markets_error") or ""
+
+        # markets_error must be scrubbed before persisting.
+        assert FAKE_HMAC not in markets_error, (
+            f"Raw HMAC leaked into result['markets_error']: {markets_error!r}"
+        )
+
+        for record in caplog.records:
+            assert FAKE_HMAC not in record.getMessage(), (
+                f"Raw HMAC leaked into log on load_markets: {record.getMessage()!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # fetch_raw_trades
 # ---------------------------------------------------------------------------
 
@@ -337,41 +516,44 @@ class TestFetchRawTrades:
 
     @pytest.mark.asyncio
     async def test_fetch_raw_trades_okx_happy_path(self) -> None:
-        """OKX fills_history returns 2 fills — verify normalized output."""
+        """OKX fills_history returns 2 fills — verify normalized output.
+
+        NEW-C13-01: fillSz=0.1 contracts × BTC-USDT ctVal=0.01 = 0.001 base units.
+        NEW-C13-02: mock returns data only for instType=SWAP; other instTypes
+        return empty so the fan-out doesn't multiply results by 4.
+        """
         from services.exchange import fetch_raw_trades
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
-        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
-            "data": [
-                {
-                    "instId": "BTC-USDT-SWAP",
-                    "side": "buy",
-                    "fillPx": "60000",
-                    "fillSz": "0.1",
-                    "fee": "-0.6",
-                    "feeCcy": "USDT",
-                    "ts": "1700000000000",
-                    "ordId": "ord-1",
-                    "tradeId": "trade-1",
-                    "execType": "T",
-                    "posSide": "long",
-                },
-                {
-                    "instId": "BTC-USDT-SWAP",
-                    "side": "sell",
-                    "fillPx": "61000",
-                    "fillSz": "0.1",
-                    "fee": "-0.61",
-                    "feeCcy": "USDT",
-                    "ts": "1700001000000",
-                    "ordId": "ord-2",
-                    "tradeId": "trade-2",
-                    "execType": "M",
-                    "posSide": "long",
-                },
-            ]
-        })
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only([
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.6",
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": "ord-1",
+                "tradeId": "trade-1",
+                "execType": "T",
+                "posSide": "long",
+            },
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "sell",
+                "fillPx": "61000",
+                "fillSz": "0.1",
+                "fee": "-0.61",
+                "feeCcy": "USDT",
+                "ts": "1700001000000",
+                "ordId": "ord-2",
+                "tradeId": "trade-2",
+                "execType": "M",
+                "posSide": "long",
+            },
+        ])
 
         mock_supabase = MagicMock()
         result = await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
@@ -381,7 +563,8 @@ class TestFetchRawTrades:
         assert result[0]["symbol"] == "BTCUSDTSWAP"
         assert result[0]["side"] == "buy"
         assert result[0]["price"] == 60000.0
-        assert result[0]["quantity"] == 0.1
+        # NEW-C13-01: fillSz=0.1 contracts × BTC-USDT ctVal=0.01 = 0.001 base units.
+        assert result[0]["quantity"] == pytest.approx(0.001)
         # Audit-2026-05-07 H-0671 — fee is the signed value from the
         # exchange. The fixture uses fee="-0.6" (a maker rebate) and the
         # post-fix branch persists it unchanged so downstream
@@ -1238,23 +1421,22 @@ class TestG12BFillRowFactory:
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
-        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
-            "data": [
-                {
-                    "instId": "BTC-USDT-SWAP",
-                    "side": "sell",
-                    "fillPx": "60000",
-                    "fillSz": "0.1",
-                    "fee": "-0.6",
-                    "feeCcy": "USDT",
-                    "ts": "1700000000000",
-                    "ordId": "ord-1",
-                    "tradeId": "trade-1",
-                    "execType": "T",
-                    "posSide": "short",
-                },
-            ]
-        })
+        # NEW-C13-02: use _okx_swap_only so other instTypes return empty.
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only([
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "sell",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.6",
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": "ord-1",
+                "tradeId": "trade-1",
+                "execType": "T",
+                "posSide": "short",
+            },
+        ])
 
         mock_supabase = MagicMock()
         result = await fetch_raw_trades(
@@ -1274,23 +1456,22 @@ class TestG12BFillRowFactory:
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
-        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
-            "data": [
-                {
-                    "instId": "BTC-USDT-SWAP",
-                    "side": "sell",
-                    "fillPx": "60000",
-                    "fillSz": "0.1",
-                    "fee": "-0.6",
-                    "feeCcy": "USDT",
-                    "ts": "1700000000000",
-                    "ordId": "ord-1",
-                    "tradeId": "trade-1",
-                    "execType": "T",
-                    "posSide": "bogus",
-                },
-            ]
-        })
+        # NEW-C13-02: use _okx_swap_only so other instTypes return empty.
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only([
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "sell",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.6",
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": "ord-1",
+                "tradeId": "trade-1",
+                "execType": "T",
+                "posSide": "bogus",
+            },
+        ])
 
         mock_supabase = MagicMock()
         with patch.object(
@@ -1332,22 +1513,21 @@ class TestG12BOverlapWindow:
 
         late_ts_ms = 1700000000000 - 7_200_000  # 2h before "since"
 
-        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
-            "data": [
-                {
-                    "instId": "BTC-USDT-SWAP",
-                    "side": "buy",
-                    "fillPx": "60000",
-                    "fillSz": "0.1",
-                    "fee": "-0.6",
-                    "feeCcy": "USDT",
-                    "ts": str(late_ts_ms),
-                    "ordId": "ord-late",
-                    "tradeId": "trade-late",
-                    "execType": "T",
-                },
-            ]
-        })
+        # NEW-C13-02: use _okx_swap_only so other instTypes return empty.
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only([
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.6",
+                "feeCcy": "USDT",
+                "ts": str(late_ts_ms),
+                "ordId": "ord-late",
+                "tradeId": "trade-late",
+                "execType": "T",
+            },
+        ])
 
         mock_supabase = MagicMock()
         result = await fetch_raw_trades(
@@ -1376,28 +1556,25 @@ class TestG12BOverlapWindow:
         # timestamp returns exactly one row, even on repeat calls.
         dst_ts_ms = 1710054000000
 
-        page = {
-            "data": [
-                {
-                    "instId": "BTC-USDT-SWAP",
-                    "side": "buy",
-                    "fillPx": "60000",
-                    "fillSz": "0.1",
-                    "fee": "-0.6",
-                    "feeCcy": "USDT",
-                    "ts": str(dst_ts_ms),
-                    "ordId": "ord-dst",
-                    "tradeId": "trade-dst",
-                    "execType": "T",
-                },
-            ]
-        }
+        swap_fills = [
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.6",
+                "feeCcy": "USDT",
+                "ts": str(dst_ts_ms),
+                "ordId": "ord-dst",
+                "tradeId": "trade-dst",
+                "execType": "T",
+            },
+        ]
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
-        mock_exchange.private_get_trade_fills_history = AsyncMock(
-            return_value=page
-        )
+        # NEW-C13-02: use _okx_swap_only so other instTypes return empty.
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only(swap_fills)
 
         mock_supabase = MagicMock()
         first = await fetch_raw_trades(
@@ -1519,13 +1696,11 @@ class TestG12BPaginationGuards:
             "tradeId": "",
             "execType": "T",
         })
-        page = {"data": fills}
-
+        # NEW-C13-02: use _okx_swap_only so FUTURES/SPOT/MARGIN return empty
+        # and don't receive the stuck-full-page (which would multiply results).
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
-        mock_exchange.private_get_trade_fills_history = AsyncMock(
-            return_value=page
-        )
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only(fills)
 
         mock_supabase = MagicMock()
         with patch.object(
@@ -1536,14 +1711,15 @@ class TestG12BPaginationGuards:
                 mock_exchange, "strat-1", mock_supabase
             )
 
-        # Only one call before bail-out (the stuck guard short-circuits).
-        assert mock_exchange.private_get_trade_fills_history.await_count == 1
-        # Stuck-cursor warning fired with okx tag.
+        # SWAP fires 1 call (stuck guard triggers), FUTURES/SPOT/MARGIN each
+        # fire 1 call (empty page = natural break) → 4 total.
+        assert mock_exchange.private_get_trade_fills_history.await_count == 4
+        # Stuck-cursor warning fired with okx + SWAP tag.
         assert any(
             "Pagination stuck" in str(call) and "okx" in str(call)
             for call in mock_warn.call_args_list
         )
-        # All 100 fills captured before the guard fires.
+        # 100 fills from SWAP captured before the stuck guard fires.
         assert len(result) == 100
 
     @pytest.mark.asyncio
@@ -1564,28 +1740,25 @@ class TestG12BPaginationGuards:
         from services.exchange import fetch_raw_trades
 
         # Single short page with 1 fill — natural end-of-data.
-        page = {
-            "data": [
-                {
-                    "instId": "BTC-USDT-SWAP",
-                    "side": "buy",
-                    "fillPx": "60000",
-                    "fillSz": "0.1",
-                    "fee": "-0.6",
-                    "feeCcy": "USDT",
-                    "ts": "1700000000000",
-                    "ordId": "ord-1",
-                    "tradeId": "",  # would have tripped pre-fix
-                    "execType": "T",
-                },
-            ]
-        }
+        # NEW-C13-02: use _okx_swap_only so FUTURES/SPOT/MARGIN return empty.
+        swap_fills = [
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.6",
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": "ord-1",
+                "tradeId": "",  # would have tripped pre-fix
+                "execType": "T",
+            },
+        ]
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
-        mock_exchange.private_get_trade_fills_history = AsyncMock(
-            return_value=page
-        )
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only(swap_fills)
 
         mock_supabase = MagicMock()
         with patch.object(
@@ -1807,48 +1980,47 @@ class TestG12BUnparseableTimestampDrops:
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
-        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
-            "data": [
-                {
-                    "instId": "BTC-USDT-SWAP",
-                    "side": "buy",
-                    "fillPx": "60000",
-                    "fillSz": "0.1",
-                    "fee": "-0.6",
-                    "feeCcy": "USDT",
-                    "ts": good_ts,
-                    "ordId": "ord-good",
-                    "tradeId": "trade-good",
-                    "execType": "T",
-                },
-                {
-                    # Missing ``ts`` entirely — pre-fix this synthesized
-                    # ``datetime.now()`` and persisted a phantom-now row.
-                    "instId": "ETH-USDT-SWAP",
-                    "side": "buy",
-                    "fillPx": "3000",
-                    "fillSz": "1",
-                    "fee": "-0.3",
-                    "feeCcy": "USDT",
-                    "ordId": "ord-bad",
-                    "tradeId": "trade-bad",
-                    "execType": "T",
-                },
-                {
-                    # Non-digit ``ts`` — also pre-fix collapsed to now().
-                    "instId": "SOL-USDT-SWAP",
-                    "side": "sell",
-                    "fillPx": "100",
-                    "fillSz": "1",
-                    "fee": "-0.05",
-                    "feeCcy": "USDT",
-                    "ts": "not-a-number",
-                    "ordId": "ord-bad2",
-                    "tradeId": "trade-bad2",
-                    "execType": "T",
-                },
-            ]
-        })
+        # NEW-C13-02: use _okx_swap_only so FUTURES/SPOT/MARGIN return empty.
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only([
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.6",
+                "feeCcy": "USDT",
+                "ts": good_ts,
+                "ordId": "ord-good",
+                "tradeId": "trade-good",
+                "execType": "T",
+            },
+            {
+                # Missing ``ts`` entirely — pre-fix this synthesized
+                # ``datetime.now()`` and persisted a phantom-now row.
+                "instId": "ETH-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "3000",
+                "fillSz": "1",
+                "fee": "-0.3",
+                "feeCcy": "USDT",
+                "ordId": "ord-bad",
+                "tradeId": "trade-bad",
+                "execType": "T",
+            },
+            {
+                # Non-digit ``ts`` — also pre-fix collapsed to now().
+                "instId": "SOL-USDT-SWAP",
+                "side": "sell",
+                "fillPx": "100",
+                "fillSz": "1",
+                "fee": "-0.05",
+                "feeCcy": "USDT",
+                "ts": "not-a-number",
+                "ordId": "ord-bad2",
+                "tradeId": "trade-bad2",
+                "execType": "T",
+            },
+        ])
 
         mock_supabase = MagicMock()
         with patch.object(
@@ -2040,22 +2212,21 @@ class TestG12BMakerRebatePreservesSign:
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
-        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
-            "data": [
-                {
-                    "instId": "BTC-USDT-SWAP",
-                    "side": "buy",
-                    "fillPx": "60000",
-                    "fillSz": "0.1",
-                    "fee": "-0.4",  # maker rebate
-                    "feeCcy": "USDT",
-                    "ts": "1700000000000",
-                    "ordId": "ord-1",
-                    "tradeId": "trade-1",
-                    "execType": "M",
-                },
-            ]
-        })
+        # NEW-C13-02: use _okx_swap_only so FUTURES/SPOT/MARGIN return empty.
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only([
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.4",  # maker rebate
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": "ord-1",
+                "tradeId": "trade-1",
+                "execType": "M",
+            },
+        ])
 
         mock_supabase = MagicMock()
         result = await fetch_raw_trades(
@@ -2217,11 +2388,12 @@ class TestG12BBinancePaginationLoop:
 
         # We expect both pages to be merged: 1000 + 1 = 1001.
         assert len(result) == 1001
-        # Two pages were fetched, second with since advanced past the
-        # last timestamp of page 1.
+        # Two pages were fetched, second with since set to last timestamp.
         assert len(call_log) == 2
-        # Page 2's ``since`` must be > page 1's last timestamp.
-        assert call_log[1] == page_1[-1]["timestamp"] + 1
+        # NEW-C13-03: Page 2's ``since`` must equal (not +1) the last
+        # timestamp of page 1 so same-ms fills at page boundaries are not
+        # skipped. Boundary duplicates are deduplicated by the unique index.
+        assert call_log[1] == page_1[-1]["timestamp"]
 
     @pytest.mark.asyncio
     async def test_binance_pagination_hits_page_cap(self) -> None:
@@ -2406,38 +2578,45 @@ class TestG12BOkxCursorAndBegin:
                 for i in range(count)
             ]
 
-        pages = [
+        swap_pages = [
             _build_page(0, 100),    # page 1: trade-0 (newest) ... trade-99 (oldest)
             _build_page(100, 100),  # page 2: trade-100 ... trade-199
             _build_page(200, 100),  # page 3: trade-200 ... trade-299
             _build_page(300, 5),    # page 4: short page → natural stop
         ]
-        call_idx = {"n": 0}
 
-        async def _fills_history(params):
+        # NEW-C13-02: wrap in a function that records params AND returns data only
+        # for instType=SWAP. Other instTypes return empty (no param capture needed
+        # for the cursor-direction assertion which is SWAP-specific).
+        async def _fills_history_capturing(params: dict) -> dict:
             captured_params.append(dict(params))
-            i = call_idx["n"]
-            call_idx["n"] += 1
-            return {"data": pages[i] if i < len(pages) else []}
+            if params.get("instType") != "SWAP":
+                return {"data": []}
+            # For SWAP: use position in captured SWAP params list
+            swap_calls = [p for p in captured_params if p.get("instType") == "SWAP"]
+            idx = len(swap_calls) - 1
+            return {"data": swap_pages[idx] if idx < len(swap_pages) else []}
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
-        mock_exchange.private_get_trade_fills_history = _fills_history
+        mock_exchange.private_get_trade_fills_history = _fills_history_capturing
 
         mock_supabase = MagicMock()
         await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
 
-        assert len(captured_params) == 4
+        # Filter to SWAP params only for cursor-direction assertions.
+        swap_params = [p for p in captured_params if p.get("instType") == "SWAP"]
+        assert len(swap_params) == 4
         # Page 1: no cursor.
-        assert "after" not in captured_params[0]
+        assert "after" not in swap_params[0]
         # Pages 2-4: cursor MUST be the OLDEST tradeId of the prior page
         # (last entry, DESC-sorted), NOT the newest (first entry).
-        assert captured_params[1]["after"] == "trade-99", (
+        assert swap_params[1]["after"] == "trade-99", (
             "page 2 cursor must be data[-1] (oldest); a regression that "
             "picked data[0] (newest) would oscillate"
         )
-        assert captured_params[2]["after"] == "trade-199"
-        assert captured_params[3]["after"] == "trade-299"
+        assert swap_params[2]["after"] == "trade-199"
+        assert swap_params[3]["after"] == "trade-299"
 
     @pytest.mark.asyncio
     async def test_okx_begin_sent_on_every_page(self) -> None:
@@ -2739,59 +2918,61 @@ class TestG12BOkxFundingRowContract:
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
-        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
-            "data": [
-                # Normal fill — must be ingested as qty 0.1.
-                {
-                    "instId": "BTC-USDT-SWAP",
-                    "side": "buy",
-                    "fillPx": "60000",
-                    "fillSz": "0.1",
-                    "fee": "-0.6",
-                    "feeCcy": "USDT",
-                    "ts": "1700000000000",
-                    "ordId": "ord-fill",
-                    "tradeId": "trade-fill",
-                    "execType": "T",
-                },
-                # Funding-shaped row (qty=0, OKX bill subType=8) — if
-                # this ever shows up in fills_history (it shouldn't),
-                # the qty=0 carries through and downstream filters at
-                # qty<=0 in position_reconstruction.
-                {
-                    "instId": "BTC-USDT-SWAP",
-                    "side": "",
-                    "fillPx": "0",
-                    "fillSz": "0",
-                    "fee": "-0.5",
-                    "feeCcy": "USDT",
-                    "ts": "1700001000000",
-                    "ordId": "",
-                    "tradeId": "trade-funding",
-                    "execType": "",
-                    "subType": "8",  # OKX bill funding-fee subType
-                },
-            ]
-        })
+        # NEW-C13-02: use _okx_swap_only so FUTURES/SPOT/MARGIN return empty.
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only([
+            # Normal fill — fillSz=0.1 contracts × BTC-USDT ctVal=0.01 = 0.001 base.
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.6",
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": "ord-fill",
+                "tradeId": "trade-fill",
+                "execType": "T",
+            },
+            # Funding-shaped row (qty=0, OKX bill subType=8) — if
+            # this ever shows up in fills_history (it shouldn't),
+            # the qty=0 carries through and downstream filters at
+            # qty<=0 in position_reconstruction.
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "",
+                "fillPx": "0",
+                "fillSz": "0",
+                "fee": "-0.5",
+                "feeCcy": "USDT",
+                "ts": "1700001000000",
+                "ordId": "",
+                "tradeId": "trade-funding",
+                "execType": "",
+                "subType": "8",  # OKX bill funding-fee subType
+            },
+        ])
 
         mock_supabase = MagicMock()
         result = await fetch_raw_trades(
             mock_exchange, "strat-1", mock_supabase
         )
 
-        # Both rows are returned by fetch_raw_trades (no client-side
-        # filter); the funding-shaped row has quantity=0 so the
-        # downstream qty<=0 guard skips it.
-        assert len(result) == 2
+        # NEW-C13-11: zero-price/zero-qty rows are now dropped at ingest
+        # (by _finite_positive_float) rather than passed through to the DB.
+        # The normal fill is kept; the funding-shaped row (fillPx=0, fillSz=0)
+        # is dropped with an ERROR log. This is the correct behavior: persisting
+        # zero-qty rows to the DB is unnecessary churn since position_reconstruction
+        # would skip them anyway at the qty<=0 guard (line 904).
+        assert len(result) == 1
         normal = [r for r in result if r["exchange_fill_id"] == "trade-fill"][0]
-        funding = [
-            r for r in result if r["exchange_fill_id"] == "trade-funding"
-        ][0]
-        assert normal["quantity"] == 0.1
-        assert funding["quantity"] == 0.0, (
-            "Funding-shaped row must carry quantity=0 so the qty<=0 "
-            "guard in services/position_reconstruction.py filters "
-            "it out without inflating fill totals."
+        # NEW-C13-01: fillSz=0.1 contracts × BTC-USDT ctVal=0.01 = 0.001 base units.
+        assert normal["quantity"] == pytest.approx(0.001)
+        # Confirm the funding-shaped row was dropped (not in result)
+        funding_rows = [
+            r for r in result if r.get("exchange_fill_id") == "trade-funding"
+        ]
+        assert len(funding_rows) == 0, (
+            "NEW-C13-11: zero-price/zero-qty OKX row must be dropped at ingest"
         )
 
 
@@ -2838,10 +3019,15 @@ class TestFetchDailyPnlBybitFailLoud:
             "silent-failure sweep) so operators can distinguish 'Bybit "
             "blip / auth fail' from 'no closed positions on the account'."
         )
-        # Pin structured-logging contract: exc_info must carry the traceback.
-        assert any(r.exc_info is not None for r in matching), (
-            "Bybit closed_pnl WARNING must use exc_info=True so operators "
-            "get the traceback in Railway logs, not just the message"
+        # silent-failure/F-05 HMAC-leak fix: exc_info must NOT be set on
+        # this inner warning — exc_info=True embeds the full exception string
+        # including &signature=<HMAC-SHA256> from ccxt NetworkError URLs,
+        # bypassing the redact processor (NEW-C13-10 / red-team/H-3).
+        # The scrubbed message in exc_class=.../scrubbed=... args is sufficient.
+        assert all(r.exc_info is None for r in matching), (
+            "Bybit closed_pnl WARNING must NOT use exc_info=True — "
+            "ccxt exception strings can contain HMAC signatures "
+            "(silent-failure/F-05, NEW-C13-10)"
         )
         # Pin the boundary: the inner WARNING must be THE log — the
         # outer wrapper's ERROR ('fetch_daily_pnl failed') must NOT
@@ -3999,48 +4185,45 @@ class TestClusterIOkxFiniteValidation:
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
-        mock_exchange.private_get_trade_fills_history = AsyncMock(
-            return_value={
-                "data": [
-                    {
-                        "instId": "BTC-USDT-SWAP",
-                        "side": "buy",
-                        "fillPx": "nan",     # rejected by _finite_float
-                        "fillSz": "0.1",
-                        "fee": "0",
-                        "feeCcy": "USDT",
-                        "ts": "1700000000000",
-                        "ordId": "ord-1",
-                        "tradeId": "trade-1",
-                        "execType": "T",
-                    },
-                    {
-                        "instId": "BTC-USDT-SWAP",
-                        "side": "sell",
-                        "fillPx": "60000",
-                        "fillSz": "inf",     # rejected
-                        "fee": "0",
-                        "feeCcy": "USDT",
-                        "ts": "1700001000000",
-                        "ordId": "ord-2",
-                        "tradeId": "trade-2",
-                        "execType": "T",
-                    },
-                    {
-                        "instId": "BTC-USDT-SWAP",
-                        "side": "buy",
-                        "fillPx": "60000",
-                        "fillSz": "0.1",
-                        "fee": "0",
-                        "feeCcy": "USDT",
-                        "ts": "1700002000000",
-                        "ordId": "ord-3",
-                        "tradeId": "trade-3",
-                        "execType": "T",
-                    },
-                ]
-            }
-        )
+        # NEW-C13-02: use _okx_swap_only so FUTURES/SPOT/MARGIN return empty.
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only([
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "nan",     # rejected by _finite_float
+                "fillSz": "0.1",
+                "fee": "0",
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": "ord-1",
+                "tradeId": "trade-1",
+                "execType": "T",
+            },
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "sell",
+                "fillPx": "60000",
+                "fillSz": "inf",     # rejected
+                "fee": "0",
+                "feeCcy": "USDT",
+                "ts": "1700001000000",
+                "ordId": "ord-2",
+                "tradeId": "trade-2",
+                "execType": "T",
+            },
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "0",
+                "feeCcy": "USDT",
+                "ts": "1700002000000",
+                "ordId": "ord-3",
+                "tradeId": "trade-3",
+                "execType": "T",
+            },
+        ])
 
         result = await _fetch_raw_trades_okx(mock_exchange, None)
         # Only the third (clean) fill survives.
@@ -4134,11 +4317,13 @@ class TestClusterIPageCapTruncationFlag:
         mock_exchange.private_get_trade_fills_history = _history
 
         result = await _fetch_raw_trades_okx(mock_exchange, since_ms=None)
-        # Page cap is 100 — every page contributes 100 fills.
-        assert len(result) == 100 * 100
+        # NEW-C13-02: fan-out hits page cap for all 4 instTypes.
+        # 4 instTypes × 100 pages × 100 fills = 40_000 fills total.
+        assert len(result) == 4 * 100 * 100
         flags = get_and_clear_last_dq_flags()
         assert flags.get("sync_truncated_okx") is True
-        assert flags.get("sync_truncated_okx_pages") == 100
+        # 4 instTypes × PAGE_CAP=100 = 400 total pages recorded.
+        assert flags.get("sync_truncated_okx_pages") == 4 * 100
 
 
 class TestClusterIDqBufferResetOnEntry:
@@ -4222,24 +4407,21 @@ class TestClusterIH0668SymbolNormalizationDocumented:
         # ``instId.replace('-', '')`` inside _fetch_raw_trades_okx).
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
-        mock_exchange.private_get_trade_fills_history = AsyncMock(
-            return_value={
-                "data": [
-                    {
-                        "instId": "BTC-USDT-SWAP",
-                        "side": "buy",
-                        "fillPx": "60000",
-                        "fillSz": "0.001",
-                        "fee": "0",
-                        "feeCcy": "USDT",
-                        "ts": "1700000000000",
-                        "ordId": "ord-1",
-                        "tradeId": "trade-1",
-                        "execType": "T",
-                    }
-                ]
+        # NEW-C13-02: use _okx_swap_only so FUTURES/SPOT/MARGIN return empty.
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only([
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.001",
+                "fee": "0",
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": "ord-1",
+                "tradeId": "trade-1",
+                "execType": "T",
             }
-        )
+        ])
         okx_rows = await _fetch_raw_trades_okx(mock_exchange, since_ms=None)
         assert len(okx_rows) == 1
         okx_canonical = okx_rows[0]["symbol"]
@@ -4742,4 +4924,293 @@ class TestBybitDailyPnlStartTimePagination:
             "No subsequent call carried cursor='cursor_abc'; nextPageCursor was "
             "not followed and the truncation bug persists at the page-level even "
             "after the startTime fix"
+        )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C13-01: OKX fillSz contract-to-base normalization
+# NEW-C13-02: OKX instType fan-out (SWAP + FUTURES + SPOT + MARGIN)
+# ---------------------------------------------------------------------------
+
+
+class TestClusterIC1301OkxContractNormalization:
+    """NEW-C13-01 — OKX SWAP/FUTURES fillSz is in CONTRACTS, not base units.
+    Storing raw fillSz as quantity causes 100×–10000× position/PnL inflation.
+    The fix multiplies fillSz × contractSize at ingest.
+    """
+
+    def test_okx_contract_size_lookup_known_symbol(self) -> None:
+        """_okx_contract_size_for_inst_id returns the hardcoded ctVal for
+        a known symbol (BTC-USDT-SWAP → 0.01 BTC per contract).
+        """
+        from services.exchange import _okx_contract_size_for_inst_id
+
+        assert _okx_contract_size_for_inst_id("BTC-USDT-SWAP") == 0.01
+        assert _okx_contract_size_for_inst_id("ETH-USDT-SWAP") == 0.1
+        assert _okx_contract_size_for_inst_id("SOL-USDT-SWAP") == 1.0
+        assert _okx_contract_size_for_inst_id("DOGE-USDT-SWAP") == 1000.0
+
+    def test_okx_contract_size_futures_same_prefix(self) -> None:
+        """FUTURES instIds share the BASE-QUOTE prefix lookup.
+        BTC-USDT-231229 → 0.01 (same as BTC-USDT-SWAP).
+        """
+        from services.exchange import _okx_contract_size_for_inst_id
+
+        assert _okx_contract_size_for_inst_id("BTC-USDT-231229") == 0.01
+
+    def test_okx_contract_size_unknown_emits_dq_flag(self) -> None:
+        """Unknown symbols fall through to 1.0 and stamp okx_unknown_ctval."""
+        from services.exchange import _okx_contract_size_for_inst_id, get_and_clear_last_dq_flags
+
+        get_and_clear_last_dq_flags()
+        ct = _okx_contract_size_for_inst_id("UNKNOWN-COIN-SWAP")
+        assert ct == 1.0
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("okx_unknown_ctval") is True
+
+    @pytest.mark.asyncio
+    async def test_okx_swap_fill_quantity_normalized_from_contracts(self) -> None:
+        """SWAP fill: fillSz=10 contracts × BTC-USDT ctVal=0.01 → quantity=0.1.
+
+        Pre-fix: quantity=10 (raw contract count, inflated by 100×).
+        Post-fix: quantity=0.1 (normalized to base units).
+        """
+        from services.exchange import _fetch_raw_trades_okx
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only([
+            {
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "10",  # 10 contracts × 0.01 BTC/contract = 0.1 BTC
+                "fee": "0",
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": "ord-1",
+                "tradeId": "trade-1",
+                "execType": "T",
+            }
+        ])
+
+        result = await _fetch_raw_trades_okx(mock_exchange, None)
+        assert len(result) == 1
+        assert result[0]["quantity"] == pytest.approx(0.1), (
+            f"Expected 10 contracts × 0.01 ctVal = 0.1 BTC, got {result[0]['quantity']}. "
+            "NEW-C13-01: fillSz must be normalized from contracts to base units."
+        )
+
+    @pytest.mark.asyncio
+    async def test_okx_futures_fill_quantity_normalized_from_contracts(self) -> None:
+        """FUTURES fill uses the same ctVal lookup as SWAP."""
+        from services.exchange import _fetch_raw_trades_okx_inst_type
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+
+        async def _history(params: dict) -> dict:
+            if params.get("instType") != "FUTURES":
+                return {"data": []}
+            return {"data": [
+                {
+                    "instId": "BTC-USDT-231229",
+                    "side": "sell",
+                    "fillPx": "65000",
+                    "fillSz": "5",  # 5 contracts × 0.01 = 0.05 BTC
+                    "fee": "0",
+                    "feeCcy": "USDT",
+                    "ts": "1700000000000",
+                    "ordId": "ord-fut",
+                    "tradeId": "trade-fut",
+                    "execType": "T",
+                }
+            ]}
+
+        mock_exchange.private_get_trade_fills_history = _history
+        fills, cap_hit = await _fetch_raw_trades_okx_inst_type(mock_exchange, None, "FUTURES")
+        assert len(fills) == 1
+        assert fills[0]["quantity"] == pytest.approx(0.05), (
+            f"Expected 5 contracts × 0.01 ctVal = 0.05 BTC, got {fills[0]['quantity']}. "
+            "NEW-C13-01: FUTURES fills need same normalization as SWAP."
+        )
+
+    @pytest.mark.asyncio
+    async def test_okx_spot_fill_quantity_not_normalized(self) -> None:
+        """SPOT fills: fillSz is already in base units. Must NOT be multiplied
+        by a ctVal.
+        """
+        from services.exchange import _fetch_raw_trades_okx_inst_type
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+
+        async def _history(params: dict) -> dict:
+            if params.get("instType") != "SPOT":
+                return {"data": []}
+            return {"data": [
+                {
+                    "instId": "BTC-USDT",
+                    "side": "buy",
+                    "fillPx": "60000",
+                    "fillSz": "0.5",  # 0.5 BTC — base units already
+                    "fee": "0",
+                    "feeCcy": "USDT",
+                    "ts": "1700000000000",
+                    "ordId": "ord-spot",
+                    "tradeId": "trade-spot",
+                    "execType": "T",
+                }
+            ]}
+
+        mock_exchange.private_get_trade_fills_history = _history
+        fills, _ = await _fetch_raw_trades_okx_inst_type(mock_exchange, None, "SPOT")
+        assert len(fills) == 1
+        # SPOT: no normalization → quantity == fillSz exactly.
+        assert fills[0]["quantity"] == pytest.approx(0.5), (
+            f"SPOT fill must not be contract-normalized. Got {fills[0]['quantity']}."
+        )
+
+    @pytest.mark.asyncio
+    async def test_okx_ingest_ctval_metadata_stamped_on_linear_fills(self) -> None:
+        """When ctVal normalization is applied, _ingest_ctval is stamped
+        into the raw fill dict so downstream audit can verify normalization.
+        """
+        from services.exchange import _fetch_raw_trades_okx
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = _okx_swap_only([
+            {
+                "instId": "ETH-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "3000",
+                "fillSz": "2",  # 2 contracts × 0.1 ETH = 0.2 ETH
+                "fee": "0",
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": "ord-1",
+                "tradeId": "trade-1",
+                "execType": "T",
+            }
+        ])
+
+        result = await _fetch_raw_trades_okx(mock_exchange, None)
+        assert len(result) == 1
+        raw_data = result[0].get("raw_data") or {}
+        assert raw_data.get("_ingest_ctval") == pytest.approx(0.1), (
+            "Linear fills must stamp _ingest_ctval=0.1 for ETH-USDT-SWAP"
+        )
+
+
+class TestClusterIC1302OkxInstTypeFanOut:
+    """NEW-C13-02 — _fetch_raw_trades_okx must fan out across SWAP, FUTURES,
+    SPOT, and MARGIN instTypes. Pre-fix only SWAP was fetched; any OKX
+    strategy with SPOT or FUTURES activity was silently truncated.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fills_from_all_inst_types_are_aggregated(self) -> None:
+        """When each instType returns 1 fill, the aggregator returns 4 fills total."""
+        from services.exchange import _fetch_raw_trades_okx, _OKX_FILL_INST_TYPES
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+
+        async def _history(params: dict) -> dict:
+            inst_type = params.get("instType", "")
+            return {"data": [
+                {
+                    "instId": f"BTC-USDT-{inst_type}",
+                    "side": "buy",
+                    "fillPx": "60000",
+                    "fillSz": "0.001",  # 0.001 BTC-equivalent
+                    "fee": "0",
+                    "feeCcy": "USDT",
+                    "ts": "1700000000000",
+                    "ordId": f"ord-{inst_type}",
+                    "tradeId": f"trade-{inst_type}",
+                    "execType": "T",
+                }
+            ]}
+
+        mock_exchange.private_get_trade_fills_history = _history
+
+        result = await _fetch_raw_trades_okx(mock_exchange, None)
+        # All 4 instTypes should contribute 1 fill each.
+        assert len(result) == len(_OKX_FILL_INST_TYPES), (
+            f"Expected {len(_OKX_FILL_INST_TYPES)} fills (one per instType), "
+            f"got {len(result)}. NEW-C13-02: fan-out must cover all instTypes."
+        )
+
+    @pytest.mark.asyncio
+    async def test_all_four_inst_types_queried(self) -> None:
+        """_fetch_raw_trades_okx must send at least one request per instType
+        in _OKX_FILL_INST_TYPES. Pre-fix only SWAP was requested.
+        """
+        from services.exchange import _fetch_raw_trades_okx, _OKX_FILL_INST_TYPES
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        queried_types: list[str] = []
+
+        async def _history(params: dict) -> dict:
+            queried_types.append(params.get("instType", ""))
+            return {"data": []}
+
+        mock_exchange.private_get_trade_fills_history = _history
+
+        await _fetch_raw_trades_okx(mock_exchange, None)
+
+        for inst_type in _OKX_FILL_INST_TYPES:
+            assert inst_type in queried_types, (
+                f"instType={inst_type!r} was not queried. "
+                "NEW-C13-02: _fetch_raw_trades_okx must fan out across all instTypes."
+            )
+
+    @pytest.mark.asyncio
+    async def test_inst_type_cap_hit_aggregates_dq_flags(self) -> None:
+        """When SWAP hits the page cap (100 pages), sync_truncated_okx must
+        be flagged and sync_truncated_okx_pages must reflect 100 (one instType).
+        Other instTypes return empty, so total pages = 100.
+        """
+        from services.exchange import _fetch_raw_trades_okx, get_and_clear_last_dq_flags
+
+        get_and_clear_last_dq_flags()
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        call_n: dict[str, int] = {}
+
+        def _fill(idx: int, inst_type: str) -> dict:
+            return {
+                "instId": f"BTC-USDT-{inst_type}",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.001",
+                "fee": "0",
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": f"ord-{inst_type}-{idx}",
+                "tradeId": f"trade-{inst_type}-{call_n.get(inst_type, 0)}-{idx}",
+                "execType": "T",
+            }
+
+        async def _history(params: dict) -> dict:
+            inst_type = params.get("instType", "")
+            call_n[inst_type] = call_n.get(inst_type, 0) + 1
+            if inst_type == "SWAP":
+                # Always return a full page → never breaks → hits page cap.
+                return {"data": [_fill(i, inst_type) for i in range(100)]}
+            return {"data": []}
+
+        mock_exchange.private_get_trade_fills_history = _history
+        result = await _fetch_raw_trades_okx(mock_exchange, None)
+
+        # SWAP contributes 100 pages × 100 fills = 10_000; others empty.
+        assert len(result) == 100 * 100
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("sync_truncated_okx") is True
+        assert flags.get("sync_truncated_okx_pages") == 100, (
+            f"Expected 100 pages (SWAP only hit cap), got "
+            f"{flags.get('sync_truncated_okx_pages')}"
         )

@@ -99,6 +99,12 @@ export function buildAllocatorPortfolioFactsheetPayload(
       markets: meta.markets ?? [],
       computedAt: meta.computedAt ?? new Date().toISOString(),
       trustTier: null,
+      // FINDING-6 (b06-silentfailure): Allocator portfolio blends are always
+      // derived from live API equity curves — not CSV uploads. Explicitly pass
+      // "api" so AllocatorSection and PeerPercentilePanel are NOT suppressed
+      // for allocator dashboard factsheets under the no-invented-data gate.
+      // Without this, the conservative default ("csv") silently hides both panels.
+      ingestSource: "api",
       description: null,
       subtypes: [],
       supportedExchanges: [],

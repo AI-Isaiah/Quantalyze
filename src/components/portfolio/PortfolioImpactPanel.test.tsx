@@ -120,9 +120,10 @@ describe("<PortfolioImpactPanel>", () => {
       />,
     );
 
+    // NEW-C11-07: magnitude-only (no sign prefix) — the word "improved" carries direction.
     await waitFor(() =>
       expect(
-        screen.getByText(/Sharpe improved by \+0\.150/),
+        screen.getByText(/Sharpe improved by 0\.150/),
       ).toBeInTheDocument(),
     );
   });
@@ -463,14 +464,16 @@ describe("<PortfolioImpactPanel>", () => {
       />,
     );
 
-    // value < 0 → "regressed by -0.150" (NOT "improved").
+    // NEW-C11-07: value < 0 → "regressed by 0.150" (magnitude only, no double-negative).
     await waitFor(() =>
       expect(
-        screen.getByText(/Sharpe regressed by -0\.150/),
+        screen.getByText(/Sharpe regressed by 0\.150/),
       ).toBeInTheDocument(),
     );
     const status = screen.getByRole("status");
-    expect(status.textContent).toMatch(/Sharpe regressed by -0\.150/);
+    expect(status.textContent).toMatch(/Sharpe regressed by 0\.150/);
+    // Must NOT use double-negative "-0.150" nor "improved".
+    expect(status.textContent).not.toMatch(/regressed by -/);
     expect(status.textContent).not.toMatch(/Sharpe improved/);
   });
 
@@ -821,5 +824,224 @@ describe("<PortfolioImpactPanel>", () => {
     );
 
     expect(await screen.findByText(/Try again in 2h/)).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // NEW-C11-05 — degenerate ok row (overlap_days<30 or all-null deltas) renders
+  // the fallback copy, not ±0 chips as a confident projection.
+  // -------------------------------------------------------------------------
+
+  it("NEW-C11-05: ok row with overlap_days<30 renders fallback copy, not chips", async () => {
+    // Simulate a degenerate ok row that slips through schema validation
+    // (e.g. producer sends overlap_days=5 with status="ok").
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            status: "ok",
+            overlap_days: 5,
+            partial_history: true,
+            deltas: {
+              sharpe_delta: 0,
+              dd_delta: 0,
+              corr_delta: 0,
+              concentration_delta: 0,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Degenerate ok"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Not enough overlapping history/i),
+      ).toBeInTheDocument(),
+    );
+    // Must NOT render the delta chips as a confident projection.
+    expect(screen.queryByText("Projected impact")).toBeNull();
+    expect(screen.queryByText("±0.000")).toBeNull();
+  });
+
+  it("NEW-C11-05: ok row with all-null deltas renders fallback copy, not ±0 chips", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            deltas: {
+              sharpe_delta: null,
+              dd_delta: null,
+              corr_delta: null,
+              concentration_delta: null,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="All null deltas"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Not enough overlapping history/i),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("Projected impact")).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // NEW-C11-08 — duplicate date in equity curve warns (last-write-wins)
+  // -------------------------------------------------------------------------
+
+  it("NEW-C11-08: duplicate date in equity curve logs a warning but still renders", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            equity_curve_current: [
+              { date: "2025-01-01", value: 1.0 },
+              { date: "2025-01-01", value: 1.01 }, // duplicate!
+              { date: "2025-01-02", value: 1.02 },
+            ],
+            equity_curve_proposed: [
+              { date: "2025-01-01", value: 1.0 },
+              { date: "2025-01-02", value: 1.03 },
+            ],
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Dupe dates"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByLabelText("Portfolio equity curve: current vs proposed"),
+      ).toBeInTheDocument(),
+    );
+
+    // The chart renders despite the duplicate (last-write-wins).
+    expect(screen.getByLabelText("Portfolio equity curve: current vs proposed")).toBeTruthy();
+    // A dev warning must have been emitted so the problem is visible in tests.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('duplicate date "2025-01-01" in current series'),
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // NEW-C11-01 — null delta renders as "—" (not computable), not ±0.000
+  // -------------------------------------------------------------------------
+
+  it("NEW-C11-01: null Sharpe delta renders '—' chip (not computable), not ±0.000", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            deltas: {
+              sharpe_delta: null,
+              dd_delta: 0.02,
+              corr_delta: 0.03,
+              concentration_delta: 0.05,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Null Sharpe"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("Sharpe")).toBeInTheDocument(),
+    );
+    // "—" must appear for the not-computable chip.
+    expect(screen.getByText("—")).toBeInTheDocument();
+    // Must NOT render ±0.000 — that's indistinguishable from a real zero delta.
+    expect(screen.queryByText("±0.000")).toBeNull();
+    // ARIA live region must say "not computable", not "unchanged".
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/Sharpe not computable/);
+    expect(status.textContent).not.toMatch(/Sharpe unchanged/);
+  });
+
+  // -------------------------------------------------------------------------
+  // NEW-C11-02 — null corr_delta (single-strategy baseline) shows "—" not ±0.000
+  // -------------------------------------------------------------------------
+
+  it("NEW-C11-02: null corr_delta (single-strategy portfolio) renders '—', not ±0.000", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            current: {
+              sharpe: 1.2,
+              max_drawdown: -0.18,
+              avg_correlation: null, // single-strategy baseline — no pair
+              concentration: 0.5,
+            },
+            deltas: {
+              sharpe_delta: 0.15,
+              dd_delta: 0.02,
+              corr_delta: null, // _delta(None, proposed) must be null, not 0.0
+              concentration_delta: 0.05,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Single strategy portfolio"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("Correlation")).toBeInTheDocument(),
+    );
+    // The not-computable em-dash must be rendered for the Correlation chip.
+    expect(screen.getByText("—")).toBeInTheDocument();
+    expect(screen.queryByText("±0.000")).toBeNull();
+    // ARIA live region: "Correlation not computable", not "Correlation unchanged".
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/Correlation not computable/);
   });
 });

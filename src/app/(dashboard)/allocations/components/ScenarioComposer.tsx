@@ -67,7 +67,7 @@ import {
   type FlaggedHolding,
 } from "../lib/holding-outcome-adapter";
 import { KpiStrip } from "./KpiStrip";
-import { EquityChart } from "../widgets/performance/EquityChart";
+import { EquityChart, toWealth } from "../widgets/performance/EquityChart";
 import DrawdownChart from "../widgets/performance/DrawdownChart";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { BridgeDrawer } from "./BridgeDrawer";
@@ -457,13 +457,19 @@ export function ScenarioComposer({
   // (start at 1.0). EquityChart needs wealth-form. DrawdownChart needs
   // wealth × scenarioAum (USD-scaled) so deriveSnapshotDrawdowns can
   // compute peak-anchored drawdown directly.
+  //
+  // NEW-C04-03: use toWealth() to produce a WealthPoint[] so the branded
+  // type propagates to EquityChart.scenarioSeries, preventing raw
+  // RETURN-form arrays from compiling at that boundary.
   // -------------------------------------------------------------------------
-  const scenarioWealthSeries: DailyPoint[] = useMemo(
+  const scenarioWealthSeries = useMemo(
     () =>
-      scenarioMetrics.equity_curve.map((p) => ({
-        date: p.date,
-        value: p.value + 1,
-      })),
+      toWealth(
+        scenarioMetrics.equity_curve.map((p) => ({
+          date: p.date,
+          value: p.value + 1,
+        })),
+      ),
     [scenarioMetrics.equity_curve],
   );
 

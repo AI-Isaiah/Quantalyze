@@ -42,6 +42,9 @@ const recorders = vi.hoisted(() => {
     // Records the `.select(cols)` argument used against the strategies
     // table so the path-extraction contract can assert no `select *` regressions.
     strategySelectCols: [] as string[],
+    // NEW-C03-03 regression: records `.eq(col, val)` calls on the strategies
+    // table so we can assert the `status=published` predicate is always sent.
+    strategyEqCalls: [] as Array<[string, unknown]>,
     // Phase B pr-test-analyzer F1 — captureToSentry call recorder.
     // H-0488 / Phase B follow-up: a regression that drops Sentry capture
     // from the RPC-error or shape-mismatch paths would otherwise be invisible.
@@ -63,7 +66,12 @@ const buildChain = (data: unknown, recordStrategySelect = false) => {
     }
     return chain;
   };
-  chain.eq = () => chain;
+  chain.eq = (col: string, val: unknown) => {
+    if (recordStrategySelect) {
+      recorders.strategyEqCalls.push([col, val]);
+    }
+    return chain;
+  };
   // Phase 15 (WR-04 fix) added `.order()` + `.limit()` to bound the embedded
   // strategy_verifications join to the latest row only. Both must return the
   // chain so the existing `.single()` / `.maybeSingle()` resolution still works.
@@ -189,6 +197,7 @@ beforeEach(() => {
   recorders.favoritesSelectCalls = [];
   recorders.favoritesEqCalls = [];
   recorders.strategySelectCols = [];
+  recorders.strategyEqCalls = [];
   recorders.sentryCalls = [];
 });
 
@@ -249,6 +258,37 @@ describe("getStrategyDetail — disclosure tier redaction", () => {
     expect(result!.manager).toBeNull();
     expect(recorders.fromCalls).not.toContain("profiles");
     expect(recorders.adminFromCalls).not.toContain("profiles");
+  });
+});
+
+/**
+ * NEW-C03-03 regression: getStrategyDetail must always filter by
+ * status='published'. Without it, RLS allows the strategy owner to see
+ * their own draft/pending_review strategies on the discovery page while
+ * /factsheet/[id] correctly 404s — the two surfaces disagree on "live."
+ */
+describe("getStrategyDetail — status=published predicate (NEW-C03-03)", () => {
+  it("sends status=published eq predicate on the strategies query", async () => {
+    recorders.strategyData = {
+      ...baseStrategy,
+      disclosure_tier: "exploratory",
+    };
+    await getStrategyDetail("strat_123");
+    // eq calls are recorded when recordStrategySelect=true (strategies table)
+    const statusCall = recorders.strategyEqCalls.find(
+      ([col]) => col === "status",
+    );
+    expect(statusCall).toBeDefined();
+    expect(statusCall![1]).toBe("published");
+  });
+
+  it("returns null when strategy data is null (non-published strategies return null from DB)", async () => {
+    // Simulate the DB returning null (e.g. a pending_review strategy whose
+    // owner requests /discovery/<slug>/<id>) — the query now always gates on
+    // status='published' so non-published rows return null → notFound().
+    recorders.strategyData = null;
+    const result = await getStrategyDetail("strat_draft");
+    expect(result).toBeNull();
   });
 });
 

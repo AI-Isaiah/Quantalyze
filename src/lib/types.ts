@@ -1310,9 +1310,47 @@ export interface OptimizerSuggestionRow {
 import type { BridgeFitLabel } from "./analytics-schemas";
 export type { BridgeFitLabel };
 
+// NEW-C21-02 — Improvement brand for BridgeCandidate deltas
+//
+// `sharpe_delta`, `dd_delta`, `corr_delta` are bare numbers with an implicit
+// per-field sign convention: for Sharpe, positive = improvement; for MaxDD and
+// Corr, NEGATIVE = improvement (lower drawdown / lower correlation is better).
+// ReplacementCard.tsx kept a hand-maintained `invertedBetter` boolean table
+// to apply this convention at render time — a source of silent bugs when new
+// delta fields are added without updating the table.
+//
+// The `Improvement` brand encodes whether "positive means better" has already
+// been applied. `asImprovement(raw, direction)` is the single constructor:
+//   - direction: "higher-better" (Sharpe) → returns raw unchanged
+//   - direction: "lower-better" (MaxDD, Corr) → negates so positive=improvement
+//
+// Consumers that receive `Improvement` values can render green for positive
+// and red for negative unconditionally, without a separate `invertedBetter`
+// flag. The hand-kept table in ReplacementCard.tsx is eliminated.
+
+/** A number that has been normalised to "positive = improvement" semantics. */
+export type Improvement = number & { readonly __improvementBrand: true };
+
+type ImprovementDirection = "higher-better" | "lower-better";
+
+/**
+ * Convert a raw delta to Improvement form.
+ * - "higher-better" (e.g. Sharpe): keep sign (positive delta = improvement).
+ * - "lower-better" (e.g. MaxDD, Corr): negate (negative delta = improvement).
+ */
+export function asImprovement(raw: number, direction: ImprovementDirection): Improvement {
+  const v = direction === "lower-better" ? -raw : raw;
+  return v as Improvement;
+}
+
 export interface BridgeCandidate {
   strategy_id: string;
   strategy_name: string;
+  /**
+   * Raw deltas — UNSIGNED sign convention (positive = improvement for Sharpe,
+   * negative = improvement for dd/corr). Use `asImprovement(raw, direction)`
+   * to produce a normalised value before rendering.
+   */
   sharpe_delta: number;
   dd_delta: number;
   corr_delta: number;
@@ -1348,11 +1386,14 @@ export type SimulatorStatus =
  *                          (HHI = sum of squared weights; lower = more
  *                           diversified)
  */
+// NEW-C11-01: delta fields are nullable — null means the metric was not
+// computable for one of the operands (e.g. flat-returns leg → Sharpe=None).
+// Rendered as a distinct "not computable" state; never coerced to 0.
 export interface SimulatorDeltas {
-  sharpe_delta: number;
-  dd_delta: number;
-  corr_delta: number;
-  concentration_delta: number;
+  sharpe_delta: number | null;
+  dd_delta: number | null;
+  corr_delta: number | null;
+  concentration_delta: number | null;
 }
 
 export interface SimulatorMetricsSnapshot {
@@ -1552,7 +1593,18 @@ export interface PositionSnapshot {
   snapshot_date: string;
   symbol: string;
   side: "long" | "short" | "flat";
+  /**
+   * NEW-C21-01 — UNSIGNED magnitude in base asset units. Direction is in
+   * `side`. Do NOT sum this raw across positions to compute net exposure —
+   * use `signedExposureUsd` / `signedExposureBase` helpers to bake in the
+   * direction sign first.
+   */
   size_base: number | null;
+  /**
+   * NEW-C21-01 — UNSIGNED magnitude in USD. Direction is in `side`.
+   * Summing raw produces gross exposure, not net. For net, use
+   * `signedExposureUsd(snapshot)`.
+   */
   size_usd: number | null;
   entry_price: number | null;
   mark_price: number | null;
@@ -1560,6 +1612,54 @@ export interface PositionSnapshot {
   exchange: SupportedExchange | null;
   computed_at: string;
   created_at: string;
+}
+
+/**
+ * NEW-C21-01: apply the sign convention from `side` to produce a SIGNED
+ * net-exposure value in USD.
+ *
+ * `side === "short"` → negate so shorts subtract from net.
+ * `side === "flat"`  → always 0 regardless of size_usd.
+ *
+ * Consumers that previously summed `s.size_usd` directly were computing
+ * gross exposure (all positive) — replacing with `signedExposureUsd(s)`
+ * gives correct net (longs − shorts).
+ */
+export function signedExposureUsd(s: PositionSnapshot): number {
+  const mag = s.size_usd ?? 0;
+  if (s.side === "flat") return 0;
+  if (s.side === "short") return -mag;
+  if (s.side === "long") return mag;
+  // SF-7 fix: unknown side values (e.g. "liquidated", null from a future schema
+  // extension) previously fell through to return +mag, silently inflating the
+  // net-exposure chart by treating unknowns as longs. Return 0 (fail-safe) and
+  // warn so engineering sees schema drift before it corrupts allocator metrics.
+  if (typeof console !== "undefined") {
+    console.warn(
+      "[signedExposureUsd] unknown side value; treating as 0 to avoid inflating net exposure",
+      { side: s.side, symbol: s.symbol },
+    );
+  }
+  return 0;
+}
+
+/**
+ * NEW-C21-01: apply the sign convention from `side` to produce a SIGNED
+ * net-exposure value in base-asset units.
+ */
+export function signedExposureBase(s: PositionSnapshot): number {
+  const mag = s.size_base ?? 0;
+  if (s.side === "flat") return 0;
+  if (s.side === "short") return -mag;
+  if (s.side === "long") return mag;
+  // SF-7 fix: mirrors signedExposureUsd — unknown side returns 0 with a warn.
+  if (typeof console !== "undefined") {
+    console.warn(
+      "[signedExposureBase] unknown side value; treating as 0 to avoid inflating net exposure",
+      { side: s.side, symbol: s.symbol },
+    );
+  }
+  return 0;
 }
 
 export interface WeightSnapshot {

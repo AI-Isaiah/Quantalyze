@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
@@ -28,11 +28,50 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
   const [apiSecret, setApiSecret] = useState("");
   const [passphrase, setPassphrase] = useState("");
 
+  // NEW-C37-06: scrub plaintext secrets and invoke the parent cancel handler.
+  function handleCancel() {
+    setApiKey("");
+    setApiSecret("");
+    setPassphrase("");
+    onCancel();
+  }
+
   const needsPassphrase = exchange === "okx";
+
+  // NEW-C29-03 / I1: zero out all plaintext credential fields on unmount,
+  // regardless of close path (Cancel button, modal X, Escape key). This bounds
+  // the in-memory lifetime of the plaintext to the time the modal is open.
+  // useState setters are stable references — no refs needed to reach them
+  // from the cleanup closure.
+  useEffect(() => {
+    return () => {
+      setApiKey("");
+      setApiSecret("");
+      setPassphrase("");
+    };
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    await onSubmit({ exchange, label, apiKey, apiSecret, passphrase });
+    // NEW-C37-02: block Enter-key double-submit. `loading` is the
+    // in-flight guard; rejecting here before the async onSubmit call means
+    // two rapid Enter presses cannot race past the parent's setLoading(true)
+    // re-render and fire two validate-and-encrypt requests.
+    if (loading) return;
+    try {
+      await onSubmit({ exchange, label, apiKey, apiSecret, passphrase });
+    } finally {
+      // NEW-C37-06 + NEW-C29-03: scrub plaintext secrets from component state
+      // after the parent resolves, whether success or failure. On success the
+      // form unmounts shortly after (showForm → false), but on failure it stays
+      // mounted — leaving apiKey/apiSecret/passphrase in state indefinitely
+      // while the user reads the error message. Together with the unmount
+      // cleanup and handleCancel scrub above, this bounds the longest-lived
+      // in-memory plaintext copy to the call.
+      setApiKey("");
+      setApiSecret("");
+      setPassphrase("");
+    }
   }
 
   return (
@@ -89,7 +128,7 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
         {error && <p className="text-sm text-negative mt-3">{error}</p>}
 
         <div className="flex gap-3 mt-4">
-          <Button variant="secondary" type="button" onClick={onCancel}>
+          <Button variant="secondary" type="button" onClick={handleCancel}>
             Cancel
           </Button>
           <Button type="submit" disabled={loading}>
