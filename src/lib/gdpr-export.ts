@@ -1707,27 +1707,22 @@ async function fetchRowsForSpec(
     // semantics — for `api_keys` and `contact_requests`, the SQL filter
     // `.eq(user_column, userId)` is the EXACT same predicate the
     // projection enforces; the projection's per-row check is a defense-
-    // in-depth no-op, so `source_truncated` accurately reflects
-    // pre-projection cap-hit. For `audit_log_for_user` the projection
-    // retention criteria is BROADER than the SQL filter — the SQL only
-    // captures isActor rows, but the projection also retains isEntity
-    // and isMetaTarget rows. For an audit_log_for_user truncation
-    // signal that captures the union, the SQL would need an `.or()`
-    // covering both branches. That widening is tracked as a follow-up
-    // (the cost is a query-plan change against audit_log's index set).
-    // Today's `source_truncated` is the pre-projection cap-hit for the
-    // ACTOR slice only; the per-table audit doc captures this nuance
-    // so a regulator audit reads the flag correctly. See the
-    // `audit_log_for_user source_truncated semantics` regression test
-    // in gdpr-export.test.ts.
-    // NEW-C16-02 (HIGH): when the spec declares an `or_filter` (today
-    // only `audit_log_for_user`), the SQL predicate must MATCH the
-    // projection's broader retention criteria (actor OR entity OR
-    // metadata target) — a bare `.eq(user_column)` returns only the
-    // actor slice and silently drops admin-on-subject rows the subject
-    // is entitled to under Art. 15. For specs without an `or_filter`
-    // (api_keys, contact_requests) the single-owner `.eq()` IS the
-    // exact predicate the projection enforces. `userId` is
+    // in-depth no-op, so `source_truncated` accurately reflects the
+    // pre-projection cap-hit.
+    //
+    // NEW-C16-02 (2026-05-26): `audit_log_for_user` (and
+    // `audit_log_cold_for_user`) now use an `.or(actor | entity |
+    // metadata-target)` filter that MATCHES the projection's full
+    // retention criteria. `source_truncated` is therefore accurate for
+    // the COMPLETE union — the pre-fix limitation ("ACTOR slice only,
+    // tracked as a follow-up") is resolved by the or_filter below.
+    // When the spec declares an `or_filter`, the SQL predicate matches
+    // the projection's broader retention criteria (actor OR entity OR
+    // metadata target) — a bare `.eq(user_column)` would return only
+    // the actor slice and silently drop admin-on-subject rows the
+    // subject is entitled to under Art. 15. For specs without an
+    // `or_filter` (api_keys, contact_requests) the single-owner `.eq()`
+    // IS the exact predicate the projection enforces. `userId` is
     // UUID-validated upstream (C-0021), so interpolating it into the
     // PostgREST filter string is safe.
     const filtered = admin
