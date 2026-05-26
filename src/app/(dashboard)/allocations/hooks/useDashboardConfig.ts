@@ -822,6 +822,21 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
     function onStorage(e: StorageEvent) {
       if (e.key !== STORAGE_KEY) return;
       if (e.newValue === null) return; // ignore clears
+      // NEW-C06-05: ignore blobs whose layoutVersion doesn't match ours.
+      // During a rolling deploy the legacy hook writes a v3 blob to the shared
+      // STORAGE_KEY → fires storage in a V2 tab → onStorage→loadV2Config()
+      // returns defaults → setConfig(defaults) triggers the persist effect →
+      // writes v4-defaults back → fires another storage event in the legacy tab
+      // → ping-pong loop re-arming the recovery toast each cycle.
+      // Gate: parse layoutVersion cheaply without full loadV2Config; bail if
+      // it doesn't match ours so the two-storage-key fix (deferred) is the
+      // long-term remedy and this prevents the runtime loop in the meantime.
+      try {
+        const peeked = JSON.parse(e.newValue) as { layoutVersion?: unknown };
+        if (peeked?.layoutVersion !== LAYOUT_VERSION) return;
+      } catch {
+        return; // malformed newValue — ignore
+      }
       // NEW-C06-01: if this tab has a pending debounced write, flush it BEFORE
       // adopting the foreign value. Previously the still-armed timer would fire
       // after the cross-tab reload, cementing the foreign value a second time
