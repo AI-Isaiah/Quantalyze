@@ -105,9 +105,16 @@ export function BridgeDrawer({
   // depends on stable identity + internal reset semantics.
 
   // Reset transient state when the drawer closes. The union collapses the
-  // four prior resets (stage/selectedRef/error/submitting) into one.
+  // four prior resets (stage/selectedRef/error/submitting) into one
+  // setState(INITIAL_STATE).
   useEffect(() => {
     if (isOpen) return;
+    // Intentional reset on the open→closed transition only (gated by the early
+    // return). No cascading render: INITIAL_STATE is a stable module const, so
+    // once reset, React bails on the identical reference. The rule fires only
+    // because the setter arg is a non-primitive it can't prove is stable (the
+    // prior four primitive setters did not trip it).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setState(INITIAL_STATE);
   }, [isOpen]);
 
