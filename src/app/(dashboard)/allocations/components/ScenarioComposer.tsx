@@ -592,8 +592,7 @@ export function ScenarioComposer({
   }, [liveMetricsForKpi, scenarioMetrics]);
 
   // -------------------------------------------------------------------------
-  // Build Commit diffs and route to onCommitRequested. Plan 07 replaces this
-  // wiring with the real ScenarioCommitDrawer.
+  // Build commit diffs and route to the ScenarioCommitDrawer (Plan 07).
   // -------------------------------------------------------------------------
   // NEW-C18-01: pre-compute the default holding weights (value-proportional
   // from holdingsSummary) so handleCommit can detect weight changes and emit
@@ -616,9 +615,6 @@ export function ScenarioComposer({
   }, [holdingsSummary]);
 
   function handleCommit() {
-    // NEW-C18-13: guard against re-submitting stale diffs (empty diff set).
-    // This also fires after a successful commit because onSubmitSuccess clears
-    // commitDiffs via setCommitDiffs([]).
     const diffs: ComposerProducedDiff[] = [];
     for (const [scopeRef, on] of Object.entries(scenario.draft.toggleByScopeRef)) {
       if (on) continue;
