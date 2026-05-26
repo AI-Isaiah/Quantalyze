@@ -66,14 +66,20 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   // the pre-blended server snapshots — the KeyFilterPanel surfaces a
   // caveat when this divergence is active (see KeyFilterPanel.tsx for
   // the rationale + the gap-tracking comment).
-  const { excluded: excludedKeyIds } = useExcludedKeyIds(allocatorId);
+  const { excluded: excludedKeyIds, clear: clearExcludedKeys } = useExcludedKeyIds(allocatorId);
 
   const filteredHoldingsSummary = useMemo(() => {
     if (excludedKeyIds.size === 0) return holdingsSummary;
     return holdingsSummary.filter((row) => !excludedKeyIds.has(row.api_key_id));
   }, [holdingsSummary, excludedKeyIds]);
 
-  const holdingsEmpty = filteredHoldingsSummary.length === 0;
+  // NEW-C26-01: gate the empty-state early return on the UNFILTERED summary so
+  // a user who has excluded ALL keys client-side doesn't land in the
+  // "Connect Exchange" CTA (factually wrong — they have connected keys). The
+  // CTA also unmounts KeyFilterPanel, the only UI to re-include keys, making
+  // the state a sticky dead-end that persists across reloads.
+  const holdingsEmpty = holdingsSummary.length === 0;
+  const allKeysFiltered = holdingsSummary.length > 0 && filteredHoldingsSummary.length === 0;
 
   const factsheetPayload = useMemo(
     () =>
@@ -98,6 +104,40 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     return (
       <div data-ui-v2-shell="true">
         <EmptyState hasSyncing={false} />
+      </div>
+    );
+  }
+
+  // NEW-C26-01: all keys filtered client-side — don't drop into the "Connect
+  // Exchange" empty state (factually wrong). Render KeyFilterPanel so the
+  // user can re-include at least one key and escape the state.
+  if (allKeysFiltered) {
+    return (
+      <div data-ui-v2-shell="true" data-testid="overview-all-keys-filtered">
+        <KeyFilterPanel
+          allocatorId={allocatorId}
+          apiKeys={apiKeys}
+          holdingsSummary={holdingsSummary}
+        />
+        <div
+          role="status"
+          className="mx-auto mt-8 max-w-[1100px] py-12 text-center"
+        >
+          <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
+            No data visible
+          </p>
+          <p className="mt-3 text-sm text-text-secondary">
+            All API keys are currently excluded. Re-include at least one key
+            above to see your portfolio data.
+          </p>
+          <button
+            type="button"
+            onClick={clearExcludedKeys}
+            className="mt-4 inline-flex items-center rounded-lg border border-accent/40 bg-surface px-4 py-2 text-sm font-medium text-accent hover:border-accent hover:bg-accent/5 transition-colors"
+          >
+            Show all keys
+          </button>
+        </div>
       </div>
     );
   }
