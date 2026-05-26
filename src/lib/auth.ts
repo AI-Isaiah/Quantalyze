@@ -5,6 +5,20 @@ import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { APP_ROLES, type AppRole } from "@/lib/auth-types";
 import { isAdminUser, isAdminUserGivenUserAppRoles } from "@/lib/admin";
+// NEW-C15-01: lazy import to avoid adding a static top-level import to a
+// widely-tested module (auth.ts). The dynamic import is resolved on the
+// first withRole call that needs the approval gate — well before any RPC
+// work — and the module is cached by the Node module system thereafter.
+// This also matches the lazy-import pattern already used in audit.ts for
+// @sentry/nextjs, keeping the module-init surface minimal under vitest.
+type ApprovalGateModule = typeof import("@/lib/api/approval-gate");
+let _approvalGate: ApprovalGateModule | null = null;
+async function getApprovalGate(): Promise<ApprovalGateModule> {
+  if (!_approvalGate) {
+    _approvalGate = await import("@/lib/api/approval-gate");
+  }
+  return _approvalGate;
+}
 
 // Re-exported here so server-side callers can keep using
 // `import { AppRole, APP_ROLES } from "@/lib/auth"`. The raw types live
@@ -451,6 +465,26 @@ export type RoleHandler<P = Record<string, never>> = (
 ) => Promise<NextResponse>;
 
 /**
+ * Options for {@link withRole}.
+ *
+ * NEW-C15-01 (audit-2026-05-26 red-team): `withAuth` and `withAllocatorAuth`
+ * both enforce `assertProfileApproved` by default — `withRole` was missing this
+ * gate, leaving a latent fail-open for any future non-admin role route. Without
+ * the gate, a freshly-registered but UNAPPROVED user who holds a role enum row
+ * (every new signup lands with a role but unapproved) can reach the handler. For
+ * admin routes today `isProfileApproved` short-circuits on `is_admin=true` (no
+ * observable bug), but Sprint 7 plans to route `allocator`/`quant_manager`/
+ * `analyst` roles through this same wrapper — those users CAN be unapproved.
+ *
+ * Default: `requireApproval: true`. Opt out only for routes that explicitly
+ * serve pending-approval callers (e.g. an account-deletion route or a public
+ * status endpoint). Mirror of {@link WithAuthOptions} in `withAuth.ts`.
+ */
+export interface WithRoleOptions {
+  requireApproval?: boolean;
+}
+
+/**
  * Route wrapper: requires the caller to hold at least one of `roles`.
  * Mutating methods (POST/PUT/PATCH/DELETE) also get the CSRF same-origin
  * check via `assertSameOrigin`, matching `withAuth`.
@@ -477,12 +511,23 @@ export type RoleHandler<P = Record<string, never>> = (
  *   // Multiple allowed roles:
  *   export const POST = withRole("admin", "quant_manager")(async (...) => { ... });
  *
+ *   // Opt out of approval gate (rare — only for pending-approval surfaces):
+ *   export const POST = withRole("admin", { requireApproval: false })(async (...) => { ... });
+ *
  * This wrapper is a PEER to `withAdminAuth`, not a replacement. See
  * ADR-0005 for the sprint-over-sprint migration plan.
  */
 export function withRole<P = Record<string, never>>(
-  ...roles: [AppRole, ...AppRole[]]
+  ...args: [AppRole, ...AppRole[]] | [...([AppRole, ...AppRole[]]), WithRoleOptions]
 ) {
+  // Split trailing options object from role list. Options must be a plain
+  // object (not a string), so the check is safe even if no options are passed.
+  const lastArg = args[args.length - 1];
+  const hasOptions = lastArg !== null && typeof lastArg === "object" && !Array.isArray(lastArg);
+  const roles = (hasOptions ? args.slice(0, -1) : args) as [AppRole, ...AppRole[]];
+  const options: WithRoleOptions = hasOptions ? (lastArg as WithRoleOptions) : {};
+  const requireApproval = options.requireApproval ?? true;
+
   return function (handler: RoleHandler<P>) {
     return async (
       req: NextRequest,
@@ -530,6 +575,16 @@ export function withRole<P = Record<string, never>>(
 
       const result = await requireRole(supabase, user, ...roles);
       if ("forbidden" in result) return result.forbidden;
+
+      // NEW-C15-01: approval gate. Mirrors withAuth's requireApproval default.
+      // Uses a lazy dynamic import so auth.ts's module initialisation isn't
+      // widened (avoids hoisting conflicts in vitest that broke APP_ROLES
+      // export during test collection). The module is cached after first load.
+      if (requireApproval) {
+        const gate = await getApprovalGate();
+        const denied = await gate.assertProfileApproved(supabase, user.id);
+        if (denied) return denied;
+      }
 
       const params = await rawCtx.params;
       return handler(req, {

@@ -935,6 +935,96 @@ describe("withRole", () => {
     );
     expect(res.status).toBe(200);
   });
+
+  // NEW-C15-01 (audit-2026-05-26): approval gate in withRole.
+  // The global test-setup.ts vi.mock makes assertProfileApproved return null
+  // (approved) by default — we override it per-test to simulate unapproved.
+  it("NEW-C15-01: unapproved user with valid role is blocked (403), handler not called", async () => {
+    // Simulate a user who holds the 'allocator' role but has not been
+    // approved yet. The approval gate returns a 403 NextResponse; withRole
+    // must propagate it without calling the handler.
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-pending", email: "p@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+
+    const { assertProfileApproved } = await import("@/lib/api/approval-gate");
+    const gateBlock = NextResponse.json(
+      { error: "Account pending approval" },
+      { status: 403 },
+    );
+    vi.mocked(assertProfileApproved).mockResolvedValueOnce(gateBlock);
+
+    const handler = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    const wrapped = withRole("allocator")(handler as never);
+
+    const res = await wrapped(makeRequest({ body: {} }) as never);
+    expect(res.status).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("NEW-C15-01: { requireApproval: false } bypasses gate even when user is unapproved", async () => {
+    // Opt-out path: an explicit requireApproval: false means the gate is
+    // never consulted. assertProfileApproved must NOT be called, and the
+    // handler must receive the request.
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-pending", email: "p@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+
+    const { assertProfileApproved } = await import("@/lib/api/approval-gate");
+    // Arm the mock so it would block if called — proves it is never called.
+    vi.mocked(assertProfileApproved).mockResolvedValueOnce(
+      NextResponse.json({ error: "Account pending approval" }, { status: 403 }),
+    );
+
+    const handler = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    const wrapped = withRole("allocator", { requireApproval: false })(
+      handler as never,
+    );
+
+    const res = await wrapped(makeRequest({ body: {} }) as never);
+    expect(res.status).toBe(200);
+    expect(handler).toHaveBeenCalledTimes(1);
+    // The global mock tracks calls; because we used mockResolvedValueOnce
+    // (not mockImplementation), the call count tells us whether it fired.
+    expect(assertProfileApproved).not.toHaveBeenCalled();
+  });
+
+  it("NEW-C15-01: approval gate is consulted AFTER role check (not wasted on wrong-role callers)", async () => {
+    // Performance + correctness: the gate must only run when the role
+    // check passes. A caller with the wrong role gets 403 from requireRole
+    // before the approval gate is ever consulted.
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-wrong-role", email: "w@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "quant_manager" }],
+      error: null,
+    });
+
+    const { assertProfileApproved } = await import("@/lib/api/approval-gate");
+
+    const handler = vi.fn();
+    const wrapped = withRole("allocator")(handler as never);
+
+    const res = await wrapped(makeRequest({ body: {} }) as never);
+    expect(res.status).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
+    // Gate was NOT consulted — would be wasteful and could leak profile
+    // existence info to callers who failed the role check.
+    expect(assertProfileApproved).not.toHaveBeenCalled();
+  });
 });
 
 describe("requireAdmin — TOCTOU close + CSRF defense-in-depth", () => {
