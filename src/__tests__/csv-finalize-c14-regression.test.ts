@@ -46,7 +46,8 @@ const updateMock = vi.hoisted(() =>
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
-    rpc: (name: string, args: Record<string, unknown>) => rpcMock(name, args),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rpc: (name: string, args: Record<string, unknown>) => (rpcMock as any)(name, args),
     from: (_table: string) => ({
       update: (_payload: Record<string, unknown>) => ({
         eq: (_c1: string, _v1: unknown) => ({
@@ -123,19 +124,21 @@ describe("NEW-C14-01: 23505 → 409 idempotent response", () => {
 
   it("returns 409 with idempotent:true when finalize_csv_strategy raises 23505", async () => {
     // Arrange: RPC returns 23505 conflict
-    rpcMock.mockResolvedValueOnce({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (rpcMock as any).mockResolvedValueOnce({
       data: null,
       error: { code: "23505", message: "duplicate key value violates unique constraint" },
     });
     // Admin lookup finds the pre-existing strategy_id
     const existingId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     adminFromMock.mockReturnValueOnce({
       select: (_cols: string) => ({
         eq: (_col: string, _val: unknown) => ({
           maybeSingle: async () => ({ data: { strategy_id: existingId }, error: null }),
         }),
       }),
-    });
+    } as any);
 
     const res = await POST(makeRequest(validBody()));
     const body = await res.json();
@@ -148,18 +151,20 @@ describe("NEW-C14-01: 23505 → 409 idempotent response", () => {
   });
 
   it("returns 409 CSV_DUPLICATE_SESSION when 23505 fires but recovery lookup finds nothing", async () => {
-    rpcMock.mockResolvedValueOnce({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (rpcMock as any).mockResolvedValueOnce({
       data: null,
       error: { code: "23505", message: "duplicate key" },
     });
     // Admin lookup finds nothing
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     adminFromMock.mockReturnValueOnce({
       select: (_cols: string) => ({
         eq: (_col: string, _val: unknown) => ({
           maybeSingle: async () => ({ data: null, error: null }),
         }),
       }),
-    });
+    } as any);
 
     const res = await POST(makeRequest(validBody()));
     const body = await res.json();
@@ -381,7 +386,6 @@ describe("NEW-C14-07: ok:true not overwritten by upstream spread (unified path)"
     // the route's ok:true → consumers see contradictory HTTP 200 / ok:false.
     vi.mocked(postProcessKey).mockResolvedValueOnce({
       ok: true,
-      response: null as unknown as Response,
       status: 200,
       body: {
         ok: false,
@@ -393,11 +397,12 @@ describe("NEW-C14-07: ok:true not overwritten by upstream spread (unified path)"
     });
 
     // Admin client for metadata update and persist (return no-ops)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     adminFromMock.mockReturnValue({
       update: () => ({ eq: () => ({ eq: () => ({ error: null }) }) }),
       upsert: () => ({ error: null }),
       select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }),
-    });
+    } as any);
     updateMock.mockResolvedValue({ error: null });
 
     const res = await POST(makeRequest(validBody()));
