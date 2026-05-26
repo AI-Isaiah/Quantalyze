@@ -76,11 +76,29 @@ export function useMandateAutoSave(
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(initialLastSavedAt);
   const [savingFields, setSavingFields] = useState<Set<MandateField>>(new Set());
 
+  // NEW-C05-07: shared rate-limit gate across all concurrent field saves.
+  // When ANY field save receives a 429, all subsequent saves for the same
+  // component instance await this timestamp before attempting a fetch. This
+  // prevents the N-field thundering herd (each field reads the same
+  // Retry-After, sleeps identically, and retries simultaneously) from
+  // re-tripping the limiter on the very next attempt.
+  const rateLimitedUntilRef = useRef<number>(0);
+
   // 2s fade-timer for "saved" -> "idle" transition (WizardChrome toast shape).
+  // NEW-C05-05: gate the idle transition on savingFields.size === 0 so a
+  // fast-finishing field cannot flip the form-level status to idle while
+  // another field is still in-flight. The ref mirrors savingFields synchronously
+  // so the setTimeout callback can read it without a stale closure.
+  const savingFieldsSizeRef = useRef<number>(0);
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (saveState === "saved") {
-      fadeTimerRef.current = setTimeout(() => setSaveState("idle"), 2000);
+      fadeTimerRef.current = setTimeout(() => {
+        // NEW-C05-05: only revert to idle when no other field is still saving.
+        if (savingFieldsSizeRef.current === 0) {
+          setSaveState("idle");
+        }
+      }, 2000);
     }
     return () => {
       if (fadeTimerRef.current) {
@@ -120,11 +138,16 @@ export function useMandateAutoSave(
 
   // Release a field from the in-flight set (no-op if absent). Every terminal
   // outcome routes through here so the per-field saving spinner can never stick.
+  // NEW-C05-05: also decrements savingFieldsSizeRef so the idle-transition gate
+  // (in the fade timer) sees an accurate count without a stale closure.
   const removeSavingField = useCallback((fieldName: MandateField) => {
     setSavingFields((prev) => {
       if (!prev.has(fieldName)) return prev;
       const next = new Set(prev);
       next.delete(fieldName);
+      // Decrement synchronously so setTimeout in the "saved" fade-timer reads 0
+      // only after the last field is actually removed.
+      savingFieldsSizeRef.current = next.size;
       return next;
     });
   }, []);
@@ -153,6 +176,9 @@ export function useMandateAutoSave(
       setSavingFields((prev) => {
         const next = new Set(prev);
         next.add(fieldName);
+        // NEW-C05-05: keep ref in sync so the "saved" fade-timer gate sees the
+        // correct count synchronously without a stale closure.
+        savingFieldsSizeRef.current = next.size;
         return next;
       });
       clearError(fieldName);
@@ -172,11 +198,34 @@ export function useMandateAutoSave(
           return { ok: false, reason: "cancelled", message: "Cancelled." };
         }
 
+        // NEW-C05-07: honor the shared rate-limit gate. If another concurrent
+        // field save received a 429 and set rateLimitedUntilRef, wait until
+        // that timestamp before sending this request. This prevents N concurrent
+        // fields from all re-hitting the limiter on the same retry window.
+        const rateLimitedUntil = rateLimitedUntilRef.current;
+        if (rateLimitedUntil > Date.now()) {
+          const waitMs = rateLimitedUntil - Date.now();
+          await wait(waitMs, mountAbortRef.current.signal);
+          if (mountAbortRef.current.signal.aborted) {
+            return { ok: false, reason: "cancelled", message: "Cancelled." };
+          }
+          if (generationRef.current[fieldName] !== gen) {
+            return { ok: false, reason: "superseded", message: "Superseded." };
+          }
+        }
+
         let res: Response;
+        // NEW-C05-06: track whether this attempt was aborted by the timeout
+        // (vs. component unmount) so we don't retry on mount-abort, but DO
+        // retry on timeout (a transient hang is different from unmount).
+        let timedOut = false;
         // Per-attempt timeout controller. Combined with the component-lifetime
         // mountAbortRef so EITHER the 12s timeout OR unmount cancels the fetch.
         const attemptController = new AbortController();
-        const timeout = setTimeout(() => attemptController.abort(), FETCH_TIMEOUT_MS);
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          attemptController.abort();
+        }, FETCH_TIMEOUT_MS);
         // Wire mount-abort into this attempt signal.
         const onMountAbort = () => attemptController.abort();
         mountAbortRef.current.signal.addEventListener("abort", onMountAbort, { once: true });
@@ -190,10 +239,14 @@ export function useMandateAutoSave(
           });
         } catch {
           // Network error or AbortError (12s timeout OR component unmounted).
-          // If unmounted, exit silently — no state updates on dead component.
+          // NEW-C05-06: only retry on timeout-abort; treat mount-abort as cancelled.
           if (mountAbortRef.current.signal.aborted) {
+            // Component unmounted — exit silently, no setState on dead component.
             return { ok: false, reason: "cancelled", message: "Cancelled." };
           }
+          // timedOut=true: per-attempt 12s timeout; !timedOut: pure network error
+          // (e.g. offline). Both are transient — retry with exponential backoff.
+          // mount-abort is handled above and never reaches here.
           if (attempt < MAX_ATTEMPTS) {
             await wait(1000 * Math.pow(2, attempt - 1), mountAbortRef.current.signal);
             if (mountAbortRef.current.signal.aborted) {
@@ -231,7 +284,34 @@ export function useMandateAutoSave(
         }
 
         if (res.status === 429) {
-          const retryAfter = Number(res.headers.get("Retry-After") ?? "5");
+          // NEW-C05-01: parse Retry-After safely. The header may be an integer
+          // seconds count OR an HTTP-date string. Number("Mon, 26 May…") = NaN.
+          // Fall back to 5s on NaN/negative; clamp to [1, 30] so a hostile
+          // server cannot pin this hook for minutes.
+          const rawRetryAfter = res.headers.get("Retry-After");
+          let retryAfterSec = rawRetryAfter !== null ? Number(rawRetryAfter) : NaN;
+          if (!Number.isFinite(retryAfterSec) || retryAfterSec <= 0) {
+            // HTTP-date or invalid value: derive seconds from the Date header
+            // if available, otherwise default to 5s.
+            const dateHeader = res.headers.get("Date");
+            const retryDateMs = rawRetryAfter ? Date.parse(rawRetryAfter) : NaN;
+            const baseDateMs = dateHeader ? Date.parse(dateHeader) : NaN;
+            if (Number.isFinite(retryDateMs) && Number.isFinite(baseDateMs)) {
+              retryAfterSec = Math.max(1, Math.ceil((retryDateMs - baseDateMs) / 1000));
+            } else {
+              retryAfterSec = 5;
+            }
+          }
+          retryAfterSec = Math.min(Math.max(retryAfterSec, 1), 30);
+
+          // NEW-C05-07: update the shared rate-limit gate so all concurrent
+          // field saves for this component also wait out the limiter window
+          // before retrying, preventing the N-field thundering herd.
+          rateLimitedUntilRef.current = Math.max(
+            rateLimitedUntilRef.current,
+            Date.now() + retryAfterSec * 1000,
+          );
+
           // Budget exhausted: terminate cleanly. Falling through the loop would
           // leave the field pinned in savingFields and a message falsely
           // promising a retry that will never run.
@@ -246,17 +326,24 @@ export function useMandateAutoSave(
               ok: false,
               reason: "throttled",
               message: "Saving too fast. Please wait a moment and try again.",
-              retryAfter,
+              retryAfter: retryAfterSec,
             };
           }
-          setFieldErrors((prev) => ({
-            ...prev,
-            [fieldName]: `Saving too fast. Will retry in ${retryAfter}s.`,
-          }));
-          setSaveState("error");
+          // NEW-C05-03: only write the transient retry-error to state when we
+          // are still the active generation for this field. A concurrent save()
+          // that bumped the generation already owns the field's UI state; writing
+          // here would clobber the newer save's message and leave a stale error
+          // visible after the newer save succeeds.
+          if (generationRef.current[fieldName] === gen) {
+            setFieldErrors((prev) => ({
+              ...prev,
+              [fieldName]: `Saving too fast. Will retry in ${retryAfterSec}s.`,
+            }));
+            setSaveState("error");
+          }
           // Cap a hostile/huge Retry-After so the hook can't be pinned for
           // minutes; the abort-aware wait() also resolves immediately on unmount.
-          await wait(Math.min(retryAfter, 30) * 1000, mountAbortRef.current.signal);
+          await wait(retryAfterSec * 1000, mountAbortRef.current.signal);
           if (mountAbortRef.current.signal.aborted) {
             return { ok: false, reason: "cancelled", message: "Cancelled." };
           }

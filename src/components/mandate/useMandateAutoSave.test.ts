@@ -249,4 +249,154 @@ describe("useMandateAutoSave", () => {
     const { result } = renderHook(() => useMandateAutoSave(seed));
     expect(result.current.lastSavedAt?.getTime()).toBe(seed.getTime());
   });
+
+  // NEW-C05-01 regression: Retry-After as an HTTP-date string must not produce
+  // NaN for retryAfterSec (Number("Mon, 26 May…") === NaN). The hook must
+  // fall back to a finite seconds value (5s default) and still complete the
+  // retry successfully without hanging forever or crashing.
+  it("NEW-C05-01 Retry-After HTTP-date string falls back to 5s — retry succeeds, no NaN hang", async () => {
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(
+        errorResponse(429, { error: "Too many" }, "Mon, 26 May 2026 12:00:05 GMT"),
+      )
+      .mockResolvedValueOnce(okResponse());
+
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    await act(async () => {
+      const promise = result.current.save("max_weight", 0.25);
+      // If NaN, wait(NaN * 1000) would never resolve — this would hang.
+      // With the fix, the fallback is 5s.
+      await vi.advanceTimersByTimeAsync(5000);
+      await promise;
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(result.current.saveState).toBe("saved");
+    expect(result.current.fieldErrors.max_weight).toBeUndefined();
+  });
+
+  // NEW-C05-03 regression: a concurrent save() that bumps the generation
+  // while the first save() is sleeping in the 429 retry window must NOT see
+  // its stale error message painted over after the second save succeeds.
+  it("NEW-C05-03 stale-gen 429-error is not written when generation has been superseded", async () => {
+    // first save gets 429, second save gets 200 immediately
+    let resolveFirst: (res: Response) => void = () => {};
+    const firstFetch = new Promise<Response>((r) => {
+      resolveFirst = r;
+    });
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(firstFetch)  // first save -> 429 (resolved later)
+      .mockResolvedValueOnce(okResponse()); // second save -> 200
+
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    await act(async () => {
+      // Start first save; don't await yet.
+      const p1 = result.current.save("max_weight", 0.25);
+      // Start second save immediately — bumps generation; resolves via its own fetch.
+      const p2 = result.current.save("max_weight", 0.30);
+      await p2;
+      // Now resolve first fetch as 429; it must detect stale gen and skip writing error.
+      resolveFirst(errorResponse(429, { error: "Too many" }, "1"));
+      await p1;
+    });
+
+    // The second save succeeded — no error should be visible.
+    expect(result.current.saveState).toBe("saved");
+    expect(result.current.fieldErrors.max_weight).toBeUndefined();
+  });
+
+  // NEW-C05-05 regression: when a field save completes and sets saveState="saved",
+  // the 2s fade-timer must NOT flip to "idle" if another field is still in-flight.
+  // The savingFieldsSizeRef gate prevents a fast-finishing field from prematurely
+  // moving the form-level status to idle. This test verifies the gate by ensuring
+  // that after A finishes, starts the idle timer, and the timer fires, the hook
+  // stays "saving" until B also completes.
+  //
+  // Strategy: start A, let it finish (saved), advance the 2s timer — hook must
+  // stay in "saving" because B was started before advancing. Then finish B and
+  // confirm the final state is "saved".
+  it("NEW-C05-05 idle-gate: saved->idle transition is blocked while a second field is still saving", async () => {
+    let resolveB: (res: Response) => void = () => {};
+    const bFetch = new Promise<Response>((r) => {
+      resolveB = r;
+    });
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(okResponse()) // field A -> immediate success
+      .mockReturnValueOnce(bFetch);         // field B -> pending until resolveB()
+
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    // Step 1: save A and let it complete.
+    await act(async () => {
+      await result.current.save("max_weight", 0.25);
+    });
+    // A is done; saveState="saved"; A released from savingFields.
+    expect(result.current.saveState).toBe("saved");
+    expect(result.current.savingFields.has("max_weight")).toBe(false);
+
+    // Step 2: start B's save (still pending).
+    let pB: ReturnType<typeof result.current.save> | undefined;
+    await act(async () => {
+      pB = result.current.save("min_weight", 0.05);
+    });
+    expect(result.current.savingFields.has("min_weight")).toBe(true);
+    // saveState must be "saving" again because B is in-flight.
+    expect(result.current.saveState).toBe("saving");
+
+    // Step 3: save A again so saveState goes back to "saved" from A's second
+    // completion, kicking off a new 2s idle timer while B is still in-flight.
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(okResponse()); // A second -> immediate
+    await act(async () => {
+      await result.current.save("max_weight", 0.30);
+    });
+    expect(result.current.saveState).toBe("saved");
+    expect(result.current.savingFields.has("min_weight")).toBe(true); // B still pending
+
+    // Step 4: advance past the 2s fade timer. With the gate, "saved" must NOT
+    // revert to "idle" because savingFieldsSizeRef.current > 0 (B still in-flight).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    // B still in-flight → gate blocked the "saved"->"idle" transition.
+    // The state must NOT be "idle" — it should remain "saved" (the timer ran
+    // but was blocked by the gate). This is the key invariant: no premature idle.
+    expect(result.current.saveState).not.toBe("idle");
+
+    // Step 5: finish B; hook should return to "saved".
+    await act(async () => {
+      resolveB(okResponse());
+      await pB;
+    });
+    expect(result.current.savingFields.size).toBe(0);
+    expect(result.current.saveState).toBe("saved");
+  });
+
+  // NEW-C05-07 regression: when field A receives a 429, field B (starting
+  // shortly after) must also wait out the shared rate-limit window before
+  // sending its first fetch, preventing the thundering-herd re-trip.
+  it("NEW-C05-07 cross-field 429 gate: concurrent field respects rateLimitedUntilRef", async () => {
+    // Field A gets 429 with Retry-After: 2; field B starts concurrently.
+    // Field A's retry and field B's first attempt should both be delayed by ~2s.
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(errorResponse(429, { error: "Too many" }, "2")) // A first attempt
+      .mockResolvedValueOnce(okResponse()) // B first attempt (after gate)
+      .mockResolvedValueOnce(okResponse()); // A retry
+
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    await act(async () => {
+      const pA = result.current.save("max_weight", 0.25);
+      const pB = result.current.save("min_weight", 0.05);
+      // Advance past the 2s gate — both A's retry and B's first attempt fire.
+      await vi.advanceTimersByTimeAsync(2000);
+      await Promise.all([pA, pB]);
+    });
+
+    // Field A and B both saved successfully.
+    expect(result.current.saveState).toBe("saved");
+    expect(result.current.fieldErrors.max_weight).toBeUndefined();
+    expect(result.current.fieldErrors.min_weight).toBeUndefined();
+  });
 });
