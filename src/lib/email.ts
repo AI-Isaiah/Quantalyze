@@ -152,7 +152,16 @@ async function send(
   cc?: string | string[],
   { throwOnFailure = false }: { throwOnFailure?: boolean } = {},
 ): Promise<void> {
-  if (!to) return;
+  if (!to) {
+    // H1 (red-team): honour throwOnFailure at the empty-recipient guard.
+    // Pre-fix: this returned void unconditionally regardless of throwOnFailure,
+    // silently violating the "throw on any delivery failure" contract for callers
+    // like the approve routes that pass throwOnFailure=true.
+    if (throwOnFailure) {
+      throw new Error("[email] Recipient address is empty — send failed");
+    }
+    return;
+  }
 
   // Audit-2026-05-07 P324: strip CR/LF/comma from the recipient before
   // either auditing or sending. A null result means the address can't
@@ -183,7 +192,9 @@ async function send(
   // metadata — asymmetric with the rigorously-guarded `to`. One future
   // user-controlled cc reintroduces the exact header-injection class
   // the `to` guard eliminated. Normalize to an array, sanitize each
-  // element, drop any that fail (warn), abort entirely if all fail.
+  // element, drop any that fail (warn). If ALL cc addresses fail and
+  // throwOnFailure=true, abort the send entirely — otherwise continue
+  // sending to `to` without any cc.
   let safeCC: string | string[] | undefined;
   if (cc !== undefined) {
     const ccArray = Array.isArray(cc) ? cc : [cc];
@@ -200,6 +211,17 @@ async function send(
       }
     }
     if (sanitizedCC.length === 0 && ccArray.length > 0) {
+      // H2 (red-team): the previous comment said "abort entirely if all fail"
+      // but the actual behaviour is "send without cc". Comment corrected to
+      // match implementation. throwOnFailure is honoured here: if all cc
+      // addresses are rejected AND the caller has opted into strict delivery
+      // semantics, treat it as a delivery failure (the intended cc audience
+      // will not receive the message).
+      if (throwOnFailure) {
+        throw new Error(
+          "[email] All cc recipients rejected by sanitization guard — send aborted",
+        );
+      }
       console.warn("[email] all cc recipients rejected — sending without cc");
     }
     safeCC = sanitizedCC.length === 1 ? sanitizedCC[0] : sanitizedCC.length > 1 ? sanitizedCC : undefined;

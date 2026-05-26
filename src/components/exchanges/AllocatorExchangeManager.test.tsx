@@ -1079,3 +1079,163 @@ describe("AllocatorExchangeManager — NEW-C29-01 Reconnect in-flight guard", ()
 // rows propagate correctly. The additive merge itself is exercised by the
 // full handleAddKey flow.
 
+// ===========================================================================
+// M1 (red-team) — Reconnect replica-lag: stale server snapshot must not
+//                  re-enable the Reconnect button on a key in mid-reconnect
+// ===========================================================================
+
+describe("AllocatorExchangeManager — M1 (red-team) Reconnect replica-lag guard", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    rpcMock.mockReset();
+  });
+
+  it("M1: re-rendering with a stale server snapshot (non-null disconnected_at) does NOT revert a reconnect-in-progress row back to the Disconnected section", async () => {
+    // Scenario: handleReconnect optimistically sets disconnected_at=null +
+    // sync_status="syncing". Before the replica propagates the RPC update,
+    // router.refresh() fires and the server snapshot still shows the old
+    // disconnected_at. Pre-fix: normalizeInitialKey would overwrite
+    // disconnected_at with the server value → row moved back to Disconnected
+    // section with Reconnect button re-enabled.
+    // Post-fix: the merge detects the in-flight state and preserves local null.
+    //
+    // We simulate the race by: (1) render with disconnected key, (2) simulate
+    // the optimistic state by re-rendering with the LOCAL optimistic state,
+    // then (3) rerender with the stale server snapshot and assert the row
+    // stays in the active section.
+    //
+    // The cleanest way to test normalizeInitialKey's guard without driving the
+    // full handleReconnect flow is to rerender the component with a key that
+    // was already in "reconnecting" local state. We do this by rendering the
+    // component twice:
+    //   - First with the row already showing sync_status="syncing" +
+    //     disconnected_at=null (simulating the state AFTER the optimistic
+    //     update has been applied in handleReconnect).
+    //   - Then rerender with the stale server snapshot (disconnected_at
+    //     non-null, sync_status="idle") and assert the row stays in the
+    //     active section.
+    //
+    // This is falsifiable: deleting the isReconnectInFlight guard from
+    // normalizeInitialKey causes the row to revert to the Disconnected section.
+
+    // Start: row is in active state with sync_status="syncing" and
+    // disconnected_at=null — this mimics the post-optimistic-update state
+    // that handleReconnect stamps before the RPC.
+    const { rerender } = render(
+      <AllocatorExchangeManager
+        initialKeys={[
+          makeKey({
+            sync_status: "syncing",
+            // disconnected_at is absent (undefined → normalized to null)
+          }),
+        ]}
+      />,
+    );
+
+    // The Reconnect button must NOT be in the DOM (row is in the active list).
+    expect(
+      screen.queryByRole("button", { name: /Reconnect binance key/i }),
+    ).not.toBeInTheDocument();
+    // The row IS in the active Exchange connections card.
+    expect(
+      screen.getByRole("button", { name: /Sync binance now/i }),
+    ).toBeInTheDocument();
+
+    // Simulate the stale server snapshot arriving: server still reports the
+    // old disconnected_at timestamp and sync_status="idle".
+    rerender(
+      <AllocatorExchangeManager
+        initialKeys={[
+          makeKey({
+            sync_status: "idle",
+            disconnected_at: "2026-04-22T09:00:00Z",
+          }),
+        ]}
+      />,
+    );
+
+    // M1 post-fix: the row must STILL be in the active section (Reconnect
+    // button absent, Sync now present), because the merge recognised that
+    // local state had disconnected_at=null + sync_status="syncing" and
+    // preserved it against the stale snapshot.
+    expect(
+      screen.queryByRole("button", { name: /Reconnect binance key/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Sync binance now/i }),
+    ).toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// M2 (red-team) — Reconnect RPC failure revert must restore original
+//                  disconnected_at, not stamp a fresh timestamp
+// ===========================================================================
+
+describe("AllocatorExchangeManager — M2 (red-team) Reconnect revert timestamp", () => {
+  let fetchMockM2: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    rpcMock.mockReset();
+    fetchMockM2 = vi.fn();
+    vi.stubGlobal("fetch", fetchMockM2);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("M2: when the Reconnect RPC fails, the row reverts to its original disconnected_at (not a fresh timestamp)", async () => {
+    // Pre-fix: the revert path used `new Date().toISOString()` — the
+    // "Disconnected Nd ago" label showed "just now" even for a key
+    // disconnected days ago. Post-fix: the original disconnected_at is
+    // captured before the optimistic update and restored on revert.
+    //
+    // This is falsifiable: changing the revert to `new Date().toISOString()`
+    // causes the label to NOT contain the original relative time.
+    const originalDisconnectedAt = "2026-04-15T09:00:00Z"; // ~11 days ago
+
+    rpcMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "42501", message: "permission denied", hint: null },
+    });
+
+    render(
+      <AllocatorExchangeManager
+        initialKeys={[
+          makeKey({
+            id: "key-binance-m2",
+            disconnected_at: originalDisconnectedAt,
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      );
+    });
+
+    // After the RPC failure, the Disconnected section must reappear with the
+    // original timestamp label (not "just now"). formatRelative for ~11 days
+    // ago renders as "11d ago".
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      ).not.toBeDisabled();
+    });
+
+    // The "Disconnected Nd ago" text should reflect the original timestamp
+    // (days), not a fresh "just now". We check the section is visible and
+    // the label does NOT say "just now" (which would only appear if the revert
+    // stamped a fresh timestamp).
+    const disconnectedSection = screen
+      .getByRole("heading", { name: /Disconnected/i })
+      .closest("div");
+    expect(disconnectedSection?.textContent).not.toContain("just now");
+  });
+});
+

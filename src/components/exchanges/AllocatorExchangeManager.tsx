@@ -144,18 +144,37 @@ function normalizeInitialKey(
   k: InitialKey,
   prev?: ExchangeConnection,
 ): ExchangeConnection {
+  // M1 (red-team): if the local state already cleared disconnected_at (the
+  // reconnect RPC succeeded and we optimistically set disconnected_at=null +
+  // sync_status="syncing"), do NOT let a stale server snapshot from a replica
+  // that hasn't caught up yet overwrite it with the old non-null timestamp.
+  // Guard: prev had disconnected_at=null AND sync_status="syncing" AND the
+  // server is still reporting a non-null disconnected_at → keep local null
+  // so the row stays in the active list and the Reconnect button stays
+  // disabled. The 5-second poll will pick up the committed server value once
+  // the replica propagates; until then, local truth wins.
+  const isReconnectInFlight =
+    prev !== undefined &&
+    prev.disconnected_at === null &&
+    prev.sync_status === "syncing" &&
+    !prev.pending_insert &&
+    k.disconnected_at != null;
+
   return {
     id: k.id,
     exchange: k.exchange,
     label: k.label,
     is_active: k.is_active,
-    sync_status: k.sync_status,
+    // When a reconnect is in-flight, preserve the optimistic sync_status
+    // ("syncing") rather than reverting to the stale server value.
+    sync_status: isReconnectInFlight ? prev!.sync_status : k.sync_status,
     last_sync_at: k.last_sync_at,
     account_balance_usdt: k.account_balance_usdt,
     created_at: k.created_at,
     sync_error: k.sync_error ?? null,
     last_429_at: k.last_429_at ?? null,
-    disconnected_at: k.disconnected_at ?? null,
+    // M1: preserve local null (reconnect in-flight) against stale server snapshot.
+    disconnected_at: isReconnectInFlight ? null : (k.disconnected_at ?? null),
     // Landmine 8 + f8/f4 preservation: client-only fields carry over across
     // router.refresh() server-state cycles when the row id matches.
     queued_next_attempt_at: prev?.queued_next_attempt_at ?? null,
@@ -251,23 +270,31 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
   }
 
   async function handleReconnect(keyId: string) {
-    // Optimistic: clear disconnected_at + flip to syncing so the pill
-    // renders immediately. Server reset of sync_error + sync_status='idle'
-    // lands via the reconnect RPC; the subsequent sync POST (mirrors
-    // handleAddKey) flips sync_status to 'syncing' on the server.
-    setKeys((prev) =>
-      prev.map((k) =>
-        k.id === keyId
-          ? {
-              ...k,
-              disconnected_at: null,
-              sync_status: "syncing",
-              sync_error: null,
-              helper_override: null,
-            }
-          : k,
-      ),
-    );
+    // M2 (red-team): capture the original disconnected_at BEFORE the optimistic
+    // update so the revert path can restore it exactly. Pre-fix: revert stamped
+    // `new Date().toISOString()` — the "Disconnected Nd ago" label showed
+    // "just now" even when the key had been disconnected for days.
+    let originalDisconnectedAt: string | null = null;
+    setKeys((prev) => {
+      // Read the current value while atomically applying the optimistic update.
+      // Optimistic: clear disconnected_at + flip to syncing so the pill
+      // renders immediately. Server reset of sync_error + sync_status='idle'
+      // lands via the reconnect RPC; the subsequent sync POST (mirrors
+      // handleAddKey) flips sync_status to 'syncing' on the server.
+      return prev.map((k) => {
+        if (k.id === keyId) {
+          originalDisconnectedAt = k.disconnected_at;
+          return {
+            ...k,
+            disconnected_at: null,
+            sync_status: "syncing",
+            sync_error: null,
+            helper_override: null,
+          };
+        }
+        return k;
+      });
+    });
 
     const { error: rpcErr } = await supabase.rpc(
       "reconnect_allocator_api_key",
@@ -284,13 +311,16 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
         message: rpcErr.message,
         hint: rpcErr.hint,
       });
-      // Revert on failure.
+      // Revert on failure — restore the original disconnected_at so the
+      // "Disconnected Nd ago" label stays accurate (M2 fix).
       setKeys((prev) =>
         prev.map((k) =>
           k.id === keyId
             ? {
                 ...k,
-                disconnected_at: new Date().toISOString(),
+                // M2: use the captured original timestamp, not a fresh one.
+                disconnected_at:
+                  originalDisconnectedAt ?? new Date().toISOString(),
                 sync_status: "idle",
                 helper_override: "Reconnect failed — try again",
               }
