@@ -269,25 +269,22 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
   //
   // NEW-C22-02: return a cleanup that removes the three inline properties so
   // they don't survive onto other routes after the allocations route unmounts.
-  // Previously the effect had no cleanup, leaving a stale "full" override on
-  // <html> across client-side navigation (factsheets, public pages, etc.)
-  // until a hard reload.
+  //
+  // NEW-C22-03: use a data attribute instead of inline style properties so the
+  // dark factsheet palette can re-declare --color-accent* inside its own scope
+  // (see globals.css) and win the cascade for dark-mode consumers. An inline
+  // style.setProperty on <html> wins over any class rule (including !important
+  // class rules for custom properties); writing only an attribute lets the
+  // dark factsheet CSS block override the custom properties within its subtree.
   useEffect(() => {
     const root = document.documentElement;
     if (state.accentIntensity === "full") {
-      root.style.setProperty("--color-accent", "#0E9F84");
-      root.style.setProperty("--color-accent-hover", "#0B8870");
-      root.style.setProperty("--color-chart-strategy", "#0E9F84");
+      root.setAttribute("data-accent-intensity", "full");
     } else {
-      // Reset to globals.css defaults.
-      root.style.removeProperty("--color-accent");
-      root.style.removeProperty("--color-accent-hover");
-      root.style.removeProperty("--color-chart-strategy");
+      root.removeAttribute("data-accent-intensity");
     }
     return () => {
-      root.style.removeProperty("--color-accent");
-      root.style.removeProperty("--color-accent-hover");
-      root.style.removeProperty("--color-chart-strategy");
+      root.removeAttribute("data-accent-intensity");
     };
   }, [state.accentIntensity]);
 

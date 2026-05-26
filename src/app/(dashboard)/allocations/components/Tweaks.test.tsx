@@ -121,18 +121,20 @@ describe("Tweaks — segmented controls", () => {
     expect(document.body.getAttribute("data-density")).toBe("loose");
   });
 
-  it("flips --color-accent on the document element when Accent = Full", () => {
+  it("sets data-accent-intensity=full on the document element when Accent = Full (NEW-C22-03)", () => {
     render(<Harness />);
     fireEvent.click(
       screen.getByRole("button", { name: /toggle tweaks panel/i }),
     );
     fireEvent.click(screen.getByRole("button", { name: /^Full$/i }));
+    // NEW-C22-03: accent override now driven via CSS attribute, not inline
+    // style properties, so dark factsheet can re-scope the custom properties.
     expect(
-      document.documentElement.style.getPropertyValue("--color-accent"),
-    ).toBe("#0E9F84");
+      document.documentElement.getAttribute("data-accent-intensity"),
+    ).toBe("full");
   });
 
-  it("removes the --color-accent override when Accent = Muted", () => {
+  it("removes the data-accent-intensity attribute when Accent = Muted (NEW-C22-03)", () => {
     render(<Harness />);
     fireEvent.click(
       screen.getByRole("button", { name: /toggle tweaks panel/i }),
@@ -141,8 +143,8 @@ describe("Tweaks — segmented controls", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Full$/i }));
     fireEvent.click(screen.getByRole("button", { name: /^Muted$/i }));
     expect(
-      document.documentElement.style.getPropertyValue("--color-accent"),
-    ).toBe("");
+      document.documentElement.getAttribute("data-accent-intensity"),
+    ).toBeNull();
   });
 
   it("persists bridgeVariant change", () => {
@@ -243,10 +245,10 @@ describe("Tweaks — hydration", () => {
     );
     // body[data-density] should reflect the persisted "loose".
     expect(document.body.getAttribute("data-density")).toBe("loose");
-    // --color-accent override applied because accentIntensity was "full".
+    // NEW-C22-03: accent attribute applied because accentIntensity was "full".
     expect(
-      document.documentElement.style.getPropertyValue("--color-accent"),
-    ).toBe("#0E9F84");
+      document.documentElement.getAttribute("data-accent-intensity"),
+    ).toBe("full");
   });
 
   // M-1079 — the displayFont knob's body[data-display-font] effect
