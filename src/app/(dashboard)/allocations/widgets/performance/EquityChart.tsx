@@ -1517,7 +1517,15 @@ export default function EquityChartWidget({ data }: WidgetProps) {
     [d.equityDailyPoints],
   );
   const benchmark = d.btcBenchmark;
-  const overlays = d.equityOverlays ?? [];
+  // Stabilize the array reference (mirrors `equityDailyPoints` above):
+  // a bare `?? []` allocates a fresh array each render, bypassing the
+  // EquityChart `EMPTY_OVERLAYS` stable-default and churning the
+  // enrichedOverlays → overlaySeries → projection memos whenever this
+  // wrapper re-renders (e.g. the gated minute tick).
+  const overlays = useMemo(
+    () => d.equityOverlays ?? [],
+    [d.equityOverlays],
+  );
   const stale = d.allKeysStale ?? false;
   const lastSyncAt = d.lastSyncAt ?? null;
   const hasBenchmark = !!benchmark && benchmark.length > 0;

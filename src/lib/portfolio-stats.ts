@@ -14,6 +14,45 @@
 import type { DailyPoint } from "./portfolio-math-utils";
 import { mean, stdDev, compound } from "./portfolio-math-utils";
 
+// ── Non-finite drop diagnostic ──────────────────────────────────────
+// computeReturnDistribution, findMinMax, and detectRegimeChanges all
+// SKIP non-finite (NaN/±Infinity) values to stay crash-safe (see each
+// call site). Dropping silently would mask an upstream data-corruption
+// signal — e.g. a malformed CSV daily_return — so each emits a one-shot
+// console.warn breadcrumb naming the dropped count + function context.
+// This mirrors the sibling drawdown-math.ts "corrupted-input signal"
+// convention. There is no shared logger util in src/lib; console.warn
+// is the established channel.
+//
+// These functions can run per-render, so the breadcrumb must not spam:
+// a module-level Set of function-context keys fires the warning at most
+// ONCE per context per process. Return values are unaffected — this is
+// purely an added diagnostic.
+const nonFiniteWarnedContexts = new Set<string>();
+
+function warnDroppedNonFinite(context: string, dropped: number): void {
+  if (dropped <= 0) return;
+  if (nonFiniteWarnedContexts.has(context)) return;
+  nonFiniteWarnedContexts.add(context);
+  if (typeof console !== "undefined") {
+    console.warn(
+      `[${context}] dropped ${dropped} non-finite (NaN/±Infinity) value(s) — ` +
+        `likely upstream data corruption (e.g. a malformed daily_return). ` +
+        `These were skipped to stay crash-safe; output reflects only finite values.`,
+    );
+  }
+}
+
+/**
+ * Test-only: clear the module-scoped one-shot warn guard so a test can
+ * assert the breadcrumb fires (and, separately, that clean input does
+ * NOT warn) without a process restart. Mirrors the codebase's
+ * `__resetXForTest` convention.
+ */
+export function __resetNonFiniteWarningsForTest(): void {
+  nonFiniteWarnedContexts.clear();
+}
+
 // ── 1. computeMonthlyReturns ────────────────────────────────────────
 /**
  * Group daily returns by year+month and compound each month.
@@ -150,6 +189,7 @@ export function computeReturnDistribution(
     if (r < minVal) minVal = r;
     if (r > maxVal) maxVal = r;
   }
+  warnDroppedNonFinite("computeReturnDistribution", returns.length - finiteCount);
   if (finiteCount === 0) return [];
   const range = maxVal - minVal;
   const binWidth = range / bins;
@@ -275,12 +315,16 @@ function findMinMax(
   let worstKey = "";
   let worstVal = Infinity;
   let sawFinite = false;
+  let droppedNonFinite = 0;
   for (const [key, val] of periods) {
     // Skip non-finite periods: every comparison against NaN is false (so
     // NaN periods would be silently dropped while leaving the ±Infinity
     // sentinels in place), and a period that overflowed to ±Infinity is a
     // meaningless extreme to surface as "best"/"worst".
-    if (!Number.isFinite(val)) continue;
+    if (!Number.isFinite(val)) {
+      droppedNonFinite++;
+      continue;
+    }
     sawFinite = true;
     if (val > bestVal) {
       bestVal = val;
@@ -291,6 +335,7 @@ function findMinMax(
       worstKey = key;
     }
   }
+  warnDroppedNonFinite("findMinMax", droppedNonFinite);
   if (!sawFinite) {
     // No finite period: return the same neutral sentinel as empty input
     // rather than the misleading best=-Infinity / worst=+Infinity.
@@ -464,6 +509,7 @@ export function detectRegimeChanges(
     if (!Number.isFinite(c)) break;
     cumulative.push(c);
   }
+  warnDroppedNonFinite("detectRegimeChanges", daily.length - cumulative.length);
 
   // Compute MAs and detect crossovers
   const result: RegimeCrossover[] = [];

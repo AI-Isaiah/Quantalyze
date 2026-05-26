@@ -251,8 +251,20 @@ export function SyncPreviewStep({
     let stopped = false;
     let timerId: number | undefined;
     let tick = 0;
-    // Count of CONSECUTIVE failed polls; reset to 0 on any clean read.
+    // Count of CONSECUTIVE status-read failures (Supabase `error` or a
+    // transport throw before the terminal fetch); reset to 0 on any clean
+    // status read.
     let consecutiveErrors = 0;
+    // Count of CONSECUTIVE terminal/heavy-fetch failures. Tracked separately
+    // from `consecutiveErrors` because the narrow status read can keep
+    // succeeding (resetting `consecutiveErrors`) while the heavy Promise.all
+    // persistently throws — e.g. RLS allows computation_status but denies
+    // `trades`. With a shared counter that fault oscillates 0→1→0 and never
+    // escalates, so the wizard spins forever (H-0197, narrowed to
+    // heavy-fetch-only faults). A dedicated counter never needs a reset: every
+    // non-throwing heavy outcome (passed / gate-fail) sets `stopped = true`
+    // and terminates the loop, so the only path that reschedules is a throw.
+    let heavyFetchErrors = 0;
 
     const scheduleNext = () => {
       if (stopped) return;
@@ -352,6 +364,13 @@ export function SyncPreviewStep({
         // count + span, sample symbols for market detection, and the
         // exchange name in one Promise.all so the user moves to the
         // factsheet preview as fast as possible.
+        //
+        // Wrapped in its own try/catch (separate from the status-read catch
+        // below) so a persistently-throwing heavy fetch escalates via
+        // `heavyFetchErrors` instead of being masked by the line-above
+        // `consecutiveErrors = 0` reset. One transient heavy fault is still
+        // tolerated; the threshold matches the status-read path.
+        try {
         const [
           { data: analytics },
           { count: tradeCount },
@@ -475,9 +494,29 @@ export function SyncPreviewStep({
         stopped = true;
         setSnapshot(nextSnapshot);
         setPhase("passed");
+        } catch (heavyErr) {
+          // The terminal fetch / gate evaluation threw (network blip,
+          // aborted fetch, a consistently-erroring `trades` query). One
+          // transient fault is tolerated, but a persistent heavy-fetch fault
+          // must escalate — the narrow status read keeps succeeding above,
+          // so `consecutiveErrors` would never reach the threshold (H-0197,
+          // heavy-fetch-narrowed). Count consecutive heavy failures and
+          // surface the recoverable SYNC_FAILED envelope past the threshold.
+          if (stopped) return;
+          console.error(
+            "[wizard:SyncPreviewStep] terminal fetch error:",
+            heavyErr,
+          );
+          heavyFetchErrors += 1;
+          if (heavyFetchErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+            failPolling();
+            return;
+          }
+          scheduleNext();
+        }
       } catch (err) {
-        // A thrown poll (network blip, aborted fetch, transient 503) is
-        // tolerated once, but repeated throws must not leave the wizard
+        // A thrown status read (network blip, aborted fetch, transient 503)
+        // is tolerated once, but repeated throws must not leave the wizard
         // spinning forever (H-0197). Count consecutive failures and
         // escalate to a recoverable SYNC_FAILED envelope past the
         // threshold; otherwise back off and retry.
