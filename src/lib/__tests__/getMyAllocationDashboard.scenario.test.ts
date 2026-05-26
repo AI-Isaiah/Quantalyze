@@ -18,6 +18,7 @@ vi.mock("server-only", () => ({}));
 
 import {
   reconstructHoldingReturnsByScopeRef,
+  holdingEquityContribution,
   type MyAllocationDashboardPayload,
 } from "../queries";
 
@@ -272,6 +273,93 @@ describe("reconstructHoldingReturnsByScopeRef", () => {
       "holding:binance:BTC:spot",
       "holding:okx:ETH:derivative",
     ]);
+  });
+});
+
+/**
+ * NEW-C03-01 regression: holdingEquityContribution must use unrealized_pnl_usd
+ * for derivatives, NOT value_usd (notional). A 10x perp with $5M notional only
+ * contributes its unrealized P&L ($X) to the portfolio's equity — using the
+ * notional would inflate AUM by the leverage factor and corrupt KPIs.
+ */
+describe("NEW-C03-01 — holdingEquityContribution: derivatives use unrealized_pnl_usd", () => {
+  type H = MyAllocationDashboardPayload["holdingsSummary"][number];
+
+  it("spot holding: returns value_usd as equity contribution", () => {
+    const h: H = {
+      symbol: "BTC",
+      venue: "binance",
+      holding_type: "spot",
+      value_usd: 50000,
+      quantity: 1,
+      mark_price_usd: 50000,
+      api_key_id: "key-1",
+    };
+    expect(holdingEquityContribution(h)).toBe(50000);
+  });
+
+  it("derivative long: returns unrealized_pnl_usd (NOT the notional value_usd)", () => {
+    const h: H = {
+      symbol: "BTC",
+      venue: "binance",
+      holding_type: "derivative",
+      // Notional (should be IGNORED): $5M
+      value_usd: 5_000_000,
+      // Equity contribution: the actual unrealized P&L
+      unrealized_pnl_usd: 12_500,
+      quantity: 1,
+      mark_price_usd: 50000,
+      api_key_id: "key-1",
+      side: "long",
+      entry_price: 48000,
+    };
+    expect(holdingEquityContribution(h)).toBe(12_500);
+    // Explicitly: must NOT return the notional
+    expect(holdingEquityContribution(h)).not.toBe(5_000_000);
+  });
+
+  it("derivative with unrealized_pnl_usd=null: returns 0 (not notional)", () => {
+    const h: H = {
+      symbol: "ETH",
+      venue: "okx",
+      holding_type: "derivative",
+      value_usd: 2_000_000, // notional — must be ignored
+      unrealized_pnl_usd: null,
+      quantity: 10,
+      mark_price_usd: 3000,
+      api_key_id: "key-2",
+      side: "short",
+      entry_price: 3100,
+    };
+    expect(holdingEquityContribution(h)).toBe(0);
+  });
+
+  it("derivative with missing unrealized_pnl_usd field: returns 0 (legacy fixture compat)", () => {
+    // Pre-split fixtures omit the optional field entirely.
+    const h: H = {
+      symbol: "SOL",
+      venue: "binance",
+      holding_type: "derivative",
+      value_usd: 800_000,
+      quantity: 100,
+      mark_price_usd: 100,
+      api_key_id: "key-3",
+      // unrealized_pnl_usd deliberately absent
+    };
+    expect(holdingEquityContribution(h)).toBe(0);
+  });
+
+  it("spot holding with NaN value_usd: returns 0", () => {
+    const h: H = {
+      symbol: "BTC",
+      venue: "binance",
+      holding_type: "spot",
+      value_usd: NaN,
+      quantity: 1,
+      mark_price_usd: null,
+      api_key_id: "key-1",
+    };
+    expect(holdingEquityContribution(h)).toBe(0);
   });
 });
 

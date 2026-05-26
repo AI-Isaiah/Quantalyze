@@ -1698,12 +1698,42 @@ export function reconstructHoldingReturnsByScopeRef(
  * Returns the empty-default shape when no holdings have ≥2 returns
  * (warm-up case).
  */
+/**
+ * NEW-C03-01: Equity contribution by holding type.
+ *
+ *   - Spot: `value_usd` (marked fair value — this IS the equity contribution).
+ *   - Derivative: `unrealized_pnl_usd` (the actual equity contribution).
+ *     `value_usd` on a derivative is the NOTIONAL contract size — e.g. a 10x
+ *     perp with $5M notional has ~$500k of margin/equity at stake, not $5M.
+ *     Using notional inflates AUM by the leverage factor and dominates the
+ *     per-holding weights used by computeScenario.
+ *
+ * Shorts: unrealized_pnl_usd is negative for a losing short. We include the
+ * full signed value so the short's equity impact is reflected in the weight
+ * (a deeply-negative short has near-zero positive weight, which is correct).
+ * We don't clamp to 0 here — callers that need a non-negative weight for the
+ * scenario can normalise after the fact.
+ */
+/** @internal Exported for unit testing only (NEW-C03-01 regression). */
+export function holdingEquityContribution(h: MyAllocationDashboardPayload["holdingsSummary"][number]): number {
+  if (h.holding_type === "derivative") {
+    // unrealized_pnl_usd may be undefined on legacy fixtures (the field is
+    // optional on the type to preserve backward-compat with pre-split rows).
+    // Fall back to 0 rather than notional when the column is absent — better
+    // to exclude a derivative than to treat notional as equity.
+    const pnl = h.unrealized_pnl_usd ?? 0;
+    return Number.isFinite(pnl) ? pnl : 0;
+  }
+  return Number.isFinite(h.value_usd) ? h.value_usd : 0;
+}
+
 function liveBaselineMetricsFromHoldings(
   holdingsSummary: MyAllocationDashboardPayload["holdingsSummary"],
   holdingReturnsByScopeRef: Record<string, DailyPoint[]>,
 ): MyAllocationDashboardPayload["liveBaselineMetrics"] {
+  // NEW-C03-01: Use equity contribution (not notional) for AUM and weights.
   const totalAum = holdingsSummary.reduce(
-    (s, h) => s + (Number.isFinite(h.value_usd) ? h.value_usd : 0),
+    (s, h) => s + holdingEquityContribution(h),
     0,
   );
   const emptyDefault: MyAllocationDashboardPayload["liveBaselineMetrics"] = {
@@ -1742,8 +1772,13 @@ function liveBaselineMetricsFromHoldings(
   }
   if (strategies.length === 0) return emptyDefault;
 
-  // All-enabled, value-weighted live set (mirrors the all-on default the
+  // All-enabled, equity-weighted live set (mirrors the all-on default the
   // composer shows on first paint). Weights normalize inside computeScenario.
+  // NEW-C03-01: use holdingEquityContribution (not value_usd) so derivatives
+  // are weighted by unrealized_pnl_usd rather than notional contract size.
+  // We clamp negative equity (deeply-losing short) to 0 for the weight so
+  // the composite curve isn't distorted by negative-weight slots — the short's
+  // daily returns already reflect its P&L direction in the equity curve.
   const selected: Record<string, boolean> = {};
   const weights: Record<string, number> = {};
   const startDates: Record<string, string> = {};
@@ -1751,7 +1786,7 @@ function liveBaselineMetricsFromHoldings(
     const scopeRef = `holding:${h.venue}:${h.symbol}:${h.holding_type}`;
     if (!holdingReturnsByScopeRef[scopeRef]) continue;
     selected[scopeRef] = true;
-    weights[scopeRef] = Math.max(0, h.value_usd ?? 0);
+    weights[scopeRef] = Math.max(0, holdingEquityContribution(h));
   }
   const state: ScenarioState = { selected, weights, startDates };
   const cache = buildDateMapCache(strategies);
