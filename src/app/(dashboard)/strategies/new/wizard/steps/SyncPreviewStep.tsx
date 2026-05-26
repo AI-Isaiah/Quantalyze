@@ -86,10 +86,30 @@ function readCorrelationId(): string {
   return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-const POLL_INTERVAL_MS = 3000;
 const SLOW_HINT_MS = 15_000;
 const WARN_THRESHOLD_MS = 60_000;
 const RETRY_THRESHOLD_MS = 180_000;
+
+/**
+ * Status-poll backoff schedule. Each entry is the delay BEFORE the next
+ * poll; the loop walks the ladder and then holds at the final step.
+ * Capping at 10s keeps DB load and background-tab timer churn down on
+ * slow first-of-day syncs (~45s) and the 3-minute worst case, while the
+ * first few ticks stay snappy so a fast sync still feels instant. The
+ * elapsed-time UI thresholds are wall-clock, not poll-count, so backing
+ * off the poll cadence does not shift the SLOW/WARN/RETRY copy.
+ */
+const POLL_BACKOFF_MS = [3000, 3000, 5000, 5000, 10_000] as const;
+
+/**
+ * How many CONSECUTIVE poll failures (Supabase `error`, a thrown
+ * exception, or a network blip) before we stop spinning and surface a
+ * recoverable SYNC_FAILED envelope. Without this the wizard hangs on
+ * "Fetching trades..." forever when the read keeps failing (e.g. an RLS
+ * regression denies the row, or a transient 503). One transient blip is
+ * tolerated; three in a row is a real fault the user needs an exit from.
+ */
+const MAX_CONSECUTIVE_POLL_ERRORS = 3;
 
 export interface SyncPreviewSnapshot {
   tradeCount: number;
@@ -219,24 +239,112 @@ export function SyncPreviewStep({
   useEffect(() => {
     if (phase !== "waiting_for_complete") return;
     const supabase = createClient();
-    const id = window.setInterval(async () => {
+
+    // `stopped` is checked at the top of every tick AND before every
+    // self-reschedule so the loop hard-stops the instant the effect
+    // tears down (phase change / strategyId change / unmount). The old
+    // setInterval relied on the effect re-running to clear the timer,
+    // which left the previous interval's closure firing 1-2 extra polls
+    // against a stale `phase` after a setPhase() (H-0195). A
+    // self-scheduling setTimeout with a local guard cannot fire again
+    // once cleared.
+    let stopped = false;
+    let timerId: number | undefined;
+    let tick = 0;
+    // Count of CONSECUTIVE failed polls; reset to 0 on any clean read.
+    let consecutiveErrors = 0;
+
+    const scheduleNext = () => {
+      if (stopped) return;
+      const delay =
+        POLL_BACKOFF_MS[Math.min(tick, POLL_BACKOFF_MS.length - 1)];
+      tick += 1;
+      timerId = window.setTimeout(poll, delay);
+    };
+
+    /**
+     * Stop polling and surface a recoverable SYNC_FAILED envelope. Used
+     * when the status read keeps failing (H-0197 / H-0198) so the user
+     * gets an exit affordance instead of an indefinite spinner. Fires
+     * the same `wizard_error` funnel event as the gate-failure path so
+     * the drop-off is recorded in PostHog.
+     */
+    const failPolling = () => {
+      if (stopped || !mountedRef.current) return;
+      stopped = true;
+      setErrorCode("SYNC_FAILED");
+      setPhase("gate_failed");
+      trackForQuantsEventClient("wizard_error", {
+        wizard_session_id: wizardSessionId,
+        step: "sync_preview",
+        code: "SYNC_FAILED",
+      });
+    };
+
+    const poll = async () => {
+      if (stopped) return;
       try {
         // Lightweight status poll: only read the two status columns
         // while we wait for completion so each tick is cheap. The
         // heavy analytics columns (sparkline, metrics) only load once
         // on the terminal state.
-        const { data: statusRow } = await supabase
+        const { data: statusRow, error: statusError } = await supabase
           .from("strategy_analytics")
           .select("computation_status, computation_error")
           .eq("strategy_id", strategyId)
           .maybeSingle();
+
+        if (stopped) return;
+
+        // A Supabase `error` (RLS denial, transient 503) is NOT the same
+        // as a genuine `pending` row. Without this branch an RLS
+        // regression returns { data: null, error } and `nextStatus`
+        // silently collapses to "pending" via the ?? default — the
+        // wizard then spins forever on a permissions misconfig nobody
+        // can see (H-0198). Treat it as a poll failure and let the
+        // consecutive-error counter escalate.
+        if (statusError) {
+          console.error(
+            "[wizard:SyncPreviewStep] poll status error:",
+            statusError,
+          );
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+            failPolling();
+            return;
+          }
+          scheduleNext();
+          return;
+        }
+
+        consecutiveErrors = 0;
 
         const nextStatus = statusRow?.computation_status ?? "pending";
         const nextError = statusRow?.computation_error ?? null;
         setComputationStatus((prev) => (prev === nextStatus ? prev : nextStatus));
         setComputationError((prev) => (prev === nextError ? prev : nextError));
 
-        if (nextStatus !== "complete" && nextStatus !== "failed") {
+        // Hard-failure terminal state. Bail BEFORE the heavy Promise.all
+        // (H-0195): on `failed` the analytics row is errored, so the 5
+        // trades/api_keys queries are pure waste, and the gate would only
+        // ever map this to GATE_ANALYTICS_FAILED anyway. Route straight
+        // to the scripted analytics-failed envelope, carrying
+        // computation_error for the detail line, and stop polling.
+        if (nextStatus === "failed") {
+          stopped = true;
+          if (!mountedRef.current) return;
+          setErrorCode("GATE_ANALYTICS_FAILED");
+          setPhase("gate_failed");
+          trackForQuantsEventClient("wizard_error", {
+            wizard_session_id: wizardSessionId,
+            step: "sync_preview",
+            code: "GATE_ANALYTICS_FAILED",
+          });
+          return;
+        }
+
+        if (nextStatus !== "complete") {
+          scheduleNext();
           return;
         }
 
@@ -319,6 +427,7 @@ export function SyncPreviewStep({
         });
 
         if (!gate.passed) {
+          stopped = true;
           setGateResult(gate);
           const wizardCode = gate.code ? gateFailureToWizardError(gate.code) : "UNKNOWN";
           setErrorCode(wizardCode);
@@ -363,14 +472,36 @@ export function SyncPreviewStep({
           computedAt: analytics?.computed_at ?? null,
         };
 
+        stopped = true;
         setSnapshot(nextSnapshot);
         setPhase("passed");
       } catch (err) {
+        // A thrown poll (network blip, aborted fetch, transient 503) is
+        // tolerated once, but repeated throws must not leave the wizard
+        // spinning forever (H-0197). Count consecutive failures and
+        // escalate to a recoverable SYNC_FAILED envelope past the
+        // threshold; otherwise back off and retry.
+        if (stopped) return;
         console.error("[wizard:SyncPreviewStep] poll error:", err);
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+          failPolling();
+          return;
+        }
+        scheduleNext();
       }
-    }, POLL_INTERVAL_MS);
+    };
 
-    return () => window.clearInterval(id);
+    // Schedule the first poll after one base interval, exactly matching
+    // the replaced setInterval's first-tick latency (setInterval also
+    // waits one period before its first callback) so resume/timing
+    // behaviour is unchanged.
+    timerId = window.setTimeout(poll, POLL_BACKOFF_MS[0]);
+
+    return () => {
+      stopped = true;
+      if (timerId !== undefined) window.clearTimeout(timerId);
+    };
   }, [phase, strategyId, apiKeyId, wizardSessionId]);
 
   const handleUseThisKey = useCallback(() => {
