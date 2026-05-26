@@ -6,8 +6,8 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { isValidPartnerTag } from "@/lib/partner";
 import { parseCsv, parseCsvWithSchema } from "@/lib/csv";
 import { ensureAuthUser } from "@/lib/supabase/admin-users";
-import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
-import { capAuditMetadata, logAuditEvent } from "@/lib/audit";
+import { adminActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
+import { capAuditMetadata, emitAsUser } from "@/lib/audit";
 import {
   validateDisplayName,
   ProfileValidationError,
@@ -109,6 +109,24 @@ class StrategyTierConflictError extends Error {
 // misclassified as a header. The query parameter is now the single source
 // of truth; the parser never sniffs.
 
+// NEW-C28-01: ticket_size_usd invariants (mirrors validateSelfEditableInput in
+// preferences.ts:107-111). Reject rows outside [0, 1e9] at parse boundary.
+const MAX_TICKET_SIZE_USD = 1_000_000_000;
+
+// NEW-C28-02: mandate_archetype length cap (mirrors preferences.ts:105).
+const MAX_MANDATE_ARCHETYPE_CHARS = 500;
+
+// NEW-C28-03: strategy_name length cap (mirrors wizard 1-80 / csv-finalize >80).
+// We enforce the same upper bound here; the lower bound is handled by the
+// !row.strategy_name null-check below.
+const MAX_STRATEGY_NAME_CHARS = 80;
+
+// NEW-C28-04: row count cap to prevent unbounded GoTrue createUser fan-out.
+// 500 rows = ~100 managers × 5 strategies + 500 allocators, well above any
+// realistic single-partner onboarding. Protects against fat-finger paste and
+// deliberate resource exhaustion.
+const MAX_IMPORT_ROWS = 500;
+
 interface ManagerRow {
   manager_email: string;
   strategy_name: string;
@@ -150,6 +168,13 @@ function parseManagerRows(
     ["manager_email", "strategy_name", "disclosure_tier"],
     (row) => {
       if (!row.manager_email || !row.strategy_name) return null;
+      // NEW-C28-03: strategy_name length + control-char guard. Mirrors
+      // validateDisplayName's [\r\n\0] guard and the wizard's 1-80 cap.
+      // Reject (drop) rows with overlong names or embedded control chars
+      // so they surface in the raw-vs-parsed delta (H-0239), not silently
+      // persist as arbitrary-length / control-char-contaminated strings.
+      if (row.strategy_name.length > MAX_STRATEGY_NAME_CHARS) return null;
+      if (/[\r\n\0]/.test(row.strategy_name)) return null;
       const tier = row.disclosure_tier.toLowerCase();
       const disclosure_tier: DisclosureTier =
         tier === "institutional" ? "institutional" : "exploratory";
@@ -174,13 +199,24 @@ function parseAllocatorRows(
     ["allocator_email", "mandate_archetype", "ticket_size_usd"],
     (row) => {
       if (!row.allocator_email || !row.mandate_archetype) return null;
+      // NEW-C28-02: mandate_archetype length cap (mirrors preferences.ts:105).
+      // Reject rows with overlong mandate cells — they surface in the
+      // raw-vs-parsed delta (H-0239) rather than persisting a multi-KB blob.
+      const mandate = row.mandate_archetype.trim();
+      if (mandate.length === 0 || mandate.length > MAX_MANDATE_ARCHETYPE_CHARS) return null;
+      // NEW-C28-01: ticket_size_usd invariants (mirrors validateSelfEditableInput).
+      // sanitizeCsvValue keeps a leading '-', so raw negative values would land
+      // in allocator_preferences; reject rather than clamp (loud failure rule).
       const ticket_size_usd = Number.parseFloat(
         (row.ticket_size_usd || "0").replace(/[,_$]/g, ""),
       );
+      if (!Number.isFinite(ticket_size_usd)) return null;
+      if (ticket_size_usd < 0) return null;
+      if (ticket_size_usd > MAX_TICKET_SIZE_USD) return null;
       return {
         allocator_email: row.allocator_email,
-        mandate_archetype: row.mandate_archetype,
-        ticket_size_usd: Number.isFinite(ticket_size_usd) ? ticket_size_usd : 0,
+        mandate_archetype: mandate,
+        ticket_size_usd,
       };
     },
     hasHeader,
@@ -331,7 +367,15 @@ export async function POST(request: Request): Promise<NextResponse> {
   if (csrfError) return csrfError;
 
   const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  // silent-failure-hunter HIGH (review Finding 3): destructure the error field
+  // so a Supabase network error / JWT failure surfaces as 500, not a silent
+  // 401 indistinguishable from "user not logged in". Without this, an auth
+  // infrastructure outage is invisible in logs and Sentry.
+  const { data: { user }, error: getUserErr } = await supabase.auth.getUser();
+  if (getUserErr) {
+    console.error("[api/admin/partner-import] auth.getUser failed:", getUserErr);
+    return NextResponse.json({ error: "Authentication check failed" }, { status: 500 });
+  }
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -340,8 +384,17 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const rl = await checkLimit(adminActionLimiter, `partner-import:${user!.id}`);
+  const rl = await checkLimit(adminActionLimiter, `partner-import:${user.id}`);
   if (!rl.success) {
+    // silent-failure-hunter HIGH (review Finding 6): mirror the roles route —
+    // distinguish Upstash misconfiguration (503) from genuine quota exhaustion
+    // (429) so an Upstash outage isn't silently collapsed into normal throttling.
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Rate limiter unavailable", code: "ratelimit_misconfigured" },
+        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+      );
+    }
     return NextResponse.json(
       { error: "Too many requests" },
       { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
@@ -425,6 +478,26 @@ export async function POST(request: Request): Promise<NextResponse> {
   if (managers.length === 0 && allocators.length === 0) {
     return NextResponse.json(
       { error: "Both CSVs are empty — nothing to import" },
+      { status: 400 },
+    );
+  }
+
+  // NEW-C28-04 (red-team H conf=7): reject requests with too many rows BEFORE
+  // the import phases run. Each row fans out to admin.createUser + 2-3 DB
+  // writes; an unbounded CSV hammers the GoTrue limiter and pins the function.
+  // The adminActionLimiter caps requests/min but not rows-per-request.
+  // Enforce a hard ceiling here so a fat-finger paste or deliberate DoS cannot
+  // spawn unbounded GoTrue calls.
+  const totalRows = managers.length + allocators.length;
+  if (totalRows > MAX_IMPORT_ROWS) {
+    return NextResponse.json(
+      {
+        error: `Import exceeds the maximum of ${MAX_IMPORT_ROWS} rows (managers + allocators combined). Got ${totalRows}. Split into multiple requests.`,
+        code: "too_many_rows",
+        managers_rows: managers.length,
+        allocators_rows: allocators.length,
+        max_rows: MAX_IMPORT_ROWS,
+      },
       { status: 400 },
     );
   }
@@ -754,24 +827,45 @@ export async function POST(request: Request): Promise<NextResponse> {
       strategies_created > 0 ||
       allocators_created > 0;
     if (observedPartialCompletion) {
-      logAuditEvent(supabase, {
-        action: "admin.partner_import",
-        entity_type: "partner_import",
-        entity_id: importUuid,
-        metadata: capAuditMetadata(
-          buildPartnerImportMetadata({
-            partner_tag,
-            managers_created,
-            strategies_created,
-            strategies_skipped_existing,
-            allocators_created,
-            managers_rows_skipped: managersRowsSkipped,
-            allocators_rows_skipped: allocatorsRowsSkipped,
-            partial_completion: true,
-            error_message: errorMessage,
-          }),
-        ),
-      });
+      // NEW-C28-05 (red-team M conf=8): await the audit emit synchronously so
+      // a transient failure surfaces as 5xx rather than producing a completed
+      // import with no forensic anchor. The fire-and-forget wrappers
+      // (logAuditEvent / logAuditEventAsUser) schedule via after() — usable
+      // for read paths, but insufficient for a write-heavy admin import where
+      // the audit row IS the forensic anchor for "which admin imported partner
+      // X, how many rows". NEW-C28-06 (red-team L conf=9): use emitAsUser
+      // (the underlying async emitter) with the admin client so auth.uid()
+      // inside the log_audit_event RPC resolves to user.id correctly — the
+      // documented anti-pattern for service-role routes.
+      // silent-failure-hunter HIGH (review Findings 4 + IMPORTANT-1):
+      // emitAsUser re-throws on permission_denied and unknown RPC errors.
+      // A bare await here lets that throw propagate out of the catch block,
+      // losing the original err context and all partial-completion counters.
+      // Wrap in try/catch — audit failure is non-fatal on the error path;
+      // the structured 500 response below is more important than an audit row.
+      try {
+        await emitAsUser(admin, user.id, {
+          action: "admin.partner_import",
+          entity_type: "partner_import",
+          entity_id: importUuid,
+          metadata: capAuditMetadata(
+            buildPartnerImportMetadata({
+              partner_tag,
+              managers_created,
+              strategies_created,
+              strategies_skipped_existing,
+              allocators_created,
+              managers_rows_skipped: managersRowsSkipped,
+              allocators_rows_skipped: allocatorsRowsSkipped,
+              partial_completion: true,
+              error_message: errorMessage,
+            }),
+          ),
+        });
+      } catch (auditErr) {
+        console.error("[api/admin/partner-import] partial-completion audit emit failed (non-fatal):", auditErr);
+        // Do NOT rethrow — continue with the original error path below.
+      }
     }
 
     // Audit-2026-05-07 red-team R-0003 (HIGH c7): PartnerTagConflictError
@@ -867,23 +961,54 @@ export async function POST(request: Request): Promise<NextResponse> {
   // shared `buildPartnerImportMetadata` so the success-path surface stays
   // in lockstep with the catch-path surface. H-0239 (red-team c7) raw-
   // row count delta still rides through unchanged.
-  logAuditEvent(supabase, {
-    action: "admin.partner_import",
-    entity_type: "partner_import",
-    entity_id: importUuid,
-    metadata: capAuditMetadata(
-      buildPartnerImportMetadata({
-        partner_tag,
-        managers_created,
-        strategies_created,
-        strategies_skipped_existing,
-        allocators_created,
-        managers_rows_skipped: managersRowsSkipped,
-        allocators_rows_skipped: allocatorsRowsSkipped,
-        partial_completion: false,
-      }),
-    ),
-  });
+  // NEW-C28-05 / NEW-C28-06: await emitAsUser directly (see catch-path comment
+  // above for rationale). For the success path, a failed audit emit surfaces
+  // as 5xx rather than silently producing a completed import with no record.
+  //
+  // silent-failure-hunter HIGH (review Finding 5): wrap in try/catch so that
+  // when emitAsUser throws (permission_denied / unknown RPC error) the caller
+  // still learns the import SUCCEEDED with all its counters. Without this, a
+  // transient audit RPC failure after a fully-committed import returns a bare
+  // 500 — the operator cannot tell whether the import committed and risks
+  // re-running it (creating duplicate auth users).
+  try {
+    await emitAsUser(admin, user.id, {
+      action: "admin.partner_import",
+      entity_type: "partner_import",
+      entity_id: importUuid,
+      metadata: capAuditMetadata(
+        buildPartnerImportMetadata({
+          partner_tag,
+          managers_created,
+          strategies_created,
+          strategies_skipped_existing,
+          allocators_created,
+          managers_rows_skipped: managersRowsSkipped,
+          allocators_rows_skipped: allocatorsRowsSkipped,
+          partial_completion: false,
+        }),
+      ),
+    });
+  } catch (auditErr) {
+    console.error("[api/admin/partner-import] success-path audit emit failed:", auditErr);
+    // M-02 (red-team MEDIUM): 207 Multi-Status is misleading here — generic
+    // HTTP clients (and the admin UI) treat any 2xx as success, ignore the
+    // body, and may re-submit the import creating duplicate GoTrue users.
+    // A 500 with the import counters in the body unambiguously signals that
+    // the import committed but the side-effect (audit) failed, and prevents
+    // callers from retrying the import itself. The counters in the body let
+    // operators verify what actually happened without a second request.
+    return NextResponse.json({
+      managers_created,
+      strategies_created,
+      strategies_skipped_existing,
+      allocators_created,
+      managers_rows_skipped: managersRowsSkipped,
+      allocators_rows_skipped: allocatorsRowsSkipped,
+      partial_completion: false,
+      audit_warning: "Import succeeded but the audit record could not be written. Contact support. Do NOT re-run the import.",
+    }, { status: 500 });
+  }
 
   return NextResponse.json({
     managers_created,
