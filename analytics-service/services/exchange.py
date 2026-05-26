@@ -688,11 +688,13 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
             # types, paginated for full history.
             all_bills: list[dict] = []
 
+            OKX_BILLS_PAGE_CAP = 100
             for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
                 after_id = ""
                 type_count = 0
+                _okx_bills_cap_hit = False
 
-                for page in range(100):
+                for page in range(OKX_BILLS_PAGE_CAP):
                     params: dict[str, str] = {"instType": inst_type, "limit": "100"}
                     if since_ms:
                         params["begin"] = str(since_ms)
@@ -709,12 +711,31 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         after_id = data[-1].get("billId", "")
                         if len(data) < 100:
                             break
+                        # NEW-C13-05: detect page-cap exhaustion
+                        if page == OKX_BILLS_PAGE_CAP - 1:
+                            _okx_bills_cap_hit = True
                     except Exception as e:
-                        logger.warning("OKX bills fetch failed for %s page %d: %s", inst_type, page, str(e))
-                        break
+                        # NEW-C13-04: re-raise so the worker retries and the
+                        # partial series is not silently treated as complete.
+                        # Pre-fix: warn+break returned a truncated series as
+                        # canonical daily PnL, feeding wrong Sharpe/equity.
+                        logger.error(
+                            "OKX bills fetch failed for %s page %d: %s — "
+                            "re-raising (partial daily_pnl rejected)",
+                            inst_type, page, str(e),
+                        )
+                        raise
 
                 if type_count > 0:
                     logger.info("OKX %s: fetched %d bills", inst_type, type_count)
+                if _okx_bills_cap_hit:
+                    # NEW-C13-05: page cap exhausted — history is truncated.
+                    logger.warning(
+                        "OKX %s: bills page cap (%d) hit — daily_pnl "
+                        "may be truncated for this inst_type",
+                        inst_type, OKX_BILLS_PAGE_CAP,
+                    )
+                    _record_dq_flag("daily_pnl_truncated_okx", True)
 
             # Fetch bills-archive for older history (>3 months)
             # Only fetch archive if we need data older than 90 days
@@ -745,8 +766,13 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                             if len(data) < 100:
                                 break
                         except Exception as e:
-                            logger.warning("OKX archive failed for %s: %s", inst_type, str(e))
-                            break
+                            # NEW-C13-04: same rationale as the bills path.
+                            logger.error(
+                                "OKX archive bills fetch failed for %s: %s — "
+                                "re-raising (partial daily_pnl rejected)",
+                                inst_type, str(e),
+                            )
+                            raise
                     if type_count > 0:
                         logger.info("OKX archive %s: fetched %d bills", inst_type, type_count)
 
@@ -903,6 +929,11 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     "Binance futures-income failed (falling back to BTC spot trades), exc_class=%s, scrubbed=%s",
                     exc_class, scrubbed_msg,
                 )
+                # NEW-C13-06: stamp a DQ flag so the admin health card shows
+                # that daily PnL is incomplete (BTC/USDT spot only, not full
+                # futures income). A persistent futures-permission/schema-drift
+                # failure silently mis-stated every Binance strategy before.
+                _record_dq_flag("daily_pnl_binance_income_fallback", True)
                 # Fallback: fetch spot trades for BTC only
                 trades = await exchange.fetch_my_trades("BTC/USDT", since=since_ms, limit=1000)
                 for t in trades:
@@ -1008,6 +1039,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
 
                 items: list[dict[str, Any]] = []
                 window_start = start_ms
+                _bybit_cap_hit = False
                 while window_start < now_ms:
                     window_end = min(window_start + BYBIT_PNL_WINDOW_MS, now_ms)
                     cursor = ""
@@ -1033,7 +1065,17 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         if not next_cursor or next_cursor == cursor:
                             break
                         cursor = next_cursor
+                        # NEW-C13-05: detect page cap exhaustion within window
+                        if _page == BYBIT_PNL_PAGE_CAP - 1:
+                            _bybit_cap_hit = True
                     window_start = window_end + 1
+                if _bybit_cap_hit:
+                    logger.warning(
+                        "Bybit: per-window page cap (%d) hit — daily_pnl "
+                        "may be truncated",
+                        BYBIT_PNL_PAGE_CAP,
+                    )
+                    _record_dq_flag("daily_pnl_truncated_bybit", True)
 
                 # Defensive dedup: pagination boundaries can occasionally
                 # echo the same closure across two adjacent windows when
@@ -1181,7 +1223,11 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 )
 
     except Exception as e:
+        # NEW-C13-07: stamp a DQ flag before returning the partial series.
+        # Pre-fix the caller couldn't distinguish "little PnL" from "crashed
+        # halfway" — the partial daily_pnl was treated as complete.
         logger.error("fetch_daily_pnl failed: %s", str(e))
+        _record_dq_flag("daily_pnl_fetch_error", True)
 
     return daily_pnl
 
