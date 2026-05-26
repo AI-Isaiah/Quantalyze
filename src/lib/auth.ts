@@ -12,12 +12,18 @@ import { isAdminUser } from "@/lib/admin";
 // This also matches the lazy-import pattern already used in audit.ts for
 // @sentry/nextjs, keeping the module-init surface minimal under vitest.
 type ApprovalGateModule = typeof import("@/lib/api/approval-gate");
-let _approvalGate: ApprovalGateModule | null = null;
+// IMPORTANT-2 (specialist-review 2026-05-26): store the IN-FLIGHT Promise, not
+// the resolved value. Storing the resolved value means two concurrent cold-start
+// requests both read `null`, both kick off `import()`, and both resolve to the
+// same module object (benign today but wastes a parallel resolution). Storing the
+// Promise ensures at most one `import()` is ever initiated regardless of
+// concurrency — the second caller awaits the same in-flight promise.
+let _approvalGatePromise: Promise<ApprovalGateModule> | null = null;
 async function getApprovalGate(): Promise<ApprovalGateModule> {
-  if (!_approvalGate) {
-    _approvalGate = await import("@/lib/api/approval-gate");
+  if (!_approvalGatePromise) {
+    _approvalGatePromise = import("@/lib/api/approval-gate");
   }
-  return _approvalGate;
+  return _approvalGatePromise;
 }
 
 // Re-exported here so server-side callers can keep using
@@ -38,11 +44,13 @@ export { APP_ROLES, type AppRole };
  *           OR (user_app_roles.role='admin')        -- additive (Sprint 7 rollout)
  *
  * `ADMIN_EMAIL` is OBSERVATIONAL ONLY — it no longer grants admin.
- * `withRole('admin')` delegates to `isAdminUser` (via
- * `isAdminUserGivenUserAppRoles`, which trusts the already-fetched
- * user_app_roles set instead of issuing a redundant round-trip). Non-admin
- * role requests resolve through `user_app_roles` alone — there is no
- * profile-flag analogue for `allocator` / `quant_manager` / `analyst`.
+ * `withRole('admin')` delegates to `isAdminUser` directly (fresh re-query
+ * of BOTH signals — `profiles.is_admin` and `user_app_roles.role='admin'`)
+ * when the initial `user_app_roles` fetch does not yield an admin row. This
+ * closes the RLS-masking vector (NEW-C15-04) where a 42501 on the roles
+ * fetch silently collapsed to an empty set. Non-admin role requests resolve
+ * through `user_app_roles` alone — there is no profile-flag analogue for
+ * `allocator` / `quant_manager` / `analyst`.
  *
  * Defense in depth: new routes should use BOTH the route wrapper (so the
  * response is 403 before touching the DB) AND the RLS policy on the
@@ -192,6 +200,19 @@ async function fetchUserRolesResult(
     if (code && EXPECTED_NO_ROLES_CODES.has(code)) {
       // Expected non-error: RLS denial or no-rows. Caller-facing answer
       // is "this user has no visible roles".
+      //
+      // F-06 (specialist-review 2026-05-26): a 42501 RLS denial was silently
+      // translated to an empty role set with no log. A misconfigured RLS policy
+      // on `user_app_roles` would then cause legitimate users to receive silent
+      // 403s with no ops signal — debugging requires correlating PostgREST logs
+      // by timestamp. Log at warn level so log aggregation can surface the fault.
+      // PGRST116 (no rows) is truly benign and stays silent.
+      if (code === "42501") {
+        console.warn("[auth] getUserRolesResult: 42501 RLS denial on user_app_roles — treating as empty roles", {
+          userId,
+          code,
+        });
+      }
       return { ok: true, roles: [] };
     }
     // Real fault — propagate so the caller can return 500 instead of
@@ -615,8 +636,24 @@ export function withRole<P = Record<string, never>>(
       // Uses a lazy dynamic import so auth.ts's module initialisation isn't
       // widened (avoids hoisting conflicts in vitest that broke APP_ROLES
       // export during test collection). The module is cached after first load.
+      //
+      // F-05 (specialist-review 2026-05-26): if the dynamic import fails
+      // (module not found, bundler misconfiguration, syntax error in
+      // approval-gate) the exception propagates unhandled through `withRole`,
+      // which could either expose the handler (fail-open) or return an empty
+      // response depending on the outer route wrapper. Fail CLOSED: catch the
+      // import failure and return 503 so the security gate is never bypassed.
       if (requireApproval) {
-        const gate = await getApprovalGate();
+        let gate: ApprovalGateModule;
+        try {
+          gate = await getApprovalGate();
+        } catch (importErr) {
+          console.error("[auth/withRole] approval-gate module failed to load:", importErr);
+          return NextResponse.json(
+            { error: "Service temporarily unavailable" },
+            { status: 503 },
+          );
+        }
         const denied = await gate.assertProfileApproved(supabase, user.id);
         if (denied) return denied;
       }

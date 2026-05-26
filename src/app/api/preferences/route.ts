@@ -69,7 +69,11 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
     const prefs = await getOwnPreferences(supabase, user.id);
     return NextResponse.json({ preferences: prefs });
   } catch (err) {
-    console.error("[api/preferences] GET error:", err);
+    // F-04 (specialist-review 2026-05-26): log error code explicitly so ops can
+    // distinguish PGRST205 (schema drift), 42501 (RLS denial), 28000 (JWT
+    // propagation failure), and network errors without parsing raw error objects.
+    const code = (err as { code?: string | null })?.code ?? null;
+    console.error("[api/preferences] GET error:", { code, message: (err as Error)?.message ?? String(err) });
     return NextResponse.json({ error: "Failed to load preferences" }, { status: 500 });
   }
 }
@@ -172,11 +176,20 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
       // Returning the same 401 a logged-out user gets collapses the two cases
       // and makes the infra fault invisible to ops (only a console.error, no
       // Sentry event). We treat this as an internal 500 so on-call sees it.
-      void import("@sentry/nextjs").then((Sentry) => {
-        Sentry.captureException(new Error("28000 after getUser — JWT did not propagate to PostgREST"), {
-          tags: { rpc_auth_uid_null: "true", route: "preferences.PUT" },
-          extra: { rpc: "update_allocator_mandates", errorCode: error.code },
-        });
+      //
+      // F-03 (specialist-review 2026-05-26): the prior `void import(...)` pattern
+      // detaches the Sentry promise — same reap risk as audit.ts NEW-C10-03.
+      // Await the import chain before returning so the capture is not dropped
+      // on a cold-finish before the Sentry SDK flushes.
+      await import("@sentry/nextjs").then((Sentry) => {
+        try {
+          Sentry.captureException(new Error("28000 after getUser — JWT did not propagate to PostgREST"), {
+            tags: { rpc_auth_uid_null: "true", route: "preferences.PUT" },
+            extra: { rpc: "update_allocator_mandates", errorCode: error.code },
+          });
+        } catch {
+          // Sentry SDK threw — swallow.
+        }
       }).catch(() => {});
       return NextResponse.json(
         { error: "Internal server error" },

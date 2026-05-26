@@ -117,6 +117,18 @@ export function SignupForm() {
     // no actionable feedback. Log the anomaly and show a recoverable error.
     if (!data.user && !data.session) {
       console.error("[SignupForm] signUp returned no user, session, or error");
+      // F-08 (specialist-review 2026-05-26): console.error in a client component
+      // goes to browser DevTools only — invisible to ops. Capture to Sentry so
+      // on-call is notified of server-side signup anomalies (GoTrue misconfiguration,
+      // limbo state, silently-dropped new signups). fire-and-forget is intentional
+      // here: we are on the client, outside `after()`, and the .catch(() => {})
+      // prevents a Sentry SDK failure from masking the UX path.
+      void import("@sentry/nextjs").then(({ captureMessage }) => {
+        captureMessage("SignupForm: signUp returned no user, session, or error", {
+          level: "warning",
+          tags: { signup_noop: "true" },
+        });
+      }).catch(() => {});
       setError(
         "Something went wrong — please try again or contact support if the problem persists.",
       );

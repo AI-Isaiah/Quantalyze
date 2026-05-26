@@ -655,7 +655,13 @@ export function logAuditEvent(
     });
     queueMicrotask(() => {
       // Fire-and-forget: emit() already logged + Sentry-reported before re-throw.
-      void emit(client, event).catch(() => {});
+      // F-07 (specialist-review 2026-05-26): log suppressed re-throws so Vercel
+      // function logs capture the event (process-level unhandled-rejection hook
+      // is bypassed by the empty catch on the after() path, but at least the
+      // console.error is visible in log aggregation for the non-request fallback).
+      void emit(client, event).catch((err) => {
+        console.error("[audit] queueMicrotask fallback: emit re-throw suppressed:", err);
+      });
     });
   }
 }
@@ -696,7 +702,12 @@ export function logAuditEventAsUser(
     });
     queueMicrotask(() => {
       // Fire-and-forget: emitAsUser() already logged + Sentry-reported.
-      void emitAsUser(adminClient, actingUserId, event).catch(() => {});
+      // F-07 (specialist-review 2026-05-26): log suppressed re-throws so
+      // Vercel function logs capture the suppression — same contract as
+      // logAuditEvent's queueMicrotask fallback above.
+      void emitAsUser(adminClient, actingUserId, event).catch((err) => {
+        console.error("[audit] queueMicrotask fallback: emitAsUser re-throw suppressed:", err);
+      });
     });
   }
 }
@@ -885,6 +896,39 @@ export async function emitAsUser(
       },
       extra: eventContext,
       level: "fatal",
+    });
+    throw errForDispatch;
+  }
+
+  // CRITICAL-1 / F-01 (specialist-review 2026-05-26): the `unauthenticated`
+  // kind was added to the shared `classifyAuditEmitError` for the user-path
+  // (`emit()`), but `emitAsUser()` had no corresponding branch. Without it,
+  // any 28000 from `log_audit_event_service` falls through to `unknown` and
+  // re-throws with a generic fatal Sentry tag — incorrect dispatch contract.
+  //
+  // For the SERVICE-ROLE path a 28000 is NOT the routine "JWT expired in
+  // after()" case (service-role does not use `auth.uid()` — that guard only
+  // exists in `log_audit_event`, not `log_audit_event_service`). A 28000
+  // here therefore indicates a misconfigured pooler injecting one or a future
+  // migration adding a NULL-guard on the service RPC. We do NOT swallow it
+  // silently — we log at error level with a distinct tag so ops can
+  // distinguish it from a fatal permission_denied. We do NOT rethrow with
+  // the `audit_permission_denied=true` tag (reserved for 42501 EXECUTE-grant
+  // drift). We do NOT tag `audit_emit_unauthenticated` (that tag is for the
+  // user path's JWT-expiry case). We use a dedicated
+  // `audit_service_unexpected_28000` tag and re-throw so the failure is loud.
+  if (kind === "unauthenticated") {
+    console.error(
+      "[audit] log_audit_event_service unexpected 28000 (service-role path — re-throwing):",
+      { ...eventContext, code: rpcError?.code, message: rpcError?.message },
+    );
+    await reportToSentry(errForDispatch, {
+      tags: {
+        audit_service_unexpected_28000: "true",
+        audit_path: "log_audit_event_service",
+      },
+      extra: eventContext,
+      level: "error",
     });
     throw errForDispatch;
   }

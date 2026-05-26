@@ -254,6 +254,88 @@ describe("audit.emitAsUser — typed dispatch (P702)", () => {
   });
 });
 
+describe("audit.emitAsUser — CRITICAL-1: unauthenticated (28000) branch", () => {
+  // CRITICAL-1 / F-01 (specialist-review 2026-05-26): `emitAsUser` had no
+  // `unauthenticated` dispatch branch. A 28000 from `log_audit_event_service`
+  // fell through to `unknown` and re-threw with a GENERIC fatal tag — wrong
+  // dispatch contract. The fix adds an explicit branch that re-throws with a
+  // DISTINCT `audit_service_unexpected_28000` tag and does NOT tag
+  // `audit_permission_denied=true` (reserved for 42501 grant-drift).
+  //
+  // Service-role does NOT use auth.uid() so 28000 here is unexpected (unlike
+  // the user path where it is a routine JWT-expiry). We still re-throw (fail
+  // loud) but with the right tag so ops can distinguish it from grant-drift.
+  beforeEach(() => {
+    captureExceptionMock.mockReset();
+    __resetAuditEmitTransientFailuresForTests();
+  });
+
+  const actingUserId = "00000000-0000-0000-0000-000000000002";
+
+  it("CRITICAL-1: 28000 on service-role path re-throws with audit_service_unexpected_28000 tag, NOT audit_permission_denied", async () => {
+    const consoleErrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const adminClient = {
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: {
+          code: "28000",
+          message: "invalid_authorization_specification",
+        },
+      }),
+    } as never;
+
+    // MUST re-throw — service-role 28000 is unexpected, not a routine JWT-expiry.
+    await expect(
+      emitAsUser(adminClient, actingUserId, fixture),
+    ).rejects.toThrow();
+
+    await waitForSentry(1);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, opts] = captureExceptionMock.mock.calls[0];
+    // Must carry the service-path distinct tag.
+    expect(opts).toMatchObject({
+      tags: expect.objectContaining({
+        audit_service_unexpected_28000: "true",
+        audit_path: "log_audit_event_service",
+      }),
+      level: "error",
+    });
+    // Must NOT carry the grant-drift tag — that is reserved for 42501.
+    expect(opts.tags).not.toHaveProperty("audit_permission_denied");
+    // Must NOT carry the user-path unauthenticated tag.
+    expect(opts.tags).not.toHaveProperty("audit_emit_unauthenticated");
+
+    consoleErrSpy.mockRestore();
+  });
+
+  it("CRITICAL-1: 42501 on service-role path still re-throws with audit_permission_denied (not changed)", async () => {
+    const consoleErrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const adminClient = {
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: { code: "42501", message: "permission denied" },
+      }),
+    } as never;
+
+    await expect(
+      emitAsUser(adminClient, actingUserId, fixture),
+    ).rejects.toThrow();
+    await waitForSentry(1);
+
+    const [, opts] = captureExceptionMock.mock.calls[0];
+    expect(opts).toMatchObject({
+      tags: expect.objectContaining({ audit_permission_denied: "true" }),
+      level: "fatal",
+    });
+    expect(opts.tags).not.toHaveProperty("audit_service_unexpected_28000");
+
+    consoleErrSpy.mockRestore();
+  });
+});
+
 describe("classifyAuditEmitError", () => {
   it("classifies 42501 PostgREST error as permission_denied", () => {
     expect(

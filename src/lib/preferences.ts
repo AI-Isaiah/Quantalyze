@@ -245,11 +245,20 @@ export async function getOwnPreferences(
         "[preferences] allocator_preferences table missing in schema cache — apply migration 011",
         { code: error.code, message: error.message },
       );
-      void import("@sentry/nextjs").then((Sentry) => {
-        Sentry.captureException(
-          new Error("allocator_preferences table missing from PostgREST schema cache (PGRST205)"),
-          { tags: { pgrst_schema_missing: "true" }, extra: { userId } },
-        );
+      // F-02 (specialist-review 2026-05-26): the prior `void import(...)` pattern
+      // detaches the Sentry promise before captureException resolves. On a Vercel
+      // cold-finish the lambda can be reaped before Sentry flushes — same failure
+      // mode fixed in audit.ts NEW-C10-03. Await the import chain so the
+      // `waitUntil` window stays open until the capture settles, then throw.
+      await import("@sentry/nextjs").then((Sentry) => {
+        try {
+          Sentry.captureException(
+            new Error("allocator_preferences table missing from PostgREST schema cache (PGRST205)"),
+            { tags: { pgrst_schema_missing: "true" }, extra: { userId } },
+          );
+        } catch {
+          // Sentry SDK threw — swallow so the original throw is not masked.
+        }
       }).catch(() => {});
       throw error;
     }

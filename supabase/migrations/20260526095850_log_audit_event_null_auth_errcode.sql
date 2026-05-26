@@ -116,6 +116,19 @@ BEGIN
     RAISE EXCEPTION 'Migration NEW-C10-04 failed: log_audit_event body still contains ERRCODE insufficient_privilege (42501). Did the CREATE OR REPLACE succeed?';
   END IF;
 
-  RAISE NOTICE 'Migration NEW-C10-04: log_audit_event NULL-auth guard now raises 28000 (invalid_authorization_specification) instead of 42501 — verified.';
+  -- LOW conf=9 (migration-review 2026-05-26): assert that the EXECUTE grants
+  -- from migration 049 survived the CREATE OR REPLACE. PostgreSQL preserves
+  -- ACLs across CREATE OR REPLACE by design, but a concurrent migration that
+  -- accidentally REVOKEs grants would be invisible without an explicit check
+  -- here. Both roles must be able to call the function post-apply.
+  IF NOT has_function_privilege('authenticated', 'public.log_audit_event(text,text,uuid,jsonb)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Migration NEW-C10-04 post-apply ACL check failed: authenticated role lost EXECUTE on log_audit_event — check for a concurrent REVOKE in another migration';
+  END IF;
+
+  IF NOT has_function_privilege('service_role', 'public.log_audit_event(text,text,uuid,jsonb)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Migration NEW-C10-04 post-apply ACL check failed: service_role lost EXECUTE on log_audit_event — check for a concurrent REVOKE in another migration';
+  END IF;
+
+  RAISE NOTICE 'Migration NEW-C10-04: log_audit_event NULL-auth guard now raises 28000 (invalid_authorization_specification) instead of 42501 — verified. ACL grants intact.';
 END;
 $$;
