@@ -536,7 +536,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         level: "error",
       },
     );
-    if (user?.id) {
+    // user is non-null here: null-check at line 67 already returned 401.
+    {
       // Emit a forensic sentinel so this anomaly is not invisible.
       // Uses intro.send_failed + reason=rpc_shape_drift to distinguish from
       // the normal RPC-error path (which sets error_code from the DB error).

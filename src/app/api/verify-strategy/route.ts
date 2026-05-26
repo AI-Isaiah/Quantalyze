@@ -206,6 +206,7 @@ async function unifiedVerifyStrategyHandler(
   // teaser caller cannot provide. Mirrors the legacy verify-strategy
   // path's @audit-skip rationale; landing-page-lead audit lands in
   // PostHog per ADR-0023 §3, not audit_log.
+  //
   // NEW-C35-02 (red-team M conf=8): force trust_tier="self_reported" for the
   // teaser flow, flag-invariant. The upstream /process-key sets "api_verified"
   // for any non-csv source (teaser is always a real exchange), but an unproven
@@ -213,7 +214,6 @@ async function unifiedVerifyStrategyHandler(
   // "api_verified" violates the no-invented-data trust chain. Override the tier
   // to "self_reported" here so the persisted grade is identical regardless of
   // which backbone path executed.
-  // @audit-skip: unauthenticated public endpoint — no user_id available (see full rationale above).
   try {
     const { error: persistError } = await admin
       .from("strategy_verifications")
