@@ -1834,8 +1834,9 @@ export function reconstructHoldingReturnsByScopeRef(
  * (a deeply-negative short has near-zero positive weight, which is correct).
  * We don't clamp to 0 here — callers that need a non-negative weight for the
  * scenario can normalise after the fact.
+ *
+ * @internal Exported for unit testing only (NEW-C03-01 regression).
  */
-/** @internal Exported for unit testing only (NEW-C03-01 regression). */
 export function holdingEquityContribution(h: MyAllocationDashboardPayload["holdingsSummary"][number]): number {
   if (h.holding_type === "derivative") {
     // unrealized_pnl_usd is required-but-nullable (never absent in production
