@@ -37,6 +37,15 @@ import type { ScenarioCommitDiff } from "./ScenarioComposer";
 
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 
+// M-5 (red-team): hoist module-level mock so captureToSentry calls are
+// observable. Existing tests do NOT assert on Sentry, so this is additive-safe.
+const drawerSentryCalls: Array<{ err: unknown; options: { level?: string; tags?: Record<string, string> } }> = [];
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: (err: unknown, options: { level?: string; tags?: Record<string, string> }) => {
+    drawerSentryCalls.push({ err, options });
+  },
+}));
+
 const VR_DIFF: ScenarioCommitDiff = {
   kind: "voluntary_remove",
   holding_ref: "holding:binance:BTC:spot",
@@ -1485,3 +1494,70 @@ describe("NEW-C18-12 — structural success gate: right count / wrong index reje
   });
 });
 
+// ===========================================================================
+// M-5 (red-team) — Sentry capture for non-ok responses with structural mismatch
+//
+// Before: isStructuralMismatch and isContractViolation both require res.ok=true,
+// so a server returning HTTP 500 with a structurally-wrong results body would
+// reach the Sentry block but fire no event — silently swallowed.
+// After: an additional else-if branch captures a level:"warning" Sentry event
+// for non-ok responses that still carry a structurally-wrong results array.
+// ===========================================================================
+describe("M-5 (red-team) — non-ok response with structural mismatch fires Sentry warning", () => {
+  beforeEach(() => {
+    // Clear the shared collector between tests.
+    drawerSentryCalls.length = 0;
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("HTTP 500 with structurally-wrong results array fires captureToSentry at level:warning", async () => {
+    vi.useRealTimers();
+    // Server returns 500 (non-ok) but still populates a results array with
+    // duplicate indices — structural mismatch + non-ok. The previous code
+    // silently swallowed this with no Sentry event.
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          recorded: 2,
+          results: [
+            { index: 1, kind: "voluntary_add", match_decision_id: "a", bridge_outcome_id: "b" },
+            { index: 1, kind: "voluntary_add", match_decision_id: "c", bridge_outcome_id: "d" },
+          ],
+          errors: ["internal server error"],
+        }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF, VA_DIFF]}
+        onSubmitSuccess={vi.fn()}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF, VA_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+
+    // M-5: the Sentry capture must have fired with level:"warning" for this
+    // non-ok + structural-mismatch combination.
+    const warnCalls = drawerSentryCalls.filter(
+      (c) =>
+        c.options.level === "warning" &&
+        c.options.tags?.["check"] === "C18-12-nonok",
+    );
+    expect(warnCalls.length).toBeGreaterThan(0);
+  });
+});

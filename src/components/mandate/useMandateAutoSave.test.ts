@@ -2,6 +2,15 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { useMandateAutoSave } from "./useMandateAutoSave";
 
+// M-2 (red-team): hoist module-level mock so captureToSentry calls are
+// observable. Existing tests do NOT assert on Sentry, so this is additive-safe.
+const sentryCalls: Array<{ err: unknown; options: { level?: string } }> = [];
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: (err: unknown, options: { level?: string }) => {
+    sentryCalls.push({ err, options });
+  },
+}));
+
 /**
  * Phase 2 — useMandateAutoSave unit tests.
  *
@@ -398,5 +407,93 @@ describe("useMandateAutoSave", () => {
     expect(result.current.saveState).toBe("saved");
     expect(result.current.fieldErrors.max_weight).toBeUndefined();
     expect(result.current.fieldErrors.min_weight).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// M-2 (red-team) — failTerminal Sentry level for expected client errors
+//
+// Before: failTerminal always called captureToSentry with level:"error",
+// meaning 400 (validation) and 401 (auth/session-expired) produced error-level
+// Sentry events — normal user-side outcomes that inflate the error budget and
+// mask genuine server failures.
+// After: 400 and 401 call sites pass sentryLevel:"warning" so they are
+// captured at warning severity. The 5xx exhaustion path still uses "error".
+// ===========================================================================
+describe("M-2 (red-team) — failTerminal Sentry level for 400/401 vs 5xx", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.stubGlobal("fetch", vi.fn());
+    // Clear the shared collector between tests.
+    sentryCalls.length = 0;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("400 validation error captures Sentry at level:warning (not error)", async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      errorResponse(400, { error: "max_weight must be between 0.05 and 0.50" }),
+    );
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    await act(async () => {
+      await result.current.save("max_weight", 0.99);
+    });
+
+    expect(result.current.saveState).toBe("error");
+    // M-2: the Sentry capture for a 400 must use level:"warning".
+    const matchingCalls = sentryCalls.filter(
+      (c) => c.options.level === "warning",
+    );
+    expect(matchingCalls.length).toBeGreaterThan(0);
+    // Sanity: must NOT have emitted an "error"-level event for this 400.
+    const errorCalls = sentryCalls.filter((c) => c.options.level === "error");
+    expect(errorCalls.length).toBe(0);
+  });
+
+  it("401 auth error captures Sentry at level:warning (not error)", async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      errorResponse(401, { error: "Session expired" }),
+    );
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    await act(async () => {
+      await result.current.save("max_weight", 0.25);
+    });
+
+    expect(result.current.saveState).toBe("error");
+    const matchingCalls = sentryCalls.filter(
+      (c) => c.options.level === "warning",
+    );
+    expect(matchingCalls.length).toBeGreaterThan(0);
+    const errorCalls = sentryCalls.filter((c) => c.options.level === "error");
+    expect(errorCalls.length).toBe(0);
+  });
+
+  it("5xx exhaustion still captures Sentry at level:error", async () => {
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(errorResponse(500, { error: "internal" }))
+      .mockResolvedValueOnce(errorResponse(500, { error: "internal" }))
+      .mockResolvedValueOnce(errorResponse(500, { error: "internal" }))
+      .mockResolvedValueOnce(errorResponse(500, { error: "internal" }));
+
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    await act(async () => {
+      const promise = result.current.save("max_weight", 0.25);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(4000);
+      await promise;
+    });
+
+    expect(result.current.saveState).toBe("error");
+    // 5xx exhaustion must still fire at level:"error".
+    const errorCalls = sentryCalls.filter((c) => c.options.level === "error");
+    expect(errorCalls.length).toBeGreaterThan(0);
   });
 });

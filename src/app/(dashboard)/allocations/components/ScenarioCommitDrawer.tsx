@@ -521,6 +521,11 @@ export function ScenarioCommitDrawer({
     // are bugs the server should never produce. Capture to Sentry so engineers
     // see these events in production rather than only hearing about them via
     // user support escalations.
+    // M-5 (red-team): also capture when the server returns a non-ok status but
+    // still includes a results array that is structurally wrong — e.g. HTTP 500
+    // with {recorded:N, results:[duplicate-index,...]}. isStructuralMismatch and
+    // isContractViolation both require res.ok=true, so without this branch a
+    // non-ok structurally-wrong response would silently produce no Sentry event.
     if (!fullSuccess) {
       if (isStructuralMismatch) {
         captureToSentry(
@@ -540,6 +545,30 @@ export function ScenarioCommitDrawer({
           {
             tags: { component: "ScenarioCommitDrawer", check: "C18-12" },
             extra: { submitted: diffs.length, recorded: json.recorded },
+          },
+        );
+      } else if (
+        !res.ok &&
+        json.results !== undefined &&
+        !resultsStructurallyMatch
+      ) {
+        // Non-ok response carrying a structurally-wrong results array: the server
+        // errored AND returned mis-matched indices/kinds. Capture as a warning
+        // (not error — the status code already signals failure) so engineers can
+        // correlate server-side anomalies with client-observed structural drift.
+        captureToSentry(
+          new Error(
+            `ScenarioCommitDrawer: non-ok response (${res.status}) with structural mismatch in results`,
+          ),
+          {
+            tags: { component: "ScenarioCommitDrawer", check: "C18-12-nonok" },
+            extra: {
+              status: res.status,
+              submitted_count: diffs.length,
+              results_count: json.results?.length,
+              recorded: json.recorded,
+            },
+            level: "warning",
           },
         );
       }

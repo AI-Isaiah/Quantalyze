@@ -159,8 +159,17 @@ export function useMandateAutoSave(
   // F-04/F-05: also capture to Sentry so that mandate save exhaustion (network,
   // 5xx, or 429 budget) is observable in production — without this, a systemic
   // route regression exhausts all retries with zero signal to engineers.
+  // M-2 (red-team): accept an optional sentryLevel override so expected client
+  // errors (400 validation, 401 auth) are captured as "warning" rather than
+  // "error" — preventing these routine user-side events from polluting the Sentry
+  // error budget and masking genuine server failures.
   const failTerminal = useCallback(
-    (fieldName: MandateField, message: string, originalError?: unknown) => {
+    (
+      fieldName: MandateField,
+      message: string,
+      originalError?: unknown,
+      sentryLevel?: "error" | "warning",
+    ) => {
       setFieldErrors((prev) => ({ ...prev, [fieldName]: message }));
       setSaveState("error");
       removeSavingField(fieldName);
@@ -169,7 +178,7 @@ export function useMandateAutoSave(
         {
           tags: { hook: "useMandateAutoSave", field: fieldName },
           extra: { message },
-          level: "error",
+          level: sentryLevel ?? "error",
         },
       );
     },
@@ -382,7 +391,10 @@ export function useMandateAutoSave(
           }
           const msg = (body?.error as string | undefined) ?? "Couldn't save";
           const reason = res.status === 401 ? "auth" : "validation";
-          failTerminal(fieldName, `${msg}. Try again.`);
+          // M-2 (red-team): 400 (validation) and 401 (session-expired) are
+          // expected client-side outcomes — capture as "warning" not "error" so
+          // they don't inflate the Sentry error budget or mask genuine failures.
+          failTerminal(fieldName, `${msg}. Try again.`, undefined, "warning");
           return { ok: false, reason, message: `${msg}. Try again.` };
         }
 
