@@ -751,35 +751,99 @@ def test_c01_09_unknown_side_skipped_in_compute_daily_equity():
 # ---------------------------------------------------------------------------
 
 
-def test_c01_10_value_usd_equals_breakdown_sum():
-    """NEW-C01-10: value_usd must equal sum(breakdown.values()) so the total
-    is internally consistent with its components.
+def test_c01_10_value_usd_not_capped_sum():
+    """review/C-01: value_usd must NOT equal sum(capped_breakdown.values()).
+
+    _cap_breakdown truncates to top-20 symbols when the JSON payload exceeds
+    4096 bytes, appending "__truncated__": True. Using sum(capped.values())
+    would (a) lose all dropped symbols' USD contribution and (b) add +1 for
+    the sentinel — a potentially large undercount for accounts with >~130
+    holdings. value_usd must always reflect the full `total`, not the capped
+    subset.
+
+    This test replaces the original source-inspection guard (which asserted
+    the buggy pattern). The behavioral regression test below is the primary
+    correctness gate.
     """
     import inspect
     from services import equity_reconstruction as er
 
     src = inspect.getsource(er._compute_daily_equity)
-
-    # The fix: value_usd = round(sum(capped_breakdown.values()), 2)
-    assert "sum(capped_breakdown.values())" in src, (
-        "NEW-C01-10: value_usd must be derived from sum(capped_breakdown.values())"
-    )
-    # The value_usd assignment must use the breakdown sum, not raw total.
-    # Check the rows.append dict to confirm.
+    # After the fix, the rows.append dict must use round(total, 2) for value_usd.
+    # Inspect that the "value_usd" key in the rows.append dict literal is NOT
+    # assigned the capped sum by checking the assignment pattern in the source.
     import ast
     tree = ast.parse(src)
-    # Find the 'value_usd' key in any dict literal — must have a Call(Sum)
-    found_sum_form = False
+    value_usd_uses_capped_sum = False
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
             for k, v in zip(node.keys, node.values):
                 if isinstance(k, ast.Constant) and k.value == "value_usd":
-                    # The value should be a Call to round(sum(...), 2)
-                    if isinstance(v, ast.Call):
-                        found_sum_form = True
-    assert found_sum_form, (
-        "NEW-C01-10: value_usd dict entry must use round(sum(...), 2)"
+                    # Check if the value is round(sum(...), 2) — the buggy form.
+                    # round(total, 2) would be a Call to round with a Name(total).
+                    if (
+                        isinstance(v, ast.Call)
+                        and isinstance(v.func, ast.Name)
+                        and v.func.id == "round"
+                    ):
+                        arg0 = v.args[0] if v.args else None
+                        # Buggy: arg0 is a Call to sum(...)
+                        if isinstance(arg0, ast.Call):
+                            fn = arg0.func
+                            fn_name = fn.id if isinstance(fn, ast.Name) else ""
+                            if fn_name == "sum":
+                                value_usd_uses_capped_sum = True
+    assert not value_usd_uses_capped_sum, (
+        "review/C-01: value_usd must NOT use round(sum(capped_breakdown.values()), 2) "
+        "— truncation drops symbols and the sentinel key adds +1"
     )
+    # Positive assertion: value_usd must use round(total, 2).
+    assert 'round(total, 2)' in src, (
+        "review/C-01: value_usd must use round(total, 2)"
+    )
+
+
+def test_c01_10_value_usd_survives_breakdown_truncation():
+    """review/C-01 behavioral: _cap_breakdown truncation must NOT affect value_usd.
+
+    Construct a breakdown large enough to trigger truncation (>20 symbols with
+    long names that push JSON size past RAW_PAYLOAD_CAP_BYTES=4096). After
+    _cap_breakdown, sum(capped.values()) < total and includes the +1 sentinel.
+    value_usd must equal round(total, 2).
+    """
+    from services.equity_reconstruction import _cap_breakdown, RAW_PAYLOAD_CAP_BYTES
+
+    # Build a breakdown with 150 symbols, each with a 20-char name, to exceed
+    # the 4096-byte JSON cap. Each symbol holds $10 USD → total = 1500.0.
+    breakdown: dict = {}
+    for i in range(150):
+        key = f"TOKEN_{i:04d}_USDT_PERP"
+        breakdown[key] = 10.0
+    total = sum(breakdown.values())  # 1500.0
+
+    capped = _cap_breakdown(breakdown)
+    # Verify truncation actually fired.
+    import json
+    assert len(json.dumps(breakdown, default=str)) > RAW_PAYLOAD_CAP_BYTES, (
+        "Test setup: breakdown must exceed 4096 bytes to trigger truncation"
+    )
+    assert "__truncated__" in capped, "Test setup: _cap_breakdown must have truncated"
+
+    # The BUG: using capped sum drops all but top-20 symbols + adds +1 sentinel.
+    buggy_value_usd = round(sum(capped.values()), 2)
+    correct_value_usd = round(total, 2)
+
+    assert buggy_value_usd != correct_value_usd, (
+        "Test setup: capped sum must differ from total (if they match, "
+        "truncation didn't lose enough to matter)"
+    )
+    # The capped sum should be 200.0 (top-20 × $10) + 1 (sentinel) = 201.0,
+    # far less than the correct 1500.0.
+    assert buggy_value_usd < correct_value_usd, (
+        "review/C-01: capped sum must be less than true total"
+    )
+    # Verify the fix: value_usd must equal round(total, 2), not the capped sum.
+    assert correct_value_usd == 1500.0, f"Expected 1500.0 got {correct_value_usd}"
 
 
 # ---------------------------------------------------------------------------

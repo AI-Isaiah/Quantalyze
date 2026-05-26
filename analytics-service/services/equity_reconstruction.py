@@ -1214,16 +1214,19 @@ def _compute_daily_equity(
                 source = "coingecko_fallback"
             else:
                 source = "exchange_primary"
-            # NEW-C01-10: derive value_usd from the rounded breakdown values
-            # rather than from `total` (which accumulates unrounded floats).
-            # Pre-fix: breakdown entries were each round(usd, 2) but value_usd
-            # was round(total, 2) — the unrounded sum can diverge by cents from
-            # sum(breakdown.values()), making the total inconsistent with its
-            # own components.
+            # NEW-C01-10 (FIXED review/C-01): value_usd MUST come from `total`,
+            # not from sum(capped_breakdown.values()). _cap_breakdown truncates to
+            # the top-20 symbols when the JSON payload exceeds 4096 bytes and
+            # appends "__truncated__": True. sum() over that dict would (a) lose
+            # all dropped symbols' USD contribution and (b) add +1 for the
+            # sentinel key — a potentially large undercount. The rounding
+            # inconsistency the original fix addressed is at most N × $0.005
+            # (negligible) compared with the truncation loss. Derive breakdown
+            # for the JSON column only; value_usd always reflects the true total.
             capped_breakdown = _cap_breakdown(breakdown)
             rows.append({
                 "asof": iso,
-                "value_usd": round(sum(capped_breakdown.values()), 2),
+                "value_usd": round(total, 2),
                 "breakdown": capped_breakdown,
                 "source": source,
             })
@@ -2234,12 +2237,14 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)
 
-        # NEW-C01-10: same rounding-consistency fix as _compute_daily_equity —
-        # derive value_usd from the rounded breakdown sum, not raw total.
+        # NEW-C01-10 (FIXED review/C-01): value_usd from `total`, not from
+        # sum(capped_bd.values()) — see _compute_daily_equity for rationale.
+        # Truncation via _cap_breakdown drops symbols and adds a sentinel key;
+        # using the capped sum would undercount equity for large portfolios.
         capped_bd = _cap_breakdown(breakdown)
         row = {
             "asof": today_iso,
-            "value_usd": round(sum(capped_bd.values()), 2),
+            "value_usd": round(total, 2),
             "breakdown": capped_bd,
             "source": "exchange_primary",
         }
