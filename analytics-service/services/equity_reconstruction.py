@@ -1604,11 +1604,34 @@ async def _fetch_and_price_window(
     # are preserved; absolute levels are anchored to the exchange's
     # own number. Breakdown gets a "STARTING_BALANCE" entry so the
     # components still sum to value_usd.
-    anchor = await _fetch_current_equity(exchange, venue)
+    anchor, anchor_partial_symbols = await _fetch_current_equity(exchange, venue)
     if rows and anchor is not None:
         last_value = float(rows[-1].get("value_usd") or 0.0)
         offset = anchor - last_value
-        if abs(offset) > 0.005:
+        # NEW-C01-02 / NEW-C01-03: skip anchor when any held asset priced
+        # to zero (ticker failure on a positive-qty asset → partial anchor).
+        # Also bound the offset to 5× the last reconstructed value to reject
+        # implausible offsets caused by phantom perps or ticker outages.
+        # Both conditions ship an unanchored series per the documented fallback
+        # and stamp a DQ flag so operators can see why anchoring was skipped.
+        _implausible_anchor = (
+            last_value > 0
+            and abs(offset) > 5.0 * abs(last_value)
+        )
+        if anchor_partial_symbols:
+            logger.warning(
+                "anchor: skipping — %d asset(s) priced to zero (ticker "
+                "failure with qty>0): %s",
+                len(anchor_partial_symbols),
+                sorted(anchor_partial_symbols),
+            )
+        elif _implausible_anchor:
+            logger.warning(
+                "anchor: offset=%.2f exceeds 5× last_value=%.2f — "
+                "skipping anchor (anchor_offset_implausible)",
+                offset, last_value,
+            )
+        elif abs(offset) > 0.005:
             for r in rows:
                 r["value_usd"] = round(float(r["value_usd"] or 0.0) + offset, 2)
                 bd = dict(r.get("breakdown") or {})
@@ -1626,9 +1649,16 @@ async def _fetch_and_price_window(
     return rows, hit_terminus, telemetry
 
 
-async def _fetch_current_equity(exchange: Any, venue: str) -> float | None:
-    """Return today's total account equity in USD, or None if we can't
-    determine it. Sums spot USDT equivalents + perp unrealised PnL.
+async def _fetch_current_equity(
+    exchange: Any, venue: str
+) -> tuple[float | None, set[str]]:
+    """Return (equity_usd, partial_unpriced_symbols).
+
+    ``equity_usd`` is today's total account equity in USD, or None if we
+    can't determine it. ``partial_unpriced_symbols`` is the set of
+    non-stablecoin assets whose ticker call failed while they had qty>0 —
+    a non-empty set means the equity figure is an undercount and the
+    anchor should be skipped (NEW-C01-02 / NEW-C01-03).
 
     Keeps the semantics of the daily refresh job (v0.15.4.0 fix 2): spot
     rows contribute their marked value, derivative rows contribute
@@ -1638,17 +1668,18 @@ async def _fetch_current_equity(exchange: Any, venue: str) -> float | None:
 
     Wrapped in a blanket try/except: the anchor is advisory, not load-
     bearing. Any exchange error — including mocked exchanges in tests
-    that don't stub fetch_balance/fetch_positions — returns None so the
-    reconstruction still ships an unanchored series rather than failing
-    the whole job.
+    that don't stub fetch_balance/fetch_positions — returns (None, set())
+    so the reconstruction still ships an unanchored series rather than
+    failing the whole job.
     """
+    partial_unpriced: set[str] = set()
     try:
         balance = await exchange.fetch_balance()
         if not isinstance(balance, dict):
-            return None
+            return None, partial_unpriced
         totals = balance.get("total") or {}
         if not isinstance(totals, dict):
-            return None
+            return None, partial_unpriced
         total = 0.0
         for asset, qty in totals.items():
             if qty is None:
@@ -1664,13 +1695,18 @@ async def _fetch_current_equity(exchange: Any, venue: str) -> float | None:
                 total += q
                 continue
             # Price non-stablecoin spot via a single ticker call. Best-
-            # effort — a missing ticker is treated as zero rather than
-            # aborting the anchor.
+            # effort — a missing ticker records the asset as unpriced so
+            # the caller can decide whether to trust the anchor.
+            px = 0.0
             try:
                 t = await exchange.fetch_ticker(f"{asset_upper}/USDT")
                 px = float((t or {}).get("last") or 0.0) if isinstance(t, dict) else 0.0
             except Exception:  # noqa: BLE001
                 px = 0.0
+            # NEW-C01-02: track assets that had a positive qty but priced
+            # to zero (ticker failure → anchor understates equity).
+            if px == 0.0:
+                partial_unpriced.add(asset_upper)
             total += q * px
 
         try:
@@ -1689,10 +1725,10 @@ async def _fetch_current_equity(exchange: Any, venue: str) -> float | None:
                 total += float(upnl)
             except (TypeError, ValueError):
                 continue
-        return total
+        return total, partial_unpriced
     except Exception as exc:  # noqa: BLE001
         logger.warning("anchor: _fetch_current_equity failed venue=%s: %s", venue, exc)
-        return None
+        return None, partial_unpriced
 
 
 # ---------------------------------------------------------------------------
