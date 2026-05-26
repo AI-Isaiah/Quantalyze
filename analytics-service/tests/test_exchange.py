@@ -2217,11 +2217,12 @@ class TestG12BBinancePaginationLoop:
 
         # We expect both pages to be merged: 1000 + 1 = 1001.
         assert len(result) == 1001
-        # Two pages were fetched, second with since advanced past the
-        # last timestamp of page 1.
+        # Two pages were fetched, second with since set to last timestamp.
         assert len(call_log) == 2
-        # Page 2's ``since`` must be > page 1's last timestamp.
-        assert call_log[1] == page_1[-1]["timestamp"] + 1
+        # NEW-C13-03: Page 2's ``since`` must equal (not +1) the last
+        # timestamp of page 1 so same-ms fills at page boundaries are not
+        # skipped. Boundary duplicates are deduplicated by the unique index.
+        assert call_log[1] == page_1[-1]["timestamp"]
 
     @pytest.mark.asyncio
     async def test_binance_pagination_hits_page_cap(self) -> None:
@@ -2779,19 +2780,21 @@ class TestG12BOkxFundingRowContract:
             mock_exchange, "strat-1", mock_supabase
         )
 
-        # Both rows are returned by fetch_raw_trades (no client-side
-        # filter); the funding-shaped row has quantity=0 so the
-        # downstream qty<=0 guard skips it.
-        assert len(result) == 2
+        # NEW-C13-11: zero-price/zero-qty rows are now dropped at ingest
+        # (by _finite_positive_float) rather than passed through to the DB.
+        # The normal fill is kept; the funding-shaped row (fillPx=0, fillSz=0)
+        # is dropped with an ERROR log. This is the correct behavior: persisting
+        # zero-qty rows to the DB is unnecessary churn since position_reconstruction
+        # would skip them anyway at the qty<=0 guard (line 904).
+        assert len(result) == 1
         normal = [r for r in result if r["exchange_fill_id"] == "trade-fill"][0]
-        funding = [
-            r for r in result if r["exchange_fill_id"] == "trade-funding"
-        ][0]
         assert normal["quantity"] == 0.1
-        assert funding["quantity"] == 0.0, (
-            "Funding-shaped row must carry quantity=0 so the qty<=0 "
-            "guard in services/position_reconstruction.py filters "
-            "it out without inflating fill totals."
+        # Confirm the funding-shaped row was dropped (not in result)
+        funding_rows = [
+            r for r in result if r.get("exchange_fill_id") == "trade-funding"
+        ]
+        assert len(funding_rows) == 0, (
+            "NEW-C13-11: zero-price/zero-qty OKX row must be dropped at ingest"
         )
 
 
