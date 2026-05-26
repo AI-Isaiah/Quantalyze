@@ -356,26 +356,35 @@ def test_c12_01_phase2_rate_limit_reaches_outer_handler():
 
 def test_c13_08_okx_symbol_replace_breaks_infer_quote():
     """NEW-C13-08: instId.replace('-','') → BTCUSDTSWAP; _infer_quote_currency
-    returns None because the string ends in 'SWAP', not 'USDT'.
-    The fee-currency mismatch check becomes dead code for ALL OKX symbols.
+    returned None because the string ends in 'SWAP', not 'USDT', making
+    the fee-currency mismatch check dead code for ALL OKX symbols.
+
+    Post-fix: _check_fee_currency_mismatch is called with raw_inst_id
+    ("BTC-USDT-SWAP") and _infer_quote_currency handles the OKX dash-format
+    by extracting the second segment ("USDT").
     """
     from services.exchange import _infer_quote_currency
 
-    # This is the actual transformation applied before calling _check_fee_currency_mismatch
-    raw_inst_id = "BTC-USDT-SWAP"
-    processed = raw_inst_id.replace("-", "")  # "BTCUSDTSWAP"
-
-    result = _infer_quote_currency(processed)
-    # Pre-fix: returns None (bug confirmed)
-    # Post-fix: should return "USDT"
-    assert result is None, (
-        f"NEW-C13-08 confirmed: _infer_quote_currency('{processed}') "
-        f"returned {result!r} — expected None (bug) before fix"
+    # Old (broken) path: replace("-","") → _infer_quote_currency returns None
+    processed = "BTC-USDT-SWAP".replace("-", "")  # "BTCUSDTSWAP"
+    broken_result = _infer_quote_currency(processed)
+    assert broken_result is None, (
+        f"BTCUSDTSWAP must still return None (used for comparison only): "
+        f"got {broken_result!r}"
     )
 
-    # Also confirm the correct symbol form (raw instId split) would work:
-    correct_symbol = "BTC-USDT-SWAP".split("-")[1]  # "USDT"
-    # Direct check: passing just the quote currency
+    # New (fixed) path: raw instId passed → correctly returns "USDT"
+    raw_inst_id = "BTC-USDT-SWAP"
+    fixed_result = _infer_quote_currency(raw_inst_id)
+    assert fixed_result == "USDT", (
+        f"_infer_quote_currency('{raw_inst_id}') must return 'USDT' "
+        f"after NEW-C13-08 fix; got {fixed_result!r}"
+    )
+
+    # Also verify BTC-USD-SWAP (coin-margined inverse) → "USD"
+    assert _infer_quote_currency("BTC-USD-SWAP") == "USD"
+
+    # And CCXT unified form still works
     assert _infer_quote_currency("BTC/USDT") == "USDT"
 
 

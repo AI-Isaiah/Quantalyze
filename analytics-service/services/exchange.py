@@ -144,6 +144,10 @@ def _infer_quote_currency(symbol: str) -> str | None:
     suffixes used by Binance / OKX / Bybit perp + spot lines: USDT,
     USDC, USD, BUSD. CCXT unified ``BTC/USDT:USDT`` is also handled.
 
+    NEW-C13-08: also handles OKX raw instId format ``BTC-USDT-SWAP``
+    (and FUTURES/expiry variants like ``BTC-USDT-231229``) where the
+    quote currency is the second dash-segment.
+
     The reader is intentionally conservative — if the symbol ends in
     anything else (BTC-pair tokens, BUSD before delisting, exotic
     venues), we return ``None`` so we don't false-positive on the
@@ -160,6 +164,15 @@ def _infer_quote_currency(symbol: str) -> str | None:
         quote = symbol.split("/", 1)[1]
         if quote:
             return quote.upper()
+    # OKX raw instId: "BTC-USDT-SWAP", "BTC-USDT-231229", "BTC-USD-SWAP"
+    # Second dash-segment is the settle currency.
+    if "-" in symbol:
+        parts = symbol.split("-")
+        if len(parts) >= 2:
+            candidate = parts[1].upper()
+            for known in ("USDT", "USDC", "BUSD", "USD"):
+                if candidate == known:
+                    return known
     sym_up = symbol.upper()
     # Order matters: USDT/USDC/BUSD before USD (USDT endswith USD too).
     for candidate in ("USDT", "USDC", "BUSD", "USD"):
@@ -1456,7 +1469,8 @@ async def _fetch_raw_trades_okx(
                     )
                     continue
 
-                symbol = fill.get("instId", "").replace("-", "")
+                raw_inst_id = fill.get("instId", "")
+                symbol = raw_inst_id.replace("-", "")
                 side = fill.get("side", "").lower()
                 # Audit-2026-05-07 H-0661 — finite-value validation. Pre-fix
                 # NaN/inf strings could land in the typed numeric columns and
@@ -1481,8 +1495,13 @@ async def _fetch_raw_trades_okx(
                 fee_currency = fill.get("feeCcy", "USDT")
                 # Audit-2026-05-07 H-0670 — surface mismatch when fees are
                 # paid in a currency other than the pair's quote.
+                # NEW-C13-08: pass the raw instId (e.g. "BTC-USDT-SWAP") so
+                # _infer_quote_currency can extract "USDT" from the second
+                # dash-segment. The replace("-","") form produces "BTCUSDTSWAP"
+                # which ends in "SWAP" and causes _infer_quote_currency to
+                # return None for EVERY OKX symbol, making H-0670 dead code.
                 _check_fee_currency_mismatch(
-                    exchange="okx", symbol=symbol, fee_currency=fee_currency,
+                    exchange="okx", symbol=raw_inst_id, fee_currency=fee_currency,
                 )
                 is_maker = fill.get("execType", "") == "M"
 
