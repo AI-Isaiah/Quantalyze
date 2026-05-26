@@ -266,6 +266,12 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
   // Accent intensity — swap --color-accent + --color-accent-hover at the
   // root so all DESIGN.md token consumers (border-accent, text-accent,
   // bg-accent, var(--color-accent-hover) etc.) flip in lock-step.
+  //
+  // NEW-C22-02: return a cleanup that removes the three inline properties so
+  // they don't survive onto other routes after the allocations route unmounts.
+  // Previously the effect had no cleanup, leaving a stale "full" override on
+  // <html> across client-side navigation (factsheets, public pages, etc.)
+  // until a hard reload.
   useEffect(() => {
     const root = document.documentElement;
     if (state.accentIntensity === "full") {
@@ -278,6 +284,11 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
       root.style.removeProperty("--color-accent-hover");
       root.style.removeProperty("--color-chart-strategy");
     }
+    return () => {
+      root.style.removeProperty("--color-accent");
+      root.style.removeProperty("--color-accent-hover");
+      root.style.removeProperty("--color-chart-strategy");
+    };
   }, [state.accentIntensity]);
 
   const set = useCallback<TweaksContextValue["set"]>((key, value) => {
