@@ -31,7 +31,20 @@ export function formatNumber(value: number | null | undefined, decimals = 2): st
 
 export function formatCurrency(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "—";
+  // code-review M: handle negative values in K/M ranges. The >= guards are
+  // never true for negatives (-1500 >= 1000 is false), so without explicit
+  // negative branches they fall through to `$${value.toFixed(0)}` producing
+  // "$-1500" instead of "-$1.5K". unrealized_pnl_usd on a losing short can
+  // be a large negative number; if totalAum goes negative the format call
+  // would produce malformed output on the money-display surface.
+  if (value <= -1_000_000) {
+    return `-$${(-value / 1_000_000).toFixed(1)}M`;
+  }
   if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
+  if (value <= -1_000) {
+    const kStr = (-value / 1_000).toFixed(1);
+    return `-$${kStr.endsWith(".0") ? kStr.slice(0, -2) : kStr}K`;
+  }
   // NEW-C09-12: use toFixed(1) to preserve ≥1 sig-fig so $1,500 renders as
   // "$1.5K" instead of "$2K" (toFixed(0) rounds to the nearest $1K, which
   // overstates by up to ~33%). Strip the redundant ".0" suffix for round

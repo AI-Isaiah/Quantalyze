@@ -121,8 +121,11 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
   const { data: strategies, error } = await query;
   // NEW-C03-05: split error vs genuinely-empty so a transient DB/RLS outage
   // is logged rather than silently appearing as "market too small to rank".
+  // captureToSentry ensures ops alerting fires (console.error alone is only
+  // visible in a Vercel log-tail session; Sentry creates an actionable event).
   if (error) {
     console.error("[queries.getPercentiles] supabase error:", error.message ?? error);
+    captureToSentry(error, { tags: { op: "getPercentiles" }, level: "error" });
     return null;
   }
   if (!strategies) return null;
@@ -243,8 +246,11 @@ export async function getPopulatedCategorySlugs(): Promise<string[]> {
   // NEW-C03-06: split error vs empty so a transient DB failure is logged
   // rather than silently appearing as "no published strategies anywhere",
   // which renders the discovery navigation empty with no ops signal.
+  // captureToSentry ensures ops alerting fires even when no one is tailing
+  // Vercel logs (empty discovery nav would look like a data problem otherwise).
   if (error) {
     console.error("[queries.getPopulatedCategorySlugs] supabase error:", error.message ?? error);
+    captureToSentry(error, { tags: { op: "getPopulatedCategorySlugs" }, level: "error" });
     return [];
   }
   if (!data) return [];
@@ -422,7 +428,24 @@ export async function getStrategyDetail(
     .limit(1, { referencedTable: "strategy_verifications" })
     .single();
 
-  if (error || !strategy) return null;
+  // F-07: split error vs not-found so DB/RLS/network failures are logged and
+  // captured rather than silently rendering the same not-found UI. PGRST116
+  // ("no rows found") is the expected .single() path when the strategy does
+  // not exist or is unpublished — that still returns null cleanly without log.
+  if (error) {
+    // PGRST116 = .single() found no rows (expected "not found" path).
+    const isNotFound =
+      (error as unknown as { code?: string }).code === "PGRST116";
+    if (!isNotFound) {
+      console.error(
+        "[queries.getStrategyDetail] supabase error:",
+        error.message ?? error,
+      );
+      captureToSentry(error, { tags: { op: "getStrategyDetail" }, level: "error" });
+    }
+    return null;
+  }
+  if (!strategy) return null;
 
   // Phase 15 / CSV-03: pick the most-recent verification row's trust_tier.
   // In Phase 15 there's at most ONE row per strategy_id (finalize_csv_strategy
@@ -1049,8 +1072,11 @@ export async function getDecks(): Promise<DeckWithCount[]> {
 
   // NEW-C03-08: split error vs empty so a transient DB failure is logged
   // rather than silently appearing as "no decks exist."
+  // captureToSentry ensures ops alerting fires so an outage on the decks
+  // table doesn't silently look like "no decks exist" indefinitely.
   if (error) {
     console.error("[queries.getDecks] supabase error:", error.message ?? error);
+    captureToSentry(error, { tags: { op: "getDecks" }, level: "error" });
     return [];
   }
   if (!decks) return [];
@@ -1188,11 +1214,19 @@ export async function getAllocationEvents(portfolioId: string) {
 
 export async function getAllocatorAggregates(userId: string) {
   const supabase = await createClient();
-  const { data: portfolios } = await supabase
+  // F-05: destructure error from both fetches so DB failures don't silently
+  // look like "user has no portfolios" or "analytics not yet computed".
+  const { data: portfolios, error: portfoliosError } = await supabase
     .from("portfolios")
     .select("id, name, description, created_at")
     .eq("user_id", userId);
 
+  if (portfoliosError) {
+    console.error(
+      "[queries.getAllocatorAggregates] portfolios fetch failed:",
+      portfoliosError.message ?? portfoliosError,
+    );
+  }
   if (!portfolios?.length) return { portfolios: [], analytics: [] };
 
   const portfolioIds = portfolios.map((p) => p.id);
@@ -1200,12 +1234,24 @@ export async function getAllocatorAggregates(userId: string) {
   // unbounded result sets when portfolio_analytics accumulates historical
   // snapshots.  The .order+.limit bounds the DB scan; the Map dedup keeps
   // only the freshest row per portfolio_id in application code.
-  const { data: analyticsRaw } = await supabase
+  //
+  // code-review M: use a fixed cap (500) instead of portfolioIds.length * 10.
+  // The formula can be defeated by one data-heavy portfolio (e.g. 1 portfolio
+  // with 11+ analytics rows silently cuts off other portfolios). 500 is
+  // generous for any realistic user (<<50 portfolios × <10 relevant rows each).
+  const { data: analyticsRaw, error: analyticsError } = await supabase
     .from("portfolio_analytics")
     .select("*")
     .in("portfolio_id", portfolioIds)
     .order("computed_at", { ascending: false })
-    .limit(portfolioIds.length * 10); // generous upper bound per portfolio
+    .limit(500);
+
+  if (analyticsError) {
+    console.error(
+      "[queries.getAllocatorAggregates] portfolio_analytics fetch failed:",
+      analyticsError.message ?? analyticsError,
+    );
+  }
 
   // Deduplicate: first occurrence per portfolio_id is the latest (DESC order).
   const seen = new Set<string>();
@@ -1214,6 +1260,16 @@ export async function getAllocatorAggregates(userId: string) {
     seen.add(row.portfolio_id);
     return true;
   });
+
+  // F-08: warn when the dedup result is smaller than the requested set —
+  // this indicates the limit truncated the result and some portfolios may
+  // be missing their latest analytics row.
+  if (seen.size < portfolioIds.length) {
+    console.warn(
+      "[queries.getAllocatorAggregates] dedup yielded fewer portfolios than requested",
+      { requested: portfolioIds.length, resolved: seen.size },
+    );
+  }
 
   return { portfolios, analytics: analytics as PortfolioAnalytics[] };
 }
@@ -1770,9 +1826,9 @@ export function reconstructHoldingReturnsByScopeRef(
 /** @internal Exported for unit testing only (NEW-C03-01 regression). */
 export function holdingEquityContribution(h: MyAllocationDashboardPayload["holdingsSummary"][number]): number {
   if (h.holding_type === "derivative") {
-    // unrealized_pnl_usd may be undefined on legacy fixtures (the field is
-    // optional on the type to preserve backward-compat with pre-split rows).
-    // Fall back to 0 rather than notional when the column is absent — better
+    // unrealized_pnl_usd is required-but-nullable (never absent in production
+    // payloads; null for spot rows or when the sync worker has not yet written
+    // a P&L value). Fall back to 0 rather than notional when null — better
     // to exclude a derivative than to treat notional as equity.
     const pnl = h.unrealized_pnl_usd ?? 0;
     return Number.isFinite(pnl) ? pnl : 0;
@@ -2276,10 +2332,7 @@ export const getMyAllocationDashboard = cache(
 
     // audit-2026-05-07 G8.A.1 (P34) — Step 1 explicit error checks.
     // Same `assertOk` helper Step 2 uses below; we're a single function
-    // so DRY both waves through one helper. `apiKeysCountRes` is
-    // intentionally left lenient — its `.count` already coalesces to 0
-    // below and we prefer to render the onboarding nudge over an error
-    // page when the count probe fails.
+    // so DRY both waves through one helper.
     assertOk(phase07EquityRes, "allocator_equity_snapshots");
     assertOk(phase07HoldingsRes, "allocator_holdings");
     assertOk(phase09MatchBatchRes, "match_batches");

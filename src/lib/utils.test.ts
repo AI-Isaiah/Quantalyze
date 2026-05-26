@@ -129,6 +129,25 @@ describe("formatCurrency", () => {
   it("regression (NEW-C09-12): exact 1K rounds cleanly ($1K not $1.0K)", () => {
     expect(formatCurrency(1_000)).toBe("$1K");
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // code-review M: negative K/M values must format as "-$1.5K" / "-$2.5M"
+  // not "$-1500" / "$-2500000". The >= 1000 guards are never true for
+  // negatives so without explicit branches the fall-through produces a
+  // malformed dollar-sign placement.
+  // ─────────────────────────────────────────────────────────────────
+  it("negative thousands: -$1,500 renders as -$1.5K not $-1500", () => {
+    expect(formatCurrency(-1_500)).toBe("-$1.5K");
+  });
+  it("negative thousands: -$250,000 renders as -$250K", () => {
+    expect(formatCurrency(-250_000)).toBe("-$250K");
+  });
+  it("negative millions: -$2,500,000 renders as -$2.5M", () => {
+    expect(formatCurrency(-2_500_000)).toBe("-$2.5M");
+  });
+  it("negative sub-thousand: -$500 renders as $-500 (sub-K path)", () => {
+    expect(formatCurrency(-500)).toBe("$-500");
+  });
 });
 
 describe("metricColor", () => {
