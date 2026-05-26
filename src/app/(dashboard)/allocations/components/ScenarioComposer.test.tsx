@@ -1566,4 +1566,129 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       ),
     ).toBe(true);
   });
+
+  // -------------------------------------------------------------------------
+  // NEW-C18-07 — weight >1 surfaces a commit error with the value forwarded
+  // (state-layer clamping is still applied; the error is just made visible).
+  // Before this fix, entering 1.5 in the weight input silently clamped to 1.0
+  // with no user-visible feedback, making the discrepancy invisible.
+  // -------------------------------------------------------------------------
+  it("NEW-C18-07: entering a weight >1 surfaces an inline error alert", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        useInternalCommitDrawer={false}
+        onCommitRequested={vi.fn()}
+      />,
+    );
+
+    // Enter a weight exceeding 1 for BTC.
+    const btcInput = screen.getByLabelText(/BTC weight/i) as HTMLInputElement;
+    fireEvent.change(btcInput, { target: { value: "1.5" } });
+
+    // An inline error must appear explaining the clamping.
+    const alert = screen.getByRole("alert");
+    expect(alert).toBeDefined();
+    expect(alert.textContent).toMatch(/clamped to 1/i);
+  });
+
+  // -------------------------------------------------------------------------
+  // NEW-C18-05 regression — per-row size gate: a voluntary_add with weight=0
+  // (positive AUM, non-zero scenarioAum) must be refused with a named error.
+  // Before this fix, a weight-0 add passed the global AUM>0 guard and committed
+  // size_at_decision_usd:0, causing a division-by-zero in the daily-delta cron.
+  // -------------------------------------------------------------------------
+  it("NEW-C18-05: voluntary_add with weight=0 and positive AUM → named error, no commit", () => {
+    // Payload with live holdings so scenarioAum > 0.
+    const payload = makePayload();
+
+    // Capture the StrategyBrowseDrawer onAdd callback to simulate adding a strategy.
+    let capturedOnAdd: ((s: unknown) => void) | null = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      capturedOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+
+    const onCommitRequested = vi.fn();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        useInternalCommitDrawer={false}
+        onCommitRequested={onCommitRequested}
+      />,
+    );
+
+    // Open Browse and add a strategy — default weight starts at 0.
+    fireEvent.click(screen.getByRole("button", { name: /^Browse strategies$/i }));
+    act(() => {
+      capturedOnAdd!({
+        id: "strat-zero-weight",
+        name: "Zero Weight Strategy",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+    });
+
+    // Explicitly set the added strategy weight to 0. The initial add via
+    // the browse drawer distributes weights equally (non-zero), so we must
+    // explicitly zero-out the strategy's weight to trigger the per-row gate.
+    // The weight input's label is "{strategy.name} weight" (ScenarioComposer.tsx:1203-1204).
+    const addedInput = screen.getByLabelText(/Zero Weight Strategy weight/i) as HTMLInputElement;
+    fireEvent.change(addedInput, { target: { value: "0" } });
+
+    // Now attempt commit — with weight=0 the per-row size gate should fire.
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+
+    // The commit must be refused with a named error referencing the strategy.
+    const alerts = screen.getAllByRole("alert");
+    expect(
+      alerts.some((a) =>
+        /zero allocation size|zero weight/i.test(a.textContent ?? ""),
+      ),
+    ).toBe(true);
+    expect(onCommitRequested).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // NEW-C18-14 regression — synthetic-baseline disclosure label
+  // When scenarioAum <= 0 the drawdown chart is scaled against a synthetic
+  // $1 baseline. Before this fix, there was no visible marker so the allocator
+  // could mistake an illustrative curve for one backed by real capital.
+  // -------------------------------------------------------------------------
+  it("NEW-C18-14: scenarioAum=0 renders synthetic-baseline disclosure text", () => {
+    // All live holdings toggled off → scenarioAum = 0.
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Toggle all three holdings off so scenarioAum collapses to 0.
+    fireEvent.click(
+      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
+    );
+    fireEvent.click(
+      screen.getByRole("switch", { name: /Toggle ETH on\/off in scenario/i }),
+    );
+    fireEvent.click(
+      screen.getByRole("switch", { name: /Toggle SOL on\/off in scenario/i }),
+    );
+
+    // Disclosure must now be visible.
+    expect(
+      screen.getByText(/Illustrative shape only — no live capital connected/i),
+    ).toBeInTheDocument();
+  });
 });

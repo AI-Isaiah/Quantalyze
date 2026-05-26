@@ -1282,3 +1282,109 @@ describe("AbortError swallow leaves the drawer alive (does not transition to fai
   });
 });
 
+// ===========================================================================
+// NEW-C18-12 — structural success gate: right count / wrong index must fail
+//
+// Before this fix fullSuccess was gated only on `recorded === diffs.length`.
+// A server bug that records N rows but with wrong indices/kinds would still
+// produce `recorded=N` and the drawer would collapse to the success card,
+// silently accepting a commit that skipped one diff and double-recorded another.
+// The structural check asserts that `result[i].index ∈ {0..length-1}` and
+// `result[i].kind === diffs[result[i].index].kind`.
+// ===========================================================================
+
+describe("NEW-C18-12 — structural success gate: right count / wrong index rejects", () => {
+  it("server returns recorded=N with mismatched result.index → failure, onSubmitSuccess NOT called", async () => {
+    vi.useRealTimers();
+    const diffs = [VR_DIFF, VA_DIFF]; // 2 diffs: indices 0, 1
+
+    // Server returns recorded=2 (matching count) but result indices are
+    // [0, 2] — index 2 does not exist in a 2-diff batch (max valid = 1).
+    // This simulates a server off-by-one or wrong-index bug.
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          recorded: 2,
+          results: [
+            { index: 0, kind: "voluntary_remove" },
+            { index: 2, kind: "voluntary_add" }, // invalid index
+          ],
+          errors: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={diffs}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs(diffs);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      // The success card must NOT appear — structural mismatch is a failure.
+      expect(screen.queryByTestId("commit-drawer-success")).toBeNull();
+    });
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("server returns recorded=N with wrong kind on a result → failure, onSubmitSuccess NOT called", async () => {
+    vi.useRealTimers();
+    const diffs = [VR_DIFF, VA_DIFF]; // index 0 = voluntary_remove, index 1 = voluntary_add
+
+    // Server returns correct indices but swapped kinds.
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          recorded: 2,
+          results: [
+            { index: 0, kind: "voluntary_add" }, // wrong kind for index 0
+            { index: 1, kind: "voluntary_remove" }, // wrong kind for index 1
+          ],
+          errors: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={diffs}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs(diffs);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-success")).toBeNull();
+    });
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+});
+

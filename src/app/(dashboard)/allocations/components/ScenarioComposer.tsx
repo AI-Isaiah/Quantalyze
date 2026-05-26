@@ -309,7 +309,19 @@ export function ScenarioComposer({
       );
       return;
     }
-    if (commitError) setCommitError(null);
+    // NEW-C18-07: surface an explicit error when the user enters a value >1
+    // (e.g. via paste). The state layer (setWeightOverride → clampWeight) silently
+    // clamps to 1, so without this check a weight of 1.5 appears to commit at 100%
+    // AUM with no feedback. Showing the error makes the clamping visible and
+    // consistent with the non-finite path above. The value is still forwarded so
+    // the input snaps to the clamped value instead of freezing.
+    if (weight > 1) {
+      setCommitError(
+        "Weight clamped to 1 — the maximum allocation is 100% of portfolio AUM.",
+      );
+    } else if (commitError) {
+      setCommitError(null);
+    }
     scenario.setWeightOverride(scopeRef, weight);
   }
 
