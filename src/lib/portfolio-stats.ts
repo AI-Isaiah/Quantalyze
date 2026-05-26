@@ -14,6 +14,45 @@
 import type { DailyPoint } from "./portfolio-math-utils";
 import { mean, stdDev, compound } from "./portfolio-math-utils";
 
+// ── Non-finite drop diagnostic ──────────────────────────────────────
+// computeReturnDistribution, findMinMax, and detectRegimeChanges all
+// SKIP non-finite (NaN/±Infinity) values to stay crash-safe (see each
+// call site). Dropping silently would mask an upstream data-corruption
+// signal — e.g. a malformed CSV daily_return — so each emits a one-shot
+// console.warn breadcrumb naming the dropped count + function context.
+// This mirrors the sibling drawdown-math.ts "corrupted-input signal"
+// convention. There is no shared logger util in src/lib; console.warn
+// is the established channel.
+//
+// These functions can run per-render, so the breadcrumb must not spam:
+// a module-level Set of function-context keys fires the warning at most
+// ONCE per context per process. Return values are unaffected — this is
+// purely an added diagnostic.
+const nonFiniteWarnedContexts = new Set<string>();
+
+function warnDroppedNonFinite(context: string, dropped: number): void {
+  if (dropped <= 0) return;
+  if (nonFiniteWarnedContexts.has(context)) return;
+  nonFiniteWarnedContexts.add(context);
+  if (typeof console !== "undefined") {
+    console.warn(
+      `[${context}] dropped ${dropped} non-finite (NaN/±Infinity) value(s) — ` +
+        `likely upstream data corruption (e.g. a malformed daily_return). ` +
+        `These were skipped to stay crash-safe; output reflects only finite values.`,
+    );
+  }
+}
+
+/**
+ * Test-only: clear the module-scoped one-shot warn guard so a test can
+ * assert the breadcrumb fires (and, separately, that clean input does
+ * NOT warn) without a process restart. Mirrors the codebase's
+ * `__resetXForTest` convention.
+ */
+export function __resetNonFiniteWarningsForTest(): void {
+  nonFiniteWarnedContexts.clear();
+}
+
 // ── 1. computeMonthlyReturns ────────────────────────────────────────
 /**
  * Group daily returns by year+month and compound each month.
@@ -136,9 +175,22 @@ export function computeReturnDistribution(
   returns: number[],
   bins: number,
 ): DistributionBin[] {
-  if (returns.length === 0 || bins <= 0) return [];
-  const minVal = Math.min(...returns);
-  const maxVal = Math.max(...returns);
+  if (bins <= 0) return [];
+  // Drop non-finite values (NaN/±Infinity). A single +Infinity entry
+  // otherwise drives binWidth to Infinity and produces idx = floor(x/Inf)
+  // = NaN, which dereferences result[NaN] (undefined) → TypeError; NaN
+  // entries silently corrupt every bin boundary into NaN.
+  let minVal = Infinity;
+  let maxVal = -Infinity;
+  let finiteCount = 0;
+  for (const r of returns) {
+    if (!Number.isFinite(r)) continue;
+    finiteCount++;
+    if (r < minVal) minVal = r;
+    if (r > maxVal) maxVal = r;
+  }
+  warnDroppedNonFinite("computeReturnDistribution", returns.length - finiteCount);
+  if (finiteCount === 0) return [];
   const range = maxVal - minVal;
   const binWidth = range / bins;
 
@@ -149,6 +201,7 @@ export function computeReturnDistribution(
   }));
 
   for (const r of returns) {
+    if (!Number.isFinite(r)) continue;
     let idx = binWidth > 0 ? Math.floor((r - minVal) / binWidth) : 0;
     // Clamp the max value into the last bin
     if (idx >= bins) idx = bins - 1;
@@ -194,17 +247,31 @@ export interface BestWorstResult {
 }
 
 /**
- * Get ISO week key for a date string. Returns "YYYY-WNN".
+ * Get the ISO 8601 week key for a date string. Returns "YYYY-WNN" where
+ * YYYY is the ISO week-numbering year (which can differ from the calendar
+ * year near year boundaries) and NN is the ISO week (01-53).
+ *
+ * ISO weeks start on Monday; week 1 is the week containing the year's
+ * first Thursday. Days late in December or early in January can therefore
+ * belong to the adjacent year's week — e.g. 2024-12-30 (Mon) is 2025-W01.
+ * A naive ceil(dayOfYear/7) splits such weeks across the year boundary and
+ * mislabels them.
  */
 function isoWeekKey(dateStr: string): string {
   const d = new Date(dateStr + "T00:00:00Z");
-  const dayOfYear =
-    Math.floor(
-      (d.getTime() - new Date(Date.UTC(d.getUTCFullYear(), 0, 1)).getTime()) /
-        86_400_000,
-    ) + 1;
-  const weekNum = Math.ceil(dayOfYear / 7);
-  return `${d.getUTCFullYear()}-W${String(weekNum).padStart(2, "0")}`;
+  // Shift to the Thursday of this date's ISO week. (getUTCDay()+6)%7 maps
+  // Mon=0..Sun=6; subtracting it lands on Monday, +3 lands on Thursday.
+  const dayNum = (d.getUTCDay() + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - dayNum + 3);
+  const isoYear = d.getUTCFullYear();
+  // Thursday of ISO week 1 = the Thursday of the week containing Jan 4.
+  const firstThursday = new Date(Date.UTC(isoYear, 0, 4));
+  const firstDayNum = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDayNum + 3);
+  const weekNum =
+    1 +
+    Math.round((d.getTime() - firstThursday.getTime()) / (7 * 86_400_000));
+  return `${isoYear}-W${String(weekNum).padStart(2, "0")}`;
 }
 
 function quarterKey(dateStr: string): string {
@@ -247,7 +314,18 @@ function findMinMax(
   let bestVal = -Infinity;
   let worstKey = "";
   let worstVal = Infinity;
+  let sawFinite = false;
+  let droppedNonFinite = 0;
   for (const [key, val] of periods) {
+    // Skip non-finite periods: every comparison against NaN is false (so
+    // NaN periods would be silently dropped while leaving the ±Infinity
+    // sentinels in place), and a period that overflowed to ±Infinity is a
+    // meaningless extreme to surface as "best"/"worst".
+    if (!Number.isFinite(val)) {
+      droppedNonFinite++;
+      continue;
+    }
+    sawFinite = true;
     if (val > bestVal) {
       bestVal = val;
       bestKey = key;
@@ -256,6 +334,15 @@ function findMinMax(
       worstVal = val;
       worstKey = key;
     }
+  }
+  warnDroppedNonFinite("findMinMax", droppedNonFinite);
+  if (!sawFinite) {
+    // No finite period: return the same neutral sentinel as empty input
+    // rather than the misleading best=-Infinity / worst=+Infinity.
+    return {
+      best: { date: "", value: 0 },
+      worst: { date: "", value: 0 },
+    };
   }
   return {
     best: { date: bestKey, value: bestVal },
@@ -410,13 +497,19 @@ export function detectRegimeChanges(
 ): RegimeCrossover[] {
   if (daily.length < slowWindow) return [];
 
-  // Build cumulative return series
+  // Build cumulative return series. Stop if the running product overflows
+  // to a non-finite value: once c is Infinity every later point is Infinity
+  // too, the moving averages all become Infinity, and `fastMA > slowMA`
+  // (Infinity > Infinity) is false — so the detector would go permanently
+  // dead. Detecting over the finite prefix is strictly better.
   const cumulative: number[] = [];
   let c = 1;
   for (const d of daily) {
     c *= 1 + d.value;
+    if (!Number.isFinite(c)) break;
     cumulative.push(c);
   }
+  warnDroppedNonFinite("detectRegimeChanges", daily.length - cumulative.length);
 
   // Compute MAs and detect crossovers
   const result: RegimeCrossover[] = [];

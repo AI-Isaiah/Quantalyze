@@ -50,7 +50,13 @@ const STATE = vi.hoisted(() => ({
   } as { id: string; email: string } | null,
   rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   rpcState: {} as Record<string, { data: unknown; error: { code?: string; message?: string } | null }>,
-  checkLimitResult: { success: true, retryAfter: 0 } as { success: boolean; retryAfter: number },
+  // M-1108: carries the optional `reason` discriminant so TC4b can drive the
+  // fail-CLOSED `ratelimit_misconfigured` path the route must translate to 503.
+  checkLimitResult: { success: true, retryAfter: 0 } as {
+    success: boolean;
+    retryAfter: number;
+    reason?: "ratelimit_misconfigured";
+  },
   csrfResponse: null as ReturnType<typeof import("next/server").NextResponse.json> | null,
   lastCheckLimitArg: null as unknown,
   // M-0338(b): when set, the log_audit_event RPC throws a TRANSIENT-class
@@ -87,6 +93,13 @@ vi.mock("@/lib/ratelimit", () => ({
     STATE.lastCheckLimitArg = limiter;
     return STATE.checkLimitResult;
   },
+  // M-1108: mirror the real predicate (src/lib/ratelimit.ts) so the route's
+  // misconfig→503 branch is exercised against the same discriminant the
+  // production helper checks.
+  isRateLimitMisconfigured: (result: {
+    success: boolean;
+    reason?: string;
+  }) => result.success === false && result.reason === "ratelimit_misconfigured",
 }));
 
 vi.mock("@/lib/csrf", () => ({
@@ -225,6 +238,31 @@ describe("PUT /api/preferences", () => {
     expect(STATE.rpcCalls).toHaveLength(0);
   });
 
+  it("TC4b — M-1108: limiter misconfigured (fail-CLOSED) returns 503, not 429, and runs no RPC", async () => {
+    // In production a null limiter (missing UPSTASH env) fails CLOSED with
+    // reason:'ratelimit_misconfigured'. The route must surface that as a 503
+    // Service Unavailable so canary/health checks see the outage — NOT a 429
+    // that useMandateAutoSave would honor and retry forever, masking the
+    // misconfig. Without the isRateLimitMisconfigured branch this returns 429.
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+
+    const { PUT } = await import("./route");
+
+    const res = await PUT(makeRequest({ max_weight: 0.25 }));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("60");
+    const body = await res.json();
+    expect(body.error).toBe("Service temporarily unavailable");
+
+    await drainAuditMicrotasks();
+    expect(STATE.rpcCalls).toHaveLength(0);
+  });
+
   it("TC5 — 400 validation (TS layer): out-of-range max_weight rejected before RPC", async () => {
     const { PUT } = await import("./route");
 
@@ -238,13 +276,20 @@ describe("PUT /api/preferences", () => {
     expect(STATE.rpcCalls).toHaveLength(0);
   });
 
-  it("TC6 — 400 from RPC SQLSTATE 22023: error.message surfaced, no audit", async () => {
+  it("TC6 — H-0299: 400 from RPC SQLSTATE 22023 returns a generic message and never leaks the raw Postgres error string", async () => {
+    // The raw RPC error is database-author-controlled and can carry internals
+    // (function name, parameter names, rejected values, schema qualifiers a
+    // future Postgres reformat appends). The route MUST NOT forward it to the
+    // client — it returns a stable generic message and keeps the raw text in
+    // the server log only. This message deliberately embeds internals so the
+    // non-leak assertion is load-bearing: a regression to `error.message`
+    // passthrough would surface "p_max_weight" / "public.update_allocator_..."
+    // to the caller.
+    const rawDbMessage =
+      "function public.update_allocator_mandates: parameter p_max_weight value 0.510000 out of bounds [0.05,0.50]";
     STATE.rpcState.update_allocator_mandates = {
       data: null,
-      error: {
-        code: "22023",
-        message: "max_weight must be between 0.05 and 0.50",
-      },
+      error: { code: "22023", message: rawDbMessage },
     };
 
     const { PUT } = await import("./route");
@@ -253,7 +298,11 @@ describe("PUT /api/preferences", () => {
 
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error).toBe("max_weight must be between 0.05 and 0.50");
+    expect(body.error).toBe("Invalid mandate value");
+    // No DB internals leaked.
+    expect(body.error).not.toBe(rawDbMessage);
+    expect(body.error).not.toMatch(/p_max_weight/);
+    expect(body.error).not.toMatch(/update_allocator_mandates/);
 
     await drainAuditMicrotasks();
     expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event")).toHaveLength(0);

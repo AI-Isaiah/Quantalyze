@@ -159,9 +159,30 @@ export function parseISO(s: string): number {
   return t;
 }
 
+// audit-2026-05-07 M-1060 c9 — anchorFromFirstPositive was running three
+// times per top-level render for the SAME data: twice in EquityChartWidget
+// (the `minDate` + `periodReturn` useMemos) and once in the inner
+// EquityChart (`composite`). Each call is an O(n) findIndex + slice + map
+// over the full DailyPoint[]. The three call sites all key on the same
+// reference-stable `equityDailyPoints` array (the wrapper memoizes it),
+// so a WeakMap keyed on the input identity collapses the duplicate passes
+// to a single computation while keeping the function's public signature
+// (and the existing useMemo deps at each call site) untouched. The cache
+// auto-evicts when the input array is GC'd; a fresh array reference (real
+// data change) is a natural cache miss and recomputes.
+const anchorCache = new WeakMap<DailyPoint[], DailyPoint[]>();
+
 /** Designer's f7 anchor — re-anchor at the first positive value.
  * Exported for `EquityChartWidget`'s picker `min` (PR4 #1). */
 export function anchorFromFirstPositive(points: DailyPoint[]): DailyPoint[] {
+  const cached = anchorCache.get(points);
+  if (cached) return cached;
+  const result = computeAnchorFromFirstPositive(points);
+  anchorCache.set(points, result);
+  return result;
+}
+
+function computeAnchorFromFirstPositive(points: DailyPoint[]): DailyPoint[] {
   if (points.length === 0) return [];
   const firstPositiveIdx = points.findIndex((p) => p.value > 0);
   if (firstPositiveIdx < 0) return [];
@@ -253,19 +274,48 @@ function sliceByPeriod(
   });
 }
 
+// audit-2026-05-07 H-1224 c9 — local-midnight Date from a YYYY-MM-DD
+// string, matching CustomRangePicker's own `parseISODate`. `parseISO`
+// (above) returns a UTC-midnight EPOCH, which is correct for all the
+// timezone-stable epoch math/sorting in this file. But the
+// CustomRangePicker consumes its `min` Date with LOCAL-time accessors
+// (`getFullYear/getMonth/getDate` in toISODate/sameDay/clampDate). Wrapping
+// the UTC epoch in `new Date(...)` and reading it locally yields the
+// PREVIOUS calendar day for any user west of UTC — so the picker's min
+// bound, disabled-cell math, and re-serialized ISO were all off by one
+// (CI passes because it runs in UTC). Build the picker bound in the SAME
+// local-midnight convention the picker uses so the two never disagree.
+export function localDateFromISO(s: string): Date {
+  const [y, m, d] = s.split("-").map(Number);
+  if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
+    return new Date(y, m - 1, d);
+  }
+  // Non-ISO fallback — defer to the Date constructor (mirrors parseISO).
+  return new Date(s);
+}
+
 function firstDate(points: DailyPoint[]): Date {
   if (points.length === 0) return new Date();
-  return new Date(parseISO(points[0].date));
+  return localDateFromISO(points[0].date);
 }
 
 // ---------------------------------------------------------------------------
 // EquityChart — public component
 // ---------------------------------------------------------------------------
 
+// audit-2026-05-07 H-0167/M-1059 (+ M-1067) — a module-level frozen empty
+// array as the `overlays` default. An inline `overlays = []` default param
+// allocates a FRESH array on every render when the prop is omitted, which
+// churns the `enrichedOverlays` → `overlaySeries` memos and therefore the
+// projection memo below — defeating the hover/Tweaks memoization. A stable
+// shared reference keeps those memos identity-stable across renders. Frozen
+// because it must never be mutated (the chart only reads/maps overlays).
+const EMPTY_OVERLAYS: readonly OverlaySeries[] = Object.freeze([]);
+
 export function EquityChart({
   equityDailyPoints,
   benchmark,
-  overlays = [],
+  overlays = EMPTY_OVERLAYS as OverlaySeries[],
   stale = false,
   initialPeriod = DEFAULT_PERIOD,
   scenarioSeries = null,
@@ -409,323 +459,387 @@ export function EquityChart({
       );
   }, [enrichedOverlays, visible]);
 
-  // Empty state — Phase 07 PURGE-04 idiom (centered helper text in the
-  // chart well rather than a hard error). Mounted before any SVG so the
-  // grid cell collapses cleanly when there's nothing to show.
-  if (equityDailyPoints.length === 0 || composite.length === 0) {
-    return (
-      <div
-        ref={wrapRef}
-        className="flex h-[260px] w-full items-center justify-center text-sm text-text-muted"
-        role="img"
-        aria-label="Equity chart"
-      >
-        Equity data warming up
-      </div>
-    );
-  }
-
-  // ── Projections ────────────────────────────────────────────────────
-  // pad.r carries the Y-axis tick labels on the right edge. Sized for
-  // "+XX.X%" labels at 12px Geist Mono without clipping.
-  const pad = { t: 20, r: 64, b: 28, l: 8 };
-  const height = 260;
-  const chartW = Math.max(1, width - pad.l - pad.r);
-  const chartH = Math.max(1, height - pad.t - pad.b);
-  const n = visible.length;
-
-  // Period-relative normalization — re-anchor everything to 1.0 at the
-  // visible window's first point. The composite is f7-anchored to the
-  // first-positive value (stable across period switches), but renders a
-  // line that starts at some arbitrary value like 1.15 at the 6M window
-  // start. Re-anchoring here makes the axis meaningful: the line always
-  // departs from 0% at the left edge and ticks read as "percent change
-  // since period start" — matching the tooltip arithmetic below.
-  //
-  // audit-2026-05-07 M-1063 c8 — `visible[0]?.value ?? 1` only catches
-  // undefined. If the first visible point's value is literally 0 (e.g. a
-  // zero-equity row that slipped past the f7 anchor because the period
-  // slice landed on a pre-anchor day), every division below produces
-  // Infinity / NaN, the y-tick walker reads NaN bounds, and the SVG path
-  // renders as a broken line off-screen with no diagnostic. Guard against
-  // non-finite and non-positive bases by reusing the existing
-  // "Equity data warming up" empty state below — this restores the
-  // visual contract (a graceful, copy-driven fallback) ONLY on broken
-  // data; the happy path is unchanged.
-  const rawBasePort = visible[0]?.value ?? 1;
-  if (!Number.isFinite(rawBasePort) || rawBasePort <= 0) {
-    return (
-      <div
-        ref={wrapRef}
-        className="flex h-[260px] w-full items-center justify-center text-sm text-text-muted"
-        role="img"
-        aria-label="Equity chart"
-      >
-        Equity data warming up
-      </div>
-    );
-  }
-  const basePort = rawBasePort;
-  const visibleNormalized = visible.map((p) => p.value / basePort);
-
-  // ADVERSARIAL-EQ-5 — period total return for the always-visible
-  // summary chip. The chip surfaces the end-of-window return for the
-  // selected period without requiring a hover, so the allocator can
-  // glance at the chart and immediately see "+12.4% over 6M". Equal
-  // to (last point / first point - 1), which is exactly the y-value
-  // of the rightmost line endpoint after period normalization.
-  const periodReturn =
-    visibleNormalized.length > 0
-      ? visibleNormalized[visibleNormalized.length - 1] - 1
-      : 0;
-  const periodReturnPositive = periodReturn >= 0;
-  const periodReturnLabel = `${periodReturnPositive ? "+" : ""}${(periodReturn * 100).toFixed(2)}%`;
-
-  const baseBench =
-    visibleBenchmark
-      ? visibleBenchmark.find((v): v is number => v != null) ?? null
-      : null;
-  const visibleBenchmarkNormalized: Array<number | null> | null =
-    visibleBenchmark && baseBench != null
-      ? visibleBenchmark.map((v) => (v == null ? null : v / baseBench))
-      : null;
-
-  // Y range over portfolio + benchmark + overlays (all period-relative
-  // and centered on 1.0). Drop nulls AND non-finite values.
-  //
-  // retro audit (red-team L4 c8): the M-1063 basePort guard catches
-  // NaN/<=0 portfolio bases, but overlay paths (overlaySeries) and the
-  // benchmark normalisation could still produce NaN when an overlay
-  // point divides 0/0 or carries a stored NaN that survived the
-  // `v != null` guard (typeof NaN === 'number'). Filter at push-time
-  // so a single corrupt overlay point can't poison yMin/yMax → NaN
-  // ticks → broken SVG path with no diagnostic.
-  const allValues: number[] = [];
-  for (const v of visibleNormalized) {
-    if (Number.isFinite(v)) allValues.push(v);
-  }
-  if (visibleBenchmarkNormalized) {
-    for (const v of visibleBenchmarkNormalized) {
-      if (v != null && Number.isFinite(v)) allValues.push(v);
+  // ── Projections (memoized) ─────────────────────────────────────────
+  // audit-2026-05-07 H-0167 / H-0168 / M-1059 c9 — the entire chart
+  // projection (period normalization, y-range scan over portfolio +
+  // benchmark + every overlay, the y-tick walker, the path/area string
+  // builders, and the smart x-tick density loop) used to run inline in the
+  // component body. Because hover state (`hoverIdx`, set on every mousemove
+  // via handleMove) and the TweaksContext subscription (`useTweakValue`,
+  // which re-renders on ANY context change — including panelOpen toggles)
+  // live in the same body, every one of those events re-executed this O(N)
+  // + O(overlays*N) work. On the ALL period with a multi-year history and
+  // ~20 overlays the array hits ~50k values and the per-month x-tick loop
+  // does an O(N) linear search — multi-hundred-ms per mouse pixel and per
+  // Tweaks toggle. Hoisting the whole block into a useMemo keyed ONLY on
+  // its real data inputs means hover/Tweaks/period-button-style churn no
+  // longer recomputes it; it recomputes when the data window actually
+  // changes. The empty + degenerate-base guards fold into the memo so the
+  // hooks stay unconditional (Rules of Hooks); a `null` result drives the
+  // single warm-up early-return below.
+  const projection = useMemo(() => {
+    // Empty state — Phase 07 PURGE-04 idiom (centered helper text in the
+    // chart well rather than a hard error). Null here drives the warm-up
+    // placeholder render below so the grid cell collapses cleanly when
+    // there's nothing to show.
+    if (equityDailyPoints.length === 0 || composite.length === 0) {
+      return null;
     }
-  }
-  for (const o of overlaySeries) {
-    for (const v of o.series) {
-      if (v != null && Number.isFinite(v)) allValues.push(v);
-    }
-  }
-  // Manual loop instead of Math.min(...allValues) — on the ALL period with
-  // benchmark + ~20 overlay series the array grows to ~50k+ values, and
-  // spreading into Math.min/max blows the JS call stack at ~125k args.
-  let yMin = 0;
-  let yMax = 1;
-  if (allValues.length) {
-    yMin = allValues[0];
-    yMax = allValues[0];
-    for (let i = 1; i < allValues.length; i++) {
-      const v = allValues[i];
-      if (v < yMin) yMin = v;
-      else if (v > yMax) yMax = v;
-    }
-  }
-  // Keep 1.0 (the 0% baseline) inside the plotted range so the baseline
-  // reference line is always visible — without this, a strictly-up line
-  // clips the 0% tick off-screen.
-  yMin = Math.min(yMin, 1);
-  yMax = Math.max(yMax, 1);
-  // 4% visual padding so the line doesn't kiss the top or bottom edge.
-  const yPadding = (yMax - yMin) * 0.04 || 0.002;
-  yMin -= yPadding;
-  yMax += yPadding;
-  const yRange = yMax - yMin || 1;
 
-  // Y-axis ticks — snap to "nice" percentage steps so labels don't read
-  // "+1.37%". Always includes 1.0 so the 0% baseline sits on a tick.
-  // PR4 #4: enforce a 5-tick minimum so narrow data ranges (test data,
-  // flat-line allocators) match the truth screenshot's density. We pick
-  // the LARGEST nice candidate that still yields >= MIN_TICKS — accepts a
-  // sub-1% step like 0.25% on tight ranges so the strip never collapses
-  // to 3 labels (+0% / -0.5% / -1.0%).
-  const yTicks: number[] = (() => {
-    const MIN_TICKS = 5;
-    const niceMultipliers = [1, 2, 2.5, 5];
-    const candidates: number[] = [];
-    for (let p = -3; p <= 3; p++) {
-      const pow = Math.pow(10, p);
-      for (const m of niceMultipliers) candidates.push(m * pow);
-    }
-    candidates.sort((a, b) => a - b);
-    const tickCount = (sp: number) => {
-      const stepVal = sp / 100;
-      const below = Math.floor((1 - yMin) / stepVal);
-      const above = Math.floor((yMax - 1) / stepVal);
-      return 1 + below + above;
-    };
-    // tickCount is monotonically decreasing in `c`. Walk ascending and
-    // keep the largest candidate that still meets MIN_TICKS; bail on
-    // first failure.
+    // pad.r carries the Y-axis tick labels on the right edge. Sized for
+    // "+XX.X%" labels at 12px Geist Mono without clipping.
+    const pad = { t: 20, r: 64, b: 28, l: 8 };
+    const height = 260;
+    const chartW = Math.max(1, width - pad.l - pad.r);
+    const chartH = Math.max(1, height - pad.t - pad.b);
+    const n = visible.length;
+
+    // Period-relative normalization — re-anchor everything to 1.0 at the
+    // visible window's first point. The composite is f7-anchored to the
+    // first-positive value (stable across period switches), but renders a
+    // line that starts at some arbitrary value like 1.15 at the 6M window
+    // start. Re-anchoring here makes the axis meaningful: the line always
+    // departs from 0% at the left edge and ticks read as "percent change
+    // since period start" — matching the tooltip arithmetic below.
     //
-    // audit-2026-05-07 M-1065 c8 — on degenerate ranges (yMin == yMax, or
-    // tickCount(candidates[0]) already < MIN_TICKS because the padded
-    // range is too small) the previous code left `stepPct` stuck at the
-    // SEED value `candidates[0] = 0.001`%. The for-v loops below then
-    // iterated ~80000+ ticks across the padded range, producing a
-    // DOM/SVG flood with no error, no log, no fallback. Track whether
-    // ANY candidate cleared MIN_TICKS; if none did, fall back to a 3-tick
-    // render (yMin, 1, yMax) so the axis stays sane on flat-line
-    // allocators and emit a one-shot console.warn so the case surfaces.
-    let stepPct = candidates[0];
-    let satisfied = false;
-    for (const c of candidates) {
-      if (tickCount(c) >= MIN_TICKS) {
-        stepPct = c;
-        satisfied = true;
-      } else break;
+    // audit-2026-05-07 M-1063 c8 — `visible[0]?.value ?? 1` only catches
+    // undefined. If the first visible point's value is literally 0 (e.g. a
+    // zero-equity row that slipped past the f7 anchor because the period
+    // slice landed on a pre-anchor day), every division below produces
+    // Infinity / NaN, the y-tick walker reads NaN bounds, and the SVG path
+    // renders as a broken line off-screen with no diagnostic. Guard against
+    // non-finite and non-positive bases by returning null → the existing
+    // "Equity data warming up" empty state below — this restores the
+    // visual contract (a graceful, copy-driven fallback) ONLY on broken
+    // data; the happy path is unchanged.
+    const rawBasePort = visible[0]?.value ?? 1;
+    if (!Number.isFinite(rawBasePort) || rawBasePort <= 0) {
+      return null;
     }
-    if (!satisfied) {
-      if (typeof console !== "undefined") {
-        console.warn(
-          "[EquityChart] y-tick walker found no candidate meeting MIN_TICKS — falling back to 3-tick render",
-          { yMin, yMax, MIN_TICKS },
-        );
+    const basePort = rawBasePort;
+    const visibleNormalized = visible.map((p) => p.value / basePort);
+
+    // ADVERSARIAL-EQ-5 — period total return for the always-visible
+    // summary chip. The chip surfaces the end-of-window return for the
+    // selected period without requiring a hover, so the allocator can
+    // glance at the chart and immediately see "+12.4% over 6M". Equal
+    // to (last point / first point - 1), which is exactly the y-value
+    // of the rightmost line endpoint after period normalization.
+    const periodReturn =
+      visibleNormalized.length > 0
+        ? visibleNormalized[visibleNormalized.length - 1] - 1
+        : 0;
+    const periodReturnPositive = periodReturn >= 0;
+    const periodReturnLabel = `${periodReturnPositive ? "+" : ""}${(periodReturn * 100).toFixed(2)}%`;
+
+    const baseBench =
+      visibleBenchmark
+        ? visibleBenchmark.find((v): v is number => v != null) ?? null
+        : null;
+    const visibleBenchmarkNormalized: Array<number | null> | null =
+      visibleBenchmark && baseBench != null
+        ? visibleBenchmark.map((v) => (v == null ? null : v / baseBench))
+        : null;
+
+    // Y range over portfolio + benchmark + overlays (all period-relative
+    // and centered on 1.0). Drop nulls AND non-finite values.
+    //
+    // retro audit (red-team L4 c8): the M-1063 basePort guard catches
+    // NaN/<=0 portfolio bases, but overlay paths (overlaySeries) and the
+    // benchmark normalisation could still produce NaN when an overlay
+    // point divides 0/0 or carries a stored NaN that survived the
+    // `v != null` guard (typeof NaN === 'number'). Filter at push-time
+    // so a single corrupt overlay point can't poison yMin/yMax → NaN
+    // ticks → broken SVG path with no diagnostic.
+    const allValues: number[] = [];
+    for (const v of visibleNormalized) {
+      if (Number.isFinite(v)) allValues.push(v);
+    }
+    if (visibleBenchmarkNormalized) {
+      for (const v of visibleBenchmarkNormalized) {
+        if (v != null && Number.isFinite(v)) allValues.push(v);
       }
-      // Fixed 3-tick render: yMin / 1.0 / yMax keeps the baseline tick
-      // and bounds visible without flooding the DOM. Dedup via Set in
-      // case yMin / yMax round-trip to exactly 1.0 (truly-flat series
-      // post-padding); the existing render code is tolerant of either
-      // 1-tick or 3-tick output here.
+    }
+    for (const o of overlaySeries) {
+      for (const v of o.series) {
+        if (v != null && Number.isFinite(v)) allValues.push(v);
+      }
+    }
+    // Manual loop instead of Math.min(...allValues) — on the ALL period with
+    // benchmark + ~20 overlay series the array grows to ~50k+ values, and
+    // spreading into Math.min/max blows the JS call stack at ~125k args.
+    let yMin = 0;
+    let yMax = 1;
+    if (allValues.length) {
+      yMin = allValues[0];
+      yMax = allValues[0];
+      for (let i = 1; i < allValues.length; i++) {
+        const v = allValues[i];
+        if (v < yMin) yMin = v;
+        else if (v > yMax) yMax = v;
+      }
+    }
+    // Keep 1.0 (the 0% baseline) inside the plotted range so the baseline
+    // reference line is always visible — without this, a strictly-up line
+    // clips the 0% tick off-screen.
+    yMin = Math.min(yMin, 1);
+    yMax = Math.max(yMax, 1);
+    // 4% visual padding so the line doesn't kiss the top or bottom edge.
+    const yPadding = (yMax - yMin) * 0.04 || 0.002;
+    yMin -= yPadding;
+    yMax += yPadding;
+    const yRange = yMax - yMin || 1;
+
+    // Y-axis ticks — snap to "nice" percentage steps so labels don't read
+    // "+1.37%". Always includes 1.0 so the 0% baseline sits on a tick.
+    // PR4 #4: enforce a 5-tick minimum so narrow data ranges (test data,
+    // flat-line allocators) match the truth screenshot's density. We pick
+    // the LARGEST nice candidate that still yields >= MIN_TICKS — accepts a
+    // sub-1% step like 0.25% on tight ranges so the strip never collapses
+    // to 3 labels (+0% / -0.5% / -1.0%).
+    const yTicks: number[] = (() => {
+      const MIN_TICKS = 5;
+      const niceMultipliers = [1, 2, 2.5, 5];
+      const candidates: number[] = [];
+      for (let p = -3; p <= 3; p++) {
+        const pow = Math.pow(10, p);
+        for (const m of niceMultipliers) candidates.push(m * pow);
+      }
+      candidates.sort((a, b) => a - b);
+      const tickCount = (sp: number) => {
+        const stepVal = sp / 100;
+        const below = Math.floor((1 - yMin) / stepVal);
+        const above = Math.floor((yMax - 1) / stepVal);
+        return 1 + below + above;
+      };
+      // tickCount is monotonically decreasing in `c`. Walk ascending and
+      // keep the largest candidate that still meets MIN_TICKS; bail on
+      // first failure.
       //
-      // retro audit (red-team L4 c8): even with the push-time isFinite
-      // filter above, defence-in-depth — if the filter ever lets a
-      // non-finite bound through, we DO NOT want it to reach the SVG
-      // y() coordinate function (NaN → invalid SVG text attribute,
-      // invisible labels with no signal). Filter the fallback set so
-      // a degenerate input shape can't produce a degenerate render.
-      return Array.from(
-        new Set([yMin, 1, yMax].filter((v) => Number.isFinite(v))),
-      ).sort((a, b) => a - b);
-    }
-    const stepVal = stepPct / 100;
-    const ticks = new Set<number>();
-    ticks.add(1);
-    for (let v = 1 - stepVal; v >= yMin; v -= stepVal) ticks.add(v);
-    for (let v = 1 + stepVal; v <= yMax; v += stepVal) ticks.add(v);
-    // pr189-followup H3 (silent-failure-hunter HIGH/8) — the M-1065 fix
-    // only fires the 3-tick fallback when `!satisfied`. For TRULY-flat
-    // series where one candidate clears MIN_TICKS via yPadding=0.002,
-    // the loops above can still emit 400+ ticks (stepPct=0.001%, range
-    // ~0.004 → ~401 ticks). The original silent-failure surface (DOM
-    // flood, no warning, no fallback) survives. Cap at 50 ticks; if
-    // exceeded, emit a one-shot warn and fall back to the 3-tick safe
-    // render. Belt-and-suspenders alongside the !satisfied path.
-    if (ticks.size > 50) {
-      if (typeof console !== "undefined") {
-        console.warn(
-          "[EquityChart] y-tick walker emitted >50 ticks for narrow range; capping at 3-tick fallback",
-          { tickCount: ticks.size, yMin, yMax, stepPct },
-        );
+      // audit-2026-05-07 M-1065 c8 — on degenerate ranges (yMin == yMax, or
+      // tickCount(candidates[0]) already < MIN_TICKS because the padded
+      // range is too small) the previous code left `stepPct` stuck at the
+      // SEED value `candidates[0] = 0.001`%. The for-v loops below then
+      // iterated ~80000+ ticks across the padded range, producing a
+      // DOM/SVG flood with no error, no log, no fallback. Track whether
+      // ANY candidate cleared MIN_TICKS; if none did, fall back to a 3-tick
+      // render (yMin, 1, yMax) so the axis stays sane on flat-line
+      // allocators and emit a one-shot console.warn so the case surfaces.
+      let stepPct = candidates[0];
+      let satisfied = false;
+      for (const c of candidates) {
+        if (tickCount(c) >= MIN_TICKS) {
+          stepPct = c;
+          satisfied = true;
+        } else break;
       }
-      return Array.from(
-        new Set([yMin, 1, yMax].filter((v) => Number.isFinite(v))),
-      ).sort((a, b) => a - b);
-    }
-    return Array.from(ticks).sort((a, b) => a - b);
-  })();
-
-  const x = (i: number) =>
-    n <= 1 ? pad.l + chartW / 2 : pad.l + (i / (n - 1)) * chartW;
-  const y = (v: number) => pad.t + (1 - (v - yMin) / yRange) * chartH;
-
-  const toPath = (arr: Array<number | null>) => {
-    let d = "";
-    let first = true;
-    for (let i = 0; i < arr.length; i++) {
-      const v = arr[i];
-      // M-0202: skip non-finite points (Infinity/NaN) the same as null, else
-      // y(Infinity) = -Infinity leaks a literal "-Infinity" coordinate into
-      // the SVG path `d`, producing an invalid/off-screen line with no
-      // diagnostic. A break in the path (first=true) is the correct degrade.
-      if (v == null || !Number.isFinite(v)) {
-        first = true;
-        continue;
-      }
-      d += `${first ? "M" : "L"}${x(i).toFixed(2)},${y(v).toFixed(2)} `;
-      first = false;
-    }
-    return d.trim();
-  };
-
-  const toArea = (arr: Array<number | null>) => {
-    const path = toPath(arr);
-    if (!path) return "";
-    return `${path} L${x(n - 1).toFixed(2)},${(pad.t + chartH).toFixed(2)} L${x(0).toFixed(2)},${(pad.t + chartH).toFixed(2)} Z`;
-  };
-
-  // ── Tick density ──────────────────────────────────────────────────
-  // Smart tick density: month ticks when n > 90, else 7 evenly-spaced
-  // "MMM D" ticks. Mirrors designer-bundle/project/src/charts.jsx:50-87.
-  type Tick = { i: number; label: string };
-  const ticks: Tick[] = [];
-  if (n > 90) {
-    const firstEpoch = parseISO(visible[0].date);
-    const lastEpoch = parseISO(visible[n - 1].date);
-    const cursor = new Date(firstEpoch);
-    cursor.setUTCDate(1);
-    let guard = 0;
-    while (cursor.getTime() <= lastEpoch && guard++ < 60) {
-      const monthStart = Date.UTC(
-        cursor.getUTCFullYear(),
-        cursor.getUTCMonth(),
-        1,
-      );
-      const monthEnd = Date.UTC(
-        cursor.getUTCFullYear(),
-        cursor.getUTCMonth() + 1,
-        0,
-      );
-      const visStart = Math.max(monthStart, firstEpoch);
-      const visEnd = Math.min(monthEnd, lastEpoch);
-      const visDays = (visEnd - visStart) / DAY_MS;
-      if (visDays >= 7) {
-        const midEpoch = (visStart + visEnd) / 2;
-        // Map epoch → index by linear search (n is small in practice; this
-        // is O(n*ticks) per render which is < 5k ops at ALL).
-        let bestIdx = 0;
-        let bestDelta = Infinity;
-        for (let i = 0; i < n; i++) {
-          const e = parseISO(visible[i].date);
-          const dlt = Math.abs(e - midEpoch);
-          if (dlt < bestDelta) {
-            bestDelta = dlt;
-            bestIdx = i;
-          }
+      if (!satisfied) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[EquityChart] y-tick walker found no candidate meeting MIN_TICKS — falling back to 3-tick render",
+            { yMin, yMax, MIN_TICKS },
+          );
         }
+        // Fixed 3-tick render: yMin / 1.0 / yMax keeps the baseline tick
+        // and bounds visible without flooding the DOM. Dedup via Set in
+        // case yMin / yMax round-trip to exactly 1.0 (truly-flat series
+        // post-padding); the existing render code is tolerant of either
+        // 1-tick or 3-tick output here.
+        //
+        // retro audit (red-team L4 c8): even with the push-time isFinite
+        // filter above, defence-in-depth — if the filter ever lets a
+        // non-finite bound through, we DO NOT want it to reach the SVG
+        // y() coordinate function (NaN → invalid SVG text attribute,
+        // invisible labels with no signal). Filter the fallback set so
+        // a degenerate input shape can't produce a degenerate render.
+        return Array.from(
+          new Set([yMin, 1, yMax].filter((v) => Number.isFinite(v))),
+        ).sort((a, b) => a - b);
+      }
+      const stepVal = stepPct / 100;
+      const ticks = new Set<number>();
+      ticks.add(1);
+      for (let v = 1 - stepVal; v >= yMin; v -= stepVal) ticks.add(v);
+      for (let v = 1 + stepVal; v <= yMax; v += stepVal) ticks.add(v);
+      // pr189-followup H3 (silent-failure-hunter HIGH/8) — the M-1065 fix
+      // only fires the 3-tick fallback when `!satisfied`. For TRULY-flat
+      // series where one candidate clears MIN_TICKS via yPadding=0.002,
+      // the loops above can still emit 400+ ticks (stepPct=0.001%, range
+      // ~0.004 → ~401 ticks). The original silent-failure surface (DOM
+      // flood, no warning, no fallback) survives. Cap at 50 ticks; if
+      // exceeded, emit a one-shot warn and fall back to the 3-tick safe
+      // render. Belt-and-suspenders alongside the !satisfied path.
+      if (ticks.size > 50) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[EquityChart] y-tick walker emitted >50 ticks for narrow range; capping at 3-tick fallback",
+            { tickCount: ticks.size, yMin, yMax, stepPct },
+          );
+        }
+        return Array.from(
+          new Set([yMin, 1, yMax].filter((v) => Number.isFinite(v))),
+        ).sort((a, b) => a - b);
+      }
+      return Array.from(ticks).sort((a, b) => a - b);
+    })();
+
+    const x = (i: number) =>
+      n <= 1 ? pad.l + chartW / 2 : pad.l + (i / (n - 1)) * chartW;
+    const y = (v: number) => pad.t + (1 - (v - yMin) / yRange) * chartH;
+
+    const toPath = (arr: Array<number | null>) => {
+      let d = "";
+      let first = true;
+      for (let i = 0; i < arr.length; i++) {
+        const v = arr[i];
+        // M-0202: skip non-finite points (Infinity/NaN) the same as null, else
+        // y(Infinity) = -Infinity leaks a literal "-Infinity" coordinate into
+        // the SVG path `d`, producing an invalid/off-screen line with no
+        // diagnostic. A break in the path (first=true) is the correct degrade.
+        if (v == null || !Number.isFinite(v)) {
+          first = true;
+          continue;
+        }
+        d += `${first ? "M" : "L"}${x(i).toFixed(2)},${y(v).toFixed(2)} `;
+        first = false;
+      }
+      return d.trim();
+    };
+
+    const toArea = (arr: Array<number | null>) => {
+      const path = toPath(arr);
+      if (!path) return "";
+      return `${path} L${x(n - 1).toFixed(2)},${(pad.t + chartH).toFixed(2)} L${x(0).toFixed(2)},${(pad.t + chartH).toFixed(2)} Z`;
+    };
+
+    // ── Tick density ──────────────────────────────────────────────────
+    // Smart tick density: month ticks when n > 90, else 7 evenly-spaced
+    // "MMM D" ticks. Mirrors designer-bundle/project/src/charts.jsx:50-87.
+    type Tick = { i: number; label: string };
+    const ticks: Tick[] = [];
+    if (n > 90) {
+      const firstEpoch = parseISO(visible[0].date);
+      const lastEpoch = parseISO(visible[n - 1].date);
+      const cursor = new Date(firstEpoch);
+      cursor.setUTCDate(1);
+      let guard = 0;
+      while (cursor.getTime() <= lastEpoch && guard++ < 60) {
+        const monthStart = Date.UTC(
+          cursor.getUTCFullYear(),
+          cursor.getUTCMonth(),
+          1,
+        );
+        const monthEnd = Date.UTC(
+          cursor.getUTCFullYear(),
+          cursor.getUTCMonth() + 1,
+          0,
+        );
+        const visStart = Math.max(monthStart, firstEpoch);
+        const visEnd = Math.min(monthEnd, lastEpoch);
+        const visDays = (visEnd - visStart) / DAY_MS;
+        if (visDays >= 7) {
+          const midEpoch = (visStart + visEnd) / 2;
+          // Map epoch → index by linear search (n is small in practice; this
+          // is O(n*ticks) per render which is < 5k ops at ALL).
+          let bestIdx = 0;
+          let bestDelta = Infinity;
+          for (let i = 0; i < n; i++) {
+            const e = parseISO(visible[i].date);
+            const dlt = Math.abs(e - midEpoch);
+            if (dlt < bestDelta) {
+              bestDelta = dlt;
+              bestIdx = i;
+            }
+          }
+          ticks.push({
+            i: bestIdx,
+            label: new Date(monthStart).toLocaleDateString("en-US", {
+              month: "short",
+              timeZone: "UTC",
+            }),
+          });
+        }
+        cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+      }
+    } else {
+      const target = 7;
+      const step = Math.max(1, Math.round(n / target));
+      for (let i = n - 1; i >= 0; i -= step) {
+        const d = new Date(parseISO(visible[i].date));
         ticks.push({
-          i: bestIdx,
-          label: new Date(monthStart).toLocaleDateString("en-US", {
+          i,
+          label: d.toLocaleDateString("en-US", {
             month: "short",
+            day: "numeric",
             timeZone: "UTC",
           }),
         });
       }
-      cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+      ticks.reverse();
     }
-  } else {
-    const target = 7;
-    const step = Math.max(1, Math.round(n / target));
-    for (let i = n - 1; i >= 0; i -= step) {
-      const d = new Date(parseISO(visible[i].date));
-      ticks.push({
-        i,
-        label: d.toLocaleDateString("en-US", {
-          month: "short",
-          day: "numeric",
-          timeZone: "UTC",
-        }),
-      });
-    }
-    ticks.reverse();
+
+    return {
+      pad,
+      height,
+      chartW,
+      chartH,
+      n,
+      visibleNormalized,
+      periodReturnPositive,
+      periodReturnLabel,
+      visibleBenchmarkNormalized,
+      yTicks,
+      x,
+      y,
+      toPath,
+      toArea,
+      ticks,
+    };
+    // `visible` already derives from `composite` (which derives from
+    // `equityDailyPoints`), so it transitively covers any content change;
+    // `equityDailyPoints` + `composite` are listed for the empty-guard
+    // reads and to satisfy exhaustive-deps / preserve-manual-memoization.
+  }, [
+    equityDailyPoints,
+    composite,
+    visible,
+    visibleBenchmark,
+    overlaySeries,
+    width,
+  ]);
+
+  // Single warm-up early-return — covers BOTH the empty-series case and the
+  // degenerate-base (M-1063) case, which the memo collapses to `null`.
+  if (!projection) {
+    return (
+      <div
+        ref={wrapRef}
+        className="flex h-[260px] w-full items-center justify-center text-sm text-text-muted"
+        role="img"
+        aria-label="Equity chart"
+      >
+        Equity data warming up
+      </div>
+    );
   }
+
+  const {
+    pad,
+    height,
+    chartW,
+    chartH,
+    n,
+    visibleNormalized,
+    periodReturnPositive,
+    periodReturnLabel,
+    visibleBenchmarkNormalized,
+    yTicks,
+    x,
+    y,
+    toPath,
+    toArea,
+    ticks,
+  } = projection;
 
   // ── Hover ─────────────────────────────────────────────────────────
   function handleMove(e: React.MouseEvent<SVGSVGElement>) {
@@ -1403,7 +1517,15 @@ export default function EquityChartWidget({ data }: WidgetProps) {
     [d.equityDailyPoints],
   );
   const benchmark = d.btcBenchmark;
-  const overlays = d.equityOverlays ?? [];
+  // Stabilize the array reference (mirrors `equityDailyPoints` above):
+  // a bare `?? []` allocates a fresh array each render, bypassing the
+  // EquityChart `EMPTY_OVERLAYS` stable-default and churning the
+  // enrichedOverlays → overlaySeries → projection memos whenever this
+  // wrapper re-renders (e.g. the gated minute tick).
+  const overlays = useMemo(
+    () => d.equityOverlays ?? [],
+    [d.equityOverlays],
+  );
   const stale = d.allKeysStale ?? false;
   const lastSyncAt = d.lastSyncAt ?? null;
   const hasBenchmark = !!benchmark && benchmark.length > 0;
@@ -1453,11 +1575,14 @@ export default function EquityChartWidget({ data }: WidgetProps) {
   );
 
   // CustomRangePicker `min` — first f7-anchored date so the picker can't
-  // resolve into the leading-zero warmup window.
+  // resolve into the leading-zero warmup window. H-1224 c9: build via the
+  // local-midnight convention (NOT `new Date(parseISO(...))`, a UTC epoch)
+  // so the picker — which reads `min` with local-time accessors — agrees
+  // with this bound for users west of UTC instead of landing one day early.
   const minDate = useMemo(
     () =>
       anchored.length > 0
-        ? new Date(parseISO(anchored[0].date))
+        ? localDateFromISO(anchored[0].date)
         : new Date(),
     [anchored],
   );
