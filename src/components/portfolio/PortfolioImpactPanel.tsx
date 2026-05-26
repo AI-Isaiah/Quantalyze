@@ -611,15 +611,21 @@ function buildDeltaAnnouncement(deltas: SimulatorDeltas): string {
 
 function formatAnnouncementChip(
   label: string,
-  value: number,
+  value: number | null,
   format: "ratio" | "percent",
 ): string {
+  // NEW-C11-01: null delta = not computable, emit a distinct phrase.
+  if (value === null) return `${label} not computable`;
   const direction =
     value > 0 ? "improved" : value < 0 ? "regressed" : "unchanged";
   if (value === 0) return `${label} unchanged`;
+  // NEW-C11-07: use Math.abs() so the word ("improved"/"regressed") carries
+  // the sign once — "regressed by 0.50%" is unambiguous; "regressed by -0.50%"
+  // is a double-negative that screen-reader users hear as an improvement.
+  const magnitude = Math.abs(value);
   const delta =
     format === "percent"
-      ? `${value > 0 ? "+" : ""}${(value * 100).toFixed(2)}%`
-      : `${value > 0 ? "+" : ""}${value.toFixed(3)}`;
+      ? `${(magnitude * 100).toFixed(2)}%`
+      : `${magnitude.toFixed(3)}`;
   return `${label} ${direction} by ${delta}`;
 }

@@ -120,9 +120,10 @@ describe("<PortfolioImpactPanel>", () => {
       />,
     );
 
+    // NEW-C11-07: magnitude-only (no sign prefix) — the word "improved" carries direction.
     await waitFor(() =>
       expect(
-        screen.getByText(/Sharpe improved by \+0\.150/),
+        screen.getByText(/Sharpe improved by 0\.150/),
       ).toBeInTheDocument(),
     );
   });
@@ -463,14 +464,16 @@ describe("<PortfolioImpactPanel>", () => {
       />,
     );
 
-    // value < 0 → "regressed by -0.150" (NOT "improved").
+    // NEW-C11-07: value < 0 → "regressed by 0.150" (magnitude only, no double-negative).
     await waitFor(() =>
       expect(
-        screen.getByText(/Sharpe regressed by -0\.150/),
+        screen.getByText(/Sharpe regressed by 0\.150/),
       ).toBeInTheDocument(),
     );
     const status = screen.getByRole("status");
-    expect(status.textContent).toMatch(/Sharpe regressed by -0\.150/);
+    expect(status.textContent).toMatch(/Sharpe regressed by 0\.150/);
+    // Must NOT use double-negative "-0.150" nor "improved".
+    expect(status.textContent).not.toMatch(/regressed by -/);
     expect(status.textContent).not.toMatch(/Sharpe improved/);
   });
 
