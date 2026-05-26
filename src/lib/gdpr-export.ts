@@ -1873,31 +1873,37 @@ async function fetchRowsForSpec(
   // chunked at EXPORT_PARENT_ID_IN_CHUNK (500) to stay under common
   // intermediate-proxy URL limits. For users with > 500 parent rows
   // we fan out across multiple SELECTs and concatenate the results.
-  // The per-call `.limit(EXPORT_PER_TABLE_ROW_CAP)` becomes a global
-  // cap across the union — we short-circuit additional chunks once
-  // the row cap is reached. Determinism (H-0456) survives because the
-  // parent ids are already ORDERED by id and the chunks process in
-  // ascending order; merged child rows are then sorted in a final
-  // pass that's also stable on `orderCol`.
+  //
+  // NEW-C16-07 (audit 2026-05-26, MED conf-8): pre-fix, the loop used
+  // `remainingBudget` (= cap - aggregated.length) as the per-chunk
+  // LIMIT and short-circuited early once the running total hit the cap.
+  // This is INCORRECT for >1 chunk: each chunk is ordered within itself
+  // by orderCol, but the concatenation is ordered by (chunk index, then
+  // orderCol) — NOT globally by orderCol. The cap then drops whichever
+  // rows happened to sit at the tail of the last processed chunk rather
+  // than the globally-oldest rows, violating the H-0456 determinism
+  // contract and silently omitting a non-deterministic subset.
+  //
+  // FIX: each chunk queries up to EXPORT_PER_TABLE_ROW_CAP rows (the
+  // ceiling of how many this chunk could need). After ALL chunks are
+  // collected, the full aggregated list is sorted GLOBALLY by orderCol
+  // (ascending, string-compare — correct for both UUID and ISO-8601
+  // timestamp columns, which are the only orderCol shapes in the
+  // current manifest). The row cap is then applied as a post-sort slice
+  // so the retained subset matches a single global
+  // `ORDER BY orderCol LIMIT cap`. `aggregatedTruncated` is set when
+  // the pre-cap total exceeds the cap (we had more globally-sorted rows
+  // to give than the cap allows).
   const aggregated: unknown[] = [];
   let aggregatedError: string | null = null;
-  let aggregatedTruncated = false;
   for (let start = 0; start < parentIds.length; start += EXPORT_PARENT_ID_IN_CHUNK) {
     const chunk = parentIds.slice(start, start + EXPORT_PARENT_ID_IN_CHUNK);
-    // Per-chunk remaining budget: the global cap is across the union.
-    const remainingBudget = EXPORT_PER_TABLE_ROW_CAP - aggregated.length;
-    if (remainingBudget <= 0) {
-      // Already at cap; any further rows would be truncated. Mark and
-      // stop probing more chunks — saves N round-trips for nothing.
-      aggregatedTruncated = true;
-      break;
-    }
     const { data: chunkData, error: chunkErr } = await admin
       .from(spec.table)
       .select("*")
       .in(spec.via_column, chunk)
       .order(orderCol, { ascending: true })
-      .limit(remainingBudget);
+      .limit(EXPORT_PER_TABLE_ROW_CAP);
     if (chunkErr) {
       aggregatedError = `indirect select failed for ${spec.table}: ${chunkErr.message}`;
       console.error(`[gdpr-export] ${aggregatedError}`);
@@ -1905,10 +1911,20 @@ async function fetchRowsForSpec(
     }
     const chunkRows = chunkData ?? [];
     aggregated.push(...chunkRows);
-    if (chunkRows.length >= remainingBudget) {
-      aggregatedTruncated = true;
-      break;
-    }
+  }
+  // Global stable sort by orderCol across all chunks (NEW-C16-07).
+  // String comparison is monotone for both UUID and ISO-8601 columns.
+  aggregated.sort((a, b) => {
+    const av = (a as Record<string, unknown>)[orderCol];
+    const bv = (b as Record<string, unknown>)[orderCol];
+    if (av == null && bv == null) return 0;
+    if (av == null) return -1;
+    if (bv == null) return 1;
+    return String(av) < String(bv) ? -1 : String(av) > String(bv) ? 1 : 0;
+  });
+  const aggregatedTruncated = aggregated.length > EXPORT_PER_TABLE_ROW_CAP;
+  if (aggregatedTruncated) {
+    aggregated.splice(EXPORT_PER_TABLE_ROW_CAP);
   }
   if (aggregatedError) {
     // Audit 2026-05-07 red-team #12 (MED conf-8, chain): precedence

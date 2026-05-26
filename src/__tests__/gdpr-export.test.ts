@@ -1736,6 +1736,92 @@ describe("collectUserExportBundle — chunked indirect IN under proxy limits (re
     const total = inCalls.reduce((s, n) => s + n, 0);
     expect(total).toBe(1200);
   });
+
+  it("NEW-C16-07: multi-chunk indirect fetch is globally sorted post-collection, not chunk-ordered", async () => {
+    // Scenario: 2 chunks of parent IDs. Chunk 1 (parents p-0..p-499) returns
+    // child rows with id/orderCol values "t-Z" (lexically LAST). Chunk 2
+    // (parents p-500..p-999) returns child rows with id "t-A" (lexically
+    // FIRST). Pre-fix the cap sliced the concatenation — chunk 1 rows all had
+    // a high orderCol so if the cap was hit, chunk 1 rows (which come first in
+    // the concatenation) would survive while chunk 2 rows (t-A, which are
+    // globally older) would be dropped. The fix sorts globally BEFORE capping.
+    //
+    // We seed 3 rows from chunk 1 (id: t-Z2, t-Z1, t-Z0 — lexically late)
+    // and 3 from chunk 2 (id: t-A2, t-A1, t-A0 — lexically early). Global
+    // sort ascending should order t-A0 < t-A1 < t-A2 < t-Z0 < t-Z1 < t-Z2.
+
+    const chunk1ParentRows = Array.from({ length: EXPORT_PARENT_ID_IN_CHUNK }, (_, i) => ({
+      id: `p-${i}`,
+    }));
+    const chunk2ParentRows = Array.from({ length: 3 }, (_, i) => ({
+      id: `p-${EXPORT_PARENT_ID_IN_CHUNK + i}`,
+    }));
+    const allParentRows = [...chunk1ParentRows, ...chunk2ParentRows];
+
+    // Chunk 1 children — lexically LAST orderCol values
+    const chunk1Children = [
+      { id: "t-Z2", strategy_id: "p-0" },
+      { id: "t-Z1", strategy_id: "p-1" },
+      { id: "t-Z0", strategy_id: "p-2" },
+    ];
+    // Chunk 2 children — lexically FIRST orderCol values
+    const chunk2Children = [
+      { id: "t-A2", strategy_id: `p-${EXPORT_PARENT_ID_IN_CHUNK}` },
+      { id: "t-A1", strategy_id: `p-${EXPORT_PARENT_ID_IN_CHUNK + 1}` },
+      { id: "t-A0", strategy_id: `p-${EXPORT_PARENT_ID_IN_CHUNK + 2}` },
+    ];
+
+    // Separate counter per table so other indirect tables don't interfere.
+    const tradesInCallCount = { v: 0 };
+    const mock = {
+      from: (table: string) => {
+        const probeLimit = async () => ({ data: allParentRows, error: null });
+        const emptyLimit = async () => ({ data: [], error: null });
+        return {
+          select: (projection: string) => {
+            const limit =
+              projection === "id" && table === "strategies"
+                ? probeLimit
+                : emptyLimit;
+            return {
+              eq: () => ({
+                order: () => ({ limit }),
+                limit,
+              }),
+              in: (_col: string, _ids: unknown[]) => {
+                if (table !== "trades") {
+                  return {
+                    order: () => ({ limit: emptyLimit }),
+                    limit: emptyLimit,
+                  };
+                }
+                const chunkIdx = tradesInCallCount.v++;
+                const rows = chunkIdx === 0 ? chunk1Children : chunk2Children;
+                return {
+                  order: () => ({
+                    limit: async () => ({ data: rows, error: null }),
+                  }),
+                  limit: async () => ({ data: rows, error: null }),
+                };
+              },
+            };
+          },
+        };
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "17171717-1717-1717-1717-171717171717");
+
+    const tradesEntry = bundle.tables.find((t) => t.table === "trades");
+    expect(tradesEntry).toBeDefined();
+    // All 6 rows must be present (well under the cap).
+    expect(tradesEntry!.row_count).toBe(6);
+    const ids = (tradesEntry!.rows as Array<{ id: string }>).map((r) => r.id);
+    // Global sort: t-A0, t-A1, t-A2 come before t-Z0, t-Z1, t-Z2.
+    // Without the fix, the order would be t-Z2, t-Z1, t-Z0, t-A2, t-A1, t-A0
+    // (chunk 1 first, then chunk 2).
+    expect(ids).toEqual(["t-A0", "t-A1", "t-A2", "t-Z0", "t-Z1", "t-Z2"]);
+  });
 });
 
 /**
