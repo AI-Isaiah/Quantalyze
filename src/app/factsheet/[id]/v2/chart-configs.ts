@@ -13,6 +13,17 @@ import type { ComparatorBlock, FactsheetPayload } from "@/lib/factsheet/types";
 
 export type ChartValueFormat = "growth" | "percent" | "ratio";
 
+/**
+ * Keys of ComparatorBlock whose value is a numeric-series type (array of
+ * number | null, or null). Non-series fields (name, shortName, summary,
+ * joint, volMatchedLabel) are excluded so a misconfigured comparatorField
+ * fails to compile instead of silently resolving to nothing at runtime.
+ * (NEW-C20-11)
+ */
+export type ComparatorSeriesKey = {
+  [K in keyof ComparatorBlock]: ComparatorBlock[K] extends (Array<number | null> | number[] | null) ? K : never;
+}[keyof ComparatorBlock];
+
 export type ChartConfig = {
   key: string;
   title: string;
@@ -37,8 +48,10 @@ export type ChartConfig = {
     | "strategyRollingSortino"
     | "strategyDrawdowns"
     | null;
-  /** Which comparator-block field provides the comparator series. */
-  comparatorField: keyof ComparatorBlock | null;
+  /** Which comparator-block field provides the comparator series.
+   *  Restricted to fields whose value is a numeric array (never string/object
+   *  fields) so a misconfigured chart fails to compile. (NEW-C20-11) */
+  comparatorField: ComparatorSeriesKey | null;
   /** When true, the comparator IS the primary line — label uses `comparatorAsPrimaryPrefix`. */
   comparatorAsPrimary?: boolean;
   comparatorAsPrimaryPrefix?: string;
