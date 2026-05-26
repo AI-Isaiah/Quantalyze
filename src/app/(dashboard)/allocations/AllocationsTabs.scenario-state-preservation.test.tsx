@@ -72,9 +72,15 @@ vi.mock("./ScenarioStub", () => ({
 // We deliberately do NOT mock ./components/ScenarioComposer or
 // ../hooks/useScenarioState — those are the integration units under test.
 
-vi.mock("./widgets/performance/EquityChart", () => ({
-  EquityChart: () => <div data-testid="equity-chart-mock" />,
-}));
+vi.mock("./widgets/performance/EquityChart", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("./widgets/performance/EquityChart")
+  >();
+  return {
+    ...actual,
+    EquityChart: () => <div data-testid="equity-chart-mock" />,
+  };
+});
 vi.mock("./widgets/performance/DrawdownChart", () => ({
   default: () => <div data-testid="drawdown-chart-mock" />,
   deriveSnapshotDrawdowns: vi.fn(() => []),
