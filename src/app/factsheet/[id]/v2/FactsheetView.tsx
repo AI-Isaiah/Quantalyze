@@ -17,6 +17,11 @@ import { MasterBrush } from "./MasterBrush";
 import { StressWindowsPanel } from "./StressWindowsPanel";
 import { CollapsibleSection, FACTSHEET_OPEN_ALL_EVENT } from "./CollapsibleSection";
 import { LazyMount } from "./LazyMount";
+// IMPORTANT-1/FINDING-8 (b06-codereview/silentfailure): Import the single-source
+// formatters from format.ts so FactsheetView uses the same implementation that
+// the audit tests cover. The private pct/pctSigned/num copies below were
+// equivalent today but divergences would silently escape test coverage.
+import { pct, pctSigned, ratio as num } from "./format";
 
 /**
  * Code-split the three heaviest panels off the initial route bundle. These
@@ -218,7 +223,13 @@ export function FactsheetBody({
             >
               <StressWindowsPanel />
             </CollapsibleSection>
-            {hasComparator && (
+            {/* FINDING-2 (b06-silentfailure): Gate signatures on ingestSource === "api"
+                in addition to hasComparator. Event signatures stitch the internal BTC
+                fixture alongside the strategy returns; for CSV strategies with too few
+                observations aggregate() fills empty trace populations with all-zero
+                arrays — fabricating a flat zero band line indistinguishable from a
+                real observation at 0% delta. Suppress for CSV to prevent false panels. */}
+            {hasComparator && payload.ingestSource === "api" && (
               <CollapsibleSection
                 id="factsheet-signatures"
                 title="Returns Signatures"
@@ -377,7 +388,14 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
   // values are author-declared free-text — surface a "self-reported" qualifier
   // beside the chip line and the AUM/capacity chip so readers aren't misled
   // into treating them as verified facts. (NEW-C20-02)
-  const isSelfReported = payload.trustTier !== "api_verified";
+  //
+  // FINDING-3 (b06-silentfailure): trustTier=null means UNVERIFIED — the
+  // strategy has never been through any verification step. "Self-reported" is
+  // the specific trust-tier value "self_reported" or "csv_uploaded", meaning the
+  // author explicitly declared the values. A null strategy gets no qualifier
+  // (TrustTierLabel already handles the null case), not a false "self-reported".
+  const isSelfReported =
+    payload.trustTier === "csv_uploaded" || payload.trustTier === "self_reported";
 
   return (
     <header className="border-b border-text pb-6">
@@ -631,16 +649,30 @@ function KpiStrip() {
  * on narrow widths.
  */
 function SectionNav() {
-  const sections: { id: string; label: string }[] = React.useMemo(() => [
-    { id: "factsheet-perf", label: "Performance" },
-    { id: "factsheet-dist", label: "Distribution" },
-    { id: "factsheet-heatmaps", label: "Heatmaps" },
-    { id: "factsheet-stress", label: "Stress" },
-    { id: "factsheet-signatures", label: "Signatures" },
-    { id: "factsheet-streak", label: "Streaks" },
-    { id: "factsheet-allocator", label: "Allocator" },
-    { id: "factsheet-metrics", label: "Metrics" },
-  ], []);
+  const payload = usePayload();
+  const { key: cmpKey } = useActiveComparator();
+  // FINDING-10 (b06-silentfailure): Filter out sections whose content is
+  // conditionally suppressed so the nav doesn't contain dead anchors.
+  // "Allocator" is only rendered when ingestSource === "api" (no-invented-data).
+  // "Signatures" is only rendered when hasComparator AND ingestSource === "api".
+  const hasComparator = cmpKey !== "none";
+  const sections: { id: string; label: string }[] = React.useMemo(() => {
+    const base: { id: string; label: string }[] = [
+      { id: "factsheet-perf", label: "Performance" },
+      { id: "factsheet-dist", label: "Distribution" },
+      { id: "factsheet-heatmaps", label: "Heatmaps" },
+      { id: "factsheet-stress", label: "Stress" },
+      ...(hasComparator && payload.ingestSource === "api"
+        ? [{ id: "factsheet-signatures", label: "Signatures" }]
+        : []),
+      { id: "factsheet-streak", label: "Streaks" },
+      ...(payload.ingestSource === "api"
+        ? [{ id: "factsheet-allocator", label: "Allocator" }]
+        : []),
+      { id: "factsheet-metrics", label: "Metrics" },
+    ];
+    return base;
+  }, [payload.ingestSource, hasComparator]);
   const [active, setActive] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -735,7 +767,13 @@ function ShareLinkButton({ strategyId }: { strategyId: string }) {
         setCopied(true);
         window.setTimeout(() => setCopied(false), 1500);
       },
-      () => { /* clipboard denied — fall back silently */ },
+      () => {
+        // FINDING-9 (b06-silentfailure): Log so we can track clipboard
+        // denial rates (common on non-HTTPS or when permission is denied).
+        // Don't set copied=true so the button label stays "Copy share link"
+        // and the user knows they need to copy manually.
+        console.warn("[factsheet] clipboard.writeText denied", { strategyId });
+      },
     );
     trackFactsheetEvent("factsheet_v2_share_copy", { strategy_id: strategyId });
   }, [strategyId]);
@@ -907,24 +945,9 @@ function FactsheetFooter({ payload }: { payload: FactsheetPayload }) {
   );
 }
 
-// Formatters accept number | null | undefined so nullable metrics from
-// ComputeResult (recovery_factor, tail_ratio, omega_ratio, common_sense_ratio)
-// are handled cleanly — a null/undefined renders "—" not a crash or a
-// fabricated 0. (NEW-C20-04)
-function pct(v: number | null | undefined, dp = 2): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return `${(v * 100).toFixed(dp)}%`;
-}
-
-function pctSigned(v: number | null | undefined, dp = 2): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return (v >= 0 ? "+" : "") + (v * 100).toFixed(dp) + "%";
-}
-
-function num(v: number | null | undefined): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return v.toFixed(2);
-}
+// pct / pctSigned / num are imported from "./format" at the top of this file.
+// (IMPORTANT-1/FINDING-8 — b06-codereview/silentfailure): removed private
+// copies to ensure a single implementation is tested by audit-c20.test.ts.
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 

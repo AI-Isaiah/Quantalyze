@@ -66,12 +66,34 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
   // Ingest source: daily_returns populated by CSV ingest; returns_series by
   // the analytics-service (live API). If daily_returns resolved we have a
   // CSV strategy; otherwise it came from the live-data path. (NEW-C20-01)
+  //
+  // CRITICAL: An empty array ([] length 0) means the CSV ingester ran but
+  // produced no rows. That is STILL a CSV strategy — classifying it as "api"
+  // would unlock PeerPercentile and AllocatorSection panels that must not
+  // render for CSV strategies (no-invented-data contract). Reserve "api" only
+  // for null/undefined (column was never written by the CSV ingester).
+  // (FINDING-1 — b06-silentfailure)
   const ingestSource: IngestSource =
-    Array.isArray(dailyRaw) && (dailyRaw as unknown[]).length > 0
-      ? "csv"
-      : typeof dailyRaw === "object" && dailyRaw !== null && !Array.isArray(dailyRaw) && Object.keys(dailyRaw as object).length > 0
-        ? "csv"
-        : "api";
+    Array.isArray(dailyRaw)
+      ? "csv"                              // any array, empty or not = CSV path touched this strategy
+      : typeof dailyRaw === "object" && dailyRaw !== null
+        ? "csv"                            // object dict = CSV attempted
+        : "api";                           // null/undefined = only analytics-service path
+  // Warn when both daily_returns (CSV indicator) and returns_series (API
+  // indicator) are populated — ambiguous provenance may mis-classify an
+  // api-verified strategy as csv if the ingester later back-fills the column.
+  // (IMPORTANT-3 — b06-codereview)
+  if (
+    Array.isArray(dailyRaw) &&
+    analytics?.returns_series != null &&
+    typeof analytics.returns_series === "object" &&
+    Object.keys(analytics.returns_series as object).length > 0
+  ) {
+    console.warn(
+      "[factsheet] fetchAndBuildPayload — both daily_returns and returns_series populated; ingestSource='csv' applied conservatively",
+      { id },
+    );
+  }
   if (dailyReturns.length === 0) {
     console.warn("[factsheet] fetchAndBuildPayload — no usable return series after normalization + equity-curve fallback", {
       id,
@@ -83,7 +105,17 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     return null;
   }
 
-  const computedAt = analytics?.computed_at ?? new Date().toISOString();
+  // FINDING-5 (b06-silentfailure): Never fall back to "now" for a missing
+  // computed_at — that would make FreshnessChip show a green "fresh" badge
+  // for a strategy with no real analytics data. Use the epoch sentinel so
+  // the chip renders "old" / staleness signal instead of a false freshness.
+  if (!analytics?.computed_at) {
+    console.warn(
+      "[factsheet] fetchAndBuildPayload — analytics.computed_at missing, freshness chip will show epoch",
+      { id },
+    );
+  }
+  const computedAt = analytics?.computed_at ?? "1970-01-01T00:00:00Z";
   // Factsheet is a "full identity" context per the strategy-display.ts
   // contract: prefer the real name, fall back to codename, then to the
   // synthetic Strategy#id. Without this, exploratory strategies with a
@@ -298,6 +330,18 @@ export default async function FactsheetV2Page({
 
   // Trust tier is per-request (not cached with payload) so verification flips
   // don't require a payload cache bust.
+  // FINDING-4 (b06-silentfailure): Log if the verifications query failed so
+  // the silent drop is visible in Sentry / server console. An api_verified
+  // strategy temporarily losing its badge is a meaningful trust-signal regression.
+  if (vRes.error) {
+    console.error(
+      "[factsheet/v2/page] strategy_verifications query failed — trustTier falling to null",
+      {
+        id,
+        errorMessage: (vRes.error as { message?: string })?.message,
+      },
+    );
+  }
   const vRows = vRes.data;
   const rawTrustTier = (vRows?.[0]?.trust_tier ?? null) as string | null;
   const trustTier: TrustTierKind | null =
@@ -317,7 +361,16 @@ export default async function FactsheetV2Page({
     description: payloadWithTrust.description ?? undefined,
     provider: { "@type": "Organization", name: "Quantalyze" },
     feesAndCommissionsSpecification: payloadWithTrust.aum != null ? `AUM ${payloadWithTrust.aum}` : undefined,
-    interestRate: payloadWithTrust.strategyMetrics.cagr,
+    // FINDING-7 (b06-silentfailure): Only publish CAGR as a machine-readable
+    // interestRate when it is a finite number AND the strategy is API-verified.
+    // NaN/Infinity serialize to null in JSON (benign but misleading), and CSV
+    // strategies with short track records should not have their annualized CAGR
+    // ingested by crawlers as a verified yield figure.
+    interestRate:
+      Number.isFinite(payloadWithTrust.strategyMetrics.cagr) &&
+      payloadWithTrust.ingestSource === "api"
+        ? payloadWithTrust.strategyMetrics.cagr
+        : undefined,
   };
   const jsonLdStr = JSON.stringify(jsonLd).replace(/</g, "\\u003c");
 
