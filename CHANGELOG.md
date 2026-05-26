@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.9.8] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: GDPR export (batch b01)
+- **CRITICAL:** schema-aware export ORDER BY — `getOrderColumn` no longer `.order("id")` on id-less tables that 500'd every Art.15/20 export (NEW-C16-01)
+- Export now covers audit_log_cold archive, positions/position_snapshots, csv_daily_returns; audit-log widened to entity/metadata-target rows (C16-02/03/04/09)
+- Redact cross-party identifiers in match tables + bridge_outcome_dismissals (PII) (C16-05/08)
+- Global stable sort + memory-bounded chunked indirect fetch; admin self-deletion-reject hardening (C16-07/10, C36-01)
+
+
 All notable changes to Quantalyze will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
