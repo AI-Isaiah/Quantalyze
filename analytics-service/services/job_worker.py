@@ -413,18 +413,34 @@ async def _check_circuit_breaker(
     # OTHER container is respected, not masked by the stale key_row snapshot.
     try:
         def _read_429_fresh():
+            # silent-failure/F-10: use maybe_single() — .single() raises
+            # APIError/PGRST116 when zero rows are returned (row deleted
+            # between initial load and re-fetch). maybe_single() returns
+            # None cleanly, avoiding a spurious exception that would be
+            # swallowed here and leave the stale snapshot in use.
             return (
                 supabase.table("api_keys")
                 .select("last_429_at")
                 .eq("id", key_row["id"])
-                .single()
+                .maybe_single()
                 .execute()
             )
         fresh = await db_execute(_read_429_fresh)
         if fresh and fresh.data and fresh.data.get("last_429_at"):
             last_429_str = fresh.data["last_429_at"]
-    except Exception:  # noqa: BLE001
-        pass  # fall through to key_row value — best-effort
+    except asyncio.CancelledError:
+        raise  # never swallow cancellation — propagate to worker shutdown
+    except Exception as _refetch_exc:  # noqa: BLE001
+        # silent-failure/F-02: bare `pass` silenced all errors including
+        # network failures, KeyError, and asyncio.CancelledError (pre-3.11).
+        # Log so operators know the freshness guarantee is inactive when this
+        # fires — the stale in-memory key_row snapshot governs the cooldown.
+        logger.warning(
+            "_check_circuit_breaker: DB re-fetch of last_429_at failed for "
+            "api_key %s — falling back to in-memory snapshot (clock-skew "
+            "guard inactive): %s",
+            key_row.get("id"), _refetch_exc,
+        )
 
     try:
         last_429 = datetime.fromisoformat(
