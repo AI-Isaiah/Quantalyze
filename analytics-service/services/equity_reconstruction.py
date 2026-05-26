@@ -2422,7 +2422,15 @@ class EquityCurveBuilder:
         Each ``funding_row`` shape: ``{timestamp, symbol, payment, ...}``.
         Bucketed by UTC date; 8h cycles (per services/funding_fetch.py)
         are aggregated up to a daily slot for the equity-curve consumer.
+
+        NEW-C30-02: rows whose ``currency`` field is present but not a
+        USD-quote stablecoin (e.g. BTC for inverse perps) are skipped with
+        a WARNING rather than added at face value, which would produce an
+        ~$6 payment being recorded as $0.0001 (magnitude error ~5 orders).
         """
+        _USD_QUOTE_CURRENCIES = frozenset(
+            {"USDT", "USDC", "BUSD", "USD", "TUSD", "FDUSD"}
+        )
         for row in funding_rows or []:
             ts = row.get("timestamp")
             if isinstance(ts, str):
@@ -2435,6 +2443,17 @@ class EquityCurveBuilder:
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
             d = ts.astimezone(timezone.utc).date()
+            # NEW-C30-02: skip base-coin-denominated (inverse perp) rows.
+            currency = (row.get("currency") or "").upper()
+            if currency and currency not in _USD_QUOTE_CURRENCIES:
+                logger.warning(
+                    "attach_funding: skipped funding row currency=%r symbol=%r "
+                    "— not a USD-quote stablecoin; add currency conversion to "
+                    "include inverse-perp funding in the equity curve "
+                    "(NEW-C30-02)",
+                    currency, row.get("symbol"),
+                )
+                continue
             payment = row.get("payment", row.get("amount", 0.0))
             try:
                 amount = float(payment)

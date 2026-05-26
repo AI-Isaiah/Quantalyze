@@ -662,7 +662,12 @@ async def _attribute_funding(
             def _fetch_funding(s=start, e=end):
                 return (
                     supabase.table("funding_fees")
-                    .select("symbol, amount, timestamp")
+                    # NEW-C30-02: include currency so we can skip
+                    # base-coin-denominated (inverse-perp) rows before
+                    # summing — previously only symbol/amount/timestamp were
+                    # selected, so a 0.0001 BTC row was silently added as $0.0001
+                    # into a USD funding_pnl column (magnitude ~5 orders wrong).
+                    .select("symbol, amount, timestamp, currency")
                     .eq("strategy_id", strategy_id)
                     .gte("timestamp", min_opened_at)
                     .lte("timestamp", max_closed_at)
@@ -701,14 +706,32 @@ async def _attribute_funding(
     # funding_pnl (a wrong-but-clean-looking ROI). Count the drops and surface
     # them so a half-corrupt funding feed is observable, mirroring the
     # all-or-nothing funding_attribution_failed flag.
+    #
+    # NEW-C30-02: funding_fees.currency is the settlement coin (USDT for linear
+    # perps, BTC/ETH for inverse perps). Summing raw amounts across currencies
+    # produces a magnitude error of ~5 orders of magnitude (0.0001 BTC ≈ $6
+    # but is added as $0.0001). Only sum rows whose currency is a USD-quote
+    # stablecoin; skip others and emit a DQ flag so the drop is observable.
+    _USD_QUOTE_CURRENCIES = frozenset({"USDT", "USDC", "BUSD", "USD", "TUSD", "FDUSD"})
     by_symbol: dict[str, list[tuple[datetime, Decimal]]] = defaultdict(list)
     funding_rows_unparseable = 0
+    funding_currency_unsupported_count = 0
     for row in funding_rows:
         sym = row.get("symbol", "")
         ts_raw = row.get("timestamp")
         amt_raw = row.get("amount")
         if not sym or ts_raw is None or amt_raw is None:
             funding_rows_unparseable += 1
+            continue
+        # NEW-C30-02: skip base-coin-denominated rows (inverse perps).
+        currency = (row.get("currency") or "").upper()
+        if currency and currency not in _USD_QUOTE_CURRENCIES:
+            funding_currency_unsupported_count += 1
+            logger.debug(
+                "funding attribution: skipped row currency=%r for symbol=%s "
+                "(strategy %s) — not a USD-quote stablecoin",
+                currency, sym, strategy_id,
+            )
             continue
         try:
             ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
@@ -723,6 +746,14 @@ async def _attribute_funding(
     if funding_rows_unparseable and flags is not None:
         flags["funding_rows_unparseable"] = (
             flags.get("funding_rows_unparseable", 0) + funding_rows_unparseable
+        )
+    if funding_currency_unsupported_count and flags is not None:
+        # NEW-C30-02: surface skipped inverse-perp funding rows so the
+        # dashboard can warn that funding_pnl EXCLUDES inverse-perp funding
+        # (partial data) rather than silently mis-summing it.
+        flags["funding_currency_unsupported"] = (
+            flags.get("funding_currency_unsupported", 0)
+            + funding_currency_unsupported_count
         )
 
     # Sort each symbol's timeline once — supports linear scan per position.

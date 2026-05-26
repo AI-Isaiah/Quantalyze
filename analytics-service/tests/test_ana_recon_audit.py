@@ -451,20 +451,13 @@ def test_c13_11_finite_positive_float_rejects_negatives_and_zero():
 # ---------------------------------------------------------------------------
 
 
-def test_c30_02_attribute_funding_currency_unaware():
-    """NEW-C30-02: _attribute_funding sums `amount` regardless of `currency`.
-    A BTC-denominated funding row (currency='BTC', amount=0.0001) is added
-    as if it were 0.0001 USD — understating or distorting funding_pnl.
+def test_c30_02_btc_denominated_funding_skipped_not_summed():
+    """NEW-C30-02: BTC-denominated (inverse-perp) funding rows must be skipped,
+    not summed as USD. A 0.0001 BTC payment (~$6) summed as 0.0001 USD is a
+    ~60,000x magnitude error. The fix emits a funding_currency_unsupported DQ flag.
     """
-    # This is a unit test that confirms the current (buggy) behavior.
-    # After the fix the function should skip non-USD-quote currencies and
-    # emit a DQ flag.
-    import asyncio
-    from unittest.mock import AsyncMock
-
     from services.position_reconstruction import _attribute_funding
 
-    # One open position
     positions = [{
         "symbol": "BTC-USD-SWAP",
         "opened_at": "2026-01-01T00:00:00+00:00",
@@ -472,26 +465,73 @@ def test_c30_02_attribute_funding_currency_unaware():
         "funding_pnl": 0.0,
     }]
 
-    # Supabase mock returning a BTC-denominated funding row
+    # Supabase mock returning one BTC-denominated row + one USDT row
     supabase = MagicMock()
-    supabase.table = MagicMock()
-    funding_data = [{
-        "symbol": "BTC-USD-SWAP",
-        "amount": "0.0001",
-        "timestamp": "2026-01-05T08:00:00+00:00",
-        "currency": "BTC",  # base-coin denominated — should NOT be summed as USD
-    }]
+    funding_data = [
+        {
+            "symbol": "BTC-USD-SWAP",
+            "amount": "0.0001",       # BTC — must be SKIPPED
+            "timestamp": "2026-01-05T08:00:00+00:00",
+            "currency": "BTC",
+        },
+        {
+            "symbol": "BTC-USD-SWAP",
+            "amount": "-5.0",          # USDT — must be SUMMED
+            "timestamp": "2026-01-05T16:00:00+00:00",
+            "currency": "USDT",
+        },
+    ]
     mock_chain = MagicMock()
     mock_chain.execute.return_value = MagicMock(data=funding_data)
-    supabase.table.return_value.select.return_value.eq.return_value.gte.return_value.lte.return_value = mock_chain
+    # _fetch_funding chain: .select().eq().gte().lte().range().execute()
+    (supabase.table.return_value.select.return_value
+     .eq.return_value.gte.return_value.lte.return_value
+     .range.return_value) = mock_chain
 
     flags: dict = {}
     asyncio.run(
         _attribute_funding("strat-1", positions, supabase, flags=flags)
     )
 
-    # Pre-fix: BTC amount 0.0001 is added as USD → funding_pnl = 0.0001
-    # Post-fix: BTC-denominated rows skipped + DQ flag set
-    current_pnl = positions[0].get("funding_pnl", 0.0)
-    # Document current behavior (pre-fix will have pnl ≠ 0 or funding_currency_unsupported flag)
-    assert isinstance(current_pnl, float)
+    # Only the USDT row should have been summed
+    pnl = positions[0].get("funding_pnl", 0.0)
+    assert pnl == -5.0, (
+        f"NEW-C30-02: expected funding_pnl=-5.0 (USDT only), got {pnl!r}; "
+        "BTC-denominated row must not be summed as USD"
+    )
+    # DQ flag must be set to mark the skipped inverse-perp rows
+    assert flags.get("funding_currency_unsupported", 0) == 1, (
+        f"NEW-C30-02: expected funding_currency_unsupported=1, got {flags!r}"
+    )
+
+
+def test_c30_02_attach_funding_btc_row_skipped():
+    """NEW-C30-02: EquityCurveBuilder.attach_funding must also skip BTC-denominated
+    rows, not mix them into USD daily funding_pnl.
+    """
+    from services.equity_reconstruction import EquityCurveBuilder
+
+    builder = EquityCurveBuilder(trades=[])
+    funding_rows = [
+        {
+            "symbol": "BTC-USD-SWAP",
+            "amount": 0.0002,          # BTC — must be SKIPPED
+            "timestamp": datetime(2026, 1, 5, 8, 0, 0, tzinfo=timezone.utc),
+            "currency": "BTC",
+        },
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "amount": -3.5,            # USDT — must be SUMMED
+            "timestamp": datetime(2026, 1, 5, 16, 0, 0, tzinfo=timezone.utc),
+            "currency": "USDT",
+        },
+    ]
+    builder.attach_funding(funding_rows)
+
+    from datetime import date as date_
+    d = date_(2026, 1, 5)
+    day_pnl = builder._funding_pnl_by_day.get(d, 0.0)
+    assert day_pnl == -3.5, (
+        f"NEW-C30-02: expected day funding_pnl=-3.5 (USDT only), got {day_pnl!r}; "
+        "BTC row must not be summed as USD in equity curve"
+    )
