@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { captureToSentry } from "@/lib/sentry-capture";
 import type {
   DashboardConfig,
   TileConfig,
@@ -475,6 +476,15 @@ function loadV2Config(): DashboardConfig {
         // Best-effort: tell the dashboard a layout reset happened so it can
         // surface a one-time toast. The user-facing recovery decision lives
         // in AllocationDashboardV2 — this hook only flags the cause.
+        // NEW-C06-03: Sentry issue so engineering sees layout resets in prod.
+        captureToSentry(new Error("dashboard layout reset: version_reset"), {
+          level: "warning",
+          tags: { area: "dashboard-config", reason: "version_reset" },
+          extra: {
+            persisted: parsed.layoutVersion,
+            expected: LAYOUT_VERSION,
+          },
+        });
         setRecoveryFlag("version_reset");
         return defaultV2Config();
       }
@@ -493,6 +503,11 @@ function loadV2Config(): DashboardConfig {
       const hasLegacyShape = tilesIsArray && parsed.tiles.some(looksLikeLegacyTile);
       if (!tilesIsArray || hasLegacyShape) {
         if (hasLegacyShape) {
+          // NEW-C06-03: Sentry issue for legacy_in_v2_blob reset.
+          captureToSentry(new Error("dashboard layout reset: legacy_in_v2_blob"), {
+            level: "warning",
+            tags: { area: "dashboard-config", reason: "legacy_in_v2_blob" },
+          });
           setRecoveryFlag("legacy_in_v2_blob");
         } else {
           // !Array.isArray(parsed.tiles)
@@ -502,6 +517,11 @@ function loadV2Config(): DashboardConfig {
               { tiles: parsed.tiles },
             );
           }
+          // NEW-C06-03: Sentry issue for non-array tiles reset.
+          captureToSentry(new Error("dashboard layout reset: tiles not array"), {
+            level: "warning",
+            tags: { area: "dashboard-config", reason: "parse_failed" },
+          });
           setRecoveryFlag("parse_failed");
         }
         return defaultV2Config();
@@ -557,6 +577,12 @@ function loadV2Config(): DashboardConfig {
             { droppedCount },
           );
         }
+        // NEW-C06-03: Sentry issue so engineering knows a full-layout wipe happened.
+        captureToSentry(new Error("dashboard layout reset: all tiles invalid"), {
+          level: "warning",
+          tags: { area: "dashboard-config", reason: "parse_failed" },
+          extra: { droppedCount },
+        });
         setRecoveryFlag("parse_failed");
         return defaultV2Config();
       }
@@ -587,6 +613,11 @@ function loadV2Config(): DashboardConfig {
     if (typeof console !== "undefined") {
       console.warn("[useDashboardConfigV2] loadV2Config failed; falling back to defaults", err);
     }
+    // NEW-C06-03: Sentry issue so engineering sees JSON parse / storage errors.
+    captureToSentry(err ?? new Error("dashboard loadV2Config failed"), {
+      level: "warning",
+      tags: { area: "dashboard-config", reason: "parse_failed" },
+    });
     setRecoveryFlag("parse_failed");
   }
   return defaultV2Config();
