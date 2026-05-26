@@ -39,7 +39,7 @@ import pytest
 # passthroughs without a Starlette Request) and restore it at module teardown.
 # ---------------------------------------------------------------------------
 
-class _NoopLimiterC19:
+class _NoopLimiter:
     """No-op slowapi.Limiter shim so @limiter.limit decorators are passthroughs.
 
     Mirrors test_routers_audit_2026_05_17._NoopLimiter — needed because the
@@ -67,7 +67,7 @@ def _install_router_stubs():
     # of routers.portfolio (and any reload) binds @limiter.limit as a passthrough.
     _PATCHED_SLOWAPI.setdefault("Limiter", slowapi.Limiter)
     _PATCHED_SLOWAPI.setdefault("get_remote_address", slowapi_util.get_remote_address)
-    slowapi.Limiter = _NoopLimiterC19  # type: ignore[attr-defined,assignment]
+    slowapi.Limiter = _NoopLimiter  # type: ignore[attr-defined,assignment]
     slowapi_util.get_remote_address = MagicMock()  # type: ignore[attr-defined,assignment]
 
     for name in ("ccxt", "ccxt.async_support"):
@@ -949,7 +949,7 @@ def _reload_portfolio_with_noop_limiter_c19():
     """Reload routers.portfolio with the noop limiter active.
 
     Mirrors test_routers_audit_2026_05_17._reload_portfolio_with_noop_limiter:
-    re-binds slowapi.Limiter to _NoopLimiterC19 (so @limiter.limit decorators
+    re-binds slowapi.Limiter to _NoopLimiter (so @limiter.limit decorators
     are passthroughs with no Starlette Request state) and reloads the module so
     the decorators pick up the noop. FastAPI is the real installed package, so
     HTTPException.status_code assertions hold.
@@ -958,7 +958,7 @@ def _reload_portfolio_with_noop_limiter_c19():
     import slowapi
     import slowapi.util as slowapi_util
 
-    slowapi.Limiter = _NoopLimiterC19  # type: ignore[attr-defined,assignment]
+    slowapi.Limiter = _NoopLimiter  # type: ignore[attr-defined,assignment]
     slowapi_util.get_remote_address = MagicMock()  # type: ignore[attr-defined,assignment]
 
     sys.modules.pop("routers.portfolio", None)

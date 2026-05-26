@@ -55,6 +55,13 @@ description = "Known test fixtures and placeholder env samples"
 # - analytics-service/tests/cassettes/: VCR-recorded HTTP fixtures. PII
 #   already scrubbed at record time via conftest_vcr.py three-layer filter;
 #   any high-entropy value remaining is a public response payload.
+# - analytics-service/tests/test_c19_portfolio_fixes.py: Cluster-19 regression
+#   suite for routers/portfolio.py. The test-only line
+#   `slowapi.Limiter = _NoopLimiter  # type: ignore[...]` (a no-op rate-limiter
+#   shim, mirroring test_routers_audit_2026_05_17) trips the generic-api-key
+#   entropy detector on the assignment RHS in the historical PR-range scan.
+#   Not a real secret — no credential material in this file. Audit-2026-05-07
+#   cluster review batch a4.
 # - src/__tests__/gitleaks-allowlist.test.ts: the H-0017 meta-test for THIS
 #   allowlist config. Embeds the canonical jwt.io tutorial JWT fixture
 #   (JWT_FIXTURE) to drive a real gitleaks scan asserting the allowlist
@@ -66,6 +73,7 @@ paths = [
   '''(^|/)tests/lib/admin/pii-scrub-python-parity\.test\.ts$''',
   '''(^|/)src/components/error/ErrorEnvelope\.test\.tsx$''',
   '''(^|/)analytics-service/tests/test_encryption\.py$''',
+  '''(^|/)analytics-service/tests/test_c19_portfolio_fixes\.py$''',
   '''(^|/)package-lock\.json$''',
   '''(^|/)\.planning/''',
   '''(^|/)src/app/api/webhooks/resend/route\.test\.ts$''',
