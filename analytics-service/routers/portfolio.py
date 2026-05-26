@@ -512,12 +512,28 @@ def _build_normalized_weights(portfolio_strategies: list[dict]) -> dict[str, flo
     current_weight=0 (paused strategy) is preserved as 0.0, not silently
     promoted to 1.0 as if unset.  A 0-weight strategy must stay 0-weight —
     it must not become the dominant allocation after renormalization.
+
+    review-fix SF-F3: log a WARNING when all strategies are 0-weight (e.g. all
+    paused).  The `or 1.0` fallback is still mathematically correct (produces an
+    all-zeros normalized vector) but the flat portfolio_returns_series that
+    results is indistinguishable from "no movement" in the dashboard.  The
+    warning makes this state visible to ops so a migration that accidentally
+    zeros all current_weight values is not invisible.
     """
     raw = {
         row["strategy_id"]: float(row["current_weight"]) if row.get("current_weight") is not None else 1.0
         for row in portfolio_strategies
     }
-    total = sum(raw.values()) or 1.0
+    total = sum(raw.values())
+    if total == 0.0:
+        logger.warning(
+            "_build_normalized_weights: all %d strategies have current_weight=0.0 "
+            "(all paused?); portfolio return series will be flat. "
+            "sids=%s",
+            len(raw),
+            list(raw.keys()),
+        )
+    total = total or 1.0
     return {sid: w / total for sid, w in raw.items()}
 
 
@@ -987,9 +1003,22 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             "data_quality": data_quality,
         })
 
-        supabase.table("portfolio_analytics").update(update_payload).eq(
-            "id", analytics_id
-        ).execute()
+        # review-fix SF-F7: check the update result.  execute() does not raise
+        # when the target row is gone (e.g. concurrently deleted by a cron
+        # reaper); it returns data=[] instead.  If the write silently fails the
+        # row stays in COMPUTING forever and the new partial_data/computed_*
+        # fields the caller reads from the inline response will never make it
+        # to the DB — the "computed from N of M" badge will appear correct in
+        # the API response but be absent from all subsequent DB reads.
+        _analytics_update_result = supabase.table("portfolio_analytics").update(
+            update_payload
+        ).eq("id", analytics_id).execute()
+        if not _analytics_update_result.data:
+            logger.error(
+                "portfolio %s: analytics update returned no data — analytics_id=%s "
+                "may have been concurrently deleted; row may remain in COMPUTING state",
+                portfolio_id, analytics_id,
+            )
 
         # Generate alerts. Wrapped in its own try so an alert-side failure
         # (review SFH-3) cannot demote a successfully-COMPLETE analytics
@@ -1586,6 +1615,11 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     candidate_names = {row["id"]: row.get("name", row["id"]) for row in candidate_rows}
 
     candidate_returns: dict[str, pd.Series] = {}
+    # review-fix SF-F5: track published candidates that lack a returns_series so
+    # ops can detect pool reductions (e.g. after a migration that truncates
+    # strategy_analytics).  A suggestion_count=0 audit event without this signal
+    # is indistinguishable from "no eligible candidates in the marketplace."
+    candidate_missing_returns_count = 0
     if candidate_ids:
         sa_cand_result = supabase.table("strategy_analytics").select(
             "strategy_id, returns_series"
@@ -1595,6 +1629,15 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
             s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
+            else:
+                candidate_missing_returns_count += 1
+
+    if candidate_missing_returns_count:
+        logger.warning(
+            "portfolio_optimizer: %d/%d published candidates missing returns_series "
+            "for portfolio %s; scorer pool reduced",
+            candidate_missing_returns_count, len(candidate_ids), req.portfolio_id,
+        )
 
     suggestions = find_improvement_candidates(portfolio_returns, candidate_returns, weights)
     # Hydrate suggestions with strategy names so the UI can render them without an extra round-trip.
@@ -1819,7 +1862,30 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     # Without this check, find_replacement_candidates immediately returns []
     # (incumbent not in port_df.columns) and the caller cannot distinguish
     # "genuine no-candidates" from "couldn't score — incumbent has no history".
+    #
+    # review-fix SF-F1: emit a bridge.score_candidates audit event on this path
+    # so ops can detect surges of incumbent_no_data outcomes (e.g. an analytics
+    # recompute failure that wipes returns_series for deployed strategies).
+    # H-0815 invariant: every successful bridge exit MUST emit an audit row.
     if req.underperformer_strategy_id not in portfolio_returns:
+        try:
+            log_audit_event(
+                user_id=req.user_id,
+                action="bridge.score_candidates",
+                entity_type="bridge_run",
+                entity_id=req.portfolio_id,
+                metadata={
+                    "underperformer_strategy_id": req.underperformer_strategy_id,
+                    "candidate_count": 0,
+                    "partial_data": True,
+                    "status": "incumbent_no_data",
+                },
+            )
+        except Exception as audit_exc:  # noqa: BLE001
+            logger.error(
+                "bridge audit emit failed (run still succeeded): %s",
+                audit_exc, exc_info=True,
+            )
         return {
             "ok": True,
             "status": "incumbent_no_data",

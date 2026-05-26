@@ -499,3 +499,213 @@ class TestOptimizerPartialDataC19:
             "portfolio_optimizer must log missing_returns_sids at WARNING "
             "parity with the analytics path (NEW-C19-09)"
         )
+
+
+# ---------------------------------------------------------------------------
+# review-fix SF-F1 — bridge.score_candidates audit event on incumbent_no_data
+# ---------------------------------------------------------------------------
+
+class TestBridgeIncumbentNoDataAuditSFF1:
+    """H-0815 invariant: every successful bridge exit must emit an audit event.
+
+    The incumbent_no_data early return (NEW-C19-03) was the only bridge exit
+    that did not emit bridge.score_candidates. SF-F1 wires the same
+    try/except audit pattern used by the empty-candidates and happy-path exits.
+    """
+
+    def test_bridge_router_source_emits_audit_on_incumbent_no_data(self):
+        """SF-F1: the source must contain log_audit_event inside the
+        incumbent_no_data branch — not just around the other two exits.
+
+        Strategy: locate the block bounded by the conditional guard and the
+        next major section marker, then assert log_audit_event is present.
+        """
+        src = _read_portfolio_router_source()
+        # The guard that triggers this path
+        guard = "if req.underperformer_strategy_id not in portfolio_returns:"
+        assert guard in src, "incumbent guard must exist in source"
+        block_start = src.index(guard)
+        # The block ends at the next top-level bridge section: fetching candidates
+        end_marker = "# Fetch all published candidate strategies"
+        assert end_marker in src, "end marker not found in source"
+        block_end = src.index(end_marker, block_start)
+        block_src = src[block_start:block_end]
+        assert "log_audit_event" in block_src, (
+            "bridge incumbent_no_data path must call log_audit_event before "
+            "returning (H-0815 invariant: every successful bridge exit must "
+            "emit an audit event) — SF-F1"
+        )
+        assert '"status": "incumbent_no_data"' in block_src or "'status': 'incumbent_no_data'" in block_src, (
+            "audit metadata must include status=incumbent_no_data — SF-F1"
+        )
+
+
+# ---------------------------------------------------------------------------
+# review-fix SF-F2 — generate_narrative hedge for benchmark_error / cov gap
+# ---------------------------------------------------------------------------
+
+class TestGenerateNarrativeBenchmarkCovHedgeSFF2:
+    """SF-F2: partial_data=True caused by benchmark_error or cov_history_sufficient=False
+    must produce hedge text even when computed_strategy_count == expected_strategy_count.
+    """
+
+    def test_benchmark_error_hedge(self):
+        """SF-F2: when partial_data=True and benchmark_error is set, the narrative
+        must include a benchmark-comparison-unavailable sentence."""
+        analytics = {
+            "partial_data": True,
+            "computed_strategy_count": 3,
+            "expected_strategy_count": 3,  # no strategy drop → old code silenced
+            "benchmark_error": True,
+        }
+        narrative = generate_narrative(analytics)
+        assert "Benchmark comparison unavailable" in narrative, (
+            "narrative must disclose benchmark unavailability when benchmark_error "
+            "is True and partial_data=True (SF-F2). Got: " + repr(narrative)
+        )
+
+    def test_cov_history_insufficient_hedge(self):
+        """SF-F2: when partial_data=True and cov_history_sufficient=False, the
+        narrative must include a risk-decomposition-unavailable sentence."""
+        analytics = {
+            "partial_data": True,
+            "computed_strategy_count": 2,
+            "expected_strategy_count": 2,  # no strategy drop
+            "cov_history_sufficient": False,
+        }
+        narrative = generate_narrative(analytics)
+        assert "Risk decomposition unavailable" in narrative, (
+            "narrative must disclose risk decomposition unavailability when "
+            "cov_history_sufficient=False and partial_data=True (SF-F2). "
+            "Got: " + repr(narrative)
+        )
+
+    def test_no_false_hedge_when_cov_sufficient(self):
+        """SF-F2: cov_history_sufficient=True must NOT trigger the risk hedge."""
+        analytics = {
+            "partial_data": False,
+            "cov_history_sufficient": True,
+            "benchmark_error": False,
+        }
+        narrative = generate_narrative(analytics)
+        assert "Risk decomposition unavailable" not in narrative
+        assert "Benchmark comparison unavailable" not in narrative
+
+    def test_both_causes_produces_both_hedge_sentences(self):
+        """SF-F2: when both cov and benchmark are unavailable, both sentences appear."""
+        analytics = {
+            "partial_data": True,
+            "computed_strategy_count": 3,
+            "expected_strategy_count": 3,
+            "cov_history_sufficient": False,
+            "benchmark_error": True,
+        }
+        narrative = generate_narrative(analytics)
+        assert "Risk decomposition unavailable" in narrative, (
+            "cov hedge missing — SF-F2"
+        )
+        assert "Benchmark comparison unavailable" in narrative, (
+            "benchmark hedge missing — SF-F2"
+        )
+
+
+# ---------------------------------------------------------------------------
+# review-fix SF-F3 — _build_normalized_weights logs WARNING on all-zero total
+# ---------------------------------------------------------------------------
+
+class TestBuildNormalizedWeightsAllZeroWarningSFF3:
+    """SF-F3: _build_normalized_weights must emit a logger.warning when the
+    pre-normalization total is 0.0 (all strategies paused).
+
+    The flat portfolio_returns_series produced by an all-zero weight vector is
+    indistinguishable from "portfolio genuinely had no movement" — the warning
+    makes the all-paused state visible to ops.
+    """
+
+    def test_all_zero_weights_triggers_warning(self):
+        """SF-F3: passing all current_weight=0 strategies must trigger a warning log."""
+        rows = [
+            {"strategy_id": "s1", "current_weight": 0.0},
+            {"strategy_id": "s2", "current_weight": 0.0},
+        ]
+        with patch("routers.portfolio.logger") as mock_logger:
+            result = _build_normalized_weights(rows)
+            mock_logger.warning.assert_called_once()
+            call_args = mock_logger.warning.call_args[0]
+            assert "0.0" in str(call_args) or "all" in str(call_args).lower() or "paused" in str(call_args).lower(), (
+                "warning message must mention all-zero / paused state — SF-F3"
+            )
+        # The normalized weights must all be 0.0 (mathematically correct).
+        assert result == {"s1": 0.0, "s2": 0.0}
+
+    def test_partial_zero_does_not_warn(self):
+        """SF-F3: a portfolio with at least one non-zero weight must NOT warn."""
+        rows = [
+            {"strategy_id": "active", "current_weight": 1.0},
+            {"strategy_id": "paused", "current_weight": 0.0},
+        ]
+        with patch("routers.portfolio.logger") as mock_logger:
+            _build_normalized_weights(rows)
+            mock_logger.warning.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# review-fix SF-F5 — optimizer published candidate pool: log missing returns
+# ---------------------------------------------------------------------------
+
+class TestOptimizerCandidatePoolMissingReturnsSFF5:
+    """SF-F5: the optimizer must log a WARNING when published candidates are
+    silently dropped because their returns_series is None.
+
+    Verifies the source-level fix — the router now tracks
+    candidate_missing_returns_count and emits a WARNING when >0.
+    """
+
+    def test_optimizer_source_tracks_candidate_missing_returns(self):
+        """SF-F5: the optimizer candidate fetch block must track and log
+        missing-returns candidates."""
+        src = _read_portfolio_router_source()
+        assert "candidate_missing_returns_count" in src, (
+            "portfolio_optimizer must track candidate_missing_returns_count "
+            "so it can warn when the scorer pool is reduced (SF-F5)"
+        )
+
+    def test_optimizer_source_warns_on_candidate_missing_returns(self):
+        """SF-F5: a WARNING log must be emitted when candidate_missing_returns_count > 0."""
+        src = _read_portfolio_router_source()
+        # The warning call must reference the missing count and the portfolio_id.
+        assert "candidate_missing_returns_count" in src
+        # Check a substring that would only appear in the warning log call.
+        assert "published candidates missing returns_series" in src, (
+            "portfolio_optimizer must log 'published candidates missing "
+            "returns_series' at WARNING level when the candidate pool is "
+            "reduced (SF-F5)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# review-fix SF-F7 — final analytics persistence: check update result
+# ---------------------------------------------------------------------------
+
+class TestAnalyticsUpdateResultCheckSFF7:
+    """SF-F7: the portfolio_analytics UPDATE that transitions the row to COMPLETE
+    must check execute()'s return value.
+
+    If execute() silently returns data=[] (row concurrently deleted), the row
+    stays in COMPUTING forever — and with the new partial_data/computed_*
+    fields, the "computed from N of M" badge in the API response becomes
+    permanently absent from subsequent DB reads.
+    """
+
+    def test_analytics_update_result_is_checked(self):
+        """SF-F7: the source must check the analytics update result and log
+        an error when no data is returned."""
+        src = _read_portfolio_router_source()
+        # The fix assigns the execute() result to a variable and checks .data.
+        assert "_analytics_update_result" in src, (
+            "portfolio analytics update must capture the execute() result "
+            "to detect silent write failures (SF-F7)"
+        )
+        assert "not _analytics_update_result.data" in src or "_analytics_update_result.data" in src, (
+            "the update result .data must be checked for emptiness (SF-F7)"
+        )

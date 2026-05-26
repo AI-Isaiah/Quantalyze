@@ -66,9 +66,16 @@ def generate_narrative(analytics: dict) -> str:
     """
     parts = []
 
-    # NEW-C19-08: when the analytics were computed from a renormalized subset
-    # (some strategies had no history), prepend a disclosure so the user is not
-    # misled by confident whole-portfolio claims derived from partial data.
+    # NEW-C19-08 + review-fix SF-F2: when the analytics were computed from a
+    # renormalized subset OR when covariance/benchmark data was unavailable,
+    # prepend disclosure sentences so the user is not misled by confident
+    # whole-portfolio claims derived from partial data.
+    #
+    # SF-F2 root cause: the original guard only fired on `computed < expected`
+    # (missing strategies), so partial_data=True caused by benchmark_error or
+    # cov_history_sufficient=False silently produced no hedge text — the caller
+    # received confident Sharpe/attribution prose with no caveat despite the
+    # risk decomposition having been entirely skipped.
     if analytics.get("partial_data"):
         computed = analytics.get("computed_strategy_count")
         expected = analytics.get("expected_strategy_count")
@@ -77,6 +84,14 @@ def generate_narrative(analytics: dict) -> str:
                 f"Computed from {computed} of {expected} strategies — "
                 f"figures exclude {expected - computed} strategy/strategies with no return history"
             )
+        # Covariance / risk decomposition unavailable (insufficient overlap).
+        if not analytics.get("cov_history_sufficient", True):
+            parts.append(
+                "Risk decomposition unavailable — insufficient overlapping return history"
+            )
+        # Benchmark fetch failed; benchmark comparison may be absent.
+        if analytics.get("benchmark_error"):
+            parts.append("Benchmark comparison unavailable")
 
     mtd = analytics.get("return_mtd")
     if mtd is not None:
