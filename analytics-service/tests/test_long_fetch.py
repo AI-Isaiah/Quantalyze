@@ -420,6 +420,129 @@ async def test_long_fetch_rejects_write_capable_key(
 
 
 @pytest.mark.asyncio
+async def test_long_fetch_scope_rejection_uses_validation_unexpected_fallback() -> None:
+    """IMP-1 + SF-2 regression: when read_only=False but error_code is None,
+    the fallback must be 'VALIDATION_UNEXPECTED' (a registered WizardErrorCode)
+    NOT 'VALIDATION_FAILED' (unregistered → blank wizard error state).
+
+    Pre-fix: the fallback was 'VALIDATION_FAILED', which is absent from
+    wizardErrors.ts and caused a silent blank-message state on the frontend.
+    Additionally 'VALIDATION_FAILED' was absent from permanent_codes, so the
+    job would have retried forever instead of marking the error permanent.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-fallback",
+        "kind": "process_key_long",
+        "strategy_id": "s-fallback",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-fallback",
+            "source": "binance",
+            "flow_type": "onboard",
+            "correlation_id": "cid-fallback",
+            "context": {"strategy_id": "s-fallback"},
+        },
+    }
+
+    # Adapter says valid=True (fetch_balance succeeded) but read_only=False
+    # AND no error_code — simulates a future adapter that sets read_only=False
+    # without a scope error_code.
+    fallback_adapter = MagicMock()
+    fallback_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=False,
+            error_code=None,  # triggers the fallback path
+            human_message="Write-capable key detected.",
+            debug_context={},
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=fallback_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    # IMP-1: must be permanent, not transient — VALIDATION_UNEXPECTED is in
+    # permanent_codes so the worker does not retry a write-capable key forever.
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+
+    # SF-2: the draft transition must carry VALIDATION_UNEXPECTED, not
+    # VALIDATION_FAILED (which is unregistered on the frontend).
+    for call in sb.rpc.call_args_list:
+        if call.args and call.args[0] == "transition_strategy_verification":
+            if call.args[1].get("p_new_status") == "draft":
+                errors = call.args[1]["p_metadata"]["errors"]
+                assert errors[0]["code"] == "VALIDATION_UNEXPECTED", (
+                    f"Fallback code must be VALIDATION_UNEXPECTED; got {errors[0]['code']}. "
+                    "VALIDATION_FAILED is not a registered WizardErrorCode."
+                )
+                break
+    else:
+        raise AssertionError("No draft transition RPC found")
+
+    fallback_adapter.fetch_raw.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_scope_rejection_survives_rpc_failure() -> None:
+    """SF-3 regression: a Supabase RPC failure in the scope-rejection branch
+    must NOT propagate as an unhandled exception — the DispatchResult must still
+    be FAILED/permanent so the caller receives the security-correct outcome.
+
+    Pre-fix: the RPC call was uncaught; a Supabase blip would propagate as an
+    unhandled exception, leaving the verification row in limbo and the worker
+    receiving a 500 instead of the expected FAILED result.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-rpc-fail",
+        "kind": "process_key_long",
+        "strategy_id": "s-rpc-fail",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-rpc-fail",
+            "source": "okx",
+            "flow_type": "onboard",
+            "correlation_id": "cid-rpc-fail",
+            "context": {"strategy_id": "s-rpc-fail"},
+        },
+    }
+
+    rpc_fail_adapter = MagicMock()
+    rpc_fail_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=False,
+            error_code="TRADE_SCOPE",
+            human_message="Trading-capable key.",
+            debug_context={},
+        )
+    )
+
+    # Supabase mock where every RPC call raises a network error.
+    sb = MagicMock()
+    sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
+        data={"status": "draft"}
+    )
+    sb.rpc.return_value.execute.side_effect = RuntimeError("Supabase unavailable")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=rpc_fail_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    # The security outcome must be preserved even when the DB transition fails.
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    rpc_fail_adapter.fetch_raw.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_long_fetch_csv_read_only_none_not_rejected() -> None:
     """NEW-C31-01 guard: read_only=None (CSV path) must NOT be rejected by
     the scope gate — only explicit False is a disqualifier for exchange keys."""

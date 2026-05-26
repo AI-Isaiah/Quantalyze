@@ -126,15 +126,20 @@ def simulate_add_candidate(
     current_concentration = _herfindahl(current_weights_map)
 
     if overlap_days < MIN_DATA_POINTS:
+        # SF-5: current_* metrics here are computed over a sub-MIN_DATA_POINTS
+        # window (same intersection used for the overlap_days guard) — they are
+        # numerically unreliable (Sharpe / max-DD over <30 days is not meaningful).
+        # Null them out so the UI renders a dash rather than a misleading float.
+        # current_metrics_reliable=False signals callers that the portfolio-side
+        # values are also unreliable, not just the proposed side.
         return {
             "candidate_id": candidate_id,
             "status": "insufficient_data",
             "overlap_days": overlap_days,
             "partial_history": True,
+            "current_metrics_reliable": False,
             "deltas": _zero_deltas(),
-            "current": _metrics_dict(
-                current_sharpe, current_max_dd, current_avg_corr, current_concentration
-            ),
+            "current": _metrics_dict(None, None, None, None),
             "proposed": _metrics_dict(None, None, None, None),
             "equity_curve_current": _cumulative_curve(current_returns),
             "equity_curve_proposed": [],

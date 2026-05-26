@@ -1209,8 +1209,14 @@ def test_process_key_onboard_missing_creds_returns_422(client):
     [
         ("TRADE_SCOPE", False),
         ("WITHDRAW_SCOPE", False),
+        # IMP-2: error_code arm must win even when read_only is True — a broker
+        # that reports a scope violation via error_code but doesn't set
+        # read_only=False (incorrect adapter, or future adapter drift) must still
+        # be rejected.  This is a defensive edge case; today all adapters that
+        # set WITHDRAW_SCOPE also set read_only=False (services/exchange.py:636-646).
+        ("WITHDRAW_SCOPE", True),
     ],
-    ids=["trade_scope", "withdraw_scope"],
+    ids=["trade_scope", "withdraw_scope", "error_code_wins"],
 )
 def test_process_key_sync_pipeline_rejects_write_capable_key(
     client, error_code: str, read_only: bool
@@ -1284,6 +1290,125 @@ def test_process_key_sync_pipeline_rejects_write_capable_key(
     assert draft_calls, "Scope rejection must transition verification to draft"
     errors = draft_calls[0].args[1]["p_metadata"]["errors"]
     assert errors[0]["code"] == error_code
+
+
+def test_process_key_sync_scope_rejection_uses_validation_unexpected_fallback(client):
+    """SF-2 regression: when read_only=False but error_code is None, the
+    fallback must be 'VALIDATION_UNEXPECTED' (a registered WizardErrorCode)
+    NOT 'VALIDATION_FAILED' (unregistered → blank wizard error state on frontend).
+
+    Pre-fix: the fallback was 'VALIDATION_FAILED', absent from wizardErrors.ts,
+    causing a silent blank error message with no remediation path.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-fallback")
+
+    fallback_adapter = MagicMock()
+    fallback_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=False,
+            error_code=None,  # triggers the fallback path
+            human_message="Write-capable key.",
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=fallback_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-fallback",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    # SF-2: code in the envelope must be the registered fallback, not the bare
+    # unregistered "VALIDATION_FAILED" string.
+    assert body["code"] == "VALIDATION_UNEXPECTED"
+    fallback_adapter.fetch_raw.assert_not_called()
+
+
+def test_process_key_sync_scope_rejection_survives_rpc_failure(client):
+    """SF-3 regression: an RPC failure during the scope-rejection draft
+    transition must NOT raise an unhandled exception — the endpoint must
+    return the correct envelope error (ok=False) regardless of Supabase state.
+
+    Pre-fix: the RPC call was uncaught; a Supabase blip would propagate as a
+    500, leaving the verification in limbo and hiding the security outcome.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    # Use the standard mock (table ops succeed to allow insert → verification_id),
+    # but override the rpc chain to always raise so the scope-rejection RPC fails.
+    rpc_fail_sb = _build_supabase_mock(existing_row=None, insert_id="ver-rpc-fail")
+    failing_rpc = MagicMock()
+    failing_rpc.execute.side_effect = RuntimeError("Supabase unavailable")
+    rpc_fail_sb.rpc.return_value = failing_rpc
+
+    rpc_fail_adapter = MagicMock()
+    rpc_fail_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=False,
+            error_code="TRADE_SCOPE",
+            human_message="Trading-capable key.",
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=rpc_fail_sb,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=rpc_fail_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-rpc-fail",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    # SF-3: even with a failing RPC the endpoint must return the security-
+    # correct envelope error, not an unhandled 500.
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == "TRADE_SCOPE"
+    rpc_fail_adapter.fetch_raw.assert_not_called()
 
 
 def test_process_key_csv_read_only_none_not_rejected_sync(client):

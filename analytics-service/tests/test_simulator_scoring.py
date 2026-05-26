@@ -157,10 +157,14 @@ class TestSimulateAddCandidate:
 
         assert result["status"] == "insufficient_data"
         assert result["partial_history"] is True
-        # Proposed metrics stay None because we can't score without enough
-        # overlapping data, but current is still populated so the UI can
-        # render the "before" side and explain why the "after" side is empty.
+        # SF-5: both current and proposed metrics are None in the insufficient_data
+        # branch. Current metrics were computed over the same sub-MIN_DATA_POINTS
+        # window — they are numerically unreliable (<30 days Sharpe/MaxDD) and
+        # must not be rendered as trusted portfolio state. current_metrics_reliable
+        # signals callers that the portfolio-side values should not be shown.
         assert result["proposed"]["sharpe"] is None
+        assert result["current"]["sharpe"] is None
+        assert result["current_metrics_reliable"] is False
         assert result["equity_curve_proposed"] == []
 
     def test_already_in_portfolio(self):

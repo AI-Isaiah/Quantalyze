@@ -699,22 +699,48 @@ async def process_key(
         or val.error_code in {"TRADE_SCOPE", "WITHDRAW_SCOPE"}
     )
     if _scope_rejected:
-        _reject_code = val.error_code or "VALIDATION_FAILED"
-        supabase.rpc(
-            "transition_strategy_verification",
-            {
-                "p_verification_id": verification_id,
-                "p_new_status": "draft",
-                "p_metadata": {
-                    "errors": [
-                        {
-                            "code": _reject_code,
-                            "human_message": val.human_message,
-                        }
-                    ]
+        # SF-2: use VALIDATION_UNEXPECTED as the fallback — it is a registered
+        # WizardErrorCode (adapter.py:74) and has defined copy in wizardErrors.ts.
+        # "VALIDATION_FAILED" is not registered and causes a silent blank wizard
+        # error state when the frontend lookup returns undefined.
+        _reject_code = val.error_code or "VALIDATION_UNEXPECTED"
+        # SF-1: security-sensitive scope rejections must be observable in the
+        # structlog stream so operators can detect regressions / anomalies.
+        log.warning(
+            "process_key.write_capable_key_rejected",
+            reject_code=_reject_code,
+            read_only=val.read_only,
+            verification_id=verification_id,
+            correlation_id=correlation_id,
+        )
+        # SF-3: wrap the RPC call so a Supabase failure does not replace the
+        # security-correct envelope error with an unexpected 500. Best-effort
+        # status transition: returning the error to the caller is more
+        # important than atomicity with the DB state machine.
+        try:
+            supabase.rpc(
+                "transition_strategy_verification",
+                {
+                    "p_verification_id": verification_id,
+                    "p_new_status": "draft",
+                    "p_metadata": {
+                        "errors": [
+                            {
+                                "code": _reject_code,
+                                "human_message": val.human_message,
+                            }
+                        ]
+                    },
                 },
-            },
-        ).execute()
+            ).execute()
+        except Exception as _rpc_err:
+            log.error(
+                "process_key.scope_rejection_rpc_failed",
+                reject_code=_reject_code,
+                verification_id=verification_id,
+                correlation_id=correlation_id,
+                error=str(_rpc_err),
+            )
         return _envelope_error(
             _reject_code, val.human_message, correlation_id, verification_id
         )

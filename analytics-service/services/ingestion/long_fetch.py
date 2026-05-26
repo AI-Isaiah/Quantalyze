@@ -201,23 +201,57 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
         or val.error_code in {"TRADE_SCOPE", "WITHDRAW_SCOPE"}
     )
     if _scope_rejected:
-        _reject_code = val.error_code or "VALIDATION_FAILED"
-        supabase.rpc(
-            "transition_strategy_verification",
-            {
-                "p_verification_id": verification_id,
-                "p_new_status": "draft",
-                "p_metadata": {
-                    "errors": [
-                        {
-                            "code": _reject_code,
-                            "human_message": val.human_message,
-                        }
-                    ]
+        # SF-2: use VALIDATION_UNEXPECTED as the fallback — it is a registered
+        # WizardErrorCode (adapter.py:74) and has defined copy in wizardErrors.ts.
+        # "VALIDATION_FAILED" is not registered, causing a silent blank UI state.
+        _reject_code = val.error_code or "VALIDATION_UNEXPECTED"
+        # SF-1 + SF-4: security-sensitive scope rejection must be observable;
+        # log verification_id + correlation_id so the operator can correlate
+        # this worker event with the user's submission (DispatchResult does not
+        # carry tracing fields, so the log entry is the authoritative trace anchor).
+        log.warning(
+            "process_key_long.write_capable_key_rejected",
+            reject_code=_reject_code,
+            read_only=val.read_only,
+            verification_id=verification_id,
+            correlation_id=correlation_id,
+        )
+        # SF-3: wrap the RPC call so a Supabase failure does not leave the
+        # verification in limbo AND swallow the security outcome. Best-effort
+        # transition: returning FAILED to the dispatcher is more important
+        # than atomicity with the DB state machine.
+        try:
+            supabase.rpc(
+                "transition_strategy_verification",
+                {
+                    "p_verification_id": verification_id,
+                    "p_new_status": "draft",
+                    "p_metadata": {
+                        "errors": [
+                            {
+                                "code": _reject_code,
+                                "human_message": val.human_message,
+                            }
+                        ]
+                    },
                 },
-            },
-        ).execute()
-        permanent_codes = {"AUTH_FAILED", "PERMISSION_DENIED", "TRADE_SCOPE", "WITHDRAW_SCOPE"}
+            ).execute()
+        except Exception as _rpc_err:
+            log.error(
+                "process_key_long.scope_rejection_rpc_failed",
+                reject_code=_reject_code,
+                verification_id=verification_id,
+                correlation_id=correlation_id,
+                error=str(_rpc_err),
+            )
+        # IMP-1: include VALIDATION_UNEXPECTED in permanent_codes so a
+        # read_only=False key with no error_code (val.error_code is None →
+        # fallback to VALIDATION_UNEXPECTED) does not retry forever.
+        permanent_codes = {
+            "AUTH_FAILED", "PERMISSION_DENIED",
+            "TRADE_SCOPE", "WITHDRAW_SCOPE",
+            "VALIDATION_UNEXPECTED",  # fallback for read_only=False + no error_code
+        }
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=f"validate failed: {_reject_code}",
