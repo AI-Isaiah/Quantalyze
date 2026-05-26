@@ -1,12 +1,32 @@
 import asyncio
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Any
 
 from supabase import Client, create_client
 
 logger = logging.getLogger(__name__)
+
+# NEW-C12-08: asyncio.to_thread posts work to Python's default ThreadPoolExecutor
+# (min(32, cpu+4) workers) which can silently saturate when many handler timeouts
+# leave zombie threads (asyncio.wait_for cancels the future but the underlying
+# synchronous Supabase/ccxt call keeps running in its thread). A saturated pool
+# makes EVERY db_execute across all loops block — a whole-worker stall with no
+# operator signal.
+#
+# Fix: run all db_execute calls through a bounded module-level executor. The
+# queue-depth alarm (logging a WARNING when usage exceeds 80%) gives operators
+# a visible signal before full saturation.
+#
+# Sizing: 48 threads supports 5-job batches × 4 concurrent worker loops on a
+# 4-core container with headroom for slow Supabase calls (typical latency
+# < 200ms). Exceeding this bound raises RuntimeError from the loop, which
+# classify_exception maps to transient — the job retries cleanly without
+# silently blocking.
+_DB_POOL_SIZE = int(os.getenv("DB_THREAD_POOL_SIZE", "48"))
+_DB_EXECUTOR = ThreadPoolExecutor(max_workers=_DB_POOL_SIZE, thread_name_prefix="db-exec")
 
 
 @lru_cache(maxsize=1)
@@ -20,8 +40,32 @@ def get_supabase() -> Client:
 
 
 async def db_execute(fn):
-    """Run a synchronous Supabase call without blocking the async event loop."""
-    return await asyncio.to_thread(fn)
+    """Run a synchronous Supabase call without blocking the async event loop.
+
+    NEW-C12-08: uses the module-level bounded ThreadPoolExecutor (_DB_EXECUTOR)
+    instead of the default thread pool. A fixed-size pool bounds the number of
+    zombie threads that accumulate when asyncio.wait_for cancels a handler but
+    the underlying synchronous Supabase/ccxt call keeps running in its thread.
+    If the pool is fully occupied, the loop raises RuntimeError which
+    classify_exception maps to 'transient' — the job retries cleanly rather
+    than silently blocking the event loop.
+    """
+    # Emit a WARNING at 80% pool occupancy so operators can see thread saturation
+    # before full blockage. _work_queue is a private attribute of ThreadPoolExecutor;
+    # fall back silently if the CPython implementation changes.
+    try:
+        qsize = _DB_EXECUTOR._work_queue.qsize()  # type: ignore[attr-defined]
+        if qsize > _DB_POOL_SIZE * 0.8:
+            logger.warning(
+                "db_execute: thread pool near saturation "
+                "(queued=%d capacity=%d) — possible zombie threads from "
+                "timed-out handlers (NEW-C12-08)",
+                qsize, _DB_POOL_SIZE,
+            )
+    except AttributeError:
+        pass
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_DB_EXECUTOR, fn)
 
 
 class PaginatedSelectTruncated(RuntimeError):
