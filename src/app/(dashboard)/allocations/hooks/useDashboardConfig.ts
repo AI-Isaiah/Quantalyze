@@ -822,6 +822,17 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
     function onStorage(e: StorageEvent) {
       if (e.key !== STORAGE_KEY) return;
       if (e.newValue === null) return; // ignore clears
+      // NEW-C06-01: if this tab has a pending debounced write, flush it BEFORE
+      // adopting the foreign value. Previously the still-armed timer would fire
+      // after the cross-tab reload, cementing the foreign value a second time
+      // (writing tab B's blob back to storage from tab A's flush). Cancel the
+      // timer first; if we had a genuine pending mutation from this tab, write
+      // it out now — it was the user's most recent local intent.
+      if (persistTimerRef.current !== null) {
+        clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+        persistV2(pendingConfigRef.current);
+      }
       const reloaded = loadV2Config();
       // NEW-C06-10: compute the comparison and assign the ref OUTSIDE the
       // setState updater. setState updaters must be pure — React invokes them

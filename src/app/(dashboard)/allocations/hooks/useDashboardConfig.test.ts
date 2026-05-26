@@ -1461,6 +1461,50 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
     }
   });
 
+  // NEW-C06-01: when a cross-tab storage event arrives while a debounced write
+  // is pending, onStorage must flush the local pending write first so the
+  // still-armed timer doesn't later cement the foreign value.
+  it("NEW-C06-01: cross-tab storage event flushes pending debounced write first", () => {
+    vi.useFakeTimers();
+    try {
+      seedV2Blob([{ k: "kpi-strip", w: 1 }]);
+      const { result } = renderHook(() => useDashboardConfigV2());
+      localStorageMock.setItem.mockClear();
+
+      // Make a local mutation — the debounce timer is now armed but not fired.
+      act(() => {
+        result.current.resizeWidget("kpi-strip", 4);
+      });
+
+      // Tab B writes a different blob (different tile count) before the
+      // debounce fires.
+      const tabBBlob = JSON.stringify({
+        tiles: [{ k: "net-exposure", w: 2 }],
+        timeframe: "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      });
+      store.set(STORAGE_KEY, tabBBlob);
+      act(() => {
+        window.dispatchEvent(
+          new StorageEvent("storage", {
+            key: "quantalyze-dashboard-config",
+            newValue: tabBBlob,
+          }),
+        );
+      });
+
+      // The pending local write (resize to w=4) should have been flushed
+      // immediately when the storage event arrived — one setItem call.
+      expect(localStorageMock.setItem).toHaveBeenCalledTimes(1);
+      const flushed = JSON.parse(
+        (localStorageMock.setItem.mock.calls[0] as [string, string])[1],
+      );
+      expect(flushed.tiles.find((t: { k: string }) => t.k === "kpi-strip").w).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // NEW-C06-06: load path must dedup by resolved key. Two distinct persisted
   // keys that collapse to the same registry id via resolveWidgetId (e.g. a
   // pre-Plan-07 layout carrying both "equity" and "equity-chart") must result
