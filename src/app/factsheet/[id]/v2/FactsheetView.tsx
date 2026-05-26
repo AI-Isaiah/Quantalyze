@@ -600,6 +600,21 @@ function KpiStrip() {
           </div>
         ))}
       </div>
+      {/* Short-track caveat: annualized CAGR/Sharpe/Sortino/Calmar/Ann.Vol
+          are statistically unreliable with fewer than 252 observations (~1y).
+          Surface the same warning here at the hero strip so mobile users who
+          never scroll to the MetricsColumn right-rail still see it. (NEW-C20-08) */}
+      {m.n < 252 && (
+        <p
+          className="px-3 sm:px-4 py-2 text-[10px] font-mono"
+          style={{
+            borderTop: "1px solid var(--color-border)",
+            color: "var(--color-warning, #B45309)",
+          }}
+        >
+          ⚠ Only {m.n} observation{m.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
+        </p>
+      )}
     </section>
   );
 }
