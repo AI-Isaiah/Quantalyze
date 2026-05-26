@@ -1553,20 +1553,30 @@ async def _fetch_raw_trades_binance(
             # across a page boundary — a busy pair with many same-ms fills can
             # lose a whole cluster. The exchange_fill_id unique index deduplicates
             # genuinely re-fetched boundary fills, so +1 is not needed for
-            # correctness. Add a stuck-cursor guard so an exchange that returns a
-            # cursor-identical full page doesn't loop forever.
+            # correctness.
+            #
+            # red-team/H-4 (NEW-C13-03 follow-up): the stuck-cursor guard that
+            # breaks with a DQ flag when next_since == current_since (same-ms
+            # full page) has a false positive: it fires for the legitimate case
+            # where a high-frequency burst of fills all share the same millisecond
+            # and span more than one page. Breaking would truncate all fills past
+            # page 1 of that burst. Instead, fall back to +1 for that single step
+            # to break past the stuck ms, then continue. The +1 causes at most one
+            # boundary fill to be re-fetched (harmless — deduped by the DB index).
             next_since = int(last_ts)
             if next_since == current_since:
-                # Cursor did not advance — no progress is possible without +1.
-                # Emit a DQ flag (same truncation class as page-cap) and stop.
-                _record_dq_flag("binance_fill_cursor_stuck", True)
+                # Cursor did not advance — use +1 to break past the same-ms
+                # cluster rather than stopping. Emit an observability flag so
+                # operators can see when this path is hit.
+                _record_dq_flag("binance_fill_cursor_advance_plus1", True)
                 logger.warning(
-                    "Binance fetch_my_trades %s: cursor did not advance "
+                    "Binance fetch_my_trades %s: cursor stuck at same-ms "
                     "(last_ts=%d == current_since) on a full page — "
-                    "stopping to avoid infinite loop; possible truncation",
+                    "advancing +1ms to break past cluster (may re-fetch "
+                    "boundary fill; dedup handles it)",
                     symbol, next_since,
                 )
-                break
+                next_since = current_since + 1
             current_since = next_since
         else:
             logger.warning(
