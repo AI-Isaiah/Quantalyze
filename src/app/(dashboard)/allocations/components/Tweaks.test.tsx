@@ -636,6 +636,52 @@ describe("Tweaks — context fallback outside provider", () => {
   });
 });
 
+describe("Tweaks — red-team C1: cross-tab write-back loop prevention", () => {
+  // WHY this matters: without the fromCrossTabEventRef guard, Tab B receives a
+  // storage event → setState → persist effect fires → writes same JSON back to
+  // localStorage → fires storage event in Tab A → onStorage → setState → …
+  // The loop terminates only when a tab is closed. This test verifies that a
+  // cross-tab storage event does NOT cause a write-back to localStorage, i.e.
+  // localStorage.setItem is NOT called as a result of receiving the event.
+  it("cross-tab storage event updates in-memory state but does NOT write back to localStorage", () => {
+    act(() => {
+      render(<Harness />);
+    });
+    // Count the setItem calls BEFORE the cross-tab event (1 post-hydration write).
+    const writesBefore = (
+      localStorageMock.setItem.mock.calls as unknown as Array<[string, string]>
+    ).filter(([k]) => k === "allocations.tweaks").length;
+
+    const newBlob = JSON.stringify({
+      density: "loose",
+      accentIntensity: "muted",
+      displayFont: "serif",
+      bridgeVariant: "full",
+      chartStyle: "area",
+      showBench: true,
+      showOutcomes: true,
+    });
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: "allocations.tweaks",
+          newValue: newBlob,
+        }),
+      );
+    });
+
+    // In-memory state MUST have updated (cross-tab sync works).
+    expect(document.body.getAttribute("data-density")).toBe("loose");
+
+    // localStorage.setItem MUST NOT have been called again — the write-back
+    // guard (fromCrossTabEventRef) must have suppressed the persist effect.
+    const writesAfter = (
+      localStorageMock.setItem.mock.calls as unknown as Array<[string, string]>
+    ).filter(([k]) => k === "allocations.tweaks").length;
+    expect(writesAfter).toBe(writesBefore);
+  });
+});
+
 describe("Tweaks — postMessage bridge invariant", () => {
   it("Tweaks.tsx source contains zero postMessage / message-listener references", () => {
     // Belt + suspenders. The designer bundle's prototype cross-window

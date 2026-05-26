@@ -1,5 +1,5 @@
 import { render, fireEvent } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
 import { EquityChart, toWealth } from "./EquityChart";
@@ -352,5 +352,59 @@ describe("EquityChart — H-0165 Pitfall 1 scenario overlay anchoring", () => {
       expect(Math.abs(rv[i][0] - wv[i][0])).toBeLessThan(0.05);
       expect(Math.abs(rv[i][1] - wv[i][1])).toBeLessThan(0.05);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// red-team M2: toWealth() 0.1 threshold false-positive for >90% drawdown
+//
+// WHY: a strategy down 91% since inception has wealth[0] = 0.09 (correctly
+// converted return –0.91 + 1). The previous 0.1 threshold fired a warn for
+// this legitimate value. The threshold is now 0.05. Assert:
+//   - wealth[0] = 0.09 (i.e. –91% drawdown) → NO warn (was false-positive)
+//   - wealth[0] = 0.04 (i.e. –96% drawdown at t=0) → warn fires (genuine miscall signal)
+//   - wealth[0] = 0.06 (i.e. –94% drawdown, still above 0.05) → NO warn
+// ---------------------------------------------------------------------------
+describe("toWealth — red-team M2: false-positive warn threshold", () => {
+  it("wealth[0]=0.09 (−91% strategy, valid) does NOT trigger a console.warn", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pts: DailyPoint[] = [
+      { date: "2024-01-01", value: 0.09 },
+      { date: "2024-01-02", value: 0.10 },
+    ];
+    toWealth(pts);
+    const tweaksWarns = warnSpy.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].includes("[EquityChart] toWealth"),
+    );
+    expect(tweaksWarns.length).toBe(0);
+    warnSpy.mockRestore();
+  });
+
+  it("wealth[0]=0.06 (−94% strategy, valid, above 0.05 threshold) does NOT trigger a console.warn", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pts: DailyPoint[] = [
+      { date: "2024-01-01", value: 0.06 },
+      { date: "2024-01-02", value: 0.07 },
+    ];
+    toWealth(pts);
+    const tweaksWarns = warnSpy.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].includes("[EquityChart] toWealth"),
+    );
+    expect(tweaksWarns.length).toBe(0);
+    warnSpy.mockRestore();
+  });
+
+  it("wealth[0]=0.04 (implausibly deep at t=0, likely raw return-form) DOES trigger a console.warn", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pts: DailyPoint[] = [
+      { date: "2024-01-01", value: 0.04 },
+      { date: "2024-01-02", value: 0.05 },
+    ];
+    toWealth(pts);
+    const tweaksWarns = warnSpy.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].includes("[EquityChart] toWealth"),
+    );
+    expect(tweaksWarns.length).toBeGreaterThanOrEqual(1);
+    warnSpy.mockRestore();
   });
 });

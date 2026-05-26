@@ -819,15 +819,33 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
   // user's newer-build layout was thrown away and the next user mutation would
   // overwrite the newer blob with old-version defaults. Now we:
   //   (a) initialise config from the actual persisted tiles (not defaults), and
-  //   (b) set readOnlyMode when wasReset is true so NO path ever writes to
+  //   (b) set readOnlyMode when readOnly is true so NO path ever writes to
   //       localStorage while in forward-compat mode, preserving all future-build
   //       additive fields the newer blob contains.
-  const initResult = loadV2ConfigResult();
-  const [config, setConfig] = useState<DashboardConfig>(initResult.config);
+  //       IMPORTANT (red-team H2): readOnly and wasReset are DISTINCT fields with
+  //       OPPOSITE semantics: wasReset=true means the config fell back to defaults
+  //       (safe to write); readOnly=true means the blob came from a newer build
+  //       (must NOT write, or we'd down-convert the newer blob). We gate on
+  //       readOnly here, NOT wasReset.
+  //
+  // red-team H1 fix: use the LAZY-INITIALIZER form of useState so
+  // loadV2ConfigResult() (which calls localStorage.getItem + JSON.parse +
+  // tile-validation loop) runs ONCE at mount, not on every re-render.
+  // React's useState(value) ignores the initial value after mount but still
+  // evaluates the expression every render. useState(() => expr) evaluates it
+  // only on the first render. We capture readOnly in the same callback so both
+  // derivations share the single mount-time parse.
+  const initReadOnlyRef = useRef<boolean | null>(null);
+  const [config, setConfig] = useState<DashboardConfig>(() => {
+    const r = loadV2ConfigResult();
+    initReadOnlyRef.current = r.readOnly === true;
+    return r.config;
+  });
   // readOnlyMode: true when we loaded a forward-compat (newer-build) blob.
   // A ref (not state) so changes don't trigger re-renders — this is a
   // mount-time invariant that never changes during the hook's lifetime.
-  const readOnlyMode = useRef(initResult.readOnly === true);
+  // Seeded from initReadOnlyRef which was set in the lazy useState callback above.
+  const readOnlyMode = useRef(initReadOnlyRef.current === true);
 
   // Phase A3 — same observe-without-write guard as the legacy hook. Mounting
   // V2 against a v3 (legacy-shape) blob must not overwrite the persisted
@@ -956,16 +974,34 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
       } catch {
         return; // malformed newValue — ignore
       }
+      // red-team M4 fix: a readOnly tab must not adopt cross-tab mutations even
+      // in-memory. If this tab loaded a newer-build blob, it cannot persist any
+      // version of the config. Adopting an old-build write from another tab
+      // would update in-memory config but the persist effect returns early for
+      // readOnlyMode, so the mutation is silently lost on reload. Worse, if the
+      // user then interacts, they see their changes disappear — a confusing
+      // win-then-lose UX. A readOnly tab should only ever display what it loaded
+      // at mount; it is a forward-compat observer, not a participant.
+      if (readOnlyMode.current) return;
       // NEW-C06-01: if this tab has a pending debounced write, flush it BEFORE
       // adopting the foreign value. Previously the still-armed timer would fire
       // after the cross-tab reload, cementing the foreign value a second time
       // (writing tab B's blob back to storage from tab A's flush). Cancel the
       // timer first; if we had a genuine pending mutation from this tab, write
       // it out now — it was the user's most recent local intent.
+      //
+      // red-team M3 fix: when we flushed a local pending write, this tab just
+      // won the race — its mutation is now the newest write in storage. Do NOT
+      // then adopt the foreign config (which was written BEFORE our flush). If
+      // we did, the user's just-added widget would be immediately overwritten by
+      // Tab A's older resize: flush writes config-with-widget → loadV2Config reads
+      // config-A → setConfig(config-A) → widget gone. Return after flushing.
       if (persistTimerRef.current !== null) {
         clearTimeout(persistTimerRef.current);
         persistTimerRef.current = null;
         persistV2(pendingConfigRef.current);
+        // Our write is now the authoritative state in storage. No adopt.
+        return;
       }
       // NEW-C06-04: use the discriminated result so we can skip adopting a
       // reset (version mismatch / corrupt blob) from the foreign tab. If tab B
@@ -983,14 +1019,19 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
       // is latently dangerous the moment the assigned value depends on
       // prev/call-count.
       //
-      // Also replace the full JSON.stringify equality with a cheap
-      // version+length compare to avoid O(n) serialization on every
-      // unrelated same-key storage event.
+      // red-team M1 fix: the previous length+version check missed tile width,
+      // config, and order changes — the primary use cases for cross-tab sync.
+      // Example: Tab A resizes w:2→w:4; tiles.length is unchanged; noChange
+      // was true → Tab B silently ignored the resize. Restore JSON.stringify
+      // on the tiles array for a correct equality check. The layoutVersion
+      // peek above (line ~955) already filters unrelated-key and version-
+      // mismatched events before we get here, so the O(n) cost is paid only
+      // for same-version same-key writes — exactly the cross-tab mutations we
+      // want to detect. The timeframe comparison is subsumed by the full check.
       const currentPending = pendingConfigRef.current;
       const noChange =
-        currentPending.layoutVersion === reloaded.layoutVersion &&
-        currentPending.tiles.length === reloaded.tiles.length &&
-        currentPending.timeframe === reloaded.timeframe;
+        currentPending.timeframe === reloaded.timeframe &&
+        JSON.stringify(currentPending.tiles) === JSON.stringify(reloaded.tiles);
       if (noChange) return;
       // Keep pendingConfigRef in sync — a cross-tab reload is the new
       // baseline, not a queued local mutation.

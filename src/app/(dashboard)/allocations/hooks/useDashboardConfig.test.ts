@@ -1602,4 +1602,162 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
       ),
     ).toBeUndefined();
   });
+
+  // ---- red-team M1: noChange check misses tile width/config/order changes ----
+
+  it("red-team M1: cross-tab resize (same tile count, different w) IS adopted by the listening tab", () => {
+    // WHY: the previous noChange check compared only tiles.length + layoutVersion +
+    // timeframe. A resize changes w but NOT length, so noChange was true and Tab B
+    // silently ignored the resize. After the fix (JSON.stringify(tiles) equality),
+    // the resize IS detected.
+    seedV2Blob([{ k: "kpi-strip", w: 2 }, { k: "equity-chart", w: 4 }]);
+    const { result } = renderHook(() => useDashboardConfigV2());
+    expect(result.current.config.tiles.find((t) => t.k === "kpi-strip")?.w).toBe(2);
+
+    // Tab A resizes kpi-strip from w:2 to w:4 and writes it to storage.
+    const resizedBlob = JSON.stringify({
+      tiles: [{ k: "kpi-strip", w: 4 }, { k: "equity-chart", w: 4 }],
+      timeframe: "YTD",
+      layoutVersion: LAYOUT_VERSION,
+    });
+    store.set(STORAGE_KEY, resizedBlob);
+
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: STORAGE_KEY,
+          newValue: resizedBlob,
+        }),
+      );
+    });
+
+    // Tab B must have adopted the resize — NOT silently ignored it.
+    expect(result.current.config.tiles.find((t) => t.k === "kpi-strip")?.w).toBe(4);
+  });
+
+  it("red-team M1: cross-tab tile reorder (same set, different order) IS adopted", () => {
+    // Same set of tiles in different order should also be detected as a change.
+    seedV2Blob([{ k: "kpi-strip", w: 2 }, { k: "equity-chart", w: 4 }]);
+    const { result } = renderHook(() => useDashboardConfigV2());
+    expect(result.current.config.tiles[0].k).toBe("kpi-strip");
+
+    // Tab A reorders: equity-chart first, kpi-strip second.
+    const reorderedBlob = JSON.stringify({
+      tiles: [{ k: "equity-chart", w: 4 }, { k: "kpi-strip", w: 2 }],
+      timeframe: "YTD",
+      layoutVersion: LAYOUT_VERSION,
+    });
+    store.set(STORAGE_KEY, reorderedBlob);
+
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: STORAGE_KEY,
+          newValue: reorderedBlob,
+        }),
+      );
+    });
+
+    // The reorder must be reflected.
+    expect(result.current.config.tiles[0].k).toBe("equity-chart");
+    expect(result.current.config.tiles[1].k).toBe("kpi-strip");
+  });
+
+  // ---- red-team M3: flush-before-adopt race silently reverts local add-widget ----
+
+  it("red-team M3: cross-tab event with pending local write does NOT overwrite local config in memory", () => {
+    // Scenario: Tab B adds a widget (pending debounce). Before the timer fires,
+    // Tab A writes a resize. Tab B's onStorage fires: it flushes the add-widget
+    // write (correct), then MUST NOT adopt Tab A's older config (which would
+    // remove Tab B's newly added widget).
+    vi.useFakeTimers();
+    try {
+      seedV2Blob([{ k: "kpi-strip", w: 2 }]);
+      const { result } = renderHook(() => useDashboardConfigV2());
+      localStorageMock.setItem.mockClear();
+
+      // Tab B adds a widget — debounce armed, not yet fired.
+      act(() => {
+        result.current.addWidget("equity-chart");
+      });
+      expect(result.current.config.tiles.length).toBe(2);
+
+      // Tab A resizes kpi-strip before Tab B's timer fires.
+      const tabABlob = JSON.stringify({
+        tiles: [{ k: "kpi-strip", w: 4 }],
+        timeframe: "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      });
+      store.set(STORAGE_KEY, tabABlob);
+
+      act(() => {
+        window.dispatchEvent(
+          new StorageEvent("storage", {
+            key: STORAGE_KEY,
+            newValue: tabABlob,
+          }),
+        );
+      });
+
+      // The local flush happened (Tab B's add-widget was written), but Tab B
+      // must still show 2 tiles in memory — NOT have reverted to Tab A's 1-tile
+      // config. The flushed local write is the authoritative state.
+      expect(result.current.config.tiles.length).toBe(2);
+      expect(
+        result.current.config.tiles.some((t) => t.k === "equity-chart"),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ---- red-team M4: readOnly tab must not adopt cross-tab mutations ----
+
+  it("red-team M4: readOnly tab ignores cross-tab storage events entirely", () => {
+    // WHY: a readOnly tab loaded a newer-build blob. If it adopts cross-tab
+    // mutations in memory but can't persist (readOnlyMode guard in persist
+    // effect), any user interaction appears to work but is silently lost on
+    // reload. After the fix, readOnly tabs don't update in-memory state from
+    // foreign writes at all.
+    //
+    // Simulate a readOnly tab: seed a blob with layoutVersion = LAYOUT_VERSION
+    // that loadV2ConfigResult() will parse as readOnly=true. We achieve this by
+    // using a higher layoutVersion blob — the hook peeks LAYOUT_VERSION and bails
+    // early, returning readOnly=true. Use the actual mechanism the hook respects.
+    const futureLayoutVersion = LAYOUT_VERSION + 1;
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: [{ k: "kpi-strip", w: 3 }],
+        timeframe: "YTD",
+        layoutVersion: futureLayoutVersion,
+      }),
+    );
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+    // readOnly tab loaded: config comes from the future blob but in-memory
+    // state is whatever loadV2ConfigResult returns (likely defaults because
+    // the layoutVersion doesn't match this build's LAYOUT_VERSION).
+    const configAtMount = result.current.config;
+
+    // Now another tab writes a current-version blob (Tab A, same-version as this tab's LAYOUT_VERSION).
+    const tabABlob = JSON.stringify({
+      tiles: [{ k: "equity-chart", w: 4 }, { k: "net-exposure", w: 2 }],
+      timeframe: "1M",
+      layoutVersion: LAYOUT_VERSION,
+    });
+    store.set(STORAGE_KEY, tabABlob);
+
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: STORAGE_KEY,
+          newValue: tabABlob,
+        }),
+      );
+    });
+
+    // readOnly tab must NOT have adopted Tab A's blob — config unchanged.
+    expect(result.current.config).toBe(configAtMount);
+  });
 });

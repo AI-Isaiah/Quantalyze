@@ -109,10 +109,21 @@ export function toWealth(points: DailyPoint[]): WealthPoint[] {
   // Raw RETURN-form arrays start at 0.xx or negative, so they're well below
   // 0.1 — tightening to 0.1 correctly catches miscalls without false-positives
   // for deeply-underwater but correctly-converted WEALTH arrays.
-  if (points.length > 0 && points[0].value < 0.1) {
+  //
+  // red-team M2 fix: the 0.1 threshold still fires a false positive for strategies
+  // with >90% cumulative drawdown since inception (wealth[0] = 0.09 for –91%).
+  // That is a legitimate wealth value, not a miscall. The distinguishing property
+  // of an unconverted RETURN-form array is that the first value is near ZERO
+  // (return-form starts at 0.0 = 0% cumulative gain), while wealth-form starts
+  // near 1.0 (= 100% of initial value). A value in [0.05, 0.95) is ambiguous
+  // (either deeply underwater wealth OR a partially-converted return), but values
+  // strictly < 0.05 reliably indicate a miscall (–95% cumulative return at t=0
+  // is implausible for any dataset that passes the f7 leading-zero trim). Use
+  // 0.05 as the threshold.
+  if (points.length > 0 && points[0].value < 0.05) {
     if (typeof console !== "undefined") {
       console.warn(
-        "[EquityChart] toWealth: first value < 0.1 — input is likely raw RETURN-form (not wealth). Did you forget to call toWealth() or add +1?",
+        "[EquityChart] toWealth: first value < 0.05 — input is likely raw RETURN-form (not wealth). Did you forget to call toWealth() or add +1?",
         { first: points[0] },
       );
     }

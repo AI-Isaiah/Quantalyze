@@ -196,6 +196,13 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
   // that buries the actual signal. Dedupe with a ref so we warn at most
   // once per session.
   const persistWarnedRef = useRef(false);
+  // red-team C1: guard to break the cross-tab write-back loop.
+  // When Tab B's onStorage listener fires, it sets this ref to true
+  // BEFORE calling setState so the persist effect can check it and
+  // skip the redundant re-write that would fire the storage event
+  // back at Tab A (and thus loop indefinitely). The ref is reset to
+  // false inside the persist effect after the check, once per render.
+  const fromCrossTabEventRef = useRef(false);
 
   // Hydrate post-mount to avoid SSR mismatch.
   useEffect(() => {
@@ -208,6 +215,13 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
   // the stored value with TWEAK_DEFAULTS on the initial render).
   useEffect(() => {
     if (!hydrated) return;
+    // red-team C1: if this render was triggered by a cross-tab storage event,
+    // skip the write-back — writing the same JSON would fire storage in the
+    // other tab, which would setState here again, looping indefinitely.
+    if (fromCrossTabEventRef.current) {
+      fromCrossTabEventRef.current = false;
+      return;
+    }
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (err) {
@@ -293,14 +307,24 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
   // its stale snapshot, overwriting Tab A's edit (last-writer-wins). Re-parse
   // + setState on same-key storage events, wrapped in the same try/catch as
   // loadTweaks so Safari private-mode failures stay silent.
+  //
+  // red-team C1 fix: set fromCrossTabEventRef BEFORE calling setState so the
+  // persist effect (keyed on [state, hydrated]) knows this state change came
+  // from another tab and must not write back to localStorage. Without this
+  // guard, Tab B receives storage → setState → persist effect fires → writes
+  // same JSON → fires storage in Tab A → onStorage → setState → ... loop.
   useEffect(() => {
     if (typeof window === "undefined") return;
     function onStorage(e: StorageEvent) {
       if (e.key !== STORAGE_KEY) return;
       if (e.newValue === null) return; // ignore clears
       try {
+        fromCrossTabEventRef.current = true;
         setState(parseTweakState(JSON.parse(e.newValue)));
       } catch (err) {
+        // Parse failed — reset the flag so the next local user change
+        // does persist normally.
+        fromCrossTabEventRef.current = false;
         if (typeof console !== "undefined") {
           console.warn("[TweaksContext] cross-tab storage event parse failed", err);
         }
