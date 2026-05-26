@@ -709,14 +709,72 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
     expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("parse_failed");
   });
 
-  it("loadV2Config: layoutVersion drift sets version_reset recovery flag without console.warn (expected drift, not error)", () => {
-    seedV2Blob([{ k: "kpi-strip", w: 4 }], { layoutVersion: 9999 }); // future version
+  it("loadV2Config: layoutVersion drift (past version) sets version_reset recovery flag", () => {
+    // layoutVersion < LAYOUT_VERSION = older blob; reset to defaults.
+    seedV2Blob([{ k: "kpi-strip", w: 4 }], { layoutVersion: 1 }); // old version
 
     renderHook(() => useDashboardConfigV2());
 
-    // Drift is expected on version bumps — no console.warn, just the flag.
-    expect(warnSpy).not.toHaveBeenCalled();
     expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("version_reset");
+  });
+
+  it("NEW-C06-09: loadV2Config: future layoutVersion (ahead of this build) loads read-only, no recovery flag", () => {
+    // NEW-C06-09: a newer build wrote a higher layoutVersion. The hook should
+    // NOT clobber the blob with defaults — return wasReset:true (skip persist)
+    // and log a warning. The recovery flag is NOT set because no layout was
+    // destroyed — the user's future-build layout is intact.
+    seedV2Blob([{ k: "kpi-strip", w: 4 }], { layoutVersion: 9999 });
+
+    renderHook(() => useDashboardConfigV2());
+
+    // Warn about forward-compat, but DO NOT set the recovery flag.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("loading read-only"),
+      expect.objectContaining({ persisted: 9999 }),
+    );
+    // No version_reset recovery flag — the user's layout was not wiped.
+    // (sessionStorageMock.getItem returns undefined for unset keys in this mock.)
+    expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBeFalsy();
+  });
+
+  it("C1/SF-1: forward-compat — hook shows persisted tiles (not defaults) + mutations never write back", () => {
+    // C1/SF-1: a newer build wrote a blob with future tiles. The OLD build
+    // must:
+    //   (a) display the user's actual persisted tiles — NOT defaultV2Config()
+    //   (b) NEVER write to localStorage, even after a user mutation (e.g.
+    //       setTimeframe), so future-build additive fields are preserved.
+    //
+    // Regression: before this fix the hook loaded defaultV2Config() and the
+    // first mutation overwrote the newer-build blob with current defaults.
+    vi.useFakeTimers();
+    try {
+      const futureTile = { k: "kpi-strip", w: 4 };
+      seedV2Blob([futureTile], { layoutVersion: 9999 });
+      // Record the blob BEFORE mounting so we can assert it's unchanged after.
+      const blobBefore = store.get(STORAGE_KEY);
+
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
+
+      // (a) The hook's config must contain the PERSISTED tile, not defaults.
+      expect(result.current.config.tiles.some((t) => t.k === "kpi-strip")).toBe(true);
+
+      // (b) A user mutation must NOT write to localStorage.
+      act(() => {
+        result.current.setTimeframe("1M");
+      });
+      act(() => {
+        vi.runAllTimers();
+      });
+
+      // Blob is unchanged — no write occurred despite the timeframe mutation.
+      expect(store.get(STORAGE_KEY)).toBe(blobBefore);
+      unmount();
+
+      // Unmount-flush also must not write (the beforeunload/pagehide path).
+      expect(store.get(STORAGE_KEY)).toBe(blobBefore);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("loadV2Config: a v2 blob carrying legacy-shape tiles sets legacy_in_v2_blob recovery flag", () => {
@@ -1459,5 +1517,247 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // NEW-C06-01: when a cross-tab storage event arrives while a debounced write
+  // is pending, onStorage must flush the local pending write first so the
+  // still-armed timer doesn't later cement the foreign value.
+  it("NEW-C06-01: cross-tab storage event flushes pending debounced write first", () => {
+    vi.useFakeTimers();
+    try {
+      seedV2Blob([{ k: "kpi-strip", w: 1 }]);
+      const { result } = renderHook(() => useDashboardConfigV2());
+      localStorageMock.setItem.mockClear();
+
+      // Make a local mutation — the debounce timer is now armed but not fired.
+      act(() => {
+        result.current.resizeWidget("kpi-strip", 4);
+      });
+
+      // Tab B writes a different blob (different tile count) before the
+      // debounce fires.
+      const tabBBlob = JSON.stringify({
+        tiles: [{ k: "net-exposure", w: 2 }],
+        timeframe: "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      });
+      store.set(STORAGE_KEY, tabBBlob);
+      act(() => {
+        window.dispatchEvent(
+          new StorageEvent("storage", {
+            key: "quantalyze-dashboard-config",
+            newValue: tabBBlob,
+          }),
+        );
+      });
+
+      // The pending local write (resize to w=4) should have been flushed
+      // immediately when the storage event arrived — one setItem call.
+      expect(localStorageMock.setItem).toHaveBeenCalledTimes(1);
+      const flushed = JSON.parse(
+        (localStorageMock.setItem.mock.calls[0] as [string, string])[1],
+      );
+      expect(flushed.tiles.find((t: { k: string }) => t.k === "kpi-strip").w).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // NEW-C06-06: load path must dedup by resolved key. Two distinct persisted
+  // keys that collapse to the same registry id via resolveWidgetId (e.g. a
+  // pre-Plan-07 layout carrying both "equity" and "equity-chart") must result
+  // in exactly ONE tile — not two duplicates that break moveWidget/removeWidget.
+  it("NEW-C06-06: load deduplicates tiles that normalize to the same registry id", () => {
+    // "kpi-strip" is the canonical id; "kpi" is its designer short key.
+    // Both normalize to "kpi-strip" via resolveWidgetId.
+    seedV2Blob([
+      { k: "kpi", w: 4 },
+      { k: "kpi-strip", w: 2 },
+    ]);
+    const { result } = renderHook(() => useDashboardConfigV2());
+    const tiles = result.current.config.tiles;
+    const kpiTiles = tiles.filter((t) => t.k === "kpi-strip");
+    expect(kpiTiles).toHaveLength(1);
+  });
+
+  // NEW-C06-07: addWidget should silently reject unknown widget ids so the
+  // write/load invariant is symmetric. The load path (validateAndNormalizeTile)
+  // drops any tile whose k is not in WIDGET_REGISTRY; addWidget previously
+  // didn't guard, so a bogus tile would live in memory+localStorage for the
+  // session and vanish on reload.
+  it("NEW-C06-07: addWidget ignores unknown widget ids (write/load invariant)", () => {
+    const { result } = renderHook(() => useDashboardConfigV2());
+    const before = result.current.config.tiles.length;
+
+    act(() => {
+      result.current.addWidget("__totally_unknown_widget__");
+    });
+
+    // Tile count unchanged — unknown key was rejected at write time.
+    expect(result.current.config.tiles.length).toBe(before);
+    // No tile with the bogus key persisted.
+    expect(
+      result.current.config.tiles.find(
+        (t) => t.k === "__totally_unknown_widget__",
+      ),
+    ).toBeUndefined();
+  });
+
+  // ---- red-team M1: noChange check misses tile width/config/order changes ----
+
+  it("red-team M1: cross-tab resize (same tile count, different w) IS adopted by the listening tab", () => {
+    // WHY: the previous noChange check compared only tiles.length + layoutVersion +
+    // timeframe. A resize changes w but NOT length, so noChange was true and Tab B
+    // silently ignored the resize. After the fix (JSON.stringify(tiles) equality),
+    // the resize IS detected.
+    seedV2Blob([{ k: "kpi-strip", w: 2 }, { k: "equity-chart", w: 4 }]);
+    const { result } = renderHook(() => useDashboardConfigV2());
+    expect(result.current.config.tiles.find((t) => t.k === "kpi-strip")?.w).toBe(2);
+
+    // Tab A resizes kpi-strip from w:2 to w:4 and writes it to storage.
+    const resizedBlob = JSON.stringify({
+      tiles: [{ k: "kpi-strip", w: 4 }, { k: "equity-chart", w: 4 }],
+      timeframe: "YTD",
+      layoutVersion: LAYOUT_VERSION,
+    });
+    store.set(STORAGE_KEY, resizedBlob);
+
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: STORAGE_KEY,
+          newValue: resizedBlob,
+        }),
+      );
+    });
+
+    // Tab B must have adopted the resize — NOT silently ignored it.
+    expect(result.current.config.tiles.find((t) => t.k === "kpi-strip")?.w).toBe(4);
+  });
+
+  it("red-team M1: cross-tab tile reorder (same set, different order) IS adopted", () => {
+    // Same set of tiles in different order should also be detected as a change.
+    seedV2Blob([{ k: "kpi-strip", w: 2 }, { k: "equity-chart", w: 4 }]);
+    const { result } = renderHook(() => useDashboardConfigV2());
+    expect(result.current.config.tiles[0].k).toBe("kpi-strip");
+
+    // Tab A reorders: equity-chart first, kpi-strip second.
+    const reorderedBlob = JSON.stringify({
+      tiles: [{ k: "equity-chart", w: 4 }, { k: "kpi-strip", w: 2 }],
+      timeframe: "YTD",
+      layoutVersion: LAYOUT_VERSION,
+    });
+    store.set(STORAGE_KEY, reorderedBlob);
+
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: STORAGE_KEY,
+          newValue: reorderedBlob,
+        }),
+      );
+    });
+
+    // The reorder must be reflected.
+    expect(result.current.config.tiles[0].k).toBe("equity-chart");
+    expect(result.current.config.tiles[1].k).toBe("kpi-strip");
+  });
+
+  // ---- red-team M3: flush-before-adopt race silently reverts local add-widget ----
+
+  it("red-team M3: cross-tab event with pending local write does NOT overwrite local config in memory", () => {
+    // Scenario: Tab B adds a widget (pending debounce). Before the timer fires,
+    // Tab A writes a resize. Tab B's onStorage fires: it flushes the add-widget
+    // write (correct), then MUST NOT adopt Tab A's older config (which would
+    // remove Tab B's newly added widget).
+    vi.useFakeTimers();
+    try {
+      seedV2Blob([{ k: "kpi-strip", w: 2 }]);
+      const { result } = renderHook(() => useDashboardConfigV2());
+      localStorageMock.setItem.mockClear();
+
+      // Tab B adds a widget — debounce armed, not yet fired.
+      act(() => {
+        result.current.addWidget("equity-chart");
+      });
+      expect(result.current.config.tiles.length).toBe(2);
+
+      // Tab A resizes kpi-strip before Tab B's timer fires.
+      const tabABlob = JSON.stringify({
+        tiles: [{ k: "kpi-strip", w: 4 }],
+        timeframe: "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      });
+      store.set(STORAGE_KEY, tabABlob);
+
+      act(() => {
+        window.dispatchEvent(
+          new StorageEvent("storage", {
+            key: STORAGE_KEY,
+            newValue: tabABlob,
+          }),
+        );
+      });
+
+      // The local flush happened (Tab B's add-widget was written), but Tab B
+      // must still show 2 tiles in memory — NOT have reverted to Tab A's 1-tile
+      // config. The flushed local write is the authoritative state.
+      expect(result.current.config.tiles.length).toBe(2);
+      expect(
+        result.current.config.tiles.some((t) => t.k === "equity-chart"),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ---- red-team M4: readOnly tab must not adopt cross-tab mutations ----
+
+  it("red-team M4: readOnly tab ignores cross-tab storage events entirely", () => {
+    // WHY: a readOnly tab loaded a newer-build blob. If it adopts cross-tab
+    // mutations in memory but can't persist (readOnlyMode guard in persist
+    // effect), any user interaction appears to work but is silently lost on
+    // reload. After the fix, readOnly tabs don't update in-memory state from
+    // foreign writes at all.
+    //
+    // Simulate a readOnly tab: seed a blob with layoutVersion = LAYOUT_VERSION
+    // that loadV2ConfigResult() will parse as readOnly=true. We achieve this by
+    // using a higher layoutVersion blob — the hook peeks LAYOUT_VERSION and bails
+    // early, returning readOnly=true. Use the actual mechanism the hook respects.
+    const futureLayoutVersion = LAYOUT_VERSION + 1;
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: [{ k: "kpi-strip", w: 3 }],
+        timeframe: "YTD",
+        layoutVersion: futureLayoutVersion,
+      }),
+    );
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+    // readOnly tab loaded: config comes from the future blob but in-memory
+    // state is whatever loadV2ConfigResult returns (likely defaults because
+    // the layoutVersion doesn't match this build's LAYOUT_VERSION).
+    const configAtMount = result.current.config;
+
+    // Now another tab writes a current-version blob (Tab A, same-version as this tab's LAYOUT_VERSION).
+    const tabABlob = JSON.stringify({
+      tiles: [{ k: "equity-chart", w: 4 }, { k: "net-exposure", w: 2 }],
+      timeframe: "1M",
+      layoutVersion: LAYOUT_VERSION,
+    });
+    store.set(STORAGE_KEY, tabABlob);
+
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: STORAGE_KEY,
+          newValue: tabABlob,
+        }),
+      );
+    });
+
+    // readOnly tab must NOT have adopted Tab A's blob — config unchanged.
+    expect(result.current.config).toBe(configAtMount);
   });
 });

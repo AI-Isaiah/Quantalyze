@@ -66,9 +66,15 @@ vi.mock("next/navigation", () => ({
 // N4-pinned vi.mock + vi.mocked technique. Each mock keeps shape-compat with
 // the real component so the composer's prop wiring is the unit-under-test.
 
-vi.mock("../widgets/performance/EquityChart", () => ({
-  EquityChart: vi.fn(() => <div data-testid="equity-chart-mock" />),
-}));
+vi.mock("../widgets/performance/EquityChart", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../widgets/performance/EquityChart")
+  >();
+  return {
+    ...actual,
+    EquityChart: vi.fn(() => <div data-testid="equity-chart-mock" />),
+  };
+});
 
 vi.mock("../widgets/performance/DrawdownChart", () => {
   // DrawdownChart has a default export AND named export; the composer

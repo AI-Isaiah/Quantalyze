@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import type { BridgeCandidate, BridgeFitLabel } from "@/lib/types";
+import type { BridgeCandidate, BridgeFitLabel, Improvement } from "@/lib/types";
+import { asImprovement } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const FIT_STYLES: Record<BridgeFitLabel, string> = {
@@ -11,21 +12,20 @@ const FIT_STYLES: Record<BridgeFitLabel, string> = {
   "Weak fit": "bg-badge-other/10 text-badge-other",
 };
 
-function deltaColor(value: number, invertedBetter: boolean): string {
-  // For MaxDD and Correlation, negative delta = improvement
-  if (invertedBetter) {
-    return value <= 0 ? "text-positive" : "text-negative";
-  }
-  // For Sharpe, positive delta = improvement
-  return value >= 0 ? "text-positive" : "text-negative";
+// NEW-C21-02: color driven by Improvement brand — positive = improvement = green,
+// regardless of which field this is. No invertedBetter table needed.
+function deltaColor(improvement: Improvement): string {
+  return improvement >= 0 ? "text-positive" : "text-negative";
 }
 
-function formatDelta(value: number, label: string): string {
-  const sign = value >= 0 ? "+" : "";
+// Format for display using the RAW delta value (for correct magnitude/sign in label)
+// and label for unit formatting. The Improvement brand is for coloring only.
+function formatDelta(raw: number, label: string): string {
+  const sign = raw >= 0 ? "+" : "";
   if (label === "MaxDD" || label === "Corr") {
-    return `${sign}${(value * 100).toFixed(1)}% ${label}`;
+    return `${sign}${(raw * 100).toFixed(1)}% ${label}`;
   }
-  return `${sign}${value.toFixed(2)} ${label}`;
+  return `${sign}${raw.toFixed(2)} ${label}`;
 }
 
 interface ReplacementCardProps {
@@ -69,10 +69,12 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
     }
   }, [candidate, replacementFor]);
 
-  const deltas: { label: string; value: number; invertedBetter: boolean }[] = [
-    { label: "Sharpe", value: candidate.sharpe_delta, invertedBetter: false },
-    { label: "MaxDD", value: candidate.dd_delta, invertedBetter: true },
-    { label: "Corr", value: candidate.corr_delta, invertedBetter: true },
+  // NEW-C21-02: use asImprovement to normalise sign so positive=improvement
+  // for all fields, eliminating the hand-kept invertedBetter table.
+  const deltas: { label: string; raw: number; improvement: Improvement }[] = [
+    { label: "Sharpe", raw: candidate.sharpe_delta, improvement: asImprovement(candidate.sharpe_delta, "higher-better") },
+    { label: "MaxDD",  raw: candidate.dd_delta,     improvement: asImprovement(candidate.dd_delta, "lower-better") },
+    { label: "Corr",   raw: candidate.corr_delta,   improvement: asImprovement(candidate.corr_delta, "lower-better") },
   ];
 
   return (
@@ -99,10 +101,10 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
             key={d.label}
             className={cn(
               "font-metric text-xs tabular-nums",
-              deltaColor(d.value, d.invertedBetter),
+              deltaColor(d.improvement),
             )}
           >
-            {formatDelta(d.value, d.label)}
+            {formatDelta(d.raw, d.label)}
           </span>
         ))}
       </div>

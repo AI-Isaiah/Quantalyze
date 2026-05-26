@@ -497,3 +497,29 @@ body[data-display-font="sans"] .font-display {
 .factsheet-v2-shell[data-theme="dark"][data-colorblind="1"] .text-positive { color: #4A8FCC !important; }
 .factsheet-v2-shell[data-theme="dark"][data-colorblind="1"] .text-negative { color: #E26A77 !important; }
 
+/* ============================================================
+   TweaksContext accent-intensity override (NEW-C22-02/03)
+   ============================================================
+   When allocations/TweaksContext sets accentIntensity = "full" it
+   writes data-accent-intensity="full" on <html> (CSS attribute) rather
+   than inline style properties, so the dark factsheet's scoped palette
+   rules below can re-declare --color-* and win the cascade inside their
+   own subtree. Inline style.setProperty beats class !important for custom
+   properties; attribute-driven CSS rules do not.
+   ============================================================ */
+
+/* Light-mode "full" accent */
+html[data-accent-intensity="full"] {
+  --color-accent: #0E9F84;
+  --color-accent-hover: #0B8870;
+  --color-chart-strategy: #0E9F84;
+}
+
+/* Dark factsheet — re-assert the dark palette so the "full" attribute on
+   the ancestor <html> doesn't leak light-mode hex into dark contexts. */
+html[data-accent-intensity="full"] .factsheet-v2-shell[data-theme="dark"] {
+  --color-accent: #5EEAD4;
+  --color-accent-hover: #99F6E4;
+  --color-chart-strategy: #5EEAD4;
+}
+

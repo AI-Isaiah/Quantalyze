@@ -160,7 +160,22 @@ export function CustomRangePicker({
   const startIso = toISODate(start);
   const endIso = toISODate(end);
   const invalid = start > end;
-  const dayCount = Math.max(1, Math.round((end.getTime() - start.getTime()) / DAY_MS) + 1);
+  // NEW-C23-02: compute day count from ISO date strings (calendar-day diff)
+  // instead of raw millisecond arithmetic. The ms approach mixes a
+  // local-midnight start with a wall-clock-now end + TZ skew, producing
+  // off-by-one near the rounding seam and time-of-day-dependent results.
+  // ISO string subtraction is time-of-day immune and TZ-agnostic.
+  const dayCount = (() => {
+    const sISO = toISODate(start);
+    const eISO = toISODate(end);
+    // Fast calendar-day diff: both strings are YYYY-MM-DD so lexicographic
+    // diff maps to epoch diff. Use UTC midnight for the subtraction so the
+    // result is always an integer number of days.
+    const [sy, sm, sd] = sISO.split("-").map(Number);
+    const [ey, em, ed] = eISO.split("-").map(Number);
+    const diffMs = Date.UTC(ey, em - 1, ed) - Date.UTC(sy, sm - 1, sd);
+    return Math.max(1, Math.round(diffMs / DAY_MS) + 1);
+  })();
   const rangeLabel = `${startIso} → ${endIso}`;
 
   // Day cells for both months; computed via useMemo because the cell
