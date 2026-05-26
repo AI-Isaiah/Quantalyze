@@ -1146,7 +1146,20 @@ def _compute_daily_equity(
                     _fee_raw = ev.get("fee")
                     if isinstance(_fee_raw, dict):
                         _fee_raw = _fee_raw.get("cost") or 0.0
-                    spot_fee = float(_fee_raw or 0.0)
+                    try:
+                        spot_fee = float(_fee_raw or 0.0)
+                    except (TypeError, ValueError):
+                        # silent-failure/F-08: non-numeric fee field (e.g.
+                        # "N/A", "0.0001BTC") would propagate a ValueError
+                        # up through _compute_daily_equity, aborting the
+                        # entire reconstruction. Treat unparseable fee as 0
+                        # and log so operators can spot schema drift.
+                        logger.warning(
+                            "equity_reconstruction: unparseable fee=%r for "
+                            "symbol=%s — treating as 0 (spot fee not deducted)",
+                            _fee_raw, raw_symbol,
+                        )
+                        spot_fee = 0.0
                     if side == "buy":
                         quantities[sym] = quantities.get(sym, 0.0) + amt
                         quantities[quote] = quantities.get(quote, 0.0) - cost - spot_fee
