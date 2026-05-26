@@ -535,3 +535,100 @@ def test_c30_02_attach_funding_btc_row_skipped():
         f"NEW-C30-02: expected day funding_pnl=-3.5 (USDT only), got {day_pnl!r}; "
         "BTC row must not be summed as USD in equity curve"
     )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C12-02 — Phase-1 RPC failure must block last_sync_at advance
+# ---------------------------------------------------------------------------
+
+
+def test_c12_02_phase1_failed_flag_initialised():
+    """NEW-C12-02: phase1_failed must be initialised before the try/except
+    that wraps the Phase-1 RPC so any raise path toggles it correctly.
+    Verified structurally by importing and checking that the symbol exists.
+    """
+    import ast
+    import inspect
+    from services import job_worker
+    src = inspect.getsource(job_worker.run_sync_trades_job)
+    tree = ast.parse(src)
+
+    assigned_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    assigned_names.add(t.id)
+
+    assert "phase1_failed" in assigned_names, (
+        "NEW-C12-02: phase1_failed must be declared in run_sync_trades_job"
+    )
+
+
+def test_c12_02_phase1_failed_gates_last_sync_at():
+    """NEW-C12-02: the _update_cursor closure must only include last_sync_at
+    when phase1_failed is False. Verified by confirming 'if not phase1_failed'
+    appears in run_sync_trades_job source.
+    """
+    import inspect
+    from services import job_worker
+    src = inspect.getsource(job_worker.run_sync_trades_job)
+    # The guard 'if not phase1_failed' must be present
+    assert "if not phase1_failed" in src, (
+        "NEW-C12-02: 'if not phase1_failed' guard missing from run_sync_trades_job; "
+        "last_sync_at must not advance when Phase-1 persisted nothing"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C12-03 — poll_allocator_positions persist failure stamps sync_status
+# ---------------------------------------------------------------------------
+
+
+def test_c12_03_persist_failure_stamps_error_status():
+    """NEW-C12-03: if persist_allocator_holdings raises, sync_status must be
+    stamped 'error' so the UI doesn't spin forever on 'syncing'.
+    """
+    import inspect
+    from services import job_worker
+    src = inspect.getsource(job_worker.run_poll_allocator_positions_job)
+
+    # The fix wraps persist_allocator_holdings in a try/except that stamps error
+    assert "persist_allocator_holdings" in src
+    # 'sync_status': 'error' must be present in the error-recovery path
+    assert "'error'" in src or '"error"' in src, (
+        "NEW-C12-03: error status string missing from poll_allocator_positions handler"
+    )
+    # 'allocator.holdings.persist_failed' audit event must be emitted
+    assert "allocator.holdings.persist_failed" in src, (
+        "NEW-C12-03: persist_failed audit event missing from handler"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C12-04 — compute_intro_snapshot final attempt marks snapshot failed
+# ---------------------------------------------------------------------------
+
+
+def test_c12_04_final_attempt_marks_intro_snapshot_failed():
+    """NEW-C12-04: when attempts >= max_attempts, dispatch must call
+    _mark_intro_snapshot_failed even if error_kind != 'permanent', so
+    contact_request.snapshot_status moves off 'pending' on the last attempt.
+    """
+    import inspect
+    from services import job_worker
+    src = inspect.getsource(job_worker.dispatch)
+
+    # The fix: is_final = (error_kind == "permanent" OR attempts >= max_attempts)
+    assert "attempts" in src and "max_attempts" in src, (
+        "NEW-C12-04: attempts/max_attempts check missing from dispatch"
+    )
+    assert "is_final" in src, (
+        "NEW-C12-04: is_final variable missing from dispatch for intro_snapshot"
+    )
+    # _mark_intro_snapshot_failed must be called inside the is_final block
+    mark_pos = src.find("_mark_intro_snapshot_failed")
+    is_final_pos = src.find("is_final")
+    assert mark_pos > is_final_pos, (
+        "NEW-C12-04: _mark_intro_snapshot_failed must be called after is_final check"
+    )

@@ -702,6 +702,11 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         # used to be log-only.
         phase2_failed = False
         phase2_error_message: str | None = None
+        # NEW-C12-02: track Phase-1 (daily-PnL) RPC failure separately.
+        # Pre-fix the except only logger.warning'd, leaving: (a) trade_count
+        # set to the *fetched* count not the *persisted* count; (b) last_sync_at
+        # advancing past the unpersisted window permanently; (c) no DQ flag.
+        phase1_failed = False
         # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — DQ flags surfaced by
         # ``fetch_raw_trades`` (partial-symbol failures, page-cap truncation,
         # fee-currency mismatch) MUST be drained immediately after the
@@ -815,6 +820,10 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 "sync_trades: persisted %s rows for strategy %s", inserted, strategy_id
             )
         except Exception as e:
+            # NEW-C12-02: set flag so (a) last_sync_at is NOT advanced past
+            # the unpersisted window, (b) trade_count reflects 0 persisted
+            # rows, and (c) a DQ flag is emitted below for the health card.
+            phase1_failed = True
             logger.warning(
                 "sync_trades Phase 1 (daily PnL) failed for strategy %s — "
                 "continuing to Phase 2 raw-fill ingestion: %s",
@@ -987,7 +996,9 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # only when Phase 2 was not run at all (_RAW_TRADE_INGESTION_ENABLED
     # is False).
     phase2_success = _RAW_TRADE_INGESTION_ENABLED and not phase2_failed
-    needs_flag_write = phase2_failed or phase2_success
+    # NEW-C12-02: phase1_failed also requires a flag write to surface via
+    # the admin health card (it has no pre-existing path for daily-PnL failures).
+    needs_flag_write = phase2_failed or phase2_success or phase1_failed
     if needs_flag_write:
         def _load_existing_flags() -> dict:
             res = (
@@ -1029,6 +1040,18 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         exchange_dq_flags_present = bool(exchange_dq_flags)
         if exchange_dq_flags_present:
             existing_flags.update(exchange_dq_flags)
+
+        # NEW-C12-02: emit DQ flag when Phase-1 (daily-PnL) RPC failed so
+        # the admin health card lights up (pre-fix had no flag path for this).
+        if phase1_failed:
+            existing_flags["phase1_daily_pnl_persist_failed"] = True
+            existing_flags["phase1_failed_at"] = datetime.now(timezone.utc).isoformat()
+            write_needed = True
+        elif existing_flags.get("phase1_daily_pnl_persist_failed"):
+            # Clear stale flag on a successful Phase-1 run.
+            existing_flags.pop("phase1_daily_pnl_persist_failed", None)
+            existing_flags.pop("phase1_failed_at", None)
+            write_needed = True
 
         if phase2_failed:
             existing_flags["phase2_fill_ingestion_failed"] = True
@@ -1112,16 +1135,21 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 ctx.key_row.get("id"), exc,
             )
 
-    # Advance sync cursor always (even for empty fetches).
+    # Advance sync cursor (skip last_sync_at when Phase-1 persisted nothing
+    # so the next run re-fetches the failed daily-PnL window — NEW-C12-02).
     def _update_cursor() -> None:
-        update_data: dict = {
-            "last_sync_at": datetime.now(timezone.utc).isoformat()
-        }
+        update_data: dict = {}
+        if not phase1_failed:
+            # NEW-C12-02: only advance last_sync_at when Phase-1 actually
+            # persisted rows; advancing past an unpersisted window loses the
+            # daily-PnL data permanently (the next run's since_ms skips it).
+            update_data["last_sync_at"] = datetime.now(timezone.utc).isoformat()
         if account_balance is not None:
             update_data["account_balance_usdt"] = account_balance
-        ctx.supabase.table("api_keys").update(update_data).eq(
-            "id", ctx.key_row["id"]
-        ).execute()
+        if update_data:
+            ctx.supabase.table("api_keys").update(update_data).eq(
+                "id", ctx.key_row["id"]
+            ).execute()
 
     await db_execute(_update_cursor)
 
@@ -1211,7 +1239,11 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             )
 
     return DispatchResult(
-        outcome=DispatchOutcome.DONE, trade_count=len(trades)
+        # NEW-C12-02: trade_count must reflect PERSISTED rows, not fetched.
+        # Pre-fix a Phase-1 failure still reported len(trades) which gave a
+        # false green signal (admin sees "N rows synced" with 0 persisted).
+        outcome=DispatchOutcome.DONE,
+        trade_count=0 if phase1_failed else len(trades),
     )
 
 
@@ -1511,35 +1543,67 @@ async def run_poll_allocator_positions_job(job: dict) -> DispatchResult:
         except Exception:  # pragma: no cover - defensive cleanup
             pass
 
-    # Persist + success status update
-    count = await persist_allocator_holdings(
-        ctx.supabase, rows, allocator_id, api_key_id, today_str
-    )
-
-    spot_count = sum(1 for r in rows if r.get("holding_type") == "spot")
-    deriv_count = sum(1 for r in rows if r.get("holding_type") == "derivative")
-
-    final_status = "complete_with_warnings" if warning else "complete"
-
-    def _update_ok():
-        return (
-            ctx.supabase.table("api_keys")
-            .update({
-                "sync_status": final_status,
-                "sync_error": warning,
-                "last_sync_at": datetime.now(timezone.utc).isoformat(),
-            })
-            .eq("id", api_key_id)
-            .execute()
+    # Persist + success status update.
+    # NEW-C12-03: wrap in a try/except that stamps sync_status='error' on
+    # failure so the UI doesn't spin forever on 'syncing'. Pre-fix a
+    # persist_allocator_holdings raise propagated to the compute_jobs FAILED
+    # handler but sync_status was never moved off 'syncing'. A failed
+    # _update_ok was previously a swallowed warning leaving the same stuck state.
+    try:
+        count = await persist_allocator_holdings(
+            ctx.supabase, rows, allocator_id, api_key_id, today_str
         )
 
-    try:
+        spot_count = sum(1 for r in rows if r.get("holding_type") == "spot")
+        deriv_count = sum(1 for r in rows if r.get("holding_type") == "derivative")
+
+        final_status = "complete_with_warnings" if warning else "complete"
+
+        def _update_ok():
+            return (
+                ctx.supabase.table("api_keys")
+                .update({
+                    "sync_status": final_status,
+                    "sync_error": warning,
+                    "last_sync_at": datetime.now(timezone.utc).isoformat(),
+                })
+                .eq("id", api_key_id)
+                .execute()
+            )
+
+        # NEW-C12-03: treat _update_ok failure as a hard error (not a swallowed
+        # warning) — a missed sync_status write leaves the UI spinner stuck on
+        # 'syncing' with no recovery path since allocator jobs have no strategy_id
+        # bridge to the dispatch UI.
         await db_execute(_update_ok)
-    except Exception as upd_exc:  # noqa: BLE001
-        logger.warning(
-            "poll_allocator_positions: failed to stamp sync_status='%s' "
-            "for api_key %s: %s",
-            final_status, api_key_id, upd_exc,
+    except Exception as persist_exc:  # noqa: BLE001
+        sanitized_persist = str(persist_exc)[:200]
+        logger.exception(
+            "poll_allocator_positions: persist/update failed for allocator %s "
+            "(api_key %s) — stamping sync_status='error' to unblock UI: %s",
+            allocator_id, api_key_id, sanitized_persist,
+        )
+        # Best-effort: stamp sync_status so the UI exits the spinner.
+        try:
+            def _update_persist_err():
+                ctx.supabase.table("api_keys").update(
+                    {"sync_status": "error", "sync_error": sanitized_persist}
+                ).eq("id", api_key_id).execute()
+            await db_execute(_update_persist_err)
+        except Exception as stamp_exc:  # noqa: BLE001
+            logger.warning(
+                "poll_allocator_positions: failed to stamp sync_status='error' "
+                "for api_key %s after persist failure: %s",
+                api_key_id, stamp_exc,
+            )
+        _emit_audit(
+            allocator_id, api_key_id, "allocator.holdings.persist_failed",
+            {"sanitized_message": sanitized_persist},
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=sanitized_persist,
+            error_kind="permanent",
         )
 
     _emit_audit(
@@ -2306,12 +2370,21 @@ async def dispatch(job: dict) -> DispatchResult:
     # On permanent failure of a compute_intro_snapshot job, mark the
     # contact_request snapshot_status='failed' so /admin/intros doesn't
     # show 'pending' indefinitely. Skipped on transient (those will retry).
-    if (
-        kind == "compute_intro_snapshot"
-        and result.outcome == DispatchOutcome.FAILED
-        and result.error_kind == "permanent"
-    ):
-        await _mark_intro_snapshot_failed(job)
+    #
+    # NEW-C12-04: also mark failed when the job exhausted its retry budget
+    # (attempts >= max_attempts). Transient/unknown errors that reach the
+    # last attempt transition to failed_final DB-side without returning
+    # error_kind="permanent", so the original permanent-only guard never
+    # fired → snapshot_status stayed 'pending' forever on the admin UI.
+    if kind == "compute_intro_snapshot" and result.outcome == DispatchOutcome.FAILED:
+        attempts = job.get("attempts", 0)
+        max_attempts = job.get("max_attempts", 3)
+        is_final = (
+            result.error_kind == "permanent"
+            or attempts >= max_attempts
+        )
+        if is_final:
+            await _mark_intro_snapshot_failed(job)
 
     # UI status bridge: after every strategy-scoped job, derive the UI
     # status from the compute_jobs aggregate and write it into
