@@ -145,3 +145,26 @@ export type SimulatorResponse = z.infer<typeof SimulatorResponseSchema>;
  *  present. Narrow via `if (response.status === "ok")` before passing
  *  to components that read those fields. */
 export type SimulatorResponseOk = Extract<SimulatorResponse, { status: "ok" }>;
+
+/**
+ * NEW-C11-06: Single source of truth for delta field units.
+ *
+ * Without this map the unit decision ("ratio" vs "percent") lives in two
+ * independent tables: deltaChips() in PortfolioImpactPanel.tsx and
+ * buildDeltaAnnouncement(). If the producer changes dd_delta to emit
+ * already-in-percent (×100), only the chip table or the announcement gets
+ * updated — the other silently drifts. Co-locating with the schema means
+ * both consumers import the same map, so a drift is a compile-time gap.
+ *
+ * "ratio"   → render as-is (e.g. +0.150 for Sharpe)
+ * "percent" → field is a fraction; multiply ×100 when displaying (e.g. dd_delta)
+ */
+export const DELTA_UNITS: Record<
+  keyof z.infer<typeof SimulatorDeltasSchema>,
+  "ratio" | "percent"
+> = {
+  sharpe_delta: "ratio",
+  dd_delta: "percent",
+  corr_delta: "ratio",
+  concentration_delta: "ratio",
+};

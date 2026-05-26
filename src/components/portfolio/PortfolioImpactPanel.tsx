@@ -6,6 +6,7 @@ import type {
   SimulatorDeltas,
   TimeSeriesPoint,
 } from "@/lib/types";
+import { DELTA_UNITS } from "@/lib/api/simulatorSchema";
 import type { SimulatorResponseOk } from "@/lib/api/simulatorSchema";
 
 interface PortfolioImpactPanelProps {
@@ -359,34 +360,36 @@ type DeltaChip = {
   hint: string;
 };
 
+// NEW-C11-06: read units from DELTA_UNITS (single source of truth in simulatorSchema.ts)
+// so this table and buildDeltaAnnouncement can't drift independently.
 function deltaChips(deltas: SimulatorDeltas): DeltaChip[] {
   return [
     {
       key: "sharpe",
       label: "Sharpe",
       value: deltas.sharpe_delta,
-      format: "ratio",
+      format: DELTA_UNITS.sharpe_delta,
       hint: "Change in portfolio Sharpe ratio.",
     },
     {
       key: "maxdd",
       label: "MaxDD",
       value: deltas.dd_delta,
-      format: "percent",
+      format: DELTA_UNITS.dd_delta,
       hint: "Positive = shallower maximum drawdown.",
     },
     {
       key: "correlation",
       label: "Correlation",
       value: deltas.corr_delta,
-      format: "ratio",
+      format: DELTA_UNITS.corr_delta,
       hint: "Positive = lower average pairwise correlation.",
     },
     {
       key: "concentration",
       label: "Concentration",
       value: deltas.concentration_delta,
-      format: "ratio",
+      format: DELTA_UNITS.concentration_delta,
       hint: "Positive = less concentrated (lower HHI).",
     },
   ];
@@ -636,12 +639,14 @@ function buildPath(points: ([number, number] | null)[]): string | null {
 // ARIA announcement
 // ---------------------------------------------------------------------------
 
+// NEW-C11-06: read units from DELTA_UNITS — same map as deltaChips() so the two
+// can't drift independently.
 function buildDeltaAnnouncement(deltas: SimulatorDeltas): string {
   const parts = [
-    formatAnnouncementChip("Sharpe", deltas.sharpe_delta, "ratio"),
-    formatAnnouncementChip("Max drawdown", deltas.dd_delta, "percent"),
-    formatAnnouncementChip("Correlation", deltas.corr_delta, "ratio"),
-    formatAnnouncementChip("Concentration", deltas.concentration_delta, "ratio"),
+    formatAnnouncementChip("Sharpe", deltas.sharpe_delta, DELTA_UNITS.sharpe_delta),
+    formatAnnouncementChip("Max drawdown", deltas.dd_delta, DELTA_UNITS.dd_delta),
+    formatAnnouncementChip("Correlation", deltas.corr_delta, DELTA_UNITS.corr_delta),
+    formatAnnouncementChip("Concentration", deltas.concentration_delta, DELTA_UNITS.concentration_delta),
   ];
   return `Simulation complete. ${parts.join(". ")}.`;
 }
