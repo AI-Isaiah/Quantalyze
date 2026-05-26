@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.9.17] - 2026-05-26
+### Changed — CI reliability (flakiness audit fixes)
+- **fencing test HTTP/1.1 (F1):** `test_compute_jobs_fencing` rebuilds the PostgREST session with `http2=False`. supabase-py hardcodes HTTP/2 and the pinned 2.15.1 has no ClientOptions seam; two concurrent claim workers multiplexed over one HTTP/2 connection caused `RemoteProtocolError: ConnectionTerminated` + spurious overlapping-claims failures. The dominant CI flake (~1-in-2 python runs).
+- **shared-test-db concurrency group (F2):** the `python` CI job now serializes across all runs (`cancel-in-progress: false`) so two PRs' jobs can't race the shared remote Supabase test project.
+- **network-step retries (F3/F6):** all 6 `npm ci` and the `pip install` are wrapped in bounded retry loops to absorb transient `ECONNRESET`.
+- **lychee binary cache + retry (F4):** `docs-link-check` caches the pinned lychee binary and retries the download, eliminating the `curl exit 22` release-CDN flake (the link scan itself is offline).
+- **pip cache completeness (speed F4):** python test/type deps (pytest, mypy, …) moved to `requirements-dev.txt` and added to the pip `cache-dependency-path` so they stop re-resolving every run.
+
+
 ## [0.24.9.16] - 2026-05-26
 ### Fixed — audit-2026-05-07 cluster review: analytics match + cron router (batch a3)
 - match recompute cron: chunk oversized IN-list fetches (avoids PostgREST URL/row limits) and cap the results array; count actual DELETE rows; log warm-up drops (NEW-C08-02…05, NEW-C32-01/02)
