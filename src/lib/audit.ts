@@ -287,6 +287,11 @@ export type AuditAction =
   // --- 7.1a pilot -------------------------------------------------------
   | "api_key.decrypt"
   | "intro.send"
+  // silent-failure-hunter HIGH (review Finding 8): distinct action for the
+  // was_already_sent=true path in /api/admin/match/send-intro. Emitted in place
+  // of intro.send so forensics can distinguish first-send from re-send no-ops
+  // (NEW-C34-03). entity_type mirrors intro.send (contact_request).
+  | "intro.resend_noop"
   // audit-2026-05-07 red-team conf-8 (admin/match/send-intro): emitted on the
   // RPC error path so a 500-storm in `record_admin_introduction` is not
   // forensically invisible. Metadata mirrors the `intro.send` success shape
@@ -461,6 +466,7 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP: Record<AuditAction, AuditEntityType> 
   // 7.1a pilot
   "api_key.decrypt": "api_key",
   "intro.send": "contact_request",
+  "intro.resend_noop": "contact_request",
   "intro.send_failed": "contact_request",
   "deletion.request.create": "data_deletion_request",
   // 7.2 RBAC

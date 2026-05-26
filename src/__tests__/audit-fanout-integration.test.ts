@@ -842,6 +842,14 @@ describe("POST /api/admin/partner-import — admin.partner_import emission", () 
 
     vi.doMock("@/lib/supabase/admin", () => ({
       createAdminClient: () => ({
+        // NEW-C28-05 fix: emitAsUser is now awaited synchronously before the
+        // response returns (was fire-and-forget via after()). The admin client
+        // mock must therefore expose rpc() so the log_audit_event_service call
+        // inside emitAsUser doesn't throw "adminClient.rpc is not a function".
+        rpc: async (name: string, args: Record<string, unknown>) => {
+          STATE.rpcCalls.push({ name, args });
+          return { data: null, error: null };
+        },
         from: (table: string) => {
           if (table === "profiles") {
             return {
