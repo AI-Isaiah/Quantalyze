@@ -1726,7 +1726,21 @@ async def _fetch_and_price_window(
             last_value > 0
             and abs(offset) > 5.0 * abs(last_value)
         )
-        if anchor_partial_symbols:
+        if hit_terminus:
+            # silent-failure/F-11: when OKX 90-day terminus was hit, the
+            # replay started from quantities={} (zero cash). Every row's
+            # absolute equity value is wrong because the pre-terminus
+            # funding deposit is missing. Applying the anchor offset would
+            # shift all rows by (exchange_equity - last_wrong_value), which
+            # may be a very large offset applied to unreliable baseline values.
+            # Skip the anchor entirely when terminus was hit; the telemetry
+            # flag (pre_terminus_balance_unknown=True) already signals the
+            # dashboard to suppress absolute-level display.
+            logger.warning(
+                "anchor: skipping — OKX 90-day terminus hit, pre-terminus "
+                "absolute equity unreliable; anchor would corrupt all rows",
+            )
+        elif anchor_partial_symbols:
             logger.warning(
                 "anchor: skipping — %d asset(s) priced to zero (ticker "
                 "failure with qty>0): %s",
