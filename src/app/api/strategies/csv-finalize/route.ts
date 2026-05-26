@@ -372,18 +372,6 @@ function parseCsvMetadata(raw: unknown): ParseCsvMetadataResult {
   return { ok: true, payload: out };
 }
 
-function parseMoney(value: string | undefined): number | null {
-  if (!value) return null;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) return null;
-  // /ship specialist review (api-contract): mirror finalize-wizard.
-  // `Number("1e20")` is a finite number, but `1e20` USD is garbage —
-  // either a typo or hostile input. Reject so the public sheet doesn't
-  // render absurd values.
-  if (n >= MAX_DOLLAR_VALUE) return null;
-  return n;
-}
-
 /**
  * Build the UPDATE payload from a parsed metadata blob. Shared between
  * the legacy direct-RPC path and the unified-backbone path so the two
@@ -687,29 +675,17 @@ function enqueueCsvAnalyticsAfter(
  * QA ISSUE-010 + /ship specialist review: persist classification
  * metadata via an authenticated UPDATE after the SECURITY DEFINER RPC
  * (or unified router) returns. Gated by `.eq("user_id", user.id)` +
- * the strategies_update RLS policy. Non-fatal: a failure here logs
- * but does NOT 500 the response because the strategy row is already
- * persisted. (Pre-19.1-redteam this comment claimed a unique
- * constraint on wizard_session_id blocked retries; that index is
- * deferred to BACKBONE-07 per migration
- * 20260501055202_strategy_verifications.sql:27, so a naive retry
- * actually creates an additional orphan strategy. The metadata
- * UPDATE is still non-fatal because partial discovery metadata is
- * a better failure mode than rolling back a persisted strategy +
- * persisted daily returns + a leaked support-recovery surface.)
- * Shared between the legacy RPC path and the unified-backbone path
- * so the two stay in lockstep.
- */
-/**
+ * the strategies_update RLS policy. Shared between the legacy RPC path
+ * and the unified-backbone path so the two stay in lockstep.
+ *
  * Returns null on success (or when there is nothing to update).
  * Returns a 400 NextResponse when parseCsvMetadata signals a
- * present-but-invalid field (NEW-C14-03 / NEW-C14-05).
- * The caller is responsible for deciding whether to treat the
- * validation error as fatal (pre-create) or non-fatal (post-create).
- *
- * Pre-create callers (the POST handler) treat it as fatal (return 400).
- * We do not call applyCsvMetadataUpdate after the strategy row is created
- * for the validation-error path — the 400 fires before RPC invocation.
+ * present-but-invalid field (NEW-C14-03 / NEW-C14-05); the caller
+ * decides whether to treat that as fatal (pre-create: return 400) or
+ * defensive (post-create: capture orphan + return 400). The UPDATE
+ * failure path (RLS/22P02) is non-fatal — it logs + captures to Sentry
+ * but returns null so the strategy row already persisted is not rolled
+ * back.
  */
 async function applyCsvMetadataUpdate(
   supabase: SupabaseClient,
