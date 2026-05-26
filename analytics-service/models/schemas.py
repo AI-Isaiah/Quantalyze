@@ -27,10 +27,18 @@ class HealthResponse(BaseModel):
 
 class PortfolioAnalyticsRequest(BaseModel):
     portfolio_id: str
+    # NEW-C19-01: user_id supplied by the Next.js caller so this service can
+    # verify the portfolio belongs to the requesting user.  The X-Service-Key
+    # middleware authenticates the CALLER (Next.js), not the end user; this
+    # ownership check is the only defense against a service-key holder passing
+    # an arbitrary portfolio_id.  See trust-boundary comment in BridgeRequest.
+    user_id: str
 
 
 class PortfolioOptimizerRequest(BaseModel):
     portfolio_id: str
+    # NEW-C19-01: same trust-boundary as PortfolioAnalyticsRequest.user_id.
+    user_id: str
     # Custom optimizer weights, keyed by strategy_id. Validated by the
     # field_validator below + the handler's per-portfolio key-scoping.
     # Audit 2026-05-07 H-0589: an unvalidated dict allowed NaN/Inf/string

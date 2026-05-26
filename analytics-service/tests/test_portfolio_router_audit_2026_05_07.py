@@ -215,10 +215,14 @@ class TestBuildNormalizedWeights:
             {"strategy_id": "s1", "current_weight": 0},
             {"strategy_id": "s2", "current_weight": 0},
         ]
-        # Zero weight rows fall back to default 1.0 each (current_weight=0
-        # is falsy in the dict comprehension) so this normalises cleanly.
+        # NEW-C19-05: current_weight=0 is now treated as an EXPLICIT zero
+        # (not as "unset"), so both strategies keep weight 0.  The `or 1.0`
+        # guard on `total` prevents a ZeroDivisionError and the result is
+        # {s1: 0.0, s2: 0.0}.  This is the correct paused-strategy behavior:
+        # two paused strategies should both be 0-weight, not silently promoted
+        # to equal 50/50 allocation.
         w = _build_normalized_weights(rows)
-        assert w == pytest.approx({"s1": 0.5, "s2": 0.5})
+        assert w == pytest.approx({"s1": 0.0, "s2": 0.0})
 
 
 # ---------------------------------------------------------------------------
@@ -612,14 +616,16 @@ class TestPerEmailRateLimit:
 
 class TestPortfolioOptimizerRequestValidator:
     def test_none_weights_accepted(self):
+        # NEW-C19-01: user_id is now required on PortfolioOptimizerRequest.
         from models.schemas import PortfolioOptimizerRequest
-        r = PortfolioOptimizerRequest(portfolio_id="p1")
+        r = PortfolioOptimizerRequest(portfolio_id="p1", user_id="u1")
         assert r.weights is None
 
     def test_valid_weights_accepted(self):
         from models.schemas import PortfolioOptimizerRequest
         r = PortfolioOptimizerRequest(
             portfolio_id="p1",
+            user_id="u1",
             weights={"s1": 0.6, "s2": 0.4},
         )
         assert r.weights == {"s1": 0.6, "s2": 0.4}
@@ -627,22 +633,22 @@ class TestPortfolioOptimizerRequestValidator:
     def test_nan_weight_rejected(self):
         from models.schemas import PortfolioOptimizerRequest
         with pytest.raises(Exception):
-            PortfolioOptimizerRequest(portfolio_id="p1", weights={"s1": float("nan")})
+            PortfolioOptimizerRequest(portfolio_id="p1", user_id="u1", weights={"s1": float("nan")})
 
     def test_inf_weight_rejected(self):
         from models.schemas import PortfolioOptimizerRequest
         with pytest.raises(Exception):
-            PortfolioOptimizerRequest(portfolio_id="p1", weights={"s1": float("inf")})
+            PortfolioOptimizerRequest(portfolio_id="p1", user_id="u1", weights={"s1": float("inf")})
 
     def test_negative_weight_rejected(self):
         from models.schemas import PortfolioOptimizerRequest
         with pytest.raises(Exception):
-            PortfolioOptimizerRequest(portfolio_id="p1", weights={"s1": -0.5})
+            PortfolioOptimizerRequest(portfolio_id="p1", user_id="u1", weights={"s1": -0.5})
 
     def test_non_numeric_weight_rejected(self):
         from models.schemas import PortfolioOptimizerRequest
         with pytest.raises(Exception):
-            PortfolioOptimizerRequest(portfolio_id="p1", weights={"s1": "not-a-number"})
+            PortfolioOptimizerRequest(portfolio_id="p1", user_id="u1", weights={"s1": "not-a-number"})
 
 
 # ---------------------------------------------------------------------------

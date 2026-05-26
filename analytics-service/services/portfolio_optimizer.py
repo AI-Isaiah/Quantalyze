@@ -57,6 +57,7 @@ def generate_narrative(analytics: dict) -> str:
     """Build a deterministic portfolio narrative.
 
     Structure:
+      0. Partial-data hedge (if partial_data=True, NEW-C19-08)
       1. MTD headline + top contributor
       2. Correlation / diversification quality
       3. Risk concentration warning (if applicable)
@@ -64,6 +65,19 @@ def generate_narrative(analytics: dict) -> str:
       5. Optimizer recommendation sentence (if optimizer_suggestions present)
     """
     parts = []
+
+    # NEW-C19-08: when the analytics were computed from a renormalized subset
+    # (some strategies had no history), prepend a disclosure so the user is not
+    # misled by confident whole-portfolio claims derived from partial data.
+    if analytics.get("partial_data"):
+        computed = analytics.get("computed_strategy_count")
+        expected = analytics.get("expected_strategy_count")
+        if computed is not None and expected is not None and computed < expected:
+            parts.append(
+                f"Computed from {computed} of {expected} strategies — "
+                f"figures exclude {expected - computed} strategy/strategies with no return history"
+            )
+
     mtd = analytics.get("return_mtd")
     if mtd is not None:
         parts.append(f"Your portfolio returned {mtd * 100:+.1f}% MTD (TWR)")

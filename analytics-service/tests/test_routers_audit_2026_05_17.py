@@ -720,8 +720,10 @@ def _make_optimizer_supabase(
     """
     mock = MagicMock()
 
+    # NEW-C19-01: portfolio_optimizer now does .eq("id").eq("user_id").single()
+    # (two .eq calls for the ownership SELECT). Update the mock chain accordingly.
     portfolio_chain = MagicMock()
-    portfolio_chain.select.return_value.eq.return_value.single.return_value.execute.return_value = (
+    portfolio_chain.select.return_value.eq.return_value.eq.return_value.single.return_value.execute.return_value = (
         MagicMock(data=portfolio_row)
     )
 
