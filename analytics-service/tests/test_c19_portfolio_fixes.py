@@ -28,43 +28,87 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Bootstrap stubs (identical pattern to test_portfolio_router_audit_2026_05_07)
+# Bootstrap (non-polluting, mirrors test_routers_audit_2026_05_17).
+#
+# fastapi / slowapi / supabase / ccxt are real installed deps, so we do NOT
+# replace them in sys.modules with MagicMocks — doing so leaks mock modules
+# into every test file collected after this one (this file sorts before
+# test_cron_router / test_debug_key_flow_router / test_match_router), turning
+# their async route handlers into un-awaitable MagicMocks. We only patch
+# slowapi.Limiter *in place* to a no-op shim (so @limiter.limit decorators are
+# passthroughs without a Starlette Request) and restore it at module teardown.
 # ---------------------------------------------------------------------------
 
-def _install_stubs():
-    stubs = [
-        "supabase",
-        "slowapi",
-        "slowapi.util",
-        "fastapi",
-        "fastapi.routing",
-        "ccxt",
-        "ccxt.async_support",
-    ]
-    for name in stubs:
+class _NoopLimiterC19:
+    """No-op slowapi.Limiter shim so @limiter.limit decorators are passthroughs.
+
+    Mirrors test_routers_audit_2026_05_17._NoopLimiter — needed because the
+    M-002 tests drive portfolio_analytics / portfolio_optimizer directly and
+    must not require a real slowapi Request.
+    """
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def limit(self, *args, **kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+
+
+_PATCHED_SLOWAPI: dict[str, object] = {}
+
+
+def _install_router_stubs():
+    import slowapi
+    import slowapi.util as slowapi_util
+
+    # Save the real Limiter + get_remote_address so the module teardown can
+    # restore them; patch the noop limiter in place so the module-level import
+    # of routers.portfolio (and any reload) binds @limiter.limit as a passthrough.
+    _PATCHED_SLOWAPI.setdefault("Limiter", slowapi.Limiter)
+    _PATCHED_SLOWAPI.setdefault("get_remote_address", slowapi_util.get_remote_address)
+    slowapi.Limiter = _NoopLimiterC19  # type: ignore[attr-defined,assignment]
+    slowapi_util.get_remote_address = MagicMock()  # type: ignore[attr-defined,assignment]
+
+    for name in ("ccxt", "ccxt.async_support"):
         if name not in sys.modules:
             sys.modules[name] = MagicMock()
-    sys.modules["supabase"].create_client = MagicMock()
-    sys.modules["supabase"].Client = MagicMock()
-    sys.modules["slowapi"].Limiter = MagicMock(return_value=MagicMock())
-    sys.modules["slowapi.util"].get_remote_address = MagicMock()
-    mock_router = MagicMock()
-    sys.modules["fastapi"].APIRouter = MagicMock(return_value=mock_router)
-    sys.modules["fastapi"].HTTPException = _StubHTTPException
-    sys.modules["fastapi"].Request = MagicMock()
 
 
-class _StubHTTPException(Exception):
-    def __init__(self, status_code: int | None = None, detail: object = None, **kwargs):
-        self.status_code = status_code
-        self.detail = detail
-        super().__init__(detail)
+def _restore_slowapi():
+    if _PATCHED_SLOWAPI:
+        import slowapi
+        import slowapi.util as slowapi_util
+        slowapi.Limiter = _PATCHED_SLOWAPI["Limiter"]  # type: ignore[attr-defined,assignment]
+        slowapi_util.get_remote_address = _PATCHED_SLOWAPI["get_remote_address"]  # type: ignore[attr-defined,assignment]
+        _PATCHED_SLOWAPI.clear()
 
 
-_install_stubs()
+_install_router_stubs()
 
 from routers.portfolio import _build_normalized_weights  # noqa: E402
 from services.portfolio_optimizer import generate_narrative  # noqa: E402
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_router_state_at_module_teardown_c19():
+    """At module teardown: restore the real slowapi.Limiter / get_remote_address
+    and drop the (M-002-reloaded, noop-limiter) `routers.portfolio` AND
+    `routers.cron` from sys.modules, so subsequent test files re-import cleanly
+    under their own stub regime.
+
+    Eviction is module-scoped (not per-test) on purpose: the pure-function
+    tests in this file call the top-level-imported `_build_normalized_weights`
+    while patching `routers.portfolio.logger`; popping the module between those
+    tests would split the function and the patch target across two module
+    objects, defeating the patch. The M-002 reload block is last in the file,
+    so the only routers.portfolio object that outlives the module is the one we
+    evict here.
+    """
+    yield
+    _restore_slowapi()
+    sys.modules.pop("routers.portfolio", None)
+    sys.modules.pop("routers.cron", None)
 
 
 # ---------------------------------------------------------------------------
@@ -794,12 +838,18 @@ class TestBuildNormalizedWeightsAllZeroWarningSFF3:
 
     def test_all_zero_weights_triggers_warning(self):
         """SF-F3: passing all current_weight=0 strategies must trigger a warning log."""
+        # Resolve the function and the logger from the SAME live module object:
+        # an earlier-collected sibling test file may have reloaded
+        # routers.portfolio, which would desync the top-level-imported
+        # `_build_normalized_weights` (frozen to the original module) from a
+        # `patch("routers.portfolio.logger")` target (the live module).
+        import routers.portfolio as pf
         rows = [
             {"strategy_id": "s1", "current_weight": 0.0},
             {"strategy_id": "s2", "current_weight": 0.0},
         ]
-        with patch("routers.portfolio.logger") as mock_logger:
-            result = _build_normalized_weights(rows)
+        with patch.object(pf, "logger") as mock_logger:
+            result = pf._build_normalized_weights(rows)
             mock_logger.warning.assert_called_once()
             call_args = mock_logger.warning.call_args[0]
             assert "0.0" in str(call_args) or "all" in str(call_args).lower() or "paused" in str(call_args).lower(), (
@@ -810,12 +860,13 @@ class TestBuildNormalizedWeightsAllZeroWarningSFF3:
 
     def test_partial_zero_does_not_warn(self):
         """SF-F3: a portfolio with at least one non-zero weight must NOT warn."""
+        import routers.portfolio as pf
         rows = [
             {"strategy_id": "active", "current_weight": 1.0},
             {"strategy_id": "paused", "current_weight": 0.0},
         ]
-        with patch("routers.portfolio.logger") as mock_logger:
-            _build_normalized_weights(rows)
+        with patch.object(pf, "logger") as mock_logger:
+            pf._build_normalized_weights(rows)
             mock_logger.warning.assert_not_called()
 
 
@@ -886,37 +937,22 @@ class TestAnalyticsUpdateResultCheckSFF7:
 #                    optimizer (replacing the coarse source-scan).
 #
 # IMPORTANT: placed LAST in the file because this block reloads
-# routers.portfolio with real FastAPI (clearing the MagicMock stub).  Any
-# test placed after it that uses `patch("routers.portfolio.logger")` would
-# see the REAL module's logger instead of the stub — causing a false failure.
-# Keeping M-002 last isolates the module-reload side-effect to the tail of
-# collection order so all earlier tests are unaffected.
+# routers.portfolio. Any test placed after it that uses
+# `patch("routers.portfolio.logger")` would target a freshly reloaded module
+# object — causing a false failure. Keeping M-002 last isolates the
+# module-reload side-effect to the tail of collection order. The autouse
+# fixtures at the top of the file then evict routers.portfolio/routers.cron
+# so sibling test files re-import cleanly.
 # ---------------------------------------------------------------------------
 
-class _NoopLimiterC19:
-    """No-op slowapi.Limiter shim so @limiter.limit decorators are passthroughs.
-
-    Mirrors test_routers_audit_2026_05_17._NoopLimiter — needed here because
-    the M-002 tests drive portfolio_analytics / portfolio_optimizer directly
-    and must not require a real slowapi Request.
-    """
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def limit(self, *args, **kwargs):
-        def decorator(fn):
-            return fn
-        return decorator
-
-
 def _reload_portfolio_with_noop_limiter_c19():
-    """Reload routers.portfolio with real FastAPI + noop limiter.
+    """Reload routers.portfolio with the noop limiter active.
 
     Mirrors test_routers_audit_2026_05_17._reload_portfolio_with_noop_limiter:
-    * pops MagicMock-stubbed fastapi from sys.modules so the reload picks up
-      the real FastAPI (required for HTTPException.status_code assertions),
-    * patches slowapi.Limiter to _NoopLimiterC19 so @limiter.limit decorators
-      are passthroughs (no Starlette Request state needed).
+    re-binds slowapi.Limiter to _NoopLimiterC19 (so @limiter.limit decorators
+    are passthroughs with no Starlette Request state) and reloads the module so
+    the decorators pick up the noop. FastAPI is the real installed package, so
+    HTTPException.status_code assertions hold.
     """
     import importlib
     import slowapi
@@ -925,13 +961,7 @@ def _reload_portfolio_with_noop_limiter_c19():
     slowapi.Limiter = _NoopLimiterC19  # type: ignore[attr-defined,assignment]
     slowapi_util.get_remote_address = MagicMock()  # type: ignore[attr-defined,assignment]
 
-    for name in ("fastapi", "fastapi.routing", "fastapi.exceptions"):
-        mod = sys.modules.get(name)
-        if mod is not None and isinstance(mod, MagicMock):
-            sys.modules.pop(name, None)
-
     sys.modules.pop("routers.portfolio", None)
-    import fastapi  # noqa: F401
     import routers.portfolio as portfolio_mod  # noqa: F401
     importlib.reload(portfolio_mod)
     return portfolio_mod
