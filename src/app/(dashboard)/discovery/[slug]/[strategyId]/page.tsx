@@ -10,7 +10,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import { createClient } from "@/lib/supabase/server";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
-import type { TrustTierKind } from "@/lib/factsheet/types";
+import type { TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { notFound, redirect } from "next/navigation";
 
 export default async function StrategyDetailPage({
@@ -52,10 +52,36 @@ export default async function StrategyDetailPage({
     | { daily_returns?: unknown; returns_series?: unknown }
     | null
     | undefined;
+  const dailyRaw = analyticsRow?.daily_returns;
   const dailyReturns = resolveDailyReturnSeries(
-    analyticsRow?.daily_returns,
+    dailyRaw,
     analyticsRow?.returns_series,
   );
+
+  // Derive ingestSource using the same logic as fetchAndBuildPayload in
+  // factsheet/[id]/v2/page.tsx: daily_returns populated = CSV path; null/
+  // undefined = analytics-service (api) path. Without this, buildFactsheetPayload
+  // defaults to "csv" and all gated panels (PeerPercentile, AllocatorSection,
+  // Signatures) are permanently suppressed for API strategies on the discovery
+  // surface. (RED-TEAM-H1)
+  const ingestSource: IngestSource =
+    Array.isArray(dailyRaw)
+      ? "csv"
+      : typeof dailyRaw === "object" && dailyRaw !== null
+        ? "csv"
+        : "api";
+
+  // RED-TEAM-H2: Never fall back to "now" for a missing computed_at — that
+  // would make FreshnessChip show a green "fresh" badge for a strategy with
+  // no real analytics data. Mirror the epoch sentinel from page.tsx so the
+  // chip correctly signals staleness. Consistent with FINDING-5 fix.
+  if (!analytics?.computed_at) {
+    console.warn(
+      "[discovery/strategyDetail] analytics.computed_at missing, freshness chip will show epoch",
+      { strategyId },
+    );
+  }
+  const computedAt = analytics?.computed_at ?? "1970-01-01T00:00:00Z";
 
   const factsheetPayload = buildFactsheetPayload(
     {
@@ -63,8 +89,9 @@ export default async function StrategyDetailPage({
       name: factsheetName,
       types: strategy.strategy_types ?? [],
       markets: strategy.markets ?? [],
-      computedAt: analytics?.computed_at ?? new Date().toISOString(),
+      computedAt,
       trustTier: (strategy.trust_tier ?? null) as TrustTierKind | null,
+      ingestSource,
       description: strategy.description ?? null,
       subtypes: strategy.subtypes ?? [],
       supportedExchanges: strategy.supported_exchanges ?? [],

@@ -166,6 +166,47 @@ export interface ProjectedUserTable {
   user_column: string;
   /** Post-fetch redaction function. */
   project: (rows: unknown[], userId: string) => unknown[];
+  /**
+   * NEW-C16-02 (audit 2026-05-26, HIGH): optional PostgREST `.or()`
+   * filter builder. When present, the SELECT uses `.or(or_filter(userId))`
+   * INSTEAD of `.eq(user_column, userId)`. This is required for
+   * `audit_log_for_user`, whose `project` (redactAuditLogForUser)
+   * retains rows where the subject is the ACTOR, the ENTITY
+   * (entity_id=subject AND entity_type='user'), OR the metadata
+   * target (metadata->>target_user_id=subject) — i.e. "data ABOUT
+   * them", per GDPR Art. 15. A bare `.eq(user_column=actor)` only ever
+   * returned the actor slice, so admin-on-subject rows (role.grant /
+   * revoke, deletion approve/reject, account.sanitize — all written
+   * with user_id=ADMIN, entity_id=subject) were SILENTLY absent from
+   * the bundle (partial:false). The `.or()` widens the SQL predicate
+   * to MATCH the projection's retention criteria so those rows reach
+   * `project` and are exported.
+   *
+   * The `userId` is UUID-validated upstream (`collectUserExportBundle`
+   * refuses a non-UUID subject — C-0021), so interpolating it into the
+   * filter string is safe. The `project` callback STILL runs as the
+   * authoritative redaction/retention gate — the SQL widening only
+   * ensures the candidate rows are fetched; no row the projection
+   * would reject can survive it.
+   *
+   * Omit for api_keys / contact_requests: their `.eq(user_column)` IS
+   * the exact predicate the projection enforces (a single-owner
+   * column), so widening would be incorrect.
+   *
+   * MAINTENANCE NOTE (NEW-C16-11, L conf-8 red-team): when adding an
+   * `or_filter`, EVERY column name referenced in the returned string
+   * MUST match the actual column names on `source_table`. In particular,
+   * the primary owner column referenced in the filter should match
+   * `user_column` declared on this spec. Copying the `audit_log` filter
+   * (`user_id.eq.${userId},...`) for a spec with `user_column: "actor_id"`
+   * would silently return zero rows for the actor direction — the SQL
+   * succeeds but returns nothing, and the export silently omits the data
+   * without any error or `partial` signal. The `project` callback does
+   * NOT compensate for a wrong SQL predicate (it is a redaction gate,
+   * not a re-filter). Verify your filter string against the source
+   * table's actual column names before landing.
+   */
+  or_filter?: (userId: string) => string;
 }
 
 export type UserExportTable =
@@ -372,6 +413,83 @@ export function redactContactRequestForUser(
 }
 
 /**
+ * Cross-party columns blanked by `redactAllocatorMatchForUser`.
+ *
+ * NEW-C16-05 (audit 2026-05-26, MED conf-8): `match_decisions`,
+ * `match_candidates`, and `bridge_outcomes` are owned by the subject
+ * (allocator_id = subject) but carry identifiers that belong to OTHER
+ * parties:
+ *   - `strategy_id` / `original_strategy_id` point at / describe the
+ *     MANAGER's strategy — the same cross-party `strategy_id` that
+ *     `redactContactRequestForUser` already blanks. Disclosing it lets
+ *     the subject derive the manager's strategy inventory.
+ *   - `decided_by` (match_decisions only) is set to the ADMIN's auth
+ *     UUID by the match console. It is the exact value
+ *     `AUDIT_METADATA_REDACT_KEYS` strips from audit_log metadata, so
+ *     shipping it raw in this bundle is an inconsistent application of
+ *     the same privacy invariant.
+ *
+ * The subject's OWN fields (rank, score, score_breakdown, reasons,
+ * decision, founder_note, notes, kind, status, deltas, timestamps) are
+ * preserved — they are the subject's own match/bridge state.
+ */
+const ALLOCATOR_MATCH_CROSS_PARTY_COLUMNS: readonly string[] = [
+  "strategy_id",
+  "original_strategy_id",
+];
+
+/**
+ * Projection helper — match_decisions / match_candidates /
+ * bridge_outcomes projected for the subject (the allocator).
+ *
+ * Keeps only rows where `allocator_id === subject`. Blanks the
+ * cross-party `strategy_id` / `original_strategy_id` (the manager's
+ * strategy) to the placeholder, and `decided_by` when it is present
+ * and not the subject (the admin's auth UUID). Mirrors
+ * `redactContactRequestForUser`.
+ *
+ * Exported for unit-test pinning.
+ */
+export function redactAllocatorMatchForUser(
+  rows: unknown[],
+  userId: string,
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    const row = r as Record<string, unknown>;
+    // Defense-in-depth: the SQL filter already scopes to the subject,
+    // but the projection re-checks (a future query change must not
+    // leak other allocators' rows). Log anomalies so operators can
+    // detect SQL predicate drift or RLS bypass — silent drops would
+    // produce a partial export with partial:false and no alert.
+    if (row.allocator_id !== userId) {
+      console.warn(
+        `[gdpr-export] defense-in-depth: dropped row with allocator_id=${String(row.allocator_id)} !== userId for table (bridge_outcomes/match_candidates/match_decisions); SQL predicate may have drifted`,
+      );
+      continue;
+    }
+    const clone: Record<string, unknown> = { ...row };
+    for (const col of ALLOCATOR_MATCH_CROSS_PARTY_COLUMNS) {
+      if (col in clone && clone[col] !== null) {
+        clone[col] = REDACTED_PLACEHOLDER;
+      }
+    }
+    // decided_by is the ADMIN's auth UUID (match_decisions only). Blank
+    // it unless it happens to be the subject themselves.
+    if (
+      "decided_by" in clone &&
+      clone.decided_by !== null &&
+      clone.decided_by !== userId
+    ) {
+      clone.decided_by = REDACTED_PLACEHOLDER;
+    }
+    out.push(clone);
+  }
+  return out;
+}
+
+/**
  * Columns on `api_keys` that carry the at-rest-encrypted credential
  * blob or its envelope metadata. Even though they're ciphertext, GDPR
  * Art. 15/20 do NOT require returning them — the user already has the
@@ -482,13 +600,52 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
     user_column: "allocator_id",
     project: redactContactRequestForUser,
   },
-  { kind: "direct", table: "bridge_outcome_dismissals", user_column: "allocator_id" },
-  { kind: "direct", table: "bridge_outcomes", user_column: "allocator_id" },
+  // NEW-C16-08 (audit 2026-05-26, HIGH): bridge_outcome_dismissals carries
+  // `strategy_id NOT NULL` pointing at the MANAGER's strategy — the same
+  // cross-party FK that NEW-C16-05 explicitly blanks in bridge_outcomes,
+  // match_candidates, and match_decisions. Exporting it raw leaks the
+  // manager's strategy UUID and breaks the privacy invariant applied
+  // consistently to the sibling tables. Converting to a projected spec using
+  // `redactAllocatorMatchForUser` blanks `strategy_id` (and
+  // `original_strategy_id` if ever added) while preserving the allocator's
+  // own dismissal metadata (dismissed_at, expires_at).
+  {
+    kind: "projected",
+    table: "bridge_outcome_dismissals",
+    source_table: "bridge_outcome_dismissals",
+    user_column: "allocator_id",
+    project: redactAllocatorMatchForUser,
+  },
+  // NEW-C16-05: bridge_outcomes carries cross-party strategy_id/original_strategy_id
+  // (manager's strategy) and no decided_by — projected to blank cross-party columns.
+  {
+    kind: "projected",
+    table: "bridge_outcomes",
+    source_table: "bridge_outcomes",
+    user_column: "allocator_id",
+    project: redactAllocatorMatchForUser,
+  },
   { kind: "direct", table: "data_deletion_requests", user_column: "user_id" },
   { kind: "direct", table: "investor_attestations", user_column: "user_id" },
   { kind: "direct", table: "match_batches", user_column: "allocator_id" },
-  { kind: "direct", table: "match_candidates", user_column: "allocator_id" },
-  { kind: "direct", table: "match_decisions", user_column: "allocator_id" },
+  // NEW-C16-05: match_candidates carries cross-party strategy_id/original_strategy_id
+  // (manager's strategy) — projected to blank cross-party columns.
+  {
+    kind: "projected",
+    table: "match_candidates",
+    source_table: "match_candidates",
+    user_column: "allocator_id",
+    project: redactAllocatorMatchForUser,
+  },
+  // NEW-C16-05: match_decisions carries cross-party strategy_id/original_strategy_id
+  // AND decided_by (the admin's auth UUID) — projected to blank all cross-party fields.
+  {
+    kind: "projected",
+    table: "match_decisions",
+    source_table: "match_decisions",
+    user_column: "allocator_id",
+    project: redactAllocatorMatchForUser,
+  },
   { kind: "direct", table: "organization_members", user_column: "user_id" },
   { kind: "direct", table: "portfolios", user_column: "user_id" },
   { kind: "direct", table: "profiles", user_column: "id" },
@@ -514,6 +671,44 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
     source_table: "audit_log",
     user_column: "user_id",
     project: redactAuditLogForUser,
+    // NEW-C16-02 (HIGH): widen the SQL predicate to MATCH the
+    // projection's retention criteria. redactAuditLogForUser keeps a
+    // row when the subject is the ACTOR, the ENTITY (entity_id=subject
+    // AND entity_type='user'), OR the metadata target
+    // (metadata->>target_user_id=subject). A bare .eq(user_id) only
+    // returned the actor slice, so admin-on-subject rows (role.grant /
+    // revoke, deletion.request.approve / reject, account.sanitize —
+    // written with user_id=ADMIN, entity_id=subject) never reached the
+    // projection and were silently absent from the export. The .or()
+    // below fetches all three directions; the projection remains the
+    // authoritative redaction gate.
+    or_filter: (userId: string) =>
+      `user_id.eq.${userId},and(entity_id.eq.${userId},entity_type.eq.user),metadata->>target_user_id.eq.${userId}`,
+  },
+  // NEW-C16-03 (audit 2026-05-26, HIGH): audit_log_cold is the 2yr+
+  // archive that the `audit_log_hot_to_cold` cron MOVEs rows into
+  // (migration 20260417110539_retention_crons.sql). It mirrors the hot
+  // audit_log schema exactly (same columns, same owner-read RLS). The
+  // export read ONLY the hot table, so an account >2yr old received an
+  // Art. 15 bundle missing its most forensically-relevant old entries
+  // (early events, old role grants/deletions) with NO `partial` signal
+  // (the rows were never fetched). We UNION the cold archive into the
+  // export as a second projection over the SAME redactor + the SAME
+  // entity/metadata-target widening (NEW-C16-02). Bundle-facing name is
+  // distinct (`audit_log_cold_for_user`) so it does not collide with
+  // the hot projection. Sanitize parity: audit_log_cold is PRESERVE
+  // (mirroring hot) — recorded in SANITIZE_PARITY_ALLOWLIST in
+  // scripts/check-gdpr-export-coverage.ts (the cold table's PRESERVE
+  // policy lives in the same retention-cron migration that creates it,
+  // not the sanitize_user matrix the parity scan reads).
+  {
+    kind: "projected",
+    table: "audit_log_cold_for_user",
+    source_table: "audit_log_cold",
+    user_column: "user_id",
+    project: redactAuditLogForUser,
+    or_filter: (userId: string) =>
+      `user_id.eq.${userId},and(entity_id.eq.${userId},entity_type.eq.user),metadata->>target_user_id.eq.${userId}`,
   },
   // ------------------------------------------------------------------
   // Indirectly owned (reachable via a parent table)
@@ -543,6 +738,44 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   {
     kind: "indirect",
     table: "reconciliation_reports",
+    via_column: "strategy_id",
+    parent_table: "strategies",
+    parent_user_column: "user_id",
+  },
+  // NEW-C16-04 (audit 2026-05-26, HIGH): positions + position_snapshots
+  // are strategy-scoped user trading data (FK strategy_id NOT NULL ->
+  // strategies), the same indirect shape as trades. They were wrongly
+  // EXCLUDED from the export ("Portfolio-scoped... indirect via
+  // portfolios" — wrong on both counts), so a user's live positions and
+  // historical position snapshots (Art. 15 personal trading data) were
+  // entirely absent. Sanitize side is covered by the existing PRESERVE
+  // rows in the sanitize_user matrix.
+  {
+    kind: "indirect",
+    table: "positions",
+    via_column: "strategy_id",
+    parent_table: "strategies",
+    parent_user_column: "user_id",
+  },
+  {
+    kind: "indirect",
+    table: "position_snapshots",
+    via_column: "strategy_id",
+    parent_table: "strategies",
+    parent_user_column: "user_id",
+  },
+  // NEW-C16-09 (audit 2026-05-26, HIGH): csv_daily_returns is a user's
+  // CSV-ingested daily return series (Art. 15 / Art. 20 portable personal
+  // financial data). Migration 20260522111839 adds it with
+  // `strategy_id NOT NULL REFERENCES strategies` — the same indirect shape
+  // as trades / funding_fees / positions / position_snapshots. It was absent
+  // from the export and from EXCLUDED_TABLES (no documented rationale), so
+  // Art. 15 bundles silently omitted the user's CSV performance data.
+  // The coverage-hook regex does NOT flag indirect tables (FK is strategy_id,
+  // not a bare user_id column); manual addition to the manifest is required.
+  {
+    kind: "indirect",
+    table: "csv_daily_returns",
     via_column: "strategy_id",
     parent_table: "strategies",
     parent_user_column: "user_id",
@@ -1399,26 +1632,98 @@ interface FetchRowsResult {
 }
 
 /**
+ * Tables in USER_EXPORT_TABLES that have NO `id` column, mapped to the
+ * NOT-NULL column that supplies their deterministic ORDER BY instead.
+ *
+ * NEW-C16-01 (audit 2026-05-26, CRITICAL): the previous
+ * `getOrderColumn` returned `"id"` for every non-audit spec on the
+ * stale assumption that "every user-owned table has an `id` UUID
+ * column". Eight manifest tables have composite/natural PKs and NO `id`
+ * column — verified against `src/lib/database.types.ts`:
+ *   - `user_app_roles`          PK (user_id, role)              — order by granted_at
+ *   - `user_favorites`          PK (user_id, strategy_id)       — order by created_at
+ *   - `allocator_preferences`   keyed on user_id                — order by updated_at
+ *   - `portfolio_strategies`    PK (portfolio_id, strategy_id)  — order by added_at
+ *   - `allocator_equity_snapshots` PK (allocator_id, asof)      — order by asof
+ *   - `investor_attestations`   PK (user_id)                    — order by attested_at
+ *   - `organization_members`    PK (organization_id, user_id)   — order by joined_at
+ *   - `csv_daily_returns`       PK (strategy_id, date)          — order by date (NEW-C16-09)
+ * A `.order("id")` against any of them raised Postgres 42703
+ * (`column "id" does not exist`), which `fetchRowsForSpec` surfaced as
+ * a `fetch_error` → `partial: true` → the route returned HTTP 500
+ * (`export_partial`) for EVERY user on EVERY call. The unit suite
+ * mocked `.order()` as a no-op so the regression shipped green; the
+ * `gdpr-export-schema.test.ts` schema-validation test now pins each
+ * order column against `database.types.ts` so a mock cannot mask it.
+ *
+ * Each chosen column is `NOT NULL` in the table's Row type, so the
+ * ORDER BY is total (no NULL-ordering ambiguity) and deterministic.
+ *
+ * Exported so the schema-validation regression test
+ * (`gdpr-export-schema.test.ts`) can assert each override column
+ * actually exists on its table in `database.types.ts` — a pure mock
+ * cannot reproduce the 42703 these overrides exist to prevent.
+ */
+export const ORDER_COLUMN_OVERRIDES: Readonly<Record<string, string>> = {
+  user_app_roles: "granted_at",
+  user_favorites: "created_at",
+  allocator_preferences: "updated_at",
+  portfolio_strategies: "added_at",
+  allocator_equity_snapshots: "asof",
+  investor_attestations: "attested_at",
+  organization_members: "joined_at",
+  // NEW-C16-09: csv_daily_returns has a composite PK (strategy_id, date) —
+  // no id column. `date` is the natural chronological sort key for a daily-
+  // return series; matches the RPC's upsert key and the worker's SELECT order.
+  csv_daily_returns: "date",
+};
+
+/**
  * The Postgres column that determines stable ORDER BY for a given
  * spec. Audit 2026-05-07 H-0456: PostgreSQL does NOT guarantee row
  * order without an explicit ORDER BY, so two calls to the same export
  * can return DIFFERENT 50K subsets for a user with >50K rows. The
  * size-cap truncation also depends on this ordering — without it the
  * bundle is non-deterministic. We sort by `created_at` for the audit
- * trail tables and by `id` for everything else. The first sort key is
- * a NULLS-LAST so rows without a `created_at` (legacy seed rows in
- * test fixtures) don't crash the SELECT planner.
+ * trail tables, by an explicit override for id-less tables
+ * (see ORDER_COLUMN_OVERRIDES), and by `id` for everything else.
  */
-function getOrderColumn(spec: UserExportTable): string {
-  // audit_log entries have created_at as their natural time-ordering
-  // field. For everything else `id` is a stable UUID PK and a
-  // sufficient deterministic sort key (every user-owned table in
-  // this codebase has an `id` UUID column — verified against
-  // database.types.ts at audit time).
-  if (spec.kind === "projected" && spec.source_table === "audit_log") {
+export function getOrderColumn(spec: UserExportTable): string {
+  // audit_log (hot) + audit_log_cold (2yr+ archive, NEW-C16-03) entries
+  // have created_at as their natural time-ordering field — chronological
+  // packing of the size-cap tail. Both lack an `id`-as-sort-key
+  // semantics worth preferring over the temporal axis.
+  if (
+    spec.kind === "projected" &&
+    (spec.source_table === "audit_log" ||
+      spec.source_table === "audit_log_cold")
+  ) {
     return "created_at";
   }
-  return "id";
+  // NEW-C16-01: the column the SELECT actually orders by is on
+  // `spec.table` for direct/indirect specs AND `spec.source_table` for
+  // projected specs (the SELECT hits the SOURCE table, not the bundle-
+  // facing name). Look up ORDER_COLUMN_OVERRIDES by the table that is
+  // actually queried, not the bundle name; fall back to the UUID PK `id`
+  // for every table that has one.
+  //
+  // NEW-C16-11 (audit 2026-05-26, MED conf-8 red-team): the original
+  // NEW-C16-01 fix keyed ORDER_COLUMN_OVERRIDES on `spec.table` for ALL
+  // kinds, including projected. For projected specs `spec.table` is the
+  // bundle-facing name (e.g. "audit_log_for_user") but the SELECT is
+  // against `spec.source_table` ("audit_log"). Today all projected specs
+  // happen to have spec.table === spec.source_table for the non-audit
+  // entries, so the lookup was accidentally correct; but a future
+  // projected spec where they differ (e.g. a synthetic view name over a
+  // source table that lacks an id column) would silently fall through to
+  // the "id" fallback even if the correct override key was registered
+  // under the source name — producing a runtime 42703 the schema test
+  // would not catch because the test uses orderedTableForSpec()
+  // (source_table) while this function was using spec.table. This fix
+  // makes both consistent: projected specs look up by source_table, all
+  // others by spec.table.
+  const lookupKey = spec.kind === "projected" ? spec.source_table : spec.table;
+  return ORDER_COLUMN_OVERRIDES[lookupKey] ?? "id";
 }
 
 async function fetchRowsForSpec(
@@ -1477,23 +1782,31 @@ async function fetchRowsForSpec(
     // semantics — for `api_keys` and `contact_requests`, the SQL filter
     // `.eq(user_column, userId)` is the EXACT same predicate the
     // projection enforces; the projection's per-row check is a defense-
-    // in-depth no-op, so `source_truncated` accurately reflects
-    // pre-projection cap-hit. For `audit_log_for_user` the projection
-    // retention criteria is BROADER than the SQL filter — the SQL only
-    // captures isActor rows, but the projection also retains isEntity
-    // and isMetaTarget rows. For an audit_log_for_user truncation
-    // signal that captures the union, the SQL would need an `.or()`
-    // covering both branches. That widening is tracked as a follow-up
-    // (the cost is a query-plan change against audit_log's index set).
-    // Today's `source_truncated` is the pre-projection cap-hit for the
-    // ACTOR slice only; the per-table audit doc captures this nuance
-    // so a regulator audit reads the flag correctly. See the
-    // `audit_log_for_user source_truncated semantics` regression test
-    // in gdpr-export.test.ts.
-    const { data, error } = await admin
+    // in-depth no-op, so `source_truncated` accurately reflects the
+    // pre-projection cap-hit.
+    //
+    // NEW-C16-02 (2026-05-26): `audit_log_for_user` (and
+    // `audit_log_cold_for_user`) now use an `.or(actor | entity |
+    // metadata-target)` filter that MATCHES the projection's full
+    // retention criteria. `source_truncated` is therefore accurate for
+    // the COMPLETE union — the pre-fix limitation ("ACTOR slice only,
+    // tracked as a follow-up") is resolved by the or_filter below.
+    // When the spec declares an `or_filter`, the SQL predicate matches
+    // the projection's broader retention criteria (actor OR entity OR
+    // metadata target) — a bare `.eq(user_column)` would return only
+    // the actor slice and silently drop admin-on-subject rows the
+    // subject is entitled to under Art. 15. For specs without an
+    // `or_filter` (api_keys, contact_requests) the single-owner `.eq()`
+    // IS the exact predicate the projection enforces. `userId` is
+    // UUID-validated upstream (C-0021), so interpolating it into the
+    // PostgREST filter string is safe.
+    const filtered = admin
       .from(spec.source_table)
-      .select("*")
-      .eq(spec.user_column, userId)
+      .select("*");
+    const scoped = spec.or_filter
+      ? filtered.or(spec.or_filter(userId))
+      : filtered.eq(spec.user_column, userId);
+    const { data, error } = await scoped
       .order(orderCol, { ascending: true })
       .limit(EXPORT_PER_TABLE_ROW_CAP + 1);
     if (error) {
@@ -1630,31 +1943,50 @@ async function fetchRowsForSpec(
   // chunked at EXPORT_PARENT_ID_IN_CHUNK (500) to stay under common
   // intermediate-proxy URL limits. For users with > 500 parent rows
   // we fan out across multiple SELECTs and concatenate the results.
-  // The per-call `.limit(EXPORT_PER_TABLE_ROW_CAP)` becomes a global
-  // cap across the union — we short-circuit additional chunks once
-  // the row cap is reached. Determinism (H-0456) survives because the
-  // parent ids are already ORDERED by id and the chunks process in
-  // ascending order; merged child rows are then sorted in a final
-  // pass that's also stable on `orderCol`.
+  //
+  // NEW-C16-07 (audit 2026-05-26, MED conf-8): pre-fix, the loop used
+  // `remainingBudget` (= cap - aggregated.length) as the per-chunk
+  // LIMIT and short-circuited early once the running total hit the cap.
+  // This is INCORRECT for >1 chunk: each chunk is ordered within itself
+  // by orderCol, but the concatenation is ordered by (chunk index, then
+  // orderCol) — NOT globally by orderCol. The cap then drops whichever
+  // rows happened to sit at the tail of the last processed chunk rather
+  // than the globally-oldest rows, violating the H-0456 determinism
+  // contract and silently omitting a non-deterministic subset.
+  //
+  // FIX: each chunk queries `EXPORT_PER_TABLE_ROW_CAP + 1` rows (one
+  // extra so we can detect source-side truncation within a single chunk
+  // — mirrors the projected-path probe pattern). After ALL chunks are
+  // collected, the full aggregated list is sorted GLOBALLY by orderCol
+  // (ascending, string-compare — correct for both UUID and ISO-8601
+  // timestamp columns, which are the only orderCol shapes in the
+  // current manifest). The row cap is then applied as a post-sort slice
+  // so the retained subset matches a single global
+  // `ORDER BY orderCol LIMIT cap`. `aggregatedTruncated` is set when
+  // the pre-cap total exceeds the cap (we had more globally-sorted rows
+  // to give than the cap allows).
+  //
+  // NEW-C16-10 (audit 2026-05-26, MED conf-9): the original NEW-C16-07
+  // fix fetched up to EXPORT_PER_TABLE_ROW_CAP (50K) rows PER chunk with
+  // no early-exit, accumulating up to 4 × 50K = 200K rows in the heap
+  // before the post-sort splice. With EXPORT_FETCH_CONCURRENCY = 10, up
+  // to 10 such indirect fetches can be in-flight simultaneously → ~600MB
+  // of heap pressure, a DoS amplification vector. The global-sort
+  // correctness requirement is preserved: we break after the first chunk
+  // that pushes the aggregate ABOVE the cap (we already have enough rows
+  // to determine truncation AND produce a globally-sorted cap-row subset).
+  // Memory ceiling is now cap + EXPORT_PARENT_ID_IN_CHUNK × max_row_width
+  // instead of 4 × cap.
   const aggregated: unknown[] = [];
   let aggregatedError: string | null = null;
-  let aggregatedTruncated = false;
   for (let start = 0; start < parentIds.length; start += EXPORT_PARENT_ID_IN_CHUNK) {
     const chunk = parentIds.slice(start, start + EXPORT_PARENT_ID_IN_CHUNK);
-    // Per-chunk remaining budget: the global cap is across the union.
-    const remainingBudget = EXPORT_PER_TABLE_ROW_CAP - aggregated.length;
-    if (remainingBudget <= 0) {
-      // Already at cap; any further rows would be truncated. Mark and
-      // stop probing more chunks — saves N round-trips for nothing.
-      aggregatedTruncated = true;
-      break;
-    }
     const { data: chunkData, error: chunkErr } = await admin
       .from(spec.table)
       .select("*")
       .in(spec.via_column, chunk)
       .order(orderCol, { ascending: true })
-      .limit(remainingBudget);
+      .limit(EXPORT_PER_TABLE_ROW_CAP + 1);
     if (chunkErr) {
       aggregatedError = `indirect select failed for ${spec.table}: ${chunkErr.message}`;
       console.error(`[gdpr-export] ${aggregatedError}`);
@@ -1662,10 +1994,27 @@ async function fetchRowsForSpec(
     }
     const chunkRows = chunkData ?? [];
     aggregated.push(...chunkRows);
-    if (chunkRows.length >= remainingBudget) {
-      aggregatedTruncated = true;
+    // NEW-C16-10: early-exit once we have more rows than the cap. We now
+    // know truncation will occur; additional chunks cannot change the
+    // post-sort slice. This bounds heap to cap + one chunk's worth of
+    // rows regardless of how many parent-id chunks remain.
+    if (aggregated.length > EXPORT_PER_TABLE_ROW_CAP) {
       break;
     }
+  }
+  // Global stable sort by orderCol across all chunks (NEW-C16-07).
+  // String comparison is monotone for both UUID and ISO-8601 columns.
+  aggregated.sort((a, b) => {
+    const av = (a as Record<string, unknown>)[orderCol];
+    const bv = (b as Record<string, unknown>)[orderCol];
+    if (av == null && bv == null) return 0;
+    if (av == null) return -1;
+    if (bv == null) return 1;
+    return String(av) < String(bv) ? -1 : String(av) > String(bv) ? 1 : 0;
+  });
+  const aggregatedTruncated = aggregated.length > EXPORT_PER_TABLE_ROW_CAP;
+  if (aggregatedTruncated) {
+    aggregated.splice(EXPORT_PER_TABLE_ROW_CAP);
   }
   if (aggregatedError) {
     // Audit 2026-05-07 red-team #12 (MED conf-8, chain): precedence

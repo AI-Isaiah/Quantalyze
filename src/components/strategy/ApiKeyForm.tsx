@@ -28,11 +28,36 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
   const [apiSecret, setApiSecret] = useState("");
   const [passphrase, setPassphrase] = useState("");
 
+  // NEW-C37-06: scrub plaintext secrets and invoke the parent cancel handler.
+  function handleCancel() {
+    setApiKey("");
+    setApiSecret("");
+    setPassphrase("");
+    onCancel();
+  }
+
   const needsPassphrase = exchange === "okx";
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    await onSubmit({ exchange, label, apiKey, apiSecret, passphrase });
+    // NEW-C37-02: block Enter-key double-submit. `loading` is the
+    // in-flight guard; rejecting here before the async onSubmit call means
+    // two rapid Enter presses cannot race past the parent's setLoading(true)
+    // re-render and fire two validate-and-encrypt requests.
+    if (loading) return;
+    try {
+      await onSubmit({ exchange, label, apiKey, apiSecret, passphrase });
+    } finally {
+      // NEW-C37-06: scrub plaintext secrets from component state after the
+      // parent resolves, whether success or failure. On success the form
+      // unmounts shortly after (showForm → false), but on failure it stays
+      // mounted — leaving apiKey/apiSecret/passphrase in state indefinitely
+      // while the user reads the error message. Clear them here so the
+      // longest-lived in-memory plaintext copy is bounded to the call.
+      setApiKey("");
+      setApiSecret("");
+      setPassphrase("");
+    }
   }
 
   return (
@@ -89,7 +114,7 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
         {error && <p className="text-sm text-negative mt-3">{error}</p>}
 
         <div className="flex gap-3 mt-4">
-          <Button variant="secondary" type="button" onClick={onCancel}>
+          <Button variant="secondary" type="button" onClick={handleCancel}>
             Cancel
           </Button>
           <Button type="submit" disabled={loading}>

@@ -690,24 +690,64 @@ async def process_key(
 
     # validate
     val = await adapter.validate(submission)
-    if not val.valid:
-        supabase.rpc(
-            "transition_strategy_verification",
-            {
-                "p_verification_id": verification_id,
-                "p_new_status": "draft",
-                "p_metadata": {
-                    "errors": [
-                        {
-                            "code": val.error_code,
-                            "human_message": val.human_message,
-                        }
-                    ]
+    # Unified rejection gate: covers both ordinary validation failures
+    # (not val.valid — e.g. AUTH_FAILED, PERMISSION_DENIED) and
+    # NEW-C31-01: write-capable key scope violations that must be caught
+    # BEFORE any encryption step. The read_only arm only blocks on
+    # explicit False — None (CSV, scope not applicable) is not rejected.
+    # The error_code arm fires even when read_only is True (IMP-2: a
+    # broker that sets a scope error_code without clearing read_only=True
+    # must still be rejected — see test "error_code_wins").
+    _scope_rejected = (
+        not val.valid
+        or val.read_only is False
+        or val.error_code in {"TRADE_SCOPE", "WITHDRAW_SCOPE"}
+    )
+    if _scope_rejected:
+        # SF-2: use VALIDATION_UNEXPECTED as the fallback — it is a registered
+        # WizardErrorCode (adapter.py:74) and has defined copy in wizardErrors.ts.
+        # "VALIDATION_FAILED" is not registered and causes a silent blank wizard
+        # error state when the frontend lookup returns undefined.
+        _reject_code = val.error_code or "VALIDATION_UNEXPECTED"
+        # SF-1: security-sensitive scope rejections must be observable in the
+        # structlog stream so operators can detect regressions / anomalies.
+        log.warning(
+            "process_key.write_capable_key_rejected",
+            reject_code=_reject_code,
+            read_only=val.read_only,
+            verification_id=verification_id,
+            correlation_id=correlation_id,
+        )
+        # SF-3: wrap the RPC call so a Supabase failure does not replace the
+        # security-correct envelope error with an unexpected 500. Best-effort
+        # status transition: returning the error to the caller is more
+        # important than atomicity with the DB state machine.
+        try:
+            supabase.rpc(
+                "transition_strategy_verification",
+                {
+                    "p_verification_id": verification_id,
+                    "p_new_status": "draft",
+                    "p_metadata": {
+                        "errors": [
+                            {
+                                "code": _reject_code,
+                                "human_message": val.human_message,
+                            }
+                        ]
+                    },
                 },
-            },
-        ).execute()
+            ).execute()
+        except Exception as _rpc_err:
+            log.error(
+                "process_key.scope_rejection_rpc_failed",
+                reject_code=_reject_code,
+                verification_id=verification_id,
+                correlation_id=correlation_id,
+                error=str(_rpc_err),
+            )
         return _envelope_error(
-            val.error_code, val.human_message, correlation_id, verification_id
+            _reject_code, val.human_message, correlation_id, verification_id
         )
 
     supabase.rpc(

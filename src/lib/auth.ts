@@ -4,7 +4,48 @@ import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { APP_ROLES, type AppRole } from "@/lib/auth-types";
-import { isAdminUser, isAdminUserGivenUserAppRoles } from "@/lib/admin";
+import { isAdminUser } from "@/lib/admin";
+// NEW-C15-01: lazy import to avoid adding a static top-level import to a
+// widely-tested module (auth.ts). The dynamic import is resolved on the
+// first withRole call that needs the approval gate — well before any RPC
+// work — and the module is cached by the Node module system thereafter.
+// This also matches the lazy-import pattern already used in audit.ts for
+// @sentry/nextjs, keeping the module-init surface minimal under vitest.
+type ApprovalGateModule = typeof import("@/lib/api/approval-gate");
+// IMPORTANT-2 (specialist-review 2026-05-26): store the IN-FLIGHT Promise, not
+// the resolved value. Storing the resolved value means two concurrent cold-start
+// requests both read `null`, both kick off `import()`, and both resolve to the
+// same module object (benign today but wastes a parallel resolution). Storing the
+// Promise ensures at most one `import()` is ever initiated regardless of
+// concurrency — the second caller awaits the same in-flight promise.
+//
+// C-1 (red-team 2026-05-26): evict the promise on rejection so a transient
+// bundler-cache miss or cold-start import failure does not permanently cache a
+// rejected promise for the process lifetime. Without eviction, every subsequent
+// call returns the same rejected promise → permanent 503 on all withRole routes,
+// creating operational pressure to disable the approval gate. The eviction path
+// mirrors `getUserRolesResult`'s perUser?.delete(userId) eviction pattern.
+let _approvalGatePromise: Promise<ApprovalGateModule> | null = null;
+async function getApprovalGate(): Promise<ApprovalGateModule> {
+  if (!_approvalGatePromise) {
+    _approvalGatePromise = import("@/lib/api/approval-gate").catch((err) => {
+      // Evict on failure so the next request retries the import rather than
+      // returning this rejected promise indefinitely (C-1 / red-team 2026-05-26).
+      _approvalGatePromise = null;
+      throw err;
+    });
+  }
+  return _approvalGatePromise;
+}
+
+/** Test-only reset hook. Mirrors __resetAuditEmitTransientFailuresForTests in audit.ts.
+ * H-1 (red-team 2026-05-26): module-level promise carries across Vitest isolated
+ * contexts when vi.resetModules() is not used. Expose a reset so test suites that
+ * call withRole without the approval-gate mock first don't leak state into
+ * subsequent suites that DO mock it. */
+export function __resetApprovalGatePromiseForTests(): void {
+  _approvalGatePromise = null;
+}
 
 // Re-exported here so server-side callers can keep using
 // `import { AppRole, APP_ROLES } from "@/lib/auth"`. The raw types live
@@ -24,11 +65,13 @@ export { APP_ROLES, type AppRole };
  *           OR (user_app_roles.role='admin')        -- additive (Sprint 7 rollout)
  *
  * `ADMIN_EMAIL` is OBSERVATIONAL ONLY — it no longer grants admin.
- * `withRole('admin')` delegates to `isAdminUser` (via
- * `isAdminUserGivenUserAppRoles`, which trusts the already-fetched
- * user_app_roles set instead of issuing a redundant round-trip). Non-admin
- * role requests resolve through `user_app_roles` alone — there is no
- * profile-flag analogue for `allocator` / `quant_manager` / `analyst`.
+ * `withRole('admin')` delegates to `isAdminUser` directly (fresh re-query
+ * of BOTH signals — `profiles.is_admin` and `user_app_roles.role='admin'`)
+ * when the initial `user_app_roles` fetch does not yield an admin row. This
+ * closes the RLS-masking vector (NEW-C15-04) where a 42501 on the roles
+ * fetch silently collapsed to an empty set. Non-admin role requests resolve
+ * through `user_app_roles` alone — there is no profile-flag analogue for
+ * `allocator` / `quant_manager` / `analyst`.
  *
  * Defense in depth: new routes should use BOTH the route wrapper (so the
  * response is 403 before touching the DB) AND the RLS policy on the
@@ -113,6 +156,28 @@ export type GetUserRolesResult =
  * fresh-per-request before landing such a refactor. Cross-request
  * caching (JWT custom claims, Edge Config) is tracked as a Sprint 7
  * follow-up — see ADR-0005.
+ *
+ * NEW-C15-03 (audit-2026-05-26 red-team): INTRA-REQUEST TOCTOU WINDOW.
+ * The memo FREEZES the role set for the lifetime of the SupabaseClient
+ * used in a given request. A role REVOKE that lands between the outer
+ * `withRole` gate and a subsequent `getUserRoles`/`requireRole` call on
+ * the SAME client (e.g. inside an `after()`-deferred task, or a long-
+ * running streaming response) will NOT be observed — the cached promise
+ * returns the pre-revoke role set. This creates an intra-request
+ * staleness window that `requireAdmin` (which always re-queries fresh)
+ * does NOT share, so the two verification paths DISAGREE after a revoke.
+ *
+ * MANDATORY RULE: privileged RPCs (sanitize_user, log_audit_event_service,
+ * or any SECURITY DEFINER function) MUST be gated by `requireAdmin` or
+ * `isAdminUser` — NOT by `getUserRoles`/`requireRole` after the initial
+ * `withRole` check. These helpers issue a fresh DB query and are
+ * unaffected by the memo. See {@link requireAdmin} for the recommended
+ * TOCTOU-close pattern.
+ *
+ * Use {@link getUserRoles} only for read-only authorization decisions
+ * that can tolerate the intra-request window (e.g. reading the role set
+ * to shape a UI response, where a stale 'admin' grants no extra write
+ * privilege beyond what is already gated at the RPC level).
  */
 const rolesByClient = new WeakMap<SupabaseClient, Map<string, Promise<GetUserRolesResult>>>();
 
@@ -156,6 +221,19 @@ async function fetchUserRolesResult(
     if (code && EXPECTED_NO_ROLES_CODES.has(code)) {
       // Expected non-error: RLS denial or no-rows. Caller-facing answer
       // is "this user has no visible roles".
+      //
+      // F-06 (specialist-review 2026-05-26): a 42501 RLS denial was silently
+      // translated to an empty role set with no log. A misconfigured RLS policy
+      // on `user_app_roles` would then cause legitimate users to receive silent
+      // 403s with no ops signal — debugging requires correlating PostgREST logs
+      // by timestamp. Log at warn level so log aggregation can surface the fault.
+      // PGRST116 (no rows) is truly benign and stays silent.
+      if (code === "42501") {
+        console.warn("[auth] getUserRolesResult: 42501 RLS denial on user_app_roles — treating as empty roles", {
+          userId,
+          code,
+        });
+      }
       return { ok: true, roles: [] };
     }
     // Real fault — propagate so the caller can return 500 instead of
@@ -303,15 +381,28 @@ export async function requireRole(
     // signal for `allocator` / `quant_manager` / `analyst`, so
     // `user_app_roles` is authoritative for those.
     //
-    // Use the `isAdminUserGivenUserAppRoles` variant which trusts the
-    // already-fetched `userRoles` as the user_app_roles signal instead
-    // of re-issuing the join-table query. On the non-admin reject path
-    // this drops DB round-trips from 3 → 2.
+    // NEW-C15-04 (audit-2026-05-26 red-team): use `isAdminUser` (fresh
+    // re-query of BOTH signals) instead of `isAdminUserGivenUserAppRoles`
+    // (which trusts the already-fetched `userRoles`). The pre-fix code
+    // optimised for DB round-trips: `isAdminUserGivenUserAppRoles` skipped
+    // the `hasAdminRoleRow` call when `userRoles` was already in hand. But
+    // `getUserRolesResult` silently translates a `42501` (RLS denial) into
+    // `{ok:true, roles:[]}`, so a join-table-only admin (profiles.is_admin=
+    // FALSE, user_app_roles.role='admin') whose roles fetch is denied by a
+    // misconfigured RLS policy ends up with an empty `userRoles`. Passing
+    // that empty set to `isAdminUserGivenUserAppRoles` makes `includes(
+    // 'admin')` false → the decision rests SOLELY on `hasIsAdminFlag`. A
+    // join-table-only admin is silently denied, and the RLS fault is masked.
+    //
+    // `isAdminUser` issues a fresh `hasAdminRoleRow` query (not the cached
+    // set), so it correctly resolves join-table-only admins even when the
+    // `getUserRolesResult` call was swallowed to `[]` by 42501. The cost is
+    // one extra `user_app_roles` round-trip on the admin-reject path (3 → 2
+    // optimisation is reverted). This is load-bearing: correctness > perf.
     if (roles.includes("admin")) {
-      const adminUnion = await isAdminUserGivenUserAppRoles(
+      const adminUnion = await isAdminUser(
         supabase,
         user,
-        userRoles,
       );
       if (adminUnion) {
         // Synthesize the admin role into the resolved set so handlers
@@ -451,6 +542,26 @@ export type RoleHandler<P = Record<string, never>> = (
 ) => Promise<NextResponse>;
 
 /**
+ * Options for {@link withRole}.
+ *
+ * NEW-C15-01 (audit-2026-05-26 red-team): `withAuth` and `withAllocatorAuth`
+ * both enforce `assertProfileApproved` by default — `withRole` was missing this
+ * gate, leaving a latent fail-open for any future non-admin role route. Without
+ * the gate, a freshly-registered but UNAPPROVED user who holds a role enum row
+ * (every new signup lands with a role but unapproved) can reach the handler. For
+ * admin routes today `isProfileApproved` short-circuits on `is_admin=true` (no
+ * observable bug), but Sprint 7 plans to route `allocator`/`quant_manager`/
+ * `analyst` roles through this same wrapper — those users CAN be unapproved.
+ *
+ * Default: `requireApproval: true`. Opt out only for routes that explicitly
+ * serve pending-approval callers (e.g. an account-deletion route or a public
+ * status endpoint). Mirror of {@link WithAuthOptions} in `withAuth.ts`.
+ */
+export interface WithRoleOptions {
+  requireApproval?: boolean;
+}
+
+/**
  * Route wrapper: requires the caller to hold at least one of `roles`.
  * Mutating methods (POST/PUT/PATCH/DELETE) also get the CSRF same-origin
  * check via `assertSameOrigin`, matching `withAuth`.
@@ -477,12 +588,23 @@ export type RoleHandler<P = Record<string, never>> = (
  *   // Multiple allowed roles:
  *   export const POST = withRole("admin", "quant_manager")(async (...) => { ... });
  *
+ *   // Opt out of approval gate (rare — only for pending-approval surfaces):
+ *   export const POST = withRole("admin", { requireApproval: false })(async (...) => { ... });
+ *
  * This wrapper is a PEER to `withAdminAuth`, not a replacement. See
  * ADR-0005 for the sprint-over-sprint migration plan.
  */
 export function withRole<P = Record<string, never>>(
-  ...roles: [AppRole, ...AppRole[]]
+  ...args: [AppRole, ...AppRole[]] | [...([AppRole, ...AppRole[]]), WithRoleOptions]
 ) {
+  // Split trailing options object from role list. Options must be a plain
+  // object (not a string), so the check is safe even if no options are passed.
+  const lastArg = args[args.length - 1];
+  const hasOptions = lastArg !== null && typeof lastArg === "object" && !Array.isArray(lastArg);
+  const roles = (hasOptions ? args.slice(0, -1) : args) as [AppRole, ...AppRole[]];
+  const options: WithRoleOptions = hasOptions ? (lastArg as WithRoleOptions) : {};
+  const requireApproval = options.requireApproval ?? true;
+
   return function (handler: RoleHandler<P>) {
     return async (
       req: NextRequest,
@@ -530,6 +652,47 @@ export function withRole<P = Record<string, never>>(
 
       const result = await requireRole(supabase, user, ...roles);
       if ("forbidden" in result) return result.forbidden;
+
+      // NEW-C15-01: approval gate. Mirrors withAuth's requireApproval default.
+      // Uses a lazy dynamic import so auth.ts's module initialisation isn't
+      // widened (avoids hoisting conflicts in vitest that broke APP_ROLES
+      // export during test collection). The module is cached after first load.
+      //
+      // F-05 (specialist-review 2026-05-26): if the dynamic import fails
+      // (module not found, bundler misconfiguration, syntax error in
+      // approval-gate) the exception propagates unhandled through `withRole`,
+      // which could either expose the handler (fail-open) or return an empty
+      // response depending on the outer route wrapper. Fail CLOSED: catch the
+      // import failure and return 503 so the security gate is never bypassed.
+      if (requireApproval) {
+        let gate: ApprovalGateModule;
+        try {
+          gate = await getApprovalGate();
+        } catch (importErr) {
+          console.error("[auth/withRole] approval-gate module failed to load:", importErr);
+          return NextResponse.json(
+            { error: "Service temporarily unavailable" },
+            { status: 503 },
+          );
+        }
+        // H-2 (red-team 2026-05-26): assertProfileApproved can throw (DB error,
+        // unexpected null, RLS fault that throws rather than returning a
+        // NextResponse). Without a catch, the exception propagates unhandled out
+        // of withRole — indistinguishable from a crashed handler and untestable.
+        // Fail CLOSED: any throw from the gate function returns 503, same as the
+        // import-failure path above.
+        let denied: NextResponse | null;
+        try {
+          denied = await gate.assertProfileApproved(supabase, user.id);
+        } catch (gateErr) {
+          console.error("[auth/withRole] assertProfileApproved threw unexpectedly:", gateErr);
+          return NextResponse.json(
+            { error: "Service temporarily unavailable" },
+            { status: 503 },
+          );
+        }
+        if (denied) return denied;
+      }
 
       const params = await rawCtx.params;
       return handler(req, {

@@ -151,3 +151,74 @@ class TestCronRecomputeIsTestFilter:
             ".eq(\"is_test\", False)" in source
             or ".eq('is_test', False)" in source
         ), "cron.py recompute branch missing .eq('is_test', False) — see G8.F.2"
+
+
+# ---------------------------------------------------------------------------
+# NEW-C32-01 — cron.py paginates synced_strategy_ids and candidate_portfolio_ids
+# ---------------------------------------------------------------------------
+
+
+class TestCronInListPagination:
+    """NEW-C32-01: the two unbounded IN-list fetches in the portfolio
+    recompute cascade must be chunked in _CRON_IN_LIST_PAGE_SIZE pages
+    to avoid PostgREST URL truncation on large books."""
+
+    def test_strategy_ids_in_list_is_chunked(self):
+        """Static-source pin: cron.py must use _CRON_IN_LIST_PAGE_SIZE in
+        the portfolio_strategies fetch loop — not a single unbounded .in_()."""
+        from pathlib import Path
+        source = (
+            Path(__file__).resolve().parent.parent / "routers" / "cron.py"
+        ).read_text(encoding="utf-8")
+        # The paginated loop must reference the page-size constant.
+        assert "_CRON_IN_LIST_PAGE_SIZE" in source, (
+            "cron.py must define _CRON_IN_LIST_PAGE_SIZE for the IN-list page "
+            "size (NEW-C32-01 — unbounded IN truncates on large books)"
+        )
+        # There must not be a raw single-shot .in_("strategy_id", synced_strategy_ids)
+        # line (the pre-fix shape was an unguarded in_ on the full list).
+        assert '.in_("strategy_id", synced_strategy_ids)' not in source, (
+            "cron.py must not use an unbounded .in_('strategy_id', synced_strategy_ids) "
+            "— the list must be chunked (NEW-C32-01)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C32-02 — cron.py caps the `results` array in the response body
+# ---------------------------------------------------------------------------
+
+
+class TestCronResultsCap:
+    """NEW-C32-02: the `results` array must be capped by RESULTS_CAP with
+    priority to non-ok statuses, mirroring the failures cap contract."""
+
+    def test_results_capped_when_above_cap(self):
+        """Static + behavioural: when all_results > RESULTS_CAP, the response
+        body carries only RESULTS_CAP entries and results_truncated=True."""
+        from pathlib import Path
+        source = (
+            Path(__file__).resolve().parent.parent / "routers" / "cron.py"
+        ).read_text(encoding="utf-8")
+
+        # RESULTS_CAP must be defined and referenced in the return block.
+        assert "RESULTS_CAP" in source, (
+            "cron.py must define RESULTS_CAP to bound the results list (NEW-C32-02)"
+        )
+        assert "results_truncated" in source, (
+            "cron.py must include results_truncated in the response (NEW-C32-02)"
+        )
+        assert "total_results" in source, (
+            "cron.py must include total_results so callers know the real count (NEW-C32-02)"
+        )
+
+    def test_results_cap_prefers_non_ok_statuses(self):
+        """Non-ok statuses must appear before ok statuses when the list is
+        truncated, so the response body is maximally diagnostic."""
+        from pathlib import Path
+        source = (
+            Path(__file__).resolve().parent.parent / "routers" / "cron.py"
+        ).read_text(encoding="utf-8")
+        # The capping logic must prioritize non-ok by sorting non-ok first.
+        assert "non_ok_results" in source, (
+            "cron.py must separate non_ok_results for priority capping (NEW-C32-02)"
+        )

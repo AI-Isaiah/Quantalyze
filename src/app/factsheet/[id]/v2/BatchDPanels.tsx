@@ -77,7 +77,11 @@ export function StyleDriftPanel() {
 
 export function PeerPercentilePanel() {
   const payload = usePayload();
+  // peerPercentile is null for csv-ingested strategies; this component is
+  // only rendered when ingestSource === "api" so this guard is a type-safety
+  // check, not a runtime branch. (RED-TEAM-M2)
   const p = payload.peerPercentile;
+  if (!p) return null;
   return (
     <section>
       <header className="mb-2 flex items-baseline justify-between border-b border-text pb-1">
@@ -117,9 +121,12 @@ function PercentileBar({ label, pct }: { label: string; pct: number }) {
 
 export function AllocatorSection() {
   const payload = usePayload();
+  // allocatorPortfolios is null for csv-ingested strategies; this component is
+  // only rendered when ingestSource === "api" so this guard is a type-safety
+  // check, not a runtime branch. (RED-TEAM-M2)
   const portfolios = payload.allocatorPortfolios;
-  const [active, setActive] = useState(portfolios[0]?.key ?? "");
-  if (portfolios.length === 0) return null;
+  const [active, setActive] = useState(portfolios?.[0]?.key ?? "");
+  if (!portfolios || portfolios.length === 0) return null;
   const p = portfolios.find(x => x.key === active) ?? portfolios[0];
 
   return (

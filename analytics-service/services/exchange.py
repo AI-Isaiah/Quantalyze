@@ -8,6 +8,7 @@ from typing import Any, Literal, TypedDict
 
 from services.ingestion._timestamps import coerce_to_aware_utc
 from services.metrics import _safe_float
+from services.redact import scrub_freeform_string
 
 logger = logging.getLogger("quantalyze.analytics")
 
@@ -144,6 +145,10 @@ def _infer_quote_currency(symbol: str) -> str | None:
     suffixes used by Binance / OKX / Bybit perp + spot lines: USDT,
     USDC, USD, BUSD. CCXT unified ``BTC/USDT:USDT`` is also handled.
 
+    NEW-C13-08: also handles OKX raw instId format ``BTC-USDT-SWAP``
+    (and FUTURES/expiry variants like ``BTC-USDT-231229``) where the
+    quote currency is the second dash-segment.
+
     The reader is intentionally conservative — if the symbol ends in
     anything else (BTC-pair tokens, BUSD before delisting, exotic
     venues), we return ``None`` so we don't false-positive on the
@@ -160,6 +165,15 @@ def _infer_quote_currency(symbol: str) -> str | None:
         quote = symbol.split("/", 1)[1]
         if quote:
             return quote.upper()
+    # OKX raw instId: "BTC-USDT-SWAP", "BTC-USDT-231229", "BTC-USD-SWAP"
+    # Second dash-segment is the settle currency.
+    if "-" in symbol:
+        parts = symbol.split("-")
+        if len(parts) >= 2:
+            candidate = parts[1].upper()
+            for known in ("USDT", "USDC", "BUSD", "USD"):
+                if candidate == known:
+                    return known
     sym_up = symbol.upper()
     # Order matters: USDT/USDC/BUSD before USD (USDT endswith USD too).
     for candidate in ("USDT", "USDC", "BUSD", "USD"):
@@ -197,6 +211,88 @@ def _check_fee_currency_mismatch(
         _record_dq_flag("fee_currency_mismatch_samples", [sample])
 
 
+# NEW-C13-01: OKX raw fills report `fillSz` in CONTRACTS, not base units.
+# Storing raw fillSz as `quantity` causes 100×–10000× position/PnL inflation
+# in FIFO matching and volume/notional aggregations.
+#
+# Lookup keyed by the "BASE-QUOTE" prefix of the instId
+# (e.g. "BTC-USDT", "ETH-USDT") so it works for both SWAP
+# ("BTC-USDT-SWAP") and FUTURES ("BTC-USDT-231229").
+# Values are contractSize in base units (matches OKX instruments API `ctVal`).
+# When a symbol is absent, fall back to markets[sym]['contractSize'] if loaded,
+# then to contractSize=1 (i.e. treat fillSz as base units) and emit a DQ flag.
+#
+# Table mirrors equity_reconstruction.OKX_PERP_CONTRACT_SIZE (avoid import
+# to prevent circular dependency: exchange → job_worker → equity_reconstruction
+# → job_worker).
+_OKX_INGEST_CONTRACT_SIZE: dict[str, float] = {
+    "BTC-USDT": 0.01,
+    "ETH-USDT": 0.1,
+    "SOL-USDT": 1.0,
+    "BNB-USDT": 0.01,
+    "XRP-USDT": 100.0,
+    "ADA-USDT": 100.0,
+    "DOGE-USDT": 1000.0,
+    "LINK-USDT": 1.0,
+    "DOT-USDT": 1.0,
+    "MATIC-USDT": 10.0,
+    "AVAX-USDT": 1.0,
+    "LTC-USDT": 1.0,
+    "ATOM-USDT": 1.0,
+    "SUI-USDT": 1.0,
+}
+
+
+def _okx_contract_size_for_inst_id(
+    raw_inst_id: str,
+    exchange: Any | None = None,
+) -> float:
+    """Return OKX contractSize for an instId like ``BTC-USDT-SWAP``.
+
+    Priority:
+    1. ``_OKX_INGEST_CONTRACT_SIZE`` keyed by ``BASE-QUOTE`` prefix.
+    2. ``exchange.markets[ccxt_sym]['contractSize']`` if markets are loaded.
+    3. Falls back to 1.0 and stamps ``okx_unknown_ctval`` DQ flag so
+       operators know the normalization was skipped (phantom position risk).
+
+    Applicable only for linear contracts (SWAP/FUTURES with USD-settled quote).
+    Inverse contracts should be guarded by the caller before calling this.
+    """
+    parts = raw_inst_id.split("-")
+    if len(parts) >= 2:
+        prefix = f"{parts[0]}-{parts[1]}"
+        ct = _OKX_INGEST_CONTRACT_SIZE.get(prefix)
+        if ct is not None:
+            return ct
+
+    # Fallback: check markets if loaded
+    if exchange is not None and hasattr(exchange, "markets") and exchange.markets:
+        # Reconstruct ccxt symbol: "BTC-USDT-SWAP" -> "BTC/USDT:USDT"
+        if len(parts) >= 2:
+            quote = parts[1].upper()
+            ccxt_sym = f"{parts[0].upper()}/{quote}:{quote}"
+            mkt = exchange.markets.get(ccxt_sym) or {}
+            ct_mkt = mkt.get("contractSize")
+            if ct_mkt and float(ct_mkt) > 0:
+                return float(ct_mkt)
+
+    _record_dq_flag("okx_unknown_ctval", True)
+    logger.warning(
+        "_okx_contract_size_for_inst_id: unknown instId %r — "
+        "defaulting contractSize=1 (fillSz treated as base units). "
+        "Add this symbol to _OKX_INGEST_CONTRACT_SIZE (NEW-C13-01).",
+        raw_inst_id,
+    )
+    return 1.0
+
+
+# NEW-C13-02: instTypes to fan out for OKX raw-fill fetches.
+# Pre-fix only SWAP was fetched; SPOT/FUTURES/MARGIN activity was silently dropped.
+# The list mirrors OKX_INSTRUMENT_TYPES in equity_reconstruction.py but excludes
+# OPTION (options fills have a different schema and are not part of trade analytics).
+_OKX_FILL_INST_TYPES: tuple[str, ...] = ("SWAP", "FUTURES", "SPOT", "MARGIN")
+
+
 def _finite_float(value: Any, *, label: str) -> float | None:
     """Audit-2026-05-07 H-0661 (partial) — exchange-ingestion variant of
     ``_safe_float``: reject bool (which Python's ``float()`` would
@@ -216,6 +312,28 @@ def _finite_float(value: Any, *, label: str) -> float | None:
             "_finite_float: rejected %s=%r (NaN/inf or non-numeric)",
             label, value,
         )
+    return out
+
+
+def _finite_positive_float(value: Any, *, label: str) -> float | None:
+    """NEW-C13-11: like _finite_float but also rejects zero and negative values.
+
+    Used for price and quantity fields where negative values indicate an
+    adversarial or corrupt fill that must not be persisted (a negative price
+    feeds into total_entry_cost = price*qty as a negative entry cost,
+    corrupting realized PnL; a negative quantity could flip aggregations).
+
+    Fee fields must NOT use this — maker rebates are legitimately negative.
+    """
+    out = _finite_float(value, label=label)
+    if out is None:
+        return None
+    if out <= 0:
+        logger.warning(
+            "_finite_positive_float: rejected %s=%r (≤0 — must be positive)",
+            label, value,
+        )
+        return None
     return out
 
 
@@ -317,6 +435,7 @@ _RAW_DATA_KEEP_KEYS: frozenset[str] = frozenset({
     "execType",           # OKX taker/maker discriminator (already mapped to is_maker but kept for audit)
     "feeCcy",             # OKX fee-currency raw (mirrors fee_currency col)
     "feeCurrency",        # Bybit fee-currency raw
+    "_ingest_ctval",      # NEW-C13-01: OKX contract size used to normalize fillSz → base units; kept for position audit
 })
 
 
@@ -491,15 +610,18 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
             # for keys without scope on the markets-meta endpoint.
             # `fetch_balance()` is the real validation, and per-exchange
             # permission probes don't depend on markets being loaded.
+            # NEW-C13-10: scrub before logging — load_markets on a signed
+            # endpoint can return ccxt exceptions embedding request URLs.
+            _scrubbed_load = scrub_freeform_string(str(load_exc))
             logger.warning(
                 "validate_key_permissions: load_markets failed on %s — %s: %s; "
                 "continuing with fetch_balance (markets_loaded=False)",
                 exchange.id,
                 type(load_exc).__name__,
-                load_exc,
+                _scrubbed_load,
             )
             result["markets_error"] = (
-                f"{type(load_exc).__name__}: {load_exc}"
+                f"{type(load_exc).__name__}: {_scrubbed_load}"
             )
         # Note: every other exception class (NetworkError, AuthenticationError,
         # ExchangeNotAvailable, etc.) is intentionally allowed to propagate
@@ -516,10 +638,14 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         # Right credentials, wrong scope (or IP allowlist mismatch on
         # exchanges that map IP-block to PermissionDenied). Must precede
         # AuthenticationError because PermissionDenied subclasses it.
-        logger.exception(
-            "validate_key_permissions: ccxt.PermissionDenied on %s — %s",
-            exchange.id,
-            exc,
+        # NEW-C13-10: scrub the exception message before logging — ccxt
+        # embeds the request URL (including &signature=<HMAC-SHA256>) in
+        # NetworkError/PermissionDenied/AuthenticationError messages.
+        # logger.exception() passes exc_info=True + str(exc) to the stdlib
+        # formatter, bypassing the structlog redact processor entirely.
+        logger.warning(
+            "validate_key_permissions: ccxt.PermissionDenied on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
             "Key denied permission. Confirm the key has read-only scope "
@@ -529,10 +655,9 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         return result
     except ccxt.AuthenticationError as exc:
         # Genuine bad credentials, signature mismatch, expired key.
-        logger.exception(
-            "validate_key_permissions: ccxt.AuthenticationError on %s — %s",
-            exchange.id,
-            exc,
+        logger.warning(
+            "validate_key_permissions: ccxt.AuthenticationError on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = "Authentication failed. Check your API key and secret."
         result["error_code"] = "AUTH_FAILED"
@@ -542,10 +667,9 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         # because retrying immediately won't help (typically a geo / ASN
         # block on the egress IP). Must precede NetworkError /
         # RateLimitExceeded since DDoSProtection subclasses NetworkError.
-        logger.exception(
-            "validate_key_permissions: ccxt.DDoSProtection on %s — %s",
-            exchange.id,
-            exc,
+        logger.warning(
+            "validate_key_permissions: ccxt.DDoSProtection on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
             "Exchange blocked the validation request at the edge "
@@ -557,10 +681,9 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         # Real rate-limit OR (per-exchange) the documented Bybit quirk
         # where 403 on a scoped endpoint surfaces as RateLimitExceeded.
         # Must precede NetworkError since RateLimitExceeded subclasses it.
-        logger.exception(
-            "validate_key_permissions: ccxt.RateLimitExceeded on %s — %s",
-            exchange.id,
-            exc,
+        logger.warning(
+            "validate_key_permissions: ccxt.RateLimitExceeded on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
             "Exchange rate-limited the validation request. Wait a moment "
@@ -572,10 +695,9 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     except ccxt.ExchangeNotAvailable as exc:
         # Exchange is down (5xx, maintenance window, regional outage).
         # Must precede NetworkError since ExchangeNotAvailable subclasses it.
-        logger.exception(
-            "validate_key_permissions: ccxt.ExchangeNotAvailable on %s — %s",
-            exchange.id,
-            exc,
+        logger.warning(
+            "validate_key_permissions: ccxt.ExchangeNotAvailable on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
             "Exchange is currently unavailable. Try again in a few minutes."
@@ -585,10 +707,9 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     except ccxt.NetworkError as exc:
         # Transport-level (timeout, DNS, TLS, connection reset). Not a
         # credential problem. Backstop for the network family.
-        logger.exception(
-            "validate_key_permissions: ccxt.NetworkError on %s — %s",
-            exchange.id,
-            exc,
+        logger.warning(
+            "validate_key_permissions: ccxt.NetworkError on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
             "Network error reaching the exchange. Check connectivity "
@@ -608,11 +729,9 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         # distinct error_code so the Next layer can render an "unexpected"
         # envelope rather than misleading the user with a "verify
         # credentials" message.
-        logger.exception(
-            "validate_key_permissions: unexpected error on %s — %s: %s",
-            exchange.id,
-            type(exc).__name__,
-            exc,
+        logger.warning(
+            "validate_key_permissions: unexpected error on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
             "Key validation failed unexpectedly. Contact support if this "
@@ -675,11 +794,13 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
             # types, paginated for full history.
             all_bills: list[dict] = []
 
+            OKX_BILLS_PAGE_CAP = 100
             for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
                 after_id = ""
                 type_count = 0
+                _okx_bills_cap_hit = False
 
-                for page in range(100):
+                for page in range(OKX_BILLS_PAGE_CAP):
                     params: dict[str, str] = {"instType": inst_type, "limit": "100"}
                     if since_ms:
                         params["begin"] = str(since_ms)
@@ -696,12 +817,32 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         after_id = data[-1].get("billId", "")
                         if len(data) < 100:
                             break
+                        # NEW-C13-05: detect page-cap exhaustion
+                        if page == OKX_BILLS_PAGE_CAP - 1:
+                            _okx_bills_cap_hit = True
                     except Exception as e:
-                        logger.warning("OKX bills fetch failed for %s page %d: %s", inst_type, page, str(e))
-                        break
+                        # NEW-C13-04: re-raise so the worker retries and the
+                        # partial series is not silently treated as complete.
+                        # Pre-fix: warn+break returned a truncated series as
+                        # canonical daily PnL, feeding wrong Sharpe/equity.
+                        # NEW-C13-10: scrub before logging.
+                        logger.error(
+                            "OKX bills fetch failed for %s page %d: exc_class=%s scrubbed=%s — "
+                            "re-raising (partial daily_pnl rejected)",
+                            inst_type, page, type(e).__name__, scrub_freeform_string(str(e)),
+                        )
+                        raise
 
                 if type_count > 0:
                     logger.info("OKX %s: fetched %d bills", inst_type, type_count)
+                if _okx_bills_cap_hit:
+                    # NEW-C13-05: page cap exhausted — history is truncated.
+                    logger.warning(
+                        "OKX %s: bills page cap (%d) hit — daily_pnl "
+                        "may be truncated for this inst_type",
+                        inst_type, OKX_BILLS_PAGE_CAP,
+                    )
+                    _record_dq_flag("daily_pnl_truncated_okx", True)
 
             # Fetch bills-archive for older history (>3 months)
             # Only fetch archive if we need data older than 90 days
@@ -732,8 +873,14 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                             if len(data) < 100:
                                 break
                         except Exception as e:
-                            logger.warning("OKX archive failed for %s: %s", inst_type, str(e))
-                            break
+                            # NEW-C13-04: same rationale as the bills path.
+                            # NEW-C13-10: scrub before logging.
+                            logger.error(
+                                "OKX archive bills fetch failed for %s: exc_class=%s scrubbed=%s — "
+                                "re-raising (partial daily_pnl rejected)",
+                                inst_type, type(e).__name__, scrub_freeform_string(str(e)),
+                            )
+                            raise
                     if type_count > 0:
                         logger.info("OKX archive %s: fetched %d bills", inst_type, type_count)
 
@@ -775,7 +922,19 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 if bill_type == _OKX_FUNDING_BILL_TYPE:
                     _okx_funding_bills_dropped += 1
                     continue
-                pnl_val = float(bill.get("pnl", 0)) + float(bill.get("fee", 0))
+                # NEW-C13-09: use _finite_float to reject NaN/Inf strings that
+                # bare float() would silently accept, poisoning daily_totals
+                # and every downstream metric (equity curve, Sharpe, CAGR).
+                _pnl_raw = _finite_float(bill.get("pnl", 0), label="OKX bill pnl")
+                _fee_raw = _finite_float(bill.get("fee", 0), label="OKX bill fee")
+                if _pnl_raw is None or _fee_raw is None:
+                    logger.warning(
+                        "OKX bill dropped: non-finite pnl=%r or fee=%r "
+                        "(billId=%s)",
+                        bill.get("pnl"), bill.get("fee"), bill.get("billId"),
+                    )
+                    continue
+                pnl_val = _pnl_raw + _fee_raw
                 ts_raw = bill.get("ts", "")
                 if ts_raw and ts_raw.isdigit():
                     dt = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc)
@@ -826,11 +985,24 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     # services.funding_fetch → funding_fees table.
                     # See migration 044 for the forward-only rationale.
                     if item.get("incomeType") in ("REALIZED_PNL", "COMMISSION"):
+                        # NEW-C13-09: guard against NaN/Inf strings
+                        _income_raw = _finite_float(
+                            item.get("income", 0), label="Binance income"
+                        )
+                        if _income_raw is None:
+                            logger.warning(
+                                "Binance income item dropped: non-finite "
+                                "income=%r (incomeType=%s, symbol=%s)",
+                                item.get("income"),
+                                item.get("incomeType"),
+                                item.get("symbol"),
+                            )
+                            continue
                         daily_pnl.append({
                             "exchange": "binance",
                             "symbol": item.get("symbol", "PORTFOLIO"),
-                            "side": "buy" if float(item.get("income", 0)) >= 0 else "sell",
-                            "price": abs(float(item.get("income", 0))),
+                            "side": "buy" if _income_raw >= 0 else "sell",
+                            "price": abs(_income_raw),
                             "quantity": 1,
                             "fee": 0,
                             "fee_currency": "USDT",
@@ -858,13 +1030,17 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 # via the format-arg (str(exc)) AND set exc_class so
                 # operators still get the exception type for triage. The
                 # raw `exc` object is no longer interpolated.
-                from .redact import scrub_freeform_string
                 exc_class = type(exc).__name__
                 scrubbed_msg = scrub_freeform_string(str(exc))
                 logger.warning(
                     "Binance futures-income failed (falling back to BTC spot trades), exc_class=%s, scrubbed=%s",
                     exc_class, scrubbed_msg,
                 )
+                # NEW-C13-06: stamp a DQ flag so the admin health card shows
+                # that daily PnL is incomplete (BTC/USDT spot only, not full
+                # futures income). A persistent futures-permission/schema-drift
+                # failure silently mis-stated every Binance strategy before.
+                _record_dq_flag("daily_pnl_binance_income_fallback", True)
                 # Fallback: fetch spot trades for BTC only
                 trades = await exchange.fetch_my_trades("BTC/USDT", since=since_ms, limit=1000)
                 for t in trades:
@@ -970,6 +1146,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
 
                 items: list[dict[str, Any]] = []
                 window_start = start_ms
+                _bybit_cap_hit = False
                 while window_start < now_ms:
                     window_end = min(window_start + BYBIT_PNL_WINDOW_MS, now_ms)
                     cursor = ""
@@ -995,7 +1172,17 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         if not next_cursor or next_cursor == cursor:
                             break
                         cursor = next_cursor
+                        # NEW-C13-05: detect page cap exhaustion within window
+                        if _page == BYBIT_PNL_PAGE_CAP - 1:
+                            _bybit_cap_hit = True
                     window_start = window_end + 1
+                if _bybit_cap_hit:
+                    logger.warning(
+                        "Bybit: per-window page cap (%d) hit — daily_pnl "
+                        "may be truncated",
+                        BYBIT_PNL_PAGE_CAP,
+                    )
+                    _record_dq_flag("daily_pnl_truncated_bybit", True)
 
                 # Defensive dedup: pagination boundaries can occasionally
                 # echo the same closure across two adjacent windows when
@@ -1136,14 +1323,30 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     _bybit_rows_dropped_unparseable_ts,
                 )
                 daily_pnl.extend(converted_rows)
+            except ccxt.RateLimitExceeded:
+                raise  # silent-failure/F-05: must propagate to _stamp_429 path
             except Exception as exc:  # noqa: BLE001
+                # silent-failure/F-05: use scrub_freeform_string and drop
+                # exc_info=True — passing exc_info embeds the full exception
+                # string including &signature=<HMAC-SHA256> from ccxt URLs
+                # (NEW-C13-10). The outer handler already covers propagated
+                # errors; this inner handler covers per-window math errors.
                 logger.warning(
-                    "Bybit closed_pnl fetch / ISO-conversion failed: %s",
-                    exc, exc_info=True,
+                    "Bybit closed_pnl fetch / ISO-conversion failed: "
+                    "exc_class=%s scrubbed=%s",
+                    type(exc).__name__, scrub_freeform_string(str(exc)),
                 )
 
     except Exception as e:
-        logger.error("fetch_daily_pnl failed: %s", str(e))
+        # NEW-C13-07: stamp a DQ flag before returning the partial series.
+        # Pre-fix the caller couldn't distinguish "little PnL" from "crashed
+        # halfway" — the partial daily_pnl was treated as complete.
+        # NEW-C13-10: ccxt signed requests embed &signature=<HMAC> in str(e).
+        logger.error(
+            "fetch_daily_pnl failed: exc_class=%s scrubbed=%s",
+            type(e).__name__, scrub_freeform_string(str(e)),
+        )
+        _record_dq_flag("daily_pnl_fetch_error", True)
 
     return daily_pnl
 
@@ -1188,7 +1391,12 @@ async def fetch_raw_trades(
         else:
             logger.warning("fetch_raw_trades: unsupported exchange %s", exchange.id)
     except Exception as e:
-        logger.error("fetch_raw_trades failed for %s: %s", exchange.id, str(e))
+        # NEW-C13-10: scrub before logging — ccxt signed requests embed
+        # &signature=<HMAC-SHA256> in str(e) on NetworkError/AuthError.
+        logger.error(
+            "fetch_raw_trades failed for %s: exc_class=%s scrubbed=%s",
+            exchange.id, type(e).__name__, scrub_freeform_string(str(e)),
+        )
         raise
 
     logger.info(
@@ -1260,8 +1468,13 @@ async def _fetch_raw_trades_binance(
                 "Binance cold start: discovered %d symbols from positions", len(symbols)
             )
         except Exception as e:
-            logger.warning("Binance cold start position fetch failed: %s", str(e))
-            raise ColdStartSymbolDiscoveryError(str(e)) from e
+            # NEW-C13-10: scrub before logging.
+            _scrubbed = scrub_freeform_string(str(e))
+            logger.warning(
+                "Binance cold start position fetch failed: exc_class=%s scrubbed=%s",
+                type(e).__name__, _scrubbed,
+            )
+            raise ColdStartSymbolDiscoveryError(_scrubbed) from e
 
         # G12.B.1 closed-position edge case: fetch_positions only returns
         # currently-open positions, so a strategy that closed everything
@@ -1330,7 +1543,36 @@ async def _fetch_raw_trades_binance(
                     symbol, len(all_trades),
                 )
                 break
-            current_since = int(last_ts) + 1
+            # NEW-C13-03: advance cursor WITHOUT +1. The pre-fix `int(last_ts)+1`
+            # permanently skips fills that share the last fill's millisecond
+            # across a page boundary — a busy pair with many same-ms fills can
+            # lose a whole cluster. The exchange_fill_id unique index deduplicates
+            # genuinely re-fetched boundary fills, so +1 is not needed for
+            # correctness.
+            #
+            # red-team/H-4 (NEW-C13-03 follow-up): the stuck-cursor guard that
+            # breaks with a DQ flag when next_since == current_since (same-ms
+            # full page) has a false positive: it fires for the legitimate case
+            # where a high-frequency burst of fills all share the same millisecond
+            # and span more than one page. Breaking would truncate all fills past
+            # page 1 of that burst. Instead, fall back to +1 for that single step
+            # to break past the stuck ms, then continue. The +1 causes at most one
+            # boundary fill to be re-fetched (harmless — deduped by the DB index).
+            next_since = int(last_ts)
+            if next_since == current_since:
+                # Cursor did not advance — use +1 to break past the same-ms
+                # cluster rather than stopping. Emit an observability flag so
+                # operators can see when this path is hit.
+                _record_dq_flag("binance_fill_cursor_advance_plus1", True)
+                logger.warning(
+                    "Binance fetch_my_trades %s: cursor stuck at same-ms "
+                    "(last_ts=%d == current_since) on a full page — "
+                    "advancing +1ms to break past cluster (may re-fetch "
+                    "boundary fill; dedup handles it)",
+                    symbol, next_since,
+                )
+                next_since = current_since + 1
+            current_since = next_since
         else:
             logger.warning(
                 "Binance fetch_my_trades %s: hit %d-page cap; "
@@ -1404,27 +1646,32 @@ async def _fetch_raw_trades_binance(
     return fills
 
 
-async def _fetch_raw_trades_okx(
+async def _fetch_raw_trades_okx_inst_type(
     exchange: ccxt.Exchange,
     since_ms: int | None,
-) -> list[dict[str, Any]]:
-    """OKX: private_get_trade_fills_history with cursor-based pagination."""
+    inst_type: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Fetch OKX fills for a single instType.
+
+    Returns (fills, hit_page_cap). Called by _fetch_raw_trades_okx for each
+    instrument type in _OKX_FILL_INST_TYPES (NEW-C13-02).
+    """
     fills: list[dict[str, Any]] = []
     cursor = ""
     prev_cursor = ""
     natural_break = False
+    _is_linear_type = inst_type in ("SWAP", "FUTURES")
 
     PAGE_CAP = 100
     for page in range(PAGE_CAP):
-        params: dict[str, str] = {"instType": "SWAP", "limit": "100"}
-        # OKX fills-history returns DESC-sorted data; ``after=<billId>``
-        # fetches records OLDER than the cursor (``before`` fetches NEWER).
-        # Using ``before`` here would oscillate until the page cap (H-0665).
+        params: dict[str, str] = {"instType": inst_type, "limit": "100"}
+        # OKX fills-history returns DESC-sorted data; ``after=<tradeId>``
+        # fetches records OLDER than the cursor (H-0665 — using ``before``
+        # oscillates until the page cap).
         if cursor:
             params["after"] = cursor
         # ``begin`` must be sent on every page — without it OKX falls back
-        # to its default window (often 7 days) on pages 2+ and silently
-        # truncates a 90-day backfill (H-0666).
+        # to its default window (often 7 days) on pages 2+ (H-0666).
         if since_ms:
             params["begin"] = str(since_ms)
 
@@ -1442,28 +1689,17 @@ async def _fetch_raw_trades_okx(
                         int(ts_raw) / 1000, tz=timezone.utc
                     )
                 else:
-                    # Drop fills with unparseable ``ts`` rather than
-                    # substituting wall-clock time — phantom timestamps
-                    # corrupt FIFO position reconstruction silently
-                    # (C-0226 / H-0667). Log the parse target + fill_id
-                    # only (never the raw fill body) so attacker- or
-                    # PII-bearing fields can't reach log aggregation.
                     logger.error(
                         "OKX fill dropped: unparseable ts=%r (instId=%s, tradeId=%s)",
-                        ts_raw,
-                        fill.get("instId"),
-                        fill.get("tradeId"),
+                        ts_raw, fill.get("instId"), fill.get("tradeId"),
                     )
                     continue
 
-                symbol = fill.get("instId", "").replace("-", "")
+                raw_inst_id = fill.get("instId", "")
+                symbol = raw_inst_id.replace("-", "")
                 side = fill.get("side", "").lower()
-                # Audit-2026-05-07 H-0661 — finite-value validation. Pre-fix
-                # NaN/inf strings could land in the typed numeric columns and
-                # corrupt every downstream metric. Drop the fill on a
-                # non-finite price / amount; treat non-finite fee as 0.
-                price_chk = _finite_float(fill.get("fillPx", 0), label="OKX fillPx")
-                amount_chk = _finite_float(fill.get("fillSz", 0), label="OKX fillSz")
+                price_chk = _finite_positive_float(fill.get("fillPx", 0), label="OKX fillPx")
+                amount_chk = _finite_positive_float(fill.get("fillSz", 0), label="OKX fillSz")
                 if price_chk is None or amount_chk is None:
                     logger.error(
                         "OKX fill dropped: non-finite price=%r or amount=%r "
@@ -1473,39 +1709,44 @@ async def _fetch_raw_trades_okx(
                     )
                     continue
                 price = price_chk
-                amount = amount_chk
-                # Preserve signed fee so maker rebates (negative) reduce
-                # ``total_fees`` instead of inflating it via abs() (H-0671).
+                fill_sz_contracts = amount_chk
+                # NEW-C13-01: for linear SWAP/FUTURES, fillSz is in contracts,
+                # not base units. Normalize to base units at ingest.
+                # SPOT/MARGIN fill fillSz is already in base units.
+                # Inverse perps (BTC-USD-SWAP settle currency = USD, not USDT)
+                # are excluded — their cost semantics differ from linear.
+                if _is_linear_type:
+                    _inst_parts = raw_inst_id.split("-")
+                    _settle = _inst_parts[1].upper() if len(_inst_parts) >= 2 else ""
+                    if _settle in ("USDT", "USDC", "BUSD", "USDE", "PYUSD", "USDB"):
+                        _ct = _okx_contract_size_for_inst_id(raw_inst_id, exchange)
+                        amount = fill_sz_contracts * _ct
+                        if _ct != 1.0:
+                            fill.setdefault("_ingest_ctval", _ct)
+                    else:
+                        amount = fill_sz_contracts  # inverse — skip normalization
+                else:
+                    amount = fill_sz_contracts  # SPOT/MARGIN: already base units
+
                 fee_chk = _finite_float(fill.get("fee", 0), label="OKX fee")
                 fee = fee_chk if fee_chk is not None else 0.0
                 fee_currency = fill.get("feeCcy", "USDT")
-                # Audit-2026-05-07 H-0670 — surface mismatch when fees are
-                # paid in a currency other than the pair's quote.
                 _check_fee_currency_mismatch(
-                    exchange="okx", symbol=symbol, fee_currency=fee_currency,
+                    exchange="okx", symbol=raw_inst_id, fee_currency=fee_currency,
                 )
                 is_maker = fill.get("execType", "") == "M"
 
                 raw_data = dict(fill)
-                # Audit-2026-05-07 G12.B.4 — populate position_direction
-                # via whitelist instead of raw passthrough. OKX's posSide
-                # is documented as long/short/net, but anything else
-                # would silently land in the typed column. Reject and
-                # log so contract violations are visible.
                 pos_side_raw = fill.get("posSide")
                 position_direction: Literal["long", "short"] | None = None
                 if pos_side_raw in _OKX_VALID_POS_SIDES:
-                    # Preserve raw_data alignment with prior behavior.
                     raw_data["posSide"] = pos_side_raw
-                    # 'net' is one-way mode — direction is implied by side,
-                    # not a long/short hedge flag; leave position_direction
-                    # as None. "long"/"short" assign through directly.
+                    # "net" = one-way mode; direction is implied by side, not
+                    # by a hedge flag. Only "long"/"short" assign through.
                     if pos_side_raw != "net":
-                        position_direction = pos_side_raw  # "long" | "short"
+                        position_direction = pos_side_raw
                 elif pos_side_raw not in (None, ""):
-                    logger.warning(
-                        "invalid posSide value=%s, using None", pos_side_raw
-                    )
+                    logger.warning("invalid posSide value=%s, using None", pos_side_raw)
 
                 fills.append(_make_fill_dict(
                     exchange="okx",
@@ -1525,36 +1766,23 @@ async def _fetch_raw_trades_okx(
 
             new_cursor = data[-1].get("tradeId", "")
 
-            # Adversarial-review hardening (PR #137 follow-up): a short
-            # final page that legitimately shares its trailing tradeId
-            # with the previous page's cursor would otherwise trip the
-            # stuck-cursor warning even though we're about to break
-            # naturally on `len(data) < 100`. Take the natural-break
-            # exit FIRST so short pages don't produce false-positive
-            # "stuck" warnings.
             if len(data) < 100:
                 prev_cursor = new_cursor
                 cursor = new_cursor
                 natural_break = True
                 break
 
-            # Audit-2026-05-07 G12.B.6 — stuck-cursor guard (full pages
-            # only). If the exchange returns the same trailing tradeId
-            # twice on a FULL page, we'd otherwise loop until the page
-            # cap and yield 100 pages of duplicates. Empty tradeId is
-            # also a hard stop (the next request would re-issue with
-            # no `before`, restarting from the most recent).
             if not new_cursor:
                 logger.warning(
-                    "Pagination stuck on cursor=%s for exchange=okx; terminating early",
-                    new_cursor,
+                    "Pagination stuck on cursor=%s for exchange=okx instType=%s; "
+                    "terminating early", new_cursor, inst_type,
                 )
                 natural_break = True
                 break
             if prev_cursor and new_cursor == prev_cursor:
                 logger.warning(
-                    "Pagination stuck on cursor=%s for exchange=okx; terminating early",
-                    new_cursor,
+                    "Pagination stuck on cursor=%s for exchange=okx instType=%s; "
+                    "terminating early", new_cursor, inst_type,
                 )
                 natural_break = True
                 break
@@ -1562,31 +1790,46 @@ async def _fetch_raw_trades_okx(
             prev_cursor = new_cursor
             cursor = new_cursor
         except Exception as e:
-            # Re-raise per-page failures so the sync_trades job is marked
-            # failed_retry and resumes via cursor on the next attempt
-            # instead of silently truncating mid-pagination (C-0227).
+            # NEW-C13-10: scrub before logging — ccxt signed requests embed
+            # &signature=<HMAC-SHA256> in str(e).
             logger.error(
-                "OKX fills fetch failed page %d (re-raising to fail the sync): %s",
-                page, str(e),
+                "OKX fills fetch failed page %d instType=%s (re-raising): exc_class=%s scrubbed=%s",
+                page, inst_type, type(e).__name__, scrub_freeform_string(str(e)),
             )
             raise
 
-    if not natural_break:
-        # Audit-2026-05-07 M-0663 — record a transient DQ flag so the
-        # caller (job_worker) can stamp ``sync_truncated_okx`` into
-        # ``strategy_analytics.data_quality_flags``. Pre-fix the warning
-        # was log-only; the admin compute-jobs UI / health card had no
-        # way to surface truncation. A 90-day backfill on a busy
-        # strategy can exceed 100 pages × 100 fills = 10K and lose the
-        # tail silently.
-        logger.warning(
-            "Pagination hit %d-page cap for okx; possible truncation",
-            PAGE_CAP,
-        )
-        _record_dq_flag("sync_truncated_okx", True)
-        _record_dq_flag("sync_truncated_okx_pages", int(PAGE_CAP))
+    return fills, not natural_break
 
-    return fills
+
+async def _fetch_raw_trades_okx(
+    exchange: ccxt.Exchange,
+    since_ms: int | None,
+) -> list[dict[str, Any]]:
+    """OKX: private_get_trade_fills_history across all instrument types.
+
+    NEW-C13-02: pre-fix fetched only instType=SWAP, silently dropping all
+    SPOT/FUTURES/MARGIN fills. Now fans out across _OKX_FILL_INST_TYPES.
+    NEW-C13-01: SWAP/FUTURES fillSz is normalized from contracts to base units.
+    """
+    all_fills: list[dict[str, Any]] = []
+    any_cap_hit = False
+    total_cap_pages = 0
+    for inst_type in _OKX_FILL_INST_TYPES:
+        type_fills, cap_hit = await _fetch_raw_trades_okx_inst_type(
+            exchange, since_ms, inst_type
+        )
+        all_fills.extend(type_fills)
+        if cap_hit:
+            any_cap_hit = True
+            total_cap_pages += 100  # PAGE_CAP per type
+            logger.warning(
+                "OKX fills: pagination hit page cap for instType=%s; "
+                "possible truncation (sync_truncated_okx)", inst_type,
+            )
+    if any_cap_hit:
+        _record_dq_flag("sync_truncated_okx", True)
+        _record_dq_flag("sync_truncated_okx_pages", total_cap_pages)
+    return all_fills
 
 
 async def _fetch_raw_trades_bybit(
@@ -1635,10 +1878,13 @@ async def _fetch_raw_trades_bybit(
                 side = fill.get("side", "").lower()
                 # Audit-2026-05-07 H-0661 — finite-value validation; same
                 # rationale as the OKX branch.
-                price_chk = _finite_float(
+                # NEW-C13-11: also reject zero/negative price and amount —
+                # both are physically impossible for a fill and indicate
+                # corrupt data; _finite_positive_float rejects ≤0 values.
+                price_chk = _finite_positive_float(
                     fill.get("execPrice", 0), label="Bybit execPrice"
                 )
-                amount_chk = _finite_float(
+                amount_chk = _finite_positive_float(
                     fill.get("execQty", 0), label="Bybit execQty"
                 )
                 if price_chk is None or amount_chk is None:
@@ -1713,9 +1959,10 @@ async def _fetch_raw_trades_bybit(
         except Exception as e:
             # Re-raise per-page failures (C-0227) — same rationale as the
             # OKX branch.
+            # NEW-C13-10: scrub before logging.
             logger.error(
-                "Bybit execution list failed page %d (re-raising to fail the sync): %s",
-                page, str(e),
+                "Bybit execution list failed page %d (re-raising to fail the sync): exc_class=%s scrubbed=%s",
+                page, type(e).__name__, scrub_freeform_string(str(e)),
             )
             raise
 
@@ -1918,11 +2165,14 @@ async def fetch_usdt_balance_with_status(
     try:
         balance = await exchange.fetch_balance()
     except Exception as e:
-        # Use exception() to capture the full traceback so operators can
-        # tell auth failures (revoked key) from rate-limit surges from
-        # network drops without re-running the job. The pre-fix
-        # warning(str(e)) lost the stack and obscured root cause.
-        logger.exception("Could not fetch account balance: %s", str(e))
+        # NEW-C13-10: ccxt NetworkError/AuthError for signed requests embed
+        # &signature=<HMAC-SHA256> in str(e). Use scrub_freeform_string and
+        # log at WARNING with exc_class for triage (auth failure vs rate-limit
+        # vs network drop) without leaking the HMAC to Railway stdout / Sentry.
+        logger.warning(
+            "Could not fetch account balance: exc_class=%s scrubbed=%s",
+            type(e).__name__, scrub_freeform_string(str(e)),
+        )
         return None, True
     try:
         usdt_total = balance.get("total", {}).get("USDT", 0)
@@ -1931,8 +2181,9 @@ async def fetch_usdt_balance_with_status(
     except (TypeError, ValueError, AttributeError) as e:
         # Malformed response shape from a misbehaving exchange / mock —
         # treat as an error read, not as a legitimate "no balance".
-        logger.exception(
-            "Malformed balance response shape: %s", str(e)
+        logger.error(
+            "Malformed balance response shape: exc_class=%s scrubbed=%s",
+            type(e).__name__, scrub_freeform_string(str(e)),
         )
         return None, True
     # Successful read, but USDT balance is zero / absent. Legitimate

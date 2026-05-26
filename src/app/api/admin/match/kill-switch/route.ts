@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 
 // GET — returns { enabled: boolean }
 // POST — body { enabled: boolean }, flips the flag. Admin only.
@@ -87,7 +87,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // `key` (text) — there's no UUID to point at. The acting admin IS
   // the forensic anchor ("admin X flipped the match engine on/off at
   // time Y"). Metadata carries the semantic payload.
-  logAuditEvent(supabase, {
+  //
+  // NEW-C10-01 (audit-2026-05-26 security): switched to logAuditEventAsUser
+  // (service-role, JWT-immune) so the kill-switch audit row cannot be lost
+  // to an admin JWT expiring in the after() window.
+  logAuditEventAsUser(admin, user!.id, {
     action: "admin.kill_switch",
     entity_type: "system_flag",
     entity_id: user!.id,

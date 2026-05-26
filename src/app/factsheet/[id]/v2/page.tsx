@@ -7,7 +7,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
-import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
+import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
 
 /**
@@ -63,6 +63,37 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
   // Both gates have to fall before we render the "still computing"
   // placeholder.
   const dailyReturns = resolveDailyReturnSeries(dailyRaw, analytics?.returns_series);
+  // Ingest source: daily_returns populated by CSV ingest; returns_series by
+  // the analytics-service (live API). If daily_returns resolved we have a
+  // CSV strategy; otherwise it came from the live-data path. (NEW-C20-01)
+  //
+  // CRITICAL: An empty array ([] length 0) means the CSV ingester ran but
+  // produced no rows. That is STILL a CSV strategy — classifying it as "api"
+  // would unlock PeerPercentile and AllocatorSection panels that must not
+  // render for CSV strategies (no-invented-data contract). Reserve "api" only
+  // for null/undefined (column was never written by the CSV ingester).
+  // (FINDING-1 — b06-silentfailure)
+  const ingestSource: IngestSource =
+    Array.isArray(dailyRaw)
+      ? "csv"                              // any array, empty or not = CSV path touched this strategy
+      : typeof dailyRaw === "object" && dailyRaw !== null
+        ? "csv"                            // object dict = CSV attempted
+        : "api";                           // null/undefined = only analytics-service path
+  // Warn when both daily_returns (CSV indicator) and returns_series (API
+  // indicator) are populated — ambiguous provenance may mis-classify an
+  // api-verified strategy as csv if the ingester later back-fills the column.
+  // (IMPORTANT-3 — b06-codereview)
+  if (
+    Array.isArray(dailyRaw) &&
+    analytics?.returns_series != null &&
+    typeof analytics.returns_series === "object" &&
+    Object.keys(analytics.returns_series as object).length > 0
+  ) {
+    console.warn(
+      "[factsheet] fetchAndBuildPayload — both daily_returns and returns_series populated; ingestSource='csv' applied conservatively",
+      { id },
+    );
+  }
   if (dailyReturns.length === 0) {
     console.warn("[factsheet] fetchAndBuildPayload — no usable return series after normalization + equity-curve fallback", {
       id,
@@ -74,7 +105,17 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     return null;
   }
 
-  const computedAt = analytics?.computed_at ?? new Date().toISOString();
+  // FINDING-5 (b06-silentfailure): Never fall back to "now" for a missing
+  // computed_at — that would make FreshnessChip show a green "fresh" badge
+  // for a strategy with no real analytics data. Use the epoch sentinel so
+  // the chip renders "old" / staleness signal instead of a false freshness.
+  if (!analytics?.computed_at) {
+    console.warn(
+      "[factsheet] fetchAndBuildPayload — analytics.computed_at missing, freshness chip will show epoch",
+      { id },
+    );
+  }
+  const computedAt = analytics?.computed_at ?? "1970-01-01T00:00:00Z";
   // Factsheet is a "full identity" context per the strategy-display.ts
   // contract: prefer the real name, fall back to codename, then to the
   // synthetic Strategy#id. Without this, exploratory strategies with a
@@ -92,6 +133,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
       markets: strategy.markets ?? [],
       computedAt,
       trustTier: null,
+      ingestSource,
       description: strategy.description ?? null,
       subtypes: strategy.subtypes ?? [],
       supportedExchanges: strategy.supported_exchanges ?? [],
@@ -120,7 +162,12 @@ function buildFactsheetPayloadCached(
     // whenever FactsheetPayload adds non-optional fields, so unstable_cache
     // entries from the previous shape don't crash readers expecting the new
     // fields. The factsheet-v2:* tags below still revalidate old entries.
-    ["factsheet-v2-payload-v2", id],
+    // Bumped v2→v3: ingestSource field added in this PR. Stale v2 entries
+    // lack the field; deserialized payload would have ingestSource=undefined,
+    // which evaluates !== "api" and silently suppresses all gated panels
+    // (PeerPercentile, AllocatorSection, Signatures) for legitimate API
+    // strategies during the TTL drain window. (RED-TEAM-C1)
+    ["factsheet-v2-payload-v3", id],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
@@ -288,6 +335,18 @@ export default async function FactsheetV2Page({
 
   // Trust tier is per-request (not cached with payload) so verification flips
   // don't require a payload cache bust.
+  // FINDING-4 (b06-silentfailure): Log if the verifications query failed so
+  // the silent drop is visible in Sentry / server console. An api_verified
+  // strategy temporarily losing its badge is a meaningful trust-signal regression.
+  if (vRes.error) {
+    console.error(
+      "[factsheet/v2/page] strategy_verifications query failed — trustTier falling to null",
+      {
+        id,
+        errorMessage: (vRes.error as { message?: string })?.message,
+      },
+    );
+  }
   const vRows = vRes.data;
   const rawTrustTier = (vRows?.[0]?.trust_tier ?? null) as string | null;
   const trustTier: TrustTierKind | null =
@@ -307,7 +366,16 @@ export default async function FactsheetV2Page({
     description: payloadWithTrust.description ?? undefined,
     provider: { "@type": "Organization", name: "Quantalyze" },
     feesAndCommissionsSpecification: payloadWithTrust.aum != null ? `AUM ${payloadWithTrust.aum}` : undefined,
-    interestRate: payloadWithTrust.strategyMetrics.cagr,
+    // FINDING-7 (b06-silentfailure): Only publish CAGR as a machine-readable
+    // interestRate when it is a finite number AND the strategy is API-verified.
+    // NaN/Infinity serialize to null in JSON (benign but misleading), and CSV
+    // strategies with short track records should not have their annualized CAGR
+    // ingested by crawlers as a verified yield figure.
+    interestRate:
+      Number.isFinite(payloadWithTrust.strategyMetrics.cagr) &&
+      payloadWithTrust.ingestSource === "api"
+        ? payloadWithTrust.strategyMetrics.cagr
+        : undefined,
   };
   const jsonLdStr = JSON.stringify(jsonLd).replace(/</g, "\\u003c");
 

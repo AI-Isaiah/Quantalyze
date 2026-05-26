@@ -848,6 +848,38 @@ export type Database = {
         }
         Relationships: []
       }
+      csv_daily_returns: {
+        Row: {
+          created_at: string
+          daily_return: number
+          date: string
+          strategy_id: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          daily_return: number
+          date: string
+          strategy_id: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          daily_return?: number
+          date?: string
+          strategy_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "csv_daily_returns_strategy_id_fkey"
+            columns: ["strategy_id"]
+            isOneToOne: false
+            referencedRelation: "strategies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       data_deletion_requests: {
         Row: {
           completed_at: string | null

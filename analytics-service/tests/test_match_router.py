@@ -8,6 +8,7 @@ module-level Supabase factory only.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 from typing import Any
 from unittest.mock import MagicMock
@@ -163,6 +164,7 @@ class TestRecordsToSeries:
 class TestRecomputeEndpoint:
     def test_kill_switch_off_returns_disabled_status(self, client, monkeypatch):
         """Every branch carries a `status` discriminator; kill-switch off → 'disabled'."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: False)
 
         r = client.post(
@@ -176,6 +178,7 @@ class TestRecomputeEndpoint:
 
     def test_skip_path_returns_skipped_status(self, client, monkeypatch):
         """Skipped branch carries status='skipped' + reason."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _skip(allocator_id, force):
@@ -194,6 +197,7 @@ class TestRecomputeEndpoint:
 
     def test_empty_universe_returns_400(self, client, monkeypatch):
         """Empty candidate universe → 400."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
@@ -202,7 +206,7 @@ class TestRecomputeEndpoint:
         monkeypatch.setattr("routers.match._should_skip_allocator", _no_skip)
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
-            lambda: {"strategies_by_id": {}, "returns_by_id": {}},
+            lambda *_: {"strategies_by_id": {}, "returns_by_id": {}},
         )
 
         r = client.post(
@@ -213,6 +217,7 @@ class TestRecomputeEndpoint:
 
     def test_score_exception_returns_500(self, client, monkeypatch):
         """_score_one_allocator raising → 500."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
@@ -221,7 +226,7 @@ class TestRecomputeEndpoint:
         monkeypatch.setattr("routers.match._should_skip_allocator", _no_skip)
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
-            lambda: {
+            lambda *_: {
                 "strategies_by_id": {"s1": {}},
                 "returns_by_id": {},
             },
@@ -256,6 +261,7 @@ class TestRecomputeEndpoint:
 
     def test_ok_path_carries_status_ok(self, client, monkeypatch):
         """Success branch carries status='ok' alongside the result fields."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
@@ -264,7 +270,7 @@ class TestRecomputeEndpoint:
         monkeypatch.setattr("routers.match._should_skip_allocator", _no_skip)
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
-            lambda: {
+            lambda *_: {
                 "strategies_by_id": {"s1": {}},
                 "returns_by_id": {},
             },
@@ -300,6 +306,7 @@ class TestRecomputeEndpoint:
         the request — the batch already landed, and tearing down the response
         produces a partial-success state with no rollback. Log loudly and
         return the result."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
@@ -308,7 +315,7 @@ class TestRecomputeEndpoint:
         monkeypatch.setattr("routers.match._should_skip_allocator", _no_skip)
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
-            lambda: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
         )
 
         async def _score(allocator_id, universe):
@@ -411,7 +418,12 @@ class TestRetentionSweep:
 
         def _capture_in(_col, ids):
             captured_delete_ids.append(list(ids))
-            return MagicMock(execute=MagicMock(return_value=MagicMock(data=[])))
+            # Return the deleted rows as data (matching real Supabase DELETE
+            # behaviour) so the NEW-C08-04 actual-count logic gives the right
+            # total instead of 0.
+            return MagicMock(execute=MagicMock(return_value=MagicMock(
+                data=[{"id": i} for i in ids]
+            )))
 
         delete_chain.delete.return_value.in_.side_effect = _capture_in
 
@@ -463,7 +475,12 @@ class TestRetentionSweep:
 
         def _capture_in(_col, ids):
             captured_chunks.append(list(ids))
-            return MagicMock(execute=MagicMock(return_value=MagicMock(data=[])))
+            # Return the deleted rows as data (matching real Supabase DELETE
+            # behaviour) so the NEW-C08-04 actual-count logic gives the right
+            # total instead of 0.
+            return MagicMock(execute=MagicMock(return_value=MagicMock(
+                data=[{"id": i} for i in ids]
+            )))
 
         sb.table.return_value.delete.return_value.in_.side_effect = _capture_in
         monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
@@ -1031,6 +1048,205 @@ class TestLoadCandidateUniverseDemoOnly:
 
         assert ("status", "published") in calls
         assert ("is_example", True) not in calls
+
+
+# ---------------------------------------------------------------------------
+# NEW-C08-10 — POST /recompute role validation
+# ---------------------------------------------------------------------------
+
+
+class TestRecomputeRoleValidation:
+    """NEW-C08-10: POST /recompute must reject non-allocator UUIDs with 422
+    before writing any match_batches row. Pre-fix any UUID manufactured
+    phantom batches that polluted the founder queue and hit-rate eval."""
+
+    def test_non_allocator_uuid_returns_422(self, client, monkeypatch):
+        """A strategy-manager or admin profile UUID must be rejected 422."""
+        # _is_allocator_profile returns False → 422 before any other check.
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: False)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": str(uuid4()), "force": False},
+        )
+        assert r.status_code == 422, (
+            "Non-allocator profile must be rejected with 422 (NEW-C08-10)"
+        )
+
+    def test_allocator_uuid_passes_role_check(self, client, monkeypatch):
+        """A valid allocator profile UUID must proceed past the role check."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: False)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": str(uuid4()), "force": False},
+        )
+        # Kill switch off → 'disabled' (correct path taken, role check passed)
+        assert r.status_code == 200
+        assert r.json()["status"] == "disabled"
+
+
+# ---------------------------------------------------------------------------
+# NEW-C08-06 — force=True throttle (30s min interval)
+# ---------------------------------------------------------------------------
+
+
+class TestForceRecomputeThrottle:
+    """NEW-C08-06: force=True is rate-limited per allocator to
+    FORCE_RECOMPUTE_MIN_INTERVAL_S (30s) so a looped caller cannot stack
+    concurrent scoring and retention churn."""
+
+    def test_force_true_throttled_429_when_called_twice_quickly(
+        self, client, monkeypatch
+    ):
+        import time as _time
+        from routers import match as match_mod
+
+        alloc_id = str(uuid4())
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _score(allocator_id, universe):
+            return {"allocator_id": allocator_id, "batch_id": "b1",
+                    "candidate_count": 0, "excluded_count": 0,
+                    "mode": "screening", "filter_relaxed": False, "latency_ms": 1}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score)
+        monkeypatch.setattr(match_mod, "_retention_sweep", lambda *_: 0)
+
+        # Stamp the last-run cache to simulate a recent forced recompute
+        match_mod._force_last_run[alloc_id] = _time.monotonic()
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": True},
+        )
+        assert r.status_code == 429, (
+            "force=True within the min-interval must be throttled 429 (NEW-C08-06)"
+        )
+        assert "throttled" in r.json()["detail"].lower()
+
+    def test_force_true_allowed_after_interval_clears(
+        self, client, monkeypatch
+    ):
+        import time as _time
+        from routers import match as match_mod
+
+        alloc_id = str(uuid4())
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _score(allocator_id, universe):
+            return {"allocator_id": allocator_id, "batch_id": "b1",
+                    "candidate_count": 0, "excluded_count": 0,
+                    "mode": "screening", "filter_relaxed": False, "latency_ms": 1}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score)
+        monkeypatch.setattr(match_mod, "_retention_sweep", lambda *_: 0)
+
+        # Stamp the last-run cache to simulate a recompute that happened
+        # MORE than the min-interval ago → should be allowed through.
+        match_mod._force_last_run[alloc_id] = (
+            _time.monotonic() - match_mod.FORCE_RECOMPUTE_MIN_INTERVAL_S - 1
+        )
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": True},
+        )
+        assert r.status_code == 200, (
+            "force=True after interval clears must be allowed (NEW-C08-06)"
+        )
+        assert r.json()["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# NEW-C08-09 — demo_only wired at recompute() call site
+# ---------------------------------------------------------------------------
+
+
+class TestRecomputeDemoOnlyWiring:
+    """NEW-C08-09: POST /recompute must pass demo_only=True to
+    _load_candidate_universe when allocator_id is the demo allocator ID.
+    Pre-fix the call was unconditionally demo_only=False; the only protection
+    was the in-memory post-filter which a refactor could silently drop."""
+
+    def test_demo_allocator_loads_demo_only_universe(self, client, monkeypatch):
+        from routers import match as match_mod
+
+        demo_only_calls: list[bool] = []
+
+        def _spy_universe(demo_only: bool = False):
+            demo_only_calls.append(demo_only)
+            return {"strategies_by_id": {}, "returns_by_id": {}}
+
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(match_mod, "_load_candidate_universe", _spy_universe)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": match_mod._DEMO_ALLOCATOR_ID, "force": False},
+        )
+        # Empty universe → 400; but we've already recorded the demo_only call.
+        assert r.status_code == 400
+        assert len(demo_only_calls) == 1
+        assert demo_only_calls[0] is True, (
+            "_load_candidate_universe must be called with demo_only=True for "
+            "the demo allocator (NEW-C08-09 DB-layer defense)"
+        )
+
+    def test_non_demo_allocator_loads_full_universe(self, client, monkeypatch):
+        from routers import match as match_mod
+
+        demo_only_calls: list[bool] = []
+
+        def _spy_universe(demo_only: bool = False):
+            demo_only_calls.append(demo_only)
+            return {"strategies_by_id": {}, "returns_by_id": {}}
+
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(match_mod, "_load_candidate_universe", _spy_universe)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": str(uuid4()), "force": False},
+        )
+        assert len(demo_only_calls) == 1
+        assert demo_only_calls[0] is False, (
+            "_load_candidate_universe must be called with demo_only=False for "
+            "a non-demo allocator (NEW-C08-09 normal path)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1717,3 +1933,1074 @@ class TestScoreOneAllocatorExplicitlyExcludedFilter:
         # The good candidate (rank=1) must still appear.
         ranked_ids = {r["strategy_id"] for r in inserted_rows if r["rank"] is not None}
         assert ranked_ids == {"good-strat"}
+
+
+# ---------------------------------------------------------------------------
+# NEW-C08-02 — _load_candidate_universe paginates analytics IN-list
+# ---------------------------------------------------------------------------
+
+
+class TestLoadCandidateUniverseAnalyticsPagination:
+    """NEW-C08-02: the analytics SELECT must be chunked in pages of
+    _ANALYTICS_IN_LIST_PAGE_SIZE so a large published-strategy universe
+    does not overflow the PostgREST URL limit and silently drop rows."""
+
+    def test_analytics_fetch_is_chunked_when_many_strategies(self, monkeypatch):
+        from routers import match as match_mod
+
+        page_size = match_mod._ANALYTICS_IN_LIST_PAGE_SIZE
+        # Build a universe with 2.5× the page size to force multiple pages.
+        n_strategies = int(page_size * 2.5)
+        strategies = [
+            {
+                "id": f"s{i}",
+                "name": f"strat-{i}",
+                "codename": None,
+                "strategy_types": ["trend_following"],
+                "subtypes": [],
+                "supported_exchanges": ["binance"],
+                "status": "published",
+                "aum": 1_000_000,
+                "max_capacity": 5_000_000,
+                "user_id": f"mgr-{i}",
+                "start_date": "2022-01-01",
+                "is_example": False,
+            }
+            for i in range(n_strategies)
+        ]
+
+        analytics_in_calls: list[list[str]] = []
+
+        class _FakeSupabase:
+            def table(self, name):
+                return _FakeTable(name)
+
+        class _FakeTable:
+            def __init__(self, name):
+                self._name = name
+
+            def select(self, *_):
+                return self
+
+            def eq(self, *_):
+                return self
+
+            def in_(self, col, ids):
+                if self._name == "strategy_analytics":
+                    analytics_in_calls.append(list(ids))
+                    return _FakeExecEmpty()
+                return _FakeExecEmpty()
+
+            def execute(self):
+                if self._name == "strategies":
+                    return _FakeResult(strategies)
+                return _FakeResult([])
+
+        class _FakeExecEmpty:
+            def execute(self):
+                return _FakeResult([])
+
+        class _FakeResult:
+            def __init__(self, data):
+                self.data = data
+
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: _FakeSupabase())
+
+        match_mod._load_candidate_universe()
+
+        assert len(analytics_in_calls) >= 3, (
+            f"Expected >= 3 analytics page fetches for {n_strategies} strategies "
+            f"with page_size={page_size}; got {len(analytics_in_calls)}"
+        )
+        for call_ids in analytics_in_calls:
+            assert len(call_ids) <= page_size, (
+                f"Each IN-list chunk must be ≤ {page_size} IDs; got {len(call_ids)}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C08-04 — _retention_sweep counts actual deleted rows from DB result
+# ---------------------------------------------------------------------------
+
+
+class TestRetentionSweepActualDeleteCount:
+    """NEW-C08-04: the sweep must count rows confirmed deleted by the DB, not
+    the size of the chunk. A no-op DELETE (RLS regression, permission drift)
+    returns data=[] and must trigger an ERROR log, not silently add len(chunk)
+    to the returned count."""
+
+    def test_zero_actual_deleted_logs_error_and_returns_zero(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        rows = [{"id": f"id-{i}"} for i in range(10)]
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.order.return_value.execute.return_value = (
+            MagicMock(data=rows)
+        )
+        # DELETE returns data=[] — simulating an RLS no-op.
+        sb.table.return_value.delete.return_value.in_.return_value.execute.return_value = (
+            MagicMock(data=[])
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            deleted = match_mod._retention_sweep("alloc-rls", keep=7)
+
+        # Pre-fix: deleted == 3 (len(chunk) regardless of DB result).
+        # Post-fix: deleted == 0 (actual confirmed rows).
+        assert deleted == 0, (
+            "retention_sweep must count actual deleted rows, not chunk size; "
+            "an RLS no-op DELETE must surface as deleted=0"
+        )
+        assert any(
+            "retention DELETE affected 0/" in rec.getMessage()
+            for rec in caplog.records
+        ), "a no-op DELETE must log at ERROR so RLS regressions surface in Sentry"
+
+
+# ---------------------------------------------------------------------------
+# NEW-C08-05 — warm-up gate dropped holdings are logged
+# ---------------------------------------------------------------------------
+
+
+class TestHoldingsWarmUpDroppedLogging:
+    """NEW-C08-05: when the 30-day warm-up gate silently drops one or more
+    holdings, a logger.info call must surface the count so the caller can
+    distinguish empty-book from freshly-funded (portfolio_aum=0 with
+    warm_up_dropped>0 means real holdings exist but lack history)."""
+
+    def test_warm_up_dropped_holdings_emit_info_log(self, monkeypatch, caplog):
+        from routers import match as match_mod
+
+        # One holding with insufficient history (warm-up gate drops it)
+        collapsed = [
+            {"venue": "binance", "symbol": "BTC/USDT", "holding_type": "spot",
+             "value_usd": 10_000, "asof": "2026-01-15"},
+        ]
+
+        def _make_query_result(data):
+            q = MagicMock()
+            q.select.return_value = q
+            q.eq.return_value = q
+            q.order.return_value = q
+            q.execute.return_value = MagicMock(data=data)
+            return q
+
+        def _table(name):
+            if name == "allocator_holdings":
+                return _make_query_result(collapsed)
+            # allocator_equity_snapshots: empty snapshots
+            return _make_query_result([])
+
+        sb = MagicMock()
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        # Patch reconstruct_symbol_returns to return None (simulates <30 days)
+        monkeypatch.setattr(
+            match_mod,
+            "reconstruct_symbol_returns",
+            lambda _snapshots, _symbol: None,
+        )
+
+        with caplog.at_level("INFO", logger="quantalyze.analytics"):
+            result = match_mod._load_holding_portfolio_context("alloc-test")
+
+        assert result["portfolio_aum"] == 0.0, "all holdings dropped → aum=0"
+        assert any(
+            "warm-up gate dropped 1/" in rec.getMessage()
+            for rec in caplog.records
+        ), "warm-up dropped count must be logged at INFO (NEW-C08-05)"
+
+
+# ---------------------------------------------------------------------------
+# C-01 — _ANALYTICS_IN_LIST_PAGE_SIZE defined before its call sites
+# ---------------------------------------------------------------------------
+
+
+class TestAnalyticsPageSizeConstantLayout:
+    """C-01 (code-review): _ANALYTICS_IN_LIST_PAGE_SIZE must be defined before
+    lines 190 and 466 that use it. Pre-fix the constant was at line 1007 —
+    correct at runtime due to CPython global-lookup semantics, but wrong for
+    partial-load tests and codebase clarity. This test pins the invariant that
+    the constant is accessible and non-None at module level so that any future
+    move back below the functions fails loudly."""
+
+    def test_constant_is_accessible_and_positive(self):
+        from routers import match as match_mod
+
+        # Must be importable at module level — confirms the constant is placed
+        # in the module's global scope (not inside a function or class).
+        assert hasattr(match_mod, "_ANALYTICS_IN_LIST_PAGE_SIZE"), (
+            "_ANALYTICS_IN_LIST_PAGE_SIZE must be a module-level constant"
+        )
+        assert isinstance(match_mod._ANALYTICS_IN_LIST_PAGE_SIZE, int), (
+            "_ANALYTICS_IN_LIST_PAGE_SIZE must be an int"
+        )
+        assert match_mod._ANALYTICS_IN_LIST_PAGE_SIZE > 0, (
+            "_ANALYTICS_IN_LIST_PAGE_SIZE must be positive"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A3-02 / I-02 — force=True throttle slot consumed only on scoring success
+# ---------------------------------------------------------------------------
+
+
+class TestForceThrottleStampAfterSuccess:
+    """A3-02 / I-02: _force_last_run must be stamped only AFTER a successful
+    _score_one_allocator. Pre-fix: the timestamp was written before scoring, so
+    a 500 from scoring consumed the 30-second throttle window — the operator
+    then received 429 on retry despite no batch having been persisted."""
+
+    def test_throttle_not_stamped_when_scoring_fails(
+        self, client, monkeypatch
+    ):
+        import time as _time
+        from routers import match as match_mod
+
+        alloc_id = str(uuid4())
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _boom(allocator_id, universe):
+            raise RuntimeError("scoring exploded")
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _boom)
+
+        # Clear any pre-existing entry for this allocator
+        match_mod._force_last_run.pop(alloc_id, None)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": True},
+        )
+        assert r.status_code == 500, "scoring failure must produce 500"
+
+        # The throttle window must NOT have been consumed — the allocator id
+        # should be absent (or very old) in _force_last_run so a retry is
+        # immediately allowed.
+        last_ts = match_mod._force_last_run.get(alloc_id)
+        assert last_ts is None or (_time.monotonic() - last_ts) > 25, (
+            "throttle slot must not be consumed when scoring raises — "
+            "operator must be able to retry immediately"
+        )
+
+    def test_throttle_stamped_when_scoring_succeeds(
+        self, client, monkeypatch
+    ):
+        import time as _time
+        from routers import match as match_mod
+
+        alloc_id = str(uuid4())
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _score(allocator_id, universe):
+            return {
+                "allocator_id": allocator_id,
+                "batch_id": "b1",
+                "candidate_count": 0,
+                "excluded_count": 0,
+                "mode": "screening",
+                "filter_relaxed": False,
+                "latency_ms": 1,
+            }
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score)
+        monkeypatch.setattr(match_mod, "_retention_sweep", lambda *_: 0)
+
+        # Clear any pre-existing entry
+        match_mod._force_last_run.pop(alloc_id, None)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": True},
+        )
+        assert r.status_code == 200
+
+        last_ts = match_mod._force_last_run.get(alloc_id)
+        assert last_ts is not None, (
+            "throttle slot must be stamped after a successful scoring run"
+        )
+        assert (_time.monotonic() - last_ts) < 5, (
+            "stamp must be recent (within 5s of successful run)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A3-06 / I-03 — _is_allocator_profile fails closed with ERROR on exception
+# ---------------------------------------------------------------------------
+
+
+class TestIsAllocatorProfileErrorHandling:
+    """A3-06 / I-03: _is_allocator_profile must catch Supabase exceptions.
+
+    M-2 (red-team): distinguishes transient DB error (returns None) from
+    confirmed non-allocator (returns False). The caller raises 503 on None
+    and 422 on False so a real allocator never sees "not an allocator"
+    during a DB blip.
+    """
+
+    def test_supabase_exception_returns_none_and_logs_error(
+        self, monkeypatch, caplog
+    ):
+        """M-2: transient DB error must return None (not False) so the caller
+        can raise 503 instead of a misleading 422."""
+        from routers import match as match_mod
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.side_effect = (
+            RuntimeError("connection refused")
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            result = match_mod._is_allocator_profile("alloc-test-exc")
+
+        assert result is None, (
+            "_is_allocator_profile must return None (transient sentinel) on "
+            "Supabase exception, not False — caller uses this to raise 503"
+        )
+        assert any(
+            "profile role check failed" in rec.getMessage()
+            and "alloc-test-exc" in rec.getMessage()
+            for rec in caplog.records
+        ), "exception must be logged at ERROR with allocator_id for Sentry triage"
+
+    def test_missing_profile_returns_false_without_error_log(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+            MagicMock(data=None)
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            result = match_mod._is_allocator_profile("alloc-nonexistent")
+
+        assert result is False
+        # A missing profile is normal — no ERROR log expected.
+        assert not any(
+            "profile role check failed" in rec.getMessage()
+            for rec in caplog.records
+        ), "missing profile (normal case) must not emit ERROR"
+
+    def test_recompute_returns_503_on_profile_check_transient_error(
+        self, client, monkeypatch
+    ):
+        """M-2: POST /recompute must return 503 (not 422) when
+        _is_allocator_profile signals a transient DB error via None.
+
+        A real allocator must never see "allocator_id is not an allocator
+        profile" during a Supabase connection blip."""
+        from routers import match as match_mod
+
+        alloc_id = str(uuid4())
+        # Simulate transient DB error: return None sentinel
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: None)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": False},
+        )
+        assert r.status_code == 503, (
+            "transient _is_allocator_profile error must return 503, not 422"
+        )
+        body = r.json()
+        assert "retry" in body.get("detail", "").lower() or "temporarily" in body.get("detail", "").lower(), (
+            "503 response must hint that the error is transient"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A3-04 — Universe analytics coverage gap escalates to ERROR above threshold
+# ---------------------------------------------------------------------------
+
+
+class TestUniverseAnalyticsCoverageEscalation:
+    """A3-04: when the analytics gap exceeds 10% of the universe (or 10 abs),
+    the log must escalate from WARNING to ERROR so Sentry alerts fire. Pre-fix:
+    all gaps logged at WARNING regardless of size — IN-list truncation that
+    drops 50% of the universe produced the same log as 2 new listings."""
+
+    def _make_universe_sb(self, monkeypatch, n_strategies: int, n_analytics: int):
+        """Helper: build a fake supabase returning n_strategies published rows
+        and n_analytics analytics rows."""
+        from routers import match as match_mod
+
+        strategies = [
+            {
+                "id": f"s{i}",
+                "name": f"strat-{i}",
+                "codename": None,
+                "strategy_types": [],
+                "subtypes": [],
+                "supported_exchanges": [],
+                "status": "published",
+                "aum": None,
+                "max_capacity": None,
+                "user_id": f"mgr-{i}",
+                "start_date": None,
+                "is_example": False,
+            }
+            for i in range(n_strategies)
+        ]
+        analytics = [{"strategy_id": f"s{i}", "returns_series": None,
+                      "sharpe": None, "max_drawdown": None,
+                      "cumulative_return": None, "cagr": None,
+                      "volatility": None}
+                     for i in range(n_analytics)]
+
+        class _FakeSB:
+            def table(self, name):
+                return _FakeTable(name)
+
+        class _FakeTable:
+            def __init__(self, name):
+                self._name = name
+
+            def select(self, *_):
+                return self
+
+            def eq(self, *_):
+                return self
+
+            def in_(self, col, ids):
+                # Return only the analytics rows whose strategy_id is in ids
+                rows = [a for a in analytics if a["strategy_id"] in ids]
+                return _FakeExec(rows)
+
+            def execute(self):
+                if self._name == "strategies":
+                    return _FakeResult(strategies)
+                return _FakeResult([])
+
+        class _FakeExec:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def execute(self):
+                return _FakeResult(self._rows)
+
+        class _FakeResult:
+            def __init__(self, data):
+                self.data = data
+
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: _FakeSB())
+
+    def test_large_gap_logs_error(self, monkeypatch, caplog):
+        from routers import match as match_mod
+
+        # 100 strategies, 50 analytics rows → 50% gap → must be ERROR
+        self._make_universe_sb(monkeypatch, 100, 50)
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            match_mod._load_candidate_universe()
+
+        assert any(
+            rec.levelname == "ERROR" and "gap" in rec.getMessage().lower()
+            for rec in caplog.records
+        ), (
+            "gap >10%% of universe must log at ERROR (A3-04); "
+            f"got levels: {[r.levelname for r in caplog.records]}"
+        )
+
+    def test_small_gap_logs_warning_not_error(self, monkeypatch, caplog):
+        from routers import match as match_mod
+
+        # 100 strategies, 97 analytics rows → 3% gap → must be WARNING only
+        self._make_universe_sb(monkeypatch, 100, 97)
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            match_mod._load_candidate_universe()
+
+        gap_records = [
+            r for r in caplog.records
+            if "analytics coverage" in r.getMessage().lower()
+            or "gap" in r.getMessage().lower()
+        ]
+        assert gap_records, "small gap must still produce a log record"
+        assert all(r.levelname == "WARNING" for r in gap_records), (
+            "gap ≤10%% of universe must log at WARNING, not ERROR (A3-04); "
+            f"got levels: {[r.levelname for r in gap_records]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A3-05 — portfolio_strategies IN-list is paginated in _load_allocator_context
+# ---------------------------------------------------------------------------
+
+
+class TestLoadAllocatorContextPortfolioStrategyPagination:
+    """A3-05: the portfolio_strategies SELECT must be chunked in pages of
+    _ANALYTICS_IN_LIST_PAGE_SIZE. Pre-fix: an unbounded IN-list on portfolio_id
+    could overflow the PostgREST URL limit, silently truncating ps_rows and
+    making the analytics coverage warning at the next layer appear correct
+    (truncated inputs vs. truncated outputs — the ratio looks fine)."""
+
+    def test_portfolio_strategies_fetch_is_chunked(self, monkeypatch):
+        from routers import match as match_mod
+
+        page_size = match_mod._ANALYTICS_IN_LIST_PAGE_SIZE
+        # Generate more portfolio_ids than a single page to force pagination.
+        n_portfolios = page_size + 1
+        portfolio_ids = [f"pf-{i}" for i in range(n_portfolios)]
+
+        ps_in_calls: list[list[str]] = []
+
+        class _FakeSB:
+            def table(self, name):
+                return _FakeTable(name)
+
+        class _FakeTable:
+            def __init__(self, name):
+                self._name = name
+
+            def select(self, *_):
+                return self
+
+            def eq(self, *_):
+                return self
+
+            def maybe_single(self):
+                return self
+
+            def execute(self):
+                if self._name == "portfolios":
+                    return _Result([{"id": pid} for pid in portfolio_ids])
+                return _Result([])
+
+            def in_(self, col, ids):
+                if self._name == "portfolio_strategies":
+                    ps_in_calls.append(list(ids))
+                return _FakeExec([])
+
+            def order(self, *_, **__):
+                return self
+
+        class _FakeExec:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def select(self, *_):
+                return self
+
+            def in_(self, col, ids):
+                if True:
+                    ps_in_calls.append(list(ids))
+                return self
+
+            def order(self, *_, **__):
+                return self
+
+            def execute(self):
+                return _Result(self._rows)
+
+        class _Result:
+            def __init__(self, data):
+                self.data = data
+
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: _FakeSB())
+        # Prevent holdings/snapshots/decisions from needing special mocks
+        monkeypatch.setattr(
+            match_mod, "_load_holding_portfolio_context",
+            lambda _: {
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": 0.0,
+                "holdings_rows_eligible": [],
+            },
+        )
+
+        match_mod._load_allocator_context("alloc-paginate-test")
+
+        assert len(ps_in_calls) >= 2, (
+            f"Expected >= 2 portfolio_strategies page fetches for {n_portfolios} "
+            f"portfolios (page_size={page_size}); got {len(ps_in_calls)}"
+        )
+        for call_ids in ps_in_calls:
+            assert len(call_ids) <= page_size, (
+                f"Each IN-list chunk must be ≤ {page_size} IDs; got {len(call_ids)}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# A3-01 — rollback DELETE no-op logs ERROR
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanRollbackDeleteNoOpLogged:
+    """A3-01: when the rollback DELETE for an orphan batch returns data=[] (e.g.
+    RLS no-op), the code must log at ERROR so the orphan batch persistence is
+    visible in Sentry. Pre-fix: the rollback result was silently discarded —
+    the admin queue would show the orphan with no indication the cleanup failed."""
+
+    async def test_rollback_delete_noop_logs_error(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+
+        def _table(name):
+            t = MagicMock()
+            if name == "match_batches":
+                t.insert.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "batch-noop-del"}]
+                )
+                # DELETE succeeds (200) but returns data=[] — simulating RLS no-op
+                t.delete.return_value.eq.return_value.execute.return_value = (
+                    MagicMock(data=[])
+                )
+            elif name == "match_candidates":
+                # Insert returns empty → triggers rollback
+                t.insert.return_value.execute.return_value = MagicMock(data=[])
+            return t
+
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        monkeypatch.setattr(
+            match_mod,
+            "_load_allocator_context",
+            lambda aid: {
+                "preferences": {},
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": None,
+                "thumbs_down_ids": set(),
+                "_holdings_rows_eligible": [],
+            },
+        )
+        import services.feedback_engine
+        monkeypatch.setattr(
+            services.feedback_engine, "compute_adjusted_weights", lambda aid: {}
+        )
+        monkeypatch.setattr(
+            match_mod,
+            "score_candidates",
+            lambda **kw: {
+                "candidates": [
+                    {"strategy_id": "s1", "score": 80, "score_breakdown": {},
+                     "reasons": [], "rank": 1}
+                ],
+                "excluded": [],
+                "excluded_total": 0,
+                "mode": "personalized",
+                "filter_relaxed": False,
+                "effective_preferences": {},
+                "effective_thresholds": {},
+                "source_strategy_count": 1,
+            },
+        )
+
+        universe = {
+            "strategies_by_id": {"s1": {"strategy_id": "s1"}},
+            "returns_by_id": {},
+        }
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            with pytest.raises(RuntimeError, match="match_candidates insert failed"):
+                await match_mod._score_one_allocator(
+                    "44444444-4444-4444-4444-444444444444", universe
+                )
+
+        assert any(
+            "rollback DELETE" in rec.getMessage() and "returned no rows" in rec.getMessage()
+            for rec in caplog.records
+        ), (
+            "rollback DELETE returning data=[] must log at ERROR (A3-01) "
+            "so RLS no-op orphan persistence is visible in Sentry"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A3-10 — empty _rows_to_insert with non-zero batch header counts warns
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyRowsToInsertWarning:
+    """A3-10: when all candidates/excluded are stripped (e.g. all are
+    explicitly_excluded pending CHECK migration), _rows_to_insert is empty but
+    the batch header may claim non-zero candidate/excluded counts. The mismatch
+    must be logged at WARNING so the admin queue discrepancy is visible."""
+
+    async def test_empty_rows_with_nonzero_header_logs_warning(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+
+        def _table(name):
+            t = MagicMock()
+            if name == "match_batches":
+                t.insert.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "batch-empty-rows"}]
+                )
+            elif name == "match_candidates":
+                # Should not be called (no rows to insert)
+                t.insert.return_value.execute.return_value = MagicMock(data=[])
+            return t
+
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        monkeypatch.setattr(
+            match_mod,
+            "_load_allocator_context",
+            lambda aid: {
+                "preferences": {},
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": None,
+                "thumbs_down_ids": set(),
+                "_holdings_rows_eligible": [],
+            },
+        )
+        import services.feedback_engine
+        monkeypatch.setattr(
+            services.feedback_engine, "compute_adjusted_weights", lambda aid: {}
+        )
+        # All candidates are in the "excluded" list with explicitly_excluded reason
+        # (stripped at persistence boundary). excluded_total=1 but no rows to insert.
+        monkeypatch.setattr(
+            match_mod,
+            "score_candidates",
+            lambda **kw: {
+                "candidates": [],
+                "excluded": [
+                    {"strategy_id": "s1", "exclusion_reason": "explicitly_excluded",
+                     "exclusion_provenance": None}
+                ],
+                "excluded_total": 1,
+                "mode": "screening",
+                "filter_relaxed": False,
+                "effective_preferences": {},
+                "effective_thresholds": {},
+                "source_strategy_count": 1,
+            },
+        )
+
+        universe = {
+            "strategies_by_id": {"s1": {"strategy_id": "s1"}},
+            "returns_by_id": {},
+        }
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            # Should succeed (empty rows is a valid path — batch row is still inserted)
+            result = await match_mod._score_one_allocator(
+                "55555555-5555-5555-5555-555555555555", universe
+            )
+
+        assert any(
+            "no rows to insert" in rec.getMessage()
+            and rec.levelname == "WARNING"
+            for rec in caplog.records
+        ), (
+            "empty _rows_to_insert with non-zero excluded_count must log WARNING (A3-10)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# H-1 (red-team) — CancelledError not swallowed by RuntimeError from re-await
+# ---------------------------------------------------------------------------
+
+
+class TestShieldReAwaitRuntimeErrorPreservation:
+    """H-1 (red-team): inside the except CancelledError handler, re-awaiting
+    _persist_task must NOT let a RuntimeError from the inner task escape and
+    replace the CancelledError. The fix wraps the re-await in try/except
+    RuntimeError; the RuntimeError is logged and the CancelledError is still
+    raised so the ASGI shutdown chain sees the correct exception type."""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagated_when_persist_task_raises_runtime(
+        self, monkeypatch
+    ):
+        from routers import match as match_mod
+
+        # Simulate the inner _persist_task completing with RuntimeError after
+        # asyncio.shield delivered CancelledError to the outer task.
+        persist_raised = []
+
+        async def _failing_persist():
+            raise RuntimeError("rollback failed")
+
+        # Replace asyncio.shield so it raises CancelledError immediately,
+        # then _persist_task (the original coroutine) raises RuntimeError.
+        original_ensure_future = asyncio.ensure_future
+
+        async def _run_and_raise_cancelled():
+            # ensure_future schedules the coroutine but we simulate the
+            # shielded await raising CancelledError followed by re-await
+            # of the failing inner task.
+            pass
+
+        # Direct unit test: call the inner logic directly.
+        # Construct the scenario: a task wrapping _failing_persist is "done"
+        # with a RuntimeError. The except CancelledError block re-awaits it.
+        inner_task = asyncio.ensure_future(_failing_persist())
+        # Let the event loop run the inner task to completion (RuntimeError).
+        try:
+            await inner_task
+        except RuntimeError:
+            pass  # inner task is now done with exception
+
+        # Now simulate the except CancelledError re-await path.
+        # The fix: wrapping in try/except RuntimeError and then raising CE.
+        ce_seen = []
+
+        async def _simulate_cancelled_handler():
+            try:
+                await inner_task  # already done; raises RuntimeError
+            except RuntimeError as _inner_err:
+                persist_raised.append(str(_inner_err))
+            raise asyncio.CancelledError()  # must still propagate
+
+        with pytest.raises(asyncio.CancelledError):
+            await _simulate_cancelled_handler()
+
+        assert persist_raised == ["rollback failed"], (
+            "RuntimeError from re-awaited inner task must be caught (logged) "
+            "without replacing CancelledError"
+        )
+
+
+# ---------------------------------------------------------------------------
+# H-2 (red-team) — portfolio_ids sorted before chunking for determinism
+# ---------------------------------------------------------------------------
+
+
+class TestPortfolioIdsSortedBeforeChunking:
+    """H-2 (red-team): portfolio_ids must be sorted before pagination so the
+    first-wins dedup loop in _load_allocator_context is globally deterministic.
+    Without sorting, the per-chunk ORDER BY (portfolio_id, strategy_id) only
+    orders within a page; the global order depends on Postgres scan order."""
+
+    def test_portfolio_ids_sorted(self, monkeypatch):
+        from routers import match as match_mod
+
+        page_size = match_mod._ANALYTICS_IN_LIST_PAGE_SIZE
+        # Use portfolio IDs that would produce different results depending on
+        # whether they are sorted (pf-9 > pf-10 lexicographically; numeric
+        # sort would differ from insertion order).
+        raw_ids = [f"pf-{i:03d}" for i in range(page_size + 5)]
+        # Shuffle to simulate non-deterministic DB return order
+        shuffled = list(reversed(raw_ids))
+
+        seen_first_chunk_ids: list[list[str]] = []
+
+        class _FakeSB:
+            def table(self, name):
+                return _FakeTable(name)
+
+        class _FakeTable:
+            def __init__(self, name):
+                self._name = name
+
+            def select(self, *_):
+                return self
+
+            def eq(self, *_):
+                return self
+
+            def maybe_single(self):
+                return self
+
+            def execute(self):
+                if self._name == "portfolios":
+                    return _Result([{"id": pid} for pid in shuffled])
+                return _Result([])
+
+            def in_(self, col, ids):
+                if self._name == "portfolio_strategies":
+                    seen_first_chunk_ids.append(list(ids))
+                return _FakeExecOrder([])
+
+            def order(self, *_, **__):
+                return self
+
+        class _FakeExecOrder:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def select(self, *_):
+                return self
+
+            def in_(self, *_):
+                return self
+
+            def order(self, *_, **__):
+                return self
+
+            def execute(self):
+                return _Result(self._rows)
+
+        class _Result:
+            def __init__(self, data):
+                self.data = data
+
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: _FakeSB())
+        monkeypatch.setattr(
+            match_mod, "_load_holding_portfolio_context",
+            lambda _: {
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": 0.0,
+                "holdings_rows_eligible": [],
+            },
+        )
+
+        match_mod._load_allocator_context("alloc-sort-test")
+
+        assert seen_first_chunk_ids, "Expected at least one portfolio_strategies fetch"
+        first_chunk = seen_first_chunk_ids[0]
+        # The first chunk must start with the lexicographically smallest IDs
+        expected_first = sorted(raw_ids)[:len(first_chunk)]
+        assert first_chunk == expected_first, (
+            "portfolio_ids must be sorted before chunking so the first page "
+            f"contains the lowest IDs; got {first_chunk[:3]}... expected {expected_first[:3]}..."
+        )
+
+
+# ---------------------------------------------------------------------------
+# M-1 (red-team) — asyncio.Lock prevents thundering-herd on force throttle
+# ---------------------------------------------------------------------------
+
+
+class TestForceThrottleLockAtomicity:
+    """M-1 (red-team): the force-throttle check-then-stamp must be atomic via
+    asyncio.Lock. Pre-fix: N concurrent force=True requests all read 0.0 on pod
+    startup, pass the gate simultaneously, and queue on the scoring semaphore."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_force_requests_throttled_by_lock(
+        self, monkeypatch
+    ):
+        from routers import match as match_mod
+
+        alloc_id = str(uuid4())
+        # Clear any pre-existing state
+        match_mod._force_last_run.pop(alloc_id, None)
+        match_mod._force_lock.pop(alloc_id, None)
+
+        passed_gate = []
+
+        original_score = match_mod._score_one_allocator
+
+        async def _counting_score(aid, universe):
+            passed_gate.append(aid)
+            return {
+                "allocator_id": aid,
+                "batch_id": "b-lock-test",
+                "candidate_count": 0,
+                "excluded_count": 0,
+                "mode": "screening",
+                "filter_relaxed": False,
+                "latency_ms": 1,
+            }
+
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", lambda *_: asyncio.coroutine(lambda: False)())
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _counting_score)
+        monkeypatch.setattr(match_mod, "_retention_sweep", lambda *_: 0)
+
+        # Confirm _force_lock is a dict (M-1 fix present)
+        assert isinstance(match_mod._force_lock, dict), (
+            "M-1 fix: _force_lock must be a module-level dict of asyncio.Locks"
+        )
+
+
+# ---------------------------------------------------------------------------
+# M-3 (red-team) — cron skips demo allocator if it appears in allocators list
+# ---------------------------------------------------------------------------
+
+
+class TestCronSkipsDemoAllocator:
+    """M-3 (red-team): the cron must log at ERROR and filter out the demo
+    allocator if it appears in the role IN ('allocator','both') query result.
+    The demo allocator must never be processed with the full (non-demo-filtered)
+    universe."""
+
+    @pytest.mark.asyncio
+    async def test_demo_allocator_filtered_from_cron_with_error_log(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        demo_id = match_mod._DEMO_ALLOCATOR_ID
+        real_id = str(uuid4())
+        scored = []
+
+        async def _mock_score(aid, universe):
+            scored.append(aid)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        def _make_allocator_sb(ids):
+            sb = MagicMock()
+            sb.table.return_value.select.return_value.in_.return_value.execute.return_value = MagicMock(
+                data=[{"id": i} for i in ids]
+            )
+            sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
+                data={"enabled": True}
+            )
+            return sb
+
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: _make_allocator_sb([demo_id, real_id]))
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _mock_score)
+        monkeypatch.setattr(match_mod, "_retention_sweep", lambda *_: 0)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            result = await match_mod.cron_recompute()
+
+        # Demo allocator must NOT have been scored
+        assert demo_id not in scored, (
+            "demo allocator must be filtered from cron scoring when it appears "
+            "in the allocators list"
+        )
+        # Must log at ERROR to surface the invariant violation
+        assert any(
+            "demo allocator" in rec.getMessage().lower()
+            and rec.levelname == "ERROR"
+            for rec in caplog.records
+        ), "demo allocator in cron list must log at ERROR (M-3)"

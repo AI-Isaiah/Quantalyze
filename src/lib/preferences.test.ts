@@ -178,6 +178,37 @@ describe("preferences helpers", () => {
       ).toMatch(/must be string\[\]/);
     });
 
+    // NEW-C07-01 (audit-2026-05-26 security+red-team) regression tests.
+    // Pre-fix: only Array.isArray + typeof e === "string" checked —
+    // no count or per-element length cap. Write-amplification attack vector.
+    it("NEW-C07-01: rejects excluded_exchanges with more than 100 entries", () => {
+      const tooMany = Array.from({ length: 101 }, (_, i) => `exchange${i}`);
+      expect(
+        validateSelfEditableInput({ excluded_exchanges: tooMany }),
+      ).toMatch(/at most 100/);
+    });
+
+    it("NEW-C07-01: accepts excluded_exchanges with exactly 100 entries", () => {
+      const exactly100 = Array.from({ length: 100 }, (_, i) => `exch${i}`);
+      expect(
+        validateSelfEditableInput({ excluded_exchanges: exactly100 }),
+      ).toBeNull();
+    });
+
+    it("NEW-C07-01: rejects excluded_exchanges with an entry longer than 100 chars", () => {
+      const longEntry = "x".repeat(101);
+      expect(
+        validateSelfEditableInput({ excluded_exchanges: [longEntry] }),
+      ).toMatch(/100 characters or less/);
+    });
+
+    it("NEW-C07-01: accepts excluded_exchanges with entries of exactly 100 chars", () => {
+      const exactly100Chars = "x".repeat(100);
+      expect(
+        validateSelfEditableInput({ excluded_exchanges: [exactly100Chars] }),
+      ).toBeNull();
+    });
+
     it("rejects NaN target_ticket_size_usd", () => {
       expect(
         validateSelfEditableInput({ target_ticket_size_usd: NaN }),

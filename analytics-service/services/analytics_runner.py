@@ -386,11 +386,26 @@ def _compute_position_side_volume_pcts(
     long_volume = 0.0
     short_volume = 0.0
     attributed_total = 0.0
+    cost_parse_failed = 0
     for f in fills:
         ts = _parse(f.get("timestamp") or f.get("filled_at"))
         if not ts:
             continue
-        cost = abs(float(f.get("cost") or 0.0))
+        # NEW-C02-07: guard cost cast with same try/except as _compute_volume_metrics;
+        # one malformed fill must not nuke the entire long/short attribution.
+        # SF-H2 (review 2026-05-26): also guard float("nan")/float("inf") — these
+        # parse without raising TypeError/ValueError but poison accumulated totals.
+        raw_cost = f.get("cost")
+        try:
+            parsed_cost = abs(float(raw_cost)) if raw_cost is not None else 0.0
+            if math.isfinite(parsed_cost):
+                cost = parsed_cost
+            else:
+                cost = 0.0
+                cost_parse_failed += 1
+        except (TypeError, ValueError):
+            cost = 0.0
+            cost_parse_failed += 1
         for opened, closed, side in windows:
             if ts < opened:
                 continue
@@ -402,6 +417,16 @@ def _compute_position_side_volume_pcts(
             else:
                 short_volume += cost
             break  # first matching window wins; positions don't overlap by design
+
+    # SF-H1 (review 2026-05-26): emit warning when cost parse failures occurred
+    # so operators can distinguish clean runs from degraded attribution.
+    if cost_parse_failed > 0:
+        logger.warning(
+            "_compute_position_side_volume_pcts: %d fill(s) had non-numeric or "
+            "non-finite cost (contributed 0 to attribution); long/short pcts may "
+            "be skewed.",
+            cost_parse_failed,
+        )
 
     if attributed_total <= 0:
         return {"long_volume_pct": 0.0, "short_volume_pct": 0.0}
@@ -609,14 +634,26 @@ def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
     """METRICS-09: aggregate volume metrics over fills (raw_fills WHERE is_fill=true).
 
     Returns:
-      gross_volume_usd     — sum of |notional_usd| over every fill
-      mean_trade_size_usd  — gross_volume / N
-      daily_turnover_usd   — mean of per-day notional totals (group by date prefix)
-      monthly_turnover_usd — mean of per-month notional totals (group by YYYY-MM prefix)
+      gross_volume_usd          — sum of |notional_usd| over every fill
+      mean_trade_size_usd       — gross_volume / N
+      daily_turnover_usd        — mean of per-day notional totals (group by date prefix)
+      monthly_turnover_usd      — mean of per-month notional totals (group by YYYY-MM prefix)
+      turnover_timestamp_coverage — fraction of fills with usable timestamps (NEW-C02-08)
 
     Pure function: groups by `filled_at` (or `created_at` fallback) date prefix.
     Skips fills with malformed/missing timestamps for daily/monthly bucketing
     but keeps them in gross_volume + mean_trade_size aggregates.
+
+    NEW-C02-08: count skipped (timestamp-less) fills; emit
+    `turnover_timestamp_coverage` into the returned dict when the fraction is
+    non-trivially low (< 1.0), so callers can surface it as a data-quality flag.
+
+    NEW-C02-09: notional_usd coerced through try/except (consistent with
+    `_compute_volume_metrics`); malformed value contributes 0, not a crash.
+
+    NEW-C02-10: each fill's notional parsed once in a single pass that accumulates
+    gross total and per-bucket totals together, eliminating the prior two-traversal
+    pattern (notionals[] list + second per-fill parse in the bucket loop).
     """
     if not fills:
         return {
@@ -626,31 +663,71 @@ def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
             "monthly_turnover_usd": 0.0,
         }
 
-    notionals = [abs(float(f.get("notional_usd", 0.0) or 0.0)) for f in fills]
-    gross_volume = sum(notionals)
-    mean_size = gross_volume / len(notionals) if notionals else 0.0
-
-    # Daily / monthly turnover — group by date / month prefix, then mean
+    # Single pass: parse notional once, accumulate gross + daily/monthly buckets.
+    gross_volume = 0.0
     daily: dict[str, float] = defaultdict(float)
     monthly: dict[str, float] = defaultdict(float)
+    ts_skipped = 0
+
+    notional_parse_failed = 0
     for f in fills:
+        raw_notional = f.get("notional_usd", 0.0)
+        try:
+            parsed_notional = abs(float(raw_notional)) if raw_notional is not None else 0.0
+            # SF-H2 (review 2026-05-26): float("nan")/"Infinity" parse without raising;
+            # guard with isfinite so they don't poison gross_volume / mean_size.
+            if math.isfinite(parsed_notional):
+                notional = parsed_notional
+            else:
+                notional = 0.0
+                notional_parse_failed += 1
+        except (TypeError, ValueError):
+            notional = 0.0
+            notional_parse_failed += 1
+        gross_volume += notional
+
         ts = f.get("filled_at") or f.get("created_at") or ""
         if not ts or len(ts) < 10:
+            ts_skipped += 1
             continue
         day = ts[:10]
         month = ts[:7]
-        notional = abs(float(f.get("notional_usd", 0.0) or 0.0))
         daily[day] += notional
         monthly[month] += notional
+
+    n = len(fills)
+    mean_size = gross_volume / n if n else 0.0
     daily_avg = sum(daily.values()) / len(daily) if daily else 0.0
     monthly_avg = sum(monthly.values()) / len(monthly) if monthly else 0.0
 
-    return {
+    # SF-H1 (review 2026-05-26): warn on non-finite/malformed notional, mirroring
+    # the timestamp-coverage warning already present below.
+    if notional_parse_failed > 0:
+        logger.warning(
+            "_compute_volume_aggregator: %d fill(s) had non-numeric or non-finite "
+            "notional_usd (contributed 0 to gross_volume); volume metrics may be "
+            "understated.",
+            notional_parse_failed,
+        )
+
+    result: dict[str, float] = {
         "gross_volume_usd": gross_volume,
         "mean_trade_size_usd": mean_size,
         "daily_turnover_usd": daily_avg,
         "monthly_turnover_usd": monthly_avg,
     }
+    # Emit coverage fraction so callers can propagate it as a data-quality flag.
+    ts_coverage = (n - ts_skipped) / n if n else 1.0
+    if ts_coverage < 1.0:
+        result["turnover_timestamp_coverage"] = round(ts_coverage, 4)
+        if ts_skipped > 0:
+            logger.warning(
+                "_compute_volume_aggregator: %d/%d fills missing/short timestamps "
+                "(turnover_timestamp_coverage=%.2f%%); gross_volume computed on all fills, "
+                "daily/monthly turnover on timestamped subset only.",
+                ts_skipped, n, ts_coverage * 100,
+            )
+    return result
 
 
 def _compute_trade_mix(
@@ -689,6 +766,7 @@ def _compute_trade_mix(
             "short": _empty_bucket(),
         }
 
+    notional_parse_failed = 0
     for f in fills:
         side = f.get("side")
         if side == "buy":
@@ -697,7 +775,20 @@ def _compute_trade_mix(
             side = "short"
         if side not in ("long", "short"):
             continue
-        notional = abs(float(f.get("notional_usd", 0.0) or 0.0))
+        # NEW-C02-09: guard notional cast (mirrors _compute_volume_metrics policy);
+        # a malformed notional_usd contributes 0 to total_notional, not a crash.
+        # SF-H2 (review 2026-05-26): also guard float("nan")/float("inf").
+        raw_notional = f.get("notional_usd", 0.0)
+        try:
+            parsed_notional = abs(float(raw_notional)) if raw_notional is not None else 0.0
+            if math.isfinite(parsed_notional):
+                notional = parsed_notional
+            else:
+                notional = 0.0
+                notional_parse_failed += 1
+        except (TypeError, ValueError):
+            notional = 0.0
+            notional_parse_failed += 1
 
         if has_maker_taker:
             is_maker = f.get("is_maker")
@@ -710,6 +801,15 @@ def _compute_trade_mix(
 
         buckets[bucket_key]["count"] += 1
         buckets[bucket_key]["total_notional"] += notional
+
+    # SF-H1 (review 2026-05-26): emit warning when notional parse failures occurred.
+    if notional_parse_failed > 0:
+        logger.warning(
+            "_compute_trade_mix: %d fill(s) had non-numeric or non-finite "
+            "notional_usd (contributed 0 to total_notional); trade mix may be "
+            "understated.",
+            notional_parse_failed,
+        )
 
     return buckets
 
@@ -1596,15 +1696,47 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
         await db_execute(_mark_complete)
 
         if metrics_result.sibling_kinds:
-            def _upsert_siblings():
-                supabase.rpc(
-                    "upsert_strategy_analytics_series_batch",
-                    {
-                        "p_strategy_id": strategy_id,
-                        "p_kinds": metrics_result.sibling_kinds,
-                    },
-                ).execute()
-            await db_execute(_upsert_siblings)
+            # NEW-C02-06: mirror the exchange runner's guarded sibling upsert.
+            # A transient RPC blip previously re-raised into the outer except,
+            # overwriting computation_status → 'failed' and discarding valid
+            # scalars. Now: sibling failure sets sibling_kinds_failed=True and
+            # still returns 'complete' (scalars are intact).
+            try:
+                def _upsert_siblings():
+                    supabase.rpc(
+                        "upsert_strategy_analytics_series_batch",
+                        {
+                            "p_strategy_id": strategy_id,
+                            "p_kinds": metrics_result.sibling_kinds,
+                        },
+                    ).execute()
+                await db_execute(_upsert_siblings)
+            except Exception as sibling_exc:  # noqa: BLE001
+                logger.warning(
+                    "csv analytics: sibling-table batch upsert failed for %s: %s",
+                    strategy_id,
+                    str(sibling_exc),
+                )
+                try:
+                    existing = data_quality_flags or {}
+                    existing["sibling_kinds_failed"] = True
+                    existing["sibling_kinds_error"] = "SIBLING_BATCH_UPSERT_FAILED"
+                    await db_execute(
+                        lambda: supabase.table("strategy_analytics")
+                        .upsert(
+                            {
+                                "strategy_id": strategy_id,
+                                "data_quality_flags": existing,
+                            },
+                            on_conflict="strategy_id",
+                        )
+                        .execute()
+                    )
+                except Exception as flag_exc:  # noqa: BLE001
+                    logger.error(
+                        "csv analytics: failed to record sibling_kinds_failed flag for %s: %s",
+                        strategy_id, str(flag_exc),
+                    )
 
         return {"status": "complete", "strategy_id": strategy_id}
 

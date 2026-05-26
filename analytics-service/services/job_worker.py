@@ -390,10 +390,55 @@ async def _check_circuit_breaker(
 
     Returns a DEFERRED DispatchResult if the job should be deferred, or
     None if the circuit breaker is not tripped (proceed normally).
+
+    NEW-C12-10: re-fetch last_429_at from the DB so a fresher stamp written by
+    another container is picked up before the cooldown decision. The delta is
+    compared against Python datetime.now(); Railway container wall-clock drift
+    is sub-second, well under the per-exchange cooldown buffer.
     """
     last_429_str = key_row.get("last_429_at")
     if not last_429_str:
         return None
+
+    # NEW-C12-10: re-read last_429_at from the DB to get the freshest stamp
+    # (another container may have stamped a more recent value) AND so the
+    # value we compare was written by the DB write path, not an older in-memory
+    # snapshot. We still use Python datetime.now() for `now`, but that is
+    # fine: both the stamp (from _stamp_429) and the check use Python UTC,
+    # so the only cross-container skew that matters is wall-clock drift between
+    # two Railway replicas — typically sub-second, well under the cooldown buffer.
+    # This re-read is the primary defence: it ensures a fresher stamp on any
+    # OTHER container is respected, not masked by the stale key_row snapshot.
+    try:
+        def _read_429_fresh():
+            # silent-failure/F-10: use maybe_single() — .single() raises
+            # APIError/PGRST116 when zero rows are returned (row deleted
+            # between initial load and re-fetch). maybe_single() returns
+            # None cleanly, avoiding a spurious exception that would be
+            # swallowed here and leave the stale snapshot in use.
+            return (
+                supabase.table("api_keys")
+                .select("last_429_at")
+                .eq("id", key_row["id"])
+                .maybe_single()
+                .execute()
+            )
+        fresh = await db_execute(_read_429_fresh)
+        if fresh and fresh.data and fresh.data.get("last_429_at"):
+            last_429_str = fresh.data["last_429_at"]
+    except asyncio.CancelledError:
+        raise  # never swallow cancellation — propagate to worker shutdown
+    except Exception as _refetch_exc:  # noqa: BLE001
+        # silent-failure/F-02: bare `pass` silenced all errors including
+        # network failures, KeyError, and asyncio.CancelledError (pre-3.11).
+        # Log so operators know the freshness guarantee is inactive when this
+        # fires — the stale in-memory key_row snapshot governs the cooldown.
+        logger.warning(
+            "_check_circuit_breaker: DB re-fetch of last_429_at failed for "
+            "api_key %s — falling back to in-memory snapshot (clock-skew "
+            "guard inactive): %s",
+            key_row.get("id"), _refetch_exc,
+        )
 
     try:
         last_429 = datetime.fromisoformat(
@@ -433,6 +478,12 @@ async def _stamp_429(supabase, key_row: dict) -> None:
 
     Called before classify_exception returns, so subsequent jobs for the
     same API key will be deferred by the circuit breaker.
+
+    NEW-C12-10: see _check_circuit_breaker. The check re-fetches last_429_at
+    fresh from the DB so a stamp written by a DIFFERENT container is always
+    picked up before the cooldown decision is made. Both stamp and check use
+    Python UTC clocks; Railway container drift is sub-second, well under the
+    per-exchange cooldown buffer.
     """
     def _update():
         supabase.table("api_keys").update({
@@ -702,6 +753,11 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         # used to be log-only.
         phase2_failed = False
         phase2_error_message: str | None = None
+        # NEW-C12-02: track Phase-1 (daily-PnL) RPC failure separately.
+        # Pre-fix the except only logger.warning'd, leaving: (a) trade_count
+        # set to the *fetched* count not the *persisted* count; (b) last_sync_at
+        # advancing past the unpersisted window permanently; (c) no DQ flag.
+        phase1_failed = False
         # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — DQ flags surfaced by
         # ``fetch_raw_trades`` (partial-symbol failures, page-cap truncation,
         # fee-currency mismatch) MUST be drained immediately after the
@@ -724,6 +780,16 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                     # fee_currency_mismatch*), so this is effectively a
                     # union.
                     exchange_dq_flags.update(fetch_raw_dq_flags)
+            except ccxt.RateLimitExceeded:
+                # NEW-C12-01: RateLimitExceeded (⊂ Exception) was previously
+                # absorbed by the broad `except Exception` below, so the outer
+                # `except ccxt.RateLimitExceeded` at the top-level try never
+                # ran → _stamp_429 was never called → circuit breaker never
+                # tripped → next job immediately re-hammered the exchange.
+                # Re-raise here so the outer handler stamps the 429 and the
+                # circuit breaker fires.
+                get_and_clear_last_dq_flags()
+                raise
             except Exception as e:
                 # Drain even on failure so a partial accumulation does not
                 # leak into the next call on this asyncio task. The drained
@@ -805,6 +871,10 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 "sync_trades: persisted %s rows for strategy %s", inserted, strategy_id
             )
         except Exception as e:
+            # NEW-C12-02: set flag so (a) last_sync_at is NOT advanced past
+            # the unpersisted window, (b) trade_count reflects 0 persisted
+            # rows, and (c) a DQ flag is emitted below for the health card.
+            phase1_failed = True
             logger.warning(
                 "sync_trades Phase 1 (daily PnL) failed for strategy %s — "
                 "continuing to Phase 2 raw-fill ingestion: %s",
@@ -977,7 +1047,9 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # only when Phase 2 was not run at all (_RAW_TRADE_INGESTION_ENABLED
     # is False).
     phase2_success = _RAW_TRADE_INGESTION_ENABLED and not phase2_failed
-    needs_flag_write = phase2_failed or phase2_success
+    # NEW-C12-02: phase1_failed also requires a flag write to surface via
+    # the admin health card (it has no pre-existing path for daily-PnL failures).
+    needs_flag_write = phase2_failed or phase2_success or phase1_failed
     if needs_flag_write:
         def _load_existing_flags() -> dict:
             res = (
@@ -1019,6 +1091,18 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         exchange_dq_flags_present = bool(exchange_dq_flags)
         if exchange_dq_flags_present:
             existing_flags.update(exchange_dq_flags)
+
+        # NEW-C12-02: emit DQ flag when Phase-1 (daily-PnL) RPC failed so
+        # the admin health card lights up (pre-fix had no flag path for this).
+        if phase1_failed:
+            existing_flags["phase1_daily_pnl_persist_failed"] = True
+            existing_flags["phase1_failed_at"] = datetime.now(timezone.utc).isoformat()
+            write_needed = True
+        elif existing_flags.get("phase1_daily_pnl_persist_failed"):
+            # Clear stale flag on a successful Phase-1 run.
+            existing_flags.pop("phase1_daily_pnl_persist_failed", None)
+            existing_flags.pop("phase1_failed_at", None)
+            write_needed = True
 
         if phase2_failed:
             existing_flags["phase2_fill_ingestion_failed"] = True
@@ -1087,12 +1171,32 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # (`raw_fills == []`) and feature-flag-disabled paths still advance —
     # `phase2_complete` defaults False but `raw_fills` is also False so
     # the gate falls through.
-    advance_fetched_cursor = (not raw_fills) or phase2_complete
+    #
+    # red-team/C-1 (NEW-C12-02 follow-up): when Phase-1 failed AND Phase-2
+    # succeeded, last_sync_at is correctly held back (NEW-C12-02), but
+    # advancing last_fetched_trade_timestamp to now() would still break the
+    # retry: parse_since_ms returns `preferred` (last_fetched_trade_timestamp)
+    # over last_sync_at, so the next run's Phase-1 fetch starts from the
+    # advanced timestamp — permanently skipping the unpersisted PnL window.
+    # Gate: do NOT advance the fetched cursor when Phase-1 failed, so the
+    # preferred=last_fetched_trade_timestamp path falls back to last_sync_at
+    # on the next run. Phase-2 dedup (exchange_fill_id unique index) absorbs
+    # the re-fetch cost.
+    advance_fetched_cursor = (not raw_fills) or (phase2_complete and not phase1_failed)
     if advance_fetched_cursor:
+        _new_fetched_ts = datetime.now(timezone.utc).isoformat()
+
         def _update_fetched_cursor() -> None:
+            # NEW-C12-05: monotonic advance — only update if the existing
+            # last_fetched_trade_timestamp is older than the new value.
+            # A preempted/slow W1 arriving after W2 has already advanced
+            # the cursor cannot regress it (split-brain half-open guard).
             ctx.supabase.table("api_keys").update(
-                {"last_fetched_trade_timestamp": datetime.now(timezone.utc).isoformat()}
-            ).eq("id", ctx.key_row["id"]).execute()
+                {"last_fetched_trade_timestamp": _new_fetched_ts}
+            ).eq("id", ctx.key_row["id"]).or_(
+                f"last_fetched_trade_timestamp.is.null,"
+                f"last_fetched_trade_timestamp.lt.{_new_fetched_ts}"
+            ).execute()
 
         try:
             await db_execute(_update_fetched_cursor)
@@ -1102,16 +1206,43 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 ctx.key_row.get("id"), exc,
             )
 
-    # Advance sync cursor always (even for empty fetches).
+    # Advance sync cursor (skip last_sync_at when Phase-1 persisted nothing
+    # so the next run re-fetches the failed daily-PnL window — NEW-C12-02).
     def _update_cursor() -> None:
-        update_data: dict = {
-            "last_sync_at": datetime.now(timezone.utc).isoformat()
-        }
+        update_data: dict = {}
+        _new_sync_ts = datetime.now(timezone.utc).isoformat()
+        if not phase1_failed:
+            # NEW-C12-02: only advance last_sync_at when Phase-1 actually
+            # persisted rows; advancing past an unpersisted window loses the
+            # daily-PnL data permanently (the next run's since_ms skips it).
+            update_data["last_sync_at"] = _new_sync_ts
         if account_balance is not None:
             update_data["account_balance_usdt"] = account_balance
-        ctx.supabase.table("api_keys").update(update_data).eq(
-            "id", ctx.key_row["id"]
-        ).execute()
+        if update_data:
+            # NEW-C12-05: monotonic advance — add last_sync_at<new_value
+            # condition so a slow W1 finishing after W2 cannot regress the
+            # cursor. account_balance_usdt has no ordering semantics so it's
+            # always updated when present.
+            builder = ctx.supabase.table("api_keys").update(update_data).eq(
+                "id", ctx.key_row["id"]
+            )
+            if "last_sync_at" in update_data:
+                builder = builder.or_(
+                    f"last_sync_at.is.null,"
+                    f"last_sync_at.lt.{_new_sync_ts}"
+                )
+            builder.execute()
+        else:
+            # silent-failure/F-04: log when we deliberately skip the DB write
+            # so operators can verify last_sync_at is intentionally held and
+            # can distinguish from a write path regression that accidentally
+            # clears update_data.
+            logger.info(
+                "sync_trades: _update_cursor skipping DB write — "
+                "phase1_failed=%s account_balance=%s "
+                "(last_sync_at intentionally held for retry)",
+                phase1_failed, account_balance,
+            )
 
     await db_execute(_update_cursor)
 
@@ -1201,7 +1332,11 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             )
 
     return DispatchResult(
-        outcome=DispatchOutcome.DONE, trade_count=len(trades)
+        # NEW-C12-02: trade_count must reflect PERSISTED rows, not fetched.
+        # Pre-fix a Phase-1 failure still reported len(trades) which gave a
+        # false green signal (admin sees "N rows synced" with 0 persisted).
+        outcome=DispatchOutcome.DONE,
+        trade_count=0 if phase1_failed else len(trades),
     )
 
 
@@ -1501,35 +1636,67 @@ async def run_poll_allocator_positions_job(job: dict) -> DispatchResult:
         except Exception:  # pragma: no cover - defensive cleanup
             pass
 
-    # Persist + success status update
-    count = await persist_allocator_holdings(
-        ctx.supabase, rows, allocator_id, api_key_id, today_str
-    )
-
-    spot_count = sum(1 for r in rows if r.get("holding_type") == "spot")
-    deriv_count = sum(1 for r in rows if r.get("holding_type") == "derivative")
-
-    final_status = "complete_with_warnings" if warning else "complete"
-
-    def _update_ok():
-        return (
-            ctx.supabase.table("api_keys")
-            .update({
-                "sync_status": final_status,
-                "sync_error": warning,
-                "last_sync_at": datetime.now(timezone.utc).isoformat(),
-            })
-            .eq("id", api_key_id)
-            .execute()
+    # Persist + success status update.
+    # NEW-C12-03: wrap in a try/except that stamps sync_status='error' on
+    # failure so the UI doesn't spin forever on 'syncing'. Pre-fix a
+    # persist_allocator_holdings raise propagated to the compute_jobs FAILED
+    # handler but sync_status was never moved off 'syncing'. A failed
+    # _update_ok was previously a swallowed warning leaving the same stuck state.
+    try:
+        count = await persist_allocator_holdings(
+            ctx.supabase, rows, allocator_id, api_key_id, today_str
         )
 
-    try:
+        spot_count = sum(1 for r in rows if r.get("holding_type") == "spot")
+        deriv_count = sum(1 for r in rows if r.get("holding_type") == "derivative")
+
+        final_status = "complete_with_warnings" if warning else "complete"
+
+        def _update_ok():
+            return (
+                ctx.supabase.table("api_keys")
+                .update({
+                    "sync_status": final_status,
+                    "sync_error": warning,
+                    "last_sync_at": datetime.now(timezone.utc).isoformat(),
+                })
+                .eq("id", api_key_id)
+                .execute()
+            )
+
+        # NEW-C12-03: treat _update_ok failure as a hard error (not a swallowed
+        # warning) — a missed sync_status write leaves the UI spinner stuck on
+        # 'syncing' with no recovery path since allocator jobs have no strategy_id
+        # bridge to the dispatch UI.
         await db_execute(_update_ok)
-    except Exception as upd_exc:  # noqa: BLE001
-        logger.warning(
-            "poll_allocator_positions: failed to stamp sync_status='%s' "
-            "for api_key %s: %s",
-            final_status, api_key_id, upd_exc,
+    except Exception as persist_exc:  # noqa: BLE001
+        sanitized_persist = str(persist_exc)[:200]
+        logger.exception(
+            "poll_allocator_positions: persist/update failed for allocator %s "
+            "(api_key %s) — stamping sync_status='error' to unblock UI: %s",
+            allocator_id, api_key_id, sanitized_persist,
+        )
+        # Best-effort: stamp sync_status so the UI exits the spinner.
+        try:
+            def _update_persist_err():
+                ctx.supabase.table("api_keys").update(
+                    {"sync_status": "error", "sync_error": sanitized_persist}
+                ).eq("id", api_key_id).execute()
+            await db_execute(_update_persist_err)
+        except Exception as stamp_exc:  # noqa: BLE001
+            logger.warning(
+                "poll_allocator_positions: failed to stamp sync_status='error' "
+                "for api_key %s after persist failure: %s",
+                api_key_id, stamp_exc,
+            )
+        _emit_audit(
+            allocator_id, api_key_id, "allocator.holdings.persist_failed",
+            {"sanitized_message": sanitized_persist},
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=sanitized_persist,
+            error_kind="permanent",
         )
 
     _emit_audit(
@@ -2296,12 +2463,21 @@ async def dispatch(job: dict) -> DispatchResult:
     # On permanent failure of a compute_intro_snapshot job, mark the
     # contact_request snapshot_status='failed' so /admin/intros doesn't
     # show 'pending' indefinitely. Skipped on transient (those will retry).
-    if (
-        kind == "compute_intro_snapshot"
-        and result.outcome == DispatchOutcome.FAILED
-        and result.error_kind == "permanent"
-    ):
-        await _mark_intro_snapshot_failed(job)
+    #
+    # NEW-C12-04: also mark failed when the job exhausted its retry budget
+    # (attempts >= max_attempts). Transient/unknown errors that reach the
+    # last attempt transition to failed_final DB-side without returning
+    # error_kind="permanent", so the original permanent-only guard never
+    # fired → snapshot_status stayed 'pending' forever on the admin UI.
+    if kind == "compute_intro_snapshot" and result.outcome == DispatchOutcome.FAILED:
+        attempts = job.get("attempts", 0)
+        max_attempts = job.get("max_attempts", 3)
+        is_final = (
+            result.error_kind == "permanent"
+            or attempts >= max_attempts
+        )
+        if is_final:
+            await _mark_intro_snapshot_failed(job)
 
     # UI status bridge: after every strategy-scoped job, derive the UI
     # status from the compute_jobs aggregate and write it into
