@@ -163,6 +163,7 @@ class TestRecordsToSeries:
 class TestRecomputeEndpoint:
     def test_kill_switch_off_returns_disabled_status(self, client, monkeypatch):
         """Every branch carries a `status` discriminator; kill-switch off → 'disabled'."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: False)
 
         r = client.post(
@@ -176,6 +177,7 @@ class TestRecomputeEndpoint:
 
     def test_skip_path_returns_skipped_status(self, client, monkeypatch):
         """Skipped branch carries status='skipped' + reason."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _skip(allocator_id, force):
@@ -194,6 +196,7 @@ class TestRecomputeEndpoint:
 
     def test_empty_universe_returns_400(self, client, monkeypatch):
         """Empty candidate universe → 400."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
@@ -202,7 +205,7 @@ class TestRecomputeEndpoint:
         monkeypatch.setattr("routers.match._should_skip_allocator", _no_skip)
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
-            lambda: {"strategies_by_id": {}, "returns_by_id": {}},
+            lambda *_: {"strategies_by_id": {}, "returns_by_id": {}},
         )
 
         r = client.post(
@@ -213,6 +216,7 @@ class TestRecomputeEndpoint:
 
     def test_score_exception_returns_500(self, client, monkeypatch):
         """_score_one_allocator raising → 500."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
@@ -221,7 +225,7 @@ class TestRecomputeEndpoint:
         monkeypatch.setattr("routers.match._should_skip_allocator", _no_skip)
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
-            lambda: {
+            lambda *_: {
                 "strategies_by_id": {"s1": {}},
                 "returns_by_id": {},
             },
@@ -256,6 +260,7 @@ class TestRecomputeEndpoint:
 
     def test_ok_path_carries_status_ok(self, client, monkeypatch):
         """Success branch carries status='ok' alongside the result fields."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
@@ -264,7 +269,7 @@ class TestRecomputeEndpoint:
         monkeypatch.setattr("routers.match._should_skip_allocator", _no_skip)
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
-            lambda: {
+            lambda *_: {
                 "strategies_by_id": {"s1": {}},
                 "returns_by_id": {},
             },
@@ -300,6 +305,7 @@ class TestRecomputeEndpoint:
         the request — the batch already landed, and tearing down the response
         produces a partial-success state with no rollback. Log loudly and
         return the result."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
@@ -308,7 +314,7 @@ class TestRecomputeEndpoint:
         monkeypatch.setattr("routers.match._should_skip_allocator", _no_skip)
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
-            lambda: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
         )
 
         async def _score(allocator_id, universe):
@@ -1041,6 +1047,205 @@ class TestLoadCandidateUniverseDemoOnly:
 
         assert ("status", "published") in calls
         assert ("is_example", True) not in calls
+
+
+# ---------------------------------------------------------------------------
+# NEW-C08-10 — POST /recompute role validation
+# ---------------------------------------------------------------------------
+
+
+class TestRecomputeRoleValidation:
+    """NEW-C08-10: POST /recompute must reject non-allocator UUIDs with 422
+    before writing any match_batches row. Pre-fix any UUID manufactured
+    phantom batches that polluted the founder queue and hit-rate eval."""
+
+    def test_non_allocator_uuid_returns_422(self, client, monkeypatch):
+        """A strategy-manager or admin profile UUID must be rejected 422."""
+        # _is_allocator_profile returns False → 422 before any other check.
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: False)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": str(uuid4()), "force": False},
+        )
+        assert r.status_code == 422, (
+            "Non-allocator profile must be rejected with 422 (NEW-C08-10)"
+        )
+
+    def test_allocator_uuid_passes_role_check(self, client, monkeypatch):
+        """A valid allocator profile UUID must proceed past the role check."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: False)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": str(uuid4()), "force": False},
+        )
+        # Kill switch off → 'disabled' (correct path taken, role check passed)
+        assert r.status_code == 200
+        assert r.json()["status"] == "disabled"
+
+
+# ---------------------------------------------------------------------------
+# NEW-C08-06 — force=True throttle (30s min interval)
+# ---------------------------------------------------------------------------
+
+
+class TestForceRecomputeThrottle:
+    """NEW-C08-06: force=True is rate-limited per allocator to
+    FORCE_RECOMPUTE_MIN_INTERVAL_S (30s) so a looped caller cannot stack
+    concurrent scoring and retention churn."""
+
+    def test_force_true_throttled_429_when_called_twice_quickly(
+        self, client, monkeypatch
+    ):
+        import time as _time
+        from routers import match as match_mod
+
+        alloc_id = str(uuid4())
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _score(allocator_id, universe):
+            return {"allocator_id": allocator_id, "batch_id": "b1",
+                    "candidate_count": 0, "excluded_count": 0,
+                    "mode": "screening", "filter_relaxed": False, "latency_ms": 1}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score)
+        monkeypatch.setattr(match_mod, "_retention_sweep", lambda *_: 0)
+
+        # Stamp the last-run cache to simulate a recent forced recompute
+        match_mod._force_last_run[alloc_id] = _time.monotonic()
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": True},
+        )
+        assert r.status_code == 429, (
+            "force=True within the min-interval must be throttled 429 (NEW-C08-06)"
+        )
+        assert "throttled" in r.json()["detail"].lower()
+
+    def test_force_true_allowed_after_interval_clears(
+        self, client, monkeypatch
+    ):
+        import time as _time
+        from routers import match as match_mod
+
+        alloc_id = str(uuid4())
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _score(allocator_id, universe):
+            return {"allocator_id": allocator_id, "batch_id": "b1",
+                    "candidate_count": 0, "excluded_count": 0,
+                    "mode": "screening", "filter_relaxed": False, "latency_ms": 1}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score)
+        monkeypatch.setattr(match_mod, "_retention_sweep", lambda *_: 0)
+
+        # Stamp the last-run cache to simulate a recompute that happened
+        # MORE than the min-interval ago → should be allowed through.
+        match_mod._force_last_run[alloc_id] = (
+            _time.monotonic() - match_mod.FORCE_RECOMPUTE_MIN_INTERVAL_S - 1
+        )
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": True},
+        )
+        assert r.status_code == 200, (
+            "force=True after interval clears must be allowed (NEW-C08-06)"
+        )
+        assert r.json()["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# NEW-C08-09 — demo_only wired at recompute() call site
+# ---------------------------------------------------------------------------
+
+
+class TestRecomputeDemoOnlyWiring:
+    """NEW-C08-09: POST /recompute must pass demo_only=True to
+    _load_candidate_universe when allocator_id is the demo allocator ID.
+    Pre-fix the call was unconditionally demo_only=False; the only protection
+    was the in-memory post-filter which a refactor could silently drop."""
+
+    def test_demo_allocator_loads_demo_only_universe(self, client, monkeypatch):
+        from routers import match as match_mod
+
+        demo_only_calls: list[bool] = []
+
+        def _spy_universe(demo_only: bool = False):
+            demo_only_calls.append(demo_only)
+            return {"strategies_by_id": {}, "returns_by_id": {}}
+
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(match_mod, "_load_candidate_universe", _spy_universe)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": match_mod._DEMO_ALLOCATOR_ID, "force": False},
+        )
+        # Empty universe → 400; but we've already recorded the demo_only call.
+        assert r.status_code == 400
+        assert len(demo_only_calls) == 1
+        assert demo_only_calls[0] is True, (
+            "_load_candidate_universe must be called with demo_only=True for "
+            "the demo allocator (NEW-C08-09 DB-layer defense)"
+        )
+
+    def test_non_demo_allocator_loads_full_universe(self, client, monkeypatch):
+        from routers import match as match_mod
+
+        demo_only_calls: list[bool] = []
+
+        def _spy_universe(demo_only: bool = False):
+            demo_only_calls.append(demo_only)
+            return {"strategies_by_id": {}, "returns_by_id": {}}
+
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(match_mod, "_load_candidate_universe", _spy_universe)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": str(uuid4()), "force": False},
+        )
+        assert len(demo_only_calls) == 1
+        assert demo_only_calls[0] is False, (
+            "_load_candidate_universe must be called with demo_only=False for "
+            "a non-demo allocator (NEW-C08-09 normal path)"
+        )
 
 
 # ---------------------------------------------------------------------------

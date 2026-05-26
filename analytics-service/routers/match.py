@@ -52,6 +52,15 @@ _scoring_semaphore = asyncio.Semaphore(3)
 # Skip recompute if the last batch is newer than this threshold (unless forced)
 RECOMPUTE_MIN_AGE_HOURS = 12
 
+# NEW-C08-06: minimum interval between forced recomputes per allocator.
+# force=True bypasses the 12h age guard, so a looped caller (SERVICE_KEY
+# holder past the Next.js rate limiter) could stack concurrent scoring and
+# retention churn. This in-memory gate enforces a 30-second floor per
+# allocator_id on the FORCED path only (normal age-gated recomputes are
+# unaffected). Process-local — a pod restart resets it, which is acceptable.
+FORCE_RECOMPUTE_MIN_INTERVAL_S = 30
+_force_last_run: dict[str, float] = {}  # allocator_id → monotonic timestamp
+
 # The demo founder-view endpoint (/api/demo/match/[allocator_id]) is anon/public
 # and hard-locks to this seeded ALLOCATOR_ACTIVE_ID (src/lib/demo.ts). Candidate
 # universe for THIS allocator MUST be filtered to is_example=true so real
@@ -781,104 +790,119 @@ async def _score_one_allocator(
             "latency_ms": latency_ms,
             "holding_flags": holding_flags_list,
         }
-        batch_insert = await asyncio.to_thread(
-            lambda: supabase.table("match_batches").insert(batch_row).execute()
-        )
-        if not batch_insert.data:
-            raise RuntimeError(f"Failed to insert match_batches for {allocator_id}")
-        batch_id = batch_insert.data[0]["id"]
+        # NEW-C08-07: wrap the batch_insert + candidates_insert pair in
+        # asyncio.shield() so a CancelledError (uvicorn shutdown / Railway
+        # redeploy / request timeout) arriving BETWEEN the two awaits does not
+        # leave a committed match_batches row with zero match_candidates children
+        # — exactly the orphan the rollback path below was designed to prevent
+        # but couldn't catch on cancellation. shield() lets the inner coroutine
+        # run to completion even if the outer task is cancelled; the outer
+        # CancelledError is re-raised after the inner finishes.
+        async def _persist_batch_and_candidates() -> str:
+            """Insert match_batches row + match_candidates rows atomically
+            enough for cancellation safety. Returns the batch_id."""
+            _batch_insert = await asyncio.to_thread(
+                lambda: supabase.table("match_batches").insert(batch_row).execute()
+            )
+            if not _batch_insert.data:
+                raise RuntimeError(f"Failed to insert match_batches for {allocator_id}")
+            _batch_id = _batch_insert.data[0]["id"]
 
-        # Insert candidates (top 30) + excluded (up to 50) into match_candidates
-        rows_to_insert = []
-        for cand in result["candidates"]:
-            rows_to_insert.append({
-                "batch_id": batch_id,
-                "allocator_id": allocator_id,
-                "strategy_id": cand["strategy_id"],
-                "score": cand["score"],
-                "score_breakdown": cand["score_breakdown"],
-                "reasons": cand["reasons"],
-                "rank": cand["rank"],
-                "exclusion_reason": None,
-                "exclusion_provenance": None,
-            })
-        # Red-team CRITICAL fix (audit-2026-05-07): `explicitly_excluded` is a
-        # NEW ExclusionReason value introduced by H-0705 but the SQL CHECK on
-        # match_candidates.exclusion_reason (supabase/migrations/
-        # 20260407164606_perfect_match.sql:111-114) still allows only 7 values.
-        # Persisting `explicitly_excluded` here would trigger CHECK violation
-        # in the bulk insert below and tear down the entire match_batches
-        # parent via the rollback path. Per the audit's in-scope fix (option b:
-        # this worktree has no migrations), we drop these rows at the
-        # persistence boundary — they remain in the in-memory `excluded` list
-        # the caller receives, and `excluded_count` on match_batches already
-        # uses `excluded_total` so the row-count audit trail stays honest.
-        # TODO(audit-2026-05-07 follow-up PR): ship a migration that widens
-        # the CHECK to include 'explicitly_excluded', then remove this filter.
-        for exc in result["excluded"]:
-            if exc["exclusion_reason"] == "explicitly_excluded":
-                logger.info(
-                    "match_engine: dropping explicitly_excluded row from "
-                    "match_candidates persistence (allocator=%s, strategy=%s) "
-                    "— pending SQL CHECK migration",
-                    allocator_id, exc["strategy_id"],
-                )
-                continue
-            rows_to_insert.append({
-                "batch_id": batch_id,
-                "allocator_id": allocator_id,
-                "strategy_id": exc["strategy_id"],
-                "score": 0,
-                "score_breakdown": {"raw": {}},
-                "reasons": [],
-                "rank": None,
-                "exclusion_reason": exc["exclusion_reason"],
-                "exclusion_provenance": exc.get("exclusion_provenance"),
-            })
+            # Build the candidates+excluded rows list.
+            # Red-team CRITICAL fix (audit-2026-05-07): `explicitly_excluded` is a
+            # NEW ExclusionReason value introduced by H-0705 but the SQL CHECK on
+            # match_candidates.exclusion_reason (supabase/migrations/
+            # 20260407164606_perfect_match.sql:111-114) still allows only 7 values.
+            # Persisting `explicitly_excluded` here would trigger CHECK violation
+            # in the bulk insert below and tear down the entire match_batches
+            # parent via the rollback path. Per the audit's in-scope fix (option b:
+            # this worktree has no migrations), we drop these rows at the
+            # persistence boundary — they remain in the in-memory `excluded` list
+            # the caller receives, and `excluded_count` on match_batches already
+            # uses `excluded_total` so the row-count audit trail stays honest.
+            # TODO(audit-2026-05-07 follow-up PR): ship a migration that widens
+            # the CHECK to include 'explicitly_excluded', then remove this filter.
+            _rows_to_insert = []
+            for _cand in result["candidates"]:
+                _rows_to_insert.append({
+                    "batch_id": _batch_id,
+                    "allocator_id": allocator_id,
+                    "strategy_id": _cand["strategy_id"],
+                    "score": _cand["score"],
+                    "score_breakdown": _cand["score_breakdown"],
+                    "reasons": _cand["reasons"],
+                    "rank": _cand["rank"],
+                    "exclusion_reason": None,
+                    "exclusion_provenance": None,
+                })
+            for _exc in result["excluded"]:
+                if _exc["exclusion_reason"] == "explicitly_excluded":
+                    logger.info(
+                        "match_engine: dropping explicitly_excluded row from "
+                        "match_candidates persistence (allocator=%s, strategy=%s) "
+                        "— pending SQL CHECK migration",
+                        allocator_id, _exc["strategy_id"],
+                    )
+                    continue
+                _rows_to_insert.append({
+                    "batch_id": _batch_id,
+                    "allocator_id": allocator_id,
+                    "strategy_id": _exc["strategy_id"],
+                    "score": 0,
+                    "score_breakdown": {"raw": {}},
+                    "reasons": [],
+                    "rank": None,
+                    "exclusion_reason": _exc["exclusion_reason"],
+                    "exclusion_provenance": _exc.get("exclusion_provenance"),
+                })
 
-        if rows_to_insert:
-            # Inspect the insert result so a silent FK/CHECK violation
-            # (e.g. strategy_id deleted between the universe snapshot and
-            # the insert) cannot leave the match_batches row claiming
-            # candidate_count > 0 with zero child rows. If the insert
-            # raises, tear down the parent batch row so the admin queue
-            # never sees an orphan with non-zero count + empty list.
-            insert_err: Exception | None = None
-            cand_data_ok = False
-            try:
-                cand_insert = await asyncio.to_thread(
-                    lambda: supabase.table("match_candidates").insert(rows_to_insert).execute()
-                )
-                cand_data_ok = bool(cand_insert.data)
-            except Exception as exc:
-                insert_err = exc
-                logger.exception(
-                    "match_engine: match_candidates insert raised for batch %s "
-                    "(allocator=%s, expected=%d)",
-                    batch_id, allocator_id, len(rows_to_insert),
-                )
-
-            if not cand_data_ok:
-                logger.error(
-                    "match_engine: rolling back orphan batch %s (allocator=%s)",
-                    batch_id, allocator_id,
-                )
+            if _rows_to_insert:
+                # Inspect the insert result so a silent FK/CHECK violation
+                # (e.g. strategy_id deleted between the universe snapshot and
+                # the insert) cannot leave the match_batches row claiming
+                # candidate_count > 0 with zero child rows. If the insert
+                # raises, tear down the parent batch row so the admin queue
+                # never sees an orphan with non-zero count + empty list.
+                _insert_err: Exception | None = None
+                _cand_data_ok = False
                 try:
-                    await asyncio.to_thread(
-                        lambda: supabase.table("match_batches")
-                        .delete()
-                        .eq("id", batch_id)
-                        .execute()
+                    _cand_insert = await asyncio.to_thread(
+                        lambda: supabase.table("match_candidates").insert(_rows_to_insert).execute()
                     )
-                except Exception as cleanup_err:
+                    _cand_data_ok = bool(_cand_insert.data)
+                except Exception as _exc_inner:
+                    _insert_err = _exc_inner
+                    logger.exception(
+                        "match_engine: match_candidates insert raised for batch %s "
+                        "(allocator=%s, expected=%d)",
+                        _batch_id, allocator_id, len(_rows_to_insert),
+                    )
+
+                if not _cand_data_ok:
                     logger.error(
-                        "match_engine: failed to roll back orphan batch %s: %s",
-                        batch_id, cleanup_err,
+                        "match_engine: rolling back orphan batch %s (allocator=%s)",
+                        _batch_id, allocator_id,
                     )
-                raise RuntimeError(
-                    f"match_candidates insert failed for batch {batch_id} "
-                    f"(allocator={allocator_id}, expected {len(rows_to_insert)} rows)"
-                ) from insert_err
+                    try:
+                        await asyncio.to_thread(
+                            lambda: supabase.table("match_batches")
+                            .delete()
+                            .eq("id", _batch_id)
+                            .execute()
+                        )
+                    except Exception as _cleanup_err:
+                        logger.error(
+                            "match_engine: failed to roll back orphan batch %s: %s",
+                            _batch_id, _cleanup_err,
+                        )
+                    raise RuntimeError(
+                        f"match_candidates insert failed for batch {_batch_id} "
+                        f"(allocator={allocator_id}, expected {len(_rows_to_insert)} rows)"
+                    ) from _insert_err
+
+            return _batch_id
+
+        batch_id = await asyncio.shield(_persist_batch_and_candidates())
 
         logger.info(
             "match_engine recompute: allocator=%s batch=%s mode=%s "
@@ -1024,6 +1048,30 @@ def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Helpers (continued)
+# ---------------------------------------------------------------------------
+
+
+def _is_allocator_profile(allocator_id: str) -> bool:
+    """NEW-C08-10: return True iff the profile exists and has role 'allocator' or 'both'.
+
+    Synchronous (called via asyncio.to_thread). Module-level so tests can
+    monkeypatch it without patching get_supabase (which requires live env vars).
+    """
+    sb = get_supabase()
+    profile = (
+        sb.table("profiles")
+        .select("role")
+        .eq("id", allocator_id)
+        .maybe_single()
+        .execute()
+    )
+    if not (profile and profile.data):
+        return False
+    return profile.data.get("role") in ("allocator", "both")
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -1033,15 +1081,54 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
     """Single-allocator recompute. Called from the Next.js admin /api/admin/match/recompute."""
     # Stringify the UUID once for Supabase / downstream sync helpers.
     allocator_id = str(req.allocator_id)
+
+    # NEW-C08-10: validate that allocator_id is actually an allocator (or both).
+    # Pre-fix any UUID (strategy-manager, admin, deleted profile) manufactured
+    # match_batches rows — polluting the founder queue and hit-rate eval.
+    # Mirrors cron_recompute's role IN ('allocator','both') filter.
+    if not await asyncio.to_thread(_is_allocator_profile, allocator_id):
+        raise HTTPException(
+            status_code=422,
+            detail=f"allocator_id {allocator_id} is not an allocator profile",
+        )
+
     if not await asyncio.to_thread(_kill_switch_enabled):
         logger.info("match_engine recompute: kill switch off, skipping allocator=%s", allocator_id)
         return {"status": "disabled", "disabled": True}
+
+    # NEW-C08-06: floor force=True to a per-allocator 30-second minimum interval.
+    # force=True bypasses the 12h age guard (see _should_skip_allocator); without
+    # this gate a looped caller past the Next.js rate limiter can stack concurrent
+    # scoring + retention churn. The interval is process-local — a pod restart
+    # resets it, which is acceptable (the guard is a budget, not a hard lock).
+    import time as _time
+    if req.force:
+        _now = _time.monotonic()
+        _last = _force_last_run.get(allocator_id, 0.0)
+        if _now - _last < FORCE_RECOMPUTE_MIN_INTERVAL_S:
+            wait_s = int(FORCE_RECOMPUTE_MIN_INTERVAL_S - (_now - _last))
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"force recompute for {allocator_id} throttled: "
+                    f"retry after {wait_s}s (min interval {FORCE_RECOMPUTE_MIN_INTERVAL_S}s)"
+                ),
+            )
+        _force_last_run[allocator_id] = _now
 
     if await _should_skip_allocator(allocator_id, req.force):
         logger.info("match_engine recompute: skipping recent batch for %s", allocator_id)
         return {"status": "skipped", "skipped": True, "reason": "recent_batch"}
 
-    universe = await asyncio.to_thread(_load_candidate_universe)
+    # NEW-C08-09: wire demo_only at the call site so the DB-layer guard is in
+    # place (defense at the boundary). Pre-fix the call was unconditionally
+    # _load_candidate_universe() with demo_only=False; the only protection was
+    # the in-memory post-filter in _score_one_allocator, which a refactor could
+    # silently drop. Now the universe is filtered at the DB for the demo allocator.
+    universe = await asyncio.to_thread(
+        _load_candidate_universe,
+        allocator_id == _DEMO_ALLOCATOR_ID,
+    )
     if not universe["strategies_by_id"]:
         raise HTTPException(status_code=400, detail="No eligible strategies in the directory")
 
@@ -1145,6 +1232,12 @@ async def cron_recompute() -> dict[str, Any]:
         return _early_return("no_allocators")
 
     # Load universe ONCE for the whole cron run.
+    # NEW-C08-09 note: the cron loads the FULL (non-demo-only) universe so all
+    # allocators share a single cached fetch. The demo allocator's is_example
+    # filter is applied inside _score_one_allocator (L708-712) at scoring time.
+    # The DB-layer defense (demo_only=True) is wired at the single-allocator
+    # POST /recompute path, which is the endpoint reachable from the anon demo
+    # surface — the cron runs with SERVICE_KEY under internal trust.
     universe = await asyncio.to_thread(_load_candidate_universe)
     if not universe["strategies_by_id"]:
         logger.warning("match_engine cron: no strategies in universe")
