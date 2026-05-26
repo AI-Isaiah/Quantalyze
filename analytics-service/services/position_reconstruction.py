@@ -416,11 +416,25 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
     # position equally with a $1M +2% position; a $10 outlier can dominate.
     # This variant reflects how much the strategy made per dollar deployed.
     # Only include closed positions with both realized_pnl and notional > 0.
-    _sum_pnl = sum(
-        float(p["realized_pnl"])
-        for p in closed
-        if p.get("realized_pnl") is not None
-    )
+    # silent-failure/F-09: float(p["realized_pnl"]) raises ValueError for
+    # non-numeric strings (e.g. "N/A", "", "12.3USDT"). The None guard only
+    # filters None; a buggy ingestion path can store an empty or currency-
+    # suffixed string. Wrap in try/except to match the same-diff fix applied
+    # to the equity_reconstruction spot_fee path (F-08).
+    _pnl_values: list[float] = []
+    for _p in closed:
+        _raw_pnl = _p.get("realized_pnl")
+        if _raw_pnl is None:
+            continue
+        try:
+            _pnl_values.append(float(_raw_pnl))
+        except (TypeError, ValueError):
+            logger.warning(
+                "capital_weighted_roi: unparseable realized_pnl=%r for "
+                "position %s — excluded from sum",
+                _raw_pnl, _p.get("id"),
+            )
+    _sum_pnl = sum(_pnl_values)
     _sum_notional = sum(
         float(p["entry_price_avg"] or 0.0) * float(p.get("size_base") or p.get("quantity") or 0.0)
         for p in closed
