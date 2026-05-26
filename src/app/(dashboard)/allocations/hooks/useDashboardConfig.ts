@@ -523,12 +523,30 @@ function loadV2Config(): DashboardConfig {
       // invariants. If every tile is unusable we fall back to defaults
       // and flag the recovery; partial corruption keeps the salvageable
       // tiles to avoid wiping the user's whole layout for one bad entry.
-      const validatedTiles: TileConfig[] = [];
+      const validatedTilesRaw: TileConfig[] = [];
       let droppedCount = 0;
       for (const raw of parsed.tiles) {
         const normalized = validateAndNormalizeTile(raw);
-        if (normalized) validatedTiles.push(normalized);
+        if (normalized) validatedTilesRaw.push(normalized);
         else droppedCount += 1;
+      }
+      // NEW-C06-06: dedup by `k` after validation. validateAndNormalizeTile
+      // runs resolveWidgetId which collapses designer short keys onto registry
+      // ids (e.g. "equity" + "equity-chart" both → "equity-chart"). A
+      // pre-Plan-07 layout round-trips two distinct persisted keys that
+      // normalize to the same id, producing duplicate React keys in the grid,
+      // broken moveWidget (findIndex targets only the first dup), and
+      // removeWidget that deletes both. Dedup preserves first occurrence
+      // (stable load order) and counts the merge towards droppedCount.
+      const seenKeys = new Set<string>();
+      const validatedTiles: TileConfig[] = [];
+      for (const tile of validatedTilesRaw) {
+        if (seenKeys.has(tile.k)) {
+          droppedCount += 1;
+        } else {
+          seenKeys.add(tile.k);
+          validatedTiles.push(tile);
+        }
       }
       if (validatedTiles.length === 0) {
         // Everything was unusable — treat as parse_failed so the dashboard

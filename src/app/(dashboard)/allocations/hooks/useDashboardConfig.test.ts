@@ -1461,6 +1461,23 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
     }
   });
 
+  // NEW-C06-06: load path must dedup by resolved key. Two distinct persisted
+  // keys that collapse to the same registry id via resolveWidgetId (e.g. a
+  // pre-Plan-07 layout carrying both "equity" and "equity-chart") must result
+  // in exactly ONE tile — not two duplicates that break moveWidget/removeWidget.
+  it("NEW-C06-06: load deduplicates tiles that normalize to the same registry id", () => {
+    // "kpi-strip" is the canonical id; "kpi" is its designer short key.
+    // Both normalize to "kpi-strip" via resolveWidgetId.
+    seedV2Blob([
+      { k: "kpi", w: 4 },
+      { k: "kpi-strip", w: 2 },
+    ]);
+    const { result } = renderHook(() => useDashboardConfigV2());
+    const tiles = result.current.config.tiles;
+    const kpiTiles = tiles.filter((t) => t.k === "kpi-strip");
+    expect(kpiTiles).toHaveLength(1);
+  });
+
   // NEW-C06-07: addWidget should silently reject unknown widget ids so the
   // write/load invariant is symmetric. The load path (validateAndNormalizeTile)
   // drops any tile whose k is not in WIDGET_REGISTRY; addWidget previously
