@@ -774,13 +774,26 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
       if (e.key !== STORAGE_KEY) return;
       if (e.newValue === null) return; // ignore clears
       const reloaded = loadV2Config();
-      setConfig((prev) => {
-        if (JSON.stringify(prev) === JSON.stringify(reloaded)) return prev;
-        // Keep pendingConfigRef in sync — a cross-tab reload is the new
-        // baseline, not a queued local mutation.
-        pendingConfigRef.current = reloaded;
-        return reloaded;
-      });
+      // NEW-C06-10: compute the comparison and assign the ref OUTSIDE the
+      // setState updater. setState updaters must be pure — React invokes them
+      // twice in dev StrictMode and may re-run them during concurrent
+      // rendering. A side-effect inside the updater (pendingConfigRef mutation)
+      // is latently dangerous the moment the assigned value depends on
+      // prev/call-count.
+      //
+      // Also replace the full JSON.stringify equality with a cheap
+      // version+length compare to avoid O(n) serialization on every
+      // unrelated same-key storage event.
+      const currentPending = pendingConfigRef.current;
+      const noChange =
+        currentPending.layoutVersion === reloaded.layoutVersion &&
+        currentPending.tiles.length === reloaded.tiles.length &&
+        currentPending.timeframe === reloaded.timeframe;
+      if (noChange) return;
+      // Keep pendingConfigRef in sync — a cross-tab reload is the new
+      // baseline, not a queued local mutation.
+      pendingConfigRef.current = reloaded;
+      setConfig(reloaded);
     }
     window.addEventListener("storage", onStorage);
     return () => {
