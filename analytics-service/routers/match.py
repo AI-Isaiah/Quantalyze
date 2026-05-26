@@ -60,6 +60,12 @@ RECOMPUTE_MIN_AGE_HOURS = 12
 # unaffected). Process-local — a pod restart resets it, which is acceptable.
 FORCE_RECOMPUTE_MIN_INTERVAL_S = 30
 _force_last_run: dict[str, float] = {}  # allocator_id → monotonic timestamp
+# M-1 (red-team): per-allocator asyncio.Lock makes the check-then-stamp
+# sequence atomic. Without the lock, N concurrent force=True requests all
+# read 0.0 on pod startup, pass the gate simultaneously, and queue on
+# _scoring_semaphore(3) — exactly the concurrent churn the throttle guards
+# against. The lock is created on first use (defaultdict pattern).
+_force_lock: dict[str, asyncio.Lock] = {}
 
 # C-01 (code-review): page size for analytics SELECT .in_() fetches
 # (NEW-C08-02 / NEW-C08-03). Previously defined at line 1007 (below its call
@@ -445,7 +451,12 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     portfolios_result = supabase.table("portfolios").select("id").eq(
         "user_id", allocator_id
     ).execute()
-    portfolio_ids = [p["id"] for p in (portfolios_result.data or [])]
+    # H-2 (red-team): sort portfolio_ids before chunking so the per-chunk
+    # ORDER BY (portfolio_id, strategy_id) produces a globally deterministic
+    # ps_rows assembly. Without this, the first-wins loop retains whichever
+    # chunk's row is seen first — non-deterministic across pod restarts when
+    # the same strategy appears in portfolios spanning different pages.
+    portfolio_ids = sorted(p["id"] for p in (portfolios_result.data or []))
 
     portfolio_strategies: list[dict[str, Any]] = []
     portfolio_weights: dict[str, float] = {}
@@ -991,7 +1002,23 @@ async def _score_one_allocator(
             # Re-await the inner task so shutdown waits for the DB writes to
             # complete before the process exits. The CancelledError is re-raised
             # after the inner task finishes (I-01 fix).
-            await _persist_task
+            #
+            # H-1 (red-team): if _persist_task itself raises RuntimeError (e.g.,
+            # rollback after a failed match_candidates insert), that RuntimeError
+            # would propagate out of this except block, making the `raise` below
+            # unreachable. The caller would see RuntimeError instead of
+            # CancelledError, corrupting the ASGI graceful-shutdown chain. Wrap
+            # the re-await so RuntimeError is logged + swallowed here; the
+            # CancelledError is still re-raised so uvicorn sees the correct
+            # shutdown signal.
+            try:
+                await _persist_task
+            except RuntimeError as _inner_err:
+                logger.error(
+                    "match_engine: batch persistence failed during shutdown for "
+                    "allocator %s: %s — CancelledError still propagated",
+                    allocator_id, _inner_err,
+                )
             raise
         except RuntimeError as _persist_err:
             # A3-07: inner RuntimeError (persist/rollback failure) may be
@@ -1143,17 +1170,23 @@ def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _is_allocator_profile(allocator_id: str) -> bool:
+def _is_allocator_profile(allocator_id: str) -> bool | None:
     """NEW-C08-10: return True iff the profile exists and has role 'allocator' or 'both'.
 
     Synchronous (called via asyncio.to_thread). Module-level so tests can
     monkeypatch it without patching get_supabase (which requires live env vars).
 
+    Return values:
+      True  — confirmed allocator/both role
+      False — confirmed non-allocator (profile found but wrong role, or no row)
+      None  — transient error (DB blip); caller must raise 503, not 422
+
     A3-06 / I-03: wraps the Supabase query in try/except so a transient DB
     blip does not surface as a context-free 500 from the recompute endpoint.
-    Fail-CLOSED on exception (returns False + logs at ERROR) — unlike
-    _kill_switch_enabled which is fail-open, a role-check failure should deny
-    rather than grant access. Log includes allocator_id for Sentry triage.
+    M-2 (red-team): distinguishes transient error (None) from confirmed
+    non-allocator (False) so the caller can return 503 on a DB blip instead of
+    422, which incorrectly tells a real allocator they are "not an allocator".
+    Log includes allocator_id for Sentry triage.
     """
     sb = get_supabase()
     try:
@@ -1167,10 +1200,10 @@ def _is_allocator_profile(allocator_id: str) -> bool:
     except Exception as exc:
         logger.error(
             "match_engine: profile role check failed for allocator %s: %s "
-            "— failing closed (treating as non-allocator)",
+            "— returning None (transient; caller will 503)",
             allocator_id, exc,
         )
-        return False
+        return None  # sentinel: transient error, not confirmed non-allocator
     if not (profile and profile.data):
         return False
     return profile.data.get("role") in ("allocator", "both")
@@ -1191,7 +1224,18 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
     # Pre-fix any UUID (strategy-manager, admin, deleted profile) manufactured
     # match_batches rows — polluting the founder queue and hit-rate eval.
     # Mirrors cron_recompute's role IN ('allocator','both') filter.
-    if not await asyncio.to_thread(_is_allocator_profile, allocator_id):
+    #
+    # M-2 (red-team): _is_allocator_profile returns None on transient DB error.
+    # Raise 503 (not 422) in that case — 422 semantically means the input is
+    # invalid, which is incorrect and misleading during a DB blip. A real
+    # allocator must not see "you are not an allocator" during a Supabase outage.
+    _role_check = await asyncio.to_thread(_is_allocator_profile, allocator_id)
+    if _role_check is None:
+        raise HTTPException(
+            status_code=503,
+            detail="profile role check temporarily unavailable — please retry",
+        )
+    if not _role_check:
         raise HTTPException(
             status_code=422,
             detail=f"allocator_id {allocator_id} is not an allocator profile",
@@ -1208,27 +1252,38 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
     # resets it, which is acceptable (the guard is a budget, not a hard lock).
     #
     # I-02 / A3-02: stamp _force_last_run AFTER scoring succeeds, not before.
-    # Pre-fix: the timestamp was written at line 1222 before calling
-    # _score_one_allocator. If scoring raised a 500, the 30-second window was
-    # consumed by a failed recompute — a retry by the operator received 429
-    # ("throttled") even though no batch was ever persisted, with a confusing
-    # message implying the previous recompute succeeded. Post-fix: the 429 check
-    # still fires at entry (correct — guards against rapid duplicate requests),
-    # but the slot is only consumed on a successful result.
-    import time as _time
+    # Pre-fix: the timestamp was written before calling _score_one_allocator.
+    # If scoring raised a 500, the 30-second window was consumed by a failed
+    # recompute — a retry by the operator received 429 ("throttled") even though
+    # no batch was ever persisted. Post-fix: the 429 check still fires at entry
+    # (correct — guards against rapid duplicate requests), but the slot is only
+    # consumed on a successful result.
+    #
+    # M-1 (red-team): per-allocator asyncio.Lock makes the read-then-stamp
+    # sequence atomic. Without the lock, N concurrent force=True requests on pod
+    # startup all read 0.0, pass the gate simultaneously, and queue on the
+    # scoring semaphore — exactly the churn the throttle was designed to prevent.
+    # Lock is created on first use (lazy initialisation keeps the module-level
+    # dict lean; locks are cheap and never removed).
     if req.force:
-        _now = _time.monotonic()
-        _last = _force_last_run.get(allocator_id, 0.0)
-        if _now - _last < FORCE_RECOMPUTE_MIN_INTERVAL_S:
-            wait_s = int(FORCE_RECOMPUTE_MIN_INTERVAL_S - (_now - _last))
-            raise HTTPException(
-                status_code=429,
-                detail=(
-                    f"force recompute for {allocator_id} throttled: "
-                    f"retry after {wait_s}s (min interval {FORCE_RECOMPUTE_MIN_INTERVAL_S}s)"
-                ),
-            )
-        # NOTE: do NOT stamp here — stamp only after scoring succeeds below.
+        if allocator_id not in _force_lock:
+            _force_lock[allocator_id] = asyncio.Lock()
+        async with _force_lock[allocator_id]:
+            _now = time.monotonic()
+            _last = _force_last_run.get(allocator_id, 0.0)
+            if _now - _last < FORCE_RECOMPUTE_MIN_INTERVAL_S:
+                wait_s = int(FORCE_RECOMPUTE_MIN_INTERVAL_S - (_now - _last))
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"force recompute for {allocator_id} throttled: "
+                        f"retry after {wait_s}s (min interval {FORCE_RECOMPUTE_MIN_INTERVAL_S}s)"
+                    ),
+                )
+            # Stamp optimistically inside the lock so concurrent requests that
+            # arrive while scoring is in-flight also see the window. On scoring
+            # failure the stamp is cleared (below) so the operator can retry.
+            _force_last_run[allocator_id] = time.monotonic()
 
     if await _should_skip_allocator(allocator_id, req.force):
         logger.info("match_engine recompute: skipping recent batch for %s", allocator_id)
@@ -1250,12 +1305,12 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
         result = await _score_one_allocator(allocator_id, universe)
     except Exception as err:
         logger.exception("match_engine recompute failed for %s", allocator_id)
+        # M-1 (red-team): clear the optimistic stamp so the operator can retry
+        # immediately after a scoring failure. The stamp was written inside the
+        # lock before scoring; clearing it here releases the throttle window.
+        if req.force:
+            _force_last_run.pop(allocator_id, None)
         raise HTTPException(status_code=500, detail=f"Scoring failed: {err}") from err
-
-    # I-02 / A3-02: stamp the throttle window only AFTER scoring succeeds so a
-    # 500 from _score_one_allocator does not block the operator's next retry.
-    if req.force:
-        _force_last_run[allocator_id] = _time.monotonic()
 
     # Retention sweep (keep last 7). A sweep failure must not 500 the
     # request after the batch was successfully persisted — log and continue.
@@ -1361,6 +1416,27 @@ async def cron_recompute() -> dict[str, Any]:
     if not allocators:
         logger.info("match_engine cron: no allocators found")
         return _early_return("no_allocators")
+
+    # M-3 (red-team): confirm the demo allocator (is_example profile) is never
+    # returned by the role IN ('allocator','both') query. The demo allocator uses
+    # the same role value as real allocators, so the only structural guarantee
+    # that it is excluded is that the seeded profile has is_example=true. If that
+    # ever changes (e.g., a migration resets the flag), the cron would process the
+    # demo allocator with the full (non-demo-filtered) universe, silently exposing
+    # real strategies. Log at ERROR so Sentry fires; continue processing the
+    # remaining allocators (removing the demo allocator from the batch is safer
+    # than aborting the entire cron run).
+    demo_ids_in_batch = [
+        p["id"] for p in allocators if p["id"] == _DEMO_ALLOCATOR_ID
+    ]
+    if demo_ids_in_batch:
+        logger.error(
+            "match_engine cron: demo allocator %s appeared in allocators list "
+            "(role IN allocator/both) — skipping to preserve demo boundary. "
+            "Verify profiles.is_example=true for the demo seed row.",
+            _DEMO_ALLOCATOR_ID,
+        )
+        allocators = [p for p in allocators if p["id"] != _DEMO_ALLOCATOR_ID]
 
     # Load universe ONCE for the whole cron run.
     # NEW-C08-09 note: the cron loads the FULL (non-demo-only) universe so all

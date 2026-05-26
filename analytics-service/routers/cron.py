@@ -712,7 +712,9 @@ async def cron_sync():
             # it impossible to determine which chunk failed and how many
             # portfolio_ids had already been successfully collected before the
             # failure — those are silently dropped when we reset to [].
-            _ps_collected = len(ps_data) if "ps_data" in dir() else 0
+            # L-1 (red-team): the original dir()-guard was dead code — ps_data
+            # is always initialised before this loop (ps_data: list[dict] = []).
+            _ps_collected = len(ps_data)
             _n_strat_pages = (
                 (len(synced_strategy_ids) + _CRON_IN_LIST_PAGE_SIZE - 1)
                 // _CRON_IN_LIST_PAGE_SIZE

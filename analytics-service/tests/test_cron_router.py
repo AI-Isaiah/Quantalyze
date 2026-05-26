@@ -2422,3 +2422,30 @@ class TestCronRecomputePaginationErrorContext:
             "cron_sync must track ps_data-collected count before the exception "
             "for blast-radius logging (A3-03)"
         )
+
+
+# ---------------------------------------------------------------------------
+# L-1 (red-team) — "ps_data" in dir() dead-code guard removed from cron_sync
+# ---------------------------------------------------------------------------
+
+
+class TestCronSyncPsDataDirGuardRemoved:
+    """L-1 (red-team): the dead-code guard `len(ps_data) if "ps_data" in dir()
+    else 0` must be replaced with `len(ps_data)` directly. ps_data is always
+    initialised before the exception handler so the dir() check never evaluates
+    False; keeping it implies a non-existent code path to future maintainers."""
+
+    def test_dir_guard_not_present_in_cron_sync(self):
+        import inspect
+        from routers import cron as cron_mod
+
+        source = inspect.getsource(cron_mod.cron_sync)
+        assert '"ps_data" in dir()' not in source, (
+            'L-1: dead-code guard `"ps_data" in dir()` must be removed — '
+            "ps_data is always initialised before the exception handler"
+        )
+        # The replacement must still log the count
+        assert "_ps_collected" in source, (
+            "L-1: _ps_collected must still be computed (without the dir() guard) "
+            "so blast-radius logging still works"
+        )
