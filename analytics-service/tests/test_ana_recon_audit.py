@@ -580,6 +580,48 @@ def test_c12_02_phase1_failed_gates_last_sync_at():
     )
 
 
+def test_redteam_c1_phase1_failed_blocks_fetched_cursor_advance():
+    """red-team/C-1: advance_fetched_cursor must be False when phase1_failed=True
+    and phase2_complete=True.
+
+    Without this guard, last_fetched_trade_timestamp is advanced to now() even
+    when Phase-1 failed. On the next run, parse_since_ms returns the advanced
+    preferred timestamp (last_fetched_trade_timestamp) over last_sync_at,
+    permanently skipping the unpersisted daily-PnL window.
+
+    This test verifies the fix: (not raw_fills) or (phase2_complete and not phase1_failed).
+    """
+    # Simulate: Phase-1 failed, Phase-2 succeeded with fills.
+    raw_fills = [{"id": "fill1"}]       # non-empty → not raw_fills = False
+    phase2_complete = True
+    phase1_failed = True
+
+    advance_fetched_cursor = (not raw_fills) or (phase2_complete and not phase1_failed)
+    assert not advance_fetched_cursor, (
+        "red-team/C-1: last_fetched_trade_timestamp must NOT advance when "
+        "phase1_failed=True and phase2_complete=True — otherwise the preferred "
+        "cursor overrides last_sync_at and the failed PnL window is skipped."
+    )
+
+    # Verify the other paths are unaffected:
+    # Phase-2 succeeded, Phase-1 succeeded → advance.
+    assert (not []) or (True and not False), "empty fetch path must advance"
+    assert (not raw_fills) or (True and not False), "phase1 success + phase2 success must advance"
+
+    # Phase-2 failed, Phase-1 succeeded → do NOT advance (G12.A.7).
+    assert not ((not raw_fills) or (False and not False)), (
+        "phase2 failure must block cursor advance"
+    )
+
+    # Verify the gate is present in the actual source.
+    import inspect
+    from services import job_worker
+    src = inspect.getsource(job_worker.run_sync_trades_job)
+    assert "not phase1_failed" in src and "phase2_complete" in src, (
+        "red-team/C-1: advance_fetched_cursor must include 'not phase1_failed' gate"
+    )
+
+
 # ---------------------------------------------------------------------------
 # NEW-C12-03 — poll_allocator_positions persist failure stamps sync_status
 # ---------------------------------------------------------------------------

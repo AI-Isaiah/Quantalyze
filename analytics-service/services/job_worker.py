@@ -1157,7 +1157,18 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # (`raw_fills == []`) and feature-flag-disabled paths still advance —
     # `phase2_complete` defaults False but `raw_fills` is also False so
     # the gate falls through.
-    advance_fetched_cursor = (not raw_fills) or phase2_complete
+    #
+    # red-team/C-1 (NEW-C12-02 follow-up): when Phase-1 failed AND Phase-2
+    # succeeded, last_sync_at is correctly held back (NEW-C12-02), but
+    # advancing last_fetched_trade_timestamp to now() would still break the
+    # retry: parse_since_ms returns `preferred` (last_fetched_trade_timestamp)
+    # over last_sync_at, so the next run's Phase-1 fetch starts from the
+    # advanced timestamp — permanently skipping the unpersisted PnL window.
+    # Gate: do NOT advance the fetched cursor when Phase-1 failed, so the
+    # preferred=last_fetched_trade_timestamp path falls back to last_sync_at
+    # on the next run. Phase-2 dedup (exchange_fill_id unique index) absorbs
+    # the re-fetch cost.
+    advance_fetched_cursor = (not raw_fills) or (phase2_complete and not phase1_failed)
     if advance_fetched_cursor:
         _new_fetched_ts = datetime.now(timezone.utc).isoformat()
 
