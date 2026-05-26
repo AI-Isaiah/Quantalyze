@@ -463,6 +463,13 @@ const EPOCH_SENTINEL = "1970-01-01T00:00:00Z";
  * Green ≤ 3d, amber 3-7d, red >7d. Date below.
  */
 function FreshnessChip({ computedAt }: { computedAt: string }) {
+  // Hooks must run unconditionally and in the same order every render, so this
+  // useState is hoisted ABOVE the EPOCH_SENTINEL early-return below
+  // (react-hooks/rules-of-hooks). The initializer runs once per mount so render
+  // stays pure — Date.now() inline would be flagged impure-in-render. Hour
+  // resolution is fine for the "fresh / stale / old" bucketing; nowMs is only
+  // consumed on the non-sentinel path.
+  const [nowMs] = React.useState(() => Date.now());
   // Epoch sentinel means analytics.computed_at was null server-side — the
   // strategy hasn't been computed yet. Render a graceful "not computed" chip
   // rather than surfacing "Jan 1, 1970 (~20000d)" which looks like a data
@@ -481,10 +488,6 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
     );
   }
   const d = new Date(computedAt);
-  // useState initializer runs once per mount so render stays pure — Date.now()
-  // would otherwise be flagged as impure-in-render. Hour resolution is fine
-  // for the "fresh / stale / old" bucketing.
-  const [nowMs] = React.useState(() => Date.now());
   const days = (nowMs - d.getTime()) / 86_400_000;
   // A future computedAt (days < 0) means the upstream series window is ahead
   // of now — treat as neutral/suspicious, never "fresh". (NEW-C20-07)
