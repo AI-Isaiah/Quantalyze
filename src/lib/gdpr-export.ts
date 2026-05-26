@@ -1638,15 +1638,16 @@ interface FetchRowsResult {
  * NEW-C16-01 (audit 2026-05-26, CRITICAL): the previous
  * `getOrderColumn` returned `"id"` for every non-audit spec on the
  * stale assumption that "every user-owned table has an `id` UUID
- * column". FOUR manifest tables have composite/natural PKs and NO `id`
+ * column". Eight manifest tables have composite/natural PKs and NO `id`
  * column — verified against `src/lib/database.types.ts`:
- *   - `user_app_roles`       PK (user_id, role)        — order by granted_at
- *   - `user_favorites`       PK (user_id, strategy_id) — order by created_at
- *   - `allocator_preferences` keyed on user_id         — order by updated_at
- *   - `portfolio_strategies` PK (portfolio_id, strategy_id) — order by added_at
- *   - `allocator_equity_snapshots` PK (allocator_id, asof) — order by asof
- *   - `investor_attestations` PK (user_id)             — order by attested_at
- *   - `organization_members` PK (organization_id, user_id) — order by joined_at
+ *   - `user_app_roles`          PK (user_id, role)              — order by granted_at
+ *   - `user_favorites`          PK (user_id, strategy_id)       — order by created_at
+ *   - `allocator_preferences`   keyed on user_id                — order by updated_at
+ *   - `portfolio_strategies`    PK (portfolio_id, strategy_id)  — order by added_at
+ *   - `allocator_equity_snapshots` PK (allocator_id, asof)      — order by asof
+ *   - `investor_attestations`   PK (user_id)                    — order by attested_at
+ *   - `organization_members`    PK (organization_id, user_id)   — order by joined_at
+ *   - `csv_daily_returns`       PK (strategy_id, date)          — order by date (NEW-C16-09)
  * A `.order("id")` against any of them raised Postgres 42703
  * (`column "id" does not exist`), which `fetchRowsForSpec` surfaced as
  * a `fetch_error` → `partial: true` → the route returned HTTP 500
@@ -1684,7 +1685,7 @@ export const ORDER_COLUMN_OVERRIDES: Readonly<Record<string, string>> = {
  * can return DIFFERENT 50K subsets for a user with >50K rows. The
  * size-cap truncation also depends on this ordering — without it the
  * bundle is non-deterministic. We sort by `created_at` for the audit
- * trail tables, by an explicit override for the four id-less tables
+ * trail tables, by an explicit override for id-less tables
  * (see ORDER_COLUMN_OVERRIDES), and by `id` for everything else.
  */
 export function getOrderColumn(spec: UserExportTable): string {
