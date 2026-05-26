@@ -253,6 +253,62 @@ class TestSimulateAddCandidate:
         assert result["status"] == "ok"
         assert result["candidate_id"] == "not-a-real-id"
 
+    def test_window_coincident_current_metrics(self):
+        """NEW-C11-03 regression: current_* metrics for deltas must be scored
+        over the same intersection window as proposed_*, not the full port_df.
+
+        Pre-fix: current metrics used port_df (full history); proposed used
+        aligned (shorter intersection). A candidate with only a recent calm
+        history manufactured an artificial Sharpe lift from regime mismatch.
+
+        Test setup: portfolio has 300-day history; candidate has only 60 days.
+        With the pre-fix code, current_sharpe was scored over 300 days; now it
+        must be scored over ~60 days so the delta is window-coincident.
+
+        We verify this by asserting that the returned current metrics are
+        consistent with a 60-day window — specifically that both
+        equity_curve_current and equity_curve_proposed have the same length
+        (both scored over the intersection). Pre-fix equity_curve_current used
+        the full 300-day window and would be much longer.
+        """
+        # Portfolio: 300 days of calm positive drift
+        port_dates_long = pd.date_range("2024-01-01", periods=300, freq="B")
+        rng = np.random.default_rng(77)
+        s1_long = pd.Series(rng.normal(0.001, 0.015, 300), index=port_dates_long)
+        s2_long = pd.Series(rng.normal(0.001, 0.015, 300), index=port_dates_long)
+
+        # Candidate: only last 60 business days (subset of portfolio window)
+        candidate_dates = port_dates_long[-60:]
+        candidate_short = pd.Series(rng.normal(0.005, 0.005, 60), index=candidate_dates)
+
+        result = simulate_add_candidate(
+            portfolio_returns={"s1": s1_long, "s2": s2_long},
+            candidate_id="c_short",
+            candidate_returns=candidate_short,
+            weights={"s1": 0.5, "s2": 0.5},
+        )
+
+        assert result["status"] == "ok"
+        # overlap_days should be ~60 (the candidate window)
+        assert result["overlap_days"] <= 62
+
+        # NEW-C11-03: both curves must cover the same (intersection) window.
+        # Pre-fix: equity_curve_current used all 300 days → len ≈ 300;
+        # equity_curve_proposed used 60 days → delta was window-mismatched.
+        # Post-fix: both are scored over the ~60-day intersection.
+        len_current = len(result["equity_curve_current"])
+        len_proposed = len(result["equity_curve_proposed"])
+        assert len_current == len_proposed, (
+            f"NEW-C11-03: equity curves must share the same intersection window. "
+            f"current={len_current} days vs proposed={len_proposed} days. "
+            f"Pre-fix: current used full port history ({len(port_dates_long)} days)."
+        )
+        # Both curves should be ~60 points (not 300).
+        assert len_current <= 65, (
+            f"equity_curve_current has {len_current} points but should be "
+            f"≤65 (the ~60-day intersection). Pre-fix: it would be ~300."
+        )
+
     def test_sign_convention_positive_is_improvement(self):
         """Regression test for the positive=improvement sign convention
         across all four deltas. A superior candidate (higher mean return,

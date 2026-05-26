@@ -97,23 +97,33 @@ def simulate_add_candidate(
     if port_df.empty:
         return _empty_result(candidate_id, status="empty_portfolio")
 
-    # --- Current portfolio (without the candidate) --------------------
-    w_arr = np.array([weights.get(sid, 0) for sid in port_df.columns])
-    if w_arr.sum() > 0:
-        w_arr = w_arr / w_arr.sum()
-    current_returns = (port_df * w_arr).sum(axis=1)
-
-    current_sharpe = _compute_sharpe(current_returns)
-    current_avg_corr = _avg_corr(port_df)
-    current_max_dd = _max_drawdown(current_returns)
-    current_weights_map = {sid: float(w) for sid, w in zip(port_df.columns, w_arr)}
-    current_concentration = _herfindahl(current_weights_map)
-
-    # --- Proposed portfolio (with the candidate added) ----------------
+    # --- Compute the intersection window first -----------------------
+    # NEW-C11-03: align candidate with portfolio BEFORE computing current
+    # metrics so that deltas compare metrics over the same window.
+    # Pre-fix: current_* used full port_df (longer history) while
+    # proposed_* used the shorter intersection — every delta subtracted
+    # metrics over non-coincident windows, manufacturing artificial
+    # Sharpe lift / diversification benefit from regime mismatch.
     aligned = pd.concat(
         [port_df, candidate_returns.rename(candidate_id)], axis=1
     ).dropna()
     overlap_days = int(len(aligned))
+
+    # Slice the portfolio-only columns to the intersection window for
+    # window-coincident current metrics.
+    port_aligned = aligned[list(port_df.columns)]
+
+    # --- Current portfolio (without the candidate) --------------------
+    w_arr = np.array([weights.get(sid, 0) for sid in port_aligned.columns])
+    if w_arr.sum() > 0:
+        w_arr = w_arr / w_arr.sum()
+    current_returns = (port_aligned * w_arr).sum(axis=1)
+
+    current_sharpe = _compute_sharpe(current_returns)
+    current_avg_corr = _avg_corr(port_aligned)
+    current_max_dd = _max_drawdown(current_returns)
+    current_weights_map = {sid: float(w) for sid, w in zip(port_aligned.columns, w_arr)}
+    current_concentration = _herfindahl(current_weights_map)
 
     if overlap_days < MIN_DATA_POINTS:
         return {
@@ -130,6 +140,7 @@ def simulate_add_candidate(
             "equity_curve_proposed": [],
         }
 
+    # --- Proposed portfolio (with the candidate added) ----------------
     new_weights = {sid: weights.get(sid, 0) * (1 - add_weight) for sid in port_df.columns}
     new_weights[candidate_id] = add_weight
 
@@ -145,6 +156,8 @@ def simulate_add_candidate(
     proposed_concentration = _herfindahl(proposed_weights_map)
 
     # --- Deltas (positive = improvement on every chip) ----------------
+    # Both sides are now scored over the same `aligned` window (the
+    # candidate∩portfolio intersection) so the deltas are window-coincident.
     sharpe_delta = _delta(proposed_sharpe, current_sharpe)
     # MaxDD is a negative number; "less drawdown" means closer to 0, so
     # current - proposed is positive when the candidate reduces drawdown.
@@ -173,6 +186,7 @@ def simulate_add_candidate(
         ),
         # Both curves are portfolio-level cumulative equity (starting at 1.0)
         # so the UI can overlay "current" vs "proposed" on a shared axis.
+        # Both start at the same intersection window for a meaningful overlay.
         "equity_curve_current": _cumulative_curve(current_returns),
         "equity_curve_proposed": _cumulative_curve(proposed_returns),
     }
