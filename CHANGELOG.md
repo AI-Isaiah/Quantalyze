@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.9.13] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: analytics credential + simulator integrity (batch a5)
+- `process_key` and `long_fetch` ingestion now reject write-capable / trade-enabled exchange API keys BEFORE encryption+persistence — a key with withdrawal/trade scope is refused at the boundary instead of being stored (NEW-C31-01)
+- simulator scores the current portfolio's metrics over the aligned (intersection) return window across strategies, not each strategy's full unaligned history — removes look-ahead/coverage skew in the what-if comparison (NEW-C11-03)
+- red-team + review hardening of scope-rejection and window-guard paths (C-1/H-2/H-3/M-1/M-3/L-3)
+
+
 ## [0.24.9.12] - 2026-05-26
 ### Fixed — audit-2026-05-07 cluster review: analytics portfolio router IDOR + data integrity (batch a4)
 - `/portfolio-analytics` and `/portfolio-optimizer` now enforce caller ownership: a `user_id` that does not own the portfolio gets a 404 (was IDOR — any authenticated user could read/optimize another user's portfolio) (NEW-C19-01)
