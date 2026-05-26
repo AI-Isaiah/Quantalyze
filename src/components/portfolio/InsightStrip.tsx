@@ -86,19 +86,18 @@ export function InsightStrip({
 }: InsightStripProps) {
   // Memoized so unrelated parent re-renders (the dashboard shell is a
   // `"use client"` component with its own state, and Overview fires a 30s
-  // router.refresh) don't re-run all 7 insight rules. Short-circuit on null
-  // analytics: computeAllInsights(null, …) always returns [], so skip the
-  // call entirely on the common loading/empty path instead of paying the
-  // rule-engine cost just to discard the result.
+  // router.refresh) don't re-run the insight rules. We call computeAllInsights
+  // unconditionally: it handles a null `analytics` internally (the
+  // analytics-keyed rules return null) but STILL surfaces an
+  // analytics-independent rebalance-drift insight when portfolioStrategies +
+  // portfolioAgeDays are supplied — so short-circuiting on `analytics === null`
+  // would wrongly drop that insight.
   const insights = useMemo(
     () =>
-      analytics === null
-        ? []
-        : computeAllInsights(
-            analytics,
-            portfolioStrategies,
-            portfolioAgeDays,
-          ).slice(0, max),
+      computeAllInsights(analytics, portfolioStrategies, portfolioAgeDays).slice(
+        0,
+        max,
+      ),
     [analytics, portfolioStrategies, portfolioAgeDays, max],
   );
 

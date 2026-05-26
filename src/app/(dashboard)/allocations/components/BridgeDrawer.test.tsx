@@ -638,7 +638,7 @@ describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () 
   // re-appears on the next confirm view.
   // ---------------------------------------------------------------------------
   it(
-    "M-0057: error surfaced on a failed Send intro is NOT cleared when going Back then re-entering confirm — fix in follow-up (Back handler should setError(null))",
+    "M-0057: backing out of confirm drops the prior Send-intro error so no stale alert re-appears when re-entering confirm",
     async () => {
       mockSendBridgeIntro.mockResolvedValueOnce({
         ok: false,

@@ -171,9 +171,13 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
     // delete the api_keys row even when sibling strategies still
     // reference it — the FK's ON DELETE SET NULL would then silently
     // break those siblings' sync. Treat a failed ref-count as "cannot
-    // prove the key is orphaned" and skip the delete; the Sprint 6
-    // cleanup cron (cron/cleanup-wizard-drafts) sweeps it later. Mirrors
-    // that cron's own countErr → skip guard.
+    // prove the key is orphaned" and skip the delete (the conservative
+    // direction — never revoke a possibly-shared key on an unproven count).
+    // NOTE: the draft strategy row is already deleted above, and
+    // cron/cleanup-wizard-drafts only discovers keys via STILL-EXISTING draft
+    // rows — so on this rare transient-failure path the key is NOT reclaimed by
+    // that cron and may linger orphaned until a dedicated orphan-key sweep.
+    // Mirrors that cron's own countErr → skip guard.
     if (refCountErr) {
       console.warn(
         "[strategies/draft DELETE] api_keys ref-count check failed (skip cleanup):",

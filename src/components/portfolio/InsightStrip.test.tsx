@@ -314,24 +314,32 @@ describe("InsightStrip — H-1083 BridgeTrigger integration", () => {
 // The strip is mounted inside a `"use client"` shell (AllocationDashboardV2)
 // and re-renders on every parent state change PLUS the 30s router.refresh on
 // Overview. Two correctness requirements:
-//   1. When `analytics === null` (the most common early-return path) the rule
-//      engine must NOT run — `computeAllInsights` over null returns [] anyway,
-//      so paying the 7-rule cost on every render of an empty/loading dashboard
-//      is pure waste. The short-circuit must precede the call.
+//   1. computeAllInsights must be called UNCONDITIONALLY — even on null
+//      `analytics`. computeRebalanceDrift is analytics-INDEPENDENT (it keys on
+//      portfolioStrategies + portfolioAgeDays), so a `analytics === null ? []`
+//      short-circuit would silently drop a live rebalance-drift insight.
 //   2. The result must be memoized so an unrelated parent re-render (same
-//      analytics identity) does not re-run all 7 rules.
+//      inputs) does not re-run the rules.
 
-describe("InsightStrip — H-1080/H-1082 compute short-circuit + memoization", () => {
+describe("InsightStrip — H-1080/H-1082 compute called unconditionally + memoized", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("does NOT call computeAllInsights when analytics is null", () => {
+  it("calls computeAllInsights even when analytics is null (rebalance-drift is analytics-independent, so null must not short-circuit)", () => {
     const spy = vi.spyOn(insightsModule, "computeAllInsights");
-    render(<InsightStrip analytics={null} portfolioId="p-1" />);
-    // null analytics can never produce insights; the rule engine must be
-    // skipped entirely rather than invoked-then-discarded.
-    expect(spy).not.toHaveBeenCalled();
+    render(
+      <InsightStrip
+        analytics={null}
+        portfolioId="p-1"
+        portfolioStrategies={[]}
+        portfolioAgeDays={30}
+      />,
+    );
+    // The prior `analytics === null ? []` short-circuit skipped the engine and
+    // silently dropped the analytics-INDEPENDENT rebalance-drift insight. The
+    // call must happen with the real args regardless of null analytics.
+    expect(spy).toHaveBeenCalledWith(null, [], 30);
   });
 
   it("does not re-run computeAllInsights when an unrelated prop is unchanged across re-render (memoized)", () => {
