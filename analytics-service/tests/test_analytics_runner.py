@@ -2228,22 +2228,23 @@ class TestComputeVolumeMetrics:
         assert result["sell_volume_pct"] == 1.0
         assert result["total_volume_usd"] == 100.0
 
-    # Audit-2026-05-07 H-0769: NaN / inf cost coverage gap. A NaN cost from
+    # Audit-2026-05-07 H-0769: NaN / inf cost coverage. A NaN cost from
     # an upstream parser divide-by-zero is a *numeric* float, so the
     # `except (TypeError, ValueError)` guard does NOT catch it — it survives
-    # `abs(float(...))` and propagates into total_volume_usd, which the runner
-    # then writes into strategy_analytics JSONB. NaN/Inf are NOT JSON-compliant
-    # (`json.dumps(..., allow_nan=False)` raises), so this corrupts the row or
-    # bypasses encoder safeguards downstream.
+    # `abs(float(...))` and would propagate into total_volume_usd, which the
+    # runner then writes into strategy_analytics JSONB. NaN/Inf are NOT
+    # JSON-compliant (`json.dumps(..., allow_nan=False)` raises), so an
+    # unsanitized non-finite cost corrupts the row or bypasses encoder
+    # safeguards downstream.
     #
-    # These two tests pin the CORRECT contract documented in the helper's
-    # docstring ("total_volume_usd is the absolute sum"; percentages in [0,1]):
-    # the output must be FINITE and JSON-serializable. They are marked
-    # xfail(strict=True) because production (_compute_volume_metrics) does NOT
-    # currently sanitize non-finite cost — see the FLAGGED note in the audit
-    # report. When production adds an `isfinite` guard, strict-xfail turns the
-    # xpass into a hard failure, forcing this marker to be removed (the test
-    # ratchets the fix in rather than silently tolerating the bug).
+    # PR #290 closed the gap: _compute_volume_metrics now applies a
+    # `math.isfinite(cost)` guard (coerce non-finite → 0, count + log it).
+    # These two tests are therefore LIVE (NOT xfail) regression guards that
+    # pin the CORRECT contract documented in the helper's docstring
+    # ("total_volume_usd is the absolute sum"; percentages in [0,1]): the
+    # output must be FINITE and JSON-serializable. If a future refactor drops
+    # the isfinite guard, both tests fail hard — they ratchet the fix in
+    # rather than silently tolerating a regression.
 
     def test_nan_cost_does_not_poison_totals(self) -> None:
         """A NaN cost (upstream divide-by-zero) must NOT propagate into

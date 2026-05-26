@@ -65,12 +65,27 @@ def _make_fill(
 
 def _make_mock_supabase(fills: list[dict]) -> MagicMock:
     """Create a mock supabase client that returns the given fills on
-    select and accepts DELETE + INSERT (legacy) or the atomic
-    rebuild RPC (audit-2026-05-07 G12.C.1/C.2) without error.
+    select and routes persistence EXCLUSIVELY through the atomic-rebuild
+    RPC (audit-2026-05-07 G12.C.1/C.2).
 
     Records every `supabase.rpc(name, payload)` call into
     ``mock.rpc_calls`` (a list of (name, payload) tuples) so tests can
     assert the new atomic-rebuild contract.
+
+    Audit H-0810 / M-0750: the legacy ``positions.delete().eq().execute()``
+    and ``positions.insert().execute()`` PostgREST chains are stubbed to
+    RAISE ``AssertionError`` on the terminal ``.execute()`` rather than
+    silently succeeding. Previously the tolerant (success-returning) stubs
+    meant only the single negative test
+    (``test_reconstruct_does_not_use_legacy_delete_path``) could catch a
+    regression that re-introduced the non-atomic DELETE-then-INSERT path —
+    every OTHER test using this helper would sail through a partial revert.
+    Failing loud here makes ANY test that drives the legacy path blow up,
+    so the migration's "atomic RPC owns DELETE+INSERT" invariant is enforced
+    file-wide. The ``.delete``/``.insert`` attributes remain MagicMocks so
+    the negative test's ``.called`` assertions still work; only the terminal
+    execute() is poisoned, and it is never reached when the production code
+    correctly uses the RPC.
     """
     mock = MagicMock()
 
@@ -86,20 +101,25 @@ def _make_mock_supabase(fills: list[dict]) -> MagicMock:
     mock_select.eq.return_value = mock_eq1
     mock_table_trades.select.return_value = mock_select
 
-    # positions.delete().eq().execute() → ok (legacy path; the atomic
-    # rebuild fix removes this from the live code path, but the mock
-    # still tolerates it so any unrelated test that exercises the old
-    # contract does not blow up.)
+    # positions.delete().eq().execute() → LOUD FAILURE. The atomic-rebuild
+    # RPC is the only sanctioned persistence path; reaching this terminal
+    # means the legacy non-transactional DELETE was re-introduced (H-0810).
     mock_table_positions = MagicMock()
     mock_delete = MagicMock()
     mock_delete_eq = MagicMock()
-    mock_delete_eq.execute.return_value = MagicMock(data=[])
+    mock_delete_eq.execute.side_effect = AssertionError(
+        "legacy positions.delete().eq().execute() path invoked — persistence "
+        "must flow through the reconstruct_positions_atomic RPC (G12.C.1)"
+    )
     mock_delete.eq.return_value = mock_delete_eq
     mock_table_positions.delete.return_value = mock_delete
 
-    # positions.insert().execute() → ok (legacy path, same rationale as above)
+    # positions.insert().execute() → LOUD FAILURE, same rationale.
     mock_insert = MagicMock()
-    mock_insert.execute.return_value = MagicMock(data=[])
+    mock_insert.execute.side_effect = AssertionError(
+        "legacy positions.insert().execute() path invoked — persistence must "
+        "flow through the reconstruct_positions_atomic RPC (G12.C.1)"
+    )
     mock_table_positions.insert.return_value = mock_insert
 
     def _table(name: str):
@@ -3134,3 +3154,60 @@ class TestTurnoverSeriesTypeValidation:
             positions_by_date, prices_by_date, nav_by_date
         )
         assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]
+
+
+# ---------------------------------------------------------------------------
+# Audit H-1095: _attribute_funding must NOT raise when every reconstructed
+# position has a falsy opened_at. The bounding-window `min(...)` over the
+# opened_at values sits BEFORE the DB-fetch try/except, so an empty sequence
+# raised ValueError that escaped _attribute_funding and crashed the entire
+# reconstruction — violating the documented fail-soft contract ("positions
+# keep funding_pnl=0").
+# ---------------------------------------------------------------------------
+class TestFundingWindowAllNullOpenedAt:
+    """When every position carries a falsy opened_at, funding attribution has
+    no lower window bound. It must fail SOFT (return early, leave funding_pnl
+    at its 0 default) rather than raising ValueError from `min([])`."""
+
+    @pytest.mark.asyncio
+    async def test_all_null_opened_at_does_not_crash_reconstruction(self) -> None:
+        """A single buy fill with a falsy ('') timestamp opens a position that
+        never closes, so its opened_at is '' (falsy). _attribute_funding's
+        bounding `min(p['opened_at'] for p in positions if p.get('opened_at'))`
+        sees an EMPTY generator. Pre-fix this raised
+        ValueError('min() arg is an empty sequence') OUTSIDE the DB try/except,
+        propagating out of reconstruct_positions. Post-fix the function
+        returns early and the open position is still persisted with
+        funding_pnl == 0 (the seeded default).
+        """
+        # One opening buy whose timestamp is an empty string: falsy, so it
+        # sorts cleanly yet yields opened_at == '' on the recorded open
+        # position. No closing fill → the position stays open.
+        fills = [
+            _make_fill(symbol="BTCUSDT", side="buy", price=100.0,
+                       quantity=1.0, timestamp=""),
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+
+        with patch(
+            "services.position_reconstruction.db_execute", side_effect=_run_sync
+        ):
+            # Must NOT raise ValueError from the empty-min bounding window.
+            result = await reconstruct_positions("strat-null-open", mock_supabase)
+
+        # Reconstruction completed: the open position survived and persisted.
+        assert result["total_positions"] == 1
+        assert result["open_positions"] == 1
+        assert result["closed_positions"] == 0
+
+        atomic = [
+            c for c in mock_supabase.rpc_calls
+            if c[0] == "reconstruct_positions_atomic"
+        ]
+        assert atomic, "atomic-rebuild RPC was not called"
+        rows = atomic[0][1]["p_positions"]
+        assert len(rows) == 1
+        # Funding attribution failed soft → funding_pnl stayed at the default 0
+        # (no window could be computed without any opened_at lower bound).
+        assert rows[0]["funding_pnl"] == 0
+        assert rows[0]["status"] == "open"

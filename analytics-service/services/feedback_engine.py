@@ -33,6 +33,7 @@ See .planning/phases/04-feedback-loop/04-CONTEXT.md for D-01..D-16 decision log.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Optional
 
@@ -55,6 +56,14 @@ SCALE_FLOOR = 0.5
 SCALE_CEILING = 1.5
 RATE_FLOOR_THRESHOLD = 0.4
 RATE_CEILING_THRESHOLD = 0.7
+
+# H-0678: single source of truth for the feedback-engine output version emitted
+# in audit metadata. Uses the vMAJOR.MINOR.PATCH form to match
+# match_engine.ENGINE_VERSION's convention (currently "v2.1.0"), so audit
+# consumers see one consistent version format. This is the FEEDBACK engine's
+# version and is independent of match_engine.ENGINE_VERSION (which versions
+# match_batches rows). Bump on any change to the attribution/shape contract.
+FEEDBACK_ENGINE_VERSION = "v1.0.0"
 
 ALL_DIMENSIONS: tuple[str, ...] = (
     "W_PORTFOLIO_FIT",
@@ -164,11 +173,31 @@ def _fetch_score_breakdowns(
         .in_("strategy_id", strategy_ids)
         .execute()
     )
+    # H-0679: the candidates query carries NO ORDER BY and there is no DB-level
+    # unique constraint on (batch_id, strategy_id) in this slice, so Supabase's
+    # within-batch row order is undefined. Cross-batch newest-wins is handled
+    # below by iterating batch_ids newest-first; to make the WITHIN-batch choice
+    # fully deterministic too (rather than depending on PostgREST internal
+    # ordering), sort by (batch_id, strategy_id, serialized score_breakdown) and
+    # keep the FIRST breakdown per (batch_id, strategy_id). The serialized-
+    # breakdown tiebreaker means even a duplicate (batch_id, strategy_id) row
+    # carrying a DIFFERENT payload resolves to the same (lexicographically-
+    # smallest) breakdown regardless of return order — the result is independent
+    # of Supabase's row order, not merely stable for distinct keys. Keeps the
+    # test_determinism contract independent of Supabase's return order.
     by_batch: dict[str, dict[str, dict[str, Any]]] = {}
-    for row in cand_result.data or []:
-        if not row.get("score_breakdown"):
-            continue
-        by_batch.setdefault(row["batch_id"], {})[row["strategy_id"]] = row["score_breakdown"]
+    sorted_rows = sorted(
+        (r for r in (cand_result.data or []) if r.get("score_breakdown")),
+        key=lambda r: (
+            r["batch_id"],
+            r["strategy_id"],
+            json.dumps(r["score_breakdown"], sort_keys=True, default=str),
+        ),
+    )
+    for row in sorted_rows:
+        by_batch.setdefault(row["batch_id"], {}).setdefault(
+            row["strategy_id"], row["score_breakdown"]
+        )
     out: dict[str, dict[str, Any]] = {}
     for bid in batch_ids:
         for sid, bd in by_batch.get(bid, {}).items():
@@ -263,12 +292,28 @@ def _persist_overrides(
     result = supabase.table("allocator_preferences").update({
         "scoring_weight_overrides": overrides if overrides else None,
     }).eq("user_id", allocator_id).execute()
+    # supabase-py update() defaults to Prefer: return=representation (postgrest
+    # ReturnMethod.representation), so a matched UPDATE returns the affected
+    # row(s) and a no-match UPDATE returns [] — bool(result.data) is a reliable
+    # affected-row signal under the supabase-py 2.x client.
     affected = bool(result.data)
     if not affected:
-        logger.debug(
-            "feedback_engine: no allocator_preferences row for %s; "
-            "overrides computed but not persisted (self-healing on next mandate write)",
-            allocator_id,
+        # H-0676/H-0677/M-0668: a missing allocator_preferences row means the
+        # overrides we just computed are NOT durably persisted here. The caller
+        # (compute_adjusted_weights) STILL returns them and match scoring still
+        # consumes them for this run, so the effect is real — it just self-heals
+        # to a persisted state on the next mandate write (which UPSERTs the row).
+        # The old debug-level log was invisible under the default WARNING root
+        # level, so this drop was silent. Surface it at WARNING with the override
+        # shape so an incident reviewer can correlate it with the audit event the
+        # caller emits with persisted=false. Creating the row here is intentionally
+        # avoided — it could violate other NOT NULL invariants on
+        # allocator_preferences and is out of this function's contract.
+        logger.warning(
+            "feedback_engine: no allocator_preferences row for %s; computed "
+            "overrides=%s NOT persisted (applied to this scoring run + recorded "
+            "in audit with persisted=false; self-heals on next mandate write)",
+            allocator_id, overrides if overrides else None,
         )
     return affected
 
@@ -289,13 +334,21 @@ def compute_adjusted_weights(allocator_id: str) -> dict[str, float]:
     outcomes = _fetch_eligible_outcomes(allocator_id)
     if not outcomes:
         affected = _persist_overrides(allocator_id, None)
+        # Unlike the main path below, this branch only CLEARS overrides and
+        # returns {} — when no row exists (affected False) nothing was cleared
+        # and nothing reaches scoring, so there is no effect to audit. When a
+        # row WAS cleared, record it (persisted is True here by construction).
         if affected:
             log_audit_event(
                 user_id=allocator_id,
                 action="feedback.overrides_updated",
                 entity_type="allocator_preference_feedback",
                 entity_id=allocator_id,
-                metadata={"dimensions_updated": [], "engine_version": "v1"},
+                metadata={
+                    "dimensions_updated": [],
+                    "engine_version": FEEDBACK_ENGINE_VERSION,
+                    "persisted": affected,
+                },
             )
         return {}
 
@@ -311,15 +364,22 @@ def compute_adjusted_weights(allocator_id: str) -> dict[str, float]:
 
     result = _apply_shape(dim_outcomes)
     affected = _persist_overrides(allocator_id, result)
-    if affected:
-        log_audit_event(
-            user_id=allocator_id,
-            action="feedback.overrides_updated",
-            entity_type="allocator_preference_feedback",
-            entity_id=allocator_id,
-            metadata={
-                "dimensions_updated": sorted(result.keys()),
-                "engine_version": "v1",
-            },
-        )
+    # H-0676 / silent-failure: `result` is returned and applied to live match
+    # scoring (routers/match.py) REGARDLESS of whether the row persisted, so the
+    # audit event must fire unconditionally on this path. Gating it on `affected`
+    # (the prior behaviour) made the forensic trail silently omit exactly the
+    # allocators whose preferences row is missing — even though their scoring was
+    # still adjusted by these overrides. `persisted` records whether the override
+    # was durably saved, so the audit record matches what scoring actually did.
+    log_audit_event(
+        user_id=allocator_id,
+        action="feedback.overrides_updated",
+        entity_type="allocator_preference_feedback",
+        entity_id=allocator_id,
+        metadata={
+            "dimensions_updated": sorted(result.keys()),
+            "engine_version": FEEDBACK_ENGINE_VERSION,
+            "persisted": affected,
+        },
+    )
     return result
