@@ -463,9 +463,18 @@ function defaultV2Config(): DashboardConfig {
   };
 }
 
-function loadV2Config(): DashboardConfig {
+/**
+ * NEW-C06-04: discriminated load result so callers can distinguish a clean
+ * parse from a reset (version mismatch, corrupt blob, all-tiles-invalid).
+ * `wasReset: true` means the returned `config` is the default layout, NOT
+ * the user's persisted layout — callers in cross-tab sync paths skip
+ * adopting a reset result to avoid clobbering valid in-memory state.
+ */
+type LoadV2Result = { config: DashboardConfig; wasReset: boolean };
+
+function loadV2ConfigResult(): LoadV2Result {
   if (typeof window === "undefined") {
-    return defaultV2Config();
+    return { config: defaultV2Config(), wasReset: false };
   }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -486,7 +495,7 @@ function loadV2Config(): DashboardConfig {
           },
         });
         setRecoveryFlag("version_reset");
-        return defaultV2Config();
+        return { config: defaultV2Config(), wasReset: true };
       }
       // Reject legacy-shape tiles and non-array tile blobs. tiles:null is
       // tagged parse_failed (no user opts into a null tiles field); legacy
@@ -524,16 +533,19 @@ function loadV2Config(): DashboardConfig {
           });
           setRecoveryFlag("parse_failed");
         }
-        return defaultV2Config();
+        return { config: defaultV2Config(), wasReset: true };
       }
       // Preserve an intentionally empty layout — the dashboard's empty-grid
       // callout already surfaces "Connect a strategy / add a widget" so we
       // never override the user's "remove all widgets" choice with defaults.
       if (parsed.tiles.length === 0) {
         return {
-          tiles: [],
-          timeframe: coerceTimeframe(parsed.timeframe),
-          layoutVersion: LAYOUT_VERSION,
+          config: {
+            tiles: [],
+            timeframe: coerceTimeframe(parsed.timeframe),
+            layoutVersion: LAYOUT_VERSION,
+          },
+          wasReset: false,
         };
       }
       // audit-2026-05-07 (M-0130 / M-0127 / M-1076 / M-0131) — validate
@@ -584,7 +596,7 @@ function loadV2Config(): DashboardConfig {
           extra: { droppedCount },
         });
         setRecoveryFlag("parse_failed");
-        return defaultV2Config();
+        return { config: defaultV2Config(), wasReset: true };
       }
       if (droppedCount > 0 && typeof console !== "undefined") {
         console.warn(
@@ -593,9 +605,12 @@ function loadV2Config(): DashboardConfig {
         );
       }
       return {
-        tiles: validatedTiles,
-        timeframe: coerceTimeframe(parsed.timeframe),
-        layoutVersion: LAYOUT_VERSION,
+        config: {
+          tiles: validatedTiles,
+          timeframe: coerceTimeframe(parsed.timeframe),
+          layoutVersion: LAYOUT_VERSION,
+        },
+        wasReset: false,
       };
     }
   } catch (err) {
@@ -620,7 +635,12 @@ function loadV2Config(): DashboardConfig {
     });
     setRecoveryFlag("parse_failed");
   }
-  return defaultV2Config();
+  return { config: defaultV2Config(), wasReset: true };
+}
+
+/** Compat shim used by useState initializer and tests. */
+function loadV2Config(): DashboardConfig {
+  return loadV2ConfigResult().config;
 }
 
 function persistV2(config: DashboardConfig): void {
@@ -848,7 +868,15 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
         persistTimerRef.current = null;
         persistV2(pendingConfigRef.current);
       }
-      const reloaded = loadV2Config();
+      // NEW-C06-04: use the discriminated result so we can skip adopting a
+      // reset (version mismatch / corrupt blob) from the foreign tab. If tab B
+      // wrote a blob this tab considers a mismatch or corrupt, loadV2Config
+      // returns defaultV2Config — adopting that would silently replace this
+      // tab's valid in-memory layout with defaults and cause the persist effect
+      // to write those defaults back. Skip on wasReset: true.
+      const loadResult = loadV2ConfigResult();
+      if (loadResult.wasReset) return;
+      const reloaded = loadResult.config;
       // NEW-C06-10: compute the comparison and assign the ref OUTSIDE the
       // setState updater. setState updaters must be pure — React invokes them
       // twice in dev StrictMode and may re-run them during concurrent
