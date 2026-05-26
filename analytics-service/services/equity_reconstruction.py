@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 from bisect import bisect_right
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -185,6 +186,58 @@ class _PerpAmtSource:
     CTVAL_TABLE: str = "ctval_table"
     FALLBACK_AMOUNT: str = "fallback_amount"
     INVERSE_UNSUPPORTED: str = "inverse_unsupported"
+
+
+@dataclass(frozen=True)
+class PerpPosition:
+    """Signed perp position state during the equity replay (H-1167).
+
+    Replaces the prior anemic ``dict[str, dict[str, float]]`` model whose
+    load-bearing invariant — ``size == 0`` MUST imply ``avg_entry == 0`` and
+    vice versa — was enforced only by prose comments and a defensive runtime
+    guard at the mark-to-market loop. ``size`` is signed (+ve long, -ve short);
+    ``avg_entry`` is the weighted-avg fill price of the currently-open lot.
+
+    ``frozen=True`` forbids in-place mutation, so the only way to change a
+    position is to construct a NEW instance — which re-runs ``__post_init__``.
+    Together they make the flat-position invariant truly unrepresentable: a
+    refactor that tried to set ``size`` to 0 without zeroing ``avg_entry`` (or
+    vice versa) raises — ``FrozenInstanceError`` on the attempted mutation, or
+    ``ValueError`` from ``__post_init__`` on construction — instead of silently
+    leaving a ghost mark on a closed position. ``mark`` centralises the
+    "return 0.0 when flat" rule the mark loop previously open-coded.
+
+    NOTE: this changes NO persisted output — the replay rows
+    (``_compute_daily_equity`` return value) are byte-for-byte identical.
+    The class is local to this module's replay; nothing in production imports
+    it (only the unit test does).
+    """
+
+    size: float = 0.0
+    avg_entry: float = 0.0
+
+    def __post_init__(self) -> None:
+        # Float equality against 0.0 is intentional: every branch in the
+        # replay assigns an exact 0.0 (not a computed near-zero) when it
+        # means "flat", so this catches the invariant violation without
+        # tripping on legitimate tiny-but-open positions.
+        if (self.size == 0.0) != (self.avg_entry == 0.0):
+            raise ValueError(
+                "PerpPosition invariant violated: size and avg_entry must be "
+                f"zero together (got size={self.size!r}, "
+                f"avg_entry={self.avg_entry!r})"
+            )
+
+    def mark(self, price: float) -> float:
+        """Unrealised PnL of this position marked at ``price``.
+
+        Returns ``0.0`` when flat (size == 0 ⇒ avg_entry == 0 by invariant),
+        so the caller no longer needs the ``if size == 0.0 or avg_entry ==
+        0.0: continue`` guard to suppress a ghost mark.
+        """
+        if self.size == 0.0:
+            return 0.0
+        return self.size * (price - self.avg_entry)
 
 
 def _is_inverse_perp(raw_symbol: str) -> bool:
@@ -819,7 +872,8 @@ def _compute_daily_equity(
     # Perp positions keyed by full ccxt symbol ('ETH/USDT:USDT'). Size is
     # signed: +ve = long, -ve = short. avg_entry is the weighted avg fill
     # price of the currently-open lot; resets to 0 when size goes to 0.
-    perp_positions: dict[str, dict[str, float]] = {}
+    # H-1167: PerpPosition enforces the size==0 ⟺ avg_entry==0 invariant.
+    perp_positions: dict[str, PerpPosition] = {}
 
     # Pre-sort pricing keys once so the inner hot loop does O(log n) lookups
     # instead of O(n log n) per (day, symbol) cell. ohlcv rows come back
@@ -966,9 +1020,15 @@ def _compute_daily_equity(
                             "amt_source": amt_src,
                         })
                     signed = amt_base if side == "buy" else -amt_base
-                    pos = perp_positions.get(raw_symbol, {"size": 0.0, "avg_entry": 0.0})
-                    cur_size = pos["size"]
-                    cur_avg = pos["avg_entry"]
+                    pos = perp_positions.get(raw_symbol) or PerpPosition()
+                    cur_size = pos.size
+                    cur_avg = pos.avg_entry
+                    # H-1167: each branch computes the FINAL (size, avg_entry)
+                    # pair and constructs a fresh PerpPosition so the
+                    # __post_init__ invariant check fires on every transition,
+                    # rather than mutating attributes in place (which would
+                    # skip validation). Arithmetic is unchanged from the prior
+                    # dict-mutation version.
                     if cur_size == 0.0 or (cur_size > 0) == (signed > 0):
                         # Open new or increase same-direction. Avg entry is
                         # weighted by contract size, not by notional value —
@@ -976,12 +1036,10 @@ def _compute_daily_equity(
                         # how leverage is recorded on the venue.
                         new_size = cur_size + signed
                         if new_size != 0.0:
-                            pos["avg_entry"] = (
-                                cur_size * cur_avg + signed * price
-                            ) / new_size
+                            new_avg = (cur_size * cur_avg + signed * price) / new_size
                         else:
-                            pos["avg_entry"] = 0.0
-                        pos["size"] = new_size
+                            new_avg = 0.0
+                        pos = PerpPosition(size=new_size, avg_entry=new_avg)
                     else:
                         # Opposite-direction: reduce, full close, or flip.
                         close_size = min(abs(cur_size), abs(signed))
@@ -993,16 +1051,19 @@ def _compute_daily_equity(
                             if remainder > 0.0:
                                 # Flip: old side fully closed, new side
                                 # opens at trade price for the remainder.
-                                pos["size"] = (1.0 if signed > 0 else -1.0) * remainder
-                                pos["avg_entry"] = price
+                                pos = PerpPosition(
+                                    size=(1.0 if signed > 0 else -1.0) * remainder,
+                                    avg_entry=price,
+                                )
                             else:
-                                pos["size"] = 0.0
-                                pos["avg_entry"] = 0.0
+                                pos = PerpPosition()
                         else:
                             # Partial close: avg_entry is unchanged on the
                             # remaining lot (the fills that are still open
                             # were always filled at `cur_avg`).
-                            pos["size"] = cur_size + signed
+                            pos = PerpPosition(
+                                size=cur_size + signed, avg_entry=cur_avg
+                            )
                     perp_positions[raw_symbol] = pos
                 else:
                     if side == "buy":
@@ -1056,9 +1117,11 @@ def _compute_daily_equity(
         # so it doesn't collide with a spot holding of the same base
         # currency and matches the refresh-path key shape (H-1157 / H-1165).
         for perp_sym, pos in perp_positions.items():
-            size = pos.get("size") or 0.0
-            avg_entry = pos.get("avg_entry") or 0.0
-            if size == 0.0 or avg_entry == 0.0:
+            # H-1167: invariant guarantees size==0 ⟺ avg_entry==0, so the
+            # single flat-check below subsumes the prior two-field guard.
+            # Keep it BEFORE _price_on so a flat position doesn't pollute
+            # skipped_symbols on an OHLCV gap.
+            if pos.size == 0.0:
                 continue
             base = perp_sym.split("/")[0].upper()
             quote_sym = (
@@ -1071,7 +1134,7 @@ def _compute_daily_equity(
                 if skipped_symbols is not None:
                     skipped_symbols.add(base)
                 continue
-            unrealized = size * (px - avg_entry)
+            unrealized = pos.mark(px)
             if unrealized == 0.0:
                 continue
             key = breakdown_key_for_perp(base, quote_sym)

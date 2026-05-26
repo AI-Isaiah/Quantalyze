@@ -894,6 +894,54 @@ def test_determinism(monkeypatch):
     assert r1 == r2, f"Non-deterministic: {r1} != {r2}"
 
 
+def test_fetch_score_breakdowns_deterministic_under_duplicate_rows(monkeypatch):
+    """H-0679: with NO ORDER BY and no DB unique constraint on
+    (batch_id, strategy_id), Supabase may return duplicate candidate rows for
+    the same (batch_id, strategy_id) in arbitrary order. _fetch_score_breakdowns
+    must resolve to the SAME score_breakdown regardless of that order — the
+    serialized-breakdown tiebreaker picks the lexicographically-smallest payload
+    deterministically. Pre-fix (last-write-wins, or sort WITHOUT the tiebreaker)
+    the two return orders yielded different breakdowns."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    from services.feedback_engine import _fetch_score_breakdowns
+
+    bd_a = {"portfolio_fit": 0.1, "preference_fit": 0.2,
+            "track_record": 0.3, "capacity_fit": 0.4}
+    bd_b = {"portfolio_fit": 0.9, "preference_fit": 0.8,
+            "track_record": 0.7, "capacity_fit": 0.6}
+    row_a = {"batch_id": "b1", "strategy_id": "s1", "score_breakdown": bd_a}
+    row_b = {"batch_id": "b1", "strategy_id": "s1", "score_breakdown": bd_b}
+
+    def _mock_for(cand_rows):
+        mock_sb = MagicMock()
+        # match_batches: .select("id").eq().order().execute()
+        mock_sb.table.return_value.select.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(
+            data=[{"id": "b1"}]
+        )
+        # match_candidates: .select().in_().in_().execute()
+        mock_sb.table.return_value.select.return_value.in_.return_value.in_.return_value.execute.return_value = MagicMock(
+            data=cand_rows
+        )
+        return mock_sb
+
+    # Same two duplicate rows, opposite Supabase return orders.
+    monkeypatch.setattr("services.feedback_engine.get_supabase",
+                        lambda: _mock_for([row_a, row_b]))
+    out_forward = _fetch_score_breakdowns("alloc-dup", ["s1"])
+
+    monkeypatch.setattr("services.feedback_engine.get_supabase",
+                        lambda: _mock_for([row_b, row_a]))
+    out_reverse = _fetch_score_breakdowns("alloc-dup", ["s1"])
+
+    assert out_forward == out_reverse, (
+        f"non-deterministic dedup across return orders: {out_forward} != {out_reverse}"
+    )
+    # The lexicographically-smallest serialized breakdown wins: bd_a's JSON
+    # ('...capacity_fit": 0.4...') sorts before bd_b's ('...0.6...').
+    assert out_forward["s1"] == bd_a, out_forward
+
+
 # ---------------------------------------------------------------------------
 # 04-01-19: Omit under-trained dimensions
 # ---------------------------------------------------------------------------
@@ -1276,6 +1324,51 @@ def test_audit_event_emitted(monkeypatch):
     assert call.get("user_id") == "alloc-audit", f"user_id mismatch: {call}"
     assert call.get("action") == "feedback.overrides_updated", f"action mismatch: {call}"
     assert call.get("entity_type") == "allocator_preference_feedback", f"entity_type mismatch: {call}"
+    # H-0678: the emitted engine_version must equal the FEEDBACK_ENGINE_VERSION
+    # constant. Assert the LITERAL so a typo'd/accidental bump fails this test.
+    md = call.get("metadata", {})
+    assert md.get("engine_version") == "v1.0.0", f"engine_version mismatch: {md}"
+    # silent-failure/H-0676: a matched UPDATE (update_affected default True)
+    # must stamp persisted=True so the audit record reflects durable persistence.
+    assert md.get("persisted") is True, f"persisted should be True on matched UPDATE: {md}"
+    assert md.get("dimensions_updated") == ["W_PREFERENCE_FIT"], md
+
+
+def test_audit_emitted_with_persisted_false_when_row_missing(monkeypatch):
+    """silent-failure / H-0676: when allocator_preferences has NO row
+    (update_affected=False) but eligible outcomes exist, the computed overrides
+    are STILL returned and applied to live match scoring (routers/match.py),
+    so the audit event MUST fire with metadata['persisted'] is False. Gating the
+    audit on persistence (the pre-fix behaviour) silently omitted exactly these
+    allocators from the forensic trail while their scoring was being adjusted."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    rejected = [
+        _make_outcome(
+            strategy_id=f"r{i}", kind="rejected",
+            rejection_reason="mandate_conflict",
+            delta_180d=None, delta_90d=None, delta_30d=None,
+            percent_allocated=None,
+        )
+        for i in range(5)
+    ]
+    # update_affected=False → the UPDATE matches no row (missing preferences row).
+    mock_sb = _make_mock_supabase(rejected_rows=rejected, update_affected=False)
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    audit_calls = []
+    monkeypatch.setattr(
+        "services.feedback_engine.log_audit_event",
+        lambda **kw: audit_calls.append(kw),
+    )
+
+    result = compute_adjusted_weights("alloc-no-row")
+    # Overrides are still computed + returned (and consumed by scoring upstream).
+    assert result == {"W_PREFERENCE_FIT": 0.5}, result
+    # The audit event fires DESPITE no persistence, flagged persisted=False.
+    assert len(audit_calls) == 1, f"expected 1 audit emission, got {len(audit_calls)}"
+    md = audit_calls[0].get("metadata", {})
+    assert md.get("persisted") is False, f"expected persisted=False, got {md}"
+    assert md.get("dimensions_updated") == ["W_PREFERENCE_FIT"], md
 
 
 # ---------------------------------------------------------------------------

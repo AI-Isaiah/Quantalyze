@@ -516,7 +516,33 @@ async def _attribute_funding(
     # Compute the date window that bounds all positions so the query is a
     # tight range scan on the (strategy_id, timestamp DESC) index rather
     # than a full strategy-partition scan.
-    min_opened_at = min(p["opened_at"] for p in positions if p.get("opened_at"))
+    #
+    # Audit H-1095: `min(... if p.get('opened_at'))` raises
+    # ValueError('min() arg is an empty sequence') when EVERY position has a
+    # falsy opened_at (e.g. open positions seeded from a fill whose timestamp
+    # was NULL/empty → position_open_time=None). This computation sits before
+    # the DB-fetch try/except below, so the ValueError would escape and crash
+    # the whole reconstruction — violating this function's documented
+    # fail-soft contract (positions keep funding_pnl=0). Materialize the valid
+    # opens and return early when none exist: with no lower bound there is no
+    # funding window to attribute, and every position already defaults to
+    # funding_pnl=0.
+    valid_opens = [p["opened_at"] for p in positions if p.get("opened_at")]
+    if not valid_opens:
+        # Fail-soft, consistent with the funding_fees-fetch-failure path below:
+        # no position has a usable opened_at (every fill carried a NULL/empty
+        # timestamp), so there is no lower window bound to attribute funding
+        # against. Surface it at WARNING — matching this function's documented
+        # fail-soft logging convention — so the all-positions-null-timestamp
+        # corruption is observable rather than a silent no-op, then leave every
+        # position's funding_pnl at its 0 default.
+        logger.warning(
+            "funding attribution skipped for strategy %s: all %d positions have "
+            "a falsy opened_at — funding_pnl stays 0",
+            strategy_id, len(positions),
+        )
+        return
+    min_opened_at = min(valid_opens)
     max_closed_at = max(
         (p.get("closed_at") or now.isoformat()) for p in positions
     )

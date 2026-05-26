@@ -1041,6 +1041,39 @@ def test_wr03_compute_daily_equity_spot_symbol_unchanged():
     assert rows[0]["value_usd"] == 0.0
 
 
+def test_perp_position_invariant_and_mark():
+    """H-1167: PerpPosition enforces the flat-position invariant
+    (size == 0 ⟺ avg_entry == 0) at construction, is immutable (frozen=True),
+    and mark() returns 0.0 when flat. Directly pins the contract the equity
+    replay relies on when it collapsed the old two-field ghost-mark guard into a
+    single `pos.size == 0.0` check — without this, a refactor that flipped the
+    invariant or unfroze the class would pass every integration test (valid
+    replays never construct an invariant-violating pair)."""
+    import dataclasses
+
+    from services.equity_reconstruction import PerpPosition
+
+    # Flat is representable; mark() is 0.0 regardless of price.
+    flat = PerpPosition()
+    assert flat.size == 0.0 and flat.avg_entry == 0.0
+    assert flat.mark(123.45) == 0.0
+
+    # Long / short marks: signed size * (price - avg_entry).
+    assert PerpPosition(size=2.0, avg_entry=50.0).mark(60.0) == pytest.approx(20.0)
+    assert PerpPosition(size=-2.0, avg_entry=50.0).mark(60.0) == pytest.approx(-20.0)
+
+    # Invariant violations raise at construction — BOTH directions.
+    with pytest.raises(ValueError):
+        PerpPosition(size=0.0, avg_entry=5.0)   # closed but ghost avg_entry
+    with pytest.raises(ValueError):
+        PerpPosition(size=2.0, avg_entry=0.0)   # open at price 0 (corrupt)
+
+    # frozen=True: in-place mutation is forbidden, so the only way to change
+    # state is to construct a fresh (re-validated) instance.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        PerpPosition(size=2.0, avg_entry=50.0).size = 0.0
+
+
 # ---------------------------------------------------------------------------
 # Test 9 — WR-04 regression: generic exceptions from fetch_deposits /
 # fetch_withdrawals MUST bubble to the outer handler for classification,
