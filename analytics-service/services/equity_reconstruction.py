@@ -1969,14 +1969,17 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
                 error_kind=error_kind,
             )
         except Exception as exc:  # noqa: BLE001
-            # H-1172: log the full traceback BEFORE sanitisation so the
-            # original error reaches stdout/sentry. The 500-char audit
-            # event keeps a sanitised summary for the trail; the logger
-            # call captures the unredacted root cause for ops.
-            logger.exception(
+            # H-1172: log the error before sanitisation so the original error
+            # reaches stdout/sentry. Use warning + scrub_freeform_string instead
+            # of logger.exception — logger.exception (exc_info=True) embeds the
+            # full exception string including ccxt NetworkError URLs with
+            # &signature=<HMAC-SHA256>, bypassing the redact processor (H-3).
+            from .redact import scrub_freeform_string
+            logger.warning(
                 "reconstruct_allocator_history unhandled exception "
-                "allocator=%s key=%s venue=%s",
+                "allocator=%s key=%s venue=%s exc_class=%s scrubbed=%s",
                 allocator_id, api_key_id, venue,
+                type(exc).__name__, scrub_freeform_string(str(exc)),
             )
             error_kind, msg = classify_exception(exc)
             sanitized = msg[:500]
@@ -2057,13 +2060,15 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
             ctx.supabase, rows, allocator_id, depth_months,
         )
     except Exception as exc:  # noqa: BLE001
-        # Same surfacing pattern as the fetch-window catch — log full
-        # traceback for sentry/stdout, then sanitised audit + FAILED
-        # outcome so the worker retries with backoff. H-1172.
-        logger.exception(
+        # Same surfacing pattern as the fetch-window catch — log before
+        # sanitisation but use warning + scrub instead of logger.exception
+        # to avoid HMAC leakage via exc_info=True (red-team/H-3). H-1172.
+        from .redact import scrub_freeform_string
+        logger.warning(
             "reconstruct_allocator_history persist phase unhandled exception "
-            "allocator=%s key=%s venue=%s",
+            "allocator=%s key=%s venue=%s exc_class=%s scrubbed=%s",
             allocator_id, api_key_id, venue,
+            type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         error_kind, msg = classify_exception(exc)
         sanitized = msg[:500]
