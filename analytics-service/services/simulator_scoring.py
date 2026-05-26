@@ -132,6 +132,11 @@ def simulate_add_candidate(
         # Null them out so the UI renders a dash rather than a misleading float.
         # current_metrics_reliable=False signals callers that the portfolio-side
         # values are also unreliable, not just the proposed side.
+        # H-3 (red-team): equity_curve_current was also emitted here over the
+        # sub-30-day window. A short curve rendered alongside null metric chips
+        # is inconsistent (the chart looks "representative" while the numbers
+        # show "—") and starts at an arbitrary recent date rather than a
+        # meaningful base. Null it out for consistency with the nulled metrics.
         return {
             "candidate_id": candidate_id,
             "status": "insufficient_data",
@@ -141,7 +146,7 @@ def simulate_add_candidate(
             "deltas": _zero_deltas(),
             "current": _metrics_dict(None, None, None, None),
             "proposed": _metrics_dict(None, None, None, None),
-            "equity_curve_current": _cumulative_curve(current_returns),
+            "equity_curve_current": [],
             "equity_curve_proposed": [],
         }
 
@@ -177,6 +182,10 @@ def simulate_add_candidate(
         "status": "ok",
         "overlap_days": overlap_days,
         "partial_history": partial_history,
+        # M-3 (red-team): present in both branches so callers get a consistent
+        # shape. True here because overlap_days >= MIN_DATA_POINTS guarantees
+        # Sharpe / MaxDD are computed over a meaningful window.
+        "current_metrics_reliable": True,
         "deltas": {
             "sharpe_delta": _safe_float(sharpe_delta),
             "dd_delta": _safe_float(dd_delta),

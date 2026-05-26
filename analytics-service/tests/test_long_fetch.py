@@ -596,6 +596,237 @@ async def test_long_fetch_csv_read_only_none_not_rejected() -> None:
     csv_adapter.fetch_raw.assert_awaited_once()
 
 
+# ---------------------------------------------------------------------------
+# Red-team regression tests (2026-05-26)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_probe_error_is_transient_not_permanent() -> None:
+    """C-1 / L-3 (red-team): when detect_permissions() returned _FAIL_CLOSED
+    (probe_error=True), long_fetch must NOT permanently reject the key.
+
+    _FAIL_CLOSED sets has_withdraw=True, has_trade=True → exchange.py derives
+    read_only=False, error_code="WITHDRAW_SCOPE" from those fail-closed defaults.
+    Before this fix, "WITHDRAW_SCOPE" was in permanent_codes → the worker marked
+    the job failed-permanent and never retried, permanently banning a user whose
+    legitimately-read-only key happened to hit an exchange 502 during the probe.
+
+    After the fix: probe_error=True in debug_context → transient early-return
+    before the scope gate fires, so the worker retries the entire probe.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-probe-error",
+        "kind": "process_key_long",
+        "strategy_id": "s-probe",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-probe",
+            "source": "okx",
+            "flow_type": "onboard",
+            "correlation_id": "cid-probe",
+            "context": {"strategy_id": "s-probe"},
+        },
+    }
+
+    # Simulate _FAIL_CLOSED result: detect_permissions raised a network
+    # error, returned the fail-closed default, and exchange.py derived
+    # read_only=False + error_code="WITHDRAW_SCOPE" from those defaults.
+    probe_error_adapter = MagicMock()
+    probe_error_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=False,  # derived from _FAIL_CLOSED has_withdraw=True
+            error_code="WITHDRAW_SCOPE",  # derived from _FAIL_CLOSED has_withdraw=True
+            human_message="Key has withdrawal permissions.",
+            debug_context={"probe_error": True},  # the discriminating signal
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=probe_error_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    # C-1 fix: probe_error → transient, not permanent.
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient", (
+        "probe_error=True must produce a transient failure so the worker retries. "
+        "Pre-fix: WITHDRAW_SCOPE was in permanent_codes → irrecoverable permanent "
+        "ban from an exchange 502 during the permission probe."
+    )
+    # The scope gate must NOT have fired — no draft-transition RPC.
+    for call in sb.rpc.call_args_list:
+        if call.args and call.args[0] == "transition_strategy_verification":
+            assert False, (
+                "probe_error path must NOT call transition_strategy_verification — "
+                "the key was not scope-rejected, only the probe was transient."
+            )
+
+    # Pipeline must have bailed before broker fetch.
+    probe_error_adapter.fetch_raw.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_validation_unexpected_from_adapter_is_transient() -> None:
+    """M-1 (red-team): VALIDATION_UNEXPECTED set by the adapter for a genuine
+    unexpected exception (e.g. ccxt.ExchangeNotAvailable not in typed hierarchy)
+    must remain retryable (transient), not permanent.
+
+    Pre-fix: VALIDATION_UNEXPECTED was unconditionally added to permanent_codes
+    (IMP-1 comment). But VALIDATION_UNEXPECTED is also the code set by
+    exchange.py line 621 for any unexpected exception during validate — those
+    can be transient (exchange down, WAF block on a different endpoint). A
+    legitimate user's key submission would silently become irrecoverable.
+
+    Post-fix: VALIDATION_UNEXPECTED is permanent ONLY when it is our own
+    fallback (val.error_code was None + read_only=False). When the adapter
+    set it for an actual exception (val.error_code == "VALIDATION_UNEXPECTED"
+    explicitly), it is transient.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-unexpected-exc",
+        "kind": "process_key_long",
+        "strategy_id": "s-unexpected",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-unexpected",
+            "source": "binance",
+            "flow_type": "onboard",
+            "correlation_id": "cid-unexpected",
+            "context": {"strategy_id": "s-unexpected"},
+        },
+    }
+
+    # Adapter had an unexpected exception → set valid=False, error_code="VALIDATION_UNEXPECTED".
+    unexpected_adapter = MagicMock()
+    unexpected_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=False,
+            read_only=None,
+            error_code="VALIDATION_UNEXPECTED",  # adapter-set, not our fallback
+            human_message="Key validation failed unexpectedly.",
+            debug_context={"probe_error": False},
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=unexpected_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient", (
+        "VALIDATION_UNEXPECTED set by the adapter (unexpected exception) must be "
+        "transient so the worker can retry when the exchange comes back up. "
+        "Pre-fix: it was unconditionally in permanent_codes → irrecoverable."
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_validation_unexpected_fallback_is_permanent() -> None:
+    """M-1 complement: VALIDATION_UNEXPECTED as our OWN fallback
+    (val.error_code is None + read_only=False) must still be permanent.
+
+    This is the IMP-1 case: an adapter confirms write-scope (read_only=False)
+    but doesn't set an error_code. We fallback to VALIDATION_UNEXPECTED and
+    must NOT retry forever.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-fallback-perm",
+        "kind": "process_key_long",
+        "strategy_id": "s-fallback-perm",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-fallback-perm",
+            "source": "bybit",
+            "flow_type": "onboard",
+            "correlation_id": "cid-fallback-perm",
+            "context": {"strategy_id": "s-fallback-perm"},
+        },
+    }
+
+    fallback_adapter = MagicMock()
+    fallback_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=False,   # write-capable confirmed by adapter
+            error_code=None,   # but no error_code set — our fallback fires
+            human_message="Write-capable key.",
+            debug_context={"probe_error": False},
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=fallback_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent", (
+        "VALIDATION_UNEXPECTED as fallback (read_only=False + no error_code) must "
+        "be permanent so a write-capable key does not retry forever."
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_defense_in_depth_error_code_none_read_only_gate() -> None:
+    """H-2 (red-team): defense-in-depth branch — read_only=None + explicit
+    TRADE_SCOPE error_code still fires the scope gate.
+
+    A future adapter that sets error_code="TRADE_SCOPE" but leaves read_only
+    unset (None) should still be rejected. The `val.error_code in {...}` arm of
+    _scope_rejected is the only arm that catches this, since
+    `val.read_only is False` is False when read_only=None.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-dib",
+        "kind": "process_key_long",
+        "strategy_id": "s-dib",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-dib",
+            "source": "okx",
+            "flow_type": "onboard",
+            "correlation_id": "cid-dib",
+            "context": {"strategy_id": "s-dib"},
+        },
+    }
+
+    dib_adapter = MagicMock()
+    dib_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=None,         # adapter omitted read_only
+            error_code="TRADE_SCOPE",  # but still set the scope code
+            human_message="Key has trading permissions.",
+            debug_context={"probe_error": False},
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=dib_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    # Defense-in-depth: the error_code arm catches this even with read_only=None.
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    dib_adapter.fetch_raw.assert_not_called()
+
+
 def test_long_fetch_uses_shared_metrics_encoder() -> None:
     """WR-05 regression (REVIEW.md 2026-05-08).
 

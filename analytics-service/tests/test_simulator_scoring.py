@@ -343,3 +343,108 @@ class TestSimulateAddCandidate:
         # by construction (going from 2 to 3 strategies).
         assert result["deltas"]["sharpe_delta"] > 0
         assert result["deltas"]["concentration_delta"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Red-team regression tests (2026-05-26)
+# ---------------------------------------------------------------------------
+
+
+class TestRedteamRegressions:
+    def test_insufficient_data_equity_curve_current_is_empty(self):
+        """H-3 (red-team): equity_curve_current must be [] in the
+        insufficient_data branch — not a short sub-MIN_DATA_POINTS curve.
+
+        Pre-fix: the branch emitted _cumulative_curve(current_returns) for
+        equity_curve_current even while nulling metric chips. A sub-30-day
+        curve rendered alongside null chips (sharpe=None etc.) is visually
+        inconsistent: the chart implies "representative history" while
+        the numbers show "—". The curve also starts at an arbitrary recent
+        date rather than a meaningful base.
+
+        Post-fix: equity_curve_current=[] in the insufficient_data branch,
+        matching equity_curve_proposed=[] for a consistent "no data" UI state.
+        """
+        portfolio = {
+            "s1": _make_returns(1, n=60),
+            "s2": _make_returns(2, n=60),
+        }
+        # Candidate with only 10 overlap days → below MIN_DATA_POINTS=30
+        candidate = _make_returns(10, n=10)
+        weights = {"s1": 0.5, "s2": 0.5}
+
+        result = simulate_add_candidate(
+            portfolio_returns=portfolio,
+            candidate_id="c1",
+            candidate_returns=candidate,
+            weights=weights,
+        )
+
+        assert result["status"] == "insufficient_data"
+        assert result["equity_curve_current"] == [], (
+            "H-3: equity_curve_current must be [] in insufficient_data. "
+            "Pre-fix: it was _cumulative_curve(current_returns) over the "
+            "sub-30-day window, inconsistent with the nulled metric chips."
+        )
+        assert result["equity_curve_proposed"] == []
+
+    def test_ok_branch_has_current_metrics_reliable_true(self):
+        """M-3 (red-team): the ok branch must include current_metrics_reliable=True.
+
+        Pre-fix: only the insufficient_data branch emitted current_metrics_reliable
+        (False). The ok branch did not emit the field. A caller using
+        result.get("current_metrics_reliable") would get None (falsy) on the ok
+        path, potentially triggering a "metrics unreliable" UI state for a fully
+        valid simulation result.
+
+        Post-fix: both branches emit the field — False for insufficient_data,
+        True for ok.
+        """
+        portfolio = {
+            "s1": _make_returns(1, n=180),
+            "s2": _make_returns(2, n=180),
+        }
+        candidate = _make_returns(10, n=180)
+        weights = {"s1": 0.5, "s2": 0.5}
+
+        result = simulate_add_candidate(
+            portfolio_returns=portfolio,
+            candidate_id="c1",
+            candidate_returns=candidate,
+            weights=weights,
+        )
+
+        assert result["status"] == "ok"
+        assert "current_metrics_reliable" in result, (
+            "M-3: ok branch must include current_metrics_reliable key. "
+            "Pre-fix: the key was absent → result.get('current_metrics_reliable') "
+            "returned None (falsy), triggering a spurious UI warning."
+        )
+        assert result["current_metrics_reliable"] is True, (
+            "M-3: current_metrics_reliable must be True in the ok branch "
+            f"(overlap_days={result['overlap_days']} >= MIN_DATA_POINTS=30)."
+        )
+
+    def test_both_branches_have_consistent_result_shape(self):
+        """M-3 complement: current_metrics_reliable is present in BOTH
+        branches with appropriate values — no KeyError for callers that
+        access the field unconditionally.
+        """
+        # Scenario 1: ok branch
+        port = {"s1": _make_returns(1, n=200), "s2": _make_returns(2, n=200)}
+        cand_ok = _make_returns(10, n=200)
+        r_ok = simulate_add_candidate(
+            portfolio_returns=port, candidate_id="c_ok",
+            candidate_returns=cand_ok, weights={"s1": 0.5, "s2": 0.5},
+        )
+        assert r_ok["status"] == "ok"
+        assert r_ok["current_metrics_reliable"] is True
+
+        # Scenario 2: insufficient_data branch
+        cand_short = _make_returns(10, n=5)  # 5 overlap days << 30
+        r_short = simulate_add_candidate(
+            portfolio_returns=port, candidate_id="c_short",
+            candidate_returns=cand_short, weights={"s1": 0.5, "s2": 0.5},
+        )
+        assert r_short["status"] == "insufficient_data"
+        assert r_short["current_metrics_reliable"] is False
