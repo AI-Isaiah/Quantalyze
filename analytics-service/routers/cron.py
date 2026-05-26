@@ -662,7 +662,7 @@ async def cron_sync():
             # An unbounded list grows 1:1 with active keys × strategies and
             # can exceed the PostgREST URL limit (HTTP 414 / silent truncation),
             # silently dropping affected portfolios from the recompute cascade.
-            # match.py:L874 already documents this hazard; same fix here.
+            # match.py:L1126 already documents this hazard; same fix here.
             ps_data: list[dict] = []
             for _page_start in range(0, len(synced_strategy_ids), _CRON_IN_LIST_PAGE_SIZE):
                 _chunk = synced_strategy_ids[_page_start:_page_start + _CRON_IN_LIST_PAGE_SIZE]
@@ -712,8 +712,6 @@ async def cron_sync():
             # it impossible to determine which chunk failed and how many
             # portfolio_ids had already been successfully collected before the
             # failure — those are silently dropped when we reset to [].
-            # L-1 (red-team): the original dir()-guard was dead code — ps_data
-            # is always initialised before this loop (ps_data: list[dict] = []).
             _ps_collected = len(ps_data)
             _n_strat_pages = (
                 (len(synced_strategy_ids) + _CRON_IN_LIST_PAGE_SIZE - 1)

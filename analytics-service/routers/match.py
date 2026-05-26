@@ -73,7 +73,7 @@ _force_lock: dict[str, asyncio.Lock] = {}
 # so no NameError in production, but tests that partially evaluate the module
 # or monkeypatch before full load would raise. Canonical placement with the
 # other per-module constants ensures the definition precedes every use.
-# The retention sweep already documents this hazard at L919; the same
+# The retention sweep already documents this hazard at L1122; the same
 # URL-length cap applies to every unbounded .in_() against strategy_analytics.
 # 200 IDs/request is well under the PostgREST/nginx URL cap (~8KB) for
 # typical 36-char UUIDs and keeps the per-query response size manageable.
@@ -199,7 +199,7 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
         return {"strategies_by_id": {}, "returns_by_id": {}}
 
     # NEW-C08-02: paginate the analytics IN-list. The retention sweep at
-    # L872-905 already documents this hazard ("an unbounded list risks HTTP
+    # L1122 already documents this hazard ("an unbounded list risks HTTP
     # 414 or silent filter truncation"); this fetch was unguarded. On
     # truncation, missing strategies received analytics={} → None Sharpe/DD/
     # returns, still emitted as candidates, scored on defaults (preference_fit
