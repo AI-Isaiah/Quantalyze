@@ -288,6 +288,30 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
     };
   }, [state.accentIntensity]);
 
+  // NEW-C22-01: cross-tab sync. Without this listener, Tab A toggles density
+  // → Tab B's in-memory state stays stale → Tab B's next knob change persists
+  // its stale snapshot, overwriting Tab A's edit (last-writer-wins). Re-parse
+  // + setState on same-key storage events, wrapped in the same try/catch as
+  // loadTweaks so Safari private-mode failures stay silent.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    function onStorage(e: StorageEvent) {
+      if (e.key !== STORAGE_KEY) return;
+      if (e.newValue === null) return; // ignore clears
+      try {
+        setState(parseTweakState(JSON.parse(e.newValue)));
+      } catch (err) {
+        if (typeof console !== "undefined") {
+          console.warn("[TweaksContext] cross-tab storage event parse failed", err);
+        }
+      }
+    }
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
   const set = useCallback<TweaksContextValue["set"]>((key, value) => {
     setState((prev) => ({ ...prev, [key]: value }));
   }, []);

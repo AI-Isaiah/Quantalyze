@@ -352,6 +352,36 @@ describe("Tweaks — hydration", () => {
     // the default path) — assert the persisted state below.
     expect(document.body.getAttribute("data-density")).toBe("comfortable");
   });
+
+  it("NEW-C22-01: cross-tab storage event updates density in the mounted provider", () => {
+    // Start with "comfortable" (default).
+    act(() => {
+      render(<Harness />);
+    });
+    expect(document.body.getAttribute("data-density")).toBe("comfortable");
+
+    // Simulate another tab writing a new blob with density="tight".
+    const newBlob = JSON.stringify({ ...{
+      density: "tight",
+      accentIntensity: "muted",
+      displayFont: "serif",
+      bridgeVariant: "full",
+      chartStyle: "area",
+      showBench: true,
+      showOutcomes: true,
+    } });
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: "allocations.tweaks",
+          newValue: newBlob,
+        }),
+      );
+    });
+
+    // Provider should have updated body[data-density] to "tight".
+    expect(document.body.getAttribute("data-density")).toBe("tight");
+  });
 });
 
 /**
