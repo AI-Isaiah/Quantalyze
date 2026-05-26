@@ -69,7 +69,16 @@ export const POST = withRole<{ id: string }>("admin")(
     // requireAdmin TOCTOU re-check BEFORE consuming a rate-limit token.
     // Mirrors approve's red-team-MED ordering — a demoted admin must
     // not touch the rate-limit bucket before being told 403.
-    const adminGuard = await requireAdmin(supabase, user);
+    //
+    // NEW-C36-01 (audit 2026-05-26, LOW conf-9): pass `req` so requireAdmin
+    // re-runs assertSameOrigin as a defense-in-depth CSRF arm on this
+    // mutating path — matching the symmetry the docstring claims and that
+    // approve already enforces. Without `req`, a future refactor that drops
+    // the outer withRole CSRF wrapper would leave this irreversible-adjacent
+    // path (permanent Art. 17 denial) with zero CSRF defense while approve
+    // remains protected. The req arg is optional on requireAdmin (so older
+    // callers remain compatible); new mutating call sites MUST pass it.
+    const adminGuard = await requireAdmin(supabase, user, req);
     if (adminGuard) return adminGuard;
 
     // audit-2026-05-07 red-team-HIGH (reject-asymmetry-vs-approve-hardening):
