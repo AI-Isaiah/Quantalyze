@@ -464,8 +464,31 @@ export function ScenarioCommitDrawer({
     // or rolls back the WHOLE batch. `recorded === diffs.length` is the only
     // signal that all rows landed.
     const noErrors = !json.errors || json.errors.length === 0;
+
+    // NEW-C18-12: also verify structural match — the result set must cover
+    // every submitted index exactly once with the matching kind. A right-count
+    // / wrong-index response is accepted as success by a count-only check but
+    // silently skips one diff and double-records another.
+    const resultsStructurallyMatch = (() => {
+      if (!json.results || json.results.length !== diffs.length) return false;
+      const expectedIndices = new Set(diffs.map((_, i) => i));
+      for (const r of json.results) {
+        if (!expectedIndices.has(r.index)) return false;
+        if (r.kind !== diffs[r.index]?.kind) return false;
+        expectedIndices.delete(r.index);
+      }
+      return expectedIndices.size === 0;
+    })();
+
     const fullSuccess =
-      res.ok && json.recorded === diffs.length && noErrors;
+      res.ok &&
+      json.recorded === diffs.length &&
+      noErrors &&
+      // Only apply the structural check when the route returns a results array.
+      // If results is absent (older route version or external call) fall back
+      // to the count-only check to avoid false failures on a count-matching
+      // response with no per-row detail.
+      (json.results === undefined || resultsStructurallyMatch);
 
     if (fullSuccess) {
       idempotencyKeyRef.current = null;

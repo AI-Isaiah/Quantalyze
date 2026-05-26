@@ -1406,4 +1406,164 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       ),
     ).toBe(true);
   });
+
+  // -------------------------------------------------------------------------
+  // NEW-C18-01 — uses useInternalCommitDrawer=false to inspect the diff
+  // payload passed to onCommitRequested. Changing a weight produces a
+  // voluntary_modify diff alongside any other changes in the batch.
+  // Before this fix, weight changes were silently dropped.
+  // -------------------------------------------------------------------------
+  it("NEW-C18-01: changing BTC weight and committing emits voluntary_modify in the diff array", () => {
+    const payload = makePayload();
+    const onCommitRequested = vi.fn();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        useInternalCommitDrawer={false}
+        onCommitRequested={onCommitRequested}
+      />,
+    );
+
+    // Change BTC weight to a non-default value to produce a modify diff.
+    const btcInput = screen.getByLabelText(/BTC weight/i) as HTMLInputElement;
+    fireEvent.change(btcInput, { target: { value: "0.800" } });
+
+    // Toggle ETH off to produce a remove diff that unlocks the Commit button.
+    fireEvent.click(
+      screen.getByRole("switch", { name: /Toggle ETH on\/off in scenario/i }),
+    );
+
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    expect(onCommitRequested).toHaveBeenCalled();
+
+    const diffs = onCommitRequested.mock.calls[0][0] as Array<{ kind: string; holding_ref?: string }>;
+    // voluntary_modify must appear for BTC (its weight changed).
+    const modifyDiff = diffs.find(
+      (d) => d.kind === "voluntary_modify" && d.holding_ref === REF_BTC,
+    );
+    expect(modifyDiff).toBeDefined();
+    // voluntary_remove must appear for ETH (toggled off).
+    const removeDiff = diffs.find(
+      (d) => d.kind === "voluntary_remove" && d.holding_ref === REF_ETH,
+    );
+    expect(removeDiff).toBeDefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // NEW-C18-10 — fingerprint mismatch blocks commit button
+  // Before this fix, a user could commit against a stale snapshot even after
+  // seeing the "holdings have changed" banner. The commit button must be
+  // disabled while fingerprintMismatch is true, regardless of diffCount.
+  // After the user resolves the mismatch (Reset or Keep), the block lifts.
+  // -------------------------------------------------------------------------
+  it("NEW-C18-10 fingerprint mismatch → Commit button disabled while banner visible; unblocked after Keep or Reset", () => {
+    // Pre-seed a stale draft so the hook detects a mismatch on mount.
+    // Note: when a fingerprint mismatch is detected, the hook re-initializes
+    // from current holdings (defaultDraftFromHoldings), so diffCount starts
+    // at 0. The commit button is disabled for BOTH reasons initially.
+    // After "Keep my draft", fingerprintMismatch clears; then toggling a holding
+    // produces a diff and the button enables. This pins the commitBlocked path.
+    lsStore.set(
+      `allocations.scenario_v0_15.${ALLOCATOR_A}`,
+      JSON.stringify({
+        schema_version: 1,
+        init_holdings_fingerprint: "STALE_FINGERPRINT_NOT_MATCHING",
+        toggleByScopeRef: { [REF_BTC]: true, [REF_ETH]: true, [REF_SOL]: true },
+        addedStrategies: [],
+        weightOverrides: { [REF_BTC]: 0.6, [REF_ETH]: 0.3, [REF_SOL]: 0.1 },
+        lastEditedAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    const commit = screen.getByTestId(
+      "scenario-footer-commit",
+    ) as HTMLButtonElement;
+    // Banner visible, commit blocked (fingerprintMismatch=true).
+    expect(
+      screen.getByText(/Your live holdings have changed since you last edited the scenario/i),
+    ).toBeInTheDocument();
+    expect(commit.disabled).toBe(true);
+
+    // Dismiss: "Keep my draft" clears the mismatch flag.
+    fireEvent.click(screen.getByRole("button", { name: /Keep my draft/i }));
+    // Banner gone, fingerprintMismatch=false. Now toggle BTC off to produce a diff.
+    expect(
+      screen.queryByText(/Your live holdings have changed since you last edited the scenario/i),
+    ).not.toBeInTheDocument();
+    // Toggle BTC off to produce a diff → button enables.
+    fireEvent.click(
+      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
+    );
+    expect(commit.disabled).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // NEW-C18-13 — commitDiffs cleared on success
+  // After a successful commit, reopening the drawer must not re-submit.
+  // -------------------------------------------------------------------------
+  it("NEW-C18-13 onSubmitSuccess clears commitDiffs so a second drawer-open starts empty", () => {
+    const payload = makePayload();
+    let capturedOnSubmitSuccess: (() => void) | null = null;
+    vi.mocked(ScenarioCommitDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onSubmitSuccess: () => void;
+    }) => {
+      capturedOnSubmitSuccess = props.onSubmitSuccess;
+      return props.isOpen ? <div data-testid="commit-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Toggle BTC off to produce a diff.
+    fireEvent.click(
+      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
+    );
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    expect(screen.getByTestId("commit-drawer-mock")).toBeInTheDocument();
+    // Simulate a successful commit.
+    act(() => {
+      capturedOnSubmitSuccess?.();
+    });
+    // After success, the draft is reset (all toggles back to ON, diff=0).
+    const commit = screen.getByTestId(
+      "scenario-footer-commit",
+    ) as HTMLButtonElement;
+    expect(commit.disabled).toBe(true);
+    // Now toggle BTC off again — but the ScenarioCommitDrawer should
+    // receive a fresh (non-stale) diffs array when opened again.
+    fireEvent.click(
+      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
+    );
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    const drawerCalls = vi.mocked(ScenarioCommitDrawer).mock.calls;
+    const lastCall = drawerCalls.at(-1)?.[0];
+    // NEW-C18-01: toggling BTC off also renormalizes ETH+SOL weights, which
+    // now differ from their defaults → voluntary_modify diffs for ETH and SOL.
+    // The diff array is: 1 voluntary_remove (BTC) + 2 voluntary_modify (ETH, SOL).
+    expect(lastCall?.diffs).toBeDefined();
+    const kinds = (lastCall?.diffs ?? []).map((d: { kind: string }) => d.kind);
+    expect(kinds).toContain("voluntary_remove");
+    // BTC remove is present.
+    expect(
+      lastCall?.diffs.some(
+        (d: { kind: string; holding_ref?: string }) =>
+          d.kind === "voluntary_remove" && d.holding_ref === REF_BTC,
+      ),
+    ).toBe(true);
+  });
 });
