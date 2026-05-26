@@ -764,6 +764,216 @@ class TestCronTotalFailureLogging:
 
 
 # ---------------------------------------------------------------------------
+# _parse_supabase_ts helper (M-0600) — direct unit coverage
+# ---------------------------------------------------------------------------
+
+
+class TestParseSupabaseTs:
+    def test_naive_date_only_promoted_to_utc(self):
+        """DATE columns (e.g. start_date) parse naive; the helper MUST promote
+        to UTC so subtracting from an aware now() can't raise TypeError — the
+        M-0600 bug. Reverting to a plain fromisoformat fails this assertion.
+        """
+        from routers import match as match_mod
+
+        parsed = match_mod._parse_supabase_ts("2024-01-01")
+        assert parsed.tzinfo is not None
+        assert parsed.utcoffset() == _dt.timedelta(0)
+
+    def test_z_suffix_parsed_as_utc(self):
+        from routers import match as match_mod
+
+        parsed = match_mod._parse_supabase_ts("2024-01-01T00:00:00Z")
+        assert parsed == _dt.datetime(2024, 1, 1, tzinfo=_dt.timezone.utc)
+
+    def test_aware_offset_normalized_to_utc(self):
+        """A non-UTC offset is normalized to UTC (the always-UTC contract this
+        helper's name promises), not merely passed through aware.
+        """
+        from routers import match as match_mod
+
+        parsed = match_mod._parse_supabase_ts("2024-01-01T05:30:00+05:30")
+        assert parsed.utcoffset() == _dt.timedelta(0)
+        assert parsed == _dt.datetime(2024, 1, 1, 0, 0, tzinfo=_dt.timezone.utc)
+
+    def test_malformed_input_raises_caught_exception(self):
+        """Contract: malformed input raises ValueError/AttributeError — the
+        exact types every call site's ``except`` already handles. If the helper
+        ever swallowed these and returned None, the call sites' error handling
+        would silently die (and _should_skip_allocator would TypeError on
+        ``None > last_at``).
+        """
+        from routers import match as match_mod
+
+        with pytest.raises((ValueError, AttributeError)):
+            match_mod._parse_supabase_ts("not-a-timestamp")
+        with pytest.raises((ValueError, AttributeError)):
+            match_mod._parse_supabase_ts(None)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic dedup ordering in _load_allocator_context
+# (M-0598 / M-0599 / H-0563 core)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadAllocatorContextDeterministicOrder:
+    def test_portfolio_strategies_query_orders_for_deterministic_dedup(
+        self, monkeypatch
+    ):
+        """`_load_allocator_context` keeps the FIRST portfolio_strategies row
+        seen per strategy_id. Without a stable ORDER BY, PostgREST may return
+        rows in any order, so an allocator holding the same strategy in two
+        portfolios with different current_weight / allocated_amount would get
+        non-deterministic weights and AUM across processes — violating the
+        docstring's determinism contract. This pins the (portfolio_id,
+        strategy_id) ordering; dropping it regresses the determinism guarantee.
+        """
+        from routers import match as match_mod
+
+        # Capture the .order() calls issued on the portfolio_strategies query.
+        ps_order_calls: list[tuple[str, bool]] = []
+
+        def _make_ps_query() -> MagicMock:
+            q = MagicMock()
+
+            def _order(col, desc=False):
+                ps_order_calls.append((col, desc))
+                return q  # chainable
+
+            q.select.return_value = q
+            q.in_.return_value = q
+            q.order.side_effect = _order
+            q.execute.return_value = MagicMock(data=[])
+            return q
+
+        ps_query = _make_ps_query()
+
+        def _table(name):
+            t = MagicMock()
+            if name == "portfolio_strategies":
+                t.select.return_value = ps_query
+                return t
+            # portfolios → one portfolio id so the ps branch is reached.
+            if name == "portfolios":
+                t.select.return_value.eq.return_value.execute.return_value = (
+                    MagicMock(data=[{"id": "pf-1"}])
+                )
+                return t
+            # allocator_preferences → maybe_single() returns None (no row).
+            if name == "allocator_preferences":
+                t.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+                    None
+                )
+                return t
+            # allocator_holdings / allocator_equity_snapshots → empty (no holdings).
+            if name in ("allocator_holdings", "allocator_equity_snapshots"):
+                t.select.return_value.eq.return_value.order.return_value.execute.return_value = (
+                    MagicMock(data=[])
+                )
+                return t
+            # match_decisions thumbs-down → empty.
+            if name == "match_decisions":
+                t.select.return_value.eq.return_value.eq.return_value.execute.return_value = (
+                    MagicMock(data=[])
+                )
+                return t
+            # strategy_analytics (and any other) → empty.
+            t.select.return_value.in_.return_value.execute.return_value = MagicMock(
+                data=[]
+            )
+            return t
+
+        sb = MagicMock()
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        match_mod._load_allocator_context("alloc-determinism")
+
+        # Both portfolio_id and strategy_id must be ordered ascending so the
+        # "first row wins" dedup tie-break is reproducible across processes.
+        # List-equality (not membership) so ORDER BY PRECEDENCE is pinned:
+        # portfolio_id MUST precede strategy_id, else the composite tie-break
+        # picks a different winner. Dropping or reordering either regresses.
+        assert ps_order_calls == [("portfolio_id", False), ("strategy_id", False)], (
+            "portfolio_strategies query must "
+            ".order('portfolio_id').order('strategy_id') in that order for "
+            f"deterministic dedup; got {ps_order_calls}"
+        )
+
+    def test_first_row_wins_dedup_is_stable(self, monkeypatch):
+        """Behavioral complement to the query-shape test above: given the SAME
+        strategy_id in two portfolios with conflicting current_weight /
+        allocated_amount, the dedup keeps the FIRST row (the DB returns them
+        ordered by portfolio_id ASC). strategy_aum therefore reflects only the
+        first row's allocated_amount (100), not the second's (900) nor the sum.
+        A refactor to last-wins or a broken dedup guard would pass the
+        query-shape test but fail this one.
+        """
+        from routers import match as match_mod
+
+        # Two rows, same strategy, conflicting weight/AUM, already in the
+        # (portfolio_id ASC) order the ORDER BY would produce.
+        ps_rows = [
+            {"strategy_id": "S1", "current_weight": 0.3,
+             "portfolio_id": "pf-1", "allocated_amount": 100.0},
+            {"strategy_id": "S1", "current_weight": 0.7,
+             "portfolio_id": "pf-2", "allocated_amount": 900.0},
+        ]
+
+        def _table(name):
+            t = MagicMock()
+            if name == "portfolios":
+                t.select.return_value.eq.return_value.execute.return_value = (
+                    MagicMock(data=[{"id": "pf-1"}, {"id": "pf-2"}])
+                )
+                return t
+            if name == "allocator_preferences":
+                t.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+                    None
+                )
+                return t
+            if name == "portfolio_strategies":
+                t.select.return_value.in_.return_value.order.return_value.order.return_value.execute.return_value = (
+                    MagicMock(data=ps_rows)
+                )
+                return t
+            if name == "strategy_analytics":
+                t.select.return_value.in_.return_value.execute.return_value = (
+                    MagicMock(data=[{"strategy_id": "S1", "returns_series": None}])
+                )
+                return t
+            if name in ("allocator_holdings", "allocator_equity_snapshots"):
+                t.select.return_value.eq.return_value.order.return_value.execute.return_value = (
+                    MagicMock(data=[])
+                )
+                return t
+            if name == "match_decisions":
+                t.select.return_value.eq.return_value.eq.return_value.execute.return_value = (
+                    MagicMock(data=[])
+                )
+                return t
+            t.select.return_value.in_.return_value.execute.return_value = MagicMock(
+                data=[]
+            )
+            return t
+
+        sb = MagicMock()
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        ctx = match_mod._load_allocator_context("alloc-first-wins")
+
+        # First row (pf-1) wins: only its allocated_amount (100) is counted;
+        # the second row (900) is skipped by the `sid not in portfolio_weights`
+        # dedup guard. portfolio_aum == combined_aum == 100, never 900 or 1000.
+        assert ctx["portfolio_aum"] == 100.0, (
+            "first-wins dedup must retain only pf-1's allocated_amount (100); "
+            f"got portfolio_aum={ctx['portfolio_aum']}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # demo_only filter on _load_candidate_universe
 # ---------------------------------------------------------------------------
 

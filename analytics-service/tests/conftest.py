@@ -141,8 +141,25 @@ def api_key_row_factory():
 
 @pytest.fixture
 def golden_252d_input() -> dict:
-    """Read the deterministic 252-day input fixture (returns + benchmark)."""
-    df = pd.read_parquet(FIXTURES_DIR / "golden_252d_input.parquet")
+    """Read the deterministic 252-day input fixture (returns + benchmark).
+
+    Audit H-0752: pin the column list and ASSERT the dtype. The cross-runtime
+    parity assertions run at 1e-12 / 1e-9 tolerances, so a silent dtype drift
+    in ``regen_golden.py`` (e.g. float32 instead of float64) would trip them
+    under environment-only changes with no schema signal. ``columns=`` fails
+    loudly if a column is renamed; the dtype assert fails loudly on drift —
+    deliberately NOT an ``.astype`` cast, which would upcast lossy float32 back
+    to float64 and MASK the very drift we want to surface.
+    """
+    df = pd.read_parquet(
+        FIXTURES_DIR / "golden_252d_input.parquet",
+        columns=["returns", "benchmark"],
+    )
+    assert df["returns"].dtype == np.float64 and df["benchmark"].dtype == np.float64, (
+        f"golden_252d_input.parquet dtype drift: returns={df['returns'].dtype}, "
+        f"benchmark={df['benchmark'].dtype} (expected float64 — regenerate via "
+        "`python -m tests.fixtures.regen_golden`)"
+    )
     return {
         "returns": df["returns"],
         "benchmark": df["benchmark"],
