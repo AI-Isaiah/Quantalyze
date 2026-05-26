@@ -864,8 +864,21 @@ def _compute_daily_equity(
     # Preserve chronological ordering within a single date. Opens must land
     # before closes so position state is correct when a round trip spans a
     # handful of minutes inside the same day.
+    # NEW-C01-18: add an enumerate-based secondary key so same-ms events
+    # keep their insertion order (open before close for same-day round trips).
+    # ts==0/None events are placed last within their day (sentinel 0 sorts
+    # before valid fills; moving them to int.max avoids inverting same-day
+    # open-close ordering for fills with real timestamps).
     for iso_key in events_by_date:
-        events_by_date[iso_key].sort(key=lambda e: int(e.get("timestamp") or 0))
+        events_by_date[iso_key] = [
+            e for _, e in sorted(
+                enumerate(events_by_date[iso_key]),
+                key=lambda ie: (
+                    int(ie[1].get("timestamp") or 0) or (10 ** 18),
+                    ie[0],
+                ),
+            )
+        ]
 
     # Running per-symbol quantities (spot side + realised perp PnL in quote)
     quantities: dict[str, float] = {}
