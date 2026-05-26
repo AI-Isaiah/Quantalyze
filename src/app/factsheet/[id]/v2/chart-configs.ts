@@ -72,6 +72,10 @@ export const CHART_CONFIGS: ChartConfig[] = [
     valueFormat: "growth",
     scalable: true,
     defaultScale: "log",
+    // Anchor the Y domain at par (1.0) so a small-return curve doesn't
+    // sweep floor-to-ceiling. Also draws the emphasized par gridline so
+    // viewers can judge magnitude at a glance. (NEW-C20-05)
+    baseline: 1,
     stratField: "strategyEquity",
     comparatorField: "cumulative",
     rebaseOnZoom: true,
@@ -97,6 +101,8 @@ export const CHART_CONFIGS: ChartConfig[] = [
     valueFormat: "growth",
     scalable: true,
     defaultScale: "log",
+    // Anchor at 1.0 par so magnitude is legible. (NEW-C20-05)
+    baseline: 1,
     stratField: "strategyEquity",
     comparatorField: "volMatched",
     comparatorLabelField: "volMatchedLabel",
@@ -177,6 +183,8 @@ export const CHART_CONFIGS: ChartConfig[] = [
     valueFormat: "growth",
     scalable: true,
     defaultScale: "log",
+    // Anchor at 1.0 par so magnitude is legible. (NEW-C20-05)
+    baseline: 1,
     stratField: "strategyEquity",
     comparatorField: null,
     ddHighlights: true,
