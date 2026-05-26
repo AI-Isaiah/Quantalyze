@@ -348,9 +348,9 @@ describe("useMandateAutoSave", () => {
     // Step 2: start B's save (still pending).
     let pB: ReturnType<typeof result.current.save> | undefined;
     await act(async () => {
-      pB = result.current.save("min_weight", 0.05);
+      pB = result.current.save("max_drawdown_tolerance", 0.05);
     });
-    expect(result.current.savingFields.has("min_weight")).toBe(true);
+    expect(result.current.savingFields.has("max_drawdown_tolerance")).toBe(true);
     // saveState must be "saving" again because B is in-flight.
     expect(result.current.saveState).toBe("saving");
 
@@ -361,7 +361,7 @@ describe("useMandateAutoSave", () => {
       await result.current.save("max_weight", 0.30);
     });
     expect(result.current.saveState).toBe("saved");
-    expect(result.current.savingFields.has("min_weight")).toBe(true); // B still pending
+    expect(result.current.savingFields.has("max_drawdown_tolerance")).toBe(true); // B still pending
 
     // Step 4: advance past the 2s fade timer. With the gate, "saved" must NOT
     // revert to "idle" because savingFieldsSizeRef.current > 0 (B still in-flight).
@@ -397,7 +397,7 @@ describe("useMandateAutoSave", () => {
 
     await act(async () => {
       const pA = result.current.save("max_weight", 0.25);
-      const pB = result.current.save("min_weight", 0.05);
+      const pB = result.current.save("max_drawdown_tolerance", 0.05);
       // Advance past the 2s gate — both A's retry and B's first attempt fire.
       await vi.advanceTimersByTimeAsync(2000);
       await Promise.all([pA, pB]);
@@ -406,7 +406,7 @@ describe("useMandateAutoSave", () => {
     // Field A and B both saved successfully.
     expect(result.current.saveState).toBe("saved");
     expect(result.current.fieldErrors.max_weight).toBeUndefined();
-    expect(result.current.fieldErrors.min_weight).toBeUndefined();
+    expect(result.current.fieldErrors.max_drawdown_tolerance).toBeUndefined();
   });
 });
 

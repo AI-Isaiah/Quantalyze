@@ -283,17 +283,17 @@ describe("OutcomesWidget — KPI strip (inline KpiStrip)", () => {
         delta_180d: null,
       }),
     ]);
-    // 1 pending row -> sub-label renders
-    expect(
-      screen.getByText(/Avg realized delta:.*\+4\.0%.*1 pending/),
-    ).toBeInTheDocument();
+    // NEW-C27-03: the avg-α cell sub-label is now the unified pending count
+    // ("N pending") — the prior "Avg realized delta: +X.X% · N pending" copy
+    // was removed. 1 pending row (o2: allocated, percent>=1, all deltas null).
+    expect(screen.getByText("1 pending")).toBeInTheDocument();
   });
 
-  it("renders 3-cell KPI strip with 'Hit rate (90d)', 'Avg realized α (90d)', 'Total outcomes' labels (Phase 09.1 Plan 10 D-06)", () => {
+  it("renders 3-cell KPI strip with 'Hit rate (latest)', 'Avg realized α (latest)', 'Total outcomes' labels (NEW-C27-01: (90d)→(latest) to match mostMatureDelta semantics)", () => {
     renderWidget([makeOutcome({ id: "o1" })]);
-    expect(screen.getByText("Hit rate (90d)")).toBeInTheDocument();
+    expect(screen.getByText("Hit rate (latest)")).toBeInTheDocument();
     expect(
-      screen.getByText("Avg realized α (90d)"),
+      screen.getByText("Avg realized α (latest)"),
     ).toBeInTheDocument();
     expect(screen.getByText("Total outcomes")).toBeInTheDocument();
   });

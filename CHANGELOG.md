@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.9.23] - 2026-05-27
+### Fixed — audit-2026-05-07 cluster review: scenario commit + mandate autosave + outcomes KPI (batch b05)
+- mandate autosave: NaN retry-after guard, stale-throttle-error clear, idle-gate (no premature "idle" while a field is in-flight), timeout-no-retry, cross-field 429 shared rate-limit gate (NEW-C05)
+- scenario composer/commit: UI feedback when total weight > 1; structural-mismatch + 400/401 Sentry capture (NEW-C18-05/07/12/14, red-team M-2/M-5)
+- outcomes KPI: relabel "(90d)" → "(latest)" to match mostMatureDelta semantics (180d>90d>30d); unified pending count across cells (no contradictory pending pairs) (NEW-C27-01/03)
+- review + red-team hardening across scenario/mandate/outcomes (F-01…F-10, IMP-1/2/3)
+
+
 ## [0.24.9.22] - 2026-05-27
 ### Fixed — audit-2026-05-07 cluster review: allocator dashboard widgets (batch b04)
 - custom range picker: local-midnight max + calendar-day dayCount fixes a timezone off-by-one (NEW-C23-01/02)
