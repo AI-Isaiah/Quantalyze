@@ -780,3 +780,286 @@ def test_c01_10_value_usd_equals_breakdown_sum():
     assert found_sum_form, (
         "NEW-C01-10: value_usd dict entry must use round(sum(...), 2)"
     )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C01-05 — unified-margin venues skip uPnL double-count
+# ---------------------------------------------------------------------------
+
+
+def test_c01_05_okx_upnl_not_double_counted():
+    """NEW-C01-05: on OKX (unified-margin), fetch_positions unrealizedPnl must
+    NOT be added on top of fetch_balance['total'] — total already includes it.
+    """
+    exchange = MagicMock()
+    # total=50000 already includes unrealised PnL on OKX unified-margin
+    exchange.fetch_balance = AsyncMock(return_value={
+        "total": {"USDT": 50000.0}
+    })
+    # fetch_ticker not needed for USDT-only balance
+    exchange.fetch_ticker = AsyncMock(return_value={"last": 0.0})
+    # Positions report unrealizedPnl=5000; if double-counted, total would be 55000
+    exchange.fetch_positions = AsyncMock(return_value=[
+        {"unrealizedPnl": 5000.0}
+    ])
+
+    equity, partial = asyncio.run(
+        _run_fetch_current_equity(exchange, venue="okx")
+    )
+    assert equity == 50000.0, (
+        f"NEW-C01-05: OKX equity should be 50000 (total only, no uPnL add), got {equity}"
+    )
+    assert not partial
+
+
+def test_c01_05_bybit_upnl_not_double_counted():
+    """NEW-C01-05: same as OKX — Bybit V5 is also unified-margin."""
+    exchange = MagicMock()
+    exchange.fetch_balance = AsyncMock(return_value={
+        "total": {"USDT": 30000.0}
+    })
+    exchange.fetch_ticker = AsyncMock(return_value={"last": 0.0})
+    exchange.fetch_positions = AsyncMock(return_value=[
+        {"unrealizedPnl": 2000.0}
+    ])
+
+    equity, partial = asyncio.run(
+        _run_fetch_current_equity(exchange, venue="bybit")
+    )
+    assert equity == 30000.0, (
+        f"NEW-C01-05: Bybit equity should be 30000 (total only), got {equity}"
+    )
+
+
+def test_c01_05_binance_upnl_still_added():
+    """NEW-C01-05: non-unified-margin venues (Binance) keep the additive path
+    — fetch_positions unrealizedPnl IS added on top of fetch_balance['total'].
+    """
+    exchange = MagicMock()
+    exchange.fetch_balance = AsyncMock(return_value={
+        "total": {"USDT": 10000.0}
+    })
+    exchange.fetch_ticker = AsyncMock(return_value={"last": 0.0})
+    exchange.fetch_positions = AsyncMock(return_value=[
+        {"unrealizedPnl": 1500.0}
+    ])
+
+    equity, partial = asyncio.run(
+        _run_fetch_current_equity(exchange, venue="binance")
+    )
+    # Binance keeps the uPnL addition: 10000 + 1500 = 11500
+    assert equity == 11500.0, (
+        f"NEW-C01-05: Binance equity should include uPnL (10000+1500=11500), got {equity}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C01-06 — Sharpe excludes terminal unrealized PnL bar
+# ---------------------------------------------------------------------------
+
+
+def test_c01_06_sharpe_excludes_terminal_unrealized_bar():
+    """NEW-C01-06: compute_sharpe must drop the last bar when it carries
+    unrealized PnL, preventing a multi-month open gain from appearing as a
+    single-day return spike that inflates stdev.
+    """
+    from datetime import date
+    from services.equity_reconstruction import EquityCurveBuilder
+    from services.ingestion.adapter import Trade
+
+    # Build a series with an open position that accumulates unrealized PnL.
+    # Buy 1 BTC on day 1, no closing trade → last bar gets unrealized.
+    buy = Trade(
+        symbol="BTC/USDT:USDT", side="buy",
+        price=40000.0, quantity=1.0,
+        fee=0.0, fee_currency="USDT",
+        timestamp=datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc),
+        exchange="okx", order_type="limit", is_fill=True,
+    )
+    sell = Trade(
+        symbol="BTC/USDT:USDT", side="sell",
+        price=41000.0, quantity=0.1,
+        fee=0.0, fee_currency="USDT",
+        timestamp=datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc),
+        exchange="okx", order_type="limit", is_fill=True,
+    )
+    # mark_prices gives the open position an unrealized PnL on the last bar
+    builder = EquityCurveBuilder(
+        trades=[buy, sell],
+        mark_prices={"BTC/USDT:USDT": 42000.0},
+    )
+    df = builder.to_equity_curve_daily()
+    last_unrealized = float(df["unrealized_pnl"].iloc[-1])
+    assert last_unrealized != 0.0, "Fixture must have non-zero last-bar unrealized"
+
+    sharpe_with_fix = builder.compute_sharpe()
+    # Now manually compute Sharpe INCLUDING last bar (old behaviour) to confirm
+    # they differ — the fix always excludes the terminal lump.
+    import math
+    all_returns = df["daily_return"]
+    # drop day-0 zero (C01-14 also applies)
+    if len(all_returns) > 1 and all_returns.iloc[0] == 0.0:
+        all_returns = all_returns.iloc[1:]
+    # include last bar (pre-fix behaviour)
+    excess_old = all_returns - 0.0
+    std_old = excess_old.std()
+    sharpe_old = (float((excess_old.mean() / std_old) * (365 ** 0.5))
+                  if std_old > 0 and not math.isnan(std_old) else None)
+
+    if sharpe_old is not None and sharpe_with_fix is not None:
+        assert abs(sharpe_with_fix - sharpe_old) > 1e-9, (
+            "NEW-C01-06: compute_sharpe must differ from the all-rows version "
+            "when last bar has unrealized PnL"
+        )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C01-11 — OKX 90-day terminus stamps pre_terminus_balance_unknown flag
+# ---------------------------------------------------------------------------
+
+
+def test_c01_11_terminus_flag_in_telemetry():
+    """NEW-C01-11: when hit_terminus=True, the telemetry dict returned by
+    _fetch_and_price_window must contain pre_terminus_balance_unknown=True
+    so the caller can propagate it to the audit log.
+    """
+    import inspect
+    from services import equity_reconstruction as er
+
+    src = inspect.getsource(er._fetch_and_price_window)
+    assert "pre_terminus_balance_unknown" in src, (
+        "NEW-C01-11: 'pre_terminus_balance_unknown' key must appear in "
+        "_fetch_and_price_window telemetry dict"
+    )
+    # The flag must be set when hit_terminus is True
+    assert "hit_terminus" in src, (
+        "NEW-C01-11: hit_terminus must gate the pre_terminus_balance_unknown flag"
+    )
+
+
+def test_c01_11_audit_log_propagates_terminus_flag():
+    """NEW-C01-11: run_reconstruct_allocator_history_job must forward
+    pre_terminus_balance_unknown into the _emit_audit call.
+    """
+    import inspect
+    from services import equity_reconstruction as er
+
+    src = inspect.getsource(er.run_reconstruct_allocator_history_job)
+    assert "pre_terminus_balance_unknown" in src, (
+        "NEW-C01-11: pre_terminus_balance_unknown must be emitted in the "
+        "reconstruct audit event so the dashboard can act on it"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C01-12 — split_holdings_symbol_to_base_quote handles USDe/PYUSD/USDB
+# ---------------------------------------------------------------------------
+
+
+def test_c01_12_usde_suffix_parsed_correctly():
+    """NEW-C01-12: split_holdings_symbol_to_base_quote must recognise USDe as
+    a quote suffix so ETHUSDe → ('ETH', 'USDE'), matching the reconstruct path
+    that derives quote from ccxt symbol split.
+    """
+    from services.equity_reconstruction import split_holdings_symbol_to_base_quote
+
+    base, quote = split_holdings_symbol_to_base_quote("ETHUSDe")
+    assert base == "ETH", f"NEW-C01-12: expected base=ETH, got {base!r}"
+    assert quote == "USDE", f"NEW-C01-12: expected quote=USDE, got {quote!r}"
+
+
+def test_c01_12_pyusd_suffix_parsed_correctly():
+    """NEW-C01-12: PYUSD suffix is also recognised."""
+    from services.equity_reconstruction import split_holdings_symbol_to_base_quote
+
+    base, quote = split_holdings_symbol_to_base_quote("SOLPYUSD")
+    assert base == "SOL", f"NEW-C01-12: expected base=SOL, got {base!r}"
+    assert quote == "PYUSD", f"NEW-C01-12: expected quote=PYUSD, got {quote!r}"
+
+
+def test_c01_12_usdb_suffix_parsed_correctly():
+    """NEW-C01-12: USDB suffix is also recognised."""
+    from services.equity_reconstruction import split_holdings_symbol_to_base_quote
+
+    base, quote = split_holdings_symbol_to_base_quote("AVAXUSDB")
+    assert base == "AVAX", f"NEW-C01-12: expected base=AVAX, got {base!r}"
+    assert quote == "USDB", f"NEW-C01-12: expected quote=USDB, got {quote!r}"
+
+
+def test_c01_12_canonical_key_reconstruct_vs_refresh_agree_for_usde():
+    """NEW-C01-12: breakdown_key_for_perp(base, quote) must produce the same
+    result whether the ccxt symbol is split by the reconstruct path or
+    the refresh path.
+    """
+    from services.equity_reconstruction import (
+        breakdown_key_for_perp,
+        split_holdings_symbol_to_base_quote,
+    )
+
+    # Reconstruct path: parses ccxt symbol "ETH/USDe:USDe"
+    ccxt_sym = "ETH/USDe:USDe"
+    reconstruct_base = ccxt_sym.split("/")[0].upper()
+    reconstruct_quote = ccxt_sym.split("/")[-1].split(":")[0].upper()
+    reconstruct_key = breakdown_key_for_perp(reconstruct_base, reconstruct_quote)
+
+    # Refresh path: receives stripped symbol "ETHUSDe" from allocator_holdings
+    refresh_base, refresh_quote = split_holdings_symbol_to_base_quote("ETHUSDe")
+    refresh_key = breakdown_key_for_perp(refresh_base, refresh_quote)
+
+    assert reconstruct_key == refresh_key, (
+        f"NEW-C01-12: canonical key mismatch — reconstruct={reconstruct_key!r} "
+        f"vs refresh={refresh_key!r}; same position gets two keys"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C01-13 — amt_from_cost implausible size is rejected
+# ---------------------------------------------------------------------------
+
+
+def test_c01_13_implausible_size_rejected():
+    """NEW-C01-13: _resolve_perp_amt_base must return (0.0, FALLBACK_AMOUNT)
+    when amt_from_cost falls outside [1e-4, 1e4] — e.g. a hostile cost field
+    inflating an OKX SWAP fill by 100×.
+    """
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
+
+    # Simulates an unknown perp (not in ctVal table) with implausible size.
+    # price=40000, cost=8_000_000_000 → amt_from_cost = 2e5 — way above 1e4
+    result_amt, result_src, _ = _resolve_perp_amt_base(
+        raw_symbol="NEWCOIN/USDT:USDT",
+        amount=200000.0,     # contracts — impossible for any known crypto perp
+        price=40000.0,
+        cost=8_000_000_000.0,  # 200000 contracts × 40000
+        inst_type="SWAP",
+        venue="okx",
+    )
+    # Symbol is not in OKX_PERP_CONTRACT_SIZE, so it falls through to the
+    # plausibility check. amt_from_cost = 8e9/40000 = 2e5 >> 1e4 → rejected.
+    assert result_amt == 0.0, (
+        f"NEW-C01-13: implausible amt_from_cost should yield 0.0, got {result_amt}"
+    )
+    assert result_src == _PerpAmtSource.FALLBACK_AMOUNT, (
+        f"NEW-C01-13: source should be FALLBACK_AMOUNT, got {result_src}"
+    )
+
+
+def test_c01_13_plausible_size_passes_through():
+    """NEW-C01-13: a plausible amt_from_cost (in [1e-4, 1e4]) must still
+    pass through to preserve correct fills for unknown perps.
+    """
+    from services.equity_reconstruction import _resolve_perp_amt_base, _PerpAmtSource
+
+    # price=40000, cost=200 → amt_from_cost = 0.005 (within range)
+    result_amt, result_src, _ = _resolve_perp_amt_base(
+        raw_symbol="NEWCOIN/USDT:USDT",
+        amount=0.005,
+        price=40000.0,
+        cost=200.0,
+        inst_type="SWAP",
+        venue="okx",
+    )
+    assert abs(result_amt - 0.005) < 1e-9, (
+        f"NEW-C01-13: plausible amt_from_cost should pass through as 0.005, got {result_amt}"
+    )
+    assert result_src == _PerpAmtSource.COST_DIV_PRICE

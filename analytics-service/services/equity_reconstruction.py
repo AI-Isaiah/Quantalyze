@@ -52,10 +52,16 @@ logger = logging.getLogger("quantalyze.analytics.equity_reconstruction")
 # ---------------------------------------------------------------------------
 
 STABLECOINS: set[str] = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USD"}
+# NEW-C01-12: also recognise USDe / PYUSD / USDB as stablecoin suffixes so that
+# split_holdings_symbol_to_base_quote can correctly parse them for the canonical
+# BASE:QUOTE:PERP key on non-USDT-settled perps (e.g. ETHUSD/USDe markets).
+# These are NOT added to STABLECOINS itself (which drives price-skip logic);
+# they are only used by the splitter.
+_EXTRA_STABLECOIN_SUFFIXES: frozenset[str] = frozenset({"USDE", "PYUSD", "USDB"})
 # Pre-sorted longest-first so the holdings.symbol splitter picks
 # USDC/BUSD/etc before USD, avoiding false-positive substring matches.
 _STABLECOINS_LONGEST_FIRST: tuple[str, ...] = tuple(
-    sorted(STABLECOINS, key=len, reverse=True)
+    sorted(STABLECOINS | _EXTRA_STABLECOIN_SUFFIXES, key=len, reverse=True)
 )
 RAW_PAYLOAD_CAP_BYTES: int = 4096
 OKX_TRADE_TERMINUS_DAYS: int = 90          # documented OKX cap (RESEARCH.md §1B, A3)
@@ -372,8 +378,29 @@ def _resolve_perp_amt_base(
         ctval = OKX_PERP_CONTRACT_SIZE.get(raw_symbol)
 
     if ctval is None:
-        # No defensive cover — caller should audit this as an unknown
-        # perp. See C-0329.
+        # NEW-C01-13: no ctVal cover — `amt_from_cost = cost/price` is
+        # unbounded for unknown perp listings (a garbage `cost` from the
+        # exchange or an adversarial value could produce a 100×–10000×
+        # phantom position that poisons the curve and the unbounded
+        # anchor offset). Apply a plausibility bound: reject sizes
+        # outside [1e-4, 1e4] base-units (covers every known crypto
+        # contract spec from SHIB ctVal=1000000 to BTC ctVal=0.01).
+        # Sizes outside this range are likely contract-count errors —
+        # skip with a DQ flag rather than corrupting the replay state.
+        _AMT_FROM_COST_MAX = 1e4
+        _AMT_FROM_COST_MIN = 1e-4
+        if not (_AMT_FROM_COST_MIN <= amt_from_cost <= _AMT_FROM_COST_MAX):
+            # NEW-C01-13: amt_from_cost out of plausible range — skip and
+            # log. DQ flag is propagated via caller's unknown_perp_symbols
+            # accumulator; this function has no ContextVar channel.
+            logger.warning(
+                "_resolve_perp_amt_base: %s amt_from_cost=%.8g outside "
+                "plausible range [%.0e, %.0e] — skipping fill to avoid "
+                "phantom position (unknown_perp_implausible_size, NEW-C01-13)",
+                raw_symbol, amt_from_cost,
+                _AMT_FROM_COST_MIN, _AMT_FROM_COST_MAX,
+            )
+            return 0.0, _PerpAmtSource.FALLBACK_AMOUNT, None
         return amt_from_cost, _PerpAmtSource.COST_DIV_PRICE, None
     amt_explicit = amount * ctval
     if amt_explicit <= 0:
@@ -1682,11 +1709,30 @@ async def _fetch_and_price_window(
                 )
                 r["breakdown"] = _cap_breakdown(bd)
 
+    # NEW-C01-11: when hit_terminus, the replay starts from quantities={}
+    # (zero cash) because the pre-terminus deposit that funds open perps
+    # falls outside the 90-day fetch window.  Every intermediate row is
+    # built against that zero baseline, making absolute equity/drawdown/TWR
+    # wrong for the pre-terminus portion.  Stamp a DQ flag so the dashboard
+    # can suppress absolute-level display and drawdown before the terminus.
+    # (Full fix — seeding quantities with live spot balances at the
+    # terminus — requires a separate balance fetch at reconstruction time
+    # and is deferred; the flag is the minimal safe signal.)
+    if hit_terminus:
+        logger.warning(
+            "equity_reconstruction: OKX 90-day terminus hit — "
+            "pre-terminus deposits not captured; intermediate absolute "
+            "equity levels are unreliable (pre_terminus_balance_unknown, "
+            "NEW-C01-11). Anchor applied to last row only."
+        )
     telemetry = {
         "skipped_symbols": sorted(skipped_symbols),
         "unknown_perp_symbols": sorted(unknown_perp_symbols),
         "inverse_perp_symbols": sorted(inverse_perp_symbols),
         "ctval_drift_warnings": ctval_drift_warnings,
+        # NEW-C01-11: dashboard must suppress absolute-level/drawdown before
+        # the terminus if this is True.
+        "pre_terminus_balance_unknown": hit_terminus,
     }
     return rows, hit_terminus, telemetry
 
@@ -1751,6 +1797,18 @@ async def _fetch_current_equity(
                 partial_unpriced.add(asset_upper)
             total += q * px
 
+        # NEW-C01-05: unified-margin venues (OKX, Bybit V5) report
+        # fetch_balance['total'] as equity-inclusive — it already marks
+        # open perp positions to market. Adding unrealizedPnl from
+        # fetch_positions on top would double-count the uPnL and shift
+        # the ENTIRE reconstructed curve upward via the anchor offset.
+        # Gate: skip the position-loop for known unified-margin venues.
+        # Non-unified venues (Binance isolated, etc.) keep the additive
+        # uPnL path because their collateral sits separately in the spot
+        # wallet and is NOT included in fetch_balance['total'].
+        _UNIFIED_MARGIN_VENUES = frozenset({"okx", "bybit"})
+        _skip_upnl = venue.lower() in _UNIFIED_MARGIN_VENUES
+
         try:
             positions = await exchange.fetch_positions()
         except Exception:  # noqa: BLE001
@@ -1759,6 +1817,10 @@ async def _fetch_current_equity(
             positions = []
         for p in positions:
             if not isinstance(p, dict):
+                continue
+            if _skip_upnl:
+                # uPnL already included in fetch_balance['total'] on
+                # unified-margin venues — adding it again double-counts.
                 continue
             upnl = p.get("unrealizedPnl")
             if upnl is None:
@@ -2026,6 +2088,9 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
             "unknown_perp_symbols": telemetry["unknown_perp_symbols"][:50],
             "inverse_perp_symbols": telemetry["inverse_perp_symbols"][:50],
             "ctval_drift_warnings": telemetry["ctval_drift_warnings"][:50],
+            # NEW-C01-11: flag propagated so dashboard can suppress
+            # absolute-level/drawdown display before the terminus.
+            "pre_terminus_balance_unknown": telemetry.get("pre_terminus_balance_unknown", False),
         },
     )
     logger.info(
@@ -2669,6 +2734,17 @@ class EquityCurveBuilder:
         # destabilizing the Sharpe on sparse fixtures with many gap-filler zeros.
         if len(returns) > 1 and returns.iloc[0] == 0.0:
             returns = returns.iloc[1:]
+        # NEW-C01-06: the terminal bar carries the sum of ALL open-position
+        # unrealized PnL as a one-day spike (set by to_equity_curve_daily
+        # line: ``df.loc[df.index[-1], "unrealized_pnl"] = open_unrealized``).
+        # Including a multi-month unrealized gain as a single-day return
+        # inflates stdev and corrupts the Sharpe ratio. Exclude the final bar
+        # from the Sharpe input when it carries non-zero unrealized PnL.
+        # TWR/drawdown are NOT affected because they read all rows.
+        if "unrealized_pnl" in df.columns and len(returns) > 0:
+            last_unrealized = float(df["unrealized_pnl"].iloc[-1])
+            if last_unrealized != 0.0 and len(returns) > 1:
+                returns = returns.iloc[:-1]
         if len(returns) < 2:
             return None
         excess = returns - (risk_free_rate / periods)
