@@ -40,14 +40,29 @@ export const ValidateKeyResponseSchema = z.object({
 // per-row DEK (api_key_encrypted), and the DEK itself is KEK-encrypted
 // (dek_encrypted). api_secret_encrypted / passphrase_encrypted / nonce
 // stay null by design. Matches analytics-service/services/encryption.py.
+//
+// NEW-C40-01: Drop .passthrough() and use .strip() (default) so unknown
+// Python fields are silently stripped instead of flowing through into the
+// api_keys INSERT. A future analytics-service field addition (e.g.
+// key_fingerprint, correlation_id, kek_alg) would previously cause
+// PostgREST PGRST204 "Could not find column X" and hard-fail ALL key
+// creation. Stripping at the schema boundary matches the named-destructure
+// pattern already in create-with-key/route.ts:158-168.
+//
+// NEW-C40-02: kek_version is typed INTEGER NOT NULL in the DB. Accept only
+// integers so a string like "v1" / "1.0" / "2 " fails loudly at parse time
+// rather than producing an opaque 22P02 insert error. z.coerce.number()
+// coerces a pure-numeric string "1" while rejecting "v1" / "1.0", matching
+// create-with-key's own defensive `typeof kek_version === "number" ? ... : 1`
+// pattern (route.ts:164-167). Integer+positive constraint mirrors the DB column.
 export const EncryptKeyResponseSchema = z.object({
   api_key_encrypted: z.string(),
   api_secret_encrypted: z.string().nullable(),
   passphrase_encrypted: z.string().nullable(),
   dek_encrypted: z.string(),
   nonce: z.string().nullable(),
-  kek_version: z.number().or(z.string()),
-}).passthrough();
+  kek_version: z.coerce.number().int().positive(),
+});
 
 // --- /api/fetch-trades ---
 export const FetchTradesResponseSchema = z.object({
