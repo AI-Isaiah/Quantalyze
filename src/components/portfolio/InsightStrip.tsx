@@ -1,3 +1,6 @@
+"use client";
+
+import { useMemo } from "react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import type { PortfolioAnalytics } from "@/lib/types";
@@ -13,8 +16,10 @@ import { BridgeTrigger } from "./BridgeTrigger";
  * row of plain-English sentences. Reads `analytics` and runs every insight
  * rule via `computeAllInsights`.
  *
- * If zero rules fire, the strip stays visible with a fallback "No unusual
- * activity" sentence so the layout doesn't shift mid-page.
+ * When zero rules fire AND there are no flagged holdings, the strip renders
+ * nothing (returns null) — there is no empty-state fallback copy (PR3
+ * dashboard-parity decision; see the early-return comment below). Presence
+ * of the section is itself the signal.
  *
  * When an underperformance insight targets a specific strategy, the sentence
  * is wrapped in `<BridgeTrigger>` which renders a "Find Replacement" link
@@ -79,11 +84,23 @@ export function InsightStrip({
   className,
   flaggedCount,
 }: InsightStripProps) {
-  const insights = computeAllInsights(
-    analytics,
-    portfolioStrategies,
-    portfolioAgeDays,
-  ).slice(0, max);
+  // Memoized so unrelated parent re-renders (the dashboard shell is a
+  // `"use client"` component with its own state, and Overview fires a 30s
+  // router.refresh) don't re-run all 7 insight rules. Short-circuit on null
+  // analytics: computeAllInsights(null, …) always returns [], so skip the
+  // call entirely on the common loading/empty path instead of paying the
+  // rule-engine cost just to discard the result.
+  const insights = useMemo(
+    () =>
+      analytics === null
+        ? []
+        : computeAllInsights(
+            analytics,
+            portfolioStrategies,
+            portfolioAgeDays,
+          ).slice(0, max),
+    [analytics, portfolioStrategies, portfolioAgeDays, max],
+  );
 
   // PR3 (dashboard parity) — when zero insights fire AND no flagged
   // holdings, render nothing. The truth screenshot doesn't show the
@@ -103,50 +120,41 @@ export function InsightStrip({
       <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
         What we noticed
       </p>
-      {false ? (
-        <p className="text-sm text-text-secondary">
-          No unusual activity in the trailing window.
-        </p>
-      ) : (
-        <ul role="list" className="space-y-2">
-          {flaggedCount !== undefined && flaggedCount > 0 && (
-            <li className="flex items-start gap-3 text-sm text-text-secondary">
-              <span
-                aria-hidden="true"
-                className="mt-1.5 inline-block h-2 w-2 flex-shrink-0 rounded-full bg-text-muted"
-              />
-              <Link href="/allocations?tab=scenario" className="hover:underline">
-                {`Bridge flagged ${flaggedCount} holding(s) — Review in Scenario →`}
-              </Link>
-            </li>
-          )}
-          {insights.map((insight) => (
-            <li
-              key={`${insight.key}${insight.strategy_id ? `:${insight.strategy_id}` : ""}`}
-              className="flex items-start gap-3 text-sm text-text-secondary"
-            >
-              <span
-                aria-hidden="true"
-                className={cn(
-                  "mt-1.5 inline-block h-2 w-2 flex-shrink-0 rounded-full",
-                  SEVERITY_DOT[insight.severity],
-                )}
-              />
-              <span className="sr-only">{SEVERITY_LABEL[insight.severity]}:</span>
-              {isBridgeable(insight, portfolioId) ? (
-                <BridgeTrigger
-                  insight={insight}
-                  portfolioId={portfolioId!}
-                >
-                  <span>{insight.sentence}</span>
-                </BridgeTrigger>
-              ) : (
-                <span>{insight.sentence}</span>
+      <ul role="list" className="space-y-2">
+        {flaggedCount !== undefined && flaggedCount > 0 && (
+          <li className="flex items-start gap-3 text-sm text-text-secondary">
+            <span
+              aria-hidden="true"
+              className="mt-1.5 inline-block h-2 w-2 flex-shrink-0 rounded-full bg-text-muted"
+            />
+            <Link href="/allocations?tab=scenario" className="hover:underline">
+              {`Bridge flagged ${flaggedCount} holding(s) — Review in Scenario →`}
+            </Link>
+          </li>
+        )}
+        {insights.map((insight) => (
+          <li
+            key={`${insight.key}${insight.strategy_id ? `:${insight.strategy_id}` : ""}`}
+            className="flex items-start gap-3 text-sm text-text-secondary"
+          >
+            <span
+              aria-hidden="true"
+              className={cn(
+                "mt-1.5 inline-block h-2 w-2 flex-shrink-0 rounded-full",
+                SEVERITY_DOT[insight.severity],
               )}
-            </li>
-          ))}
-        </ul>
-      )}
+            />
+            <span className="sr-only">{SEVERITY_LABEL[insight.severity]}:</span>
+            {isBridgeable(insight, portfolioId) ? (
+              <BridgeTrigger insight={insight} portfolioId={portfolioId!}>
+                <span>{insight.sentence}</span>
+              </BridgeTrigger>
+            ) : (
+              <span>{insight.sentence}</span>
+            )}
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }
