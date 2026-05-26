@@ -169,14 +169,15 @@ export function BridgeDrawer({
    */
   function handleAddToScenario() {
     if (state.stage !== "confirm" || !selected || !onAddToScenario) return;
-    // Audit H-0085 / Rule 12 (Fail loud): the host mutator
-    // (scenario-state.ts `addStrategyBridge`) can throw — quota exceeded,
-    // duplicate strategy_id in scope, malformed state. A bare try/finally
-    // that always `onClose()`d swallowed that throw: the drawer dismissed
-    // cleanly while the strategy was silently NOT added. Mirror the
-    // handleSendIntro error path — surface the message into the confirm
-    // stage's existing role="alert" and KEEP the drawer open so the
-    // allocator sees the failure and can retry. Only close on success.
+    // Audit H-0085 / Rule 12 (Fail loud): if the host mutator throws
+    // SYNCHRONOUSLY, surface the message into the confirm stage's existing
+    // role="alert" and KEEP the drawer open (a bare try/finally that always
+    // `onClose()`d would dismiss the drawer while the add silently failed).
+    // Only close on success. NOTE: the production callback
+    // (scenario-state.ts `addStrategyBridge`) mutates through a `setState`
+    // updater, so a throw THERE is a render-phase error handled by the route
+    // error boundary — NOT by this synchronous catch. This catch is a
+    // defensive net for a callback that throws on the spot.
     try {
       onAddToScenario(buildHoldingRef(selected), {
         id: selected.top_candidate_strategy_id,
