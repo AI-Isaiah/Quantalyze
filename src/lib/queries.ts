@@ -383,10 +383,19 @@ export async function getStrategyDetail(
     ? "*, discovery_categories!inner(slug), strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)"
     : "*, strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)";
 
+  // NEW-C03-03 / NEW-C38-01: add the `status='published'` predicate as
+  // defence-in-depth mirror of all sibling fetchers (getPublicStrategyDetail,
+  // getFactsheetDetail, getStrategyDetailV2). Without it, RLS
+  // `strategies_read` returns the owner's own draft/pending_review rows and
+  // the discovery detail page renders full institutional CTAs for an
+  // unapproved strategy while /factsheet/[id] correctly 404s — the two
+  // surfaces disagree on what is "live". A future RLS widening would also
+  // instantly leak every draft's chart suite through this function alone.
   let query = supabase
     .from("strategies")
     .select(baseSelect)
-    .eq("id", strategyId);
+    .eq("id", strategyId)
+    .eq("status", "published");
 
   if (expectedCategorySlug) {
     query = query.eq("discovery_categories.slug", expectedCategorySlug);
