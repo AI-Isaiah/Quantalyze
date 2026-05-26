@@ -187,6 +187,16 @@ vi.mock("@/lib/audit", () => ({
   ) => {
     state.auditLog(event);
   },
+  // NEW-C10-01: route switched to logAuditEventAsUser (service-role path).
+  // Intercepted here so assertions on state.auditLog still work and the real
+  // adminClient.rpc path never runs (preserving the anti-cross-wire test).
+  logAuditEventAsUser: (
+    _adminClient: unknown,
+    _actingUserId: string,
+    event: { action: string; entity_id: string; metadata?: unknown },
+  ) => {
+    state.auditLog(event);
+  },
 }));
 
 vi.mock("@/lib/csrf", () => ({

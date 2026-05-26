@@ -65,6 +65,15 @@ import { after } from "next/server";
 export type AuditEmitErrorKind =
   | "permission_denied"
   | "transient"
+  // NEW-C10-04 (audit-2026-05-26 silent-failure): NULL auth.uid() from the
+  // user-path RPC raises a distinct SQLSTATE 28000 (invalid_authorization_
+  // specification) since migration 049-patch-1. An everyday expired/missing
+  // JWT reaching the deferred `after()` path is non-fatal: the request
+  // already responded, the user's session lapsed after response flush, and
+  // the row drop is expected (the audit contract for that window). Do NOT
+  // tag as `audit_permission_denied=true` — that tag is reserved for the
+  // EXECUTE-grant-drift catastrophe (42501). See migration 049-patch-1.
+  | "unauthenticated"
   | "unknown";
 
 /**
@@ -114,6 +123,34 @@ export function classifyAuditEmitError(
   if (rpcError && rpcError.code === "42501") {
     return "permission_denied";
   }
+  // NEW-C10-04 (audit-2026-05-26): 28000 (invalid_authorization_specification)
+  // is SQLSTATE raised by `log_audit_event` when auth.uid() IS NULL (migration
+  // 049-patch-1). An expired JWT in the deferred `after()` path hits this code
+  // every time the session lapses between response-flush and RPC settle — an
+  // everyday occurrence, not a fatal permission_denied (42501 = EXECUTE-grant
+  // drift). Classify separately so:
+  //   (a) the `audit_permission_denied=true` tag is NOT emitted (reserved for
+  //       real grant-drift so the Sentry alert rule remains signal, not noise),
+  //   (b) the row drop is treated as non-fatal (the request succeeded; the
+  //       audit window simply expired).
+  //
+  // H-3 (red-team 2026-05-26): check BOTH the rpcError path (PostgREST error
+  // object) AND the thrown path (connection-level auth failure that rejects the
+  // fetch promise before PostgREST returns a JSON body). When 28000 arrives as
+  // a thrown exception the `err` carries `.code === "28000"` directly on the
+  // Error object (set by Object.assign in emit()'s errForDispatch construction);
+  // `rpcError` is null in that case. Without this second branch the thrown-path
+  // 28000 falls through to `unknown` and re-throws as a fatal event, defeating
+  // the noise-reduction goal of NEW-C10-04.
+  if (rpcError && rpcError.code === "28000") {
+    return "unauthenticated";
+  }
+  if (
+    err instanceof Error &&
+    (err as Error & { code?: string }).code === "28000"
+  ) {
+    return "unauthenticated";
+  }
   if (err instanceof Error) {
     if (err.name === "AbortError") return "transient";
     if (err instanceof TypeError && /fetch failed/i.test(err.message)) {
@@ -129,6 +166,14 @@ export function classifyAuditEmitError(
  * (DSN misconfig, network down) never masks the original audit-emit
  * exception. Mirrors the lazy-import pattern in
  * `src/app/api/for-quants-lead/route.ts` and `src/app/error.tsx`.
+ *
+ * NEW-C10-03 (audit-2026-05-26 red-team): the prior implementation used
+ * `void import(...)...` which returns synchronously — the in-flight
+ * dynamic-import promise was detached before captureException resolved.
+ * Under `after()` on a cold-finish the lambda can be reaped before Sentry
+ * flushes, producing a double silent failure: no audit row AND no Sentry
+ * event. Fixed by returning the import chain as a Promise (awaited by the
+ * caller) so the `waitUntil` window stays open until capture settles.
  */
 function reportToSentry(
   err: unknown,
@@ -137,23 +182,19 @@ function reportToSentry(
     extra?: Record<string, unknown>;
     level?: "fatal" | "error" | "warning";
   } = {},
-): void {
-  try {
-    void import("@sentry/nextjs")
-      .then((Sentry) => {
-        try {
-          Sentry.captureException(err, options);
-        } catch {
-          // Sentry SDK threw — swallow. The caller has already logged
-          // the original error to stderr via the stable `[audit]` prefix.
-        }
-      })
-      .catch(() => {
-        // Sentry import failed — swallow. Same reasoning.
-      });
-  } catch {
-    // import() construction failed (extremely unlikely) — swallow.
-  }
+): Promise<void> {
+  return import("@sentry/nextjs")
+    .then((Sentry) => {
+      try {
+        Sentry.captureException(err, options);
+      } catch {
+        // Sentry SDK threw — swallow. The caller has already logged
+        // the original error to stderr via the stable `[audit]` prefix.
+      }
+    })
+    .catch(() => {
+      // Sentry import failed — swallow. Same reasoning.
+    });
 }
 
 /**
@@ -196,6 +237,19 @@ function reportToSentry(
  * throws synchronously — we catch and fall back to `queueMicrotask` so
  * the emission still attempts a best-effort background write rather than
  * surfacing the scheduling error to the caller.
+ *
+ * SECURITY BOUNDARY — when to use this vs `logAuditEventAsUser`
+ * ---------------------------------------------------------------
+ * NEW-C10-01 (audit-2026-05-26): this function emits on the USER-SCOPED
+ * client, so `auth.uid()` in Postgres is resolved from the caller's JWT.
+ * For security-critical mutations (role grants, strategy approve/reject,
+ * GDPR deletion, kill-switch) the JWT may expire between response flush
+ * and `after()` settle (1 h default), causing a 42501 → row dropped.
+ * Use `logAuditEventAsUser(adminClient, verifiedUserId, ...)` for those
+ * paths — it uses the service-role client which is JWT-immune. Prefer
+ * this function only for non-critical, high-volume events (analytics,
+ * portfolio updates, note edits) where an occasional missed row is
+ * acceptable and avoiding a service-role import is desirable.
  *
  * Taxonomy
  * --------
@@ -561,8 +615,17 @@ export function capAuditMetadata<T>(value: T, depth = 0): T {
     return value.map((v) => capAuditMetadata(v, depth + 1)) as unknown as T;
   }
   if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
+    // NEW-C10-06 (audit-2026-05-26 red-team): use Object.create(null) so the
+    // accumulator has no prototype to pollute. Skip reserved property names
+    // but PRESERVE them as a forensic sentinel (silent erasure is the worse
+    // failure for an audit boundary) so the audit row still records the datum.
+    const out = Object.create(null) as Record<string, unknown>;
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (k === "__proto__" || k === "constructor" || k === "prototype") {
+        // Store under a safe sentinel key so the value is not silently lost.
+        out[`__sanitized_key_${k}`] = capAuditMetadata(v, depth + 1);
+        continue;
+      }
       out[k] = capAuditMetadata(v, depth + 1);
     }
     return out as unknown as T;
@@ -613,7 +676,13 @@ export function logAuditEvent(
     });
     queueMicrotask(() => {
       // Fire-and-forget: emit() already logged + Sentry-reported before re-throw.
-      void emit(client, event).catch(() => {});
+      // F-07 (specialist-review 2026-05-26): log suppressed re-throws so Vercel
+      // function logs capture the event (process-level unhandled-rejection hook
+      // is bypassed by the empty catch on the after() path, but at least the
+      // console.error is visible in log aggregation for the non-request fallback).
+      void emit(client, event).catch((err) => {
+        console.error("[audit] queueMicrotask fallback: emit re-throw suppressed:", err);
+      });
     });
   }
 }
@@ -654,7 +723,12 @@ export function logAuditEventAsUser(
     });
     queueMicrotask(() => {
       // Fire-and-forget: emitAsUser() already logged + Sentry-reported.
-      void emitAsUser(adminClient, actingUserId, event).catch(() => {});
+      // F-07 (specialist-review 2026-05-26): log suppressed re-throws so
+      // Vercel function logs capture the suppression — same contract as
+      // logAuditEvent's queueMicrotask fallback above.
+      void emitAsUser(adminClient, actingUserId, event).catch((err) => {
+        console.error("[audit] queueMicrotask fallback: emitAsUser re-throw suppressed:", err);
+      });
     });
   }
 }
@@ -672,11 +746,15 @@ export async function emit(
   let rpcError: { code?: string | null; message?: string } | null = null;
   let thrown: unknown = null;
   try {
+    // NEW-C10-05 (audit-2026-05-26 security+code-review): apply capAuditMetadata
+    // centrally so ALL emit paths are bounded — not just the opt-in callers
+    // (previously only partner-import called it). This is pure + idempotent:
+    // partner-import can keep its explicit capAuditMetadata call without penalty.
     const { error } = await client.rpc("log_audit_event", {
       p_action: event.action,
       p_entity_type: event.entity_type,
       p_entity_id: event.entity_id,
-      p_metadata: event.metadata ?? {},
+      p_metadata: capAuditMetadata(event.metadata ?? {}),
     });
     rpcError = error;
   } catch (err) {
@@ -708,7 +786,8 @@ export async function emit(
       "[audit] log_audit_event permission_denied (re-throwing):",
       { ...eventContext, code: rpcError?.code, message: rpcError?.message },
     );
-    reportToSentry(errForDispatch, {
+    // NEW-C10-03: await so the `waitUntil` window stays open until capture settles.
+    await reportToSentry(errForDispatch, {
       tags: {
         audit_permission_denied: "true",
         audit_path: "log_audit_event",
@@ -717,6 +796,26 @@ export async function emit(
       level: "fatal",
     });
     throw errForDispatch;
+  }
+
+  if (kind === "unauthenticated") {
+    // NEW-C10-04: NULL auth.uid() after JWT expiry in the deferred after()
+    // window. Not a grant-drift fatal — log at warning level with a
+    // distinct tag so ops can distinguish session-lapse drops from real
+    // permission_denied events. Do NOT tag audit_permission_denied=true.
+    console.warn(
+      "[audit] log_audit_event unauthenticated (28000 — JWT expired before after() settled, swallowing):",
+      {
+        ...eventContext,
+        code: rpcError?.code,
+      },
+    );
+    await reportToSentry(errForDispatch, {
+      tags: { audit_emit_unauthenticated: "true", audit_path: "log_audit_event" },
+      extra: eventContext,
+      level: "warning",
+    });
+    return; // Do NOT rethrow — expected post-flush JWT expiry.
   }
 
   if (kind === "transient") {
@@ -729,7 +828,8 @@ export async function emit(
         transient_failure_count: auditEmitTransientFailures,
       },
     );
-    reportToSentry(errForDispatch, {
+    // NEW-C10-03: await so the `waitUntil` window stays open until capture settles.
+    await reportToSentry(errForDispatch, {
       tags: { audit_emit_transient: "true", audit_path: "log_audit_event" },
       extra: eventContext,
       level: "error",
@@ -748,7 +848,8 @@ export async function emit(
         (thrown instanceof Error ? thrown.message : String(thrown)),
     },
   );
-  reportToSentry(errForDispatch, {
+  // NEW-C10-03: await so the `waitUntil` window stays open until capture settles.
+  await reportToSentry(errForDispatch, {
     tags: { audit_path: "log_audit_event" },
     extra: eventContext,
     level: "error",
@@ -769,12 +870,13 @@ export async function emitAsUser(
   let rpcError: { code?: string | null; message?: string } | null = null;
   let thrown: unknown = null;
   try {
+    // NEW-C10-05: capAuditMetadata applied centrally — same rationale as emit().
     const { error } = await adminClient.rpc("log_audit_event_service", {
       p_user_id: actingUserId,
       p_action: event.action,
       p_entity_type: event.entity_type,
       p_entity_id: event.entity_id,
-      p_metadata: event.metadata ?? {},
+      p_metadata: capAuditMetadata(event.metadata ?? {}),
     });
     rpcError = error;
   } catch (err) {
@@ -807,13 +909,47 @@ export async function emitAsUser(
       "[audit] log_audit_event_service permission_denied (re-throwing):",
       { ...eventContext, code: rpcError?.code, message: rpcError?.message },
     );
-    reportToSentry(errForDispatch, {
+    // NEW-C10-03: await so the `waitUntil` window stays open until capture settles.
+    await reportToSentry(errForDispatch, {
       tags: {
         audit_permission_denied: "true",
         audit_path: "log_audit_event_service",
       },
       extra: eventContext,
       level: "fatal",
+    });
+    throw errForDispatch;
+  }
+
+  // CRITICAL-1 / F-01 (specialist-review 2026-05-26): the `unauthenticated`
+  // kind was added to the shared `classifyAuditEmitError` for the user-path
+  // (`emit()`), but `emitAsUser()` had no corresponding branch. Without it,
+  // any 28000 from `log_audit_event_service` falls through to `unknown` and
+  // re-throws with a generic fatal Sentry tag — incorrect dispatch contract.
+  //
+  // For the SERVICE-ROLE path a 28000 is NOT the routine "JWT expired in
+  // after()" case (service-role does not use `auth.uid()` — that guard only
+  // exists in `log_audit_event`, not `log_audit_event_service`). A 28000
+  // here therefore indicates a misconfigured pooler injecting one or a future
+  // migration adding a NULL-guard on the service RPC. We do NOT swallow it
+  // silently — we log at error level with a distinct tag so ops can
+  // distinguish it from a fatal permission_denied. We do NOT rethrow with
+  // the `audit_permission_denied=true` tag (reserved for 42501 EXECUTE-grant
+  // drift). We do NOT tag `audit_emit_unauthenticated` (that tag is for the
+  // user path's JWT-expiry case). We use a dedicated
+  // `audit_service_unexpected_28000` tag and re-throw so the failure is loud.
+  if (kind === "unauthenticated") {
+    console.error(
+      "[audit] log_audit_event_service unexpected 28000 (service-role path — re-throwing):",
+      { ...eventContext, code: rpcError?.code, message: rpcError?.message },
+    );
+    await reportToSentry(errForDispatch, {
+      tags: {
+        audit_service_unexpected_28000: "true",
+        audit_path: "log_audit_event_service",
+      },
+      extra: eventContext,
+      level: "error",
     });
     throw errForDispatch;
   }
@@ -828,7 +964,8 @@ export async function emitAsUser(
         transient_failure_count: auditEmitTransientFailures,
       },
     );
-    reportToSentry(errForDispatch, {
+    // NEW-C10-03: await so the `waitUntil` window stays open until capture settles.
+    await reportToSentry(errForDispatch, {
       tags: {
         audit_emit_transient: "true",
         audit_path: "log_audit_event_service",
@@ -849,7 +986,8 @@ export async function emitAsUser(
         (thrown instanceof Error ? thrown.message : String(thrown)),
     },
   );
-  reportToSentry(errForDispatch, {
+  // NEW-C10-03: await so the `waitUntil` window stays open until capture settles.
+  await reportToSentry(errForDispatch, {
     tags: { audit_path: "log_audit_event_service" },
     extra: eventContext,
     level: "error",

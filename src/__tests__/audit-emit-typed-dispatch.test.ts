@@ -254,6 +254,168 @@ describe("audit.emitAsUser — typed dispatch (P702)", () => {
   });
 });
 
+describe("audit.emitAsUser — CRITICAL-1: unauthenticated (28000) branch", () => {
+  // CRITICAL-1 / F-01 (specialist-review 2026-05-26): `emitAsUser` had no
+  // `unauthenticated` dispatch branch. A 28000 from `log_audit_event_service`
+  // fell through to `unknown` and re-threw with a GENERIC fatal tag — wrong
+  // dispatch contract. The fix adds an explicit branch that re-throws with a
+  // DISTINCT `audit_service_unexpected_28000` tag and does NOT tag
+  // `audit_permission_denied=true` (reserved for 42501 grant-drift).
+  //
+  // Service-role does NOT use auth.uid() so 28000 here is unexpected (unlike
+  // the user path where it is a routine JWT-expiry). We still re-throw (fail
+  // loud) but with the right tag so ops can distinguish it from grant-drift.
+  beforeEach(() => {
+    captureExceptionMock.mockReset();
+    __resetAuditEmitTransientFailuresForTests();
+  });
+
+  const actingUserId = "00000000-0000-0000-0000-000000000002";
+
+  it("CRITICAL-1: 28000 on service-role path re-throws with audit_service_unexpected_28000 tag, NOT audit_permission_denied", async () => {
+    const consoleErrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const adminClient = {
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: {
+          code: "28000",
+          message: "invalid_authorization_specification",
+        },
+      }),
+    } as never;
+
+    // MUST re-throw — service-role 28000 is unexpected, not a routine JWT-expiry.
+    await expect(
+      emitAsUser(adminClient, actingUserId, fixture),
+    ).rejects.toThrow();
+
+    await waitForSentry(1);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, opts] = captureExceptionMock.mock.calls[0];
+    // Must carry the service-path distinct tag.
+    expect(opts).toMatchObject({
+      tags: expect.objectContaining({
+        audit_service_unexpected_28000: "true",
+        audit_path: "log_audit_event_service",
+      }),
+      level: "error",
+    });
+    // Must NOT carry the grant-drift tag — that is reserved for 42501.
+    expect(opts.tags).not.toHaveProperty("audit_permission_denied");
+    // Must NOT carry the user-path unauthenticated tag.
+    expect(opts.tags).not.toHaveProperty("audit_emit_unauthenticated");
+
+    consoleErrSpy.mockRestore();
+  });
+
+  it("CRITICAL-1: 42501 on service-role path still re-throws with audit_permission_denied (not changed)", async () => {
+    const consoleErrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const adminClient = {
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: { code: "42501", message: "permission denied" },
+      }),
+    } as never;
+
+    await expect(
+      emitAsUser(adminClient, actingUserId, fixture),
+    ).rejects.toThrow();
+    await waitForSentry(1);
+
+    const [, opts] = captureExceptionMock.mock.calls[0];
+    expect(opts).toMatchObject({
+      tags: expect.objectContaining({ audit_permission_denied: "true" }),
+      level: "fatal",
+    });
+    expect(opts.tags).not.toHaveProperty("audit_service_unexpected_28000");
+
+    consoleErrSpy.mockRestore();
+  });
+});
+
+describe("classifyAuditEmitError — H-3 red-team: 28000 on thrown path", () => {
+  // H-3 (red-team 2026-05-26): the original NEW-C10-04 fix only checked
+  // `rpcError.code === "28000"` (PostgREST error object path). When the
+  // Supabase client propagates 28000 as a THROWN exception (connection-level
+  // auth failure before PostgREST returns a JSON body), `rpcError` is null
+  // and the thrown Error carries `.code === "28000"`. Without this second
+  // branch the thrown-path 28000 falls through to `unknown` → re-throw as
+  // a fatal event, defeating the noise-reduction goal.
+  beforeEach(() => {
+    captureExceptionMock.mockReset();
+    __resetAuditEmitTransientFailuresForTests();
+  });
+
+  it("H-3: 28000 as a THROWN exception (rpcError=null) is classified as unauthenticated, not unknown", () => {
+    const thrownErr = Object.assign(
+      new Error("invalid_authorization_specification"),
+      { code: "28000" },
+    );
+    const result = classifyAuditEmitError(thrownErr, null);
+    expect(result).toBe("unauthenticated");
+    expect(result).not.toBe("unknown");
+    expect(result).not.toBe("permission_denied");
+  });
+
+  it("H-3: 28000 thrown path → emit() swallows (non-fatal), tags audit_emit_unauthenticated", async () => {
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Simulate the Supabase client rejecting at the fetch level with a 28000
+    // error (connection-level auth failure rather than a PostgREST JSON error body).
+    const thrownErr = Object.assign(
+      new Error("invalid_authorization_specification"),
+      { code: "28000" },
+    );
+    const client = {
+      rpc: vi.fn().mockRejectedValue(thrownErr),
+    } as never;
+
+    // Must NOT throw — 28000 on thrown path must be swallowed like the rpcError path.
+    await expect(emit(client, fixture)).resolves.toBeUndefined();
+    await waitForSentry(1);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, opts] = captureExceptionMock.mock.calls[0];
+    expect(opts).toMatchObject({
+      tags: expect.objectContaining({
+        audit_emit_unauthenticated: "true",
+        audit_path: "log_audit_event",
+      }),
+      level: "warning",
+    });
+    expect(opts.tags).not.toHaveProperty("audit_permission_denied");
+
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("H-3: a generic thrown Error (no .code) still falls through to unknown (regression guard)", () => {
+    // Ensure the new thrown-path check does not widen classification for
+    // errors that happen to be instanceof Error but carry no .code — they
+    // must still land in "unknown" so fail-loud is preserved.
+    const genericErr = new Error("unexpected schema drift");
+    const result = classifyAuditEmitError(genericErr, null);
+    expect(result).toBe("unknown");
+  });
+
+  it("H-3: a thrown Error with code=42501 (not 28000) is still classified correctly", () => {
+    // Belt-and-suspenders: an Error thrown with .code=42501 must stay
+    // permission_denied even on the thrown path (rpcError=null).
+    // Note: classifyAuditEmitError checks rpcError first; when rpcError is
+    // null the 42501 thrown case falls to unknown (the permission_denied
+    // check requires rpcError). This test pins that boundary explicitly.
+    const thrownErr = Object.assign(new Error("permission denied"), { code: "42501" });
+    // rpcError is null — only the thrown path is active here.
+    // The existing code checks rpcError?.code === "42501" so without rpcError
+    // this lands in unknown. Pin the actual behavior so a future change that
+    // broadens the 42501 catch to the thrown path is explicit.
+    const result = classifyAuditEmitError(thrownErr, null);
+    expect(result).toBe("unknown"); // existing contract: 42501 on thrown path is unknown
+  });
+});
+
 describe("classifyAuditEmitError", () => {
   it("classifies 42501 PostgREST error as permission_denied", () => {
     expect(
@@ -281,5 +443,90 @@ describe("classifyAuditEmitError", () => {
     expect(
       classifyAuditEmitError(null, { code: "PGRST200" }),
     ).toBe("unknown");
+  });
+
+  // NEW-C10-04 (audit-2026-05-26 silent-failure) regression tests.
+  // Pre-fix: 28000 fell through to "unknown" → re-throw (fatal). Post-fix:
+  // 28000 is classified as "unauthenticated" (non-fatal, separate Sentry tag).
+  it("NEW-C10-04: classifies 28000 PostgREST error as unauthenticated (not permission_denied, not unknown)", () => {
+    // 28000 = invalid_authorization_specification: raised by log_audit_event
+    // when auth.uid() IS NULL (JWT expired before after() settled).
+    // MUST NOT be permission_denied — that tag is reserved for EXECUTE-grant drift.
+    const result = classifyAuditEmitError(null, { code: "28000" });
+    expect(result).toBe("unauthenticated");
+    expect(result).not.toBe("permission_denied");
+    expect(result).not.toBe("unknown");
+  });
+});
+
+describe("audit.emit — NEW-C10-04: 28000 unauthenticated path is non-fatal", () => {
+  // NEW-C10-04 (audit-2026-05-26 silent-failure): 28000 from log_audit_event
+  // is raised when auth.uid() IS NULL (JWT expired before after() settled).
+  // Pre-fix: 28000 fell through to "unknown" → re-throw + Sentry, but
+  // operators couldn't distinguish it from grant-drift (42501). Post-fix:
+  // 28000 → "unauthenticated" → swallowed + Sentry at warning level with
+  // audit_emit_unauthenticated=true (NOT audit_permission_denied=true).
+  beforeEach(() => {
+    captureExceptionMock.mockReset();
+    __resetAuditEmitTransientFailuresForTests();
+  });
+
+  it("NEW-C10-04: 28000 swallows (non-fatal), tags audit_emit_unauthenticated, NOT audit_permission_denied", async () => {
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const client = {
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: {
+          code: "28000",
+          message: "log_audit_event: auth.uid() is NULL — caller must be authenticated",
+        },
+      }),
+    } as never;
+
+    // Must NOT throw — unauthenticated is non-fatal.
+    await expect(emit(client, fixture)).resolves.toBeUndefined();
+    await waitForSentry(1);
+
+    // Sentry capture must fire with audit_emit_unauthenticated=true.
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, opts] = captureExceptionMock.mock.calls[0];
+    expect(opts).toMatchObject({
+      tags: expect.objectContaining({
+        audit_emit_unauthenticated: "true",
+        audit_path: "log_audit_event",
+      }),
+      level: "warning",
+    });
+    // The fatal tag must NOT be present — it is reserved for grant-drift (42501).
+    expect(opts.tags).not.toHaveProperty("audit_permission_denied");
+
+    // Console.warn (not error) so log aggregation sees distinct severity.
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[audit]"),
+      expect.objectContaining({ code: "28000" }),
+    );
+
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("NEW-C10-04: 42501 still re-throws (fatal) — 28000 fix does not change grant-drift handling", async () => {
+    // Belt-and-suspenders: verify that the new 28000 branch doesn't accidentally
+    // swallow 42501. Pre-existing behavior must be preserved.
+    const client = {
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: { code: "42501", message: "permission denied" },
+      }),
+    } as never;
+
+    await expect(emit(client, fixture)).rejects.toThrow();
+    await waitForSentry(1);
+
+    const [, opts] = captureExceptionMock.mock.calls[0];
+    expect(opts).toMatchObject({
+      tags: expect.objectContaining({ audit_permission_denied: "true" }),
+      level: "fatal",
+    });
   });
 });
