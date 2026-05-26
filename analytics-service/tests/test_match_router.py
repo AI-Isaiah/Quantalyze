@@ -411,7 +411,12 @@ class TestRetentionSweep:
 
         def _capture_in(_col, ids):
             captured_delete_ids.append(list(ids))
-            return MagicMock(execute=MagicMock(return_value=MagicMock(data=[])))
+            # Return the deleted rows as data (matching real Supabase DELETE
+            # behaviour) so the NEW-C08-04 actual-count logic gives the right
+            # total instead of 0.
+            return MagicMock(execute=MagicMock(return_value=MagicMock(
+                data=[{"id": i} for i in ids]
+            )))
 
         delete_chain.delete.return_value.in_.side_effect = _capture_in
 
@@ -463,7 +468,12 @@ class TestRetentionSweep:
 
         def _capture_in(_col, ids):
             captured_chunks.append(list(ids))
-            return MagicMock(execute=MagicMock(return_value=MagicMock(data=[])))
+            # Return the deleted rows as data (matching real Supabase DELETE
+            # behaviour) so the NEW-C08-04 actual-count logic gives the right
+            # total instead of 0.
+            return MagicMock(execute=MagicMock(return_value=MagicMock(
+                data=[{"id": i} for i in ids]
+            )))
 
         sb.table.return_value.delete.return_value.in_.side_effect = _capture_in
         monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
@@ -1717,3 +1727,183 @@ class TestScoreOneAllocatorExplicitlyExcludedFilter:
         # The good candidate (rank=1) must still appear.
         ranked_ids = {r["strategy_id"] for r in inserted_rows if r["rank"] is not None}
         assert ranked_ids == {"good-strat"}
+
+
+# ---------------------------------------------------------------------------
+# NEW-C08-02 — _load_candidate_universe paginates analytics IN-list
+# ---------------------------------------------------------------------------
+
+
+class TestLoadCandidateUniverseAnalyticsPagination:
+    """NEW-C08-02: the analytics SELECT must be chunked in pages of
+    _ANALYTICS_IN_LIST_PAGE_SIZE so a large published-strategy universe
+    does not overflow the PostgREST URL limit and silently drop rows."""
+
+    def test_analytics_fetch_is_chunked_when_many_strategies(self, monkeypatch):
+        from routers import match as match_mod
+
+        page_size = match_mod._ANALYTICS_IN_LIST_PAGE_SIZE
+        # Build a universe with 2.5× the page size to force multiple pages.
+        n_strategies = int(page_size * 2.5)
+        strategies = [
+            {
+                "id": f"s{i}",
+                "name": f"strat-{i}",
+                "codename": None,
+                "strategy_types": ["trend_following"],
+                "subtypes": [],
+                "supported_exchanges": ["binance"],
+                "status": "published",
+                "aum": 1_000_000,
+                "max_capacity": 5_000_000,
+                "user_id": f"mgr-{i}",
+                "start_date": "2022-01-01",
+                "is_example": False,
+            }
+            for i in range(n_strategies)
+        ]
+
+        analytics_in_calls: list[list[str]] = []
+
+        class _FakeSupabase:
+            def table(self, name):
+                return _FakeTable(name)
+
+        class _FakeTable:
+            def __init__(self, name):
+                self._name = name
+
+            def select(self, *_):
+                return self
+
+            def eq(self, *_):
+                return self
+
+            def in_(self, col, ids):
+                if self._name == "strategy_analytics":
+                    analytics_in_calls.append(list(ids))
+                    return _FakeExecEmpty()
+                return _FakeExecEmpty()
+
+            def execute(self):
+                if self._name == "strategies":
+                    return _FakeResult(strategies)
+                return _FakeResult([])
+
+        class _FakeExecEmpty:
+            def execute(self):
+                return _FakeResult([])
+
+        class _FakeResult:
+            def __init__(self, data):
+                self.data = data
+
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: _FakeSupabase())
+
+        match_mod._load_candidate_universe()
+
+        assert len(analytics_in_calls) >= 3, (
+            f"Expected >= 3 analytics page fetches for {n_strategies} strategies "
+            f"with page_size={page_size}; got {len(analytics_in_calls)}"
+        )
+        for call_ids in analytics_in_calls:
+            assert len(call_ids) <= page_size, (
+                f"Each IN-list chunk must be ≤ {page_size} IDs; got {len(call_ids)}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C08-04 — _retention_sweep counts actual deleted rows from DB result
+# ---------------------------------------------------------------------------
+
+
+class TestRetentionSweepActualDeleteCount:
+    """NEW-C08-04: the sweep must count rows confirmed deleted by the DB, not
+    the size of the chunk. A no-op DELETE (RLS regression, permission drift)
+    returns data=[] and must trigger an ERROR log, not silently add len(chunk)
+    to the returned count."""
+
+    def test_zero_actual_deleted_logs_error_and_returns_zero(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        rows = [{"id": f"id-{i}"} for i in range(10)]
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.order.return_value.execute.return_value = (
+            MagicMock(data=rows)
+        )
+        # DELETE returns data=[] — simulating an RLS no-op.
+        sb.table.return_value.delete.return_value.in_.return_value.execute.return_value = (
+            MagicMock(data=[])
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            deleted = match_mod._retention_sweep("alloc-rls", keep=7)
+
+        # Pre-fix: deleted == 3 (len(chunk) regardless of DB result).
+        # Post-fix: deleted == 0 (actual confirmed rows).
+        assert deleted == 0, (
+            "retention_sweep must count actual deleted rows, not chunk size; "
+            "an RLS no-op DELETE must surface as deleted=0"
+        )
+        assert any(
+            "retention DELETE affected 0/" in rec.getMessage()
+            for rec in caplog.records
+        ), "a no-op DELETE must log at ERROR so RLS regressions surface in Sentry"
+
+
+# ---------------------------------------------------------------------------
+# NEW-C08-05 — warm-up gate dropped holdings are logged
+# ---------------------------------------------------------------------------
+
+
+class TestHoldingsWarmUpDroppedLogging:
+    """NEW-C08-05: when the 30-day warm-up gate silently drops one or more
+    holdings, a logger.info call must surface the count so the caller can
+    distinguish empty-book from freshly-funded (portfolio_aum=0 with
+    warm_up_dropped>0 means real holdings exist but lack history)."""
+
+    def test_warm_up_dropped_holdings_emit_info_log(self, monkeypatch, caplog):
+        from routers import match as match_mod
+
+        # One holding with insufficient history (warm-up gate drops it)
+        collapsed = [
+            {"venue": "binance", "symbol": "BTC/USDT", "holding_type": "spot",
+             "value_usd": 10_000, "asof": "2026-01-15"},
+        ]
+
+        def _make_query_result(data):
+            q = MagicMock()
+            q.select.return_value = q
+            q.eq.return_value = q
+            q.order.return_value = q
+            q.execute.return_value = MagicMock(data=data)
+            return q
+
+        def _table(name):
+            if name == "allocator_holdings":
+                return _make_query_result(collapsed)
+            # allocator_equity_snapshots: empty snapshots
+            return _make_query_result([])
+
+        sb = MagicMock()
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        # Patch reconstruct_symbol_returns to return None (simulates <30 days)
+        monkeypatch.setattr(
+            match_mod,
+            "reconstruct_symbol_returns",
+            lambda _snapshots, _symbol: None,
+        )
+
+        with caplog.at_level("INFO", logger="quantalyze.analytics"):
+            result = match_mod._load_holding_portfolio_context("alloc-test")
+
+        assert result["portfolio_aum"] == 0.0, "all holdings dropped → aum=0"
+        assert any(
+            "warm-up gate dropped 1/" in rec.getMessage()
+            for rec in caplog.records
+        ), "warm-up dropped count must be logged at INFO (NEW-C08-05)"

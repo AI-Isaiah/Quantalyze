@@ -171,16 +171,34 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
     if not strategy_ids:
         return {"strategies_by_id": {}, "returns_by_id": {}}
 
-    analytics_result = (
-        supabase.table("strategy_analytics")
-        .select(
-            "strategy_id, returns_series, sharpe, max_drawdown, "
-            "cumulative_return, cagr, volatility"
+    # NEW-C08-02: paginate the analytics IN-list. The retention sweep at
+    # L872-905 already documents this hazard ("an unbounded list risks HTTP
+    # 414 or silent filter truncation"); this fetch was unguarded. On
+    # truncation, missing strategies received analytics={} → None Sharpe/DD/
+    # returns, still emitted as candidates, scored on defaults (preference_fit
+    # 0.5) — a silent universe contamination indistinguishable from healthy.
+    analytics_rows: list[dict[str, Any]] = []
+    for _page_start in range(0, len(strategy_ids), _ANALYTICS_IN_LIST_PAGE_SIZE):
+        _chunk = strategy_ids[_page_start:_page_start + _ANALYTICS_IN_LIST_PAGE_SIZE]
+        _page = (
+            supabase.table("strategy_analytics")
+            .select(
+                "strategy_id, returns_series, sharpe, max_drawdown, "
+                "cumulative_return, cagr, volatility"
+            )
+            .in_("strategy_id", _chunk)
+            .execute()
         )
-        .in_("strategy_id", strategy_ids)
-        .execute()
-    )
-    analytics_by_sid = {row["strategy_id"]: row for row in (analytics_result.data or [])}
+        analytics_rows.extend(_page.data or [])
+    if len(analytics_rows) < len(strategy_ids):
+        logger.warning(
+            "match: universe analytics coverage %d/%d — %d strategies have "
+            "no analytics row (expected for new strategies; log rate > 0 on "
+            "a full platform likely indicates IN-list truncation)",
+            len(analytics_rows), len(strategy_ids),
+            len(strategy_ids) - len(analytics_rows),
+        )
+    analytics_by_sid = {row["strategy_id"]: row for row in analytics_rows}
 
     strategies_by_id: dict[str, dict[str, Any]] = {}
     returns_by_id: dict[str, pd.Series] = {}
@@ -312,6 +330,7 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
     portfolio_returns: dict[str, pd.Series] = {}
     holdings_rows_eligible: list[dict] = []
     raw_values: dict[str, float] = {}  # pseudo_id -> value_usd (for weight computation)
+    warm_up_dropped = 0  # NEW-C08-05: count excluded holdings for observability
 
     for row in collapsed:
         venue = row["venue"]
@@ -322,13 +341,26 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
 
         series = reconstruct_symbol_returns(snapshots, symbol)
         if series is None or len(series) < 30:
-            # Warm-up gate: insufficient history — exclude entirely (Phase 07 D-03 analog)
+            # Warm-up gate: insufficient history — exclude entirely (Phase 07 D-03 analog).
+            # NEW-C08-05: count and log so the caller can distinguish empty-book
+            # from freshly-funded (portfolio_aum=0 with warm_up_dropped>0 means
+            # the allocator has holdings but they're all too new to score, not
+            # that there are genuinely no holdings).
+            warm_up_dropped += 1
             continue
 
         portfolio_strategies.append({"strategy_id": pseudo_id})
         portfolio_returns[pseudo_id] = series
         holdings_rows_eligible.append(row)
         raw_values[pseudo_id] = value_usd
+
+    if warm_up_dropped > 0:
+        logger.info(
+            "match: holdings warm-up gate dropped %d/%d holding(s) for allocator %s "
+            "(< 30 reconstructable daily returns) — these are excluded from portfolio "
+            "math and flag computation",
+            warm_up_dropped, len(collapsed), allocator_id,
+        )
 
     # --- Step 5: compute weights (value_usd / total_eligible_value) ---
     total_eligible_value = sum(raw_values.values())
@@ -413,15 +445,36 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         # is order-independent today, but a future edit that iterates
         # strategy_ids directly would silently regress.
         strategy_ids = sorted({row["strategy_id"] for row in ps_rows})
-        sa_result = (
-            supabase.table("strategy_analytics")
-            .select("strategy_id, returns_series")
-            .in_("strategy_id", strategy_ids)
-            .execute()
-        ) if strategy_ids else None
+        # NEW-C08-03: paginate the portfolio analytics IN-list. An allocator
+        # with many strategies can push the IN-list past the URL cap; on
+        # truncation analytics_by_sid is missing entries → portfolio_returns
+        # is incomplete → _compute_portfolio_fit_components silently scores
+        # against a partial book, understating existing exposure (audit
+        # finding M-0675 angle but query-caused, no log distinguishing "no
+        # analytics yet" from "silently truncated").
+        if strategy_ids:
+            sa_rows: list[dict[str, Any]] = []
+            for _page_start in range(0, len(strategy_ids), _ANALYTICS_IN_LIST_PAGE_SIZE):
+                _chunk = strategy_ids[_page_start:_page_start + _ANALYTICS_IN_LIST_PAGE_SIZE]
+                _page = (
+                    supabase.table("strategy_analytics")
+                    .select("strategy_id, returns_series")
+                    .in_("strategy_id", _chunk)
+                    .execute()
+                )
+                sa_rows.extend(_page.data or [])
+            if len(sa_rows) < len(strategy_ids):
+                logger.warning(
+                    "match: portfolio analytics coverage %d/%d for allocator %s "
+                    "— %d strategies lack analytics rows",
+                    len(sa_rows), len(strategy_ids), allocator_id,
+                    len(strategy_ids) - len(sa_rows),
+                )
+            analytics_by_sid = {row["strategy_id"]: row for row in sa_rows}
+        else:
+            analytics_by_sid: dict[str, Any] = {}
 
-        if sa_result:
-            analytics_by_sid = {row["strategy_id"]: row for row in (sa_result.data or [])}
+        if strategy_ids:
             for row in ps_rows:
                 sid = row["strategy_id"]
                 if sid not in portfolio_weights:
@@ -922,6 +975,13 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
 # batches would survive the sweep). 50 IDs per page is well under any cap.
 _RETENTION_DELETE_BATCH_SIZE = 50
 
+# Page size for analytics SELECT .in_() fetches (NEW-C08-02 / NEW-C08-03).
+# The retention sweep already documents this hazard at L919 above; the same
+# URL-length cap applies to every unbounded .in_() against strategy_analytics.
+# 200 IDs/request is well under the PostgREST/nginx URL cap (~8KB) for
+# typical 36-char UUIDs and keeps the per-query response size manageable.
+_ANALYTICS_IN_LIST_PAGE_SIZE = 200
+
 
 def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
     """Delete old batches for this allocator, keeping the last `keep`.
@@ -947,8 +1007,19 @@ def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
     # its own request, so partial progress survives transient failures.
     for start in range(0, len(ids_to_delete), _RETENTION_DELETE_BATCH_SIZE):
         chunk = ids_to_delete[start:start + _RETENTION_DELETE_BATCH_SIZE]
-        supabase.table("match_batches").delete().in_("id", chunk).execute()
-        deleted += len(chunk)
+        del_result = supabase.table("match_batches").delete().in_("id", chunk).execute()
+        # NEW-C08-04: count actual deleted rows from the result, not len(chunk).
+        # A no-op DELETE (RLS regression, permission drift, CASCADE issue) returns
+        # 200 with data=[] — pre-fix we'd unconditionally add len(chunk) and
+        # surface retention_deleted=N while old batches accumulated unbounded.
+        actual_deleted = len(del_result.data or [])
+        if actual_deleted < len(chunk):
+            logger.error(
+                "match_engine: retention DELETE affected %d/%d rows for allocator %s "
+                "— possible RLS/permission regression; old batches may survive sweep",
+                actual_deleted, len(chunk), allocator_id,
+            )
+        deleted += actual_deleted
     return deleted
 
 
