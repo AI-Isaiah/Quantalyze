@@ -91,11 +91,17 @@ export function SignupForm() {
       return;
     }
 
-    // Supabase's enumeration-safe response for "email already registered":
-    // signUp returns 200 with data.user populated but data.user.identities = [].
-    // Without this branch the form falls through to "Check your email" — but no
-    // email is ever sent (the account already exists), so the user waits forever.
-    if (data.user && data.user.identities && data.user.identities.length === 0) {
+    // NEW-C15-02: Supabase's enumeration-safe response for "email already
+    // registered": signUp returns 200 with data.user populated but
+    // identities may be [] OR undefined (the field is absent under some
+    // GoTrue configs or when email-confirmation is off). The pre-fix guard
+    //   `data.user.identities && data.user.identities.length === 0`
+    // evaluated to false when identities was undefined, skipping this branch
+    // and falling through to "Check your email" — but no email was sent so
+    // the user waited forever with no feedback. Fix: treat absent identities
+    // OR empty identities as the duplicate-email signal.
+    const ids = data.user?.identities;
+    if (data.user && (!ids || ids.length === 0)) {
       setError(
         "An account with this email already exists. Sign in instead, or use password reset if you forgot it.",
       );
@@ -103,6 +109,24 @@ export function SignupForm() {
       return;
     }
 
+    // NEW-C15-02: unexpected no-op response — Supabase returned no user, no
+    // session, and no error. This can happen if the account is in a limbo
+    // state or if a server-side misconfiguration swallowed the request.
+    // Pre-fix this fell through to the "Check your email" message below —
+    // but no email would ever be sent, leaving the user waiting forever with
+    // no actionable feedback. Log the anomaly and show a recoverable error.
+    if (!data.user && !data.session) {
+      console.error("[SignupForm] signUp returned no user, session, or error");
+      setError(
+        "Something went wrong — please try again or contact support if the problem persists.",
+      );
+      setLoading(false);
+      return;
+    }
+
+    // `data.user` is guaranteed non-null here (the two early-returns above
+    // cover user=null paths). Require the email-confirmation step (standard
+    // for the GoTrue email-confirmation flow).
     if (!data.session) {
       setError("Check your email to confirm your account, then sign in.");
       setLoading(false);
