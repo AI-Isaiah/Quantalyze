@@ -26,7 +26,24 @@ import {
   type FlaggedHolding,
 } from "../lib/holding-outcome-adapter";
 
-type Stage = "browse" | "confirm";
+/**
+ * Drawer state machine as a discriminated union (audit M-0058). The
+ * previous four orthogonal `useState`s (`stage` / `selectedRef` /
+ * `submitting` / `error`) carried implicit invariants TS could not check:
+ * in `browse` there is no selection and nothing in flight; `confirm`
+ * always has a ref. Encoding those as a union makes "confirm without a
+ * ref" and "submitting/error while browsing" unrepresentable.
+ */
+type DrawerState =
+  | { stage: "browse" }
+  | {
+      stage: "confirm";
+      ref: string;
+      submitting: boolean;
+      error: string | null;
+    };
+
+const INITIAL_STATE: DrawerState = { stage: "browse" };
 
 /**
  * Phase 10 Plan 05 / D-05. Candidate-strategy payload delivered to
@@ -78,10 +95,7 @@ export function BridgeDrawer({
   matchDecisionsByHoldingRef: _matchDecisionsByHoldingRef,
   onAddToScenario,
 }: BridgeDrawerProps) {
-  const [stage, setStage] = useState<Stage>("browse");
-  const [selectedRef, setSelectedRef] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [state, setState] = useState<DrawerState>(INITIAL_STATE);
   const drawerRef = useRef<HTMLDivElement>(null);
 
   // 09.1-REVIEW IN-04: split the previous combined effect into two so
@@ -90,13 +104,11 @@ export function BridgeDrawer({
   // is key-based remount at the call site, but every existing caller
   // depends on stable identity + internal reset semantics.
 
-  // Reset transient state when the drawer closes.
+  // Reset transient state when the drawer closes. The union collapses the
+  // four prior resets (stage/selectedRef/error/submitting) into one.
   useEffect(() => {
     if (isOpen) return;
-    setStage("browse");
-    setSelectedRef(null);
-    setError(null);
-    setSubmitting(false);
+    setState(INITIAL_STATE);
   }, [isOpen]);
 
   // Esc-to-close handler — only attached while the drawer is open.
@@ -111,21 +123,25 @@ export function BridgeDrawer({
 
   if (!isOpen) return null;
 
-  const selected = selectedRef
-    ? flaggedHoldings.find((h) => buildHoldingRef(h) === selectedRef)
-    : null;
+  const selected =
+    state.stage === "confirm"
+      ? flaggedHoldings.find((h) => buildHoldingRef(h) === state.ref)
+      : null;
 
   async function handleSendIntro() {
-    if (!selected) return;
-    setSubmitting(true);
-    setError(null);
+    if (state.stage !== "confirm" || !selected) return;
+    setState({ ...state, submitting: true, error: null });
     try {
       const result = await sendBridgeIntro({
         holdingRef: buildHoldingRef(selected),
         topCandidateStrategyId: selected.top_candidate_strategy_id,
       });
       if (!result.ok) {
-        setError(result.error);
+        setState((prev) =>
+          prev.stage === "confirm"
+            ? { ...prev, submitting: false, error: result.error }
+            : prev,
+        );
         return;
       }
       onClose();
@@ -134,9 +150,12 @@ export function BridgeDrawer({
       // the resolved {ok:false} path: re-enable the button and show an error
       // so the allocator can retry. Without this, the await rejection escapes
       // as an unhandled promise rejection and the button strands on "Sending…".
-      setError(e instanceof Error ? e.message : "Failed to send intro");
-    } finally {
-      setSubmitting(false);
+      const message = e instanceof Error ? e.message : "Failed to send intro";
+      setState((prev) =>
+        prev.stage === "confirm"
+          ? { ...prev, submitting: false, error: message }
+          : prev,
+      );
     }
   }
 
@@ -149,11 +168,15 @@ export function BridgeDrawer({
    * is available before forwarding to the scenario-state mutator.
    */
   function handleAddToScenario() {
-    if (!selected || !onAddToScenario) return;
-    // Review-pass P2 fix — wrap the callback in try/finally so onClose
-    // ALWAYS runs even if the host throws synchronously. Without this,
-    // a callback exception would strand the drawer open with no path
-    // for the allocator to dismiss without page reload.
+    if (state.stage !== "confirm" || !selected || !onAddToScenario) return;
+    // Audit H-0085 / Rule 12 (Fail loud): the host mutator
+    // (scenario-state.ts `addStrategyBridge`) can throw — quota exceeded,
+    // duplicate strategy_id in scope, malformed state. A bare try/finally
+    // that always `onClose()`d swallowed that throw: the drawer dismissed
+    // cleanly while the strategy was silently NOT added. Mirror the
+    // handleSendIntro error path — surface the message into the confirm
+    // stage's existing role="alert" and KEEP the drawer open so the
+    // allocator sees the failure and can retry. Only close on success.
     try {
       onAddToScenario(buildHoldingRef(selected), {
         id: selected.top_candidate_strategy_id,
@@ -161,9 +184,15 @@ export function BridgeDrawer({
         markets: [selected.venue],
         strategy_types: [],
       });
-    } finally {
-      onClose();
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : "Failed to add to scenario";
+      setState((prev) =>
+        prev.stage === "confirm" ? { ...prev, error: message } : prev,
+      );
+      return;
     }
+    onClose();
   }
 
   const candidates = flaggedHoldings.filter(
@@ -208,7 +237,7 @@ export function BridgeDrawer({
       >
         <div className="flex items-center justify-between">
           <div className="text-lg font-semibold text-text-primary">
-            {stage === "browse" ? "Review candidates" : "Confirm intro"}
+            {state.stage === "browse" ? "Review candidates" : "Confirm intro"}
           </div>
           <button
             type="button"
@@ -220,7 +249,7 @@ export function BridgeDrawer({
           </button>
         </div>
 
-        {stage === "browse" && (
+        {state.stage === "browse" && (
           <div className="mt-4 grid gap-3">
             {/* Mandate gates failed card — designer screenshot 13.51.27 */}
             <div
@@ -274,8 +303,12 @@ export function BridgeDrawer({
                       <button
                         type="button"
                         onClick={() => {
-                          setSelectedRef(ref);
-                          setStage("confirm");
+                          setState({
+                            stage: "confirm",
+                            ref,
+                            submitting: false,
+                            error: null,
+                          });
                         }}
                         className="w-full rounded-md border border-border p-3 text-left hover:border-accent"
                         data-testid={`bridge-candidate-${ref}`}
@@ -295,7 +328,7 @@ export function BridgeDrawer({
           </div>
         )}
 
-        {stage === "confirm" && selected && (
+        {state.stage === "confirm" && selected && (
           <div className="mt-4 grid gap-4">
             {/* From → To row — designer screenshot 13.51.40 */}
             <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 rounded-md border border-border p-4">
@@ -333,12 +366,12 @@ export function BridgeDrawer({
               <button
                 type="button"
                 onClick={handleSendIntro}
-                disabled={submitting}
+                disabled={state.submitting}
                 className={`${
                   onAddToScenario ? "flex-1" : "self-start"
                 } rounded-md bg-accent px-4 py-2 text-sm text-white hover:bg-accent/90 disabled:opacity-50`}
               >
-                {submitting ? "Sending…" : "Send intro"}
+                {state.submitting ? "Sending…" : "Send intro"}
               </button>
               {onAddToScenario && (
                 <button
@@ -351,18 +384,19 @@ export function BridgeDrawer({
                 </button>
               )}
             </div>
-            {error && (
+            {state.error && (
               <div role="alert" className="text-xs text-negative">
-                {error}
+                {state.error}
               </div>
             )}
             <button
               type="button"
               onClick={() => {
-                // Clear any prior Send-intro error so a stale alert never
-                // re-appears when the allocator re-enters the confirm stage.
-                setError(null);
-                setStage("browse");
+                // Returning to browse drops the confirm variant entirely, so
+                // any prior Send-intro / Add-to-scenario error is discarded —
+                // a stale alert never re-appears when the allocator re-enters
+                // the confirm stage.
+                setState({ stage: "browse" });
               }}
               className="self-start text-xs text-text-muted hover:text-text-primary"
             >
