@@ -294,9 +294,20 @@ function NonOkState({ data }: { data: SimulatorCandidate }) {
 }
 
 function SuccessBody({ data }: { data: SimulatorResponseOk }) {
-  // NEW-C11-05: defense-in-depth — if the schema's ok-branch refine is ever
-  // bypassed (e.g. producer drift before the next schema gate upgrade), guard
-  // against rendering ±0 chips as a confident projection for a degenerate row.
+  // NEW-C11-05: belt-and-suspenders guard for future schema relaxation.
+  //
+  // I3 review note: the SimulatorOkBranch refine already hard-rejects
+  // `overlap_days < 30` at parse time, so in the current schema this branch
+  // is unreachable for the `overlap_days < 30` arm. If the schema parse
+  // throws (degenerate producer response), the caller catches and renders the
+  // generic error state — it never reaches SuccessBody at all.
+  //
+  // This guard is intentionally retained as belt-and-suspenders: if the
+  // ok-branch refine is ever relaxed or a future schema migration widens the
+  // accepted range, this runtime check prevents a degenerate parsed row from
+  // rendering ±0 chips as a confident projection. The `allDeltasNull` arm
+  // catches a future case where all metrics fail to compute but the schema
+  // still emits `status:"ok"` (today impossible under the refine).
   const allDeltasNull =
     data.deltas.sharpe_delta === null &&
     data.deltas.dd_delta === null &&
@@ -482,14 +493,17 @@ function EquityOverlay({
   // Merged x-axis of all unique dates across both series keeps the overlay
   // aligned when the proposed curve starts later (candidate has shorter history).
   // NEW-C11-08: building the Map with new Map(arr.map(...)) silently drops
-  // duplicate dates (last-write-wins). Warn in development when a collision is
-  // detected so an accidental date-normalization change surfaces immediately
-  // rather than producing an invisible gap in the line.
+  // duplicate dates (last-write-wins). Warn unconditionally when a collision is
+  // detected so a producer-side date-normalization regression is observable in
+  // production logs, not just in dev/test. A duplicate date is a data integrity
+  // signal (DST boundary drift, normalization regression) — not a developer hint.
+  // SF-F5: the original NODE_ENV guard meant the production chart silently
+  // rendered incorrect data (last-write-wins) with no operator signal. Removed.
   const merged = useMemo(() => {
     function buildDateMap(points: TimeSeriesPoint[], label: string) {
       const map = new Map<string, number>();
       for (const p of points) {
-        if (map.has(p.date) && process.env.NODE_ENV !== "production") {
+        if (map.has(p.date)) {
           console.warn(
             `[EquityOverlay] duplicate date "${p.date}" in ${label} series — last-write-wins`,
           );

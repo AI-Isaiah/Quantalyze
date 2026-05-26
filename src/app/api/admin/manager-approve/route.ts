@@ -93,17 +93,47 @@ export async function POST(req: NextRequest) {
     metadata: { new_status: "verified" },
   });
 
-  // PR #266 red-team: notify the user their signup is approved. See
-  // allocator-approve/route.ts for rationale.
-  const { data: approvedProfile } = await admin
+  // PR #266 red-team: notify the user their signup is approved.
+  //
+  // SF-F6: check the SELECT error explicitly — the pre-fix code discarded
+  // the .error field entirely. See allocator-approve/route.ts for the full
+  // rationale.
+  const { data: approvedProfile, error: profileErr } = await admin
     .from("profiles")
     .select("role, email")
     .eq("id", id)
     .single();
-  if (approvedProfile?.email && approvedProfile.role) {
+  if (profileErr || !approvedProfile?.email || !approvedProfile.role) {
+    console.error("[manager-approve] profile lookup failed, notification skipped:", {
+      id,
+      error: profileErr?.message,
+      hasEmail: !!approvedProfile?.email,
+      hasRole: !!approvedProfile?.role,
+    });
+    return NextResponse.json(
+      { success: true, email_warning: "Account approved but notification lookup failed." },
+      { status: 200 },
+    );
+  }
+
+  // C1 / SF-F1: wrap notifyUserSignupApproved in try/catch. The DB approval
+  // is already committed — an unhandled throw returns a raw 500, signalling
+  // failure on a committed operation, causing likely admin retry and a
+  // duplicate audit row. See allocator-approve/route.ts for full rationale.
+  try {
     await notifyUserSignupApproved(
       approvedProfile.email as string,
       approvedProfile.role as "allocator" | "manager" | "both",
+    );
+  } catch (emailErr) {
+    console.error("[manager-approve] notification email failed (approval already committed):", {
+      id,
+      role: approvedProfile.role,
+      error: emailErr instanceof Error ? emailErr.message : String(emailErr),
+    });
+    return NextResponse.json(
+      { success: true, email_warning: "Account approved but notification email failed." },
+      { status: 200 },
     );
   }
 

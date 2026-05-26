@@ -165,6 +165,16 @@ async function send(
       "[email] recipient rejected by sanitizeEmailRecipient (header-injection guard):",
       JSON.stringify(to),
     );
+    // SF-F2: honour throwOnFailure here too — a rejected address is a
+    // delivery failure from the caller's perspective. Without this, callers
+    // that pass throwOnFailure=true (e.g. approve routes) silently received
+    // a void return even when the address was malformed or injected, while
+    // believing the throw contract was in effect.
+    if (throwOnFailure) {
+      throw new Error(
+        `[email] Recipient address rejected by sanitization guard: ${JSON.stringify(to)}`,
+      );
+    }
     return;
   }
 
@@ -231,15 +241,25 @@ async function send(
 
   if (!resend) {
     console.warn("[email] Resend not configured — skipping send to", safeTo);
-    // Fire-and-forget: audit trail updates must never block the caller.
+    // SF-F9: on the throwOnFailure failure path the caller has opted into
+    // strict delivery semantics — await the audit update before throwing so
+    // the dispatch row reliably reflects 'failed' before the exception
+    // propagates. Without this, a void fire-and-forget leaves the row in
+    // 'queued' when the throw races ahead of the update, and operators
+    // querying queued+age>threshold find phantom rows that were never sent.
+    if (throwOnFailure) {
+      await markDispatch(admin, dispatchId, {
+        status: "failed",
+        error: "Resend not configured",
+      });
+      throw new Error("[email] Resend not configured — send failed");
+    }
+    // Fire-and-forget: on the non-throwing path, audit trail updates must
+    // never block the caller.
     void markDispatch(admin, dispatchId, {
       status: "failed",
       error: "Resend not configured",
     });
-    // NEW-C33-01: throw for callers that document a 500 on failure.
-    if (throwOnFailure) {
-      throw new Error("[email] Resend not configured — send failed");
-    }
     return;
   }
 
@@ -299,17 +319,24 @@ async function send(
 
   if (sendError) {
     console.error("[email] Failed to send after all retries:", subject, sendError);
-    void markDispatch(admin, dispatchId, {
-      status: "failed",
-      error: errorMessage(sendError),
-    });
-    // NEW-C33-01: surface the failure as a thrown error for callers that need
-    // a 500 when the email permanently fails (e.g. approve routes).
+    // SF-F9: on the throwOnFailure path, await the dispatch update before
+    // throwing so the row reliably transitions to 'failed' before the
+    // exception propagates. See the same pattern in the !resend branch above.
     if (throwOnFailure) {
+      await markDispatch(admin, dispatchId, {
+        status: "failed",
+        error: errorMessage(sendError),
+      });
+      // NEW-C33-01: surface the failure as a thrown error for callers that
+      // need a 500 when the email permanently fails (e.g. approve routes).
       throw new Error(
         `[email] Send failed after ${MAX_ATTEMPTS} attempts: ${errorMessage(sendError)}`,
       );
     }
+    void markDispatch(admin, dispatchId, {
+      status: "failed",
+      error: errorMessage(sendError),
+    });
     return;
   }
 

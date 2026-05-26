@@ -718,3 +718,71 @@ describe("NEW-C33-02 — cc recipients sanitized before Resend and audit", () =>
     expect(JSON.stringify(state.rows[0].metadata ?? {})).not.toContain("attacker@evil.com");
   });
 });
+
+// ===========================================================================
+// SF-F2 — throwOnFailure honoured when sanitizeEmailRecipient rejects
+// ===========================================================================
+
+describe("SF-F2 — throwOnFailure honoured at the sanitization guard", () => {
+  beforeEach(() => {
+    state.rows = [];
+    state.insertShouldFail = false;
+    state.insertShouldThrow = false;
+    state.updateShouldThrow = false;
+    state.resendShouldFail = false;
+    state.resendError = "Resend rejected the message";
+    state.sendCalls = [];
+    vi.restoreAllMocks();
+    vi.stubEnv("RESEND_API_KEY", "re_test_key");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "http://localhost:54321");
+    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key");
+    vi.stubEnv("ADMIN_EMAIL", "founder@example.com");
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("SF-F2: notifyUserSignupApproved throws when recipient is rejected by sanitization guard", async () => {
+    // Pre-fix: send() returned void silently when sanitizeEmailRecipient
+    // rejected the address, bypassing the throwOnFailure contract. An admin
+    // would see 200 "approved" while the user received no email.
+    // Post-fix: throwOnFailure is checked at the sanitization early-return too.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { notifyUserSignupApproved } = await import("./email");
+
+    // A CRLF-injected address that sanitizeEmailRecipient will reject.
+    await expect(
+      notifyUserSignupApproved(
+        "user@example.com\r\nBcc: attacker@evil.com",
+        "allocator",
+      ),
+    ).rejects.toThrow(/sanitization guard/);
+
+    // No Resend call was made and no dispatch row was written (rejected before audit).
+    expect(state.sendCalls).toHaveLength(0);
+    expect(state.rows).toHaveLength(0);
+  });
+
+  it("SF-F2: other notify* helpers still silently skip on sanitization rejection (no regression)", async () => {
+    // Non-throwOnFailure callers must continue to absorb the sanitization
+    // rejection silently so they never crash their own callers.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { notifyManagerIntroRequest } = await import("./email");
+
+    await expect(
+      notifyManagerIntroRequest(
+        "manager@example.com\r\nBcc: attacker@evil.com",
+        "Acme Capital",
+        "Long Vol Macro",
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(state.sendCalls).toHaveLength(0);
+    expect(state.rows).toHaveLength(0);
+  });
+});

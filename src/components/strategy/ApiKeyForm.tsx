@@ -34,16 +34,24 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
   // reach them without closing over the state values themselves.
   const setApiSecretRef = useRef(setApiSecret);
   const setPassphraseRef = useRef(setPassphrase);
+  // I1: also scrub apiKey — it is lower-sensitivity than the secret/passphrase
+  // but is equally reachable in a DevTools heap snapshot. The stated intent of
+  // C29-03 is to "zero out the plaintext secret fields on unmount", which
+  // covers all credential-bearing fields. Previously only apiSecret and
+  // passphrase were cleared, leaving apiKey in fiber state indefinitely.
+  const setApiKeyRef = useRef(setApiKey);
   setApiSecretRef.current = setApiSecret;
   setPassphraseRef.current = setPassphrase;
+  setApiKeyRef.current = setApiKey;
 
-  // NEW-C29-03: zero out the plaintext secret fields on unmount regardless of
-  // close path (Cancel button, modal X button, Escape key). This bounds the
+  // NEW-C29-03: zero out the plaintext credential fields on unmount regardless
+  // of close path (Cancel button, modal X button, Escape key). This bounds the
   // in-memory lifetime of the plaintext to the time the modal is open — the
   // same session the user intended — rather than leaving it in the React fiber
   // tree / DevTools heap snapshot for an unbounded time after dismiss.
   useEffect(() => {
     return () => {
+      setApiKeyRef.current("");
       setApiSecretRef.current("");
       setPassphraseRef.current("");
     };
@@ -59,7 +67,10 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
 
   // NEW-C29-03: also scrub on explicit Cancel before calling onCancel, so the
   // fields are cleared synchronously before the parent re-renders.
+  // I1: include apiKey so all credential-bearing fields are cleared, matching
+  // the stated scrub intent and the unmount cleanup above.
   function handleCancel() {
+    setApiKey("");
     setApiSecret("");
     setPassphrase("");
     onCancel();

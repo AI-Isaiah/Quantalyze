@@ -274,6 +274,16 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
       { p_api_key_id: keyId },
     );
     if (rpcErr) {
+      // SF-F3: log the RPC error before reverting so operators can see
+      // whether this is a permissions failure, network blip, deleted row,
+      // or constraint violation — previously rpcErr was silently absorbed
+      // with only a generic UI string, leaving no operator signal.
+      console.error("[AllocatorExchangeManager] handleReconnect RPC failed:", {
+        keyId,
+        code: rpcErr.code,
+        message: rpcErr.message,
+        hint: rpcErr.hint,
+      });
       // Revert on failure.
       setKeys((prev) =>
         prev.map((k) =>
@@ -311,7 +321,11 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
           ),
         );
       }
-    } catch {
+    } catch (syncErr) {
+      // SF-F4: log the network/fetch error so operators can distinguish a
+      // transient network partition from a config regression — previously a
+      // bare catch {} absorbed TypeError/DOMException with no signal.
+      console.error("[AllocatorExchangeManager] handleReconnect sync POST failed:", syncErr);
       setKeys((prev) =>
         prev.map((k) =>
           k.id === keyId
@@ -349,8 +363,13 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
       const serverIds = new Set(initialKeys.map((k) => k.id));
       const merged = initialKeys.map((k) => normalizeInitialKey(k, byId.get(k.id)));
       // Retain any locally-inserted rows that haven't appeared on the server yet.
+      // SF-F8: use === true (not truthy) so that undefined (absent field) is
+      // explicitly non-matching. The cast was redundant — pending_insert is
+      // already declared optional on ExchangeConnection — and masked the risk
+      // that a future interface removal would silently break the merge logic
+      // (undefined && ... evaluates falsy without a type error).
       const pending = prev.filter(
-        (k) => (k as ExchangeConnection & { pending_insert?: boolean }).pending_insert && !serverIds.has(k.id),
+        (k) => k.pending_insert === true && !serverIds.has(k.id),
       );
       return [...pending, ...merged];
     });
