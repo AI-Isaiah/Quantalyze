@@ -127,8 +127,14 @@ async function insertCorrelationMapping(
 /**
  * Low-level send primitive. Writes an audit row to `notification_dispatches`
  * (migration 018), calls Resend, and best-effort updates the row with the
- * outcome. Failures in either the audit write or the Resend call are
- * swallowed — the public `notify*` helpers should never crash their callers.
+ * outcome. By default all failures are swallowed — the public `notify*`
+ * helpers should never crash their callers.
+ *
+ * NEW-C33-01: pass `throwOnFailure: true` for the approve-route callers
+ * (notifyUserSignupApproved) that document "surfaces as a 500." Without this
+ * option send() can NEVER throw on delivery failure, so the approve route
+ * returns 200 even when the approval email permanently failed — the docstring
+ * claimed a 500 the implementation could not produce.
  *
  * The `notificationType` parameter is required so operators can filter the
  * audit trail by category (e.g., "manager_intro_request" vs "alert_digest").
@@ -144,6 +150,7 @@ async function send(
   html: string,
   notificationType: NotificationType,
   cc?: string | string[],
+  { throwOnFailure = false }: { throwOnFailure?: boolean } = {},
 ): Promise<void> {
   if (!to) return;
 
@@ -161,6 +168,33 @@ async function send(
     return;
   }
 
+  // NEW-C33-02: apply the same header-injection guard to cc recipients.
+  // Previously cc was passed raw to Resend and stored verbatim in audit
+  // metadata — asymmetric with the rigorously-guarded `to`. One future
+  // user-controlled cc reintroduces the exact header-injection class
+  // the `to` guard eliminated. Normalize to an array, sanitize each
+  // element, drop any that fail (warn), abort entirely if all fail.
+  let safeCC: string | string[] | undefined;
+  if (cc !== undefined) {
+    const ccArray = Array.isArray(cc) ? cc : [cc];
+    const sanitizedCC: string[] = [];
+    for (const addr of ccArray) {
+      const cleaned = sanitizeEmailRecipient(addr);
+      if (cleaned) {
+        sanitizedCC.push(cleaned);
+      } else {
+        console.warn(
+          "[email] cc recipient rejected by sanitizeEmailRecipient (header-injection guard):",
+          JSON.stringify(addr),
+        );
+      }
+    }
+    if (sanitizedCC.length === 0 && ccArray.length > 0) {
+      console.warn("[email] all cc recipients rejected — sending without cc");
+    }
+    safeCC = sanitizedCC.length === 1 ? sanitizedCC[0] : sanitizedCC.length > 1 ? sanitizedCC : undefined;
+  }
+
   const admin = getAuditAdminClient();
 
   const dispatchRow = {
@@ -168,7 +202,7 @@ async function send(
     recipient_email: safeTo,
     subject,
     status: "queued" as const,
-    metadata: cc ? { cc } : null,
+    metadata: safeCC ? { cc: safeCC } : null,
   };
 
   let dispatchId: string | undefined;
@@ -202,6 +236,10 @@ async function send(
       status: "failed",
       error: "Resend not configured",
     });
+    // NEW-C33-01: throw for callers that document a 500 on failure.
+    if (throwOnFailure) {
+      throw new Error("[email] Resend not configured — send failed");
+    }
     return;
   }
 
@@ -225,7 +263,8 @@ async function send(
       const result = await resend.emails.send({
         from: FROM,
         to: safeTo,
-        cc,
+        // NEW-C33-02: use safeCC (sanitized) instead of raw cc.
+        cc: safeCC,
         subject,
         html,
         // Path A (Resend tag round-trip): the webhook handler reads
@@ -264,6 +303,13 @@ async function send(
       status: "failed",
       error: errorMessage(sendError),
     });
+    // NEW-C33-01: surface the failure as a thrown error for callers that need
+    // a 500 when the email permanently fails (e.g. approve routes).
+    if (throwOnFailure) {
+      throw new Error(
+        `[email] Send failed after ${MAX_ATTEMPTS} attempts: ${errorMessage(sendError)}`,
+      );
+    }
     return;
   }
 
@@ -510,6 +556,12 @@ export async function notifyUserSignupApproved(
         };
     }
   })();
+  // NEW-C33-01: pass throwOnFailure=true so a Resend failure surfaces as a
+  // thrown error. The approve routes (allocator-approve / manager-approve)
+  // await this and return 500 on throw — matching the docstring contract.
+  // Previously send() could never throw, so the route returned 200 even when
+  // the approval email permanently failed (admin saw "approved", user never
+  // got the welcome email).
   await send(
     userEmail,
     safeSubject(`Welcome to ${PLATFORM_NAME} — your account is approved`),
@@ -519,6 +571,8 @@ export async function notifyUserSignupApproved(
      <p>If you weren't expecting this, you can safely ignore the email.</p>
      ${SIGNATURE}`,
     "signup_approved",
+    undefined,
+    { throwOnFailure: true },
   );
 }
 

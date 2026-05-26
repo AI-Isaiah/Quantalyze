@@ -560,3 +560,161 @@ describe("send() — P324 header-injection guard at the Resend boundary", () => 
     expect(state.rows[0].recipient_email).toBe("manager@example.com");
   });
 });
+
+// ===========================================================================
+// NEW-C33-01 — notifyUserSignupApproved throws on permanent Resend failure
+// ===========================================================================
+
+describe("NEW-C33-01 — notifyUserSignupApproved surfaces failure as a throw", () => {
+  beforeEach(() => {
+    state.rows = [];
+    state.insertShouldFail = false;
+    state.insertShouldThrow = false;
+    state.updateShouldThrow = false;
+    state.resendShouldFail = false;
+    state.resendError = "Resend rejected the message";
+    state.sendCalls = [];
+    vi.restoreAllMocks();
+    vi.stubEnv("RESEND_API_KEY", "re_test_key");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "http://localhost:54321");
+    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key");
+    vi.stubEnv("ADMIN_EMAIL", "founder@example.com");
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("NEW-C33-01: throws when Resend permanently fails — approve route can surface a 500", async () => {
+    // Pre-fix: send() returned void regardless of Resend failure — the approve
+    // route returned 200 even when the approval email was permanently lost.
+    // Post-fix: notifyUserSignupApproved passes throwOnFailure=true so a
+    // permanent failure throws, letting the awaiting route return 500.
+    state.resendShouldFail = true;
+    state.resendError = "Permanent delivery failure";
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { notifyUserSignupApproved } = await import("./email");
+
+    await expect(
+      notifyUserSignupApproved("user@example.com", "allocator"),
+    ).rejects.toThrow(/Send failed/);
+
+    // The dispatch row must be marked failed.
+    expect(state.rows).toHaveLength(1);
+    expect(state.rows[0].status).toBe("failed");
+  });
+
+  it("NEW-C33-01: throws when Resend is not configured — matches 500 contract", async () => {
+    vi.stubEnv("RESEND_API_KEY", "");
+    vi.resetModules();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { notifyUserSignupApproved } = await import("./email");
+
+    await expect(
+      notifyUserSignupApproved("user@example.com", "manager"),
+    ).rejects.toThrow(/Resend not configured/);
+  });
+
+  it("NEW-C33-01: other notify* helpers still swallow Resend failures (no regression)", async () => {
+    // Only notifyUserSignupApproved uses throwOnFailure. Other helpers must
+    // still swallow failures so they never crash their callers.
+    state.resendShouldFail = true;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { notifyManagerIntroRequest } = await import("./email");
+
+    await expect(
+      notifyManagerIntroRequest("manager@example.com", "Acme Capital", "Long Vol"),
+    ).resolves.toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// NEW-C33-02 — cc recipients sanitized against header-injection
+// ===========================================================================
+
+describe("NEW-C33-02 — cc recipients sanitized before Resend and audit", () => {
+  beforeEach(() => {
+    state.rows = [];
+    state.insertShouldFail = false;
+    state.insertShouldThrow = false;
+    state.updateShouldThrow = false;
+    state.resendShouldFail = false;
+    state.resendError = "Resend rejected the message";
+    state.sendCalls = [];
+    vi.restoreAllMocks();
+    vi.stubEnv("RESEND_API_KEY", "re_test_key");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "http://localhost:54321");
+    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key");
+    vi.stubEnv("ADMIN_EMAIL", "founder@example.com");
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("NEW-C33-02: a clean cc address is passed through to Resend unchanged", async () => {
+    const { notifyAllocatorOfAdminIntro } = await import("./email");
+
+    await notifyAllocatorOfAdminIntro(
+      "allocator@example.com",
+      {
+        display_name: "Jane Manager",
+        company: "Macro Capital",
+        bio: null,
+        years_trading: null,
+        aum_range: null,
+        linkedin: null,
+      },
+      "Long Vol Macro",
+      "strategy-uuid",
+      "Great fit.",
+    );
+
+    expect(state.sendCalls).toHaveLength(1);
+    // The cc (founderEmail = founder@example.com) must arrive at Resend sanitized.
+    expect(state.sendCalls[0].cc).toBe("founder@example.com");
+  });
+
+  it("NEW-C33-02: cc with CRLF injection is rejected — not passed to Resend", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Set ADMIN_EMAIL to an injection payload so founderEmail() returns it.
+    vi.stubEnv("ADMIN_EMAIL", "founder@example.com\r\nBcc: attacker@evil.com");
+    vi.resetModules();
+
+    const { notifyAllocatorOfAdminIntro } = await import("./email");
+
+    await notifyAllocatorOfAdminIntro(
+      "allocator@example.com",
+      {
+        display_name: "Jane Manager",
+        company: null,
+        bio: null,
+        years_trading: null,
+        aum_range: null,
+        linkedin: null,
+      },
+      "Long Vol Macro",
+      "strategy-uuid",
+      "Great fit.",
+    );
+
+    // The email still goes out (to is clean) but cc must be undefined.
+    expect(state.sendCalls).toHaveLength(1);
+    expect(state.sendCalls[0].cc).toBeUndefined();
+    // A warning must have been logged for the rejected cc.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("cc recipient rejected by sanitizeEmailRecipient"),
+      expect.any(String),
+    );
+    // The audit row must NOT contain the tainted address in metadata.
+    expect(state.rows).toHaveLength(1);
+    expect(JSON.stringify(state.rows[0].metadata ?? {})).not.toContain("attacker@evil.com");
+  });
+});
