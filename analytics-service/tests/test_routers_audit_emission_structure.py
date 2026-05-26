@@ -155,9 +155,10 @@ def test_bridge_score_candidates_emission_structure():
         == "'bridge.score_candidates'"
     ]
     # /review per-task fix split the emission so BOTH branches emit (empty
-    # candidates fast-return + full candidates happy path). Accept 1-or-2
-    # call sites, and enforce the shape-invariants on every site.
-    assert 1 <= len(bridge_calls) <= 2, (
+    # candidates fast-return + full candidates happy path). C19 SF-F1 added a
+    # third branch (incumbent_no_data early exit). Accept 1–3 call sites and
+    # enforce the shape-invariants on every site.
+    assert 1 <= len(bridge_calls) <= 3, (
         "portfolio_bridge must call log_audit_event with action='bridge.score_candidates' "
         f"at least once (once per branch); found {len(bridge_calls)}"
     )

@@ -7,7 +7,7 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyManagerApproved } from "@/lib/email";
 import { checkStrategyGate } from "@/lib/strategyGate";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 
 // Handler body inlined (rather than wrapped via withAdminAuth) so we run a
 // single createClient + getUser + isAdminUser round-trip per request.
@@ -204,10 +204,16 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Audit the approve/reject decision. Use the user-scoped `supabase` client
-  // so log_audit_event resolves auth.uid() to the acting admin (not the
-  // service-role admin client). review_note is truncated to bound the
-  // audit row size.
+  // Audit the approve/reject decision. review_note is truncated to bound the
+  // audit row size (capAuditMetadata in emit() also caps at 1024, but this
+  // ad-hoc 2000-char slice pre-dates the central cap and is kept as an
+  // explicit belt-and-suspenders marker for reviewers).
+  //
+  // NEW-C10-01 (audit-2026-05-26 security): switched from logAuditEvent
+  // (user-scoped, deferred after()) to logAuditEventAsUser (service-role,
+  // JWT-immune) so a strategy approve/reject audit row cannot be lost to
+  // an admin JWT expiring between response flush and after() settle.
+  // strategy.approve / strategy.reject are security-critical writes.
   const REVIEW_NOTE_AUDIT_CAP = 2000;
   const rawReviewNote = (review_note as string) || null;
   const reviewNoteForAudit =
@@ -216,7 +222,7 @@ export async function POST(req: NextRequest) {
       : null;
   const reviewNoteTruncated =
     rawReviewNote !== null && rawReviewNote.length > REVIEW_NOTE_AUDIT_CAP;
-  logAuditEvent(supabase, {
+  logAuditEventAsUser(admin, user.id, {
     action: action === "approve" ? "strategy.approve" : "strategy.reject",
     entity_type: "strategy",
     entity_id: id as string,

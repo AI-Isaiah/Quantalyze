@@ -164,3 +164,142 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
     expect(verifyStrategyMock).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * NEW-C35-02 (red-team M conf=8): the unified path MUST persist
+ * trust_tier="self_reported" regardless of what the upstream /process-key
+ * returns. An unproven landing-page key must never be badged "api_verified".
+ *
+ * Pre-fix: the update call only wrote `{public_token, expires_at}`, leaving
+ * the upstream-set "api_verified" tier in place.
+ * Post-fix: the update explicitly writes `trust_tier: "self_reported"` to
+ * override whatever the Python backend emitted.
+ */
+describe("NEW-C35-02 — unified path persists trust_tier=self_reported for teaser", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("update call includes trust_tier=self_reported, overriding upstream api_verified", async () => {
+    vi.doMock("@/lib/feature-flags", () => ({
+      isUnifiedBackboneActive: vi.fn().mockResolvedValue(true),
+    }));
+
+    vi.doMock("@/lib/process-key-client", () => ({
+      postProcessKey: vi.fn().mockResolvedValue({
+        ok: true,
+        response: null,
+        body: {
+          verification_id: "44444444-4444-4444-4444-444444444444",
+          status: "published",
+          // upstream reports api_verified — the teaser path must override this
+          trust_tier: "api_verified",
+        },
+      }),
+    }));
+
+    const updateSpy = vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from(table: string) {
+          if (table === "strategy_verifications") {
+            return { update: updateSpy };
+          }
+          throw new Error(`unexpected: ${table}`);
+        },
+      }),
+    }));
+
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    // The update must have been called with trust_tier="self_reported"
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    const updateArg = updateSpy.mock.calls[0]![0] as Record<string, unknown>;
+    expect(updateArg.trust_tier).toBe("self_reported");
+    // Sanity: public_token and expires_at are still present
+    expect(updateArg).toHaveProperty("public_token");
+    expect(updateArg).toHaveProperty("expires_at");
+  });
+});
+
+/**
+ * NEW-C35-01 (red-team H conf=8): the unified path MUST NOT spread the raw
+ * upstream body into the response. The upstream /process-key teaser response
+ * includes `encrypted_credentials` (KEK-wrapped api_key/secret/passphrase),
+ * `fingerprint`, and internal trust fields that must never reach an
+ * unauthenticated browser.
+ *
+ * This test drives the unified handler (isUnifiedBackboneActive=true) and
+ * asserts that the response contains NONE of the sensitive upstream fields,
+ * even when the upstream mock injects them.
+ *
+ * Pre-fix: `return NextResponse.json({ ...upstream, verification_id, ... })`
+ * spread the entire upstream blob → encrypted_credentials leaked.
+ * Post-fix: explicit allowlist → only verification_id/public_token/expires_at
+ * (+ optional metrics_snapshot/status).
+ */
+describe("NEW-C35-01 — unified path does not spread encrypted_credentials", () => {
+  // Drive the unified path
+  const isUnifiedMock = vi.fn().mockResolvedValue(true);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    verificationCount = 0;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("response body contains NO encrypted_credentials even when upstream injects them", async () => {
+    vi.doMock("@/lib/feature-flags", () => ({
+      isUnifiedBackboneActive: isUnifiedMock,
+    }));
+
+    // Mock process-key-client to return a response that includes sensitive fields
+    vi.doMock("@/lib/process-key-client", () => ({
+      postProcessKey: vi.fn().mockResolvedValue({
+        ok: true,
+        response: null,
+        body: {
+          verification_id: "33333333-3333-3333-3333-333333333333",
+          status: "published",
+          trust_tier: "api_verified",
+          encrypted_credentials: "aes-gcm:AAAA...SENSITIVE_CIPHERTEXT",
+          fingerprint: "sha256:abc123",
+          metrics_snapshot: { twr: 0.12 },
+        },
+      }),
+    }));
+
+    // Mock admin client for public_token persist
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from(table: string) {
+          if (table === "strategy_verifications") {
+            return { update: () => ({ eq: async () => ({ error: null }) }) };
+          }
+          throw new Error(`unexpected: ${table}`);
+        },
+      }),
+    }));
+
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    // Contract: no credential/internal fields leaked
+    expect(body).not.toHaveProperty("encrypted_credentials");
+    expect(body).not.toHaveProperty("fingerprint");
+    expect(body).not.toHaveProperty("trust_tier");
+    // Contract: required landing-page fields are present
+    expect(body).toHaveProperty("verification_id");
+    expect(body).toHaveProperty("public_token");
+    expect(body).toHaveProperty("expires_at");
+  });
+});

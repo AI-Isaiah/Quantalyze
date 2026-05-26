@@ -24,6 +24,23 @@ const TEST_ADMIN = vi.hoisted(() => ({
 
 const upsertSpy = vi.hoisted(() => vi.fn());
 
+// NEW-C17-05: the TOCTOU requireAdmin re-check calls isAdminUser (from
+// @/lib/admin) on a fresh createClient() before every service-role mutation.
+// Rather than plumbing profiles/.single() support into every per-test
+// createClient mock, we mock @/lib/admin and control the return value via
+// a hoisted state flag. Default: actor is still admin → re-check passes.
+// C17-05 sets actorIsAdmin=false to simulate a demoted actor mid-request.
+const adminLibState = vi.hoisted(() => ({
+  actorIsAdmin: true as boolean,
+}));
+vi.mock("@/lib/admin", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/admin")>();
+  return {
+    ...actual,
+    isAdminUser: async () => adminLibState.actorIsAdmin,
+    isAdminUserGivenUserAppRoles: async () => adminLibState.actorIsAdmin,
+  };
+});
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: {
@@ -63,6 +80,16 @@ vi.mock("@/lib/supabase/server", () => ({
 // audit-2026-05-07 fix M-0287 / M-0289: `revokeCount` controls the
 // rows-affected count on the delete chain so tests can pin the no-op
 // revoke (count=0 → 404) vs successful revoke (count>0) behavior.
+//
+// NEW-C17-01: `targetIsAdmin` — if true, the profiles.is_admin lookup
+// returns { is_admin: true }, causing the route to reject admin revoke
+// with 409 revoke_admin_ineffective.
+// NEW-C17-01: `profileIsAdminError` — inject a PG error on is_admin lookup.
+//
+// NEW-C17-02: `survivingProfileAdmins` / `survivingRoleAdmins` — count
+// of admins surviving the proposed revoke (excluding target).  If both
+// are 0 the route returns 409 would_orphan_last_admin.
+// NEW-C17-02: `lastAdminCountError` — inject a PG error on count query.
 const adminMockState = vi.hoisted(() => ({
   profileExists: true as boolean,
   rolesRows: [
@@ -76,6 +103,13 @@ const adminMockState = vi.hoisted(() => ({
     | null
     | { code: string | null; message: string },
   revokeCount: 1 as number,
+  // C17-01
+  targetIsAdmin: false as boolean,
+  profileIsAdminError: null as null | { code: string | null; message: string },
+  // C17-02
+  survivingProfileAdmins: 1 as number,
+  survivingRoleAdmins: 0 as number,
+  lastAdminCountError: null as null | { code: string | null; message: string },
 }));
 
 vi.mock("@/lib/supabase/admin", () => ({
@@ -95,15 +129,31 @@ vi.mock("@/lib/supabase/admin", () => ({
               }),
             }),
           }),
-          // The route now uses TWO different select chains:
+          // The route uses THREE different select chains on user_app_roles:
           //   (1) Post-mutation read: `.select("role").eq("user_id", X)`
           //       (awaited directly — returns role rows).
           //   (2) Pre-grant existence check (M-0288):
-          //       `.select("granted_at").eq("user_id", X).eq("role", Y).maybeSingle()`
-          //       (returns single row or null).
-          // The chain object exposes BOTH the directly-awaited shape (for
-          // shape (1)) and a second `.eq().maybeSingle()` for shape (2).
-          select: (_cols: string) => {
+          //       `.select("granted_at").eq("user_id",X).eq("role",Y).maybeSingle()`
+          //   (3) Last-admin count (C17-02):
+          //       `.select("user_id",{count:"exact",head:true}).eq("role","admin").neq("user_id",X)`
+          //       (awaited directly — data is array whose .length = survivor count).
+          select: (_cols: string, opts?: { count?: string; head?: boolean }) => {
+            // Shape (3): head-only count for surviving role admins.
+            // Supabase head:true → data=null, count in the `count` field.
+            // Pre-fix the mock returned { data: Array.from({length:N}) } which
+            // masked the CRITICAL-1 bug (route used data?.length, always 0 for
+            // real HEAD responses). Fixed mock returns { count: N, data: null }.
+            if (opts?.head) {
+              const countVal = adminMockState.lastAdminCountError
+                ? null
+                : adminMockState.survivingRoleAdmins;
+              const countErr = adminMockState.lastAdminCountError ?? null;
+              return {
+                eq: () => ({
+                  neq: async () => ({ data: null, count: countVal, error: countErr }),
+                }),
+              };
+            }
             const postMutationPromise = Promise.resolve({
               data: adminMockState.rolesReadError
                 ? null
@@ -111,7 +161,10 @@ vi.mock("@/lib/supabase/admin", () => ({
               error: adminMockState.rolesReadError,
             });
             // First .eq() — shape (1) awaits this directly; shape (2)
-            // chains another .eq() + .maybeSingle().
+            // chains another .eq() + .maybeSingle(); shape (3-non-head)
+            // chains .neq() for the last-admin count dedup query:
+            //   .select("user_id").eq("role","admin").neq("user_id", X)
+            //   → awaited directly, returns { data: [{user_id},...], error }
             return {
               eq: (...args: unknown[]) => {
                 void args;
@@ -128,6 +181,20 @@ vi.mock("@/lib/supabase/admin", () => ({
                       error: adminMockState.preExistingGrantError,
                     }),
                   }),
+                  // shape (3-non-head): .neq() for last-admin count dedup
+                  // Returns surviving role-admin rows as an array so the
+                  // route can union them with the profile-admin set.
+                  neq: async () => ({
+                    data: adminMockState.lastAdminCountError
+                      ? null
+                      : Array.from(
+                          { length: adminMockState.survivingRoleAdmins },
+                          (_, i) => ({
+                            user_id: `surviving-role-admin-${i}`,
+                          }),
+                        ),
+                    error: adminMockState.lastAdminCountError ?? null,
+                  }),
                 };
                 return node;
               },
@@ -137,16 +204,82 @@ vi.mock("@/lib/supabase/admin", () => ({
       }
       if (table === "profiles") {
         return {
-          select: (_cols: string) => ({
-            eq: () => ({
-              maybeSingle: async () => ({
-                data: adminMockState.profileExists
-                  ? { id: "00000000-0000-0000-0000-000000000999" }
-                  : null,
-                error: null,
-              }),
+          // The route issues FOUR distinct operations against profiles:
+          //   (A) Existence check:   select("id").eq("id",X).maybeSingle()
+          //   (B) is_admin check:    select("is_admin").eq("id",X).maybeSingle()
+          //   (C) Last-admin count:  select("id").eq("is_admin",true).neq("id",X)
+          //       → awaited directly, returns { data: [{id},...], error }
+          //       (route unions these with role-admin rows in JS to deduplicate)
+          //   (D) Ghost-admin clear: update({is_admin:false}).eq("id",X)
+          //       → awaited directly, returns { error }
+          // We inspect the first argument to select() to distinguish (A)/(B) from (C).
+          //
+          // NOTE: the old Shape (C) assumed head:true — the route was updated (C-01
+          // red-team fix) to use plain array selects so the JS set-union dedup works.
+          // The head path is kept for safety but is no longer reached by route code.
+          update: (_vals: Record<string, unknown>) => ({
+            // Shape (D): ghost-admin flag clear.
+            // update({ is_admin: false }).eq("id", targetUserId) → { error }
+            eq: async () => ({
+              error: null,
             }),
           }),
+          select: (cols: string, opts?: { count?: string; head?: boolean }) => {
+            // Shape (C) head variant — kept for safety, not reached by current route.
+            if (opts?.head) {
+              const countVal = adminMockState.lastAdminCountError
+                ? null
+                : adminMockState.survivingProfileAdmins;
+              const countErr = adminMockState.lastAdminCountError ?? null;
+              return {
+                eq: () => ({
+                  neq: async () => ({ data: null, count: countVal, error: countErr }),
+                }),
+              };
+            }
+            // Shape (B): is_admin lookup → .eq().maybeSingle()
+            if (cols === "is_admin") {
+              return {
+                eq: () => ({
+                  maybeSingle: async () => ({
+                    data: adminMockState.profileIsAdminError
+                      ? null
+                      : (adminMockState.profileExists
+                          ? { is_admin: adminMockState.targetIsAdmin }
+                          : null),
+                    error: adminMockState.profileIsAdminError,
+                  }),
+                }),
+              };
+            }
+            // Shape (A) / (C): cols="id"
+            // (A): .eq("id",X).maybeSingle()       — profile existence check
+            // (C): .eq("is_admin",true).neq("id",X) — last-admin count dedup
+            // Distinguish by whether .neq() is chained (C) or .maybeSingle() (A).
+            return {
+              eq: () => ({
+                // Shape (A): awaited via .maybeSingle()
+                maybeSingle: async () => ({
+                  data: adminMockState.profileExists
+                    ? { id: "00000000-0000-0000-0000-000000000999" }
+                    : null,
+                  error: null,
+                }),
+                // Shape (C): awaited via .neq(), returns surviving profile-admin rows
+                neq: async () => ({
+                  data: adminMockState.lastAdminCountError
+                    ? null
+                    : Array.from(
+                        { length: adminMockState.survivingProfileAdmins },
+                        (_, i) => ({
+                          id: `surviving-profile-admin-${i}`,
+                        }),
+                      ),
+                  error: adminMockState.lastAdminCountError ?? null,
+                }),
+              }),
+            };
+          },
         };
       }
       throw new Error(`Unexpected table on admin client: ${table}`);
@@ -173,6 +306,13 @@ function makeCtx() {
   };
 }
 
+// Global reset: ensure the TOCTOU admin-lib state flag is always true at the
+// start of each test. Tests that need to simulate a demoted actor (C17-05) set
+// adminLibState.actorIsAdmin=false in their own body after this runs.
+beforeEach(() => {
+  adminLibState.actorIsAdmin = true;
+});
+
 describe("POST /api/admin/users/[id]/roles — rate limit (I4)", () => {
   beforeEach(() => {
     upsertSpy.mockClear();
@@ -182,6 +322,11 @@ describe("POST /api/admin/users/[id]/roles — rate limit (I4)", () => {
     adminMockState.preExistingGrant = null;
     adminMockState.preExistingGrantError = null;
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.resetModules();
@@ -304,6 +449,11 @@ describe("response envelope consistency (P462)", () => {
     adminMockState.preExistingGrant = null;
     adminMockState.preExistingGrantError = null;
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.doUnmock("@/lib/ratelimit");
@@ -396,6 +546,11 @@ describe("Issue 3 — fetchUserRoles error propagation (audit-2026-05-07 follow-
     adminMockState.preExistingGrant = null;
     adminMockState.preExistingGrantError = null;
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.doUnmock("@/lib/ratelimit");
@@ -479,6 +634,11 @@ describe("revoke no-op suppression — M-0287 + M-0289 (audit-2026-05-07)", () =
     adminMockState.preExistingGrant = null;
     adminMockState.preExistingGrantError = null;
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.doUnmock("@/lib/ratelimit");
@@ -558,6 +718,11 @@ describe("revoke no-op suppression — M-0287 + M-0289 (audit-2026-05-07)", () =
     // Regression guard for M-0287: tightening the no-op path must not
     // affect the happy path.
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     adminMockState.rolesRows = [];
     const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async () => ({ data: null, error: null }));
     vi.doMock("@/lib/supabase/server", () => ({
@@ -622,6 +787,11 @@ describe("grant was_new_grant discriminator — M-0288 (audit-2026-05-07)", () =
     adminMockState.preExistingGrant = null;
     adminMockState.preExistingGrantError = null;
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.doUnmock("@/lib/ratelimit");
@@ -750,6 +920,11 @@ describe("self-action 403 standardization — C-0066 (audit-2026-05-07)", () => 
     adminMockState.preExistingGrant = null;
     adminMockState.preExistingGrantError = null;
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.doUnmock("@/lib/ratelimit");
@@ -801,6 +976,11 @@ describe("role.state_observed anchor — C-0067 (audit-2026-05-07)", () => {
     adminMockState.preExistingGrant = null;
     adminMockState.preExistingGrantError = null;
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.doUnmock("@/lib/ratelimit");
@@ -856,6 +1036,11 @@ describe("role.state_observed anchor — C-0067 (audit-2026-05-07)", () => {
     // Post-revoke role set is empty, so holds_role should be false.
     adminMockState.rolesRows = [];
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async () => ({ data: null, error: null }));
     vi.doMock("@/lib/supabase/server", () => ({
       createClient: async () => ({
@@ -958,6 +1143,11 @@ describe("synchronous audit emit — C-0065 (audit-2026-05-07)", () => {
     adminMockState.preExistingGrant = null;
     adminMockState.preExistingGrantError = null;
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.doUnmock("@/lib/ratelimit");
@@ -1102,6 +1292,11 @@ describe("specialist-apply red-team — pr-test HIGH (audit-2026-05-07)", () => 
     adminMockState.preExistingGrant = null;
     adminMockState.preExistingGrantError = null;
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.doUnmock("@/lib/ratelimit");
@@ -1134,6 +1329,11 @@ describe("specialist-apply red-team — pr-test HIGH (audit-2026-05-07)", () => 
   it("HIGH #1 + M #6 revoke ORDER: role.revoke emit happens BEFORE role.state_observed", async () => {
     adminMockState.rolesRows = [];
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async () => ({ data: null, error: null }));
     vi.doMock("@/lib/supabase/server", () => ({
       createClient: async () => ({
@@ -1154,12 +1354,21 @@ describe("specialist-apply red-team — pr-test HIGH (audit-2026-05-07)", () => 
     );
   });
 
-  it("HIGH #2 inverted-observation interleave: revoke commits but concurrent grant lands → state_observed records holds_role=true", async () => {
+  it("HIGH #2 inverted-observation interleave: revoke commits but concurrent grant lands → state_observed records holds_role=true, 409 revoke_did_not_take", async () => {
     // Race scenario: this request DELETEd the row (revokeCount=1) but
     // between the DELETE and the post-mutation re-read another admin's
     // concurrent grant inserted it. The role IS in the post-read set —
     // state_observed must record that observation truthfully.
+    //
+    // NEW-C17-06: when holdsRoleAfterRevoke=true, the route now returns 409
+    // revoke_did_not_take (pre-fix: 200). The role.state_observed audit anchor
+    // is still emitted before the 409 response.
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     adminMockState.rolesRows = [{ role: "analyst" }];
     const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async () => ({ data: null, error: null }));
     vi.doMock("@/lib/supabase/server", () => ({
@@ -1174,7 +1383,11 @@ describe("specialist-apply red-team — pr-test HIGH (audit-2026-05-07)", () => 
       makeReq({ action: "revoke", role: "analyst" }),
       makeCtx(),
     );
-    expect(res.status).toBe(200);
+    // C17-06: role still held → 409 (pre-fix was 200).
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("revoke_did_not_take");
+    // role.state_observed must still have been emitted (forensic anchor).
     const stateCall = rpcSpy.mock.calls.find(
       (c) => (c[1] as { p_action: string }).p_action === "role.state_observed",
     );
@@ -1189,6 +1402,11 @@ describe("specialist-apply red-team — pr-test HIGH (audit-2026-05-07)", () => 
 
   it("HIGH #3 revoke post-read failure: role.revoke emitted, role.state_observed NOT emitted, 500 surfaced", async () => {
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     adminMockState.rolesReadError = {
       code: "57014",
       message: "statement timeout",
@@ -1245,6 +1463,11 @@ describe("specialist-apply red-team — pr-test HIGH (audit-2026-05-07)", () => 
 
   it("HIGH #4 role.state_observed emit failure on revoke: route still returns 200 (fail-soft)", async () => {
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     adminMockState.rolesRows = [];
     const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async (_n, args) => {
       if (args.p_action === "role.state_observed") {
@@ -1307,6 +1530,11 @@ describe("specialist-apply — rate-limit misconfigured 503 (audit-2026-05-07)",
     adminMockState.preExistingGrant = null;
     adminMockState.preExistingGrantError = null;
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.resetModules();
@@ -1370,6 +1598,11 @@ describe("specialist-apply — POST profile-existence (api-contract HIGH)", () =
     adminMockState.preExistingGrant = null;
     adminMockState.preExistingGrantError = null;
     adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.doUnmock("@/lib/ratelimit");
@@ -1445,5 +1678,500 @@ describe("red-team — role.revoke_noop fail-soft (audit-2026-05-07)", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.code).toBe("role_not_held");
+  });
+});
+
+/**
+ * NEW-C17-03 (code-review H conf=8): self-revoke admin rail must be
+ * case-insensitive. An uppercase variant of the admin's own UUID bypasses
+ * the prior string-equality guard (`===`) but matches Postgres's
+ * case-insensitive UUID `.eq()` — a self-lockout through the rail that
+ * was meant to prevent it.
+ *
+ * FIX: `targetUserId` is normalized to lowercase immediately after the
+ * null-check so all comparisons (guard + DB) use the canonical form.
+ *
+ * This test FAILS on pre-fix code (uppercase UUID bypasses guard → DELETE
+ * runs → 200 returned instead of 403).
+ */
+describe("NEW-C17-03 — self-revoke admin rail is case-insensitive", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "admin" }];
+    adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("UPPERCASE own UUID → 403 (not 200), mutation NOT run", async () => {
+    const { POST } = await import("./route");
+    const uppercasedOwnId = TEST_ADMIN.id.toUpperCase();
+    const req = new NextRequest(
+      `http://localhost:3000/api/admin/users/${uppercasedOwnId}/roles`,
+      {
+        method: "POST",
+        headers: VALID_ORIGIN,
+        body: JSON.stringify({ action: "revoke", role: "admin" }),
+      },
+    );
+    const res = await POST(req, {
+      params: Promise.resolve({ id: uppercasedOwnId }),
+    });
+    // Pre-fix: `uppercasedOwnId !== user.id` (string) → guard passes →
+    // DELETE runs → 200. Post-fix: lowercased → guard fires → 403.
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toMatch(/another admin must act/i);
+    expect(upsertSpy).not.toHaveBeenCalled();
+  });
+
+  it("lowercase own UUID still returns 403 (regression guard for existing rail)", async () => {
+    const { POST } = await import("./route");
+    const req = new NextRequest(
+      `http://localhost:3000/api/admin/users/${TEST_ADMIN.id}/roles`,
+      {
+        method: "POST",
+        headers: VALID_ORIGIN,
+        body: JSON.stringify({ action: "revoke", role: "admin" }),
+      },
+    );
+    const res = await POST(req, {
+      params: Promise.resolve({ id: TEST_ADMIN.id }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("uppercase OTHER user UUID revokes successfully (no false-positive 403)", async () => {
+    adminMockState.rolesRows = [];
+    const { POST } = await import("./route");
+    const otherUppercase = "00000000-0000-0000-0000-000000000999".toUpperCase();
+    const req = new NextRequest(
+      `http://localhost:3000/api/admin/users/${otherUppercase}/roles`,
+      {
+        method: "POST",
+        headers: VALID_ORIGIN,
+        body: JSON.stringify({ action: "revoke", role: "analyst" }),
+      },
+    );
+    const res = await POST(req, {
+      params: Promise.resolve({ id: otherUppercase }),
+    });
+    // Should NOT be 403 — different user from admin.
+    expect(res.status).not.toBe(403);
+  });
+});
+
+/**
+ * NEW-C17-05 (security+red-team H conf=7): TOCTOU requireAdmin re-check.
+ * A just-demoted admin (concurrent revoke between withRole check and the
+ * service-role mutation) must be blocked; a fresh client re-check is
+ * performed before createAdminClient() is called.
+ *
+ * This test FAILS on pre-fix code (no re-check → mutation reaches
+ * createAdminClient even after demotion).
+ */
+describe("NEW-C17-05 — requireAdmin TOCTOU re-check before mutation", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "analyst" }];
+    adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("demoted-mid-request admin is rejected 403, mutation does NOT run", async () => {
+    // Simulate a concurrent admin revoke that stripped the actor's admin
+    // status between the withRole wrapper check and the service-role mutation.
+    // Set actorIsAdmin=false so the hoisted vi.mock("@/lib/admin") returns
+    // isAdminUser=false — requireAdmin TOCTOU re-check fires → 403 before
+    // the DELETE runs.
+    //
+    // The TOCTOU re-check (route.ts ~L835) only runs on the REVOKE path,
+    // immediately before the service-role DELETE. We must send action:revoke
+    // (non-admin role so the self-revoke guard and last-admin guard are
+    // bypassed) to reach that checkpoint.
+    //
+    // Pre-fix: no re-check → DELETE runs → 200.
+    // Post-fix: re-check fires → 403 Forbidden, DELETE not reached.
+    adminLibState.actorIsAdmin = false;
+    adminMockState.rolesRows = [];
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(403);
+    expect(upsertSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * NEW-C17-01 (security H conf=8): revoke admin is ineffective for users
+ * with profiles.is_admin=TRUE ("ghost-admin"). The route must refuse with
+ * 409 revoke_admin_ineffective instead of returning 200 with misleading
+ * "Revoked admin" while leaving the profile flag untouched.
+ *
+ * This test FAILS on pre-fix code (DELETE runs, 200 returned, is_admin
+ * still TRUE → target retains access).
+ */
+describe("NEW-C17-01 — ghost-admin revoke refused with 409", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "admin" }];
+    adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("revoke admin on ghost-admin (is_admin=TRUE) clears the flag and returns 200", async () => {
+    // C-01 (red-team): the previous behaviour was to block with 409
+    // `revoke_admin_ineffective` leaving the ghost-admin permanently
+    // privileged — the endpoint detected the condition but never fixed it.
+    // The red-team pass changed the contract: the route now clears
+    // profiles.is_admin=FALSE via the service-role client as an atomic
+    // prerequisite step, then proceeds with the user_app_roles DELETE.
+    // This fully removes access regardless of which signal was authoritative.
+    //
+    // Verify: flag-clear succeeds + DELETE runs + post-read shows no admin
+    // → 200 with unified { user_id, roles[] } envelope.
+    adminMockState.targetIsAdmin = true;
+    adminMockState.rolesRows = []; // post-delete re-read: role removed
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "admin" }),
+      makeCtx(),
+    );
+    // C-01: 200 — ghost-admin flag cleared + role row deleted.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      user_id: "00000000-0000-0000-0000-000000000999",
+      roles: [],
+    });
+  });
+
+  it("revoke admin on non-ghost-admin (is_admin=FALSE) proceeds normally", async () => {
+    adminMockState.targetIsAdmin = false;
+    adminMockState.rolesRows = [];
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "admin" }),
+      makeCtx(),
+    );
+    // Should NOT be 409 — regular role-row only admin.
+    expect(res.status).not.toBe(409);
+  });
+
+  it("revoke non-admin role skips the is_admin check entirely", async () => {
+    // Ensure the ghost-admin guard only runs for role==='admin'
+    adminMockState.targetIsAdmin = true;
+    adminMockState.rolesRows = [];
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    // analyst revoke should not 409 even if target has is_admin=TRUE
+    expect(res.status).not.toBe(409);
+  });
+
+  it("profiles.is_admin lookup failure returns 500 profile_read_failed", async () => {
+    adminMockState.profileIsAdminError = {
+      code: "57014",
+      message: "statement timeout",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "admin" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("profile_read_failed");
+  });
+});
+
+/**
+ * NEW-C17-02 (red-team H conf=8): last-admin lockout guard. Revoking the
+ * last admin (across BOTH profiles.is_admin=TRUE and user_app_roles rows)
+ * must return 409 would_orphan_last_admin.
+ *
+ * This test FAILS on pre-fix code (DELETE runs, org left with zero
+ * reachable admins).
+ */
+describe("NEW-C17-02 — last-admin lockout guard", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "admin" }];
+    adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    // Default: 1 surviving profile admin → safe
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("zero surviving admins from both sources → 409 would_orphan_last_admin", async () => {
+    adminMockState.survivingProfileAdmins = 0;
+    adminMockState.survivingRoleAdmins = 0;
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "admin" }),
+      makeCtx(),
+    );
+    // Pre-fix: DELETE runs. Post-fix: 409 before DELETE.
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("would_orphan_last_admin");
+    expect(body.error).toMatch(/last admin/i);
+  });
+
+  it("1 surviving profile admin → revoke proceeds (no lockout)", async () => {
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.rolesRows = [];
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "admin" }),
+      makeCtx(),
+    );
+    expect(res.status).not.toBe(409);
+  });
+
+  it("1 surviving role admin (no profile admin) → revoke proceeds", async () => {
+    adminMockState.survivingProfileAdmins = 0;
+    adminMockState.survivingRoleAdmins = 1;
+    adminMockState.rolesRows = [];
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "admin" }),
+      makeCtx(),
+    );
+    expect(res.status).not.toBe(409);
+  });
+
+  it("last-admin count query failure returns 500 last_admin_count_failed", async () => {
+    adminMockState.lastAdminCountError = {
+      code: "57014",
+      message: "statement timeout",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "admin" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("last_admin_count_failed");
+  });
+
+  it("last-admin guard only runs for role==='admin', not for other roles", async () => {
+    adminMockState.survivingProfileAdmins = 0;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.rolesRows = [];
+    const { POST } = await import("./route");
+    // Revoking a non-admin role must not trigger the lockout guard
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).not.toBe(409);
+  });
+});
+
+/**
+ * NEW-C17-04 (security H conf=7): captureToSentry is called on every
+ * admin role grant so rogue elevation surfaces to on-call in real time.
+ *
+ * This test FAILS on pre-fix code (no Sentry call is made).
+ */
+describe("NEW-C17-04 — Sentry alert on admin role grant", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "admin" }];
+    adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("granting admin role calls captureToSentry with level=warning", async () => {
+    const sentryCaptureSpy = vi.fn();
+    vi.doMock("@/lib/sentry-capture", () => ({
+      captureToSentry: sentryCaptureSpy,
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "grant", role: "admin" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    // Pre-fix: sentryCaptureSpy is never called.
+    // Post-fix: must be called exactly once with level=warning.
+    expect(sentryCaptureSpy).toHaveBeenCalledTimes(1);
+    const [, opts] = sentryCaptureSpy.mock.calls[0] as [unknown, { tags: Record<string, string>; level: string }];
+    expect(opts.level).toBe("warning");
+    expect(opts.tags.role).toBe("admin");
+    expect(opts.tags.action).toBe("role.grant");
+  });
+
+  it("granting a non-admin role does NOT call captureToSentry", async () => {
+    const sentryCaptureSpy = vi.fn();
+    vi.doMock("@/lib/sentry-capture", () => ({
+      captureToSentry: sentryCaptureSpy,
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "grant", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    expect(sentryCaptureSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * NEW-C17-06 (silent-failure H conf=7): revoke returns 409
+ * revoke_did_not_take when the role is still observed as held after the
+ * DELETE (e.g. concurrent re-grant). Pre-fix the route returned 200 and
+ * the UI flashed a false "Revoked" success toast.
+ *
+ * This test FAILS on pre-fix code (200 returned even when
+ * holdsRoleAfterRevoke=true).
+ */
+describe("NEW-C17-06 — revoke returns 409 when holdsRoleAfterRevoke=true", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "analyst" }];
+    adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
+    adminMockState.targetIsAdmin = false;
+    adminMockState.profileIsAdminError = null;
+    adminMockState.survivingProfileAdmins = 1;
+    adminMockState.survivingRoleAdmins = 0;
+    adminMockState.lastAdminCountError = null;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("role still held after revoke (concurrent re-grant) → 409 revoke_did_not_take", async () => {
+    // revokeCount=1 (DELETE ran) but post-mutation read still includes
+    // the role (concurrent re-grant).
+    adminMockState.revokeCount = 1;
+    adminMockState.rolesRows = [{ role: "analyst" }]; // role still there
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    // Pre-fix: 200 with false "Revoked" toast.
+    // Post-fix: 409 so operator knows access was NOT removed.
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("revoke_did_not_take");
+    expect(body.error).toMatch(/still observed as held/i);
+  });
+
+  it("role NOT held after revoke → normal 200 (no regression)", async () => {
+    adminMockState.revokeCount = 1;
+    adminMockState.rolesRows = []; // role successfully removed
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      user_id: "00000000-0000-0000-0000-000000000999",
+      roles: [],
+    });
+  });
+
+  it("role.state_observed is emitted BEFORE the 409 revoke_did_not_take response", async () => {
+    adminMockState.revokeCount = 1;
+    adminMockState.rolesRows = [{ role: "analyst" }];
+    const rpcSpy = vi.fn<(name: string, args: { p_action: string }) => Promise<{ data: unknown; error: unknown }>>(
+      async () => ({ data: null, error: null }),
+    );
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: { getUser: async () => ({ data: { user: TEST_ADMIN }, error: null }) },
+        rpc: rpcSpy,
+        from: () => ({ select: () => ({ eq: async () => ({ data: [{ role: "admin" }], error: null }) }) }),
+      }),
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(409);
+    // The forensic anchor must still have fired even on the 409 path.
+    const actions = rpcSpy.mock.calls.map((c) => (c[1] as { p_action: string }).p_action);
+    expect(actions).toContain("role.state_observed");
+    const stateCall = rpcSpy.mock.calls.find(
+      (c) => (c[1] as { p_action: string }).p_action === "role.state_observed",
+    );
+    expect(
+      (stateCall![1] as unknown as { p_metadata: Record<string, unknown> }).p_metadata,
+    ).toMatchObject({ holds_role: true, following_action: "revoke" });
   });
 });
