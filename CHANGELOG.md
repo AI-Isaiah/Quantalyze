@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.9.9] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: auth / audit / preferences (batch b08)
+- Auth: `withRole` requireApproval gate + fail-closed `assertProfileApproved`; `_approvalGate` promise evicts on rejection (was a permanent-503 DoS); `isAdminUser` direct-query delegation (C15-01/04, red-team)
+- Audit: security mutations now use service-scoped `logAuditEventAsUser`; awaited Sentry + central metadata cap + proto-poison guard; explicit 28000/42501 dispatch branches (C10-01/02/03/05/06, red-team)
+- Preferences API: validation + rate-limit (503 on misconfig) + error logging (C07-01..05)
+- New migration `20260526095850_log_audit_event_null_auth_errcode.sql` (ERRCODE-anchored null-auth handling) — auto-applies to prod
+
+
 ## [0.24.9.8] - 2026-05-26
 ### Fixed — audit-2026-05-07 cluster review: GDPR export (batch b01)
 - **CRITICAL:** schema-aware export ORDER BY — `getOrderColumn` no longer `.order("id")` on id-less tables that 500'd every Art.15/20 export (NEW-C16-01)

@@ -29,6 +29,7 @@ vi.mock("next/server", () => ({
 import {
   logAuditEvent,
   logAuditEventAsUser,
+  emit,
   capAuditMetadata,
   AUDIT_METADATA_VALUE_MAX_CHARS,
   AUDIT_METADATA_MAX_DEPTH,
@@ -167,6 +168,33 @@ describe("logAuditEvent — fire-and-forget contract (orthogonal invariants)", (
     // synchronously, but the RPC body is async so its completion
     // still lands after the caller's sync push.
     expect(callOrder).toEqual(["after-call"]);
+  });
+});
+
+/**
+ * NEW-C10-05 (audit-2026-05-26 security+code-review): capAuditMetadata is now
+ * applied centrally inside emit() — unbounded metadata from any route can no
+ * longer reach the RPC verbatim, even if the call site doesn't wrap with
+ * capAuditMetadata explicitly.
+ */
+describe("emit — NEW-C10-05: metadata capped centrally before RPC call", () => {
+  it("truncates an oversized string in metadata before forwarding to the RPC", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
+    const client = { rpc };
+    const oversized = "x".repeat(AUDIT_METADATA_VALUE_MAX_CHARS + 100);
+
+    await emit(client as unknown as Parameters<typeof emit>[0], {
+      action: "intro.send",
+      entity_type: "contact_request",
+      entity_id: DUMMY_ENTITY,
+      metadata: { big: oversized },
+    });
+
+    expect(rpc).toHaveBeenCalledTimes(1);
+    const sentMetadata = (rpc.mock.calls[0][1] as { p_metadata: Record<string, string> }).p_metadata;
+    // The value in the RPC call must be capped, not the original oversized string.
+    expect(sentMetadata.big.length).toBeLessThan(oversized.length);
+    expect(sentMetadata.big).toMatch(/…\[truncated:\d+\]$/);
   });
 });
 
@@ -350,5 +378,41 @@ describe("capAuditMetadata — H-0238 length cap on audit_log.metadata", () => {
           .c as Record<string, unknown>
       ).d,
     ).toBe("leaf");
+  });
+
+  /**
+   * NEW-C10-06 (audit-2026-05-26 red-team): __proto__ key in metadata must
+   * not pollute the output object's prototype AND the datum must be preserved
+   * (renamed to __sanitized_key___proto__) so the audit row is not silently
+   * missing a field the attacker could use for forensic suppression.
+   */
+  it("NEW-C10-06: __proto__ key is preserved (renamed) and does NOT pollute prototype", () => {
+    // Simulates an attacker-supplied JSON object with a __proto__ key.
+    // JSON.parse produces a plain object with an own property named __proto__
+    // (not a prototype mutation) — capAuditMetadata must handle it safely.
+    const input = JSON.parse('{"__proto__":"evil","real":"kept"}') as Record<string, unknown>;
+    const out = capAuditMetadata(input) as Record<string, unknown>;
+
+    // The real field must pass through unchanged.
+    expect(out.real).toBe("kept");
+
+    // The __proto__ value must NOT be silently erased — it is renamed.
+    expect(out.__sanitized_key___proto__).toBe("evil");
+
+    // The output object must NOT have a polluted prototype.
+    expect(Object.getPrototypeOf(out)).toBeNull();
+
+    // The output must NOT have an own property literally named __proto__
+    // (which would be a prototype reassignment attempt on a normal object).
+    expect(Object.prototype.hasOwnProperty.call(out, "__proto__")).toBe(false);
+  });
+
+  it("NEW-C10-06: constructor and prototype keys are also sanitized", () => {
+    const input = { constructor: "hijack", prototype: "bad", ok: "fine" };
+    const out = capAuditMetadata(input) as Record<string, unknown>;
+    expect(out.ok).toBe("fine");
+    expect(out.__sanitized_key_constructor).toBe("hijack");
+    expect(out.__sanitized_key_prototype).toBe("bad");
+    expect(Object.getPrototypeOf(out)).toBeNull();
   });
 });
