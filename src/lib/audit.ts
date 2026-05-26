@@ -65,6 +65,15 @@ import { after } from "next/server";
 export type AuditEmitErrorKind =
   | "permission_denied"
   | "transient"
+  // NEW-C10-04 (audit-2026-05-26 silent-failure): NULL auth.uid() from the
+  // user-path RPC raises a distinct SQLSTATE 28000 (invalid_authorization_
+  // specification) since migration 049-patch-1. An everyday expired/missing
+  // JWT reaching the deferred `after()` path is non-fatal: the request
+  // already responded, the user's session lapsed after response flush, and
+  // the row drop is expected (the audit contract for that window). Do NOT
+  // tag as `audit_permission_denied=true` — that tag is reserved for the
+  // EXECUTE-grant-drift catastrophe (42501). See migration 049-patch-1.
+  | "unauthenticated"
   | "unknown";
 
 /**
@@ -113,6 +122,19 @@ export function classifyAuditEmitError(
 ): AuditEmitErrorKind {
   if (rpcError && rpcError.code === "42501") {
     return "permission_denied";
+  }
+  // NEW-C10-04 (audit-2026-05-26): 28000 (invalid_authorization_specification)
+  // is SQLSTATE raised by `log_audit_event` when auth.uid() IS NULL (migration
+  // 049-patch-1). An expired JWT in the deferred `after()` path hits this code
+  // every time the session lapses between response-flush and RPC settle — an
+  // everyday occurrence, not a fatal permission_denied (42501 = EXECUTE-grant
+  // drift). Classify separately so:
+  //   (a) the `audit_permission_denied=true` tag is NOT emitted (reserved for
+  //       real grant-drift so the Sentry alert rule remains signal, not noise),
+  //   (b) the row drop is treated as non-fatal (the request succeeded; the
+  //       audit window simply expired).
+  if (rpcError && rpcError.code === "28000") {
+    return "unauthenticated";
   }
   if (err instanceof Error) {
     if (err.name === "AbortError") return "transient";
@@ -742,6 +764,26 @@ export async function emit(
       level: "fatal",
     });
     throw errForDispatch;
+  }
+
+  if (kind === "unauthenticated") {
+    // NEW-C10-04: NULL auth.uid() after JWT expiry in the deferred after()
+    // window. Not a grant-drift fatal — log at warning level with a
+    // distinct tag so ops can distinguish session-lapse drops from real
+    // permission_denied events. Do NOT tag audit_permission_denied=true.
+    console.warn(
+      "[audit] log_audit_event unauthenticated (28000 — JWT expired before after() settled, swallowing):",
+      {
+        ...eventContext,
+        code: rpcError?.code,
+      },
+    );
+    await reportToSentry(errForDispatch, {
+      tags: { audit_emit_unauthenticated: "true", audit_path: "log_audit_event" },
+      extra: eventContext,
+      level: "warning",
+    });
+    return; // Do NOT rethrow — expected post-flush JWT expiry.
   }
 
   if (kind === "transient") {

@@ -282,4 +282,89 @@ describe("classifyAuditEmitError", () => {
       classifyAuditEmitError(null, { code: "PGRST200" }),
     ).toBe("unknown");
   });
+
+  // NEW-C10-04 (audit-2026-05-26 silent-failure) regression tests.
+  // Pre-fix: 28000 fell through to "unknown" → re-throw (fatal). Post-fix:
+  // 28000 is classified as "unauthenticated" (non-fatal, separate Sentry tag).
+  it("NEW-C10-04: classifies 28000 PostgREST error as unauthenticated (not permission_denied, not unknown)", () => {
+    // 28000 = invalid_authorization_specification: raised by log_audit_event
+    // when auth.uid() IS NULL (JWT expired before after() settled).
+    // MUST NOT be permission_denied — that tag is reserved for EXECUTE-grant drift.
+    const result = classifyAuditEmitError(null, { code: "28000" });
+    expect(result).toBe("unauthenticated");
+    expect(result).not.toBe("permission_denied");
+    expect(result).not.toBe("unknown");
+  });
+});
+
+describe("audit.emit — NEW-C10-04: 28000 unauthenticated path is non-fatal", () => {
+  // NEW-C10-04 (audit-2026-05-26 silent-failure): 28000 from log_audit_event
+  // is raised when auth.uid() IS NULL (JWT expired before after() settled).
+  // Pre-fix: 28000 fell through to "unknown" → re-throw + Sentry, but
+  // operators couldn't distinguish it from grant-drift (42501). Post-fix:
+  // 28000 → "unauthenticated" → swallowed + Sentry at warning level with
+  // audit_emit_unauthenticated=true (NOT audit_permission_denied=true).
+  beforeEach(() => {
+    captureExceptionMock.mockReset();
+    __resetAuditEmitTransientFailuresForTests();
+  });
+
+  it("NEW-C10-04: 28000 swallows (non-fatal), tags audit_emit_unauthenticated, NOT audit_permission_denied", async () => {
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const client = {
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: {
+          code: "28000",
+          message: "log_audit_event: auth.uid() is NULL — caller must be authenticated",
+        },
+      }),
+    } as never;
+
+    // Must NOT throw — unauthenticated is non-fatal.
+    await expect(emit(client, fixture)).resolves.toBeUndefined();
+    await waitForSentry(1);
+
+    // Sentry capture must fire with audit_emit_unauthenticated=true.
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, opts] = captureExceptionMock.mock.calls[0];
+    expect(opts).toMatchObject({
+      tags: expect.objectContaining({
+        audit_emit_unauthenticated: "true",
+        audit_path: "log_audit_event",
+      }),
+      level: "warning",
+    });
+    // The fatal tag must NOT be present — it is reserved for grant-drift (42501).
+    expect(opts.tags).not.toHaveProperty("audit_permission_denied");
+
+    // Console.warn (not error) so log aggregation sees distinct severity.
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[audit]"),
+      expect.objectContaining({ code: "28000" }),
+    );
+
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("NEW-C10-04: 42501 still re-throws (fatal) — 28000 fix does not change grant-drift handling", async () => {
+    // Belt-and-suspenders: verify that the new 28000 branch doesn't accidentally
+    // swallow 42501. Pre-existing behavior must be preserved.
+    const client = {
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: { code: "42501", message: "permission denied" },
+      }),
+    } as never;
+
+    await expect(emit(client, fixture)).rejects.toThrow();
+    await waitForSentry(1);
+
+    const [, opts] = captureExceptionMock.mock.calls[0];
+    expect(opts).toMatchObject({
+      tags: expect.objectContaining({ audit_permission_denied: "true" }),
+      level: "fatal",
+    });
+  });
 });
