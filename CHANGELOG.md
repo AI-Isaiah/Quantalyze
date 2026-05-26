@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.24.9.10] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: match claim-dedupe SQL (batch b10)
+- New migration `20260526100000_claim_dedupe_done_pending_children_guard.sql`: `claim_compute_jobs` deduped CTE now excludes candidates when a `running`/`done_pending_children` row exists for the same `(kind, partition_col)`, and the UPDATE re-checks `status IN ('pending','failed_retry')` — closes the 23505 unique-index violation race (NEW-C39-01 + red-team TOCTOU). SECURITY DEFINER/search_path/GRANT-REVOKE preserved vs mig 117; format-agnostic proconfig assertion.
+
+
 ## [0.24.9.9] - 2026-05-26
 ### Fixed — audit-2026-05-07 cluster review: auth / audit / preferences (batch b08)
 - Auth: `withRole` requireApproval gate + fail-closed `assertProfileApproved`; `_approvalGate` promise evicts on rejection (was a permanent-503 DoS); `isAdminUser` direct-query delegation (C15-01/04, red-team)
