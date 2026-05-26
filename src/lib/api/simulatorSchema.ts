@@ -38,11 +38,16 @@ export const SimulatorMetricsSchema = z.object({
   concentration: z.number().nullable(),
 });
 
+// NEW-C11-01: deltas are nullable — a null means the operand metric was not
+// computable (e.g. flat-returns → Sharpe=None upstream). Nullable deltas
+// render as a distinct "— / not computable" state in the UI rather than a
+// confident "unchanged" neutral chip (±0.000), which was indistinguishable
+// from a real zero-impact result and could mislead allocation decisions.
 export const SimulatorDeltasSchema = z.object({
-  sharpe_delta: z.number(),
-  dd_delta: z.number(),
-  corr_delta: z.number(),
-  concentration_delta: z.number(),
+  sharpe_delta: z.number().nullable(),
+  dd_delta: z.number().nullable(),
+  corr_delta: z.number().nullable(),
+  concentration_delta: z.number().nullable(),
 });
 
 const EquityCurvePointSchema = z.object({

@@ -327,7 +327,8 @@ function PartialHistoryBanner({ overlapDays }: { overlapDays: number }) {
 type DeltaChip = {
   key: string;
   label: string;
-  value: number;
+  // NEW-C11-01: null = not computable (operand metric was None upstream).
+  value: number | null;
   format: "ratio" | "percent";
   hint: string;
 };
@@ -382,24 +383,31 @@ function DeltaHero({ deltas }: { deltas: SimulatorDeltas }) {
 }
 
 function DeltaChipCard({ chip }: { chip: DeltaChip }) {
-  const improving = chip.value > 0;
-  const neutral = chip.value === 0;
-  const color = neutral
-    ? "text-text-secondary"
-    : improving
-      ? "text-positive"
-      : "text-negative";
-  const accent = neutral
+  // NEW-C11-01: null = not computable — 4th state distinct from neutral/improving/regressing.
+  // NEW-C11-02: corr_delta=null when current portfolio has <2 strategies (no baseline pair).
+  const notComputable = chip.value === null;
+  const improving = !notComputable && chip.value > 0;
+  const neutral = !notComputable && chip.value === 0;
+  const color = notComputable
+    ? "text-text-muted"
+    : neutral
+      ? "text-text-secondary"
+      : improving
+        ? "text-positive"
+        : "text-negative";
+  const accent = notComputable
     ? "border-border"
-    : improving
-      ? "border-positive/30"
-      : "border-negative/30";
+    : neutral
+      ? "border-border"
+      : improving
+        ? "border-positive/30"
+        : "border-negative/30";
   // DESIGN.md muted teal accent bar for improving chips.
   const teal = "#1B6B5A";
   return (
     <div
       className={`rounded-lg border ${accent} bg-surface px-3 py-3`}
-      title={chip.hint}
+      title={notComputable ? `${chip.hint} (not computable — operand metric unavailable)` : chip.hint}
     >
       <div className="flex items-center justify-between">
         <p className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
@@ -420,7 +428,10 @@ function DeltaChipCard({ chip }: { chip: DeltaChip }) {
   );
 }
 
-function formatDelta(value: number, format: "ratio" | "percent"): string {
+// NEW-C11-01: null renders as "—" (em dash) — visually distinct from ±0.000
+// so the allocator cannot mistake "not computable" for "no impact."
+function formatDelta(value: number | null, format: "ratio" | "percent"): string {
+  if (value === null) return "—";
   const sign = value > 0 ? "+" : value < 0 ? "" : "±";
   if (format === "percent") {
     return `${sign}${(value * 100).toFixed(2)}%`;

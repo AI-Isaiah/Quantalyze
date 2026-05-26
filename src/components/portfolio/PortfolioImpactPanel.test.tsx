@@ -825,4 +825,94 @@ describe("<PortfolioImpactPanel>", () => {
 
     expect(await screen.findByText(/Try again in 2h/)).toBeInTheDocument();
   });
+
+  // -------------------------------------------------------------------------
+  // NEW-C11-01 — null delta renders as "—" (not computable), not ±0.000
+  // -------------------------------------------------------------------------
+
+  it("NEW-C11-01: null Sharpe delta renders '—' chip (not computable), not ±0.000", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            deltas: {
+              sharpe_delta: null,
+              dd_delta: 0.02,
+              corr_delta: 0.03,
+              concentration_delta: 0.05,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Null Sharpe"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("Sharpe")).toBeInTheDocument(),
+    );
+    // "—" must appear for the not-computable chip.
+    expect(screen.getByText("—")).toBeInTheDocument();
+    // Must NOT render ±0.000 — that's indistinguishable from a real zero delta.
+    expect(screen.queryByText("±0.000")).toBeNull();
+    // ARIA live region must say "not computable", not "unchanged".
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/Sharpe not computable/);
+    expect(status.textContent).not.toMatch(/Sharpe unchanged/);
+  });
+
+  // -------------------------------------------------------------------------
+  // NEW-C11-02 — null corr_delta (single-strategy baseline) shows "—" not ±0.000
+  // -------------------------------------------------------------------------
+
+  it("NEW-C11-02: null corr_delta (single-strategy portfolio) renders '—', not ±0.000", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            current: {
+              sharpe: 1.2,
+              max_drawdown: -0.18,
+              avg_correlation: null, // single-strategy baseline — no pair
+              concentration: 0.5,
+            },
+            deltas: {
+              sharpe_delta: 0.15,
+              dd_delta: 0.02,
+              corr_delta: null, // _delta(None, proposed) must be null, not 0.0
+              concentration_delta: 0.05,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Single strategy portfolio"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("Correlation")).toBeInTheDocument(),
+    );
+    // The not-computable em-dash must be rendered for the Correlation chip.
+    expect(screen.getByText("—")).toBeInTheDocument();
+    expect(screen.queryByText("±0.000")).toBeNull();
+    // ARIA live region: "Correlation not computable", not "Correlation unchanged".
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/Correlation not computable/);
+  });
 });
