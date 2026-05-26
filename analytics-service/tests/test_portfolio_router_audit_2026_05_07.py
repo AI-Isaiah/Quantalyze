@@ -30,6 +30,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
 import pytest
+from pydantic import ValidationError
 
 
 # Install stubs BEFORE importing routers.portfolio (same pattern as
@@ -642,6 +643,112 @@ class TestPortfolioOptimizerRequestValidator:
         from models.schemas import PortfolioOptimizerRequest
         with pytest.raises(Exception):
             PortfolioOptimizerRequest(portfolio_id="p1", weights={"s1": "not-a-number"})
+
+
+# ---------------------------------------------------------------------------
+# VerifyStrategyRequest boundary validation (audit H-0530 exchange Literal,
+# H-0536 email format/length). These pin the service-edge contract to the DB
+# CHECK (exchange IN ('binance','okx','bybit'), email TEXT) + the TS boundary
+# (SUPPORTED_EXCHANGES, isValidEmail). They FAIL if the field types regress to
+# bare ``str`` — an out-of-domain exchange or a junk email would then clear
+# Pydantic and only fail at INSERT (or never), the exact pre-fix defect.
+# ---------------------------------------------------------------------------
+
+class TestVerifyStrategyRequestValidation:
+    _BASE = {
+        "email": "trader@example.com",
+        "exchange": "binance",
+        "api_key": "k" * 16,
+        "api_secret": "s" * 16,
+    }
+
+    def test_valid_request_accepted(self):
+        from models.schemas import VerifyStrategyRequest
+        r = VerifyStrategyRequest(**self._BASE)
+        assert r.exchange == "binance"
+        assert r.email == "trader@example.com"
+
+    def test_all_three_supported_exchanges_accepted(self):
+        from models.schemas import VerifyStrategyRequest
+        for ex in ("binance", "okx", "bybit"):
+            assert VerifyStrategyRequest(**{**self._BASE, "exchange": ex}).exchange == ex
+
+    def test_deribit_exchange_rejected(self):
+        # create_exchange() accepts 'deribit', but the TS SUPPORTED_EXCHANGES
+        # boundary does not. Without the Literal it clears Pydantic and reaches
+        # a live exchange handshake before failing downstream.
+        from models.schemas import VerifyStrategyRequest
+        with pytest.raises(ValidationError):
+            VerifyStrategyRequest(**{**self._BASE, "exchange": "deribit"})
+
+    def test_unknown_exchange_rejected(self):
+        from models.schemas import VerifyStrategyRequest
+        with pytest.raises(ValidationError):
+            VerifyStrategyRequest(**{**self._BASE, "exchange": "kraken"})
+
+    def test_malformed_email_rejected(self):
+        from models.schemas import VerifyStrategyRequest
+        with pytest.raises(ValidationError):
+            VerifyStrategyRequest(**{**self._BASE, "email": "not-an-email"})
+
+    def test_empty_email_rejected(self):
+        from models.schemas import VerifyStrategyRequest
+        with pytest.raises(ValidationError):
+            VerifyStrategyRequest(**{**self._BASE, "email": "   "})
+
+    def test_oversized_email_rejected(self):
+        # RFC-5321 caps addr-spec at 254 chars; oversized payloads are a junk
+        # row + trivial-DoS vector (H-0536).
+        from models.schemas import VerifyStrategyRequest
+        long_local = "a" * 250
+        with pytest.raises(ValidationError):
+            VerifyStrategyRequest(**{**self._BASE, "email": f"{long_local}@example.com"})
+
+    def test_control_char_email_rejected(self):
+        from models.schemas import VerifyStrategyRequest
+        with pytest.raises(ValidationError):
+            VerifyStrategyRequest(**{**self._BASE, "email": "evil\n@example.com"})
+
+    # --- Divergent cases the tightened validator (regex + Unicode Cc) newly
+    # rejects. These pin the "mirror+harden the TS isValidEmail" contract so a
+    # regression to the looser partition()-based check fails loudly.
+
+    def test_trailing_dot_domain_rejected(self):
+        # Both an empty final label (``trader@gmail.``) and a trailing dot after
+        # a valid TLD (``trader@example.com.``) are rejected — the latter would
+        # otherwise create a distinct rate-limit/idempotency key for the same
+        # address. Stricter than the TS regex, which accepts the trailing dot.
+        from models.schemas import VerifyStrategyRequest
+        for bad in ("trader@gmail.", "trader@example.com."):
+            with pytest.raises(ValidationError):
+                VerifyStrategyRequest(**{**self._BASE, "email": bad})
+
+    def test_interior_whitespace_rejected(self):
+        from models.schemas import VerifyStrategyRequest
+        with pytest.raises(ValidationError):
+            VerifyStrategyRequest(**{**self._BASE, "email": "trader name@example.com"})
+
+    def test_multiple_at_rejected(self):
+        from models.schemas import VerifyStrategyRequest
+        with pytest.raises(ValidationError):
+            VerifyStrategyRequest(**{**self._BASE, "email": "a@b@example.com"})
+
+    def test_del_control_char_rejected(self):
+        # DEL (0x7f) and the C1 range are control chars the prior ``ord(ch)<32``
+        # check missed; the Unicode ``Cc`` category catches them.
+        from models.schemas import VerifyStrategyRequest
+        with pytest.raises(ValidationError):
+            VerifyStrategyRequest(**{**self._BASE, "email": "trader@example.com\x7f"})
+
+    def test_max_length_boundary(self):
+        # 254 chars accepted, 255 rejected — pins the >254 cap exactly.
+        from models.schemas import VerifyStrategyRequest
+        at_limit = "a" * 249 + "@e.co"   # 249 + 5 = 254
+        assert len(at_limit) == 254
+        assert VerifyStrategyRequest(**{**self._BASE, "email": at_limit}).email == at_limit
+        over_limit = "a" * 250 + "@e.co"  # 255
+        with pytest.raises(ValidationError):
+            VerifyStrategyRequest(**{**self._BASE, "email": over_limit})
 
 
 # ---------------------------------------------------------------------------

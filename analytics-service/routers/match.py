@@ -33,8 +33,20 @@ from services.match_eval import (
 router = APIRouter(prefix="/api/match", tags=["match"])
 logger = logging.getLogger("quantalyze.analytics")
 
-# Per-allocator scoring concurrency. Semaphore is process-local; multi-worker
-# deploys rely on the in-flight marker pattern from portfolio cron.
+# Per-allocator scoring concurrency. This Semaphore is PROCESS-LOCAL and the
+# cron loop awaits _score_one_allocator sequentially, so today at most one
+# holder is ever active and the bound does not gate anything — it only becomes
+# load-bearing if a future change fans the loop out with asyncio.gather.
+#
+# H-0562: there is NO cross-worker serialization here. Unlike the portfolio
+# cron (routers/cron.py), this router has no in-flight marker row, and
+# match_batches has no UNIQUE constraint on (allocator_id, computed_at)
+# (migration 20260407164606_perfect_match.sql only adds the NON-unique
+# idx_match_batches_allocator_recent). So if the deploy ever scales to 2+
+# FastAPI workers AND this loop is parallelised, two workers can each insert a
+# duplicate batch for the same allocator+second. Before doing either, add a
+# Postgres advisory lock keyed on allocator_id (or a UNIQUE constraint on
+# match_batches) — do NOT assume this Semaphore protects multi-worker runs.
 _scoring_semaphore = asyncio.Semaphore(3)
 
 # Skip recompute if the last batch is newer than this threshold (unless forced)
@@ -78,6 +90,26 @@ def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
     dates = [r["date"] for r in raw]
     vals = [r["value"] for r in raw]
     return pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
+
+
+def _parse_supabase_ts(raw: str) -> datetime:
+    """Parse a Supabase ISO timestamp/date string into a tz-aware UTC datetime.
+
+    M-0600: three sites (start_date, computed_at, mandate_edited_at) used to
+    repeat ``datetime.fromisoformat(raw.replace("Z", "+00:00"))`` with
+    inconsistent tzinfo promotion — DATE columns (e.g. start_date) parse to a
+    naive datetime, and subtracting a naive from an aware ``now()`` raises
+    TypeError. Centralize the invariant here: the result is ALWAYS tz-aware
+    UTC. A naive parse is promoted to UTC; a malformed value raises
+    ``ValueError``/``AttributeError`` (the same exceptions every call site
+    already catches), so error handling and logging stay at the call site.
+    """
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    # A non-UTC offset (rare from Supabase, which emits Z/+00:00) is normalized
+    # so the return is ALWAYS UTC, matching this helper's name and docstring.
+    return parsed.astimezone(timezone.utc)
 
 
 def _kill_switch_enabled() -> bool:
@@ -157,15 +189,13 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
         sid = strategy["id"]
         analytics = analytics_by_sid.get(sid, {})
 
-        # Track record days from start_date. start_date is a DATE column,
-        # so fromisoformat returns a naive datetime — promote to UTC before
-        # subtracting from the aware now().
+        # Track record days from start_date. start_date is a DATE column, so it
+        # parses to a naive datetime — _parse_supabase_ts promotes it to UTC
+        # before subtracting from the aware now().
         track_record_days = 0
         if strategy.get("start_date"):
             try:
-                start = datetime.fromisoformat(strategy["start_date"].replace("Z", "+00:00"))
-                if start.tzinfo is None:
-                    start = start.replace(tzinfo=timezone.utc)
+                start = _parse_supabase_ts(strategy["start_date"])
                 track_record_days = (datetime.now(timezone.utc) - start).days
             except (ValueError, AttributeError) as exc:
                 # A malformed start_date would silently produce
@@ -357,15 +387,32 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     strategy_raw_values: dict[str, float] = {}
 
     if portfolio_ids:
+        # M-0598 / M-0599 / H-0563 core: the dedup loop below keeps the FIRST
+        # row seen per strategy_id. Without an ORDER BY, PostgREST may return
+        # the rows in any order, so when the same strategy appears in two of
+        # this allocator's portfolios with different current_weight /
+        # allocated_amount, the retained values (and therefore strategy_aum and
+        # the final scores) would vary between processes — contradicting the
+        # engine's determinism contract ("same inputs → identical output,
+        # modulo dict ordering", services/match_engine.py module docstring) and
+        # the test_determinism guarantee. Order by (portfolio_id, strategy_id)
+        # so the first-wins tie-break is reproducible.
         ps_result = (
             supabase.table("portfolio_strategies")
             .select("strategy_id, current_weight, portfolio_id, allocated_amount")
             .in_("portfolio_id", portfolio_ids)
+            .order("portfolio_id", desc=False)
+            .order("strategy_id", desc=False)
             .execute()
         )
         ps_rows = ps_result.data or []
 
-        strategy_ids = list({row["strategy_id"] for row in ps_rows})
+        # sorted() (not list(set(...))): a bare set has non-deterministic
+        # iteration order, and the match engine this feeds promises
+        # deterministic output (services/match_engine.py). The IN-filter result
+        # is order-independent today, but a future edit that iterates
+        # strategy_ids directly would silently regress.
+        strategy_ids = sorted({row["strategy_id"] for row in ps_rows})
         sa_result = (
             supabase.table("strategy_analytics")
             .select("strategy_id, returns_series")
@@ -828,7 +875,7 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
     if last_row.get("engine_version") != ENGINE_VERSION:
         return False
     try:
-        last_at = datetime.fromisoformat(last_row["computed_at"].replace("Z", "+00:00"))
+        last_at = _parse_supabase_ts(last_row["computed_at"])
     except (ValueError, AttributeError):
         return False
     # Age guard FIRST: if the batch is already older than the threshold we
@@ -851,7 +898,7 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
     edited_raw = prefs.get("mandate_edited_at") if isinstance(prefs, dict) else None
     if edited_raw:
         try:
-            edited_at = datetime.fromisoformat(edited_raw.replace("Z", "+00:00"))
+            edited_at = _parse_supabase_ts(edited_raw)
             if edited_at > last_at:
                 return False
         except (ValueError, AttributeError) as exc:

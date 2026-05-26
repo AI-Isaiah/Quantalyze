@@ -1,4 +1,6 @@
 import math
+import re
+import unicodedata
 from pydantic import BaseModel, ConfigDict, field_validator
 from typing import Any, Literal, Optional
 
@@ -65,11 +67,52 @@ class BridgeRequest(BaseModel):
 
 
 class VerifyStrategyRequest(BaseModel):
+    # Audit H-0536: this endpoint does NOT persist the email — post-migration-107
+    # ``verification_requests`` is a read-only VIEW backed by
+    # ``strategy_verifications`` (which has no email column), and the Python
+    # handler only owns the compute path (validate keys → fetch trades → score →
+    # return metrics); the TS caller (src/app/api/verify-strategy/route.ts) does
+    # the ``strategy_verifications`` upsert. ``req.email`` is consumed here only
+    # as the per-email rate-limit key and the idempotency-cache key
+    # (routers/portfolio.py). A bare ``str`` let control chars / oversized
+    # payloads / junk poison those keys and waste an exchange handshake +
+    # key-encryption first. Validated at the service edge to mirror+harden the
+    # TS ``isValidEmail`` boundary (defense-in-depth, no new dependency).
     email: str
-    exchange: str  # binance, okx, bybit
+    # Audit H-0530: the three user-verifiable exchanges, matching the TS
+    # boundary ``SUPPORTED_EXCHANGES = ['binance','okx','bybit']``. A bare
+    # ``str`` let an out-of-domain value (e.g. ``deribit`` — which
+    # ``create_exchange`` accepts) clear Pydantic and reach a live exchange
+    # handshake before failing downstream. (The persisted store,
+    # ``strategy_verifications.source``, also admits ``csv`` for ingestion, but
+    # that is not a user-submitted verify exchange.) The Literal 422s the bad
+    # value at the boundary.
+    exchange: Literal["binance", "okx", "bybit"]
     api_key: str
     api_secret: str
     passphrase: Optional[str] = None  # OKX only
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, v: str) -> str:
+        # Harden the TS boundary ``isValidEmail`` (/^[^\s@]+@[^\s@]+\.[^\s@]+$/):
+        # exactly one ``@``, non-empty local + dotted domain, no interior
+        # whitespace, and a final label (TLD) with no dot so a trailing dot
+        # (``a@b.com.``) is rejected — it would otherwise yield a distinct
+        # rate-limit/idempotency key for the same address. RFC-5321 caps the
+        # addr-spec at 254 chars. The ``Cc`` check rejects every Unicode control
+        # char — NUL, DEL, and the C1 range that the regex's ``[^\s@]`` would
+        # otherwise admit (``\s`` already blocks CR/LF/tab).
+        s = v.strip()
+        if not s:
+            raise ValueError("email must not be empty")
+        if len(s) > 254:
+            raise ValueError("email must be at most 254 characters")
+        if any(unicodedata.category(ch) == "Cc" for ch in s):
+            raise ValueError("email must not contain control characters")
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@.]+", s):
+            raise ValueError("email is not a valid address")
+        return s
 
 
 # ---------------------------------------------------------------------------
