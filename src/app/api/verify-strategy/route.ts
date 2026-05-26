@@ -214,6 +214,7 @@ async function unifiedVerifyStrategyHandler(
   // "api_verified" violates the no-invented-data trust chain. Override the tier
   // to "self_reported" here so the persisted grade is identical regardless of
   // which backbone path executed.
+  // @audit-skip: unauthenticated public endpoint — no user_id available (see full rationale above).
   try {
     const { error: persistError } = await admin
       .from("strategy_verifications")
