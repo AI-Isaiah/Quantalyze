@@ -36,7 +36,10 @@ const TRACE_LEN = WINDOW * 2 + 1;
 export function SignaturesSection() {
   const payload = usePayload();
   const { block: cmp } = useActiveComparator();
+  // eventSignatures is null for csv-ingested strategies; this component is
+  // only rendered when ingestSource === "api" so this guard is type-safety. (RED-TEAM-M3)
   const sigs = payload.eventSignatures;
+  if (!sigs) return null;
   return (
     <section className="flex flex-col gap-10">
       <SignatureHorizon

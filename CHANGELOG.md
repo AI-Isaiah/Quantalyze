@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.9.19] - 2026-05-27
+### Fixed — audit-2026-05-07 cluster review: factsheet two-tier data integrity (batch b06)
+- factsheet v2 gates non-derivable panels for CSV-ingested strategies via an `ingestSource` discriminator — CSV (daily-return series only) hides panels that require API-level trade/position data instead of fabricating them (NEW-C20-01)
+- freshness chip renders a graceful "not computed" state for the epoch sentinel (null computed_at) instead of "Jan 1 1970"; a future computed_at is treated as suspicious, never "fresh" (RED-TEAM-M4, NEW-C20-07)
+- data-fabrication + silent-failure fixes across build-payload / FactsheetView / panel components (C20)
+- review + red-team hardening (C-1/H-1/H-2/M-2/M-3/M-4)
+
+
 ## [0.24.9.18] - 2026-05-26
 ### Fixed — audit-2026-05-07 cluster review: CSV-finalize / wizard / API-key (batch b07)
 - csv-finalize route: handle the 409 idempotent-success path (no false error), log the wizard_session UUID on 409, Sentry on placeholder-precheck, strip upstream error/code on the success path so `ok:true` isn't overwritten (NEW-C14-01/07)

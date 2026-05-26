@@ -110,7 +110,10 @@ export function MetricsColumn() {
 
       <EditorialSection label="III" name="Style">
         <StyleDriftPanel />
-        <PeerPercentilePanel />
+        {/* PeerPercentile uses a demo/synthesized cohort — not derivable from
+            a CSV daily-return series. Only show for api_verified (live-ingested)
+            strategies per the no-invented-data contract. (NEW-C20-01) */}
+        {payload.ingestSource === "api" && <PeerPercentilePanel />}
       </EditorialSection>
 
       <EditorialSection label="V" name="Terms">
