@@ -493,3 +493,105 @@ describe("computeRebalanceSuggestions", () => {
     }
   });
 });
+
+// ── Audit batch-1 regressions (HIGH findings) ───────────────────────
+describe("non-finite input robustness (audit batch1)", () => {
+  // H-0470: a single +Infinity drives binWidth to Infinity and
+  // idx = floor(x / Infinity) = NaN, so result[NaN].count++ threw a
+  // TypeError. NaN entries corrupted every bin boundary to NaN.
+  it("computeReturnDistribution does not crash and excludes non-finite returns", () => {
+    expect(() =>
+      computeReturnDistribution([0.01, Infinity, 0.02, NaN, -Infinity], 10),
+    ).not.toThrow();
+    const dist = computeReturnDistribution([0.01, Infinity, 0.02, NaN, -Infinity], 10);
+    expect(dist.length).toBe(10);
+    // Only the two finite returns are counted.
+    const total = dist.reduce((s, b) => s + b.count, 0);
+    expect(total).toBe(2);
+    // Bin boundaries stay finite (derived from finite min/max only).
+    for (const bin of dist) {
+      expect(Number.isFinite(bin.min)).toBe(true);
+      expect(Number.isFinite(bin.max)).toBe(true);
+    }
+    expect(dist[0].min).toBeCloseTo(0.01, 12);
+    expect(dist[dist.length - 1].max).toBeCloseTo(0.02, 12);
+  });
+
+  it("computeReturnDistribution returns [] when no finite returns remain", () => {
+    expect(computeReturnDistribution([NaN, Infinity, -Infinity], 10)).toEqual([]);
+  });
+
+  // H-0472: findMinMax left the -Infinity/+Infinity sentinels in place when
+  // every period was non-finite, so best/worst serialized to null. Partial
+  // non-finite periods must be skipped, not corrupt the finite extremes.
+  it("computeBestWorstPeriods returns neutral 0 (not ±Infinity) when all periods are non-finite", () => {
+    const allNaN: DailyPoint[] = [
+      { date: "2025-01-01", value: NaN },
+      { date: "2025-01-02", value: NaN },
+    ];
+    const result = computeBestWorstPeriods(allNaN);
+    expect(result.day.best.value).toBe(0);
+    expect(result.day.worst.value).toBe(0);
+    expect(result.day.best.date).toBe("");
+    expect(result.day.worst.date).toBe("");
+  });
+
+  it("computeBestWorstPeriods skips non-finite periods but keeps finite extremes", () => {
+    const partial: DailyPoint[] = [
+      { date: "2025-01-01", value: 0.05 },
+      { date: "2025-01-02", value: NaN },
+      { date: "2025-01-03", value: -0.03 },
+    ];
+    const day = computeBestWorstPeriods(partial).day;
+    expect(day.best.value).toBeCloseTo(0.05, 12);
+    expect(day.best.date).toBe("2025-01-01");
+    expect(day.worst.value).toBeCloseTo(-0.03, 12);
+    expect(day.worst.date).toBe("2025-01-03");
+  });
+
+  // H-0473: once the cumulative product overflowed to Infinity, every later
+  // point was Infinity, the moving averages were Infinity, and the
+  // Infinity > Infinity comparison fabricated/suppressed crossovers. Here the
+  // overflow tail produced a spurious extra crossover (index 296). The guard
+  // detects only over the finite prefix.
+  it("detectRegimeChanges ignores the overflowed tail and reports only finite-prefix crossovers", () => {
+    const series: DailyPoint[] = Array.from({ length: 305 }, (_, i) => ({
+      date: new Date(2025, 0, 2 + i).toISOString().slice(0, 10),
+      value: i < 295 ? (i - 150) * 0.0001 : 1e308, // overflows cumulative near the end
+    }));
+    const crossovers = detectRegimeChanges(series);
+    // Exactly the one legitimate bullish crossover from the rising prefix;
+    // no phantom crossover manufactured by the Infinity tail.
+    expect(crossovers.length).toBe(1);
+    expect(crossovers[0].direction).toBe("bullish");
+    for (const c of crossovers) {
+      expect(c.index).toBeLessThan(295);
+    }
+  });
+});
+
+// ── isoWeekKey ISO 8601 correctness (audit batch1: H-0471) ──────────
+// isoWeekKey is module-private; exercise it through computeBestWorstPeriods'
+// weekly aggregation. A naive ceil(dayOfYear/7) splits an ISO week that
+// straddles the year boundary into two buckets; true ISO 8601 keeps it whole.
+describe("ISO 8601 weekly bucketing (audit batch1)", () => {
+  it("groups a year-boundary ISO week into a single weekly period", () => {
+    // 2024-12-30 (Mon) .. 2025-01-05 (Sun) is one ISO week (2025-W01).
+    // Naive week-of-year splits Dec 30-31 (2024) from Jan 1-5 (2025).
+    const week: DailyPoint[] = [
+      { date: "2024-12-30", value: 0.01 },
+      { date: "2024-12-31", value: 0.01 },
+      { date: "2025-01-01", value: 0.01 },
+      { date: "2025-01-02", value: 0.01 },
+      { date: "2025-01-03", value: 0.01 },
+    ];
+    const { week: weekResult } = computeBestWorstPeriods(week);
+    // All five days compound into ONE bucket: best === worst, and the value
+    // equals (1.01^5 - 1). Under the naive split there were two buckets
+    // (1.01^2-1 and 1.01^3-1), so best !== worst.
+    const expected = Math.pow(1.01, 5) - 1;
+    expect(weekResult.best.value).toBeCloseTo(expected, 12);
+    expect(weekResult.worst.value).toBeCloseTo(expected, 12);
+    expect(weekResult.best.value).toBeCloseTo(weekResult.worst.value, 12);
+  });
+});
