@@ -57,6 +57,7 @@ def generate_narrative(analytics: dict) -> str:
     """Build a deterministic portfolio narrative.
 
     Structure:
+      0. Partial-data hedge (if partial_data=True, NEW-C19-08)
       1. MTD headline + top contributor
       2. Correlation / diversification quality
       3. Risk concentration warning (if applicable)
@@ -64,6 +65,47 @@ def generate_narrative(analytics: dict) -> str:
       5. Optimizer recommendation sentence (if optimizer_suggestions present)
     """
     parts = []
+
+    # NEW-C19-08 + review-fix SF-F2: when the analytics were computed from a
+    # renormalized subset OR when covariance/benchmark data was unavailable,
+    # prepend disclosure sentences so the user is not misled by confident
+    # whole-portfolio claims derived from partial data.
+    #
+    # SF-F2 root cause: the original guard only fired on `computed < expected`
+    # (missing strategies), so partial_data=True caused by benchmark_error or
+    # cov_history_sufficient=False silently produced no hedge text — the caller
+    # received confident Sharpe/attribution prose with no caveat despite the
+    # risk decomposition having been entirely skipped.
+    if analytics.get("partial_data"):
+        computed = analytics.get("computed_strategy_count")
+        expected = analytics.get("expected_strategy_count")
+        if computed is not None and expected is not None and computed < expected:
+            parts.append(
+                f"Computed from {computed} of {expected} strategies — "
+                f"figures exclude {expected - computed} strategy/strategies with no return history"
+            )
+        # Covariance / risk decomposition unavailable (insufficient overlap).
+        if not analytics.get("cov_history_sufficient", True):
+            parts.append(
+                "Risk decomposition unavailable — insufficient overlapping return history"
+            )
+        # Benchmark fetch failed; benchmark comparison may be absent.
+        if analytics.get("benchmark_error"):
+            parts.append("Benchmark comparison unavailable")
+        # H-002 (red-team): equity curves missing for one or more strategies.
+        # These strategies ARE included in strategy_returns (and therefore in
+        # computed_strategy_count) so the `computed < expected` hedge above does
+        # not fire.  TWR/attribution figures are still derived from the return
+        # series; only equity-curve-dependent metrics (e.g. drawdown shape) may
+        # be affected.  We disclose rather than silently produce confident prose.
+        missing_equity = analytics.get("missing_equity_sids")
+        if missing_equity:
+            n = len(missing_equity)
+            parts.append(
+                f"Equity curve unavailable for {n} strategy/strategies — "
+                "some metrics may be based on return series only"
+            )
+
     mtd = analytics.get("return_mtd")
     if mtd is not None:
         parts.append(f"Your portfolio returned {mtd * 100:+.1f}% MTD (TWR)")
