@@ -258,12 +258,18 @@ export function SyncPreviewStep({
     // Count of CONSECUTIVE terminal/heavy-fetch failures. Tracked separately
     // from `consecutiveErrors` because the narrow status read can keep
     // succeeding (resetting `consecutiveErrors`) while the heavy Promise.all
-    // persistently throws — e.g. RLS allows computation_status but denies
-    // `trades`. With a shared counter that fault oscillates 0→1→0 and never
-    // escalates, so the wizard spins forever (H-0197, narrowed to
-    // heavy-fetch-only faults). A dedicated counter never needs a reset: every
-    // non-throwing heavy outcome (passed / gate-fail) sets `stopped = true`
-    // and terminates the loop, so the only path that reschedules is a throw.
+    // persistently REJECTS — e.g. a network blip, an aborted fetch, or a
+    // transport-level error on a trades/api_keys query. (A Supabase error
+    // returned AS A VALUE — `{ data, error }` with a non-null `error` — is NOT
+    // caught here: the destructured results ignore `.error`, so e.g. an RLS
+    // denial on `trades` drops `tradeCount` to 0 via `?? 0` and the gate fails
+    // with INSUFFICIENT_TRADES — a terminal, loop-stopping outcome, not a
+    // heavyFetchErrors escalation.) With a shared counter a persistent throw
+    // oscillates 0→1→0 and never escalates, so the wizard spins forever
+    // (H-0197, narrowed to heavy-fetch-only faults). A dedicated counter never
+    // needs a reset: every non-throwing heavy outcome (passed / gate-fail)
+    // sets `stopped = true` and terminates the loop, so the only path that
+    // reschedules is a throw.
     let heavyFetchErrors = 0;
 
     const scheduleNext = () => {
@@ -371,133 +377,133 @@ export function SyncPreviewStep({
         // `consecutiveErrors = 0` reset. One transient heavy fault is still
         // tolerated; the threshold matches the status-read path.
         try {
-        const [
-          { data: analytics },
-          { count: tradeCount },
-          { data: earliest },
-          { data: latest },
-          { data: sample },
-          keyRowResult,
-        ] = await Promise.all([
-          supabase
-            .from("strategy_analytics")
-            .select(
-              "cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at",
-            )
-            .eq("strategy_id", strategyId)
-            .maybeSingle(),
-          supabase
-            .from("trades")
-            .select("id", { count: "exact", head: true })
-            .eq("strategy_id", strategyId),
-          supabase
-            .from("trades")
-            .select("timestamp")
-            .eq("strategy_id", strategyId)
-            .order("timestamp", { ascending: true })
-            .limit(1),
-          supabase
-            .from("trades")
-            .select("timestamp")
-            .eq("strategy_id", strategyId)
-            .order("timestamp", { ascending: false })
-            .limit(1),
-          supabase
-            .from("trades")
-            .select("symbol")
-            .eq("strategy_id", strategyId)
-            // Bybit + OKX ingest writes daily portfolio aggregates under
-            // the synthetic symbol "PORTFOLIO". Bybit accounts can have
-            // hundreds of these clustered at the start of the table; an
-            // unordered limit(50) sample then comes back as 50× PORTFOLIO
-            // and the client-side filter leaves the detected-markets
-            // hint empty. Excluding the sentinel at the query layer keeps
-            // the sample biased toward real trading pairs.
-            .neq("symbol", "PORTFOLIO")
-            .limit(50),
-          apiKeyId
-            ? supabase
-                .from("api_keys")
-                .select("exchange")
-                .eq("id", apiKeyId)
-                .maybeSingle()
-            : Promise.resolve({ data: null as { exchange?: string } | null }),
-        ]);
+          const [
+            { data: analytics },
+            { count: tradeCount },
+            { data: earliest },
+            { data: latest },
+            { data: sample },
+            keyRowResult,
+          ] = await Promise.all([
+            supabase
+              .from("strategy_analytics")
+              .select(
+                "cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at",
+              )
+              .eq("strategy_id", strategyId)
+              .maybeSingle(),
+            supabase
+              .from("trades")
+              .select("id", { count: "exact", head: true })
+              .eq("strategy_id", strategyId),
+            supabase
+              .from("trades")
+              .select("timestamp")
+              .eq("strategy_id", strategyId)
+              .order("timestamp", { ascending: true })
+              .limit(1),
+            supabase
+              .from("trades")
+              .select("timestamp")
+              .eq("strategy_id", strategyId)
+              .order("timestamp", { ascending: false })
+              .limit(1),
+            supabase
+              .from("trades")
+              .select("symbol")
+              .eq("strategy_id", strategyId)
+              // Bybit + OKX ingest writes daily portfolio aggregates under
+              // the synthetic symbol "PORTFOLIO". Bybit accounts can have
+              // hundreds of these clustered at the start of the table; an
+              // unordered limit(50) sample then comes back as 50× PORTFOLIO
+              // and the client-side filter leaves the detected-markets
+              // hint empty. Excluding the sentinel at the query layer keeps
+              // the sample biased toward real trading pairs.
+              .neq("symbol", "PORTFOLIO")
+              .limit(50),
+            apiKeyId
+              ? supabase
+                  .from("api_keys")
+                  .select("exchange")
+                  .eq("id", apiKeyId)
+                  .maybeSingle()
+              : Promise.resolve({ data: null as { exchange?: string } | null }),
+          ]);
 
-        const detectedMarkets = deriveDetectedMarkets(
-          (sample ?? []).map((t) => (t as { symbol?: string }).symbol),
-        );
+          const detectedMarkets = deriveDetectedMarkets(
+            (sample ?? []).map((t) => (t as { symbol?: string }).symbol),
+          );
 
-        const keyRow = keyRowResult.data;
+          const keyRow = keyRowResult.data;
 
-        if (!mountedRef.current) return;
+          if (!mountedRef.current) return;
 
-        const gate = checkStrategyGate({
-          apiKeyId,
-          tradeCount: tradeCount ?? 0,
-          earliestTradeAt: earliest?.[0]?.timestamp
-            ? new Date(earliest[0].timestamp)
-            : null,
-          latestTradeAt: latest?.[0]?.timestamp
-            ? new Date(latest[0].timestamp)
-            : null,
-          computationStatus: nextStatus,
-          computationError: nextError,
-        });
-
-        if (!gate.passed) {
-          stopped = true;
-          setGateResult(gate);
-          const wizardCode = gate.code ? gateFailureToWizardError(gate.code) : "UNKNOWN";
-          setErrorCode(wizardCode);
-          setPhase("gate_failed");
-          trackForQuantsEventClient("wizard_error", {
-            wizard_session_id: wizardSessionId,
-            step: "sync_preview",
-            code: wizardCode,
-            trade_count: tradeCount ?? 0,
+          const gate = checkStrategyGate({
+            apiKeyId,
+            tradeCount: tradeCount ?? 0,
+            earliestTradeAt: earliest?.[0]?.timestamp
+              ? new Date(earliest[0].timestamp)
+              : null,
+            latestTradeAt: latest?.[0]?.timestamp
+              ? new Date(latest[0].timestamp)
+              : null,
+            computationStatus: nextStatus,
+            computationError: nextError,
           });
-          return;
-        }
 
-        const metrics: FactsheetPreviewMetric[] = [
-          { label: "CAGR", value: formatCagr(analytics?.cagr ?? null) },
-          { label: "Sharpe", value: formatMetric(analytics?.sharpe ?? null) },
-          { label: "Sortino", value: formatMetric(analytics?.sortino ?? null) },
-          {
-            label: "Max DD",
-            value: analytics?.max_drawdown != null ? formatCagr(analytics.max_drawdown) : "—",
-          },
-          {
-            label: "Volatility",
-            value: analytics?.volatility != null ? formatMetric(analytics.volatility, "%") : "—",
-          },
-          {
-            label: "Cumulative",
-            value: analytics?.cumulative_return != null ? formatCagr(analytics.cumulative_return) : "—",
-          },
-        ];
+          if (!gate.passed) {
+            stopped = true;
+            setGateResult(gate);
+            const wizardCode = gate.code ? gateFailureToWizardError(gate.code) : "UNKNOWN";
+            setErrorCode(wizardCode);
+            setPhase("gate_failed");
+            trackForQuantsEventClient("wizard_error", {
+              wizard_session_id: wizardSessionId,
+              step: "sync_preview",
+              code: wizardCode,
+              trade_count: tradeCount ?? 0,
+            });
+            return;
+          }
 
-        const nextSnapshot: SyncPreviewSnapshot = {
-          tradeCount: tradeCount ?? 0,
-          earliestTradeAt: earliest?.[0]?.timestamp ?? null,
-          latestTradeAt: latest?.[0]?.timestamp ?? null,
-          detectedMarkets,
-          exchange: keyRow?.exchange ?? null,
-          metrics,
-          sparkline: Array.isArray(analytics?.sparkline_returns)
-            ? (analytics.sparkline_returns as number[])
-            : null,
-          computedAt: analytics?.computed_at ?? null,
-        };
+          const metrics: FactsheetPreviewMetric[] = [
+            { label: "CAGR", value: formatCagr(analytics?.cagr ?? null) },
+            { label: "Sharpe", value: formatMetric(analytics?.sharpe ?? null) },
+            { label: "Sortino", value: formatMetric(analytics?.sortino ?? null) },
+            {
+              label: "Max DD",
+              value: analytics?.max_drawdown != null ? formatCagr(analytics.max_drawdown) : "—",
+            },
+            {
+              label: "Volatility",
+              value: analytics?.volatility != null ? formatMetric(analytics.volatility, "%") : "—",
+            },
+            {
+              label: "Cumulative",
+              value: analytics?.cumulative_return != null ? formatCagr(analytics.cumulative_return) : "—",
+            },
+          ];
 
-        stopped = true;
-        setSnapshot(nextSnapshot);
-        setPhase("passed");
+          const nextSnapshot: SyncPreviewSnapshot = {
+            tradeCount: tradeCount ?? 0,
+            earliestTradeAt: earliest?.[0]?.timestamp ?? null,
+            latestTradeAt: latest?.[0]?.timestamp ?? null,
+            detectedMarkets,
+            exchange: keyRow?.exchange ?? null,
+            metrics,
+            sparkline: Array.isArray(analytics?.sparkline_returns)
+              ? (analytics.sparkline_returns as number[])
+              : null,
+            computedAt: analytics?.computed_at ?? null,
+          };
+
+          stopped = true;
+          setSnapshot(nextSnapshot);
+          setPhase("passed");
         } catch (heavyErr) {
-          // The terminal fetch / gate evaluation threw (network blip,
-          // aborted fetch, a consistently-erroring `trades` query). One
-          // transient fault is tolerated, but a persistent heavy-fetch fault
+          // The terminal fetch / gate evaluation threw (network blip, an
+          // aborted fetch, or a transport-level rejection). One transient
+          // fault is tolerated, but a persistent heavy-fetch fault
           // must escalate — the narrow status read keeps succeeding above,
           // so `consecutiveErrors` would never reach the threshold (H-0197,
           // heavy-fetch-narrowed). Count consecutive heavy failures and

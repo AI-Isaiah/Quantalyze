@@ -612,8 +612,8 @@ describe("CustomRangePicker", () => {
   // deliver a malformed string to parseISODate — the native date control only
   // fires change with a valid YYYY-MM-DD or "" (verified against jsdom). The
   // REACHABLE path that feeds raw strings into parseISODate is the
-  // `initialRange` prop, consumed by the start/end useState initializers
-  // (CustomRangePicker.tsx:95-108). These tests drive that path: a rollover-
+  // `initialRange` prop, consumed by the start/end useState initializers.
+  // These tests drive that path: a rollover-
   // prone initialRange must NOT be silently coerced into a wrong-but-valid
   // date; instead parseISODate returns null and the initializer falls back to
   // the min/max bound. This is a defensive root-cause fix on the parsing
