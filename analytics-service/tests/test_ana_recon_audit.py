@@ -102,6 +102,50 @@ def test_c01_03_implausible_offset_skips_anchor(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# NEW-C01-04 — spot replay: fee must be deducted from quote balance
+# ---------------------------------------------------------------------------
+
+
+def test_c01_04_spot_fee_deducted_from_quote():
+    """NEW-C01-04: a spot buy's trading fee (quote-denominated) must reduce
+    the quote cash balance. Pre-fix: fee was never subtracted → phantom equity.
+    """
+    from datetime import date
+    from services.equity_reconstruction import _compute_daily_equity
+
+    # One BTC/USDT buy: price=$40000, qty=1.0 BTC, fee=$40 (0.1% maker)
+    # timestamp must be Unix milliseconds for _event_date() to parse
+    ts_ms = int(datetime(2026, 1, 5, 12, 0, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    trades = [{
+        "symbol": "BTC/USDT",
+        "side": "buy",
+        "amount": 1.0,
+        "price": 40000.0,
+        "cost": 40000.0,
+        "fee": 40.0,  # $40 fee in USDT
+        "timestamp": ts_ms,
+    }]
+    # BTC priced at $40000 on that day
+    ohlcv = {"BTC": [("2026-01-05", 40000.0)]}
+    rows = _compute_daily_equity(
+        trades, [], [],
+        ohlcv, {},
+        date(2026, 1, 5), date(2026, 1, 5),
+        venue="binance",
+    )
+    assert len(rows) == 1
+    # USDT balance: started at 0, paid cost=$40000, paid fee=$40 → USDT=-40040
+    # BTC value: 1.0 BTC × $40000 = $40000
+    # Total equity: $40000 - $40040 = -$40 (fee correctly deducted)
+    # Pre-fix: equity = $40000 - $40000 = $0 (fee ignored, inflated by $40)
+    value = rows[0]["value_usd"]
+    assert value == pytest.approx(-40.0, abs=1.0), (
+        f"NEW-C01-04: spot fee must reduce equity by $40; got value_usd={value}. "
+        "Pre-fix value is 0.0 (fee ignored)."
+    )
+
+
+# ---------------------------------------------------------------------------
 # NEW-C01-07 — EquityCurveBuilder: open perp with no mark price → warning
 # ---------------------------------------------------------------------------
 

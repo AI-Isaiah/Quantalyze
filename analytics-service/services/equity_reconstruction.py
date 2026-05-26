@@ -1066,12 +1066,17 @@ def _compute_daily_equity(
                             )
                     perp_positions[raw_symbol] = pos
                 else:
+                    # NEW-C01-04: deduct spot trading fee from the quote
+                    # balance. Fee is quote-denominated on USDT-settled pairs
+                    # (the overwhelmingly common case). Maker rebates (negative
+                    # fee) correctly ADD back to quote. Absent/None → 0.
+                    spot_fee = float(ev.get("fee") or 0.0)
                     if side == "buy":
                         quantities[sym] = quantities.get(sym, 0.0) + amt
-                        quantities[quote] = quantities.get(quote, 0.0) - cost
+                        quantities[quote] = quantities.get(quote, 0.0) - cost - spot_fee
                     elif side == "sell":
                         quantities[sym] = quantities.get(sym, 0.0) - amt
-                        quantities[quote] = quantities.get(quote, 0.0) + cost
+                        quantities[quote] = quantities.get(quote, 0.0) + cost - spot_fee
             elif kind == "deposit":
                 sym = (ev.get("currency") or ev.get("code") or "").upper()
                 amt = float(ev.get("amount") or 0.0)
