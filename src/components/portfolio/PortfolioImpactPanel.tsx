@@ -426,8 +426,10 @@ function DeltaChipCard({ chip }: { chip: DeltaChip }) {
   // NEW-C11-01: null = not computable — 4th state distinct from neutral/improving/regressing.
   // NEW-C11-02: corr_delta=null when current portfolio has <2 strategies (no baseline pair).
   const notComputable = chip.value === null;
-  const improving = !notComputable && chip.value > 0;
-  const neutral = !notComputable && chip.value === 0;
+  // Narrow on chip.value directly (not via !notComputable) so TS strips the
+  // `null` from `number | null` — the boolean indirection defeats narrowing.
+  const improving = chip.value !== null && chip.value > 0;
+  const neutral = chip.value !== null && chip.value === 0;
   const color = notComputable
     ? "text-text-muted"
     : neutral

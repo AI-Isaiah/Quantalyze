@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.9.21] - 2026-05-27
+### Fixed — audit-2026-05-07 cluster review: exchange manager + portfolio impact + email (batch b09)
+- exchange manager: Reconnect guard (no duplicate connect), additive key merge (no clobber), secret scrub on close (NEW-C29-01/02/03)
+- portfolio impact panel: `corr_delta=null` rendered as a distinct "not computable" 4th state (current portfolio <2 strategies = no baseline pair), not a misleading neutral/regressing chip (NEW-C11-01/02)
+- email: surface permanent send failure (no silent drop), sanitize cc recipients (NEW-C33-01/02); ApiKeyForm double-submit guard + plaintext scrub on all close paths
+- admin allocator/manager-approve hardening; simulatorSchema validation; review + red-team hardening (H1/H2/M1/M2)
+
+
 ## [0.24.9.20] - 2026-05-27
 ### Fixed — audit-2026-05-07 cluster review: allocation queries + formatting (batch b03)
 - `getAllocatorAggregates` collapsed to latest-per-portfolio (no double-count across stale rows); corrected a stale REVOKE comment (NEW-C03-11/12)
