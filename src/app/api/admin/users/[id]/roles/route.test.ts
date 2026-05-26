@@ -2171,7 +2171,7 @@ describe("NEW-C17-06 — revoke returns 409 when holdsRoleAfterRevoke=true", () 
       (c) => (c[1] as { p_action: string }).p_action === "role.state_observed",
     );
     expect(
-      (stateCall![1] as { p_metadata: Record<string, unknown> }).p_metadata,
+      (stateCall![1] as unknown as { p_metadata: Record<string, unknown> }).p_metadata,
     ).toMatchObject({ holds_role: true, following_action: "revoke" });
   });
 });
