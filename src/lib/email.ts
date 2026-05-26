@@ -224,7 +224,12 @@ async function send(
       }
       console.warn("[email] all cc recipients rejected — sending without cc");
     }
-    safeCC = sanitizedCC.length === 1 ? sanitizedCC[0] : sanitizedCC.length > 1 ? sanitizedCC : undefined;
+    safeCC =
+      sanitizedCC.length === 0
+        ? undefined
+        : sanitizedCC.length === 1
+          ? sanitizedCC[0]
+          : sanitizedCC;
   }
 
   const admin = getAuditAdminClient();

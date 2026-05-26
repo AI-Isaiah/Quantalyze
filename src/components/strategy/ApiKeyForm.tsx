@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
@@ -30,30 +30,16 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
 
   const needsPassphrase = exchange === "okx";
 
-  // NEW-C29-03: hold refs to the secret setters so the unmount cleanup can
-  // reach them without closing over the state values themselves.
-  const setApiSecretRef = useRef(setApiSecret);
-  const setPassphraseRef = useRef(setPassphrase);
-  // I1: also scrub apiKey — it is lower-sensitivity than the secret/passphrase
-  // but is equally reachable in a DevTools heap snapshot. The stated intent of
-  // C29-03 is to "zero out the plaintext secret fields on unmount", which
-  // covers all credential-bearing fields. Previously only apiSecret and
-  // passphrase were cleared, leaving apiKey in fiber state indefinitely.
-  const setApiKeyRef = useRef(setApiKey);
-  setApiSecretRef.current = setApiSecret;
-  setPassphraseRef.current = setPassphrase;
-  setApiKeyRef.current = setApiKey;
-
-  // NEW-C29-03: zero out the plaintext credential fields on unmount regardless
-  // of close path (Cancel button, modal X button, Escape key). This bounds the
-  // in-memory lifetime of the plaintext to the time the modal is open — the
-  // same session the user intended — rather than leaving it in the React fiber
-  // tree / DevTools heap snapshot for an unbounded time after dismiss.
+  // NEW-C29-03 / I1: zero out all plaintext credential fields on unmount,
+  // regardless of close path (Cancel button, modal X, Escape key). This bounds
+  // the in-memory lifetime of the plaintext to the time the modal is open.
+  // useState setters are stable references — no refs needed to reach them
+  // from the cleanup closure.
   useEffect(() => {
     return () => {
-      setApiKeyRef.current("");
-      setApiSecretRef.current("");
-      setPassphraseRef.current("");
+      setApiKey("");
+      setApiSecret("");
+      setPassphrase("");
     };
   }, []);
 
