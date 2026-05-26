@@ -1234,6 +1234,17 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                     f"last_sync_at.lt.{_new_sync_ts}"
                 )
             builder.execute()
+        else:
+            # silent-failure/F-04: log when we deliberately skip the DB write
+            # so operators can verify last_sync_at is intentionally held and
+            # can distinguish from a write path regression that accidentally
+            # clears update_data.
+            logger.info(
+                "sync_trades: _update_cursor skipping DB write — "
+                "phase1_failed=%s account_balance=%s "
+                "(last_sync_at intentionally held for retry)",
+                phase1_failed, account_balance,
+            )
 
     await db_execute(_update_cursor)
 
