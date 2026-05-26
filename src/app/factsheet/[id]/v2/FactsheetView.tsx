@@ -533,10 +533,10 @@ function KpiStrip() {
   // metric formats to "—" but would otherwise render that dash with a red
   // "negative" tint, which conveys a false signal. Also: max_dd at exactly
   // 0 (no drawdown observed) gets no negative tint — a zero isn't bad. (NEW-C20-09)
-  const signTone = (v: number): "positive" | "negative" | undefined =>
-    Number.isFinite(v) ? (v >= 0 ? "positive" : "negative") : undefined;
-  const maxDdTone = (v: number): "negative" | undefined =>
-    Number.isFinite(v) && v < 0 ? "negative" : undefined;
+  const signTone = (v: number | null | undefined): "positive" | "negative" | undefined =>
+    v != null && Number.isFinite(v) ? (v >= 0 ? "positive" : "negative") : undefined;
+  const maxDdTone = (v: number | null | undefined): "negative" | undefined =>
+    v != null && Number.isFinite(v) && v < 0 ? "negative" : undefined;
 
   const items: Array<{ label: string; value: string; tone?: "positive" | "negative" }> = [
     { label: "Cum. Return", value: pctSigned(m.cum_ret, 1), tone: signTone(m.cum_ret) },
@@ -904,18 +904,22 @@ function FactsheetFooter({ payload }: { payload: FactsheetPayload }) {
   );
 }
 
-function pct(v: number, dp = 2): string {
-  if (!Number.isFinite(v)) return "—";
+// Formatters accept number | null | undefined so nullable metrics from
+// ComputeResult (recovery_factor, tail_ratio, omega_ratio, common_sense_ratio)
+// are handled cleanly — a null/undefined renders "—" not a crash or a
+// fabricated 0. (NEW-C20-04)
+function pct(v: number | null | undefined, dp = 2): string {
+  if (v == null || !Number.isFinite(v)) return "—";
   return `${(v * 100).toFixed(dp)}%`;
 }
 
-function pctSigned(v: number, dp = 2): string {
-  if (!Number.isFinite(v)) return "—";
+function pctSigned(v: number | null | undefined, dp = 2): string {
+  if (v == null || !Number.isFinite(v)) return "—";
   return (v >= 0 ? "+" : "") + (v * 100).toFixed(dp) + "%";
 }
 
-function num(v: number): string {
-  if (!Number.isFinite(v)) return "—";
+function num(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return "—";
   return v.toFixed(2);
 }
 
