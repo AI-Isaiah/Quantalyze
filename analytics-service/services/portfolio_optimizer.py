@@ -92,6 +92,19 @@ def generate_narrative(analytics: dict) -> str:
         # Benchmark fetch failed; benchmark comparison may be absent.
         if analytics.get("benchmark_error"):
             parts.append("Benchmark comparison unavailable")
+        # H-002 (red-team): equity curves missing for one or more strategies.
+        # These strategies ARE included in strategy_returns (and therefore in
+        # computed_strategy_count) so the `computed < expected` hedge above does
+        # not fire.  TWR/attribution figures are still derived from the return
+        # series; only equity-curve-dependent metrics (e.g. drawdown shape) may
+        # be affected.  We disclose rather than silently produce confident prose.
+        missing_equity = analytics.get("missing_equity_sids")
+        if missing_equity:
+            n = len(missing_equity)
+            parts.append(
+                f"Equity curve unavailable for {n} strategy/strategies — "
+                "some metrics may be based on return series only"
+            )
 
     mtd = analytics.get("return_mtd")
     if mtd is not None:

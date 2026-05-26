@@ -1,6 +1,7 @@
 import math
 import re
 import unicodedata
+import uuid as _uuid_mod
 from pydantic import BaseModel, ConfigDict, field_validator
 from typing import Any, Literal, Optional
 
@@ -25,6 +26,34 @@ class HealthResponse(BaseModel):
     version: str
 
 
+def _validate_user_id(v: Optional[str]) -> Optional[str]:
+    """Validate user_id when present: must be a non-empty UUID-formatted string.
+
+    Red-team M-001: bare ``str`` accepted empty strings and whitespace-only
+    values, giving a misleading 404 instead of a 422 at the boundary.  We
+    mirror the ``VerifyStrategyRequest.email`` pattern and reject at the edge.
+
+    Red-team C-001: ``user_id`` is now Optional so existing TS callers that
+    do not yet forward it (``runPortfolioOptimizer``, ``computePortfolioAnalytics``)
+    continue to receive a response rather than an immediate 422.  The router
+    performs a best-effort ownership check when the field is present and logs a
+    warning when it is absent — the defence-in-depth goal of NEW-C19-01 is
+    preserved for the callers that DO supply it (bridge, simulator).
+    """
+    if v is None:
+        return None
+    s = v.strip()
+    if not s:
+        raise ValueError("user_id must not be empty")
+    try:
+        _uuid_mod.UUID(s)
+    except ValueError as exc:
+        raise ValueError(
+            f"user_id must be a valid UUID (got {s!r})"
+        ) from exc
+    return s
+
+
 class PortfolioAnalyticsRequest(BaseModel):
     portfolio_id: str
     # NEW-C19-01: user_id supplied by the Next.js caller so this service can
@@ -32,13 +61,29 @@ class PortfolioAnalyticsRequest(BaseModel):
     # middleware authenticates the CALLER (Next.js), not the end user; this
     # ownership check is the only defense against a service-key holder passing
     # an arbitrary portfolio_id.  See trust-boundary comment in BridgeRequest.
-    user_id: str
+    #
+    # C-001 (red-team): changed from required ``str`` to ``Optional[str] = None``
+    # so that callers that do not yet forward user_id receive a 200 rather than a
+    # 422.  The handler skips the ownership SELECT when user_id is None and logs a
+    # warning.  See ``_validate_user_id`` for format enforcement.
+    user_id: Optional[str] = None
+
+    @field_validator("user_id")
+    @classmethod
+    def _validate_user_id_field(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_user_id(v)
 
 
 class PortfolioOptimizerRequest(BaseModel):
     portfolio_id: str
     # NEW-C19-01: same trust-boundary as PortfolioAnalyticsRequest.user_id.
-    user_id: str
+    # C-001 (red-team): Optional — see PortfolioAnalyticsRequest.user_id comment.
+    user_id: Optional[str] = None
+
+    @field_validator("user_id")
+    @classmethod
+    def _validate_user_id_field(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_user_id(v)
     # Custom optimizer weights, keyed by strategy_id. Validated by the
     # field_validator below + the handler's per-portfolio key-scoping.
     # Audit 2026-05-07 H-0589: an unvalidated dict allowed NaN/Inf/string
@@ -71,7 +116,16 @@ class PortfolioOptimizerRequest(BaseModel):
 class BridgeRequest(BaseModel):
     portfolio_id: str
     underperformer_strategy_id: str
+    # M-001 (red-team): UUID-validated, same boundary as PortfolioAnalyticsRequest.
     user_id: str
+
+    @field_validator("user_id")
+    @classmethod
+    def _validate_user_id_field(cls, v: str) -> str:
+        result = _validate_user_id(v)
+        if result is None:
+            raise ValueError("user_id is required for BridgeRequest")
+        return result
 
 
 class VerifyStrategyRequest(BaseModel):

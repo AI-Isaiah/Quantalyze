@@ -328,31 +328,81 @@ class TestGenerateNarrativePartialDataC19:
 # ---------------------------------------------------------------------------
 
 class TestRequestSchemaUserIdC19:
-    def test_portfolio_analytics_request_requires_user_id(self):
-        """NEW-C19-01: PortfolioAnalyticsRequest must require user_id.
-        Without it any X-Service-Key holder could trigger analytics on
-        another tenant's portfolio_id."""
+    # C-001 (red-team): user_id is now Optional so callers that don't yet
+    # forward it receive a 200 rather than a 422.  The "requires user_id"
+    # tests are updated: omitting user_id is now valid (None is accepted);
+    # providing a bad value (non-UUID) must still raise ValidationError.
+    def test_portfolio_analytics_request_omits_user_id_is_valid(self):
+        """C-001: PortfolioAnalyticsRequest must accept a missing user_id
+        (Optional) so the TS caller that doesn't yet forward it doesn't
+        receive a 422."""
+        from models.schemas import PortfolioAnalyticsRequest
+        r = PortfolioAnalyticsRequest(portfolio_id="p1")
+        assert r.user_id is None
+
+    def test_portfolio_analytics_request_accepts_valid_uuid(self):
+        """M-001: a well-formed UUID must be accepted and stored verbatim."""
+        from models.schemas import PortfolioAnalyticsRequest
+        uid = "123e4567-e89b-12d3-a456-426614174000"
+        r = PortfolioAnalyticsRequest(portfolio_id="p1", user_id=uid)
+        assert r.user_id == uid
+
+    def test_portfolio_analytics_request_rejects_non_uuid(self):
+        """M-001: a non-UUID string must raise ValidationError at the boundary."""
         from pydantic import ValidationError
         from models.schemas import PortfolioAnalyticsRequest
-        with pytest.raises(ValidationError):
-            PortfolioAnalyticsRequest(portfolio_id="p1")  # missing user_id
+        with pytest.raises(ValidationError, match="valid UUID"):
+            PortfolioAnalyticsRequest(portfolio_id="p1", user_id="not-a-uuid")
 
-    def test_portfolio_analytics_request_accepts_user_id(self):
+    def test_portfolio_analytics_request_rejects_empty_string(self):
+        """M-001: an empty user_id must raise ValidationError, not pass silently."""
+        from pydantic import ValidationError
         from models.schemas import PortfolioAnalyticsRequest
-        r = PortfolioAnalyticsRequest(portfolio_id="p1", user_id="u1")
-        assert r.user_id == "u1"
+        with pytest.raises(ValidationError, match="not be empty"):
+            PortfolioAnalyticsRequest(portfolio_id="p1", user_id="")
 
-    def test_portfolio_optimizer_request_requires_user_id(self):
-        """NEW-C19-01: PortfolioOptimizerRequest must require user_id."""
+    def test_portfolio_optimizer_request_omits_user_id_is_valid(self):
+        """C-001: PortfolioOptimizerRequest must accept a missing user_id."""
+        from models.schemas import PortfolioOptimizerRequest
+        r = PortfolioOptimizerRequest(portfolio_id="p1")
+        assert r.user_id is None
+
+    def test_portfolio_optimizer_request_accepts_valid_uuid(self):
+        """M-001: a well-formed UUID must be accepted."""
+        from models.schemas import PortfolioOptimizerRequest
+        uid = "123e4567-e89b-12d3-a456-426614174000"
+        r = PortfolioOptimizerRequest(portfolio_id="p1", user_id=uid)
+        assert r.user_id == uid
+
+    def test_portfolio_optimizer_request_rejects_non_uuid(self):
+        """M-001: a non-UUID user_id must raise ValidationError."""
         from pydantic import ValidationError
         from models.schemas import PortfolioOptimizerRequest
-        with pytest.raises(ValidationError):
-            PortfolioOptimizerRequest(portfolio_id="p1")  # missing user_id
+        with pytest.raises(ValidationError, match="valid UUID"):
+            PortfolioOptimizerRequest(portfolio_id="p1", user_id="garbage")
 
-    def test_portfolio_optimizer_request_accepts_user_id(self):
-        from models.schemas import PortfolioOptimizerRequest
-        r = PortfolioOptimizerRequest(portfolio_id="p1", user_id="u1")
-        assert r.user_id == "u1"
+    def test_bridge_request_rejects_empty_user_id(self):
+        """M-001: BridgeRequest.user_id is still required; an empty string
+        must be rejected at the boundary (not silently 404)."""
+        from pydantic import ValidationError
+        from models.schemas import BridgeRequest
+        with pytest.raises(ValidationError, match="not be empty"):
+            BridgeRequest(
+                portfolio_id="p1",
+                underperformer_strategy_id="s1",
+                user_id="",
+            )
+
+    def test_bridge_request_rejects_non_uuid(self):
+        """M-001: BridgeRequest.user_id must be a valid UUID."""
+        from pydantic import ValidationError
+        from models.schemas import BridgeRequest
+        with pytest.raises(ValidationError, match="valid UUID"):
+            BridgeRequest(
+                portfolio_id="p1",
+                underperformer_strategy_id="s1",
+                user_id="not-a-uuid",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +465,126 @@ def _read_schema_source() -> str:
     )
     with open(os.path.abspath(src_path)) as f:
         return f.read()
+
+
+# ---------------------------------------------------------------------------
+# H-001 (red-team) — cov_history_sufficient / benchmark_error must reach
+#                     generate_narrative so the hedge branches fire
+# ---------------------------------------------------------------------------
+
+class TestNarrativeCovBenchmarkHedgeH001:
+    """H-001 (red-team): the SF-F2 fix injected cov/benchmark guards into
+    generate_narrative but the caller (portfolio.py) did NOT pass those keys
+    in analytics_payload, so analytics.get("cov_history_sufficient", True)
+    always returned True and analytics.get("benchmark_error") always returned
+    None — both hedge clauses were dead.
+
+    The router fix (now injects both keys before generate_narrative) is
+    exercised here by calling generate_narrative directly with the keys
+    present, confirming the hedge text fires — and testing the absent-keys
+    path to confirm backward-compat (no crash, defaults to no-hedge).
+    """
+
+    def test_cov_insufficient_hedge_fires(self):
+        """H-001: when cov_history_sufficient=False is in the payload,
+        generate_narrative must emit the risk-decomposition disclosure."""
+        analytics = {
+            "partial_data": True,
+            "computed_strategy_count": 3,
+            "expected_strategy_count": 3,
+            "cov_history_sufficient": False,
+        }
+        narrative = generate_narrative(analytics)
+        assert "insufficient overlapping return history" in narrative, (
+            "H-001: cov_history_sufficient=False hedge must appear in narrative — "
+            "this would fail before the router fix that injects the key into analytics_payload. "
+            "Got: " + repr(narrative)
+        )
+
+    def test_benchmark_error_hedge_fires(self):
+        """H-001: when benchmark_error is truthy in the payload,
+        generate_narrative must emit the benchmark comparison disclosure."""
+        analytics = {
+            "partial_data": True,
+            "computed_strategy_count": 3,
+            "expected_strategy_count": 3,
+            "benchmark_error": "HTTP 503",
+        }
+        narrative = generate_narrative(analytics)
+        assert "Benchmark comparison unavailable" in narrative, (
+            "H-001: benchmark_error hedge must appear in narrative — "
+            "this would fail before the router fix. Got: " + repr(narrative)
+        )
+
+    def test_cov_insufficient_absent_key_no_crash(self):
+        """H-001 backward-compat: if the key is absent (old callers),
+        the default True must silently suppress the hedge (no crash)."""
+        analytics = {
+            "partial_data": True,
+            "computed_strategy_count": 2,
+            "expected_strategy_count": 2,
+        }
+        narrative = generate_narrative(analytics)
+        # No crash — the default True suppresses the clause
+        assert "insufficient overlapping" not in narrative
+
+
+# ---------------------------------------------------------------------------
+# H-002 (red-team) — missing_equity_sids hedge in generate_narrative
+# ---------------------------------------------------------------------------
+
+class TestNarrativeMissingEquityHedgeH002:
+    """H-002 (red-team): strategies with a returns_series but no equity_curve
+    are added to strategy_returns (included in computed_strategy_count) but
+    also to missing_equity_sids.  partial_data=True is stored in the DB but
+    `computed == expected` so the `computed < expected` hedge never fires —
+    the narrative silently produced confident TWR/attribution prose.
+
+    The fix adds missing_equity_sids to analytics_payload in the router and
+    a new hedge branch in generate_narrative.
+    """
+
+    def test_missing_equity_sids_hedge_fires(self):
+        """H-002: when missing_equity_sids is non-empty, generate_narrative
+        must emit the equity-curve disclosure."""
+        analytics = {
+            "partial_data": True,
+            "computed_strategy_count": 3,
+            "expected_strategy_count": 3,  # equal — strategy IS in returns
+            "missing_equity_sids": ["strat-abc"],
+        }
+        narrative = generate_narrative(analytics)
+        assert "Equity curve unavailable" in narrative, (
+            "H-002: missing_equity_sids hedge must appear in narrative when equity "
+            "curves are absent for included strategies. Got: " + repr(narrative)
+        )
+        assert "1 strategy" in narrative or "1 strategy/strategies" in narrative, (
+            "H-002: hedge should mention the count of affected strategies"
+        )
+
+    def test_missing_equity_sids_count_in_hedge(self):
+        """H-002: hedge text must mention the correct count of affected strategies."""
+        analytics = {
+            "partial_data": True,
+            "computed_strategy_count": 3,
+            "expected_strategy_count": 3,
+            "missing_equity_sids": ["s1", "s2"],
+        }
+        narrative = generate_narrative(analytics)
+        assert "2 strategy" in narrative, (
+            "H-002: hedge should mention 2 affected strategies. Got: " + repr(narrative)
+        )
+
+    def test_empty_missing_equity_sids_no_hedge(self):
+        """H-002: an empty list must not emit the equity-curve disclosure."""
+        analytics = {
+            "partial_data": False,
+            "computed_strategy_count": 3,
+            "expected_strategy_count": 3,
+            "missing_equity_sids": [],
+        }
+        narrative = generate_narrative(analytics)
+        assert "Equity curve unavailable" not in narrative
 
 
 # ---------------------------------------------------------------------------
@@ -708,4 +878,149 @@ class TestAnalyticsUpdateResultCheckSFF7:
         )
         assert "not _analytics_update_result.data" in src or "_analytics_update_result.data" in src, (
             "the update result .data must be checked for emptiness (SF-F7)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# M-002 (red-team) — HTTP-level ownership rejection tests for analytics /
+#                    optimizer (replacing the coarse source-scan).
+#
+# IMPORTANT: placed LAST in the file because this block reloads
+# routers.portfolio with real FastAPI (clearing the MagicMock stub).  Any
+# test placed after it that uses `patch("routers.portfolio.logger")` would
+# see the REAL module's logger instead of the stub — causing a false failure.
+# Keeping M-002 last isolates the module-reload side-effect to the tail of
+# collection order so all earlier tests are unaffected.
+# ---------------------------------------------------------------------------
+
+class _NoopLimiterC19:
+    """No-op slowapi.Limiter shim so @limiter.limit decorators are passthroughs.
+
+    Mirrors test_routers_audit_2026_05_17._NoopLimiter — needed here because
+    the M-002 tests drive portfolio_analytics / portfolio_optimizer directly
+    and must not require a real slowapi Request.
+    """
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def limit(self, *args, **kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+
+
+def _reload_portfolio_with_noop_limiter_c19():
+    """Reload routers.portfolio with real FastAPI + noop limiter.
+
+    Mirrors test_routers_audit_2026_05_17._reload_portfolio_with_noop_limiter:
+    * pops MagicMock-stubbed fastapi from sys.modules so the reload picks up
+      the real FastAPI (required for HTTPException.status_code assertions),
+    * patches slowapi.Limiter to _NoopLimiterC19 so @limiter.limit decorators
+      are passthroughs (no Starlette Request state needed).
+    """
+    import importlib
+    import slowapi
+    import slowapi.util as slowapi_util
+
+    slowapi.Limiter = _NoopLimiterC19  # type: ignore[attr-defined,assignment]
+    slowapi_util.get_remote_address = MagicMock()  # type: ignore[attr-defined,assignment]
+
+    for name in ("fastapi", "fastapi.routing", "fastapi.exceptions"):
+        mod = sys.modules.get(name)
+        if mod is not None and isinstance(mod, MagicMock):
+            sys.modules.pop(name, None)
+
+    sys.modules.pop("routers.portfolio", None)
+    import fastapi  # noqa: F401
+    import routers.portfolio as portfolio_mod  # noqa: F401
+    importlib.reload(portfolio_mod)
+    return portfolio_mod
+
+
+class TestPortfolioOwnershipHTTPLevelM002:
+    """M-002 (red-team): the source-scan test in TestPortfolioAnalyticsOwnershipC19
+    provides false assurance — portfolio_bridge already contains .eq("user_id")
+    so the assertion passes even if portfolio_analytics/optimizer dropped the filter.
+
+    These tests assert the HTTP-level contract: a request with a mismatched
+    user_id must 404 for BOTH portfolio_analytics and portfolio_optimizer.
+    They mirror test_routers_audit_2026_05_17::test_portfolio_bridge_rejects_mismatched_user_id.
+    """
+
+    @pytest.mark.asyncio
+    async def test_portfolio_analytics_rejects_mismatched_user_id(self):
+        """M-002: /portfolio-analytics must 404 when user_id does not match
+        the portfolio owner.  Without this check a refactor that drops the
+        .eq("user_id") filter would go undetected by the source-scan test."""
+        from unittest.mock import MagicMock, patch
+        portfolio_mod = _reload_portfolio_with_noop_limiter_c19()
+
+        # The reloaded module uses real FastAPI — import HTTPException from it.
+        import fastapi.exceptions as _fapi_exc
+        _RealHTTPException = _fapi_exc.HTTPException
+
+        mock_supabase = MagicMock()
+        # Ownership SELECT returns no row (mismatched user_id).
+        chain = MagicMock()
+        chain.select.return_value.eq.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(data=None)
+        mock_supabase.table.return_value = chain
+
+        req = MagicMock()
+        req.portfolio_id = "portfolio-real"
+        req.user_id = "00000000-0000-0000-0000-000000000001"  # attacker UUID
+        request_obj = MagicMock()
+        request_obj.headers = {}
+
+        with patch.object(portfolio_mod, "get_supabase", return_value=mock_supabase):
+            with pytest.raises(_RealHTTPException) as exc_info:
+                await portfolio_mod.portfolio_analytics(request_obj, req)
+
+        assert exc_info.value.status_code == 404, (
+            "M-002: portfolio_analytics must 404 on mismatched user_id. "
+            f"Got status_code={exc_info.value.status_code}"
+        )
+        # Verify the SELECT chain used .eq twice (id + user_id).
+        select_chain = mock_supabase.table.return_value.select.return_value
+        assert select_chain.eq.call_count >= 1
+        eq_chain = select_chain.eq.return_value
+        assert eq_chain.eq.call_count >= 1, (
+            "M-002: the portfolios SELECT must chain two .eq() calls "
+            "(one for id, one for user_id)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_portfolio_optimizer_rejects_mismatched_user_id(self):
+        """M-002: /portfolio-optimizer must 404 when user_id does not match
+        the portfolio owner."""
+        from unittest.mock import MagicMock, patch
+        portfolio_mod = _reload_portfolio_with_noop_limiter_c19()
+
+        import fastapi.exceptions as _fapi_exc
+        _RealHTTPException = _fapi_exc.HTTPException
+
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.select.return_value.eq.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(data=None)
+        mock_supabase.table.return_value = chain
+
+        req = MagicMock()
+        req.portfolio_id = "portfolio-real"
+        req.user_id = "00000000-0000-0000-0000-000000000001"
+        req.weights = None
+        request_obj = MagicMock()
+        request_obj.headers = {}
+
+        with patch.object(portfolio_mod, "get_supabase", return_value=mock_supabase):
+            with pytest.raises(_RealHTTPException) as exc_info:
+                await portfolio_mod.portfolio_optimizer(request_obj, req)
+
+        assert exc_info.value.status_code == 404, (
+            "M-002: portfolio_optimizer must 404 on mismatched user_id. "
+            f"Got status_code={exc_info.value.status_code}"
+        )
+        select_chain = mock_supabase.table.return_value.select.return_value
+        assert select_chain.eq.call_count >= 1
+        eq_chain = select_chain.eq.return_value
+        assert eq_chain.eq.call_count >= 1, (
+            "M-002: the portfolios SELECT must chain two .eq() calls"
         )

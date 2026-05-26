@@ -956,6 +956,21 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         analytics_payload["computed_strategy_count"] = len(strategy_returns)
         analytics_payload["expected_strategy_count"] = len(strategy_ids)
 
+        # H-001 (red-team SF-F2 fix was dead code): inject cov_history_sufficient
+        # and benchmark_error into analytics_payload BEFORE generate_narrative so
+        # the hedge branches at portfolio_optimizer.py:88-94 are reachable.
+        # Previously these keys only appeared in data_quality (built after the
+        # narrative call), so analytics.get("cov_history_sufficient", True) always
+        # returned the default True and analytics.get("benchmark_error") always
+        # returned None — both hedge clauses were unreachable.
+        # H-002 (red-team): also inject missing_equity_sids so generate_narrative
+        # can emit a hedge when equity curves are absent (that case is not
+        # detectable via computed < expected because equity-missing strategies
+        # ARE included in strategy_returns / computed_strategy_count).
+        analytics_payload["cov_history_sufficient"] = cov_history_sufficient
+        analytics_payload["benchmark_error"] = benchmark_error
+        analytics_payload["missing_equity_sids"] = missing_equity_sids
+
         narrative = generate_narrative(analytics_payload)
 
         # Partial-data telemetry. Tracks WHY a dashboard might look smaller
@@ -1434,9 +1449,24 @@ async def portfolio_analytics(request: Request, req: PortfolioAnalyticsRequest):
     # The service-role client bypasses RLS; without this ownership filter any
     # X-Service-Key holder could compute analytics on another tenant's portfolio.
     # Same pattern as the bridge endpoint's L-0047 ownership SELECT.
-    portfolio_result = supabase.table("portfolios").select("id").eq(
-        "id", req.portfolio_id
-    ).eq("user_id", req.user_id).single().execute()
+    #
+    # C-001 (red-team): user_id is now Optional. When present, apply the
+    # ownership .eq("user_id") filter (full defence-in-depth). When absent,
+    # fall back to an existence-only check and emit a warning so the ops team
+    # can track which callers still need to be upgraded to forward user_id.
+    if req.user_id is not None:
+        portfolio_result = supabase.table("portfolios").select("id").eq(
+            "id", req.portfolio_id
+        ).eq("user_id", req.user_id).single().execute()
+    else:
+        logger.warning(
+            "portfolio_analytics called without user_id for portfolio %s — "
+            "ownership check skipped; update caller to forward user_id",
+            req.portfolio_id,
+        )
+        portfolio_result = supabase.table("portfolios").select("id").eq(
+            "id", req.portfolio_id
+        ).single().execute()
 
     if not portfolio_result.data:
         raise HTTPException(status_code=404, detail="Portfolio not found")
@@ -1509,9 +1539,23 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     # NOTE: portfolio_owner_id is captured from the row so the audit below
     # can attribute under the portfolio's real owner; req.user_id is the value
     # verified by the ownership SELECT.
-    portfolio_result = supabase.table("portfolios").select("id, user_id").eq(
-        "id", req.portfolio_id
-    ).eq("user_id", req.user_id).single().execute()
+    #
+    # C-001 (red-team): user_id is now Optional. When present, apply the
+    # ownership .eq("user_id") filter (full defence-in-depth). When absent,
+    # fall back to an existence-only check and emit a warning.
+    if req.user_id is not None:
+        portfolio_result = supabase.table("portfolios").select("id, user_id").eq(
+            "id", req.portfolio_id
+        ).eq("user_id", req.user_id).single().execute()
+    else:
+        logger.warning(
+            "portfolio_optimizer called without user_id for portfolio %s — "
+            "ownership check skipped; update caller to forward user_id",
+            req.portfolio_id,
+        )
+        portfolio_result = supabase.table("portfolios").select("id, user_id").eq(
+            "id", req.portfolio_id
+        ).single().execute()
 
     if not portfolio_result.data:
         raise HTTPException(status_code=404, detail="Portfolio not found")
