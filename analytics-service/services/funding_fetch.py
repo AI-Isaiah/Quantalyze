@@ -660,46 +660,67 @@ async def fetch_funding_bybit(
                         params
                     )
                 except ccxt.BadRequest as exc:
+                    # C13-10 scope (funding_fetch): the signed Bybit
+                    # transaction-log endpoint embeds &signature=<HMAC-SHA256>
+                    # in error URLs; scrub before logging.
+                    from .redact import scrub_freeform_string
                     if category == "inverse" and page_idx == 0:
                         logger.warning(
                             "Bybit inverse category returned BadRequest for "
                             "strategy %s (likely API key lacks inverse "
-                            "permission); skipping inverse: %s",
-                            strategy_id, exc,
+                            "permission); skipping inverse: exc_class=%s "
+                            "scrubbed=%s",
+                            strategy_id,
+                            type(exc).__name__,
+                            scrub_freeform_string(str(exc)),
                         )
                         inverse_skipped = True
                         break
                     logger.error(
                         "Bybit funding fetch BadRequest page %d category=%s "
-                        "window=[%s,%s] for strategy %s: %s",
+                        "window=[%s,%s] for strategy %s: exc_class=%s "
+                        "scrubbed=%s",
                         page_idx, category, window_start, window_end,
-                        strategy_id, exc,
+                        strategy_id,
+                        type(exc).__name__,
+                        scrub_freeform_string(str(exc)),
                     )
                     raise
                 except ccxt.PermissionDenied as exc:
+                    from .redact import scrub_freeform_string
                     if category == "inverse" and page_idx == 0:
                         logger.warning(
                             "Bybit inverse category PermissionDenied for "
-                            "strategy %s; skipping inverse: %s",
-                            strategy_id, exc,
+                            "strategy %s; skipping inverse: exc_class=%s "
+                            "scrubbed=%s",
+                            strategy_id,
+                            type(exc).__name__,
+                            scrub_freeform_string(str(exc)),
                         )
                         inverse_skipped = True
                         break
                     logger.error(
                         "Bybit funding fetch PermissionDenied page %d "
-                        "category=%s window=[%s,%s] for strategy %s: %s",
+                        "category=%s window=[%s,%s] for strategy %s: "
+                        "exc_class=%s scrubbed=%s",
                         page_idx, category, window_start, window_end,
-                        strategy_id, exc,
+                        strategy_id,
+                        type(exc).__name__,
+                        scrub_freeform_string(str(exc)),
                     )
                     raise
                 except Exception as exc:
                     # C-0322 / H-1103: was warn+break (partial truncation).
                     # Re-raise so the worker classifies as transient-failed.
+                    from .redact import scrub_freeform_string
                     logger.error(
                         "Bybit funding fetch failed page %d category=%s "
-                        "window=[%s,%s] for strategy %s: %s",
+                        "window=[%s,%s] for strategy %s: exc_class=%s "
+                        "scrubbed=%s",
                         page_idx, category, window_start, window_end,
-                        strategy_id, exc,
+                        strategy_id,
+                        type(exc).__name__,
+                        scrub_freeform_string(str(exc)),
                     )
                     raise
 
