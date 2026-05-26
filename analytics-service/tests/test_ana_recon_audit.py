@@ -421,19 +421,29 @@ def test_c13_09_bare_float_accepts_nan_string():
 # ---------------------------------------------------------------------------
 
 
-def test_c13_11_finite_float_accepts_negatives():
-    """NEW-C13-11: _finite_float/_safe_float accept negative values, so
-    an adversarial fillSz='-2' persists a negative quantity.
-    A _finite_positive_float variant would reject negatives.
+def test_c13_11_finite_positive_float_rejects_negatives_and_zero():
+    """NEW-C13-11: _finite_positive_float rejects zero and negative values,
+    preventing adversarial fillPx/fillSz='-2' or '0' from persisting
+    corrupt trades into the DB.
     """
-    from services.exchange import _finite_float
+    from services.exchange import _finite_float, _finite_positive_float
 
-    # Current behavior: negative values pass through
-    result = _finite_float(-2.0, label="test_qty")
-    assert result == -2.0, (
-        "NEW-C13-11: _finite_float currently accepts negatives — "
-        "a _finite_positive_float guard is needed for price/qty fields"
+    # _finite_float still accepts negatives (unchanged — needed for signed fees)
+    assert _finite_float(-2.0, label="signed_fee") == -2.0
+
+    # _finite_positive_float rejects negatives
+    assert _finite_positive_float(-2.0, label="price") is None, (
+        "NEW-C13-11: _finite_positive_float must reject negative price"
     )
+    # _finite_positive_float rejects zero
+    assert _finite_positive_float(0.0, label="qty") is None, (
+        "NEW-C13-11: _finite_positive_float must reject zero quantity"
+    )
+    # _finite_positive_float accepts valid positive
+    assert _finite_positive_float(0.5, label="price") == 0.5
+    # _finite_positive_float still rejects NaN/inf (inherits from _finite_float)
+    assert _finite_positive_float(float("nan"), label="price") is None
+    assert _finite_positive_float(float("inf"), label="price") is None
 
 
 # ---------------------------------------------------------------------------

@@ -232,6 +232,28 @@ def _finite_float(value: Any, *, label: str) -> float | None:
     return out
 
 
+def _finite_positive_float(value: Any, *, label: str) -> float | None:
+    """NEW-C13-11: like _finite_float but also rejects zero and negative values.
+
+    Used for price and quantity fields where negative values indicate an
+    adversarial or corrupt fill that must not be persisted (a negative price
+    feeds into total_entry_cost = price*qty as a negative entry cost,
+    corrupting realized PnL; a negative quantity could flip aggregations).
+
+    Fee fields must NOT use this — maker rebates are legitimately negative.
+    """
+    out = _finite_float(value, label=label)
+    if out is None:
+        return None
+    if out <= 0:
+        logger.warning(
+            "_finite_positive_float: rejected %s=%r (≤0 — must be positive)",
+            label, value,
+        )
+        return None
+    return out
+
+
 # Audit-2026-05-07 G12.B.5 — overlap window for late-arriving exchange fills.
 # Hardcoded to 1 hour (3_600_000 ms) because:
 #   * CCXT timestamps are normalized to UTC, but exchange-side propagation lag
@@ -1547,8 +1569,11 @@ async def _fetch_raw_trades_okx(
                 # NaN/inf strings could land in the typed numeric columns and
                 # corrupt every downstream metric. Drop the fill on a
                 # non-finite price / amount; treat non-finite fee as 0.
-                price_chk = _finite_float(fill.get("fillPx", 0), label="OKX fillPx")
-                amount_chk = _finite_float(fill.get("fillSz", 0), label="OKX fillSz")
+                # NEW-C13-11: also reject zero/negative price and amount —
+                # both are physically impossible for a fill and indicate
+                # corrupt data; _finite_positive_float rejects ≤0 values.
+                price_chk = _finite_positive_float(fill.get("fillPx", 0), label="OKX fillPx")
+                amount_chk = _finite_positive_float(fill.get("fillSz", 0), label="OKX fillSz")
                 if price_chk is None or amount_chk is None:
                     logger.error(
                         "OKX fill dropped: non-finite price=%r or amount=%r "
@@ -1725,10 +1750,13 @@ async def _fetch_raw_trades_bybit(
                 side = fill.get("side", "").lower()
                 # Audit-2026-05-07 H-0661 — finite-value validation; same
                 # rationale as the OKX branch.
-                price_chk = _finite_float(
+                # NEW-C13-11: also reject zero/negative price and amount —
+                # both are physically impossible for a fill and indicate
+                # corrupt data; _finite_positive_float rejects ≤0 values.
+                price_chk = _finite_positive_float(
                     fill.get("execPrice", 0), label="Bybit execPrice"
                 )
-                amount_chk = _finite_float(
+                amount_chk = _finite_positive_float(
                     fill.get("execQty", 0), label="Bybit execQty"
                 )
                 if price_chk is None or amount_chk is None:
