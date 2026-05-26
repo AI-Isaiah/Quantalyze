@@ -447,8 +447,15 @@ export function redactAllocatorMatchForUser(
     const row = r as Record<string, unknown>;
     // Defense-in-depth: the SQL filter already scopes to the subject,
     // but the projection re-checks (a future query change must not
-    // leak other allocators' rows).
-    if (row.allocator_id !== userId) continue;
+    // leak other allocators' rows). Log anomalies so operators can
+    // detect SQL predicate drift or RLS bypass — silent drops would
+    // produce a partial export with partial:false and no alert.
+    if (row.allocator_id !== userId) {
+      console.warn(
+        `[gdpr-export] defense-in-depth: dropped row with allocator_id=${String(row.allocator_id)} !== userId for table (bridge_outcomes/match_candidates/match_decisions); SQL predicate may have drifted`,
+      );
+      continue;
+    }
     const clone: Record<string, unknown> = { ...row };
     for (const col of ALLOCATOR_MATCH_CROSS_PARTY_COLUMNS) {
       if (col in clone && clone[col] !== null) {

@@ -568,6 +568,23 @@ describe("redactAllocatorMatchForUser — cross-party field redaction (NEW-C16-0
     expect(out[0].id).toBe("own");
   });
 
+  it("emits console.warn when a cross-tenant row is dropped (review: SF-3)", () => {
+    // Regression for b01-silentfailure Finding 3: the defense-in-depth drop must
+    // be observable to operators so SQL predicate drift or RLS bypass is surfaced.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const rows = [
+        { id: "own", allocator_id: subject, strategy_id: managerStrategyId },
+        { id: "alien", allocator_id: "other-allocator-uuid", strategy_id: managerStrategyId },
+      ];
+      redactAllocatorMatchForUser(rows, subject);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toMatch(/defense-in-depth.*other-allocator-uuid/);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it("manifest wires match_decisions as projected (not direct) — raw bundle must not contain decided_by admin UUID", () => {
     const entry = USER_EXPORT_TABLES.find(
       (t) => t.table === "match_decisions",
