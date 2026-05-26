@@ -1460,4 +1460,27 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
       vi.useRealTimers();
     }
   });
+
+  // NEW-C06-07: addWidget should silently reject unknown widget ids so the
+  // write/load invariant is symmetric. The load path (validateAndNormalizeTile)
+  // drops any tile whose k is not in WIDGET_REGISTRY; addWidget previously
+  // didn't guard, so a bogus tile would live in memory+localStorage for the
+  // session and vanish on reload.
+  it("NEW-C06-07: addWidget ignores unknown widget ids (write/load invariant)", () => {
+    const { result } = renderHook(() => useDashboardConfigV2());
+    const before = result.current.config.tiles.length;
+
+    act(() => {
+      result.current.addWidget("__totally_unknown_widget__");
+    });
+
+    // Tile count unchanged — unknown key was rejected at write time.
+    expect(result.current.config.tiles.length).toBe(before);
+    // No tile with the bogus key persisted.
+    expect(
+      result.current.config.tiles.find(
+        (t) => t.k === "__totally_unknown_widget__",
+      ),
+    ).toBeUndefined();
+  });
 });

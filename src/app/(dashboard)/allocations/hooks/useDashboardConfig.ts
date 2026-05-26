@@ -809,6 +809,20 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
       // short key (or even an unknown id) is collapsed onto the registry
       // namespace before the idempotent-add check runs.
       const resolved = resolveWidgetId(k);
+      // NEW-C06-07: guard unknown keys at write time. resolveWidgetId returns
+      // `k` unchanged for unknown inputs; `clampWidth(undefined)` returns 2;
+      // the bogus tile is added + persisted but validateAndNormalizeTile drops
+      // it on next load — a write/load invariant asymmetry. Mirror the load
+      // path's guard so write and load agree on what constitutes a valid tile.
+      if (!Object.prototype.hasOwnProperty.call(WIDGET_REGISTRY, resolved)) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useDashboardConfigV2] addWidget: unknown widget id, skipping",
+            { k, resolved },
+          );
+        }
+        return prev;
+      }
       // D-03 idempotent add — designer-bundle/project/src/app.jsx:42-44.
       if (prev.tiles.some((t) => t.k === resolved)) return prev;
       const meta = WIDGET_REGISTRY[resolved];
