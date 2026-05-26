@@ -489,12 +489,11 @@ describe("NEW-C14-07: ok:true not overwritten by upstream spread (unified path)"
     });
 
     // Admin client for metadata update and persist (return no-ops)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     adminFromMock.mockReturnValue({
       update: () => ({ eq: () => ({ eq: () => ({ error: null }) }) }),
       upsert: () => ({ error: null }),
       select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }),
-    } as any);
+    } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
     updateMock.mockResolvedValue({ error: null });
 
     const res = await POST(makeRequest(validBody()));

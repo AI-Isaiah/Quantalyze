@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.9.18] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: CSV-finalize / wizard / API-key (batch b07)
+- csv-finalize route: handle the 409 idempotent-success path (no false error), log the wizard_session UUID on 409, Sentry on placeholder-precheck, strip upstream error/code on the success path so `ok:true` isn't overwritten (NEW-C14-01/07)
+- wizard (WizardClient / CsvSubmitStep): CSV_PERSIST_FAIL retry gate + 409 idempotent-success handling
+- surface silent failures across csv-finalize, SyncProgress, ApiKeyManager/ApiKeyForm; encrypt-key schema validation (C40)
+- review + red-team hardening (FINDING-6/7, I2, H-1, M-1/M-2, L-2)
+
+
 ## [0.24.9.17] - 2026-05-26
 ### Changed — CI reliability (flakiness audit fixes)
 - **fencing test HTTP/1.1 (F1):** `test_compute_jobs_fencing` rebuilds the PostgREST session with `http2=False`. supabase-py hardcodes HTTP/2 and the pinned 2.15.1 has no ClientOptions seam; two concurrent claim workers multiplexed over one HTTP/2 connection caused `RemoteProtocolError: ConnectionTerminated` + spurious overlapping-claims failures. The dominant CI flake (~1-in-2 python runs).
