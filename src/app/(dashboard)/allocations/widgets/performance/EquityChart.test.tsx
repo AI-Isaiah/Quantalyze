@@ -2,7 +2,13 @@ import { render, fireEvent } from "@testing-library/react";
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
-import { EquityChart, type OverlaySeries, type Period } from "./EquityChart";
+import {
+  EquityChart,
+  anchorFromFirstPositive,
+  localDateFromISO,
+  type OverlaySeries,
+  type Period,
+} from "./EquityChart";
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / Task 3 — EquityChart test suite.
@@ -717,6 +723,158 @@ describe("EquityChart — M-1058 controlled period mode", () => {
       (onCustomRangeChange.mock.calls[0] as unknown as [unknown])[0],
     ).toEqual({ start: "2024-02-01", end: "2024-03-01" });
     expect(onPeriodChange).toHaveBeenCalledWith("CUSTOM");
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// audit-2026-05-07 H-1224 c9 — CustomRangePicker `min` was built via
+// `new Date(parseISO(iso))`, a UTC-MIDNIGHT epoch, but the picker reads
+// that Date with LOCAL-time accessors (toISODate/sameDay/clampDate). For
+// users west of UTC the bound resolved to the PREVIOUS calendar day. The
+// fix routes the picker bound through `localDateFromISO`, which builds a
+// LOCAL-midnight Date matching the picker's own `parseISODate`. The
+// contract: the helper's epoch must equal `new Date(y, m-1, d)` (local
+// midnight) for the SAME components — which differs from the old
+// UTC-epoch construction by the runner's UTC offset whenever that offset
+// is non-zero (true in CI's UTC only as a blind spot, hence the explicit
+// component + getTime assertions to also pin behavior at offset 0).
+// ───────────────────────────────────────────────────────────────────
+
+describe("EquityChart — H-1224 localDateFromISO timezone convention", () => {
+  it("builds a LOCAL-midnight Date (not a UTC epoch) so the picker bound matches the runner's calendar", () => {
+    const d = localDateFromISO("2024-03-15");
+    // Local calendar components must echo the ISO string verbatim. The
+    // pre-fix `new Date(Date.UTC(2024,2,15))` returns the 14th when read
+    // locally west of UTC — this pins the 15th in every zone.
+    expect(d.getFullYear()).toBe(2024);
+    expect(d.getMonth()).toBe(2); // March (0-indexed)
+    expect(d.getDate()).toBe(15);
+    // Exact-epoch contract: identical to the canonical local-midnight
+    // constructor. This DIFFERS from the old UTC-epoch construction by the
+    // runner's UTC offset whenever offset !== 0, so this assertion fails
+    // pre-fix on any non-UTC runner (e.g. the dev host) — the regression
+    // teeth the finding's "CI passes in UTC" trap was missing.
+    expect(d.getTime()).toBe(new Date(2024, 2, 15).getTime());
+    // Belt-and-suspenders: prove it is NOT the UTC-epoch construction
+    // unless the runner happens to be exactly UTC (offset 0).
+    if (new Date().getTimezoneOffset() !== 0) {
+      expect(d.getTime()).not.toBe(Date.UTC(2024, 2, 15));
+    }
+  });
+
+  it("falls back to the Date constructor for non-ISO input (mirrors parseISO)", () => {
+    // A non-ISO string can't be split into finite Y/M/D — the helper must
+    // not throw; it defers to `new Date(s)` like parseISO does.
+    const d = localDateFromISO("not-a-date");
+    expect(Number.isNaN(d.getTime())).toBe(true);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// audit-2026-05-07 M-1060 c9 — anchorFromFirstPositive ran three times
+// per top-level render for the SAME data (twice in EquityChartWidget's
+// minDate/periodReturn memos, once in EquityChart's composite). It is now
+// memoized on the input array reference via a module-scoped WeakMap so the
+// duplicate O(n) passes collapse to one computation. The observable
+// contract: calling it twice with the SAME array reference returns the
+// SAME array instance (identity), while a different reference recomputes.
+// Pre-fix every call allocated a fresh array, so the identity assertion
+// fails.
+// ───────────────────────────────────────────────────────────────────
+
+describe("EquityChart — M-1060 anchorFromFirstPositive memoization", () => {
+  it("returns the SAME array instance for the same input reference (WeakMap cache)", () => {
+    const input: DailyPoint[] = [
+      { date: "2024-01-01", value: 2 },
+      { date: "2024-01-02", value: 3 },
+    ];
+    const a = anchorFromFirstPositive(input);
+    const b = anchorFromFirstPositive(input);
+    // Identity — proves the second call hit the cache instead of redoing
+    // the findIndex + slice + map. Pre-fix these are two distinct arrays.
+    expect(a).toBe(b);
+    // Still correct: index 0 re-anchored to 1.0, index 1 = 3/2 = 1.5.
+    expect(a[0].value).toBe(1);
+    expect(a[1].value).toBe(1.5);
+  });
+
+  it("recomputes for a different input reference (cache is keyed on identity, not value)", () => {
+    const a = anchorFromFirstPositive([{ date: "2024-01-01", value: 2 }]);
+    const b = anchorFromFirstPositive([{ date: "2024-01-01", value: 2 }]);
+    // Different array references → cache miss → distinct result instances,
+    // but value-equal (same transform).
+    expect(a).not.toBe(b);
+    expect(a[0].value).toBe(b[0].value);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// audit-2026-05-07 H-0167 / H-0168 / M-1059 c9 — the chart projection
+// (period normalization, y-range scan, y-tick walker, path/area builders,
+// x-tick density loop) used to run inline in the render body, so it
+// re-executed on every hover (handleMove sets hoverIdx per mousemove) and
+// every TweaksContext change. It is now hoisted into a useMemo keyed on
+// the data window (visible / benchmark / overlays / width). These tests
+// prove the projection does NOT recompute on hover.
+//
+// Probe: the y-tick walker calls Math.pow(10, p) for p in [-3..3] — seven
+// calls per projection computation — and that is the ONLY Math.pow call
+// site in the component (verified against the source). Crucially it is NOT
+// reached by the hover crosshair or tooltip render (unlike
+// toLocaleDateString/parseISO, which the tooltip also calls). So Math.pow
+// is a clean, deterministic projection-recompute counter: pre-fix it climbs
+// on every mousemove (walker re-ran in the render body); post-fix it is
+// frozen after mount because hover only flips hoverIdx, not a memo dep.
+// ───────────────────────────────────────────────────────────────────
+
+describe("EquityChart — H-0167/M-1059 projection memoized across hover", () => {
+  it("does not re-run the y-tick walker (Math.pow) on repeated hover", () => {
+    const series = makeSeries(60);
+    const powSpy = vi.spyOn(Math, "pow");
+    try {
+      const { container } = render(
+        <EquityChart equityDailyPoints={series} initialPeriod="ALL" />,
+      );
+      const svg = container.querySelector("svg");
+      expect(svg).not.toBeNull();
+      // Sanity: mount ran the walker (proves the spy is wired to the path).
+      const afterMount = powSpy.mock.calls.length;
+      expect(afterMount).toBeGreaterThan(0);
+
+      // Burst of mousemoves — each sets hoverIdx and re-renders the tooltip.
+      // Pre-fix the projection (incl. the walker) re-ran on every one.
+      for (let px = 20; px < 200; px += 5) {
+        fireEvent.mouseMove(svg!, { clientX: px, clientY: 40 });
+      }
+
+      // Hover must NOT recompute the projection: zero additional Math.pow
+      // calls after mount. A regression that inlines the block again, or
+      // adds hoverIdx to the memo deps, fails here.
+      expect(powSpy.mock.calls.length).toBe(afterMount);
+    } finally {
+      powSpy.mockRestore();
+    }
+  });
+
+  it("recomputes the projection when the period (data window) actually changes", () => {
+    const series = makeSeries(200);
+    const powSpy = vi.spyOn(Math, "pow");
+    try {
+      const { getByRole, container } = render(
+        <EquityChart equityDailyPoints={series} initialPeriod="ALL" />,
+      );
+      expect(container.querySelector("svg")).not.toBeNull();
+      const afterMount = powSpy.mock.calls.length;
+      expect(afterMount).toBeGreaterThan(0);
+
+      // Switching period changes `visible` (a real memo dep) → the
+      // projection MUST recompute. Proves the memo is keyed on the data
+      // window, not frozen across genuine input changes.
+      fireEvent.click(getByRole("tab", { name: "1M" }));
+      expect(powSpy.mock.calls.length).toBeGreaterThan(afterMount);
+    } finally {
+      powSpy.mockRestore();
+    }
   });
 });
 

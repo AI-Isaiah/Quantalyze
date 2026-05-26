@@ -86,10 +86,30 @@ function readCorrelationId(): string {
   return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-const POLL_INTERVAL_MS = 3000;
 const SLOW_HINT_MS = 15_000;
 const WARN_THRESHOLD_MS = 60_000;
 const RETRY_THRESHOLD_MS = 180_000;
+
+/**
+ * Status-poll backoff schedule. Each entry is the delay BEFORE the next
+ * poll; the loop walks the ladder and then holds at the final step.
+ * Capping at 10s keeps DB load and background-tab timer churn down on
+ * slow first-of-day syncs (~45s) and the 3-minute worst case, while the
+ * first few ticks stay snappy so a fast sync still feels instant. The
+ * elapsed-time UI thresholds are wall-clock, not poll-count, so backing
+ * off the poll cadence does not shift the SLOW/WARN/RETRY copy.
+ */
+const POLL_BACKOFF_MS = [3000, 3000, 5000, 5000, 10_000] as const;
+
+/**
+ * How many CONSECUTIVE poll failures (Supabase `error`, a thrown
+ * exception, or a network blip) before we stop spinning and surface a
+ * recoverable SYNC_FAILED envelope. Without this the wizard hangs on
+ * "Fetching trades..." forever when the read keeps failing (e.g. an RLS
+ * regression denies the row, or a transient 503). One transient blip is
+ * tolerated; three in a row is a real fault the user needs an exit from.
+ */
+const MAX_CONSECUTIVE_POLL_ERRORS = 3;
 
 export interface SyncPreviewSnapshot {
   tradeCount: number;
@@ -219,24 +239,130 @@ export function SyncPreviewStep({
   useEffect(() => {
     if (phase !== "waiting_for_complete") return;
     const supabase = createClient();
-    const id = window.setInterval(async () => {
+
+    // `stopped` is checked at the top of every tick AND before every
+    // self-reschedule so the loop hard-stops the instant the effect
+    // tears down (phase change / strategyId change / unmount). The old
+    // setInterval relied on the effect re-running to clear the timer,
+    // which left the previous interval's closure firing 1-2 extra polls
+    // against a stale `phase` after a setPhase() (H-0195). A
+    // self-scheduling setTimeout with a local guard cannot fire again
+    // once cleared.
+    let stopped = false;
+    let timerId: number | undefined;
+    let tick = 0;
+    // Count of CONSECUTIVE status-read failures (Supabase `error` or a
+    // transport throw before the terminal fetch); reset to 0 on any clean
+    // status read.
+    let consecutiveErrors = 0;
+    // Count of CONSECUTIVE terminal/heavy-fetch failures. Tracked separately
+    // from `consecutiveErrors` because the narrow status read can keep
+    // succeeding (resetting `consecutiveErrors`) while the heavy Promise.all
+    // persistently REJECTS — e.g. a network blip, an aborted fetch, or a
+    // transport-level error on a trades/api_keys query. (A Supabase error
+    // returned AS A VALUE — `{ data, error }` with a non-null `error` — is NOT
+    // caught here: the destructured results ignore `.error`, so e.g. an RLS
+    // denial on `trades` drops `tradeCount` to 0 via `?? 0` and the gate fails
+    // with INSUFFICIENT_TRADES — a terminal, loop-stopping outcome, not a
+    // heavyFetchErrors escalation.) With a shared counter a persistent throw
+    // oscillates 0→1→0 and never escalates, so the wizard spins forever
+    // (H-0197, narrowed to heavy-fetch-only faults). A dedicated counter never
+    // needs a reset: every non-throwing heavy outcome (passed / gate-fail)
+    // sets `stopped = true` and terminates the loop, so the only path that
+    // reschedules is a throw.
+    let heavyFetchErrors = 0;
+
+    const scheduleNext = () => {
+      if (stopped) return;
+      const delay =
+        POLL_BACKOFF_MS[Math.min(tick, POLL_BACKOFF_MS.length - 1)];
+      tick += 1;
+      timerId = window.setTimeout(poll, delay);
+    };
+
+    /**
+     * Stop polling and surface a recoverable SYNC_FAILED envelope. Used
+     * when the status read keeps failing (H-0197 / H-0198) so the user
+     * gets an exit affordance instead of an indefinite spinner. Fires
+     * the same `wizard_error` funnel event as the gate-failure path so
+     * the drop-off is recorded in PostHog.
+     */
+    const failPolling = () => {
+      if (stopped || !mountedRef.current) return;
+      stopped = true;
+      setErrorCode("SYNC_FAILED");
+      setPhase("gate_failed");
+      trackForQuantsEventClient("wizard_error", {
+        wizard_session_id: wizardSessionId,
+        step: "sync_preview",
+        code: "SYNC_FAILED",
+      });
+    };
+
+    const poll = async () => {
+      if (stopped) return;
       try {
         // Lightweight status poll: only read the two status columns
         // while we wait for completion so each tick is cheap. The
         // heavy analytics columns (sparkline, metrics) only load once
         // on the terminal state.
-        const { data: statusRow } = await supabase
+        const { data: statusRow, error: statusError } = await supabase
           .from("strategy_analytics")
           .select("computation_status, computation_error")
           .eq("strategy_id", strategyId)
           .maybeSingle();
+
+        if (stopped) return;
+
+        // A Supabase `error` (RLS denial, transient 503) is NOT the same
+        // as a genuine `pending` row. Without this branch an RLS
+        // regression returns { data: null, error } and `nextStatus`
+        // silently collapses to "pending" via the ?? default — the
+        // wizard then spins forever on a permissions misconfig nobody
+        // can see (H-0198). Treat it as a poll failure and let the
+        // consecutive-error counter escalate.
+        if (statusError) {
+          console.error(
+            "[wizard:SyncPreviewStep] poll status error:",
+            statusError,
+          );
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+            failPolling();
+            return;
+          }
+          scheduleNext();
+          return;
+        }
+
+        consecutiveErrors = 0;
 
         const nextStatus = statusRow?.computation_status ?? "pending";
         const nextError = statusRow?.computation_error ?? null;
         setComputationStatus((prev) => (prev === nextStatus ? prev : nextStatus));
         setComputationError((prev) => (prev === nextError ? prev : nextError));
 
-        if (nextStatus !== "complete" && nextStatus !== "failed") {
+        // Hard-failure terminal state. Bail BEFORE the heavy Promise.all
+        // (H-0195): on `failed` the analytics row is errored, so the 5
+        // trades/api_keys queries are pure waste, and the gate would only
+        // ever map this to GATE_ANALYTICS_FAILED anyway. Route straight
+        // to the scripted analytics-failed envelope, carrying
+        // computation_error for the detail line, and stop polling.
+        if (nextStatus === "failed") {
+          stopped = true;
+          if (!mountedRef.current) return;
+          setErrorCode("GATE_ANALYTICS_FAILED");
+          setPhase("gate_failed");
+          trackForQuantsEventClient("wizard_error", {
+            wizard_session_id: wizardSessionId,
+            step: "sync_preview",
+            code: "GATE_ANALYTICS_FAILED",
+          });
+          return;
+        }
+
+        if (nextStatus !== "complete") {
+          scheduleNext();
           return;
         }
 
@@ -244,133 +370,183 @@ export function SyncPreviewStep({
         // count + span, sample symbols for market detection, and the
         // exchange name in one Promise.all so the user moves to the
         // factsheet preview as fast as possible.
-        const [
-          { data: analytics },
-          { count: tradeCount },
-          { data: earliest },
-          { data: latest },
-          { data: sample },
-          keyRowResult,
-        ] = await Promise.all([
-          supabase
-            .from("strategy_analytics")
-            .select(
-              "cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at",
-            )
-            .eq("strategy_id", strategyId)
-            .maybeSingle(),
-          supabase
-            .from("trades")
-            .select("id", { count: "exact", head: true })
-            .eq("strategy_id", strategyId),
-          supabase
-            .from("trades")
-            .select("timestamp")
-            .eq("strategy_id", strategyId)
-            .order("timestamp", { ascending: true })
-            .limit(1),
-          supabase
-            .from("trades")
-            .select("timestamp")
-            .eq("strategy_id", strategyId)
-            .order("timestamp", { ascending: false })
-            .limit(1),
-          supabase
-            .from("trades")
-            .select("symbol")
-            .eq("strategy_id", strategyId)
-            // Bybit + OKX ingest writes daily portfolio aggregates under
-            // the synthetic symbol "PORTFOLIO". Bybit accounts can have
-            // hundreds of these clustered at the start of the table; an
-            // unordered limit(50) sample then comes back as 50× PORTFOLIO
-            // and the client-side filter leaves the detected-markets
-            // hint empty. Excluding the sentinel at the query layer keeps
-            // the sample biased toward real trading pairs.
-            .neq("symbol", "PORTFOLIO")
-            .limit(50),
-          apiKeyId
-            ? supabase
-                .from("api_keys")
-                .select("exchange")
-                .eq("id", apiKeyId)
-                .maybeSingle()
-            : Promise.resolve({ data: null as { exchange?: string } | null }),
-        ]);
+        //
+        // Wrapped in its own try/catch (separate from the status-read catch
+        // below) so a persistently-throwing heavy fetch escalates via
+        // `heavyFetchErrors` instead of being masked by the line-above
+        // `consecutiveErrors = 0` reset. One transient heavy fault is still
+        // tolerated; the threshold matches the status-read path.
+        try {
+          const [
+            { data: analytics },
+            { count: tradeCount },
+            { data: earliest },
+            { data: latest },
+            { data: sample },
+            keyRowResult,
+          ] = await Promise.all([
+            supabase
+              .from("strategy_analytics")
+              .select(
+                "cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at",
+              )
+              .eq("strategy_id", strategyId)
+              .maybeSingle(),
+            supabase
+              .from("trades")
+              .select("id", { count: "exact", head: true })
+              .eq("strategy_id", strategyId),
+            supabase
+              .from("trades")
+              .select("timestamp")
+              .eq("strategy_id", strategyId)
+              .order("timestamp", { ascending: true })
+              .limit(1),
+            supabase
+              .from("trades")
+              .select("timestamp")
+              .eq("strategy_id", strategyId)
+              .order("timestamp", { ascending: false })
+              .limit(1),
+            supabase
+              .from("trades")
+              .select("symbol")
+              .eq("strategy_id", strategyId)
+              // Bybit + OKX ingest writes daily portfolio aggregates under
+              // the synthetic symbol "PORTFOLIO". Bybit accounts can have
+              // hundreds of these clustered at the start of the table; an
+              // unordered limit(50) sample then comes back as 50× PORTFOLIO
+              // and the client-side filter leaves the detected-markets
+              // hint empty. Excluding the sentinel at the query layer keeps
+              // the sample biased toward real trading pairs.
+              .neq("symbol", "PORTFOLIO")
+              .limit(50),
+            apiKeyId
+              ? supabase
+                  .from("api_keys")
+                  .select("exchange")
+                  .eq("id", apiKeyId)
+                  .maybeSingle()
+              : Promise.resolve({ data: null as { exchange?: string } | null }),
+          ]);
 
-        const detectedMarkets = deriveDetectedMarkets(
-          (sample ?? []).map((t) => (t as { symbol?: string }).symbol),
-        );
+          const detectedMarkets = deriveDetectedMarkets(
+            (sample ?? []).map((t) => (t as { symbol?: string }).symbol),
+          );
 
-        const keyRow = keyRowResult.data;
+          const keyRow = keyRowResult.data;
 
-        if (!mountedRef.current) return;
+          if (!mountedRef.current) return;
 
-        const gate = checkStrategyGate({
-          apiKeyId,
-          tradeCount: tradeCount ?? 0,
-          earliestTradeAt: earliest?.[0]?.timestamp
-            ? new Date(earliest[0].timestamp)
-            : null,
-          latestTradeAt: latest?.[0]?.timestamp
-            ? new Date(latest[0].timestamp)
-            : null,
-          computationStatus: nextStatus,
-          computationError: nextError,
-        });
-
-        if (!gate.passed) {
-          setGateResult(gate);
-          const wizardCode = gate.code ? gateFailureToWizardError(gate.code) : "UNKNOWN";
-          setErrorCode(wizardCode);
-          setPhase("gate_failed");
-          trackForQuantsEventClient("wizard_error", {
-            wizard_session_id: wizardSessionId,
-            step: "sync_preview",
-            code: wizardCode,
-            trade_count: tradeCount ?? 0,
+          const gate = checkStrategyGate({
+            apiKeyId,
+            tradeCount: tradeCount ?? 0,
+            earliestTradeAt: earliest?.[0]?.timestamp
+              ? new Date(earliest[0].timestamp)
+              : null,
+            latestTradeAt: latest?.[0]?.timestamp
+              ? new Date(latest[0].timestamp)
+              : null,
+            computationStatus: nextStatus,
+            computationError: nextError,
           });
+
+          if (!gate.passed) {
+            stopped = true;
+            setGateResult(gate);
+            const wizardCode = gate.code ? gateFailureToWizardError(gate.code) : "UNKNOWN";
+            setErrorCode(wizardCode);
+            setPhase("gate_failed");
+            trackForQuantsEventClient("wizard_error", {
+              wizard_session_id: wizardSessionId,
+              step: "sync_preview",
+              code: wizardCode,
+              trade_count: tradeCount ?? 0,
+            });
+            return;
+          }
+
+          const metrics: FactsheetPreviewMetric[] = [
+            { label: "CAGR", value: formatCagr(analytics?.cagr ?? null) },
+            { label: "Sharpe", value: formatMetric(analytics?.sharpe ?? null) },
+            { label: "Sortino", value: formatMetric(analytics?.sortino ?? null) },
+            {
+              label: "Max DD",
+              value: analytics?.max_drawdown != null ? formatCagr(analytics.max_drawdown) : "—",
+            },
+            {
+              label: "Volatility",
+              value: analytics?.volatility != null ? formatMetric(analytics.volatility, "%") : "—",
+            },
+            {
+              label: "Cumulative",
+              value: analytics?.cumulative_return != null ? formatCagr(analytics.cumulative_return) : "—",
+            },
+          ];
+
+          const nextSnapshot: SyncPreviewSnapshot = {
+            tradeCount: tradeCount ?? 0,
+            earliestTradeAt: earliest?.[0]?.timestamp ?? null,
+            latestTradeAt: latest?.[0]?.timestamp ?? null,
+            detectedMarkets,
+            exchange: keyRow?.exchange ?? null,
+            metrics,
+            sparkline: Array.isArray(analytics?.sparkline_returns)
+              ? (analytics.sparkline_returns as number[])
+              : null,
+            computedAt: analytics?.computed_at ?? null,
+          };
+
+          stopped = true;
+          setSnapshot(nextSnapshot);
+          setPhase("passed");
+        } catch (heavyErr) {
+          // The terminal fetch / gate evaluation threw (network blip, an
+          // aborted fetch, or a transport-level rejection). One transient
+          // fault is tolerated, but a persistent heavy-fetch fault
+          // must escalate — the narrow status read keeps succeeding above,
+          // so `consecutiveErrors` would never reach the threshold (H-0197,
+          // heavy-fetch-narrowed). Count consecutive heavy failures and
+          // surface the recoverable SYNC_FAILED envelope past the threshold.
+          if (stopped) return;
+          console.error(
+            "[wizard:SyncPreviewStep] terminal fetch error:",
+            heavyErr,
+          );
+          heavyFetchErrors += 1;
+          if (heavyFetchErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+            failPolling();
+            return;
+          }
+          scheduleNext();
+        }
+      } catch (err) {
+        // A thrown status read (network blip, aborted fetch, transient 503)
+        // is tolerated once, but repeated throws must not leave the wizard
+        // spinning forever (H-0197). Count consecutive failures and
+        // escalate to a recoverable SYNC_FAILED envelope past the
+        // threshold; otherwise back off and retry.
+        if (stopped) return;
+        console.error("[wizard:SyncPreviewStep] poll error:", err);
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+          failPolling();
           return;
         }
-
-        const metrics: FactsheetPreviewMetric[] = [
-          { label: "CAGR", value: formatCagr(analytics?.cagr ?? null) },
-          { label: "Sharpe", value: formatMetric(analytics?.sharpe ?? null) },
-          { label: "Sortino", value: formatMetric(analytics?.sortino ?? null) },
-          {
-            label: "Max DD",
-            value: analytics?.max_drawdown != null ? formatCagr(analytics.max_drawdown) : "—",
-          },
-          {
-            label: "Volatility",
-            value: analytics?.volatility != null ? formatMetric(analytics.volatility, "%") : "—",
-          },
-          {
-            label: "Cumulative",
-            value: analytics?.cumulative_return != null ? formatCagr(analytics.cumulative_return) : "—",
-          },
-        ];
-
-        const nextSnapshot: SyncPreviewSnapshot = {
-          tradeCount: tradeCount ?? 0,
-          earliestTradeAt: earliest?.[0]?.timestamp ?? null,
-          latestTradeAt: latest?.[0]?.timestamp ?? null,
-          detectedMarkets,
-          exchange: keyRow?.exchange ?? null,
-          metrics,
-          sparkline: Array.isArray(analytics?.sparkline_returns)
-            ? (analytics.sparkline_returns as number[])
-            : null,
-          computedAt: analytics?.computed_at ?? null,
-        };
-
-        setSnapshot(nextSnapshot);
-        setPhase("passed");
-      } catch (err) {
-        console.error("[wizard:SyncPreviewStep] poll error:", err);
+        scheduleNext();
       }
-    }, POLL_INTERVAL_MS);
+    };
 
-    return () => window.clearInterval(id);
+    // Schedule the first poll after one base interval, exactly matching
+    // the replaced setInterval's first-tick latency (setInterval also
+    // waits one period before its first callback) so resume/timing
+    // behaviour is unchanged.
+    timerId = window.setTimeout(poll, POLL_BACKOFF_MS[0]);
+
+    return () => {
+      stopped = true;
+      if (timerId !== undefined) window.clearTimeout(timerId);
+    };
   }, [phase, strategyId, apiKeyId, wizardSessionId]);
 
   const handleUseThisKey = useCallback(() => {

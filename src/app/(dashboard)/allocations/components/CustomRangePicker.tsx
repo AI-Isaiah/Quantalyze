@@ -54,7 +54,24 @@ function toISODate(d: Date): string {
 function parseISODate(s: string): Date | null {
   const [y, m, d] = s.split("-").map(Number);
   if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
-  return new Date(y, m - 1, d);
+  // Reject semantically out-of-range components up front; the Date
+  // constructor would otherwise silently roll them over (`new Date(2024, 12, 1)`
+  // → Jan 2025, `new Date(2024, 0, 99)` → Apr 8 2024) and hand back a date
+  // nobody supplied (H-1231).
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const parsed = new Date(y, m - 1, d);
+  // Round-trip check catches rollovers that survive the range gate — e.g. a
+  // non-existent calendar day like Feb 31 (→ Mar 2) or Apr 31 (→ May 1). If
+  // the constructed date doesn't echo the requested components, the input was
+  // invalid.
+  if (
+    parsed.getFullYear() !== y ||
+    parsed.getMonth() !== m - 1 ||
+    parsed.getDate() !== d
+  ) {
+    return null;
+  }
+  return parsed;
 }
 
 function startOfMonth(d: Date): Date {
