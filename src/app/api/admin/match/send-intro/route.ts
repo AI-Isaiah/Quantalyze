@@ -49,7 +49,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (csrfError) return csrfError;
 
   const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  // H-03 (red-team HIGH): partner-import was fixed to destructure and check
+  // getUserErr; send-intro had the identical unhandled pattern. A Supabase
+  // auth infrastructure error silently produced user=null, falling through to
+  // a 401 that is indistinguishable from "not logged in" — masking the root
+  // cause from operators and monitoring.
+  const { data: { user }, error: getUserErr } = await supabase.auth.getUser();
+  if (getUserErr) {
+    console.error("[api/admin/match/send-intro] getUser failed:", getUserErr);
+    return NextResponse.json(
+      { error: "Authentication service unavailable", code: "auth_getuser_failed" },
+      { status: 503 },
+    );
+  }
 
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
   if (!user) {
@@ -503,6 +515,52 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // the EXISTING row; no new note was applied and no new email was sent. Emit the
   // distinct "intro.resend_noop" action so forensics can distinguish first-send
   // from re-send attempts, and surface note_applied:false to the response.
+  //
+  // H-05 (red-team HIGH): the audit block was gated on `row?.contact_request_id`.
+  // If the RPC succeeds but returns a row without contact_request_id (schema
+  // drift, future RPC change, malformed response), the route dispatched emails
+  // via after() and returned 200 with ZERO forensic record. The fix: emit a
+  // sentinel `intro.send_failed` row with reason="rpc_shape_drift" when the
+  // RPC succeeded but the row is unusable for the normal audit path, then
+  // return 500 so the admin is alerted and no email is dispatched.
+  if (!row?.contact_request_id) {
+    console.error(
+      "[api/admin/match/send-intro] RPC succeeded but contact_request_id missing from response — halting",
+      { strategy_id: body.strategy_id, allocator_id: body.allocator_id, row },
+    );
+    captureToSentry(
+      new Error("[api/admin/match/send-intro] send_intro_with_decision returned no contact_request_id"),
+      {
+        tags: { area: "send-intro", gate: "rpc_shape_drift" },
+        extra: { strategy_id: body.strategy_id, allocator_id: body.allocator_id },
+        level: "error",
+      },
+    );
+    if (user?.id) {
+      // Emit a forensic sentinel so this anomaly is not invisible.
+      // Uses intro.send_failed + reason=rpc_shape_drift to distinguish from
+      // the normal RPC-error path (which sets error_code from the DB error).
+      logAuditEventAsUser(admin, user.id, {
+        action: "intro.send_failed",
+        entity_type: "strategy",
+        entity_id: body.strategy_id,
+        metadata: {
+          path: "admin",
+          reason: "rpc_shape_drift",
+          allocator_id: body.allocator_id,
+          strategy_id: body.strategy_id,
+          original_strategy_id: body.original_strategy_id,
+          candidate_id: body.candidate_id,
+          admin_note_length: body.admin_note.length,
+        },
+      });
+    }
+    return NextResponse.json(
+      { error: "Intro service returned an unexpected response. No email was sent.", code: "rpc_shape_drift" },
+      { status: 500 },
+    );
+  }
+
   if (row?.contact_request_id && user?.id) {
     const auditEvent = wasAlreadySent
       ? {

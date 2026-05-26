@@ -991,6 +991,13 @@ export async function POST(request: Request): Promise<NextResponse> {
     });
   } catch (auditErr) {
     console.error("[api/admin/partner-import] success-path audit emit failed:", auditErr);
+    // M-02 (red-team MEDIUM): 207 Multi-Status is misleading here — generic
+    // HTTP clients (and the admin UI) treat any 2xx as success, ignore the
+    // body, and may re-submit the import creating duplicate GoTrue users.
+    // A 500 with the import counters in the body unambiguously signals that
+    // the import committed but the side-effect (audit) failed, and prevents
+    // callers from retrying the import itself. The counters in the body let
+    // operators verify what actually happened without a second request.
     return NextResponse.json({
       managers_created,
       strategies_created,
@@ -999,8 +1006,8 @@ export async function POST(request: Request): Promise<NextResponse> {
       managers_rows_skipped: managersRowsSkipped,
       allocators_rows_skipped: allocatorsRowsSkipped,
       partial_completion: false,
-      audit_warning: "Import succeeded but the audit record could not be written. Contact support.",
-    }, { status: 207 });
+      audit_warning: "Import succeeded but the audit record could not be written. Contact support. Do NOT re-run the import.",
+    }, { status: 500 });
   }
 
   return NextResponse.json({

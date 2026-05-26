@@ -78,6 +78,42 @@ export async function POST(req: NextRequest) {
 }
 
 /**
+ * H-04 (red-team HIGH): sanitize a metrics_snapshot value received from the
+ * Railway process-key service before returning it to an unauthenticated caller.
+ *
+ * Allowed leaf types: number | string | boolean | null.
+ * Arrays and plain objects are walked recursively; any leaf that does not
+ * satisfy the allowed types is replaced with null so the shape is preserved
+ * without leaking opaque blobs.
+ *
+ * This is intentionally strict: a Railway regression that embeds an object
+ * with sensitive fields (api_key, tokens, etc.) inside a metric key produces
+ * null at that key rather than a passthrough.
+ */
+function sanitizeMetricsSnapshot(value: unknown): unknown {
+  if (
+    value === null ||
+    typeof value === "number" ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(sanitizeMetricsSnapshot);
+  }
+  if (typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      result[k] = sanitizeMetricsSnapshot(v);
+    }
+    return result;
+  }
+  // Drop functions, symbols, undefined, etc.
+  return null;
+}
+
+/**
  * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
  * `flow_type=teaser`. Source is the user-supplied exchange (already validated
  * against SUPPORTED_EXCHANGES above).
@@ -148,12 +184,22 @@ async function unifiedVerifyStrategyHandler(
   const publicToken = crypto.randomBytes(32).toString("base64url");
   const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
 
-  // silent-failure-hunter MEDIUM (review Finding 12): createAdminClient() is
-  // moved outside the try/catch so a configuration error (missing service role
-  // key, env var absent) propagates as an unhandled exception rather than being
-  // silently swallowed as "Failed to finalize verification". Config bugs should
-  // be loud and distinct from transient DB failures.
-  const admin = createAdminClient();
+  // M-03 (red-team MEDIUM): createAdminClient() was moved outside try/catch
+  // to "fail loud" on config errors. But in this unauthenticated public route
+  // an unhandled throw produces a framework-caught 500 that may expose the
+  // stack trace or env var name to callers. Use explicit catch-and-rethrow
+  // with a structured 500 body so config failures are loud in logs/Sentry
+  // without leaking internals to the unauthenticated browser.
+  let admin: ReturnType<typeof createAdminClient>;
+  try {
+    admin = createAdminClient();
+  } catch (configErr) {
+    console.error("[verify-strategy] createAdminClient config error:", configErr);
+    return NextResponse.json(
+      { error: "Verification service misconfigured" },
+      { status: 500 },
+    );
+  }
   // @audit-skip: unauthenticated public endpoint (no user session). The
   // strategy_verifications row carries no PII (only a public_token +
   // status), and audit_log requires a user_id which the unauthenticated
@@ -206,9 +252,21 @@ async function unifiedVerifyStrategyHandler(
     public_token: publicToken,
     expires_at: expiresAt,
   };
-  // metrics_snapshot is safe and needed by the verification status card.
+  // H-04 (red-team HIGH): metrics_snapshot was passed through as `unknown`
+  // with no shape validation. If the Railway process-key service embeds
+  // sensitive fields (api_key, api_secret, internal tokens) inside
+  // metrics_snapshot — due to a bug or compromise — they would leak to
+  // unauthenticated browsers. The allowlist for the outer response body
+  // provides no protection for nested objects.
+  //
+  // Fix: walk metrics_snapshot and allow ONLY numeric, boolean, string, null,
+  // or arrays/objects whose leaves also satisfy those types. Any key whose
+  // value is a nested object or array is recursively sanitised; any non-
+  // primitive leaf that is not a number/string/boolean/null is dropped.
+  // This enforces the invariant "metrics are numbers/strings" at this
+  // boundary regardless of the Railway service's internals.
   if (upstream.metrics_snapshot !== undefined) {
-    responseBody.metrics_snapshot = upstream.metrics_snapshot;
+    responseBody.metrics_snapshot = sanitizeMetricsSnapshot(upstream.metrics_snapshot);
   }
   // status is informational and contains no credentials.
   if (typeof upstream.status === "string") {

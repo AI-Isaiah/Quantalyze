@@ -349,35 +349,6 @@ export const POST = withRole<{ id: string }>("admin")(
       );
     }
 
-    // NEW-C17-05 (security+red-team H conf=7): TOCTOU re-check — withRole
-    // verified admin status ONCE at the wrapper, but several awaited
-    // round-trips (checkLimit, profile lookup, pre-read) widen the window
-    // for a concurrent revoke to strip the actor's admin row before the
-    // service-role mutation. The re-check MUST use a FRESH client (not the
-    // per-request `supabase` from withRole context) so that any session
-    // invalidation or role revocation that happened since the initial
-    // getUser() is observable. The service-role admin client bypasses all
-    // RLS; a just-demoted admin must NOT reach it.
-    //
-    // silent-failure-hunter CRITICAL (review): createClient() must be wrapped
-    // in try/catch that FAILS CLOSED — a network blip, missing env var, or
-    // cookies() failure would throw and skip the re-check entirely, allowing
-    // a just-demoted admin to reach the service-role mutation unchecked.
-    {
-      let freshClient: Awaited<ReturnType<typeof createClient>>;
-      try {
-        freshClient = await createClient();
-      } catch (err) {
-        console.error("[admin/users/roles] TOCTOU createClient failed:", err);
-        return NextResponse.json(
-          { error: "Authorization re-check unavailable", code: "toctou_check_failed" },
-          { status: 500 },
-        );
-      }
-      const toctouGuard = await requireAdmin(freshClient, user, req);
-      if (toctouGuard) return toctouGuard;
-    }
-
     const admin = createAdminClient();
 
     // audit-2026-05-07 specialist-apply (api-contract HIGH conf-9 +
@@ -715,59 +686,81 @@ export const POST = withRole<{ id: string }>("admin")(
           { status: 500 },
         );
       }
+      // C-01 (red-team CRITICAL): previously returned 409 here, but that left
+      // the ghost-admin permanently privileged — no UI/API path could clear
+      // the flag, so a ghost-admin could never actually be demoted.
+      // Fix: clear profiles.is_admin=FALSE via the service-role client so the
+      // revoke fully removes access regardless of which admission signal was
+      // authoritative. The user_app_roles DELETE that follows handles the row
+      // side; this update handles the flag side. Both paths are idempotent.
       if (profileRow?.is_admin === true) {
-        return NextResponse.json(
-          {
-            error:
-              "Cannot revoke admin role via this endpoint: target user has profiles.is_admin=TRUE (ghost-admin). " +
-              "Deleting the user_app_roles row would not remove access. " +
-              "Use the DB break-glass path (SET profiles.is_admin=FALSE) to demote this user.",
-            code: "revoke_admin_ineffective",
-          },
-          { status: 409 },
-        );
+        // @audit-skip: ghost-admin flag clear — this update is a prerequisite
+        // step within the admin-role revoke flow. The role.revoke audit event
+        // emitted later in this same request (after the user_app_roles DELETE)
+        // covers the full revocation action, including clearing is_admin=FALSE.
+        // A separate audit row for the profiles.update would double-count the
+        // same logical operation and add noise to forensic queries.
+        const { error: clearIsAdminErr } = await admin
+          .from("profiles")
+          .update({ is_admin: false })
+          .eq("id", targetUserId);
+        if (clearIsAdminErr) {
+          console.error(
+            "[admin/users/roles] revoke admin: failed to clear profiles.is_admin:",
+            {
+              target_user_id: targetUserId,
+              code: clearIsAdminErr.code,
+              message: clearIsAdminErr.message,
+            },
+          );
+          return NextResponse.json(
+            {
+              error: "Failed to clear ghost-admin flag before revoke",
+              code: "ghost_admin_clear_failed",
+            },
+            { status: 500 },
+          );
+        }
       }
 
-      // NEW-C17-02 (red-team H conf=8): last-admin lockout guard.
+      // NEW-C17-02 (red-team H conf=8) + H-02 fix: last-admin lockout guard.
       // Count surviving admins across BOTH sources (profiles.is_admin=TRUE
-      // UNION user_app_roles.role='admin'), excluding the target.  If
+      // UNION user_app_roles.role='admin'), excluding the target. If
       // deleting this row would drop the surviving count to zero, refuse
       // with 409 would_orphan_last_admin so the org cannot be stripped to
       // zero reachable admins via this endpoint.
       //
-      // We use two separate queries via the admin client (which bypasses
-      // RLS) rather than a UNION RPC so the result is accurate under
-      // concurrent grants/revokes.  A SECURITY DEFINER RPC that makes the
-      // count→delete atomic is the correct long-term fix (tracked in
-      // audit-2026-05-17 backlog); the guard here closes the immediate
-      // foot-gun within acceptable TOCTOU tolerance (admin-facing, low
-      // concurrency).
-      // code-reviewer CRITICAL / silent-failure-hunter CRITICAL (review):
-      // { count: "exact", head: true } issues a HEAD request — the PostgREST
-      // client returns data=null for every HEAD response; the row count is
-      // in the `count` field, NOT data.length. Using data?.length always
-      // evaluates to undefined (nullish → 0), so survivingAdminCount was
-      // always 0, permanently triggering the 409 for every admin revoke.
-      // Fix: destructure `count` from each result, not `data`.
+      // H-02 (red-team HIGH): the prior implementation summed two counts, which
+      // double-counts users who hold BOTH signals (is_admin=TRUE AND a
+      // user_app_roles row). If the SINGLE surviving admin holds both, the
+      // sum is 2 — the guard passes, the revoke fires, and the org has zero
+      // admins. The comment's "conservative" claim was backwards: over-counting
+      // produces a false "safe" signal, not a false "orphan".
+      //
+      // Fix: deduplicate via a UNION of the two distinct user_id sets.
+      // We query the actual user_id values (not just counts) for the
+      // small surviving set, union them in JS, and count distinct.
+      // Admin surfaces are low-volume (typically < 5 admins) so this is
+      // not a performance concern.
       const [
-        { count: profileAdminCount, error: profileAdminErr },
-        { count: roleAdminCount, error: roleAdminErr },
+        { data: profileAdminRows, error: profileAdminRowsErr },
+        { data: roleAdminRows, error: roleAdminRowsErr },
       ] = await Promise.all([
         admin
           .from("profiles")
-          .select("id", { count: "exact", head: true })
+          .select("id")
           .eq("is_admin", true)
           .neq("id", targetUserId),
         admin
           .from("user_app_roles")
-          .select("user_id", { count: "exact", head: true })
+          .select("user_id")
           .eq("role", "admin")
           .neq("user_id", targetUserId),
       ]);
-      if (profileAdminErr || roleAdminErr) {
-        const err = profileAdminErr ?? roleAdminErr;
+      if (profileAdminRowsErr || roleAdminRowsErr) {
+        const err = profileAdminRowsErr ?? roleAdminRowsErr;
         console.error(
-          "[admin/users/roles] last-admin count query failed:",
+          "[admin/users/roles] last-admin dedup query failed:",
           { target_user_id: targetUserId, code: err?.code, message: err?.message },
         );
         return NextResponse.json(
@@ -778,12 +771,12 @@ export const POST = withRole<{ id: string }>("admin")(
           { status: 500 },
         );
       }
-      // Deduplicate: a user with both is_admin=TRUE and a user_app_roles row
-      // is counted twice above. We're conservative here: if either source
-      // reports > 0 survivors, the revoke is safe.  If both report 0 we
-      // refuse.  This may over-count (false "safe") but NEVER under-count
-      // (false "orphan"), which is the correct safety direction.
-      const survivingAdminCount = (profileAdminCount ?? 0) + (roleAdminCount ?? 0);
+      // Union distinct user_ids across both sources.
+      const survivingAdminIds = new Set<string>([
+        ...(profileAdminRows ?? []).map((r: { id: string }) => r.id),
+        ...(roleAdminRows ?? []).map((r: { user_id: string }) => r.user_id),
+      ]);
+      const survivingAdminCount = survivingAdminIds.size;
       if (survivingAdminCount === 0) {
         return NextResponse.json(
           {
@@ -795,6 +788,52 @@ export const POST = withRole<{ id: string }>("admin")(
           { status: 409 },
         );
       }
+    }
+
+    // H-01 / M-01 (red-team HIGH): TOCTOU re-check placed immediately before
+    // the service-role DELETE — the only point where narrowing the window
+    // matters. Placing it at the top of the handler (original position) left
+    // multiple DB round-trips between the check and the mutation, preserving
+    // a TOCTOU window nearly as wide as having no re-check at all.
+    //
+    // H-01 fix: re-fetch the actor's identity via freshClient.auth.getUser()
+    // BEFORE passing user.id to requireAdmin. The original code passed the
+    // stale `user` object captured by withRole; if the JWT was revoked after
+    // withRole ran but before this point, the DB role-row queries in
+    // requireAdmin → isAdminUser still ran against a revoked session's uid.
+    // Re-fetching via freshClient ensures session validity is checked at the
+    // JWT layer, not only at the DB-row layer.
+    //
+    // Fail-CLOSED: any failure in client construction or getUser() blocks the
+    // DELETE — a network blip or missing env var must not let a potentially-
+    // demoted admin reach the service-role mutation unchecked.
+    {
+      let freshClient: Awaited<ReturnType<typeof createClient>>;
+      try {
+        freshClient = await createClient();
+      } catch (err) {
+        console.error("[admin/users/roles] TOCTOU createClient failed:", err);
+        return NextResponse.json(
+          { error: "Authorization re-check unavailable", code: "toctou_check_failed" },
+          { status: 500 },
+        );
+      }
+      // Re-fetch the actor via the fresh client to validate JWT validity,
+      // not just the DB role row. A revoked JWT with a valid role row would
+      // pass requireAdmin's DB queries but fail here.
+      const { data: { user: freshUser }, error: freshUserErr } = await freshClient.auth.getUser();
+      if (freshUserErr || !freshUser) {
+        console.error("[admin/users/roles] TOCTOU getUser failed:", freshUserErr);
+        return NextResponse.json(
+          { error: "Authorization re-check failed — session may have been revoked", code: "toctou_session_invalid" },
+          { status: 401 },
+        );
+      }
+      // requireAdmin checks DB role rows via the fresh client — using freshUser
+      // (not the outer stale `user`) so the uid is consistent with the
+      // re-validated session.
+      const toctouGuard = await requireAdmin(freshClient, freshUser, req);
+      if (toctouGuard) return toctouGuard;
     }
 
     const { error, count } = await admin
