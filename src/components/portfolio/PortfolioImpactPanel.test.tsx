@@ -907,6 +907,55 @@ describe("<PortfolioImpactPanel>", () => {
   });
 
   // -------------------------------------------------------------------------
+  // NEW-C11-08 — duplicate date in equity curve warns (last-write-wins)
+  // -------------------------------------------------------------------------
+
+  it("NEW-C11-08: duplicate date in equity curve logs a warning but still renders", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            equity_curve_current: [
+              { date: "2025-01-01", value: 1.0 },
+              { date: "2025-01-01", value: 1.01 }, // duplicate!
+              { date: "2025-01-02", value: 1.02 },
+            ],
+            equity_curve_proposed: [
+              { date: "2025-01-01", value: 1.0 },
+              { date: "2025-01-02", value: 1.03 },
+            ],
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Dupe dates"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByLabelText("Portfolio equity curve: current vs proposed"),
+      ).toBeInTheDocument(),
+    );
+
+    // The chart renders despite the duplicate (last-write-wins).
+    expect(screen.getByLabelText("Portfolio equity curve: current vs proposed")).toBeTruthy();
+    // A dev warning must have been emitted so the problem is visible in tests.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('duplicate date "2025-01-01" in current series'),
+    );
+  });
+
+  // -------------------------------------------------------------------------
   // NEW-C11-01 — null delta renders as "—" (not computable), not ±0.000
   // -------------------------------------------------------------------------
 

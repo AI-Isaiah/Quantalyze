@@ -479,14 +479,27 @@ function EquityOverlay({
   current: TimeSeriesPoint[];
   proposed: TimeSeriesPoint[];
 }) {
-  // Build a merged x-axis of all unique dates across both series so the
-  // overlay stays aligned even when the proposed curve starts later
-  // (candidate has a shorter history).
   // Merged x-axis of all unique dates across both series keeps the overlay
   // aligned when the proposed curve starts later (candidate has shorter history).
+  // NEW-C11-08: building the Map with new Map(arr.map(...)) silently drops
+  // duplicate dates (last-write-wins). Warn in development when a collision is
+  // detected so an accidental date-normalization change surfaces immediately
+  // rather than producing an invisible gap in the line.
   const merged = useMemo(() => {
-    const mapCurrent = new Map(current.map((p) => [p.date, p.value]));
-    const mapProposed = new Map(proposed.map((p) => [p.date, p.value]));
+    function buildDateMap(points: TimeSeriesPoint[], label: string) {
+      const map = new Map<string, number>();
+      for (const p of points) {
+        if (map.has(p.date) && process.env.NODE_ENV !== "production") {
+          console.warn(
+            `[EquityOverlay] duplicate date "${p.date}" in ${label} series — last-write-wins`,
+          );
+        }
+        map.set(p.date, p.value);
+      }
+      return map;
+    }
+    const mapCurrent = buildDateMap(current, "current");
+    const mapProposed = buildDateMap(proposed, "proposed");
     const dates = Array.from(
       new Set([...mapCurrent.keys(), ...mapProposed.keys()]),
     ).sort();
