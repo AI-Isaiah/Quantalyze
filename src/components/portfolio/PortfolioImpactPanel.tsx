@@ -307,6 +307,12 @@ function SuccessBody({ data }: { data: SimulatorResponseOk }) {
   );
 }
 
+// NEW-C11-04: PartialHistoryBanner previously said "only {overlapDays} overlapping
+// trading days" which implied both sides are measured over those days. In reality,
+// `current_*` metrics use the full portfolio window while `proposed_*` use the
+// overlap window — the wording implied a symmetric short window that doesn't exist.
+// Clarify that the overlap applies to the candidate side only until window alignment
+// is implemented (NEW-C11-03, Python-side fix).
 function PartialHistoryBanner({ overlapDays }: { overlapDays: number }) {
   return (
     <div
@@ -314,8 +320,10 @@ function PartialHistoryBanner({ overlapDays }: { overlapDays: number }) {
       role="note"
     >
       <strong className="font-medium">Partial history:</strong>{" "}
-      only {overlapDays} overlapping trading days. Deltas become more
-      reliable as the candidate accumulates more history.
+      the candidate has only {overlapDays} overlapping trading days with your
+      portfolio. Current metrics use your full history; proposed metrics use
+      the shorter overlap window. Deltas mix two different periods — treat them
+      as directional signals, not precise measurements.
     </div>
   );
 }
