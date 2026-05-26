@@ -210,6 +210,88 @@ def _check_fee_currency_mismatch(
         _record_dq_flag("fee_currency_mismatch_samples", [sample])
 
 
+# NEW-C13-01: OKX raw fills report `fillSz` in CONTRACTS, not base units.
+# Storing raw fillSz as `quantity` causes 100×–10000× position/PnL inflation
+# in FIFO matching and volume/notional aggregations.
+#
+# Lookup keyed by the "BASE-QUOTE" prefix of the instId
+# (e.g. "BTC-USDT", "ETH-USDT") so it works for both SWAP
+# ("BTC-USDT-SWAP") and FUTURES ("BTC-USDT-231229").
+# Values are contractSize in base units (matches OKX instruments API `ctVal`).
+# When a symbol is absent, fall back to markets[sym]['contractSize'] if loaded,
+# then to contractSize=1 (i.e. treat fillSz as base units) and emit a DQ flag.
+#
+# Table mirrors equity_reconstruction.OKX_PERP_CONTRACT_SIZE (avoid import
+# to prevent circular dependency: exchange → job_worker → equity_reconstruction
+# → job_worker).
+_OKX_INGEST_CONTRACT_SIZE: dict[str, float] = {
+    "BTC-USDT": 0.01,
+    "ETH-USDT": 0.1,
+    "SOL-USDT": 1.0,
+    "BNB-USDT": 0.01,
+    "XRP-USDT": 100.0,
+    "ADA-USDT": 100.0,
+    "DOGE-USDT": 1000.0,
+    "LINK-USDT": 1.0,
+    "DOT-USDT": 1.0,
+    "MATIC-USDT": 10.0,
+    "AVAX-USDT": 1.0,
+    "LTC-USDT": 1.0,
+    "ATOM-USDT": 1.0,
+    "SUI-USDT": 1.0,
+}
+
+
+def _okx_contract_size_for_inst_id(
+    raw_inst_id: str,
+    exchange: Any | None = None,
+) -> float:
+    """Return OKX contractSize for an instId like ``BTC-USDT-SWAP``.
+
+    Priority:
+    1. ``_OKX_INGEST_CONTRACT_SIZE`` keyed by ``BASE-QUOTE`` prefix.
+    2. ``exchange.markets[ccxt_sym]['contractSize']`` if markets are loaded.
+    3. Falls back to 1.0 and stamps ``okx_unknown_ctval`` DQ flag so
+       operators know the normalization was skipped (phantom position risk).
+
+    Applicable only for linear contracts (SWAP/FUTURES with USD-settled quote).
+    Inverse contracts should be guarded by the caller before calling this.
+    """
+    parts = raw_inst_id.split("-")
+    if len(parts) >= 2:
+        prefix = f"{parts[0]}-{parts[1]}"
+        ct = _OKX_INGEST_CONTRACT_SIZE.get(prefix)
+        if ct is not None:
+            return ct
+
+    # Fallback: check markets if loaded
+    if exchange is not None and hasattr(exchange, "markets") and exchange.markets:
+        # Reconstruct ccxt symbol: "BTC-USDT-SWAP" -> "BTC/USDT:USDT"
+        if len(parts) >= 2:
+            quote = parts[1].upper()
+            ccxt_sym = f"{parts[0].upper()}/{quote}:{quote}"
+            mkt = exchange.markets.get(ccxt_sym) or {}
+            ct_mkt = mkt.get("contractSize")
+            if ct_mkt and float(ct_mkt) > 0:
+                return float(ct_mkt)
+
+    _record_dq_flag("okx_unknown_ctval", True)
+    logger.warning(
+        "_okx_contract_size_for_inst_id: unknown instId %r — "
+        "defaulting contractSize=1 (fillSz treated as base units). "
+        "Add this symbol to _OKX_INGEST_CONTRACT_SIZE (NEW-C13-01).",
+        raw_inst_id,
+    )
+    return 1.0
+
+
+# NEW-C13-02: instTypes to fan out for OKX raw-fill fetches.
+# Pre-fix only SWAP was fetched; SPOT/FUTURES/MARGIN activity was silently dropped.
+# The list mirrors OKX_INSTRUMENT_TYPES in equity_reconstruction.py but excludes
+# OPTION (options fills have a different schema and are not part of trade analytics).
+_OKX_FILL_INST_TYPES: tuple[str, ...] = ("SWAP", "FUTURES", "SPOT", "MARGIN")
+
+
 def _finite_float(value: Any, *, label: str) -> float | None:
     """Audit-2026-05-07 H-0661 (partial) — exchange-ingestion variant of
     ``_safe_float``: reject bool (which Python's ``float()`` would
@@ -352,6 +434,7 @@ _RAW_DATA_KEEP_KEYS: frozenset[str] = frozenset({
     "execType",           # OKX taker/maker discriminator (already mapped to is_maker but kept for audit)
     "feeCcy",             # OKX fee-currency raw (mirrors fee_currency col)
     "feeCurrency",        # Bybit fee-currency raw
+    "_ingest_ctval",      # NEW-C13-01: OKX contract size used to normalize fillSz → base units; kept for position audit
 })
 
 
@@ -1529,27 +1612,27 @@ async def _fetch_raw_trades_binance(
     return fills
 
 
-async def _fetch_raw_trades_okx(
+async def _fetch_raw_trades_okx_inst_type(
     exchange: ccxt.Exchange,
     since_ms: int | None,
-) -> list[dict[str, Any]]:
-    """OKX: private_get_trade_fills_history with cursor-based pagination."""
+    inst_type: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Fetch OKX fills for a single instType.
+
+    Returns (fills, hit_page_cap). Called by _fetch_raw_trades_okx for each
+    instrument type in _OKX_FILL_INST_TYPES (NEW-C13-02).
+    """
     fills: list[dict[str, Any]] = []
     cursor = ""
     prev_cursor = ""
     natural_break = False
+    _is_linear_type = inst_type in ("SWAP", "FUTURES")
 
     PAGE_CAP = 100
     for page in range(PAGE_CAP):
-        params: dict[str, str] = {"instType": "SWAP", "limit": "100"}
-        # OKX fills-history returns DESC-sorted data; ``after=<billId>``
-        # fetches records OLDER than the cursor (``before`` fetches NEWER).
-        # Using ``before`` here would oscillate until the page cap (H-0665).
+        params: dict[str, str] = {"instType": inst_type, "limit": "100"}
         if cursor:
             params["after"] = cursor
-        # ``begin`` must be sent on every page — without it OKX falls back
-        # to its default window (often 7 days) on pages 2+ and silently
-        # truncates a 90-day backfill (H-0666).
         if since_ms:
             params["begin"] = str(since_ms)
 
@@ -1567,30 +1650,15 @@ async def _fetch_raw_trades_okx(
                         int(ts_raw) / 1000, tz=timezone.utc
                     )
                 else:
-                    # Drop fills with unparseable ``ts`` rather than
-                    # substituting wall-clock time — phantom timestamps
-                    # corrupt FIFO position reconstruction silently
-                    # (C-0226 / H-0667). Log the parse target + fill_id
-                    # only (never the raw fill body) so attacker- or
-                    # PII-bearing fields can't reach log aggregation.
                     logger.error(
                         "OKX fill dropped: unparseable ts=%r (instId=%s, tradeId=%s)",
-                        ts_raw,
-                        fill.get("instId"),
-                        fill.get("tradeId"),
+                        ts_raw, fill.get("instId"), fill.get("tradeId"),
                     )
                     continue
 
                 raw_inst_id = fill.get("instId", "")
                 symbol = raw_inst_id.replace("-", "")
                 side = fill.get("side", "").lower()
-                # Audit-2026-05-07 H-0661 — finite-value validation. Pre-fix
-                # NaN/inf strings could land in the typed numeric columns and
-                # corrupt every downstream metric. Drop the fill on a
-                # non-finite price / amount; treat non-finite fee as 0.
-                # NEW-C13-11: also reject zero/negative price and amount —
-                # both are physically impossible for a fill and indicate
-                # corrupt data; _finite_positive_float rejects ≤0 values.
                 price_chk = _finite_positive_float(fill.get("fillPx", 0), label="OKX fillPx")
                 amount_chk = _finite_positive_float(fill.get("fillSz", 0), label="OKX fillSz")
                 if price_chk is None or amount_chk is None:
@@ -1602,44 +1670,42 @@ async def _fetch_raw_trades_okx(
                     )
                     continue
                 price = price_chk
-                amount = amount_chk
-                # Preserve signed fee so maker rebates (negative) reduce
-                # ``total_fees`` instead of inflating it via abs() (H-0671).
+                fill_sz_contracts = amount_chk
+                # NEW-C13-01: for linear SWAP/FUTURES, fillSz is in contracts,
+                # not base units. Normalize to base units at ingest.
+                # SPOT/MARGIN fill fillSz is already in base units.
+                # Inverse perps (BTC-USD-SWAP settle currency = USD, not USDT)
+                # are excluded — their cost semantics differ from linear.
+                if _is_linear_type:
+                    _inst_parts = raw_inst_id.split("-")
+                    _settle = _inst_parts[1].upper() if len(_inst_parts) >= 2 else ""
+                    if _settle in ("USDT", "USDC", "BUSD", "USDE", "PYUSD", "USDB"):
+                        _ct = _okx_contract_size_for_inst_id(raw_inst_id, exchange)
+                        amount = fill_sz_contracts * _ct
+                        if _ct != 1.0:
+                            fill.setdefault("_ingest_ctval", _ct)
+                    else:
+                        amount = fill_sz_contracts  # inverse — skip normalization
+                else:
+                    amount = fill_sz_contracts  # SPOT/MARGIN: already base units
+
                 fee_chk = _finite_float(fill.get("fee", 0), label="OKX fee")
                 fee = fee_chk if fee_chk is not None else 0.0
                 fee_currency = fill.get("feeCcy", "USDT")
-                # Audit-2026-05-07 H-0670 — surface mismatch when fees are
-                # paid in a currency other than the pair's quote.
-                # NEW-C13-08: pass the raw instId (e.g. "BTC-USDT-SWAP") so
-                # _infer_quote_currency can extract "USDT" from the second
-                # dash-segment. The replace("-","") form produces "BTCUSDTSWAP"
-                # which ends in "SWAP" and causes _infer_quote_currency to
-                # return None for EVERY OKX symbol, making H-0670 dead code.
                 _check_fee_currency_mismatch(
                     exchange="okx", symbol=raw_inst_id, fee_currency=fee_currency,
                 )
                 is_maker = fill.get("execType", "") == "M"
 
                 raw_data = dict(fill)
-                # Audit-2026-05-07 G12.B.4 — populate position_direction
-                # via whitelist instead of raw passthrough. OKX's posSide
-                # is documented as long/short/net, but anything else
-                # would silently land in the typed column. Reject and
-                # log so contract violations are visible.
                 pos_side_raw = fill.get("posSide")
                 position_direction: Literal["long", "short"] | None = None
                 if pos_side_raw in _OKX_VALID_POS_SIDES:
-                    # Preserve raw_data alignment with prior behavior.
                     raw_data["posSide"] = pos_side_raw
-                    # 'net' is one-way mode — direction is implied by side,
-                    # not a long/short hedge flag; leave position_direction
-                    # as None. "long"/"short" assign through directly.
                     if pos_side_raw != "net":
-                        position_direction = pos_side_raw  # "long" | "short"
+                        position_direction = pos_side_raw
                 elif pos_side_raw not in (None, ""):
-                    logger.warning(
-                        "invalid posSide value=%s, using None", pos_side_raw
-                    )
+                    logger.warning("invalid posSide value=%s, using None", pos_side_raw)
 
                 fills.append(_make_fill_dict(
                     exchange="okx",
@@ -1659,36 +1725,23 @@ async def _fetch_raw_trades_okx(
 
             new_cursor = data[-1].get("tradeId", "")
 
-            # Adversarial-review hardening (PR #137 follow-up): a short
-            # final page that legitimately shares its trailing tradeId
-            # with the previous page's cursor would otherwise trip the
-            # stuck-cursor warning even though we're about to break
-            # naturally on `len(data) < 100`. Take the natural-break
-            # exit FIRST so short pages don't produce false-positive
-            # "stuck" warnings.
             if len(data) < 100:
                 prev_cursor = new_cursor
                 cursor = new_cursor
                 natural_break = True
                 break
 
-            # Audit-2026-05-07 G12.B.6 — stuck-cursor guard (full pages
-            # only). If the exchange returns the same trailing tradeId
-            # twice on a FULL page, we'd otherwise loop until the page
-            # cap and yield 100 pages of duplicates. Empty tradeId is
-            # also a hard stop (the next request would re-issue with
-            # no `before`, restarting from the most recent).
             if not new_cursor:
                 logger.warning(
-                    "Pagination stuck on cursor=%s for exchange=okx; terminating early",
-                    new_cursor,
+                    "Pagination stuck on cursor=%s for exchange=okx instType=%s; "
+                    "terminating early", new_cursor, inst_type,
                 )
                 natural_break = True
                 break
             if prev_cursor and new_cursor == prev_cursor:
                 logger.warning(
-                    "Pagination stuck on cursor=%s for exchange=okx; terminating early",
-                    new_cursor,
+                    "Pagination stuck on cursor=%s for exchange=okx instType=%s; "
+                    "terminating early", new_cursor, inst_type,
                 )
                 natural_break = True
                 break
@@ -1696,31 +1749,44 @@ async def _fetch_raw_trades_okx(
             prev_cursor = new_cursor
             cursor = new_cursor
         except Exception as e:
-            # Re-raise per-page failures so the sync_trades job is marked
-            # failed_retry and resumes via cursor on the next attempt
-            # instead of silently truncating mid-pagination (C-0227).
             logger.error(
-                "OKX fills fetch failed page %d (re-raising to fail the sync): %s",
-                page, str(e),
+                "OKX fills fetch failed page %d instType=%s (re-raising): %s",
+                page, inst_type, str(e),
             )
             raise
 
-    if not natural_break:
-        # Audit-2026-05-07 M-0663 — record a transient DQ flag so the
-        # caller (job_worker) can stamp ``sync_truncated_okx`` into
-        # ``strategy_analytics.data_quality_flags``. Pre-fix the warning
-        # was log-only; the admin compute-jobs UI / health card had no
-        # way to surface truncation. A 90-day backfill on a busy
-        # strategy can exceed 100 pages × 100 fills = 10K and lose the
-        # tail silently.
-        logger.warning(
-            "Pagination hit %d-page cap for okx; possible truncation",
-            PAGE_CAP,
-        )
-        _record_dq_flag("sync_truncated_okx", True)
-        _record_dq_flag("sync_truncated_okx_pages", int(PAGE_CAP))
+    return fills, not natural_break
 
-    return fills
+
+async def _fetch_raw_trades_okx(
+    exchange: ccxt.Exchange,
+    since_ms: int | None,
+) -> list[dict[str, Any]]:
+    """OKX: private_get_trade_fills_history across all instrument types.
+
+    NEW-C13-02: pre-fix fetched only instType=SWAP, silently dropping all
+    SPOT/FUTURES/MARGIN fills. Now fans out across _OKX_FILL_INST_TYPES.
+    NEW-C13-01: SWAP/FUTURES fillSz is normalized from contracts to base units.
+    """
+    all_fills: list[dict[str, Any]] = []
+    any_cap_hit = False
+    total_cap_pages = 0
+    for inst_type in _OKX_FILL_INST_TYPES:
+        type_fills, cap_hit = await _fetch_raw_trades_okx_inst_type(
+            exchange, since_ms, inst_type
+        )
+        all_fills.extend(type_fills)
+        if cap_hit:
+            any_cap_hit = True
+            total_cap_pages += 100  # PAGE_CAP per type
+            logger.warning(
+                "OKX fills: pagination hit page cap for instType=%s; "
+                "possible truncation (sync_truncated_okx)", inst_type,
+            )
+    if any_cap_hit:
+        _record_dq_flag("sync_truncated_okx", True)
+        _record_dq_flag("sync_truncated_okx_pages", total_cap_pages)
+    return all_fills
 
 
 async def _fetch_raw_trades_bybit(
