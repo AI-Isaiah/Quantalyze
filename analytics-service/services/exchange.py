@@ -788,7 +788,19 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 if bill_type == _OKX_FUNDING_BILL_TYPE:
                     _okx_funding_bills_dropped += 1
                     continue
-                pnl_val = float(bill.get("pnl", 0)) + float(bill.get("fee", 0))
+                # NEW-C13-09: use _finite_float to reject NaN/Inf strings that
+                # bare float() would silently accept, poisoning daily_totals
+                # and every downstream metric (equity curve, Sharpe, CAGR).
+                _pnl_raw = _finite_float(bill.get("pnl", 0), label="OKX bill pnl")
+                _fee_raw = _finite_float(bill.get("fee", 0), label="OKX bill fee")
+                if _pnl_raw is None or _fee_raw is None:
+                    logger.warning(
+                        "OKX bill dropped: non-finite pnl=%r or fee=%r "
+                        "(billId=%s)",
+                        bill.get("pnl"), bill.get("fee"), bill.get("billId"),
+                    )
+                    continue
+                pnl_val = _pnl_raw + _fee_raw
                 ts_raw = bill.get("ts", "")
                 if ts_raw and ts_raw.isdigit():
                     dt = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc)
@@ -839,11 +851,24 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     # services.funding_fetch → funding_fees table.
                     # See migration 044 for the forward-only rationale.
                     if item.get("incomeType") in ("REALIZED_PNL", "COMMISSION"):
+                        # NEW-C13-09: guard against NaN/Inf strings
+                        _income_raw = _finite_float(
+                            item.get("income", 0), label="Binance income"
+                        )
+                        if _income_raw is None:
+                            logger.warning(
+                                "Binance income item dropped: non-finite "
+                                "income=%r (incomeType=%s, symbol=%s)",
+                                item.get("income"),
+                                item.get("incomeType"),
+                                item.get("symbol"),
+                            )
+                            continue
                         daily_pnl.append({
                             "exchange": "binance",
                             "symbol": item.get("symbol", "PORTFOLIO"),
-                            "side": "buy" if float(item.get("income", 0)) >= 0 else "sell",
-                            "price": abs(float(item.get("income", 0))),
+                            "side": "buy" if _income_raw >= 0 else "sell",
+                            "price": abs(_income_raw),
                             "quantity": 1,
                             "fee": 0,
                             "fee_currency": "USDT",
