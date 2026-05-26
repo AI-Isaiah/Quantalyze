@@ -119,7 +119,13 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
         .eq("status", "published");
 
   const { data: strategies, error } = await query;
-  if (error || !strategies) return null;
+  // NEW-C03-05: split error vs genuinely-empty so a transient DB/RLS outage
+  // is logged rather than silently appearing as "market too small to rank".
+  if (error) {
+    console.error("[queries.getPercentiles] supabase error:", error.message ?? error);
+    return null;
+  }
+  if (!strategies) return null;
   if (strategies.length < 5) return null;
 
   // Extract analytics for each strategy
@@ -234,7 +240,14 @@ export async function getPopulatedCategorySlugs(): Promise<string[]> {
     .select("discovery_categories!inner(slug)")
     .eq("status", "published");
 
-  if (error || !data) return [];
+  // NEW-C03-06: split error vs empty so a transient DB failure is logged
+  // rather than silently appearing as "no published strategies anywhere",
+  // which renders the discovery navigation empty with no ops signal.
+  if (error) {
+    console.error("[queries.getPopulatedCategorySlugs] supabase error:", error.message ?? error);
+    return [];
+  }
+  if (!data) return [];
 
   const slugs = new Set<string>();
   for (const row of data) {
@@ -1005,7 +1018,15 @@ export async function getUserPortfolios(): Promise<PortfolioWithCount[]> {
     .eq("user_id", user.id)
     .order("created_at", { ascending: false });
 
-  if (error || !portfolios) return [];
+  // NEW-C03-07: mirror getRealPortfolio (L1161) — log + throw so the error
+  // boundary fires instead of rendering "create your first portfolio" for a
+  // user who has portfolios. A transient outage/RLS/schema-drift on the
+  // portfolios table was previously indistinguishable from "no portfolios."
+  if (error) {
+    console.error("[queries.getUserPortfolios] supabase error:", error.message ?? error);
+    throw new Error(`getUserPortfolios failed: ${error.message ?? "unknown supabase error"}`);
+  }
+  if (!portfolios) return [];
 
   return portfolios.map((p) => ({
     id: p.id,
@@ -1026,7 +1047,13 @@ export async function getDecks(): Promise<DeckWithCount[]> {
     .select("*, deck_strategies(strategy_id)")
     .order("created_at", { ascending: false });
 
-  if (error || !decks) return [];
+  // NEW-C03-08: split error vs empty so a transient DB failure is logged
+  // rather than silently appearing as "no decks exist."
+  if (error) {
+    console.error("[queries.getDecks] supabase error:", error.message ?? error);
+    return [];
+  }
+  if (!decks) return [];
 
   return decks.map((d) => ({
     id: d.id,
