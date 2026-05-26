@@ -591,9 +591,6 @@ def _compute_portfolio_fit_components(
     if w_arr.sum() > 0:
         w_arr = w_arr / w_arr.sum()
     current_port = (port_df * w_arr).sum(axis=1)
-    current_sharpe = _compute_sharpe(current_port)
-    current_avg_corr = _avg_corr(port_df)
-    current_max_dd = _max_drawdown(current_port)
 
     # New portfolio = old × (1 - add_weight) + candidate × add_weight
     aligned = pd.concat([port_df, candidate_returns.rename("__cand__")], axis=1).dropna()
@@ -606,6 +603,20 @@ def _compute_portfolio_fit_components(
         )
         components["data_completeness"] = _safe_float(data_completeness_short)
         return components
+
+    # NEW-C08-01: reindex current_port baseline to the intersection window
+    # (aligned.index) before computing the delta metrics. `aligned` is the
+    # result of concat([port_df, candidate]).dropna(), so its index is the
+    # INTERSECTION of portfolio history and candidate history. Without this
+    # reindex, `current_port` covers the full portfolio window while `new_port`
+    # only covers the shorter intersection — a candidate with a short, low-vol
+    # history manufactures an artificial Sharpe lift / DD improvement purely
+    # from the truncated window, biasing ranking 40% of the final score.
+    current_port_aligned = current_port.reindex(aligned.index)
+    port_df_aligned = port_df.reindex(aligned.index)
+    current_sharpe = _compute_sharpe(current_port_aligned)
+    current_avg_corr = _avg_corr(port_df_aligned)
+    current_max_dd = _max_drawdown(current_port_aligned)
 
     new_weights = {sid: w * (1 - add_weight) for sid, w in portfolio_weights.items()}
     new_weights["__cand__"] = add_weight

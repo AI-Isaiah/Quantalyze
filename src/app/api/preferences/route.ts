@@ -10,10 +10,12 @@ import {
 } from "@/lib/preferences";
 import {
   mandateAutoSaveLimiter,
+  preferencesReadLimiter,
   checkLimit,
   isRateLimitMisconfigured,
 } from "@/lib/ratelimit";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
  * RPC parameter bag for `update_allocator_mandates`. Each non-null
@@ -31,7 +33,7 @@ import { logAuditEvent } from "@/lib/audit";
 type MandateRpcArgs =
   Database["public"]["Functions"]["update_allocator_mandates"]["Args"];
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(_req: NextRequest): Promise<NextResponse> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) {
@@ -44,11 +46,35 @@ export async function GET(): Promise<NextResponse> {
   const denied = await assertProfileApproved(supabase, user.id);
   if (denied) return denied;
 
+  // NEW-C07-05 (audit-2026-05-26 code-review): rate-limit GET to prevent
+  // an authenticated allocator from scripting unbounded SELECT * calls
+  // that inflate Supabase egress. checkLimit is already imported for PUT;
+  // the read-appropriate bucket is higher than the write limiter (60/min
+  // vs 30/min) since reads are idempotent and cheaper, and any legitimate
+  // session will load this at most once per page mount.
+  const rlRead = await checkLimit(preferencesReadLimiter, `preferences:read:${user.id}`);
+  if (!rlRead.success) {
+    if (isRateLimitMisconfigured(rlRead)) {
+      return NextResponse.json(
+        { error: "Service temporarily unavailable" },
+        { status: 503, headers: { "Retry-After": String(rlRead.retryAfter) } },
+      );
+    }
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rlRead.retryAfter) } },
+    );
+  }
+
   try {
     const prefs = await getOwnPreferences(supabase, user.id);
     return NextResponse.json({ preferences: prefs });
   } catch (err) {
-    console.error("[api/preferences] GET error:", err);
+    // F-04 (specialist-review 2026-05-26): log error code explicitly so ops can
+    // distinguish PGRST205 (schema drift), 42501 (RLS denial), 28000 (JWT
+    // propagation failure), and network errors without parsing raw error objects.
+    const code = (err as { code?: string | null })?.code ?? null;
+    console.error("[api/preferences] GET error:", { code, message: (err as Error)?.message ?? String(err) });
     return NextResponse.json({ error: "Failed to load preferences" }, { status: 500 });
   }
 }
@@ -66,26 +92,6 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   const deniedPut = await assertProfileApproved(supabase, user.id);
   if (deniedPut) return deniedPut;
 
-  const rl = await checkLimit(mandateAutoSaveLimiter, `preferences:${user.id}`);
-  if (!rl.success) {
-    // M-1108: a null limiter in production (missing UPSTASH env) fails CLOSED
-    // with reason:'ratelimit_misconfigured'. Translate that to 503 so the
-    // outage surfaces to canary/health checks rather than masquerading as
-    // ordinary user-side throttling — useMandateAutoSave honors Retry-After
-    // and re-fires on 429, so a misconfig presented as 429 would loop
-    // silently on every mandate edit. Mirrors src/app/api/simulator/route.ts.
-    if (isRateLimitMisconfigured(rl)) {
-      return NextResponse.json(
-        { error: "Service temporarily unavailable" },
-        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
-      );
-    }
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
   let body: Record<string, unknown>;
   try {
     body = await req.json();
@@ -98,6 +104,30 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   const validationError = validateSelfEditableInput(fields);
   if (validationError) {
     return NextResponse.json({ error: validationError }, { status: 400 });
+  }
+
+  // NEW-C07-04 (audit-2026-05-26 code-review): rate-limit token consumed
+  // AFTER body parse + validate. Pre-fix: checkLimit ran before JSON parse,
+  // so a client retrying on a 400 (one out-of-range field) burned the full
+  // 30/min auto-save budget without reaching the RPC, then 429d their next
+  // *valid* edit. The limiter is meant to cap writes, not rejections.
+  // Placed here — after validate and after the pickSelfEditableFields
+  // whitelist — so only requests that would reach the RPC consume a token.
+  // M-1108: a null limiter in production fails CLOSED with
+  // reason:'ratelimit_misconfigured' → 503 so the outage surfaces to
+  // canary/health checks rather than masquerading as ordinary throttling.
+  const rl = await checkLimit(mandateAutoSaveLimiter, `preferences:${user.id}`);
+  if (!rl.success) {
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Service temporarily unavailable" },
+        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+      );
+    }
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
   }
 
   // Null-to-clear transform (Pitfall 1 in RESEARCH.md): the COALESCE UPSERT
@@ -138,7 +168,34 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   if (error) {
     console.error("[api/preferences] update_allocator_mandates RPC error:", error);
     if (error.code === "28000") {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      // NEW-C07-02 (audit-2026-05-26 silent-failure): we already verified the
+      // user is authenticated via auth.getUser() above. If the RPC then raises
+      // 28000 (invalid_authorization_specification), auth.uid() resolved NULL
+      // inside Postgres — i.e. the JWT did NOT propagate to PostgREST. That is
+      // an infra fault (cookie/session binding bug, mid-request expiry on the
+      // PostgREST side, service-client misuse), NOT an unauthenticated request.
+      // Returning the same 401 a logged-out user gets collapses the two cases
+      // and makes the infra fault invisible to ops (only a console.error, no
+      // Sentry event). We treat this as an internal 500 so on-call sees it.
+      //
+      // F-03 (specialist-review 2026-05-26): the prior `void import(...)` pattern
+      // detaches the Sentry promise — same reap risk as audit.ts NEW-C10-03.
+      // Await the import chain before returning so the capture is not dropped
+      // on a cold-finish before the Sentry SDK flushes.
+      await import("@sentry/nextjs").then((Sentry) => {
+        try {
+          Sentry.captureException(new Error("28000 after getUser — JWT did not propagate to PostgREST"), {
+            tags: { rpc_auth_uid_null: "true", route: "preferences.PUT" },
+            extra: { rpc: "update_allocator_mandates", errorCode: error.code },
+          });
+        } catch {
+          // Sentry SDK threw — swallow.
+        }
+      }).catch(() => {});
+      return NextResponse.json(
+        { error: "Internal server error" },
+        { status: 500 },
+      );
     }
     if (error.code === "22023") {
       // H-0299: SQLSTATE 22023 is raised by update_allocator_mandates'
@@ -160,7 +217,15 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   }
 
   // Audit emission — fire-and-forget; grepped by audit-coverage.test.ts.
-  logAuditEvent(supabase, {
+  // C-2 (red-team 2026-05-26): switched from logAuditEvent (user-scoped,
+  // JWT-resolved in the deferred after() window) to logAuditEventAsUser
+  // (service-role, JWT-immune). `mandate_preference.update` is the primary
+  // write path for the preferences route and the exact failure mode NEW-C10-01
+  // was designed to close: an allocator with a short JWT TTL can get a 200
+  // response but no audit row when the JWT expires between response-flush and
+  // after() settle. The PR switched all other security-critical mutations but
+  // missed this call site.
+  logAuditEventAsUser(createAdminClient(), user.id, {
     action: "mandate_preference.update",
     entity_type: "allocator_preference_mandate",
     entity_id: user.id,

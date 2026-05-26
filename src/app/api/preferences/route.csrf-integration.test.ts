@@ -60,8 +60,18 @@ vi.mock("@/lib/ratelimit", () => ({
   checkLimit: async () => ({ success: true, retryAfter: 0 }),
 }));
 
+// C-2 (red-team 2026-05-26): audit now uses logAuditEventAsUser (service-role).
+// Stub both symbols so the route handler can call either without throwing.
 vi.mock("@/lib/audit", () => ({
   logAuditEvent: vi.fn(),
+  logAuditEventAsUser: vi.fn(),
+}));
+
+// C-2: createAdminClient is called inside logAuditEventAsUser(createAdminClient(), ...).
+// Mock the admin module so the real factory (which requires SUPABASE_SERVICE_ROLE_KEY)
+// is never invoked in this test environment.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({}),
 }));
 
 // NOTE: @/lib/csrf is intentionally NOT mocked — the real

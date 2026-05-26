@@ -591,6 +591,13 @@ describe("POST /api/admin/match/kill-switch — admin.kill_switch emission", () 
             eq: async () => ({ data: null, error: null }),
           }),
         }),
+        // NEW-C10-01: kill-switch route switched to logAuditEventAsUser which
+        // calls adminClient.rpc("log_audit_event_service"). Wire this into
+        // STATE.rpcCalls so waitForAudit("admin.kill_switch") can find it.
+        rpc: async (name: string, args: Record<string, unknown>) => {
+          STATE.rpcCalls.push({ name, args });
+          return { data: null, error: null };
+        },
       }),
     }));
 
@@ -763,6 +770,13 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
           }
           throw new Error(`unexpected from(${table})`);
         },
+        // NEW-C10-01: strategy-review route switched to logAuditEventAsUser
+        // which calls adminClient.rpc("log_audit_event_service"). Wire into
+        // STATE.rpcCalls so waitForAudit("strategy.approve") can find it.
+        rpc: async (name: string, args: Record<string, unknown>) => {
+          STATE.rpcCalls.push({ name, args });
+          return { data: null, error: null };
+        },
       }),
     }));
     vi.doMock("@/lib/strategyGate", () => ({
@@ -828,6 +842,14 @@ describe("POST /api/admin/partner-import — admin.partner_import emission", () 
 
     vi.doMock("@/lib/supabase/admin", () => ({
       createAdminClient: () => ({
+        // NEW-C28-05 fix: emitAsUser is now awaited synchronously before the
+        // response returns (was fire-and-forget via after()). The admin client
+        // mock must therefore expose rpc() so the log_audit_event_service call
+        // inside emitAsUser doesn't throw "adminClient.rpc is not a function".
+        rpc: async (name: string, args: Record<string, unknown>) => {
+          STATE.rpcCalls.push({ name, args });
+          return { data: null, error: null };
+        },
         from: (table: string) => {
           if (table === "profiles") {
             return {

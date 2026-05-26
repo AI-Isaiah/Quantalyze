@@ -40,6 +40,7 @@ from services.job_worker import (
     _stamp_429,
     classify_exception,
 )
+from services.redact import scrub_freeform_string
 
 if TYPE_CHECKING:
     from services.ingestion.adapter import MetricsSnapshot, Position
@@ -52,10 +53,16 @@ logger = logging.getLogger("quantalyze.analytics.equity_reconstruction")
 # ---------------------------------------------------------------------------
 
 STABLECOINS: set[str] = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USD"}
+# NEW-C01-12: also recognise USDe / PYUSD / USDB as stablecoin suffixes so that
+# split_holdings_symbol_to_base_quote can correctly parse them for the canonical
+# BASE:QUOTE:PERP key on non-USDT-settled perps (e.g. ETHUSD/USDe markets).
+# These are NOT added to STABLECOINS itself (which drives price-skip logic);
+# they are only used by the splitter.
+_EXTRA_STABLECOIN_SUFFIXES: frozenset[str] = frozenset({"USDE", "PYUSD", "USDB"})
 # Pre-sorted longest-first so the holdings.symbol splitter picks
 # USDC/BUSD/etc before USD, avoiding false-positive substring matches.
 _STABLECOINS_LONGEST_FIRST: tuple[str, ...] = tuple(
-    sorted(STABLECOINS, key=len, reverse=True)
+    sorted(STABLECOINS | _EXTRA_STABLECOIN_SUFFIXES, key=len, reverse=True)
 )
 RAW_PAYLOAD_CAP_BYTES: int = 4096
 OKX_TRADE_TERMINUS_DAYS: int = 90          # documented OKX cap (RESEARCH.md §1B, A3)
@@ -140,6 +147,14 @@ PERP_AMT_CTVAL_DIVERGENCE_THRESHOLD: float = 0.05
 # cost/price but emit an audit signal so table-drift surfaces before
 # the curve goes visibly wrong.
 PERP_AMT_CTVAL_DRIFT_WARN_THRESHOLD: float = 0.01
+
+# Plausibility bounds for amt_from_cost = cost/price on unknown perps.
+# Upper bound covers high-ctVal memecoins (OKX SHIB ctVal=1,000,000, PEPE
+# ctVal≈50M): SHIB at $0.00001, cost=$10 → amt_from_cost=1,000,000, which
+# is within 1e9. Lower bound rejects sub-nanogram quantities that indicate
+# corrupt cost fields. See _resolve_perp_amt_base / NEW-C01-13 / red-team H-1.
+_PERP_AMT_FROM_COST_MIN: float = 1e-9
+_PERP_AMT_FROM_COST_MAX: float = 1e9
 
 OKX_PERP_CONTRACT_SIZE: dict[str, float] = {
     "BTC/USDT:USDT": 0.01,
@@ -372,8 +387,21 @@ def _resolve_perp_amt_base(
         ctval = OKX_PERP_CONTRACT_SIZE.get(raw_symbol)
 
     if ctval is None:
-        # No defensive cover — caller should audit this as an unknown
-        # perp. See C-0329.
+        # No ctVal cover — apply a plausibility bound on amt_from_cost = cost/price
+        # to reject obviously corrupt values (phantom position risk). Bounds are
+        # [_PERP_AMT_FROM_COST_MIN, _PERP_AMT_FROM_COST_MAX]; see module-level
+        # constants for rationale (NEW-C01-13 / red-team H-1).
+        if not (_PERP_AMT_FROM_COST_MIN <= amt_from_cost <= _PERP_AMT_FROM_COST_MAX):
+            # DQ flag propagated via caller's unknown_perp_symbols accumulator;
+            # this function has no ContextVar channel.
+            logger.warning(
+                "_resolve_perp_amt_base: %s amt_from_cost=%.8g outside "
+                "plausible range [%.0e, %.0e] — skipping fill to avoid "
+                "phantom position (unknown_perp_implausible_size)",
+                raw_symbol, amt_from_cost,
+                _PERP_AMT_FROM_COST_MIN, _PERP_AMT_FROM_COST_MAX,
+            )
+            return 0.0, _PerpAmtSource.FALLBACK_AMOUNT, None
         return amt_from_cost, _PerpAmtSource.COST_DIV_PRICE, None
     amt_explicit = amount * ctval
     if amt_explicit <= 0:
@@ -864,8 +892,21 @@ def _compute_daily_equity(
     # Preserve chronological ordering within a single date. Opens must land
     # before closes so position state is correct when a round trip spans a
     # handful of minutes inside the same day.
+    # NEW-C01-18: add an enumerate-based secondary key so same-ms events
+    # keep their insertion order (open before close for same-day round trips).
+    # ts==0/None events are placed last within their day (sentinel 0 sorts
+    # before valid fills; moving them to int.max avoids inverting same-day
+    # open-close ordering for fills with real timestamps).
     for iso_key in events_by_date:
-        events_by_date[iso_key].sort(key=lambda e: int(e.get("timestamp") or 0))
+        events_by_date[iso_key] = [
+            e for _, e in sorted(
+                enumerate(events_by_date[iso_key]),
+                key=lambda ie: (
+                    int(ie[1].get("timestamp") or 0) or (10 ** 18),
+                    ie[0],
+                ),
+            )
+        ]
 
     # Running per-symbol quantities (spot side + realised perp PnL in quote)
     quantities: dict[str, float] = {}
@@ -928,6 +969,18 @@ def _compute_daily_equity(
                 cost = float(ev.get("cost") or 0.0)
                 if not sym or amt <= 0:
                     continue
+                # NEW-C01-09: whitelist side to {buy, sell}. Pre-fix a perp
+                # fill with side=None/unknown silently opened a SHORT (the
+                # `else` branch of `signed = amt if side == "buy" else -amt`);
+                # a spot fill with unknown side was silently dropped but with
+                # no diagnostic. Either way the position state is corrupt.
+                if side not in ("buy", "sell"):
+                    logger.warning(
+                        "equity_reconstruction: skipping fill with unknown "
+                        "side=%r (symbol=%s) — expected 'buy' or 'sell'",
+                        side, raw_symbol,
+                    )
+                    continue
                 # WR-03: CCXT normalises linear perpetuals as "BTC/USDT:USDT"
                 # and inverse contracts as "BTC/USD:BTC". A naive split("/")[-1]
                 # would yield "USDT:USDT" and leak non-existent symbols into
@@ -980,6 +1033,18 @@ def _compute_daily_equity(
                             "(unsupported cost shape) venue=%s symbol=%s amount=%s",
                             venue, raw_symbol, amt,
                         )
+                        continue
+                    if amt_src == _PerpAmtSource.FALLBACK_AMOUNT:
+                        # silent-failure/F-01 (NEW-C01-13 follow-up): the callee
+                        # already logged a warning. Without this explicit continue
+                        # the fill falls through with amt_base=0.0, silently
+                        # skipping the position-state update while leaving
+                        # unknown_perp_symbols unchanged. Record the symbol in
+                        # the same DQ accumulator as COST_DIV_PRICE unknowns so
+                        # operators can distinguish "all fills plausible" from
+                        # "some fills dropped for implausible size".
+                        if unknown_perp_symbols is not None:
+                            unknown_perp_symbols.add(raw_symbol)
                         continue
                     if (
                         amt_src == _PerpAmtSource.COST_DIV_PRICE
@@ -1066,12 +1131,35 @@ def _compute_daily_equity(
                             )
                     perp_positions[raw_symbol] = pos
                 else:
+                    # NEW-C01-04: deduct spot trading fee from the quote
+                    # balance. Fee is quote-denominated on USDT-settled pairs
+                    # (the overwhelmingly common case). Maker rebates (negative
+                    # fee) correctly ADD back to quote. Absent/None → 0.
+                    # ccxt / DB can store fee as a numeric or as a dict
+                    # {"cost": <float>, "currency": <str>} — handle both.
+                    _fee_raw = ev.get("fee")
+                    if isinstance(_fee_raw, dict):
+                        _fee_raw = _fee_raw.get("cost") or 0.0
+                    try:
+                        spot_fee = float(_fee_raw or 0.0)
+                    except (TypeError, ValueError):
+                        # silent-failure/F-08: non-numeric fee field (e.g.
+                        # "N/A", "0.0001BTC") would propagate a ValueError
+                        # up through _compute_daily_equity, aborting the
+                        # entire reconstruction. Treat unparseable fee as 0
+                        # and log so operators can spot schema drift.
+                        logger.warning(
+                            "equity_reconstruction: unparseable fee=%r for "
+                            "symbol=%s — treating as 0 (spot fee not deducted)",
+                            _fee_raw, raw_symbol,
+                        )
+                        spot_fee = 0.0
                     if side == "buy":
                         quantities[sym] = quantities.get(sym, 0.0) + amt
-                        quantities[quote] = quantities.get(quote, 0.0) - cost
+                        quantities[quote] = quantities.get(quote, 0.0) - cost - spot_fee
                     elif side == "sell":
                         quantities[sym] = quantities.get(sym, 0.0) - amt
-                        quantities[quote] = quantities.get(quote, 0.0) + cost
+                        quantities[quote] = quantities.get(quote, 0.0) + cost - spot_fee
             elif kind == "deposit":
                 sym = (ev.get("currency") or ev.get("code") or "").upper()
                 amt = float(ev.get("amount") or 0.0)
@@ -1152,10 +1240,20 @@ def _compute_daily_equity(
                 source = "coingecko_fallback"
             else:
                 source = "exchange_primary"
+            # NEW-C01-10 (FIXED review/C-01): value_usd MUST come from `total`,
+            # not from sum(capped_breakdown.values()). _cap_breakdown truncates to
+            # the top-20 symbols when the JSON payload exceeds 4096 bytes and
+            # appends "__truncated__": True. sum() over that dict would (a) lose
+            # all dropped symbols' USD contribution and (b) add +1 for the
+            # sentinel key — a potentially large undercount. The rounding
+            # inconsistency the original fix addressed is at most N × $0.005
+            # (negligible) compared with the truncation loss. Derive breakdown
+            # for the JSON column only; value_usd always reflects the true total.
+            capped_breakdown = _cap_breakdown(breakdown)
             rows.append({
                 "asof": iso,
                 "value_usd": round(total, 2),
-                "breakdown": _cap_breakdown(breakdown),
+                "breakdown": capped_breakdown,
                 "source": source,
             })
         cur = cur + timedelta(days=1)
@@ -1604,31 +1702,112 @@ async def _fetch_and_price_window(
     # are preserved; absolute levels are anchored to the exchange's
     # own number. Breakdown gets a "STARTING_BALANCE" entry so the
     # components still sum to value_usd.
-    anchor = await _fetch_current_equity(exchange, venue)
+    anchor, anchor_partial_symbols = await _fetch_current_equity(exchange, venue)
+    # M-1 / H-02: initialise anchor-skip DQ fields (populated inside the block
+    # below when skipping fires; remain empty/False when anchor is not attempted).
+    _anchor_skipped_partial_ticker: list[str] = []
+    _anchor_skipped_implausible: bool = False
     if rows and anchor is not None:
         last_value = float(rows[-1].get("value_usd") or 0.0)
         offset = anchor - last_value
-        if abs(offset) > 0.005:
-            for r in rows:
-                r["value_usd"] = round(float(r["value_usd"] or 0.0) + offset, 2)
-                bd = dict(r.get("breakdown") or {})
-                bd["STARTING_BALANCE"] = round(
-                    float(bd.get("STARTING_BALANCE", 0.0)) + offset, 2,
-                )
-                r["breakdown"] = _cap_breakdown(bd)
+        # NEW-C01-02 / NEW-C01-03: skip anchor when any held asset priced
+        # to zero (ticker failure on a positive-qty asset → partial anchor).
+        # Also bound the offset to 5× the last reconstructed value to reject
+        # implausible offsets caused by phantom perps or ticker outages.
+        # Both conditions ship an unanchored series per the documented fallback
+        # and stamp a DQ flag so operators can see why anchoring was skipped.
+        _implausible_anchor = (
+            last_value > 0
+            and abs(offset) > 5.0 * abs(last_value)
+        )
+        if hit_terminus:
+            # silent-failure/F-11: when OKX 90-day terminus was hit, the
+            # replay started from quantities={} (zero cash). Every row's
+            # absolute equity value is wrong because the pre-terminus
+            # funding deposit is missing. Applying the anchor offset would
+            # shift all rows by (exchange_equity - last_wrong_value), which
+            # may be a very large offset applied to unreliable baseline values.
+            # Skip the anchor entirely when terminus was hit; the telemetry
+            # flag (pre_terminus_balance_unknown=True) already signals the
+            # dashboard to suppress absolute-level display.
+            logger.warning(
+                "anchor: skipping — OKX 90-day terminus hit, pre-terminus "
+                "absolute equity unreliable; anchor would corrupt all rows",
+            )
+        elif anchor_partial_symbols:
+            logger.warning(
+                "anchor: skipping — %d asset(s) priced to zero (ticker "
+                "failure with qty>0): %s",
+                len(anchor_partial_symbols),
+                sorted(anchor_partial_symbols),
+            )
+            # M-1 / H-02: stamp DQ telemetry so the admin health card can
+            # distinguish "anchor succeeded" from "anchor skipped due to
+            # partial ticker failures".
+            _anchor_skipped_partial_ticker = sorted(anchor_partial_symbols)
+            _anchor_skipped_implausible = False
+        elif _implausible_anchor:
+            logger.warning(
+                "anchor: offset=%.2f exceeds 5× last_value=%.2f — "
+                "skipping anchor (anchor_offset_implausible)",
+                offset, last_value,
+            )
+            _anchor_skipped_partial_ticker = []
+            _anchor_skipped_implausible = True
+        else:
+            _anchor_skipped_partial_ticker = []
+            _anchor_skipped_implausible = False
+            if abs(offset) > 0.005:
+                for r in rows:
+                    r["value_usd"] = round(float(r["value_usd"] or 0.0) + offset, 2)
+                    bd = dict(r.get("breakdown") or {})
+                    bd["STARTING_BALANCE"] = round(
+                        float(bd.get("STARTING_BALANCE", 0.0)) + offset, 2,
+                    )
+                    r["breakdown"] = _cap_breakdown(bd)
 
+    # NEW-C01-11: when hit_terminus, the replay starts from quantities={}
+    # (zero cash) because the pre-terminus deposit that funds open perps
+    # falls outside the 90-day fetch window.  Every intermediate row is
+    # built against that zero baseline, making absolute equity/drawdown/TWR
+    # wrong for the pre-terminus portion.  Stamp a DQ flag so the dashboard
+    # can suppress absolute-level display and drawdown before the terminus.
+    # (Full fix — seeding quantities with live spot balances at the
+    # terminus — requires a separate balance fetch at reconstruction time
+    # and is deferred; the flag is the minimal safe signal.)
+    if hit_terminus:
+        logger.warning(
+            "equity_reconstruction: OKX 90-day terminus hit — "
+            "pre-terminus deposits not captured; intermediate absolute "
+            "equity levels are unreliable (pre_terminus_balance_unknown, "
+            "NEW-C01-11). Anchor applied to last row only."
+        )
     telemetry = {
         "skipped_symbols": sorted(skipped_symbols),
         "unknown_perp_symbols": sorted(unknown_perp_symbols),
         "inverse_perp_symbols": sorted(inverse_perp_symbols),
         "ctval_drift_warnings": ctval_drift_warnings,
+        # NEW-C01-11: dashboard must suppress absolute-level/drawdown before
+        # the terminus if this is True.
+        "pre_terminus_balance_unknown": hit_terminus,
+        # M-1 / H-02: anchor-skip DQ flags so the admin health card can
+        # distinguish "anchor succeeded" from "anchor skipped".
+        "anchor_partial_ticker_symbols": _anchor_skipped_partial_ticker,
+        "anchor_offset_implausible": _anchor_skipped_implausible,
     }
     return rows, hit_terminus, telemetry
 
 
-async def _fetch_current_equity(exchange: Any, venue: str) -> float | None:
-    """Return today's total account equity in USD, or None if we can't
-    determine it. Sums spot USDT equivalents + perp unrealised PnL.
+async def _fetch_current_equity(
+    exchange: Any, venue: str
+) -> tuple[float | None, set[str]]:
+    """Return (equity_usd, partial_unpriced_symbols).
+
+    ``equity_usd`` is today's total account equity in USD, or None if we
+    can't determine it. ``partial_unpriced_symbols`` is the set of
+    non-stablecoin assets whose ticker call failed while they had qty>0 —
+    a non-empty set means the equity figure is an undercount and the
+    anchor should be skipped (NEW-C01-02 / NEW-C01-03).
 
     Keeps the semantics of the daily refresh job (v0.15.4.0 fix 2): spot
     rows contribute their marked value, derivative rows contribute
@@ -1638,17 +1817,18 @@ async def _fetch_current_equity(exchange: Any, venue: str) -> float | None:
 
     Wrapped in a blanket try/except: the anchor is advisory, not load-
     bearing. Any exchange error — including mocked exchanges in tests
-    that don't stub fetch_balance/fetch_positions — returns None so the
-    reconstruction still ships an unanchored series rather than failing
-    the whole job.
+    that don't stub fetch_balance/fetch_positions — returns (None, set())
+    so the reconstruction still ships an unanchored series rather than
+    failing the whole job.
     """
+    partial_unpriced: set[str] = set()
     try:
         balance = await exchange.fetch_balance()
         if not isinstance(balance, dict):
-            return None
+            return None, partial_unpriced
         totals = balance.get("total") or {}
         if not isinstance(totals, dict):
-            return None
+            return None, partial_unpriced
         total = 0.0
         for asset, qty in totals.items():
             if qty is None:
@@ -1663,24 +1843,74 @@ async def _fetch_current_equity(exchange: Any, venue: str) -> float | None:
             if asset_upper in STABLECOINS:
                 total += q
                 continue
+            # red-team/H-2: _EXTRA_STABLECOIN_SUFFIXES (USDE, PYUSD, USDB)
+            # are NOT in STABLECOINS (by design — they drive symbol-suffix
+            # logic not price-skip logic). But they ARE stable-value assets.
+            # Without this guard, fetch_ticker("USDE/USDT") is attempted; on
+            # venues without a liquid pair it fails → partial_unpriced.add →
+            # anchor unconditionally skipped for every OKX account holding
+            # USDe collateral (extremely common). Treat them as $1 per unit.
+            if any(asset_upper == suf for suf in _EXTRA_STABLECOIN_SUFFIXES):
+                total += q
+                continue
             # Price non-stablecoin spot via a single ticker call. Best-
-            # effort — a missing ticker is treated as zero rather than
-            # aborting the anchor.
+            # effort — a missing ticker records the asset as unpriced so
+            # the caller can decide whether to trust the anchor.
+            px = 0.0
+            _ticker_fetch_failed = False
             try:
                 t = await exchange.fetch_ticker(f"{asset_upper}/USDT")
                 px = float((t or {}).get("last") or 0.0) if isinstance(t, dict) else 0.0
             except Exception:  # noqa: BLE001
                 px = 0.0
+                _ticker_fetch_failed = True
+            # NEW-C01-02 (silent-failure/F-06 fix): track assets that priced
+            # to zero because of a FETCH FAILURE (auth error, network error,
+            # missing ticker) — those represent unknown equity that could cause
+            # the anchor to understate the true total. A genuine zero (delisted
+            # token, or exchange returns 0.0 as last price) contributes 0 to
+            # the anchor regardless, so skipping the anchor for it is wrong.
+            # Only mark as partial_unpriced when the ticker fetch failed.
+            if _ticker_fetch_failed:
+                partial_unpriced.add(asset_upper)
             total += q * px
+
+        # NEW-C01-05: unified-margin venues (OKX, Bybit V5) report
+        # fetch_balance['total'] as equity-inclusive — it already marks
+        # open perp positions to market. Adding unrealizedPnl from
+        # fetch_positions on top would double-count the uPnL and shift
+        # the ENTIRE reconstructed curve upward via the anchor offset.
+        # Gate: skip the position-loop for known unified-margin venues.
+        # Non-unified venues (Binance isolated, etc.) keep the additive
+        # uPnL path because their collateral sits separately in the spot
+        # wallet and is NOT included in fetch_balance['total'].
+        _UNIFIED_MARGIN_VENUES = frozenset({"okx", "bybit"})
+        _skip_upnl = venue.lower() in _UNIFIED_MARGIN_VENUES
 
         try:
             positions = await exchange.fetch_positions()
-        except Exception:  # noqa: BLE001
+        except Exception as _pos_exc:  # noqa: BLE001
+            # silent-failure/F-03: bare except silently dropped the error,
+            # leaving positions=[] with no log entry. For non-unified-margin
+            # venues (Binance), uPnL is additive — missing it understates the
+            # anchor, which shifts the entire reconstructed equity curve.
+            # Log the failure so operators can diagnose auth/network errors
+            # that cause silent anchor undercounts.
+            logger.warning(
+                "_fetch_current_equity: fetch_positions failed venue=%s — "
+                "uPnL excluded from anchor (may understate equity for "
+                "non-unified-margin venues): %s",
+                venue, _pos_exc,
+            )
             positions = []
         if not isinstance(positions, list):
             positions = []
         for p in positions:
             if not isinstance(p, dict):
+                continue
+            if _skip_upnl:
+                # uPnL already included in fetch_balance['total'] on
+                # unified-margin venues — adding it again double-counts.
                 continue
             upnl = p.get("unrealizedPnl")
             if upnl is None:
@@ -1689,10 +1919,10 @@ async def _fetch_current_equity(exchange: Any, venue: str) -> float | None:
                 total += float(upnl)
             except (TypeError, ValueError):
                 continue
-        return total
+        return total, partial_unpriced
     except Exception as exc:  # noqa: BLE001
         logger.warning("anchor: _fetch_current_equity failed venue=%s: %s", venue, exc)
-        return None
+        return None, partial_unpriced
 
 
 # ---------------------------------------------------------------------------
@@ -1778,14 +2008,16 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
                 error_kind=error_kind,
             )
         except Exception as exc:  # noqa: BLE001
-            # H-1172: log the full traceback BEFORE sanitisation so the
-            # original error reaches stdout/sentry. The 500-char audit
-            # event keeps a sanitised summary for the trail; the logger
-            # call captures the unredacted root cause for ops.
-            logger.exception(
+            # H-1172: log the error before sanitisation so the original error
+            # reaches stdout/sentry. Use warning + scrub_freeform_string instead
+            # of logger.exception — logger.exception (exc_info=True) embeds the
+            # full exception string including ccxt NetworkError URLs with
+            # &signature=<HMAC-SHA256>, bypassing the redact processor (H-3).
+            logger.warning(
                 "reconstruct_allocator_history unhandled exception "
-                "allocator=%s key=%s venue=%s",
+                "allocator=%s key=%s venue=%s exc_class=%s scrubbed=%s",
                 allocator_id, api_key_id, venue,
+                type(exc).__name__, scrub_freeform_string(str(exc)),
             )
             error_kind, msg = classify_exception(exc)
             sanitized = msg[:500]
@@ -1866,13 +2098,14 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
             ctx.supabase, rows, allocator_id, depth_months,
         )
     except Exception as exc:  # noqa: BLE001
-        # Same surfacing pattern as the fetch-window catch — log full
-        # traceback for sentry/stdout, then sanitised audit + FAILED
-        # outcome so the worker retries with backoff. H-1172.
-        logger.exception(
+        # Same surfacing pattern as the fetch-window catch — log before
+        # sanitisation but use warning + scrub instead of logger.exception
+        # to avoid HMAC leakage via exc_info=True (red-team/H-3). H-1172.
+        logger.warning(
             "reconstruct_allocator_history persist phase unhandled exception "
-            "allocator=%s key=%s venue=%s",
+            "allocator=%s key=%s venue=%s exc_class=%s scrubbed=%s",
             allocator_id, api_key_id, venue,
+            type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         error_kind, msg = classify_exception(exc)
         sanitized = msg[:500]
@@ -1948,6 +2181,13 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
             "unknown_perp_symbols": telemetry["unknown_perp_symbols"][:50],
             "inverse_perp_symbols": telemetry["inverse_perp_symbols"][:50],
             "ctval_drift_warnings": telemetry["ctval_drift_warnings"][:50],
+            # NEW-C01-11: flag propagated so dashboard can suppress
+            # absolute-level/drawdown display before the terminus.
+            "pre_terminus_balance_unknown": telemetry.get("pre_terminus_balance_unknown", False),
+            # M-1 / H-02: anchor-skip DQ flags so the admin health card can
+            # distinguish "anchor succeeded" from "anchor skipped".
+            "anchor_partial_ticker_symbols": telemetry.get("anchor_partial_ticker_symbols", []),
+            "anchor_offset_implausible": telemetry.get("anchor_offset_implausible", False),
         },
     )
     logger.info(
@@ -2091,10 +2331,15 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)
 
+        # NEW-C01-10 (FIXED review/C-01): value_usd from `total`, not from
+        # sum(capped_bd.values()) — see _compute_daily_equity for rationale.
+        # Truncation via _cap_breakdown drops symbols and adds a sentinel key;
+        # using the capped sum would undercount equity for large portfolios.
+        capped_bd = _cap_breakdown(breakdown)
         row = {
             "asof": today_iso,
             "value_usd": round(total, 2),
-            "breakdown": _cap_breakdown(breakdown),
+            "breakdown": capped_bd,
             "source": "exchange_primary",
         }
         depth_months = history_depth_months_for_venue(venue)
@@ -2260,8 +2505,9 @@ class EquityCurveBuilder:
       - services.exchange.fetch_mark_prices(instruments) (60s in-process
         cache)
 
-    Sharpe matches an independently-computed quantstats reference
-    (qs.stats.sharpe(returns, periods=252)) within ±0.05.
+    Sharpe uses `periods=365` (calendar-daily crypto). Matches
+    `qs.stats.sharpe(returns, periods=365)` within ±0.10 (tolerance
+    widened from ±0.05 after C01-14/C01-15; see test_equity_curve_builder.py).
     """
 
     # Synthetic starting NAV used when the caller does not supply one.
@@ -2339,9 +2585,13 @@ class EquityCurveBuilder:
             all_positions.extend(matched)
 
         # Attach mark prices to open positions (BACKBONE-06).
+        # NEW-C01-07: collect symbols whose mark price is missing so we can
+        # emit a single warning rather than silently zero-ing unrealized_pnl.
+        mark_price_missing_symbols: set[str] = set()
         for pos in all_positions:
             if pos.get("status") == "open":
-                mark = self.mark_prices.get(pos.get("symbol", ""))
+                sym = pos.get("symbol", "")
+                mark = self.mark_prices.get(sym)
                 if mark is not None:
                     pos["mark_price"] = float(mark)
                     entry = float(pos.get("entry_price_avg") or 0.0)
@@ -2351,6 +2601,19 @@ class EquityCurveBuilder:
                         pos["unrealized_pnl"] = (mark - entry) * qty
                     else:
                         pos["unrealized_pnl"] = (entry - mark) * qty
+                else:
+                    # NEW-C01-07: mark price missing — unrealized_pnl will be
+                    # absent/zero, silently understating equity for this position.
+                    mark_price_missing_symbols.add(sym)
+
+        if mark_price_missing_symbols:
+            logger.warning(
+                "EquityCurveBuilder.reconstruct_positions: mark price missing "
+                "for %d open position symbol(s) %r — unrealized_pnl will be "
+                "absent (equity understated). Supply mark_prices= to fix.",
+                len(mark_price_missing_symbols),
+                sorted(mark_price_missing_symbols),
+            )
 
         positions_typed = [
             Position(**_position_dict_to_position_kwargs(p)) for p in all_positions
@@ -2368,7 +2631,15 @@ class EquityCurveBuilder:
         Each ``funding_row`` shape: ``{timestamp, symbol, payment, ...}``.
         Bucketed by UTC date; 8h cycles (per services/funding_fetch.py)
         are aggregated up to a daily slot for the equity-curve consumer.
+
+        NEW-C30-02: rows whose ``currency`` field is present but not a
+        USD-quote stablecoin (e.g. BTC for inverse perps) are skipped with
+        a WARNING rather than added at face value, which would produce an
+        ~$6 payment being recorded as $0.0001 (magnitude error ~5 orders).
         """
+        _USD_QUOTE_CURRENCIES = frozenset(
+            {"USDT", "USDC", "BUSD", "USD", "TUSD", "FDUSD"}
+        )
         for row in funding_rows or []:
             ts = row.get("timestamp")
             if isinstance(ts, str):
@@ -2381,6 +2652,17 @@ class EquityCurveBuilder:
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
             d = ts.astimezone(timezone.utc).date()
+            # NEW-C30-02: skip base-coin-denominated (inverse perp) rows.
+            currency = (row.get("currency") or "").upper()
+            if currency and currency not in _USD_QUOTE_CURRENCIES:
+                logger.warning(
+                    "attach_funding: skipped funding row currency=%r symbol=%r "
+                    "— not a USD-quote stablecoin; add currency conversion to "
+                    "include inverse-perp funding in the equity curve "
+                    "(NEW-C30-02)",
+                    currency, row.get("symbol"),
+                )
+                continue
             payment = row.get("payment", row.get("amount", 0.0))
             try:
                 amount = float(payment)
@@ -2419,18 +2701,8 @@ class EquityCurveBuilder:
 
         positions = self.reconstruct_positions()
 
-        realized_by_date: dict[date, float] = defaultdict(float)
-        for pos in positions:
-            if pos.status == "closed" and pos.closed_at and pos.pnl is not None:
-                closed_at = pos.closed_at
-                if isinstance(closed_at, datetime):
-                    if closed_at.tzinfo is None:
-                        closed_at = closed_at.replace(tzinfo=timezone.utc)
-                    d = closed_at.astimezone(timezone.utc).date()
-                else:
-                    continue
-                realized_by_date[d] += float(pos.pnl)
-
+        # Compute the date window first so the string-closed_at fallback
+        # can book unparseable positions on last_d (NEW-C01-08).
         first = min(t.timestamp for t in self.trades)
         last = max(t.timestamp for t in self.trades)
         if first.tzinfo is None:
@@ -2439,6 +2711,38 @@ class EquityCurveBuilder:
             last = last.replace(tzinfo=timezone.utc)
         first_d = first.astimezone(timezone.utc).date()
         last_d = last.astimezone(timezone.utc).date()
+
+        realized_by_date: dict[date, float] = defaultdict(float)
+        for pos in positions:
+            if pos.status == "closed" and pos.closed_at and pos.pnl is not None:
+                closed_at = pos.closed_at
+                if isinstance(closed_at, datetime):
+                    if closed_at.tzinfo is None:
+                        closed_at = closed_at.replace(tzinfo=timezone.utc)
+                    d = closed_at.astimezone(timezone.utc).date()
+                elif isinstance(closed_at, str):
+                    # NEW-C01-08: _match_positions_fifo emits ISO string
+                    # closed_at values; silently continuing (pre-fix) dropped
+                    # all PnL for such positions, diverging the curve from
+                    # to_metrics_snapshot (which counts them). Parse instead
+                    # and fall back to the last day on parse failure.
+                    try:
+                        closed_dt = datetime.fromisoformat(
+                            closed_at.replace("Z", "+00:00")
+                        )
+                        if closed_dt.tzinfo is None:
+                            closed_dt = closed_dt.replace(tzinfo=timezone.utc)
+                        d = closed_dt.astimezone(timezone.utc).date()
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "EquityCurveBuilder: closed_at %r unparseable — "
+                            "booking PnL %.6f on last bar (NEW-C01-08)",
+                            closed_at, float(pos.pnl),
+                        )
+                        d = last_d
+                else:
+                    continue
+                realized_by_date[d] += float(pos.pnl)
         idx = pd.date_range(first_d, last_d, freq="D")
 
         df = pd.DataFrame({"date": idx})
@@ -2501,17 +2805,48 @@ class EquityCurveBuilder:
         return float((1 + ytd_df["daily_return"]).prod() - 1)
 
     def compute_sharpe(
-        self, risk_free_rate: float = 0.0, periods: int = 252
+        self, risk_free_rate: float = 0.0, periods: int = 365
     ) -> float | None:
         """Annualized Sharpe ratio.
 
-        Matches ``qs.stats.sharpe(returns, periods=252)`` within ±0.05
-        (Assumption A2 verified by ``scripts/probe-quantstats-version.sh``).
+        NEW-C01-15: default changed from 252 to 365. The equity curve is
+        calendar-daily (freq="D", ~365 rows/yr on crypto which trades 24/7).
+        Using periods=252 (business-day convention) under-scales by
+        √(252/365)≈0.83. Callers that explicitly pass periods=252 are
+        unaffected.
+
+        NEW-C01-14: The forced day-0 zero return biases the ratio on sparse
+        series. Dropped the first row's zero if it is the seeded day-0 entry
+        (i.e., the first row has daily_return==0 and is an artefact of the
+        `.fillna(0.0)` seed). Calendar-gap filler zeros are intentionally
+        KEPT here because dropping ALL zeros would reduce an exchange-halt
+        month to zero observations, producing an infinite/NaN Sharpe — the
+        opposite distortion. The primary fix for filler-zero bias is
+        C01-15 (correct annualization factor) which reduces the gap.
         """
         df = self.to_equity_curve_daily()
         if df.empty or len(df) < 2:
             return None
         returns = df["daily_return"]
+        # NEW-C01-14: drop the day-0 forced-zero (first row only — seeded
+        # by `prev_equity.fillna(starting_nav)` → daily_pnl/starting_nav
+        # with daily_pnl=0 → return=0). Dropping only the FIRST zero avoids
+        # destabilizing the Sharpe on sparse fixtures with many gap-filler zeros.
+        if len(returns) > 1 and returns.iloc[0] == 0.0:
+            returns = returns.iloc[1:]
+        # NEW-C01-06: the terminal bar carries the sum of ALL open-position
+        # unrealized PnL as a one-day spike (set by to_equity_curve_daily
+        # line: ``df.loc[df.index[-1], "unrealized_pnl"] = open_unrealized``).
+        # Including a multi-month unrealized gain as a single-day return
+        # inflates stdev and corrupts the Sharpe ratio. Exclude the final bar
+        # from the Sharpe input when it carries non-zero unrealized PnL.
+        # TWR/drawdown are NOT affected because they read all rows.
+        if "unrealized_pnl" in df.columns and len(returns) > 0:
+            last_unrealized = float(df["unrealized_pnl"].iloc[-1])
+            if last_unrealized != 0.0 and len(returns) > 1:
+                returns = returns.iloc[:-1]
+        if len(returns) < 2:
+            return None
         excess = returns - (risk_free_rate / periods)
         std = excess.std()
         if std == 0 or math.isnan(std):

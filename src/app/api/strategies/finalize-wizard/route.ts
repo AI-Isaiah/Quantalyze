@@ -458,7 +458,26 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     return await unifiedFinalizeWizardHandler({
       strategy_id: fields.strategy_id,
       userId: user.id,
-      payload: body as Record<string, unknown>,
+      // NEW-C14-06: forward the validated+normalized `fields` object instead
+      // of the raw body. Pre-fix: `payload: body as Record<string,unknown>`
+      // bypassed canonicalizeExchangeList + string→number coercion so the
+      // unified path persisted un-canonicalized exchanges and raw aum/max_capacity
+      // strings. The 400-gate still ran, but normalization drift persisted bad
+      // data. Forwarding `fields` ensures both paths (legacy + unified) persist
+      // identically.
+      payload: {
+        strategy_id: fields.strategy_id,
+        name: fields.name,
+        description: fields.description,
+        category_id: fields.category_id,
+        strategy_types: fields.strategy_types,
+        subtypes: fields.subtypes,
+        markets: fields.markets,
+        supported_exchanges: fields.supported_exchanges,
+        leverage_range: fields.leverage_range,
+        aum: fields.aumNum,
+        max_capacity: fields.maxCapacityNum,
+      },
       apiKeyId,
       source: resolvedSource,
     });

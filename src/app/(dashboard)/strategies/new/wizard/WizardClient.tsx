@@ -277,6 +277,42 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     };
   }, [wizardSessionId, step]);
 
+  // NEW-C14-11: bfcache restore guard. After the user clicks Submit and the
+  // browser navigates away, bfcache may restore the final step with the
+  // Submit button still live and localStorage cleared. Re-clicking Submit
+  // re-POSTs finalize → CSV path mints a duplicate (NEW-C14-01); API path
+  // hits the confusing 22023→403. On bfcache restore, re-run loadWizardState:
+  // if no draft pointer is found redirect to /strategies (the submitted
+  // strategy is there with its pending badge).
+  useEffect(() => {
+    function handlePageShow(event: PageTransitionEvent) {
+      if (!event.persisted) return;
+      // Fire-and-forget: check LS for a draft pointer. If absent, the wizard
+      // was finalized — route to /strategies to prevent re-submit.
+      // FINDING-5: wrap in try/catch so a loadWizardState exception (localStorage
+      // access denied in strict browser policy, JSON parse error on corrupted
+      // value) doesn't silently swallow and leave the Submit button active.
+      // Fail-safe: redirect on throw to prevent the duplicate-submit the guard
+      // was added to prevent.
+      void (async () => {
+        try {
+          const loaded = await loadWizardState();
+          if (!loaded?.strategyId && !loaded?.wizardSessionId) {
+            router.push("/strategies");
+          }
+        } catch (err) {
+          console.error("[wizard] bfcache restore loadWizardState threw:", err);
+          // Fail safe: redirect to prevent re-submit of an already-finalized wizard.
+          router.push("/strategies");
+        }
+      })();
+    }
+    window.addEventListener("pageshow", handlePageShow);
+    return () => {
+      window.removeEventListener("pageshow", handlePageShow);
+    };
+  }, [router]);
+
   const persistPointer = useCallback(
     (nextStep: WizardStepKey, id: string | null) => {
       if (!id) return;
@@ -361,7 +397,12 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     if (!strategyId) {
       // No server draft yet; just clear local state.
       clearWizardState();
-      setStep("connect_key");
+      // NEW-C14-08: regenerate wizardSessionId on clear so the stale
+      // idempotency key is never reused (feeds NEW-C14-01 duplicate-submit).
+      setWizardSessionId(newWizardSessionId());
+      // NEW-C14-08: route CSV branch back to csv_upload, not connect_key
+      // (connect_key matches no CSV render case → blank body, reload-only recovery).
+      setStep(source === "csv" ? "csv_upload" : "connect_key");
       setStrategyId(null);
       setApiKeyId(null);
       setSyncSnapshot(null);
@@ -379,27 +420,38 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
       const res = await fetch(`/api/strategies/draft/${strategyId}`, {
         method: "DELETE",
       });
-      // 404 is the desired end-state: the draft is already gone (finalized,
-      // deleted in another tab, never created server-side, or owned by a
-      // different user — the route returns 404 for all of these). The local
-      // cleanup in the finally block satisfies the user intent regardless, so
-      // surfacing a console.error for 404 is misleading noise. Only log when
-      // the response is a genuine failure that the user might want to retry.
-      if (!res.ok && res.status !== 404) {
-        console.error("[wizard] delete draft failed:", await res.text());
+      // NEW-C14-08: only reset state on confirmed delete (2xx) or
+      // confirmed-never-existed (404). On other errors, leave state intact
+      // so the user can retry — the finally block previously reset
+      // unconditionally, discarding the pointer to the real server draft.
+      if (res.ok || res.status === 404) {
+        // 404 after finalize: draft is finalized, route to /strategies.
+        if (res.status === 404 && source !== "csv") {
+          // A 404 after the wizard was previously on submit step means the
+          // draft was finalized in another tab — redirect to the list page.
+          clearWizardState();
+          setConfirmDelete(false);
+          router.push("/strategies");
+          return;
+        }
+        clearWizardState();
+        // NEW-C14-08: regenerate wizardSessionId on confirmed delete.
+        setWizardSessionId(newWizardSessionId());
+        setStep(source === "csv" ? "csv_upload" : "connect_key");
+        setStrategyId(null);
+        setApiKeyId(null);
+        setSyncSnapshot(null);
+        setMetadataDraft(null);
+        setConfirmDelete(false);
+      } else {
+        console.error("[wizard] delete draft failed:", res.status, await res.text().catch(() => ""));
+        setConfirmDelete(false);
       }
     } catch (err) {
       console.error("[wizard] delete draft threw:", err);
-    } finally {
-      clearWizardState();
-      setStep("connect_key");
-      setStrategyId(null);
-      setApiKeyId(null);
-      setSyncSnapshot(null);
-      setMetadataDraft(null);
       setConfirmDelete(false);
     }
-  }, [strategyId, wizardSessionId]);
+  }, [strategyId, wizardSessionId, source, router]);
 
   const handleResume = useCallback(() => {
     if (!initialDraft) return;

@@ -480,7 +480,30 @@ def _need_supabase():
 @pytest.fixture
 def admin():
     _need_supabase()
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    # Force the PostgREST transport onto HTTP/1.1. supabase-py hardcodes
+    # http2=True when it builds the PostgREST httpx client
+    # (postgrest/_sync/client.py create_session), and the pinned supabase
+    # 2.15.1 exposes no ClientOptions seam to override it. With `h2` installed,
+    # the concurrent-claim test multiplexes both worker RPCs over ONE HTTP/2
+    # connection → the Supabase edge sends a GOAWAY mid-stream
+    # (httpx.RemoteProtocolError: ConnectionTerminated error_code:1) AND the
+    # multiplex serializes the two requests so the second worker sees the
+    # first's committed claim ("overlapping claims"). Rebuilding the session
+    # with http2=False gives each concurrent thread its own pooled connection —
+    # genuine parallelism at the DB, no multiplexed GOAWAY surface — which is
+    # exactly what the SKIP LOCKED disjointness assertion is meant to exercise.
+    # Reusing type(session)(...) keeps the postgrest SyncClient subclass (and
+    # its aclose) across supabase-py versions. (CI flakiness audit F1.)
+    client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    session = client.postgrest.session
+    client.postgrest.session = type(session)(
+        base_url=session.base_url,
+        headers=session.headers,
+        timeout=session.timeout,
+        follow_redirects=True,
+        http2=False,
+    )
+    return client
 
 
 def _seed_user_id(admin) -> str:
