@@ -55,6 +55,11 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   const [recoveryReason, setRecoveryReason] = useState<DashboardRecoveryReason | null>(null);
   useEffect(() => {
     const reason = consumeDashboardRecoveryFlag();
+    // One-shot mount-time drain of a browser-only flag (sessionStorage) that
+    // only exists post-hydration; a lazy useState initializer would run during
+    // render (SSR-unsafe + double-consume under StrictMode). The intentional
+    // one-extra-render is harmless. Same pattern as the factsheet v2 contexts.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (reason) setRecoveryReason(reason);
   }, []);
 

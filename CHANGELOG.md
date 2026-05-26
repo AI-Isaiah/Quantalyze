@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.9.22] - 2026-05-27
+### Fixed — audit-2026-05-07 cluster review: allocator dashboard widgets (batch b04)
+- custom range picker: local-midnight max + calendar-day dayCount fixes a timezone off-by-one (NEW-C23-01/02)
+- dashboard config / equity chart / tweaks / net-exposure: scenario-state correctness + widget hardening; one-shot layout-recovery banner surfaces a corrupt/version-mismatch reset instead of silently discarding the customized layout (NEW-C06-02)
+- review + red-team hardening across the V2 dashboard (C1/H1/H2/M1/M2/M3/M4)
+
+
 ## [0.24.9.21] - 2026-05-27
 ### Fixed — audit-2026-05-07 cluster review: exchange manager + portfolio impact + email (batch b09)
 - exchange manager: Reconnect guard (no duplicate connect), additive key merge (no clobber), secret scrub on close (NEW-C29-01/02/03)

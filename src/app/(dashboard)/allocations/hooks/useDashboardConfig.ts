@@ -838,17 +838,21 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
   // evaluates the expression every render. useState(() => expr) evaluates it
   // only on the first render. We capture readOnly in the same callback so both
   // derivations share the single mount-time parse.
-  const initReadOnlyRef = useRef<boolean | null>(null);
-  const [config, setConfig] = useState<DashboardConfig>(() => {
+  // Single mount-time parse shared by `config` and `readOnly`. The lazy
+  // useState initializer runs ONCE at mount and returns BOTH derivations, so
+  // neither writes nor reads a ref during render (react-hooks/refs forbids ref
+  // access in render). loadV2ConfigResult() (localStorage.getItem + JSON.parse
+  // + tile-validation loop) therefore still runs exactly once.
+  const [initial] = useState<{ config: DashboardConfig; readOnly: boolean }>(() => {
     const r = loadV2ConfigResult();
-    initReadOnlyRef.current = r.readOnly === true;
-    return r.config;
+    return { config: r.config, readOnly: r.readOnly === true };
   });
+  const [config, setConfig] = useState<DashboardConfig>(initial.config);
   // readOnlyMode: true when we loaded a forward-compat (newer-build) blob.
   // A ref (not state) so changes don't trigger re-renders — this is a
   // mount-time invariant that never changes during the hook's lifetime.
-  // Seeded from initReadOnlyRef which was set in the lazy useState callback above.
-  const readOnlyMode = useRef(initReadOnlyRef.current === true);
+  // Seeded from the single mount-time parse above (plain value, not a ref read).
+  const readOnlyMode = useRef(initial.readOnly);
 
   // Phase A3 — same observe-without-write guard as the legacy hook. Mounting
   // V2 against a v3 (legacy-shape) blob must not overwrite the persisted
