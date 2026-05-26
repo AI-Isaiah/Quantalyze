@@ -1226,6 +1226,9 @@ export async function getAllocatorAggregates(userId: string) {
       "[queries.getAllocatorAggregates] portfolios fetch failed:",
       portfoliosError.message ?? portfoliosError,
     );
+    throw new Error(
+      `getAllocatorAggregates portfolios failed: ${portfoliosError.message ?? "unknown supabase error"}`,
+    );
   }
   if (!portfolios?.length) return { portfolios: [], analytics: [] };
 
@@ -1261,13 +1264,22 @@ export async function getAllocatorAggregates(userId: string) {
     return true;
   });
 
-  // F-08: warn when the dedup result is smaller than the requested set —
-  // this indicates the limit truncated the result and some portfolios may
-  // be missing their latest analytics row.
+  // F-08: warn when the dedup result is smaller than the requested set.
+  // Two causes: (a) limit(500) truncated the result and some portfolios have
+  // no latest-row in the window (genuine data loss); (b) a portfolio was
+  // recently created and the analytics job has not yet run (no rows exist).
+  // Include both counts so ops can distinguish truncation from "new portfolio."
   if (seen.size < portfolioIds.length) {
+    const missingCount = portfolioIds.length - seen.size;
     console.warn(
-      "[queries.getAllocatorAggregates] dedup yielded fewer portfolios than requested",
-      { requested: portfolioIds.length, resolved: seen.size },
+      "[queries.getAllocatorAggregates] some portfolios have no analytics row " +
+        "(new portfolios with no job run yet, or limit(500) truncation)",
+      {
+        requested: portfolioIds.length,
+        resolved: seen.size,
+        missing: missingCount,
+        rawRowCount: (analyticsRaw ?? []).length,
+      },
     );
   }
 
@@ -1957,7 +1969,9 @@ function derivePhase07Fields(
     holding_type: "spot" | "derivative";
     asof: string;
     api_key_id: string;
-    side: "long" | "short" | "flat";
+    // M-04: nullable to match allocator_holdings DB column (spot rows have
+    // side=null from the sync worker).
+    side: "long" | "short" | "flat" | null;
     entry_price: number | null;
     unrealized_pnl_usd: number | null;
   }>,
@@ -2365,7 +2379,10 @@ export const getMyAllocationDashboard = cache(
       holding_type: "spot" | "derivative";
       asof: string;
       api_key_id: string;
-      side: "long" | "short" | "flat";
+      // M-04: allocator_holdings.side is nullable (spot holdings have side=null
+      // from the sync worker). The output interface already accepts null; this
+      // intermediate cast must match so downstream code cannot assume non-null.
+      side: "long" | "short" | "flat" | null;
       entry_price: number | null;
       unrealized_pnl_usd: number | null;
     }>;
@@ -2426,6 +2443,12 @@ export const getMyAllocationDashboard = cache(
           .from("strategies")
           .select("id, name, codename, disclosure_tier")
           .in("id", candidateIds)
+          // NEW-C03-03 defence-in-depth: only surface published strategies.
+          // candidateIds come from match_batches JSONB and may reference
+          // strategies that were archived/reverted to draft after the compute
+          // job ran. Without this gate the strategy id (UUID) and codename are
+          // returned to the RSC payload even for non-published rows.
+          .eq("status", "published")
       : {
           data: [] as Array<{
             id: string;

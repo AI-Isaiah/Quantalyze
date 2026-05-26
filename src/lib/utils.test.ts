@@ -145,8 +145,22 @@ describe("formatCurrency", () => {
   it("negative millions: -$2,500,000 renders as -$2.5M", () => {
     expect(formatCurrency(-2_500_000)).toBe("-$2.5M");
   });
-  it("negative sub-thousand: -$500 renders as $-500 (sub-K path)", () => {
-    expect(formatCurrency(-500)).toBe("$-500");
+  it("regression (M-01): negative sub-thousand renders -$500 not $-500", () => {
+    expect(formatCurrency(-500)).toBe("-$500");
+  });
+  it("regression (M-01): negative sub-thousand -$999 renders correctly", () => {
+    expect(formatCurrency(-999)).toBe("-$999");
+  });
+  // ─────────────────────────────────────────────────────────────────
+  // M-02 regression guard: values near the K-to-M boundary must NOT
+  // render as "$1000K" / "-$1000K". (999_999.5 / 1000).toFixed(1) === "1000.0"
+  // which previously stripped to "1000" and produced "$1000K".
+  // ─────────────────────────────────────────────────────────────────
+  it("regression (M-02): K-to-M boundary 999_999.5 renders $1M not $1000K", () => {
+    expect(formatCurrency(999_999.5)).toBe("$1.0M");
+  });
+  it("regression (M-02): negative K-to-M boundary -999_999.5 renders -$1M not -$1000K", () => {
+    expect(formatCurrency(-999_999.5)).toBe("-$1.0M");
   });
 });
 
