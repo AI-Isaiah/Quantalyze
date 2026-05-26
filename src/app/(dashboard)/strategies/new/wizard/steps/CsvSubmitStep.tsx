@@ -129,6 +129,7 @@ export function CsvSubmitStep({
       });
 
       const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
         strategy_id?: unknown;
         status?: unknown;
         code?: string;
@@ -140,7 +141,12 @@ export function CsvSubmitStep({
         error?: string;
       };
 
-      if (!res.ok) {
+      // NEW-C14-01: 409 with ok:true is an idempotent success — the route
+      // found the pre-existing strategy_id for this wizard_session_id.
+      // Treat it as a successful finalize so the user lands on /strategies.
+      const isIdempotentSuccess = res.status === 409 && data.ok === true;
+
+      if (!res.ok && !isIdempotentSuccess) {
         const errEnvelope: ValidationEnvelope = {
           code: data.code ?? "CSV_SUBMIT_FAILED",
           human_message:
@@ -156,7 +162,14 @@ export function CsvSubmitStep({
           step: "csv_submit",
           code: errEnvelope.code,
         });
-        setSubmitting(false);
+        // NEW-C14-01: re-enable Submit on errors that are safe to retry.
+        // The route is now idempotent for wizard_session_id conflicts
+        // (23505 → 409), so retrying after CSV_FINALIZE_FAIL is safe.
+        // Keep button disabled only for CSV_PERSIST_FAIL (strategy exists
+        // but series not saved — user should contact support, not retry).
+        if (data.code !== "CSV_PERSIST_FAIL") {
+          setSubmitting(false);
+        }
         return;
       }
 
