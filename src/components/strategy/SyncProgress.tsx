@@ -14,6 +14,17 @@ import type { StrategyAnalytics } from "@/lib/types";
  */
 export type ComputationStatus = StrategyAnalytics["computation_status"];
 
+// I2: module-level constants so they are not re-created on every render and
+// are not captured in useCallback closures as reactive values. These are
+// non-reactive (not derived from props/state) so placing them inside the
+// component body was misleading — a future engineer adding a prop shadow
+// would create a confusing closure-vs-constant ambiguity.
+// After ~120 s (40 polls × 3 s) call onStatusChange("error").
+const POLL_MAX_ATTEMPTS = 40;
+// After a few initial polls a missing row is treated as a failure so
+// the user sees a recoverable error instead of "Computing…" forever.
+const MISSING_ROW_GRACE_POLLS = 3;
+
 export type SyncStatus =
   | "idle"
   | "syncing"
@@ -195,13 +206,6 @@ export function SyncProgress({
   // timeout is measured in poll cycles, not wall-clock seconds. We use a
   // ref (not state) so incrementing it doesn't trigger a re-render.
   const pollAttemptsRef = useRef(0);
-  // After ~120 s (40 polls × 3 s) call onStatusChange("error") so the
-  // poller cannot run forever when the worker crashes, never claims the
-  // job, or the strategy_analytics row is missing.
-  const POLL_MAX_ATTEMPTS = 40;
-  // After a few initial polls a missing row is treated as a failure so
-  // the user sees a recoverable error instead of "Computing…" forever.
-  const MISSING_ROW_GRACE_POLLS = 3;
 
   const pollStatus = useCallback(async () => {
     // NEW-C37-01: increment attempt count and short-circuit on timeout.

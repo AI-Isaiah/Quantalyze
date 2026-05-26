@@ -173,6 +173,16 @@ export function CsvSubmitStep({
         return;
       }
 
+      // FINDING-6: on the 409 idempotent-success path, explicitly log if
+      // strategy_id is absent or non-UUID before the generic check below
+      // surfaces the error. This distinguishes "admin lookup silently failed
+      // and returned a corrupted shape" from "route returned 200 with no id".
+      // The /uuid4/ regex matches the standard uuid4 format produced by the DB.
+      if (isIdempotentSuccess && (typeof data.strategy_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(data.strategy_id ?? ""))) {
+        console.error("[wizard:CsvSubmitStep] 409 idempotent but strategy_id missing or non-UUID", { strategy_id: data.strategy_id, correlation_id: data.correlation_id });
+        // Fall through to the generic defensive check below which surfaces the error to the user.
+      }
+
       // Defensive: route returned 200 but missing strategy_id.
       if (typeof data.strategy_id !== "string" || data.strategy_id.length === 0) {
         const errEnvelope: ValidationEnvelope = {

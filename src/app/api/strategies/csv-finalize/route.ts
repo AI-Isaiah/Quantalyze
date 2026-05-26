@@ -567,6 +567,14 @@ async function writeFailedStrategyAnalyticsPlaceholder(
       console.warn(
         `${opts.logPrefix} ${opts.subcontext} placeholder pre-check SELECT failed (non-blocking) [correlation_id=${opts.correlationId}]: ${selectErr.message}`,
       );
+      // FINDING-7: capture to Sentry so admin-client SELECT failures
+      // (misconfiguration, PostgREST 5xx) are alertable. Without this,
+      // a guard bypass that stomps a 'complete' row with 'failed' leaves
+      // zero trace beyond the console.warn above.
+      captureToSentry(selectErr, {
+        tags: { surface: "csv-finalize", step: "placeholder-precheck" },
+        extra: { strategy_id: strategyId, correlation_id: opts.correlationId },
+      });
       // Best-effort: fall through to upsert anyway. The pre-fix
       // behaviour is preserved on infra fault; the guard only matters
       // when SELECT succeeds and the row is already complete.
