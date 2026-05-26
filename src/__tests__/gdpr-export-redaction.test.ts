@@ -390,6 +390,14 @@ describe("collectUserExportBundle — audit_log replaced by audit_log_for_user (
               order: () => ({ limit }),
               limit,
             }),
+            // NEW-C16-02: audit_log_for_user now filters via `.or()`
+            // (actor OR entity OR metadata-target). The mock returns the
+            // raw audit rows regardless of predicate; redactAuditLogForUser
+            // is the authoritative retention gate the assertions verify.
+            or: () => ({
+              order: () => ({ limit }),
+              limit,
+            }),
             in: () => ({
               order: () => ({ limit: indirectLimit }),
               limit: indirectLimit,

@@ -166,6 +166,34 @@ export interface ProjectedUserTable {
   user_column: string;
   /** Post-fetch redaction function. */
   project: (rows: unknown[], userId: string) => unknown[];
+  /**
+   * NEW-C16-02 (audit 2026-05-26, HIGH): optional PostgREST `.or()`
+   * filter builder. When present, the SELECT uses `.or(or_filter(userId))`
+   * INSTEAD of `.eq(user_column, userId)`. This is required for
+   * `audit_log_for_user`, whose `project` (redactAuditLogForUser)
+   * retains rows where the subject is the ACTOR, the ENTITY
+   * (entity_id=subject AND entity_type='user'), OR the metadata
+   * target (metadata->>target_user_id=subject) — i.e. "data ABOUT
+   * them", per GDPR Art. 15. A bare `.eq(user_column=actor)` only ever
+   * returned the actor slice, so admin-on-subject rows (role.grant /
+   * revoke, deletion approve/reject, account.sanitize — all written
+   * with user_id=ADMIN, entity_id=subject) were SILENTLY absent from
+   * the bundle (partial:false). The `.or()` widens the SQL predicate
+   * to MATCH the projection's retention criteria so those rows reach
+   * `project` and are exported.
+   *
+   * The `userId` is UUID-validated upstream (`collectUserExportBundle`
+   * refuses a non-UUID subject — C-0021), so interpolating it into the
+   * filter string is safe. The `project` callback STILL runs as the
+   * authoritative redaction/retention gate — the SQL widening only
+   * ensures the candidate rows are fetched; no row the projection
+   * would reject can survive it.
+   *
+   * Omit for api_keys / contact_requests: their `.eq(user_column)` IS
+   * the exact predicate the projection enforces (a single-owner
+   * column), so widening would be incorrect.
+   */
+  or_filter?: (userId: string) => string;
 }
 
 export type UserExportTable =
@@ -514,6 +542,19 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
     source_table: "audit_log",
     user_column: "user_id",
     project: redactAuditLogForUser,
+    // NEW-C16-02 (HIGH): widen the SQL predicate to MATCH the
+    // projection's retention criteria. redactAuditLogForUser keeps a
+    // row when the subject is the ACTOR, the ENTITY (entity_id=subject
+    // AND entity_type='user'), OR the metadata target
+    // (metadata->>target_user_id=subject). A bare .eq(user_id) only
+    // returned the actor slice, so admin-on-subject rows (role.grant /
+    // revoke, deletion.request.approve / reject, account.sanitize —
+    // written with user_id=ADMIN, entity_id=subject) never reached the
+    // projection and were silently absent from the export. The .or()
+    // below fetches all three directions; the projection remains the
+    // authoritative redaction gate.
+    or_filter: (userId: string) =>
+      `user_id.eq.${userId},and(entity_id.eq.${userId},entity_type.eq.user),metadata->>target_user_id.eq.${userId}`,
   },
   // ------------------------------------------------------------------
   // Indirectly owned (reachable via a parent table)
@@ -1532,10 +1573,23 @@ async function fetchRowsForSpec(
     // so a regulator audit reads the flag correctly. See the
     // `audit_log_for_user source_truncated semantics` regression test
     // in gdpr-export.test.ts.
-    const { data, error } = await admin
+    // NEW-C16-02 (HIGH): when the spec declares an `or_filter` (today
+    // only `audit_log_for_user`), the SQL predicate must MATCH the
+    // projection's broader retention criteria (actor OR entity OR
+    // metadata target) — a bare `.eq(user_column)` returns only the
+    // actor slice and silently drops admin-on-subject rows the subject
+    // is entitled to under Art. 15. For specs without an `or_filter`
+    // (api_keys, contact_requests) the single-owner `.eq()` IS the
+    // exact predicate the projection enforces. `userId` is
+    // UUID-validated upstream (C-0021), so interpolating it into the
+    // PostgREST filter string is safe.
+    const filtered = admin
       .from(spec.source_table)
-      .select("*")
-      .eq(spec.user_column, userId)
+      .select("*");
+    const scoped = spec.or_filter
+      ? filtered.or(spec.or_filter(userId))
+      : filtered.eq(spec.user_column, userId);
+    const { data, error } = await scoped
       .order(orderCol, { ascending: true })
       .limit(EXPORT_PER_TABLE_ROW_CAP + 1);
     if (error) {

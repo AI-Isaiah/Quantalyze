@@ -34,6 +34,7 @@ import {
   EXPORT_PER_TABLE_ROW_CAP,
   EXPORT_SIZE_CAP_BYTES,
   EXPORT_PARENT_ID_IN_CHUNK,
+  REDACTED_PLACEHOLDER,
   type ExportBundle,
   type UserExportTable,
 } from "@/lib/gdpr-export";
@@ -134,6 +135,14 @@ function makeMockClient(
             projection === "id" ? parentIdResolver(table) : directResolver(table);
           return {
             eq: () => ({
+              order: () => ({ limit: limitFn }),
+              limit: limitFn,
+            }),
+            // NEW-C16-02: audit_log_for_user now filters via `.or()`
+            // (actor OR entity OR metadata-target) instead of `.eq()`.
+            // The mock mirrors `.eq()` so the projected fetch resolves
+            // the seeded rows for the source table.
+            or: () => ({
               order: () => ({ limit: limitFn }),
               limit: limitFn,
             }),
@@ -359,6 +368,11 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
             order: () => ({ limit: delayedLimit }),
             limit: delayedLimit,
           }),
+          // NEW-C16-02: audit_log_for_user filters via `.or()`.
+          or: () => ({
+            order: () => ({ limit: delayedLimit }),
+            limit: delayedLimit,
+          }),
           in: () => ({
             order: () => ({ limit: delayedLimit }),
             limit: delayedLimit,
@@ -393,6 +407,11 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
         return {
           select: () => ({
             eq: () => ({
+              order: () => ({ limit }),
+              limit,
+            }),
+            // NEW-C16-02: audit_log_for_user filters via `.or()`.
+            or: () => ({
               order: () => ({ limit }),
               limit,
             }),
@@ -445,6 +464,11 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
               order: () => ({ limit }),
               limit,
             }),
+            // NEW-C16-02: audit_log_for_user filters via `.or()`.
+            or: () => ({
+              order: () => ({ limit }),
+              limit,
+            }),
             in: () => ({
               order: () => ({ limit: indirectLimit }),
               limit: indirectLimit,
@@ -471,6 +495,11 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
       from: () => ({
         select: () => ({
           eq: () => ({
+            order: () => ({ limit: emptyLimit }),
+            limit: emptyLimit,
+          }),
+          // NEW-C16-02: audit_log_for_user filters via `.or()`.
+          or: () => ({
             order: () => ({ limit: emptyLimit }),
             limit: emptyLimit,
           }),
@@ -581,6 +610,11 @@ describe("collectUserExportBundle — M-0520 indirect parent error fails loud (n
         return {
           select: () => ({
             eq: () => ({
+              order: () => ({ limit }),
+              limit,
+            }),
+            // NEW-C16-02: audit_log_for_user filters via `.or()`.
+            or: () => ({
               order: () => ({ limit }),
               limit,
             }),
@@ -833,6 +867,16 @@ describe("collectUserExportBundle — H-0456 / NEW-C16-01 getOrderColumn per-tab
               },
               limit,
             }),
+            // NEW-C16-02: audit_log_for_user filters via `.or()` — record
+            // its order column the same way so the audit_log assertion
+            // (sorts by created_at) still fires.
+            or: () => ({
+              order: (col: string) => {
+                orderCalls.push({ table, col });
+                return { limit };
+              },
+              limit,
+            }),
             in: () => ({
               order: (col: string) => {
                 orderCalls.push({ table, col });
@@ -877,6 +921,101 @@ describe("collectUserExportBundle — H-0456 / NEW-C16-01 getOrderColumn per-tab
     );
     expect(idTables.length).toBeGreaterThan(0);
     for (const c of idTables) expect(c.col).toBe("id");
+  });
+});
+
+describe("collectUserExportBundle — NEW-C16-02 audit_log widened to entity/metadata-target rows (HIGH)", () => {
+  it("fetches audit_log via `.or()` covering actor + entity + metadata-target, not a bare `.eq()`", async () => {
+    // Pre-fix the audit_log_for_user source SELECT used
+    // `.eq("user_id", subject)`, so admin-on-subject rows (user_id=ADMIN,
+    // entity_id=subject) were never fetched and silently absent from the
+    // export despite the projection being entitled to keep them. The fix
+    // widens the SQL predicate to MATCH redactAuditLogForUser's retention
+    // criteria. This test pins that audit_log is queried through `.or()`
+    // (NOT `.eq()`) and that the filter string covers all three
+    // directions.
+    const SUBJECT = "55555555-5555-5555-5555-555555555555";
+    const ADMIN = "99999999-9999-9999-9999-999999999999";
+    // The admin-on-subject row: actor is the ADMIN, the subject is the
+    // ENTITY. A bare `.eq("user_id", subject)` would NEVER return it.
+    const adminOnSubjectRow = {
+      id: "audit-1",
+      user_id: ADMIN,
+      action: "role.grant",
+      entity_type: "user",
+      entity_id: SUBJECT,
+      metadata: { granted_by: ADMIN, role: "allocator" },
+      created_at: "2026-05-01T00:00:00Z",
+    };
+
+    let auditOrFilter: string | null = null;
+    let auditUsedEq = false;
+    const mock = {
+      from: (table: string) => {
+        const empty = async () => ({ data: [], error: null });
+        const auditRows = async () => ({
+          data: [adminOnSubjectRow],
+          error: null,
+        });
+        return {
+          select: () => ({
+            eq: () => {
+              if (table === "audit_log") auditUsedEq = true;
+              return {
+                order: () => ({ limit: empty }),
+                limit: empty,
+              };
+            },
+            or: (filter: string) => {
+              if (table === "audit_log") auditOrFilter = filter;
+              return {
+                order: () => ({
+                  limit: table === "audit_log" ? auditRows : empty,
+                }),
+                limit: table === "audit_log" ? auditRows : empty,
+              };
+            },
+            in: () => ({
+              order: () => ({ limit: empty }),
+              limit: empty,
+            }),
+          }),
+        };
+      },
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, SUBJECT);
+
+    // The audit_log source MUST be queried via `.or()`, never the
+    // actor-only `.eq()`.
+    expect(auditUsedEq).toBe(false);
+    expect(auditOrFilter).not.toBeNull();
+    // The `.or()` filter covers all three retention directions.
+    expect(auditOrFilter).toContain(`user_id.eq.${SUBJECT}`);
+    expect(auditOrFilter).toContain(
+      `and(entity_id.eq.${SUBJECT},entity_type.eq.user)`,
+    );
+    expect(auditOrFilter).toContain(
+      `metadata->>target_user_id.eq.${SUBJECT}`,
+    );
+
+    // The admin-on-subject row reaches the projection and is exported.
+    const auditTable = bundle.tables.find(
+      (t) => t.table === "audit_log_for_user",
+    );
+    expect(auditTable).toBeDefined();
+    expect(auditTable!.row_count).toBe(1);
+    const row = auditTable!.rows[0] as Record<string, unknown>;
+    expect(row.id).toBe("audit-1");
+    expect(row.entity_id).toBe(SUBJECT);
+    // Entity-only retention scrubs the cross-party actor user_id and the
+    // admin UUID in metadata (existing redaction contract, NEW-C16-02
+    // does not weaken it).
+    expect(row.user_id).toBe(REDACTED_PLACEHOLDER);
+    expect((row.metadata as Record<string, unknown>).granted_by).toBe(
+      REDACTED_PLACEHOLDER,
+    );
   });
 });
 
@@ -1282,6 +1421,11 @@ describe("collectUserExportBundle — indirect null parent IDs are tolerated (re
                 : emptyLimit;
             return {
               eq: () => ({
+                order: () => ({ limit }),
+                limit,
+              }),
+              // NEW-C16-02: audit_log_for_user filters via `.or()`.
+              or: () => ({
                 order: () => ({ limit }),
                 limit,
               }),
