@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
@@ -30,9 +30,39 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
 
   const needsPassphrase = exchange === "okx";
 
+  // NEW-C29-03: hold refs to the secret setters so the unmount cleanup can
+  // reach them without closing over the state values themselves.
+  const setApiSecretRef = useRef(setApiSecret);
+  const setPassphraseRef = useRef(setPassphrase);
+  setApiSecretRef.current = setApiSecret;
+  setPassphraseRef.current = setPassphrase;
+
+  // NEW-C29-03: zero out the plaintext secret fields on unmount regardless of
+  // close path (Cancel button, modal X button, Escape key). This bounds the
+  // in-memory lifetime of the plaintext to the time the modal is open — the
+  // same session the user intended — rather than leaving it in the React fiber
+  // tree / DevTools heap snapshot for an unbounded time after dismiss.
+  useEffect(() => {
+    return () => {
+      setApiSecretRef.current("");
+      setPassphraseRef.current("");
+    };
+  }, []);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     await onSubmit({ exchange, label, apiKey, apiSecret, passphrase });
+    // On a successful round-trip the parent closes the modal and unmounts this
+    // component, triggering the cleanup above. On validation failure the modal
+    // stays open for retry — the plaintext stays available for the next attempt.
+  }
+
+  // NEW-C29-03: also scrub on explicit Cancel before calling onCancel, so the
+  // fields are cleared synchronously before the parent re-renders.
+  function handleCancel() {
+    setApiSecret("");
+    setPassphrase("");
+    onCancel();
   }
 
   return (
@@ -89,7 +119,7 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
         {error && <p className="text-sm text-negative mt-3">{error}</p>}
 
         <div className="flex gap-3 mt-4">
-          <Button variant="secondary" type="button" onClick={onCancel}>
+          <Button variant="secondary" type="button" onClick={handleCancel}>
             Cancel
           </Button>
           <Button type="submit" disabled={loading}>

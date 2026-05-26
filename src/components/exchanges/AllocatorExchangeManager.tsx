@@ -72,6 +72,12 @@ interface ExchangeConnection {
   // AllocatorSyncStatus.helperOverride so it takes precedence over computed
   // helper text.
   helper_override: string | null;
+  // NEW-C29-02 (client-only — NOT persisted to DB): true for rows optimistically
+  // inserted before the DB replica confirms them. The merge effect retains rows
+  // with this flag until their id appears in the server snapshot, preventing
+  // a router.refresh() that resolves before replica propagation from dropping
+  // the row from local state.
+  pending_insert?: boolean;
 }
 
 /**
@@ -154,6 +160,10 @@ function normalizeInitialKey(
     // router.refresh() server-state cycles when the row id matches.
     queued_next_attempt_at: prev?.queued_next_attempt_at ?? null,
     helper_override: prev?.helper_override ?? null,
+    // NEW-C29-02: a row that arrives in the server snapshot is no longer pending.
+    // pending_insert is cleared when the server confirms the id (this call
+    // happens when the row appears in initialKeys).
+    pending_insert: false,
   };
 }
 
@@ -325,12 +335,24 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
   // for matching ids (f8 / f4). Done during render (not an effect) so the
   // merged state is visible on the same commit — avoids the cascading-render
   // penalty of setState-in-useEffect (react-hooks/set-state-in-effect).
+  //
+  // NEW-C29-02: make the merge ADDITIVE — preserve locally-inserted rows
+  // flagged pending_insert=true until the server snapshot contains a row
+  // with the same id. Without this, a router.refresh() that resolves
+  // before the DB replica propagates the new row drops it from local state
+  // (appears to vanish for 1-2s then reappears on the next 5s poll tick).
   const [prevInitialKeys, setPrevInitialKeys] = useState(initialKeys);
   if (prevInitialKeys !== initialKeys) {
     setPrevInitialKeys(initialKeys);
     setKeys((prev) => {
       const byId = new Map(prev.map((k) => [k.id, k]));
-      return initialKeys.map((k) => normalizeInitialKey(k, byId.get(k.id)));
+      const serverIds = new Set(initialKeys.map((k) => k.id));
+      const merged = initialKeys.map((k) => normalizeInitialKey(k, byId.get(k.id)));
+      // Retain any locally-inserted rows that haven't appeared on the server yet.
+      const pending = prev.filter(
+        (k) => (k as ExchangeConnection & { pending_insert?: boolean }).pending_insert && !serverIds.has(k.id),
+      );
+      return [...pending, ...merged];
     });
   }
 
@@ -509,8 +531,13 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
       // BEFORE awaiting the POST (so the f4 error surfaces on the row's
       // aria-live helper line rather than blocking the modal). Finally,
       // await the sync request per f4.
-      const newRow = normalizeInitialKey(inserted as InitialKey);
-      newRow.sync_status = "syncing";
+      // NEW-C29-02: stamp pending_insert=true so the merge effect retains this
+      // row even if router.refresh() resolves before the replica propagates it.
+      const newRow: ExchangeConnection = {
+        ...normalizeInitialKey(inserted as InitialKey),
+        sync_status: "syncing",
+        pending_insert: true,
+      };
       setKeys((prev) => [newRow, ...prev]);
       setShowForm(false);
       setFormLoading(false);
@@ -738,9 +765,20 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
                       {formatRelative(key.last_sync_at)}
                     </p>
                   </div>
+                  {/* NEW-C29-01: guard against double-click firing the RPC twice.
+                      sync_status is already flipped to "syncing" optimistically
+                      before the RPC in handleReconnect, so this disabled check
+                      prevents a second click from queuing a duplicate RPC +
+                      sync POST and racing against the first. */}
                   <Button
                     variant="primary"
+                    disabled={key.sync_status === "syncing"}
                     aria-label={`Reconnect ${key.exchange} key`}
+                    title={
+                      key.sync_status === "syncing"
+                        ? "Reconnect in progress"
+                        : undefined
+                    }
                     onClick={() => handleReconnect(key.id)}
                   >
                     Reconnect
