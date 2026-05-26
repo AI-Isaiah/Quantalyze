@@ -147,6 +147,10 @@ function makeAdminClient() {
     },
     rpc: (fn: string, args: unknown) => {
       if (fn === "sanitize_user") return sanitizeUserRpcMock(args);
+      // NEW-C10-01: reject route switched to logAuditEventAsUser which calls
+      // adminClient.rpc("log_audit_event_service"). Route it to logAuditRpcMock
+      // so existing rejection-audit assertions can find the call.
+      if (fn === "log_audit_event_service") return logAuditRpcMock(fn, args);
       throw new Error(`Unexpected admin RPC: ${fn}`);
     },
   };
@@ -641,18 +645,20 @@ describe("POST /api/admin/deletion-requests/[id]/reject — self-action guard (C
     expect(res.status).toBe(200);
 
     // M-0008: bounded poll (see note above) — fail-loud on a missing emission.
+    // NEW-C10-01: reject route now calls logAuditEventAsUser → adminClient.rpc
+    // "log_audit_event_service" (service-role path). Look for that RPC name.
     await vi.waitFor(() =>
       expect(
         logAuditRpcMock.mock.calls.find(
           (c) =>
-            c[0] === "log_audit_event" &&
+            c[0] === "log_audit_event_service" &&
             c[1]?.p_action === "deletion.request.reject",
         ),
       ).toBeDefined(),
     );
 
     const rejectAudit = logAuditRpcMock.mock.calls.find(
-      (c) => c[0] === "log_audit_event" && c[1]?.p_action === "deletion.request.reject",
+      (c) => c[0] === "log_audit_event_service" && c[1]?.p_action === "deletion.request.reject",
     );
     expect(rejectAudit).toBeDefined();
     expect(rejectAudit![1]).toMatchObject({
@@ -735,18 +741,20 @@ describe("POST /api/admin/deletion-requests/[id]/reject — self-action guard (C
     expect(res.status).toBe(200);
 
     // M-0008: bounded poll (see note above) — fail-loud on a missing emission.
+    // NEW-C10-01: reject route now calls logAuditEventAsUser → adminClient.rpc
+    // "log_audit_event_service" (service-role path). Look for that RPC name.
     await vi.waitFor(() =>
       expect(
         logAuditRpcMock.mock.calls.find(
           (c) =>
-            c[0] === "log_audit_event" &&
+            c[0] === "log_audit_event_service" &&
             c[1]?.p_action === "deletion.request.reject",
         ),
       ).toBeDefined(),
     );
 
     const rejectAudit = logAuditRpcMock.mock.calls.find(
-      (c) => c[0] === "log_audit_event" && c[1]?.p_action === "deletion.request.reject",
+      (c) => c[0] === "log_audit_event_service" && c[1]?.p_action === "deletion.request.reject",
     );
     expect(rejectAudit).toBeDefined();
     expect(
