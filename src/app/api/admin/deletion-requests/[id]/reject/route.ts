@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withRole, requireAdmin } from "@/lib/auth";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 import {
   adminActionLimiter,
   checkLimit,
@@ -164,8 +164,15 @@ export const POST = withRole<{ id: string }>("admin")(
     // when the CAS won — the loser of a race has nothing honest to
     // claim about who rejected the request (the winning admin already
     // owns that row).
+    //
+    // NEW-C10-01 (audit-2026-05-26 security): switched from logAuditEvent
+    // (user-scoped, deferred after()) to logAuditEventAsUser (service-role)
+    // so the RPC does not depend on auth.uid() resolving from an admin JWT
+    // that may expire between response flush and after() settle. Deletion
+    // rejection is a security-critical write — a missed audit row is
+    // unacceptable.
     if (rowsAffected > 0) {
-      logAuditEvent(supabase, {
+      logAuditEventAsUser(admin, user.id, {
         action: "deletion.request.reject",
         entity_type: "data_deletion_request",
         entity_id: requestId,

@@ -201,6 +201,19 @@ function reportToSentry(
  * the emission still attempts a best-effort background write rather than
  * surfacing the scheduling error to the caller.
  *
+ * SECURITY BOUNDARY — when to use this vs `logAuditEventAsUser`
+ * ---------------------------------------------------------------
+ * NEW-C10-01 (audit-2026-05-26): this function emits on the USER-SCOPED
+ * client, so `auth.uid()` in Postgres is resolved from the caller's JWT.
+ * For security-critical mutations (role grants, strategy approve/reject,
+ * GDPR deletion, kill-switch) the JWT may expire between response flush
+ * and `after()` settle (1 h default), causing a 42501 → row dropped.
+ * Use `logAuditEventAsUser(adminClient, verifiedUserId, ...)` for those
+ * paths — it uses the service-role client which is JWT-immune. Prefer
+ * this function only for non-critical, high-volume events (analytics,
+ * portfolio updates, note edits) where an occasional missed row is
+ * acceptable and avoiding a service-role import is desirable.
+ *
  * Taxonomy
  * --------
  * Action strings are namespaced `<subject>.<verb>` (e.g. `api_key.decrypt`,
