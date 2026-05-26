@@ -1523,6 +1523,45 @@ def test_risk_of_ruin_low_winrate_no_edge_returns_one():
         )
 
 
+def test_risk_of_ruin_50pct_winrate_positive_payoff_returns_one():
+    """red-team C1 (2026-05-26): p == 0.5 exactly with positive payoff ratio
+    (r=2.0) — a 50%-win / 2:1-payoff strategy.
+
+    Old code: strict `p > q` guard → False at boundary → fell through to
+    `p*r > q` (1.0 > 0.5 → True) → returned None instead of 1.0.
+
+    Cox-Miller formula at p=0.5: (q/p)^N = (0.5/0.5)^N = 1.0^N = 1.0.
+    Certain ruin is the mathematically correct answer; the clamp handles it.
+    Fixed: `p >= q and r > 0` admits the boundary.
+    """
+    result = compute_risk_of_ruin(win_rate=0.5, payoff_ratio=2.0, avg_trade_size=0.01)
+    for entry in result:
+        prob = entry["probability"]
+        assert prob == 1.0, (
+            f"risk_of_ruin must return 1.0 for p=0.5 / r=2.0 (red-team C1 "
+            f"regression — old code returned None; got {prob!r})"
+        )
+
+
+def test_risk_of_ruin_high_winrate_zero_payoff_returns_one():
+    """red-team H1 (2026-05-26): p=0.6 with r=0 (zero payoff ratio).
+
+    Old code: strict `p > q` guard → True → entered decay branch →
+    returned ~0.017 (low-ruin). But r=0 means every "win" contributes
+    nothing; the strategy bleeds losses to certain ruin.
+
+    Fixed: `p >= q and r > 0` — zero payoff fails the r>0 guard, falls
+    through to `p*r > q` (0.6*0=0 is not > 0.4) → else → 1.0.
+    """
+    result = compute_risk_of_ruin(win_rate=0.6, payoff_ratio=0.0, avg_trade_size=0.01)
+    for entry in result:
+        prob = entry["probability"]
+        assert prob == 1.0, (
+            f"risk_of_ruin must return 1.0 for p=0.6 / r=0 (red-team H1 "
+            f"regression — old code returned ~0.017; got {prob!r})"
+        )
+
+
 # ---------------------------------------------------------------------------
 # NEW-C02-02: _rolling_sharpe zero-variance guard
 # ---------------------------------------------------------------------------
@@ -1657,9 +1696,15 @@ def test_return_quantiles_accepts_precomputed_monthly(golden_returns):
     """
     import services.metrics as metrics_module
 
+    # red-team H2 (2026-05-26): use the SAME guard as production
+    # (compute_all_metrics line ~398: x.notna().any()) so the test cannot
+    # silently pass phantom months through when the precomputed path is used.
+    # The old len(x) > 0 guard included all-NaN calendar buckets as 0.0,
+    # which is exactly the phantom-month bug that x.notna().any() was added
+    # to prevent.
     monthly_rets = (
         golden_returns.resample("ME")
-        .apply(lambda x: (1 + x).prod() - 1 if len(x) > 0 else float("nan"))
+        .apply(lambda x: (1 + x).prod() - 1 if x.notna().any() else float("nan"))
         .dropna()
     )
     result_with = _return_quantiles(golden_returns, monthly_rets=monthly_rets)

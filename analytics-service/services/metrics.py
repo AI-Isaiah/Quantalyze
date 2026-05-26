@@ -854,23 +854,29 @@ def compute_risk_of_ruin(
 ) -> list[dict[str, float | None]]:
     """Cox-Miller analytical approximation for probability of reaching various loss levels.
 
-    The decaying-ruin branch requires p > q (win rate strictly above 0.5) so
-    that q/p is in (0, 1) and (q/p)^exponent decays toward 0. The original
-    guard `p*r > q` (positive edge) is INSUFFICIENT: a 40%-win / 3:1-payoff
-    strategy satisfies 1.2 > 0.6 yet q/p = 1.5 → the exponentiation explodes
-    to values far above 1.0, which is not a valid probability.
+    The decaying-ruin branch requires p >= q (win rate at or above 0.5) AND
+    r > 0 so that the formula is valid.  When p > 0.5, q/p is in (0, 1) and
+    (q/p)^exponent decays toward 0.  At p == 0.5 exactly, q/p == 1.0 and the
+    result is 1.0 (certain ruin) for every loss level — mathematically correct
+    and handled safely by the [0, 1] clamp.  The original guard `p*r > q`
+    (positive edge) is INSUFFICIENT: a 40%-win / 3:1-payoff strategy satisfies
+    1.2 > 0.6 yet q/p = 1.5 → exponentiation explodes to values far above 1.0.
 
-    NEW-C02-01: gate the decaying branch on `p > q` (i.e. p > 0.5); result
-    is also clamped to [0, 1] as a defence-in-depth safeguard.
+    NEW-C02-01: gate the decaying branch on `p >= q` (i.e. p >= 0.5) AND
+    r > 0; result is also clamped to [0, 1] as a defence-in-depth safeguard.
 
-    CR-C1 (specialist review 2026-05-26): This implementation is win-rate-only
-    (Cox-Miller / gambler's ruin formula). It is valid only when p > 0.5
-    (q/p < 1, so exponentiation decays). For strategies with p <= 0.5 AND a
+    CR-C1 (specialist review 2026-05-26): For strategies with p < 0.5 AND a
     genuine positive Kelly edge (p*r > q — e.g. 45%-win / 10:1-payoff, common
     in trend-following), returning 1.0 (certain ruin) would be factually wrong
     and misleading. Instead we return None so the UI can render "N/A — formula
-    requires win rate > 50%". Strategies with p <= 0.5 AND no Kelly edge
+    requires win rate > 50%". Strategies with p < 0.5 AND no Kelly edge
     (p*r <= q) do face near-certain ruin and get 1.0.
+
+    red-team C1 (2026-05-26): p == 0.5 with r > 0 previously fell through to
+    the None branch because the guard was strict `p > q`.  Fixed to `p >= q`.
+    red-team H1 (2026-05-26): p > 0.5 with r == 0 previously entered the decay
+    branch and returned low-ruin (~0.017) despite zero payoff meaning certain
+    ruin.  Fixed by adding `and r > 0` to the decay-branch guard.
     """
     p = win_rate
     q = 1.0 - p
@@ -881,8 +887,13 @@ def compute_risk_of_ruin(
     for level in loss_levels:
         if p <= 0 or avg_trade_size <= 0:
             prob: float | None = _safe_float(1.0)
-        elif p > q:
-            # q/p is in (0, 1) when p > 0.5, so exponentiation decays safely.
+        elif p >= q and r > 0:
+            # q/p is in (0, 1] when p >= 0.5 (strict decay when p > 0.5; at
+            # p == 0.5 exactly, q/p == 1.0 so (1.0)^N == 1.0 → certain ruin,
+            # which is the correct answer and passes through the clamp safely).
+            # Guard r > 0: if payoff_ratio == 0 every "win" contributes nothing
+            # so the formula is invalid regardless of p — fall through to
+            # certain-ruin or None branches below.
             exponent = min(level / max(avg_trade_size, 0.001), 500)
             raw = (q / p) ** exponent
             prob = _safe_float(min(max(raw, 0.0), 1.0))
