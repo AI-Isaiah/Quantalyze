@@ -567,32 +567,80 @@ describe("requireRole", () => {
     }
   });
 
-  it("red-team: admin-union fallback issues at-most-one user_app_roles round-trip (no redundant hasAdminRoleRow)", async () => {
-    // audit-2026-05-07 red-team (MED conf 8): pre-fix the fallback path
-    // called `isAdminUser` → `hasAdminRoleRow`, which re-queries
-    // user_app_roles with a `.eq("role","admin").limit(1)` chain that
-    // React `cache()` cannot dedupe against the prior `getUserRolesResult`
-    // call (cache keys on argument identity, not result-equivalence).
-    // That gave the non-admin reject path THREE DB round-trips:
-    //   1. user_app_roles role-set fetch (getUserRolesResult — cached)
-    //   2. user_app_roles admin-row re-check (hasAdminRoleRow)
-    //   3. profiles.is_admin fetch (hasIsAdminFlag)
-    // Post-fix: the fallback uses `isAdminUserGivenUserAppRoles`, which
-    // trusts the already-fetched userRoles as the user_app_roles signal.
-    // Round-trips on the reject path drop to TWO: one user_app_roles
-    // query + one profiles query. This test pins that contract.
+  it("NEW-C15-04: admin-union fallback issues TWO user_app_roles round-trips (fresh hasAdminRoleRow via isAdminUser)", async () => {
+    // NEW-C15-04 (audit-2026-05-26 red-team): the C15-04 fix reverts the
+    // round-trip optimisation that was in `isAdminUserGivenUserAppRoles`.
+    // The fallback now calls `isAdminUser` which issues a fresh
+    // `hasAdminRoleRow` query REGARDLESS of the already-fetched `userRoles`.
+    //
+    // Why this is correct: `getUserRolesResult` silently maps a 42501
+    // (RLS denial) to `{ok:true, roles:[]}`. Trusting that empty set inside
+    // the fallback (as `isAdminUserGivenUserAppRoles` did) means a
+    // join-table-only admin whose roles fetch is denied stays denied — and
+    // the RLS fault is masked. The fresh `hasAdminRoleRow` query resolves
+    // via the SECURITY DEFINER path and is not subject to the same RLS
+    // policy, so it can still see the admin row. Correctness > 1 round-trip.
+    //
+    // Non-admin reject path now takes THREE DB round-trips:
+    //   1. user_app_roles role-set fetch (getUserRolesResult)
+    //   2. user_app_roles admin-row re-check (hasAdminRoleRow inside isAdminUser)
+    //   3. profiles.is_admin fetch (hasIsAdminFlag inside isAdminUser)
     userRolesQueryMock.mockResolvedValue({ data: [], error: null });
     profilesIsAdminQueryMock.mockResolvedValueOnce({
       data: { is_admin: false },
       error: null,
     });
     await requireRole(makeFromOnly(), mockUser, "admin");
-    // ONE user_app_roles round-trip — the redundant hasAdminRoleRow call
-    // is gone. If a future refactor re-introduces it, this assertion fails.
-    expect(userRolesQueryMock).toHaveBeenCalledTimes(1);
+    // TWO user_app_roles round-trips: getUserRolesResult + hasAdminRoleRow.
+    // If a future refactor collapses these back to one (reintroducing
+    // isAdminUserGivenUserAppRoles), this assertion fails — that's the
+    // C15-04 regression we're guarding against.
+    expect(userRolesQueryMock).toHaveBeenCalledTimes(2);
     // profiles.is_admin still gets called — that signal can grant admin
     // even when user_app_roles is empty.
     expect(profilesIsAdminQueryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("NEW-C15-04: join-table-only admin + 42501 on getUserRolesResult still resolves to admin", async () => {
+    // NEW-C15-04 (audit-2026-05-26 red-team) regression test.
+    //
+    // Setup: user has user_app_roles.role='admin' (join-table-only admin),
+    // profiles.is_admin = FALSE. The FIRST user_app_roles read (getUserRoles-
+    // Result) is denied with 42501 → silently mapped to `{ok:true, roles:[]}`.
+    // The SECOND user_app_roles read (hasAdminRoleRow inside isAdminUser) uses
+    // the SECURITY DEFINER path and succeeds — returns the admin row.
+    //
+    // Pre-fix (isAdminUserGivenUserAppRoles): the empty set from the first
+    // call was passed in as the authoritative `userAppRoles` argument, so
+    // `includes('admin')` was false and the user was denied. The RLS fault
+    // was invisible to the caller.
+    //
+    // Post-fix (isAdminUser): the second fresh query resolves the admin row
+    // → returns admin. The 42501 on the first read is masked only at the
+    // role-set level; the second independent query recovers it.
+    userRolesQueryMock
+      // First call (getUserRolesResult): 42501 → maps to {ok:true, roles:[]}
+      .mockResolvedValueOnce({
+        data: null,
+        error: { code: "42501", message: "permission denied" },
+      })
+      // Second call (hasAdminRoleRow inside isAdminUser): SECURITY DEFINER
+      // path succeeds and finds the admin row.
+      .mockResolvedValueOnce({ data: [{ role: "admin" }], error: null });
+    // profiles.is_admin = FALSE — join-table-only admin, no profile flag.
+    profilesIsAdminQueryMock.mockResolvedValueOnce({
+      data: { is_admin: false },
+      error: null,
+    });
+
+    const result = await requireRole(makeFromOnly(), mockUser, "admin");
+
+    // Must resolve to admin, not forbidden — the fresh hasAdminRoleRow
+    // recovered the join-table row that the denied getUserRolesResult hid.
+    expect("roles" in result).toBe(true);
+    if ("roles" in result) {
+      expect(result.roles).toContain("admin");
+    }
   });
 
   it("admin-union fallback is admin-scoped only: caller requesting non-admin role still gets 403 even when is_admin=true", async () => {

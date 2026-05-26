@@ -4,7 +4,7 @@ import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { APP_ROLES, type AppRole } from "@/lib/auth-types";
-import { isAdminUser, isAdminUserGivenUserAppRoles } from "@/lib/admin";
+import { isAdminUser } from "@/lib/admin";
 // NEW-C15-01: lazy import to avoid adding a static top-level import to a
 // widely-tested module (auth.ts). The dynamic import is resolved on the
 // first withRole call that needs the approval gate — well before any RPC
@@ -339,15 +339,28 @@ export async function requireRole(
     // signal for `allocator` / `quant_manager` / `analyst`, so
     // `user_app_roles` is authoritative for those.
     //
-    // Use the `isAdminUserGivenUserAppRoles` variant which trusts the
-    // already-fetched `userRoles` as the user_app_roles signal instead
-    // of re-issuing the join-table query. On the non-admin reject path
-    // this drops DB round-trips from 3 → 2.
+    // NEW-C15-04 (audit-2026-05-26 red-team): use `isAdminUser` (fresh
+    // re-query of BOTH signals) instead of `isAdminUserGivenUserAppRoles`
+    // (which trusts the already-fetched `userRoles`). The pre-fix code
+    // optimised for DB round-trips: `isAdminUserGivenUserAppRoles` skipped
+    // the `hasAdminRoleRow` call when `userRoles` was already in hand. But
+    // `getUserRolesResult` silently translates a `42501` (RLS denial) into
+    // `{ok:true, roles:[]}`, so a join-table-only admin (profiles.is_admin=
+    // FALSE, user_app_roles.role='admin') whose roles fetch is denied by a
+    // misconfigured RLS policy ends up with an empty `userRoles`. Passing
+    // that empty set to `isAdminUserGivenUserAppRoles` makes `includes(
+    // 'admin')` false → the decision rests SOLELY on `hasIsAdminFlag`. A
+    // join-table-only admin is silently denied, and the RLS fault is masked.
+    //
+    // `isAdminUser` issues a fresh `hasAdminRoleRow` query (not the cached
+    // set), so it correctly resolves join-table-only admins even when the
+    // `getUserRolesResult` call was swallowed to `[]` by 42501. The cost is
+    // one extra `user_app_roles` round-trip on the admin-reject path (3 → 2
+    // optimisation is reverted). This is load-bearing: correctness > perf.
     if (roles.includes("admin")) {
-      const adminUnion = await isAdminUserGivenUserAppRoles(
+      const adminUnion = await isAdminUser(
         supabase,
         user,
-        userRoles,
       );
       if (adminUnion) {
         // Synthesize the admin role into the resolved set so handlers
