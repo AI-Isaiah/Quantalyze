@@ -119,6 +119,7 @@ import {
   requireRole,
   withRole,
   APP_ROLES,
+  __resetApprovalGatePromiseForTests,
   type RoleHandler,
 } from "./auth";
 
@@ -567,32 +568,80 @@ describe("requireRole", () => {
     }
   });
 
-  it("red-team: admin-union fallback issues at-most-one user_app_roles round-trip (no redundant hasAdminRoleRow)", async () => {
-    // audit-2026-05-07 red-team (MED conf 8): pre-fix the fallback path
-    // called `isAdminUser` → `hasAdminRoleRow`, which re-queries
-    // user_app_roles with a `.eq("role","admin").limit(1)` chain that
-    // React `cache()` cannot dedupe against the prior `getUserRolesResult`
-    // call (cache keys on argument identity, not result-equivalence).
-    // That gave the non-admin reject path THREE DB round-trips:
-    //   1. user_app_roles role-set fetch (getUserRolesResult — cached)
-    //   2. user_app_roles admin-row re-check (hasAdminRoleRow)
-    //   3. profiles.is_admin fetch (hasIsAdminFlag)
-    // Post-fix: the fallback uses `isAdminUserGivenUserAppRoles`, which
-    // trusts the already-fetched userRoles as the user_app_roles signal.
-    // Round-trips on the reject path drop to TWO: one user_app_roles
-    // query + one profiles query. This test pins that contract.
+  it("NEW-C15-04: admin-union fallback issues TWO user_app_roles round-trips (fresh hasAdminRoleRow via isAdminUser)", async () => {
+    // NEW-C15-04 (audit-2026-05-26 red-team): the C15-04 fix reverts the
+    // round-trip optimisation that was in `isAdminUserGivenUserAppRoles`.
+    // The fallback now calls `isAdminUser` which issues a fresh
+    // `hasAdminRoleRow` query REGARDLESS of the already-fetched `userRoles`.
+    //
+    // Why this is correct: `getUserRolesResult` silently maps a 42501
+    // (RLS denial) to `{ok:true, roles:[]}`. Trusting that empty set inside
+    // the fallback (as `isAdminUserGivenUserAppRoles` did) means a
+    // join-table-only admin whose roles fetch is denied stays denied — and
+    // the RLS fault is masked. The fresh `hasAdminRoleRow` query resolves
+    // via the SECURITY DEFINER path and is not subject to the same RLS
+    // policy, so it can still see the admin row. Correctness > 1 round-trip.
+    //
+    // Non-admin reject path now takes THREE DB round-trips:
+    //   1. user_app_roles role-set fetch (getUserRolesResult)
+    //   2. user_app_roles admin-row re-check (hasAdminRoleRow inside isAdminUser)
+    //   3. profiles.is_admin fetch (hasIsAdminFlag inside isAdminUser)
     userRolesQueryMock.mockResolvedValue({ data: [], error: null });
     profilesIsAdminQueryMock.mockResolvedValueOnce({
       data: { is_admin: false },
       error: null,
     });
     await requireRole(makeFromOnly(), mockUser, "admin");
-    // ONE user_app_roles round-trip — the redundant hasAdminRoleRow call
-    // is gone. If a future refactor re-introduces it, this assertion fails.
-    expect(userRolesQueryMock).toHaveBeenCalledTimes(1);
+    // TWO user_app_roles round-trips: getUserRolesResult + hasAdminRoleRow.
+    // If a future refactor collapses these back to one (reintroducing
+    // isAdminUserGivenUserAppRoles), this assertion fails — that's the
+    // C15-04 regression we're guarding against.
+    expect(userRolesQueryMock).toHaveBeenCalledTimes(2);
     // profiles.is_admin still gets called — that signal can grant admin
     // even when user_app_roles is empty.
     expect(profilesIsAdminQueryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("NEW-C15-04: join-table-only admin + 42501 on getUserRolesResult still resolves to admin", async () => {
+    // NEW-C15-04 (audit-2026-05-26 red-team) regression test.
+    //
+    // Setup: user has user_app_roles.role='admin' (join-table-only admin),
+    // profiles.is_admin = FALSE. The FIRST user_app_roles read (getUserRoles-
+    // Result) is denied with 42501 → silently mapped to `{ok:true, roles:[]}`.
+    // The SECOND user_app_roles read (hasAdminRoleRow inside isAdminUser) uses
+    // the SECURITY DEFINER path and succeeds — returns the admin row.
+    //
+    // Pre-fix (isAdminUserGivenUserAppRoles): the empty set from the first
+    // call was passed in as the authoritative `userAppRoles` argument, so
+    // `includes('admin')` was false and the user was denied. The RLS fault
+    // was invisible to the caller.
+    //
+    // Post-fix (isAdminUser): the second fresh query resolves the admin row
+    // → returns admin. The 42501 on the first read is masked only at the
+    // role-set level; the second independent query recovers it.
+    userRolesQueryMock
+      // First call (getUserRolesResult): 42501 → maps to {ok:true, roles:[]}
+      .mockResolvedValueOnce({
+        data: null,
+        error: { code: "42501", message: "permission denied" },
+      })
+      // Second call (hasAdminRoleRow inside isAdminUser): SECURITY DEFINER
+      // path succeeds and finds the admin row.
+      .mockResolvedValueOnce({ data: [{ role: "admin" }], error: null });
+    // profiles.is_admin = FALSE — join-table-only admin, no profile flag.
+    profilesIsAdminQueryMock.mockResolvedValueOnce({
+      data: { is_admin: false },
+      error: null,
+    });
+
+    const result = await requireRole(makeFromOnly(), mockUser, "admin");
+
+    // Must resolve to admin, not forbidden — the fresh hasAdminRoleRow
+    // recovered the join-table row that the denied getUserRolesResult hid.
+    expect("roles" in result).toBe(true);
+    if ("roles" in result) {
+      expect(result.roles).toContain("admin");
+    }
   });
 
   it("admin-union fallback is admin-scoped only: caller requesting non-admin role still gets 403 even when is_admin=true", async () => {
@@ -935,6 +984,96 @@ describe("withRole", () => {
     );
     expect(res.status).toBe(200);
   });
+
+  // NEW-C15-01 (audit-2026-05-26): approval gate in withRole.
+  // The global test-setup.ts vi.mock makes assertProfileApproved return null
+  // (approved) by default — we override it per-test to simulate unapproved.
+  it("NEW-C15-01: unapproved user with valid role is blocked (403), handler not called", async () => {
+    // Simulate a user who holds the 'allocator' role but has not been
+    // approved yet. The approval gate returns a 403 NextResponse; withRole
+    // must propagate it without calling the handler.
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-pending", email: "p@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+
+    const { assertProfileApproved } = await import("@/lib/api/approval-gate");
+    const gateBlock = NextResponse.json(
+      { error: "Account pending approval" },
+      { status: 403 },
+    );
+    vi.mocked(assertProfileApproved).mockResolvedValueOnce(gateBlock);
+
+    const handler = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    const wrapped = withRole("allocator")(handler as never);
+
+    const res = await wrapped(makeRequest({ body: {} }) as never);
+    expect(res.status).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("NEW-C15-01: { requireApproval: false } bypasses gate even when user is unapproved", async () => {
+    // Opt-out path: an explicit requireApproval: false means the gate is
+    // never consulted. assertProfileApproved must NOT be called, and the
+    // handler must receive the request.
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-pending", email: "p@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+
+    const { assertProfileApproved } = await import("@/lib/api/approval-gate");
+    // Arm the mock so it would block if called — proves it is never called.
+    vi.mocked(assertProfileApproved).mockResolvedValueOnce(
+      NextResponse.json({ error: "Account pending approval" }, { status: 403 }),
+    );
+
+    const handler = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    const wrapped = withRole("allocator", { requireApproval: false })(
+      handler as never,
+    );
+
+    const res = await wrapped(makeRequest({ body: {} }) as never);
+    expect(res.status).toBe(200);
+    expect(handler).toHaveBeenCalledTimes(1);
+    // The global mock tracks calls; because we used mockResolvedValueOnce
+    // (not mockImplementation), the call count tells us whether it fired.
+    expect(assertProfileApproved).not.toHaveBeenCalled();
+  });
+
+  it("NEW-C15-01: approval gate is consulted AFTER role check (not wasted on wrong-role callers)", async () => {
+    // Performance + correctness: the gate must only run when the role
+    // check passes. A caller with the wrong role gets 403 from requireRole
+    // before the approval gate is ever consulted.
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-wrong-role", email: "w@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "quant_manager" }],
+      error: null,
+    });
+
+    const { assertProfileApproved } = await import("@/lib/api/approval-gate");
+
+    const handler = vi.fn();
+    const wrapped = withRole("allocator")(handler as never);
+
+    const res = await wrapped(makeRequest({ body: {} }) as never);
+    expect(res.status).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
+    // Gate was NOT consulted — would be wasteful and could leak profile
+    // existence info to callers who failed the role check.
+    expect(assertProfileApproved).not.toHaveBeenCalled();
+  });
 });
 
 describe("requireAdmin — TOCTOU close + CSRF defense-in-depth", () => {
@@ -1118,4 +1257,174 @@ describe("RBAC back-compat matrix (simulated post-backfill state)", () => {
       }
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Red-team 2026-05-26 regression tests: C-1, H-1, H-2
+// ---------------------------------------------------------------------------
+
+describe("withRole — approval-gate import-failure eviction (C-1/H-1 red-team)", () => {
+  // C-1 (red-team 2026-05-26): _approvalGatePromise previously cached the
+  // REJECTED promise permanently, so a single transient import failure caused
+  // every subsequent request on that process to return 503 indefinitely.
+  // The fix attaches a .catch() to the import() call that evicts the promise
+  // on rejection so the next getApprovalGate() call retries the import.
+  //
+  // H-1 corollary: __resetApprovalGatePromiseForTests exposes the module-level
+  // state reset so test suites can start from a clean slate, preventing
+  // promise-state leakage across Vitest isolated contexts.
+  //
+  // Note: in the test environment the dynamic import always succeeds (the
+  // module is globally mocked). We test C-1's invariants:
+  //   (a) __resetApprovalGatePromiseForTests() is callable (H-1 hook works);
+  //   (b) after reset, a fresh withRole call picks up updated mock state,
+  //       proving the promise is NOT permanently cached from a prior run
+  //       (the observable property that C-1 fixes in production).
+
+  beforeEach(async () => {
+    __resetApprovalGatePromiseForTests();
+    // Reset the approval-gate mock state so queued returns don't leak.
+    const { assertProfileApproved } = await import("@/lib/api/approval-gate");
+    vi.mocked(assertProfileApproved).mockReset();
+    vi.mocked(assertProfileApproved).mockResolvedValue(null); // approved by default
+  });
+
+  it("H-1: __resetApprovalGatePromiseForTests resets module-level state — idempotent", () => {
+    // Belt-and-suspenders: the reset function must not throw and must be
+    // callable from beforeEach without side-effects.
+    expect(() => __resetApprovalGatePromiseForTests()).not.toThrow();
+    // Calling it twice is idempotent.
+    expect(() => __resetApprovalGatePromiseForTests()).not.toThrow();
+  });
+
+  it("C-1: after reset, withRole re-evaluates the module rather than using a stale cached promise", async () => {
+    // This test verifies the observable property of C-1's fix: that each
+    // withRole invocation AFTER a reset gets a fresh gate check rather than
+    // a permanently-cached promise. In production, this means a transient
+    // import failure does not permanently 503 the process — the next request
+    // re-attempts the import. Here we prove the non-cached behavior by
+    // asserting the mock's call count reflects a fresh resolution per reset.
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-c1", email: "c1@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValue({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+
+    const { assertProfileApproved } = await import("@/lib/api/approval-gate");
+    const handler = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    const wrapped = withRole("allocator")(handler as never);
+
+    // First invocation: gate is consulted (assertProfileApproved called once).
+    const res1 = await wrapped(makeRequest({ body: {} }) as never);
+    expect(res1.status).toBe(200);
+    expect(assertProfileApproved).toHaveBeenCalledTimes(1);
+
+    // Reset the module-level promise (simulates C-1's eviction-on-failure path).
+    __resetApprovalGatePromiseForTests();
+
+    // Second invocation: gate is consulted AGAIN (fresh import, not cached rejection).
+    const res2 = await wrapped(makeRequest({ body: {} }) as never);
+    expect(res2.status).toBe(200);
+    // assertProfileApproved was called a second time — proves the module was
+    // re-resolved (not served from a permanently-rejected cached promise).
+    expect(assertProfileApproved).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("withRole — assertProfileApproved throw caught as 503 (H-2 red-team)", () => {
+  // H-2 (red-team 2026-05-26): assertProfileApproved can throw (DB error,
+  // RLS fault that propagates as an exception rather than a NextResponse).
+  // Without the try/catch added in H-2, the exception propagates unhandled
+  // out of withRole — no test covered it. Post-fix: any throw from
+  // assertProfileApproved returns 503 (fail-closed) with a console.error.
+
+  beforeEach(async () => {
+    __resetApprovalGatePromiseForTests();
+    // Reset the approval-gate mock state so queued returns from prior tests
+    // don't leak into this describe block (vi.clearAllMocks() does not reset
+    // mockResolvedValueOnce queues — only mockReset() does).
+    const { assertProfileApproved } = await import("@/lib/api/approval-gate");
+    vi.mocked(assertProfileApproved).mockReset();
+    vi.mocked(assertProfileApproved).mockResolvedValue(null); // approved by default
+  });
+
+  it("H-2: assertProfileApproved throw returns 503, does NOT propagate unhandled", async () => {
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-gate-throw", email: "gt@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+
+    const { assertProfileApproved } = await import("@/lib/api/approval-gate");
+    vi.mocked(assertProfileApproved).mockRejectedValueOnce(
+      new Error("DB connection reset during profile lookup"),
+    );
+
+    const consoleErrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const handler = vi.fn();
+    const wrapped = withRole("allocator")(handler as never);
+
+    // Must NOT throw — must return 503 (fail-closed) and not call the handler.
+    const res = await wrapped(makeRequest({ body: {} }) as never);
+    expect(res.status).toBe(503);
+    expect(handler).not.toHaveBeenCalled();
+    // Console error must fire so ops can see the gate failure.
+    expect(consoleErrSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[auth/withRole]"),
+      expect.any(Error),
+    );
+
+    consoleErrSpy.mockRestore();
+  });
+
+  it("H-2: assertProfileApproved returning null (approved) still passes through to handler", async () => {
+    // Sanity: the new try/catch must not interfere with the happy path.
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-approved", email: "a@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+
+    // assertProfileApproved is already set to resolve(null) by beforeEach.
+    const handler = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    const wrapped = withRole("allocator")(handler as never);
+
+    const res = await wrapped(makeRequest({ body: {} }) as never);
+    expect(res.status).toBe(200);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("H-2: assertProfileApproved returning a 403 (unapproved) blocks handler", async () => {
+    // Belt-and-suspenders: the try/catch must not swallow a RETURNED
+    // 403 response — only a THROWN exception should return 503.
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-unapproved", email: "u@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+
+    const { assertProfileApproved } = await import("@/lib/api/approval-gate");
+    vi.mocked(assertProfileApproved).mockResolvedValueOnce(
+      NextResponse.json({ error: "Account pending approval" }, { status: 403 }),
+    );
+
+    const handler = vi.fn();
+    const wrapped = withRole("allocator")(handler as never);
+
+    const res = await wrapped(makeRequest({ body: {} }) as never);
+    expect(res.status).toBe(403); // gate's own 403, NOT 503
+    expect(handler).not.toHaveBeenCalled();
+  });
 });

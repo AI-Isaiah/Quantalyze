@@ -566,3 +566,87 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     },
   );
 });
+
+/**
+ * NEW-C16-06 (audit 2026-05-26, MED conf-8): the coverage regex previously
+ * only matched user-ownership columns that carried an inline REFERENCES FK.
+ * Tables like `audit_log` / `audit_log_cold` that use a bare
+ * `user_id UUID NOT NULL` (no inline REFERENCES) were invisible to the drift
+ * guard — a user-owned table of that shape would escape detection with green
+ * CI.  The widened regex now matches bare `user_id|allocator_id UUID NOT NULL`
+ * as well, relying on EXCLUDED_TABLES to suppress legitimate non-owned cases.
+ */
+describe("NEW-C16-06: extractUserTablesFromMigration — bare UUID NOT NULL (no inline FK)", () => {
+  it("matches a bare `user_id UUID NOT NULL` column (no inline REFERENCES)", () => {
+    const sql = `
+CREATE TABLE audit_log_like (
+  id UUID PRIMARY KEY,
+  user_id UUID NOT NULL,
+  action TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+`;
+    const out = extractUserTablesFromMigration(sql, "20260526_test.sql");
+    expect(out.get("audit_log_like")).toBe("20260526_test.sql");
+  });
+
+  it("matches a bare `allocator_id UUID NOT NULL` column (no inline REFERENCES)", () => {
+    const sql = `
+CREATE TABLE allocator_event_log (
+  id UUID PRIMARY KEY,
+  allocator_id UUID NOT NULL,
+  event TEXT NOT NULL
+);
+`;
+    const out = extractUserTablesFromMigration(sql, "20260526_test2.sql");
+    expect(out.get("allocator_event_log")).toBe("20260526_test2.sql");
+  });
+
+  it("does NOT match a bare `strategy_id UUID NOT NULL` (not a canonical user-owner column)", () => {
+    // strategy_id is not in the bare-UUID arm — only user_id / allocator_id
+    // trigger the bare match.  This keeps the false-positive surface narrow.
+    const sql = `
+CREATE TABLE strategy_thing (
+  id UUID PRIMARY KEY,
+  strategy_id UUID NOT NULL,
+  payload JSONB
+);
+`;
+    const out = extractUserTablesFromMigration(sql, "20260526_test3.sql");
+    expect(out.size).toBe(0);
+  });
+
+  it("bare-UUID table in EXCLUDED_TABLES (not SANITIZE_PARITY_ALLOWLIST) is suppressed at extraction", () => {
+    // organization_invites is in EXCLUDED_TABLES.  Simulate it gaining a bare
+    // user_id UUID NOT NULL column — the EXCLUDED_TABLES guard fires inside
+    // extractUserTablesFromMigration before it lands in declarations.
+    const sql = `
+CREATE TABLE organization_invites (
+  id UUID PRIMARY KEY,
+  user_id UUID NOT NULL,
+  email TEXT NOT NULL
+);
+`;
+    const out = extractUserTablesFromMigration(sql, "20260526_test4.sql");
+    // organization_invites is in EXCLUDED_TABLES — must not appear in output.
+    expect(out.has("organization_invites")).toBe(false);
+  });
+
+  it("bare-UUID table covered by SANITIZE_PARITY_ALLOWLIST IS detected at extraction (allowlist handles it downstream)", () => {
+    // audit_log_cold is in SANITIZE_PARITY_ALLOWLIST (not EXCLUDED_TABLES).
+    // extractUserTablesFromMigration only checks EXCLUDED_TABLES — so the
+    // wider regex now correctly surfaces audit_log_cold; the downstream
+    // runCoverageCheck SANITIZE_PARITY_ALLOWLIST gate handles it.
+    const sql = `
+CREATE TABLE audit_log_cold (
+  id UUID PRIMARY KEY,
+  user_id UUID NOT NULL,
+  action TEXT NOT NULL
+);
+`;
+    const out = extractUserTablesFromMigration(sql, "20260526_test5.sql");
+    // The wider regex detects it; EXCLUDED_TABLES does not suppress it.
+    // This is the correct behavior — runCoverageCheck allowlist handles it.
+    expect(out.has("audit_log_cold")).toBe(true);
+  });
+});

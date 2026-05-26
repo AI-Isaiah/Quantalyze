@@ -507,12 +507,33 @@ def _build_normalized_weights(portfolio_strategies: list[dict]) -> dict[str, flo
 
     Replaces three near-identical inline copies across _compute_portfolio_analytics,
     portfolio_optimizer, and portfolio_bridge (audit M-0624).
+
+    NEW-C19-05: use `is not None` instead of truthiness so an explicit
+    current_weight=0 (paused strategy) is preserved as 0.0, not silently
+    promoted to 1.0 as if unset.  A 0-weight strategy must stay 0-weight —
+    it must not become the dominant allocation after renormalization.
+
+    review-fix SF-F3: log a WARNING when all strategies are 0-weight (e.g. all
+    paused).  The `or 1.0` fallback is still mathematically correct (produces an
+    all-zeros normalized vector) but the flat portfolio_returns_series that
+    results is indistinguishable from "no movement" in the dashboard.  The
+    warning makes this state visible to ops so a migration that accidentally
+    zeros all current_weight values is not invisible.
     """
     raw = {
-        row["strategy_id"]: float(row["current_weight"]) if row.get("current_weight") else 1.0
+        row["strategy_id"]: float(row["current_weight"]) if row.get("current_weight") is not None else 1.0
         for row in portfolio_strategies
     }
-    total = sum(raw.values()) or 1.0
+    total = sum(raw.values())
+    if total == 0.0:
+        logger.warning(
+            "_build_normalized_weights: all %d strategies have current_weight=0.0 "
+            "(all paused?); portfolio return series will be flat. "
+            "sids=%s",
+            len(raw),
+            list(raw.keys()),
+        )
+    total = total or 1.0
     return {sid: w / total for sid, w in raw.items()}
 
 
@@ -655,7 +676,14 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             else:
                 missing_returns_sids.append(sid)
 
-            if row.get("total_aum"):
+            # NEW-C19-06: use `is not None` so a genuine $0 strategy is counted
+            # as a known reporter, not silently treated as NULL.  A truthy check
+            # (if row.get("total_aum"):) maps $0 → falsy → no entry in
+            # strategy_aum, causing aum_known_count to fall short of
+            # len(strategy_ids) even when every strategy has reported, and
+            # collapsing total_aum to None for any portfolio that contains one
+            # drained strategy.
+            if row.get("total_aum") is not None:
                 strategy_aum[sid] = float(row["total_aum"])
 
         if missing_analytics_sids:
@@ -735,21 +763,43 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         ordered_sids = list(df.columns)
         ordered_weights = [weights.get(sid, 0) for sid in ordered_sids]
 
-        # Covariance matrix for risk decomposition. When we have fewer than
-        # 6 days of overlap, df.cov() yields zeros/NaN and downstream risk
-        # numbers become noise. We previously substituted np.eye() and
-        # silently shipped fake variance to the dashboard; now we mark the
-        # row as insufficient history so the UI can flag it explicitly.
-        cov_history_sufficient = len(df) > 5
+        # Covariance matrix for risk decomposition.
+        #
+        # NEW-C19-04: gate on OVERLAP (dropna) rather than UNION length.
+        # `df` was built with .reindex(all_dates).fillna(0), so `len(df)` is
+        # the UNION of dates across all strategies — two strategies with 100
+        # disjoint days each yield len(df)==200 and previously passed the >5
+        # gate.  The resulting cov() off-diagonals collapse toward 0 and
+        # on-diagonals dilute (numerator contains many synthetic 0-returns),
+        # producing fabricated "confident" risk numbers exactly as the comment
+        # above intends to prevent.
+        #
+        # Fix: count rows where every strategy has a real return (`dropna`),
+        # and compute cov() from that overlap-only frame.  The fillna(0) `df`
+        # is still used for the portfolio_returns_series weighted sum (preserving
+        # existing flat-performance semantics); only the risk-decomposition
+        # covariance path is tightened here.
+        overlap_df = pd.DataFrame(strategy_returns).dropna()
+        cov_history_sufficient = len(overlap_df) > 5
         if cov_history_sufficient:
-            cov_matrix = df.cov().values
-            risk_decomp_raw = compute_risk_decomposition(ordered_weights, cov_matrix)
+            # Build weights aligned to overlap_df columns.  overlap_df is built
+            # from the same strategy_returns dict as df, so columns are identical;
+            # we re-derive the list here to keep overlap_sids / overlap_weights
+            # self-consistent rather than relying on the outer ordered_sids.
+            overlap_sids = list(overlap_df.columns)
+            overlap_weights = [weights.get(sid, 0) for sid in overlap_sids]
+            cov_matrix = overlap_df.cov().values
+            risk_decomp_raw = compute_risk_decomposition(overlap_weights, cov_matrix)
+            # Re-sync ordered_sids / ordered_weights to the overlap frame so
+            # the risk_decomp annotation loop below iterates the right columns.
+            ordered_sids = overlap_sids
+            ordered_weights = overlap_weights
         else:
             cov_matrix = None
             risk_decomp_raw = []
             logger.warning(
-                "portfolio %s has %d days of overlap (<6); skipping risk decomposition",
-                portfolio_id, len(df),
+                "portfolio %s has %d days of full overlap (<6); skipping risk decomposition",
+                portfolio_id, len(overlap_df),
             )
 
         # Annotate risk decomposition with strategy names and weight pcts
@@ -893,6 +943,36 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
                 portfolio_id, exc, exc_info=True,
             )
 
+        # NEW-C19-08: compute partial_data BEFORE generating the narrative so
+        # generate_narrative can prepend a hedge when the figures were derived
+        # from a renormalized subset.  This must stay above the data_quality
+        # dict construction so partial_data is available for both uses.
+        partial_data = bool(
+            missing_analytics_sids or missing_returns_sids or missing_equity_sids
+            or benchmark_error or not cov_history_sufficient
+        )
+
+        # Pass partial_data context so the narrative discloses that numbers
+        # are subset-derived when relevant (audit NEW-C19-08).
+        analytics_payload["partial_data"] = partial_data
+        analytics_payload["computed_strategy_count"] = len(strategy_returns)
+        analytics_payload["expected_strategy_count"] = len(strategy_ids)
+
+        # H-001 (red-team SF-F2 fix was dead code): inject cov_history_sufficient
+        # and benchmark_error into analytics_payload BEFORE generate_narrative so
+        # the hedge branches at portfolio_optimizer.py:88-94 are reachable.
+        # Previously these keys only appeared in data_quality (built after the
+        # narrative call), so analytics.get("cov_history_sufficient", True) always
+        # returned the default True and analytics.get("benchmark_error") always
+        # returned None — both hedge clauses were unreachable.
+        # H-002 (red-team): also inject missing_equity_sids so generate_narrative
+        # can emit a hedge when equity curves are absent (that case is not
+        # detectable via computed < expected because equity-missing strategies
+        # ARE included in strategy_returns / computed_strategy_count).
+        analytics_payload["cov_history_sufficient"] = cov_history_sufficient
+        analytics_payload["benchmark_error"] = benchmark_error
+        analytics_payload["missing_equity_sids"] = missing_equity_sids
+
         narrative = generate_narrative(analytics_payload)
 
         # Partial-data telemetry. Tracks WHY a dashboard might look smaller
@@ -901,10 +981,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         # `dropped_for_renormalize` was previously computed here as
         # (missing_analytics_sids ∪ missing_returns_sids); the two lists
         # already cover every drop reason so the union is redundant.
-        partial_data = bool(
-            missing_analytics_sids or missing_returns_sids or missing_equity_sids
-            or benchmark_error or not cov_history_sufficient
-        )
+        # (partial_data already computed above for the narrative path.)
         data_quality = {
             "partial_data": partial_data,
             "expected_strategy_count": len(strategy_ids),
@@ -943,9 +1020,22 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             "data_quality": data_quality,
         })
 
-        supabase.table("portfolio_analytics").update(update_payload).eq(
-            "id", analytics_id
-        ).execute()
+        # review-fix SF-F7: check the update result.  execute() does not raise
+        # when the target row is gone (e.g. concurrently deleted by a cron
+        # reaper); it returns data=[] instead.  If the write silently fails the
+        # row stays in COMPUTING forever and the new partial_data/computed_*
+        # fields the caller reads from the inline response will never make it
+        # to the DB — the "computed from N of M" badge will appear correct in
+        # the API response but be absent from all subsequent DB reads.
+        _analytics_update_result = supabase.table("portfolio_analytics").update(
+            update_payload
+        ).eq("id", analytics_id).execute()
+        if not _analytics_update_result.data:
+            logger.error(
+                "portfolio %s: analytics update returned no data — analytics_id=%s "
+                "may have been concurrently deleted; row may remain in COMPUTING state",
+                portfolio_id, analytics_id,
+            )
 
         # Generate alerts. Wrapped in its own try so an alert-side failure
         # (review SFH-3) cannot demote a successfully-COMPLETE analytics
@@ -1357,10 +1447,28 @@ async def portfolio_analytics(request: Request, req: PortfolioAnalyticsRequest):
     """Compute full portfolio analytics for a given portfolio."""
     supabase = get_supabase()
 
-    # Verify portfolio exists
-    portfolio_result = supabase.table("portfolios").select("id").eq(
-        "id", req.portfolio_id
-    ).single().execute()
+    # NEW-C19-01: verify portfolio exists AND belongs to the requesting user.
+    # The service-role client bypasses RLS; without this ownership filter any
+    # X-Service-Key holder could compute analytics on another tenant's portfolio.
+    # Same pattern as the bridge endpoint's L-0047 ownership SELECT.
+    #
+    # C-001 (red-team): user_id is now Optional. When present, apply the
+    # ownership .eq("user_id") filter (full defence-in-depth). When absent,
+    # fall back to an existence-only check and emit a warning so the ops team
+    # can track which callers still need to be upgraded to forward user_id.
+    if req.user_id is not None:
+        portfolio_result = supabase.table("portfolios").select("id").eq(
+            "id", req.portfolio_id
+        ).eq("user_id", req.user_id).single().execute()
+    else:
+        logger.warning(
+            "portfolio_analytics called without user_id for portfolio %s — "
+            "ownership check skipped; update caller to forward user_id",
+            req.portfolio_id,
+        )
+        portfolio_result = supabase.table("portfolios").select("id").eq(
+            "id", req.portfolio_id
+        ).single().execute()
 
     if not portfolio_result.data:
         raise HTTPException(status_code=404, detail="Portfolio not found")
@@ -1424,10 +1532,32 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     """
     supabase = get_supabase()
 
-    # Verify portfolio exists + capture owner id for audit attribution
-    portfolio_result = supabase.table("portfolios").select("id, user_id").eq(
-        "id", req.portfolio_id
-    ).single().execute()
+    # NEW-C19-01: verify portfolio exists AND belongs to the requesting user.
+    # Without the .eq("user_id", req.user_id) filter this endpoint used to do
+    # a pure existence check — any X-Service-Key holder could pass an arbitrary
+    # portfolio_id and also issue an in-place UPDATE of another tenant's
+    # optimizer_suggestions (attribution forgery + cross-tenant write).
+    # The fix mirrors the bridge endpoint's L-0047 pattern.
+    # NOTE: portfolio_owner_id is captured from the row so the audit below
+    # can attribute under the portfolio's real owner; req.user_id is the value
+    # verified by the ownership SELECT.
+    #
+    # C-001 (red-team): user_id is now Optional. When present, apply the
+    # ownership .eq("user_id") filter (full defence-in-depth). When absent,
+    # fall back to an existence-only check and emit a warning.
+    if req.user_id is not None:
+        portfolio_result = supabase.table("portfolios").select("id, user_id").eq(
+            "id", req.portfolio_id
+        ).eq("user_id", req.user_id).single().execute()
+    else:
+        logger.warning(
+            "portfolio_optimizer called without user_id for portfolio %s — "
+            "ownership check skipped; update caller to forward user_id",
+            req.portfolio_id,
+        )
+        portfolio_result = supabase.table("portfolios").select("id, user_id").eq(
+            "id", req.portfolio_id
+        ).single().execute()
 
     if not portfolio_result.data:
         raise HTTPException(status_code=404, detail="Portfolio not found")
@@ -1469,14 +1599,57 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     ).in_("strategy_id", strategy_ids).execute()
 
     portfolio_returns: dict[str, pd.Series] = {}
+    optimizer_missing_returns_sids: list[str] = []
+    optimizer_fetched_sids: set[str] = set()
     for row in (sa_in_result.data or []):
+        optimizer_fetched_sids.add(row["strategy_id"])
         s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
         if s is not None:
             portfolio_returns[row["strategy_id"]] = s
+        else:
+            optimizer_missing_returns_sids.append(row["strategy_id"])
+
+    # NEW-C19-09: log dropped strategies at WARNING parity with the analytics path.
+    # find_improvement_candidates builds port_df from portfolio_returns (dropna),
+    # so any strategy without a returns_series silently vanishes from the weight
+    # vector and scores are computed against a renormalized subset.
+    optimizer_missing_analytics_sids = [
+        sid for sid in strategy_ids if sid not in optimizer_fetched_sids
+    ]
+    if optimizer_missing_returns_sids:
+        logger.warning(
+            "portfolio_optimizer: %d/%d portfolio strategies missing returns_series "
+            "for portfolio %s; scores computed against subset: %s",
+            len(optimizer_missing_returns_sids), len(strategy_ids),
+            req.portfolio_id, optimizer_missing_returns_sids,
+        )
+    if optimizer_missing_analytics_sids:
+        logger.warning(
+            "portfolio_optimizer: %d/%d portfolio strategies missing analytics rows "
+            "for portfolio %s: %s",
+            len(optimizer_missing_analytics_sids), len(strategy_ids),
+            req.portfolio_id, optimizer_missing_analytics_sids,
+        )
+    optimizer_computed_strategy_count = len(portfolio_returns)
+    optimizer_expected_strategy_count = len(strategy_ids)
 
     if not portfolio_returns:
         raise HTTPException(status_code=400, detail="No returns data available for portfolio strategies")
 
+    # NEW-C19-10 (design decision confirmation): pulling published strategies
+    # for the optimizer/bridge candidate pool exposes co-movement information
+    # (correlation/sharpe scores) derived from other authors' return series.
+    # CONFIRMED INTENT: `status='published'` is the marketplace-visible state —
+    # by publishing, a strategy manager explicitly makes their strategy
+    # discoverable and scoreable by allocators (the match engine, bridge, and
+    # optimizer all use this same pool).  Only id/name are selected here; the
+    # raw returns_series are fetched separately from strategy_analytics and
+    # NEVER returned to the caller — only derived numeric scores (sharpe_lift,
+    # corr_with_portfolio, score) are emitted.  These scores do not allow
+    # reconstruction of the underlying return series.  This is the intended
+    # behavior; no additional scoping is required.
+    # If a future "unlisted but published" visibility tier is introduced, scope
+    # this SELECT by that predicate (e.g. `.eq("is_listed", True)`).
     all_published = supabase.table("strategies").select("id, name").eq(
         "status", "published"
     ).not_.in_("id", strategy_ids).order(
@@ -1488,6 +1661,11 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     candidate_names = {row["id"]: row.get("name", row["id"]) for row in candidate_rows}
 
     candidate_returns: dict[str, pd.Series] = {}
+    # review-fix SF-F5: track published candidates that lack a returns_series so
+    # ops can detect pool reductions (e.g. after a migration that truncates
+    # strategy_analytics).  A suggestion_count=0 audit event without this signal
+    # is indistinguishable from "no eligible candidates in the marketplace."
+    candidate_missing_returns_count = 0
     if candidate_ids:
         sa_cand_result = supabase.table("strategy_analytics").select(
             "strategy_id, returns_series"
@@ -1497,6 +1675,15 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
             s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
+            else:
+                candidate_missing_returns_count += 1
+
+    if candidate_missing_returns_count:
+        logger.warning(
+            "portfolio_optimizer: %d/%d published candidates missing returns_series "
+            "for portfolio %s; scorer pool reduced",
+            candidate_missing_returns_count, len(candidate_ids), req.portfolio_id,
+        )
 
     suggestions = find_improvement_candidates(portfolio_returns, candidate_returns, weights)
     # Hydrate suggestions with strategy names so the UI can render them without an extra round-trip.
@@ -1552,6 +1739,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
             "auditing under sentinel actor",
             req.portfolio_id,
         )
+    optimizer_partial_data = optimizer_computed_strategy_count < optimizer_expected_strategy_count
     log_audit_event(
         user_id=audit_user_id,
         action="optimizer.run",
@@ -1561,6 +1749,11 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
             "suggestion_count": len(suggestions),
             "owner_resolved": bool(portfolio_owner_id),
             "persisted": persisted,
+            # NEW-C19-09: surface coverage signal in the audit trail so ops
+            # can see when suggestions were computed against a subset.
+            "computed_strategy_count": optimizer_computed_strategy_count,
+            "expected_strategy_count": optimizer_expected_strategy_count,
+            "partial_data": optimizer_partial_data,
         },
     )
 
@@ -1570,6 +1763,11 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
         "portfolio_id": req.portfolio_id,
         "suggestions": suggestions,
         "persisted": persisted,
+        # NEW-C19-09: surface partial_data so the UI/caller can show a badge
+        # when suggestions were scored against fewer strategies than expected.
+        "computed_strategy_count": optimizer_computed_strategy_count,
+        "expected_strategy_count": optimizer_expected_strategy_count,
+        "partial_data": optimizer_partial_data,
     }
 
 
@@ -1668,17 +1866,89 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     ).in_("strategy_id", strategy_ids).execute()
 
     portfolio_returns: dict[str, pd.Series] = {}
+    bridge_missing_returns_sids: list[str] = []
     for row in (sa_in_result.data or []):
         s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
         if s is not None:
             portfolio_returns[row["strategy_id"]] = s
+        else:
+            bridge_missing_returns_sids.append(row["strategy_id"])
+
+    # NEW-C19-02: track strategies that had analytics rows but no returns_series.
+    # The scorer (find_replacement_candidates) builds port_df from portfolio_returns,
+    # so any dropped strategy's weight silently vanishes and the candidate scores
+    # are computed against a renormalized subset.  Log so the problem is visible.
+    if bridge_missing_returns_sids:
+        logger.warning(
+            "portfolio_bridge: %d/%d portfolio strategies missing returns_series "
+            "for portfolio %s; scores computed against subset: %s",
+            len(bridge_missing_returns_sids), len(strategy_ids),
+            req.portfolio_id, bridge_missing_returns_sids,
+        )
+
+    # Also detect strategies that had no analytics row at all.
+    fetched_sids = {row["strategy_id"] for row in (sa_in_result.data or [])}
+    bridge_missing_analytics_sids = [sid for sid in strategy_ids if sid not in fetched_sids]
+    if bridge_missing_analytics_sids:
+        logger.warning(
+            "portfolio_bridge: %d/%d portfolio strategies missing analytics rows "
+            "for portfolio %s: %s",
+            len(bridge_missing_analytics_sids), len(strategy_ids),
+            req.portfolio_id, bridge_missing_analytics_sids,
+        )
+
+    # partial_data is True when any strategy was excluded from scoring.
+    bridge_partial_data = bool(bridge_missing_returns_sids or bridge_missing_analytics_sids)
 
     if not portfolio_returns:
         raise HTTPException(status_code=400, detail="No returns data available")
 
+    # NEW-C19-03: detect when the incumbent itself has no returns data.
+    # Without this check, find_replacement_candidates immediately returns []
+    # (incumbent not in port_df.columns) and the caller cannot distinguish
+    # "genuine no-candidates" from "couldn't score — incumbent has no history".
+    #
+    # review-fix SF-F1: emit a bridge.score_candidates audit event on this path
+    # so ops can detect surges of incumbent_no_data outcomes (e.g. an analytics
+    # recompute failure that wipes returns_series for deployed strategies).
+    # H-0815 invariant: every successful bridge exit MUST emit an audit row.
+    if req.underperformer_strategy_id not in portfolio_returns:
+        try:
+            log_audit_event(
+                user_id=req.user_id,
+                action="bridge.score_candidates",
+                entity_type="bridge_run",
+                entity_id=req.portfolio_id,
+                metadata={
+                    "underperformer_strategy_id": req.underperformer_strategy_id,
+                    "candidate_count": 0,
+                    "partial_data": True,
+                    "status": "incumbent_no_data",
+                },
+            )
+        except Exception as audit_exc:  # noqa: BLE001
+            logger.error(
+                "bridge audit emit failed (run still succeeded): %s",
+                audit_exc, exc_info=True,
+            )
+        return {
+            "ok": True,
+            "status": "incumbent_no_data",
+            "portfolio_id": req.portfolio_id,
+            "underperformer_strategy_id": req.underperformer_strategy_id,
+            "candidates": [],
+            "partial_data": True,
+            "computed_from_n_of_m": f"{len(portfolio_returns)} of {len(strategy_ids)}",
+        }
+
     # Fetch all published candidate strategies (excluding portfolio members).
     # Cap at _OPTIMIZER_PUBLISHED_LIMIT to bound the JSONB payload size as the
     # catalog grows (audit-2026-05-07 H-1072).
+    # NEW-C19-10 (design decision confirmation): see the optimizer's matching
+    # comment — published=marketplace-visible is the confirmed intent; only
+    # derived numeric scores (composite_score, sharpe_delta, etc.) are returned,
+    # never the raw return series.  No additional scoping is required until a
+    # "unlisted-but-published" visibility tier is added.
     all_published = supabase.table("strategies").select("id, name").eq(
         "status", "published"
     ).not_.in_("id", strategy_ids).order(
@@ -1728,6 +1998,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
                 metadata={
                     "underperformer_strategy_id": req.underperformer_strategy_id,
                     "candidate_count": 0,
+                    "partial_data": bridge_partial_data,
                 },
             )
         except Exception as audit_exc:  # noqa: BLE001
@@ -1741,6 +2012,10 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
             "portfolio_id": req.portfolio_id,
             "underperformer_strategy_id": req.underperformer_strategy_id,
             "candidates": [],
+            # NEW-C19-02: surface partial_data so the caller knows scores were
+            # computed against a subset (or that there truly are no candidates).
+            "partial_data": bridge_partial_data,
+            "computed_from_n_of_m": f"{len(portfolio_returns)} of {len(strategy_ids)}" if bridge_partial_data else None,
         }
 
     candidates = find_replacement_candidates(
@@ -1767,6 +2042,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
             metadata={
                 "underperformer_strategy_id": req.underperformer_strategy_id,
                 "candidate_count": len(candidates),
+                "partial_data": bridge_partial_data,
             },
         )
     except Exception as audit_exc:  # noqa: BLE001
@@ -1781,6 +2057,10 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
         "portfolio_id": req.portfolio_id,
         "underperformer_strategy_id": req.underperformer_strategy_id,
         "candidates": candidates,
+        # NEW-C19-02: surface partial_data when scores were computed against
+        # a renormalized subset (some strategies had no returns_series).
+        "partial_data": bridge_partial_data,
+        "computed_from_n_of_m": f"{len(portfolio_returns)} of {len(strategy_ids)}" if bridge_partial_data else None,
     }
 
 

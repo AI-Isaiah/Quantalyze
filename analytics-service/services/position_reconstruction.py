@@ -411,6 +411,39 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
     rois = [p.get("roi", 0) or 0 for p in closed]
     avg_roi = sum(rois) / len(rois) if rois else 0.0
 
+    # NEW-C01-16: capital-weighted ROI = total realized PnL / total entry
+    # notional. `avg_roi` (unweighted arithmetic mean) weights a $10 +500%
+    # position equally with a $1M +2% position; a $10 outlier can dominate.
+    # This variant reflects how much the strategy made per dollar deployed.
+    # Only include closed positions with both realized_pnl and notional > 0.
+    # silent-failure/F-09: float(p["realized_pnl"]) raises ValueError for
+    # non-numeric strings (e.g. "N/A", "", "12.3USDT"). The None guard only
+    # filters None; a buggy ingestion path can store an empty or currency-
+    # suffixed string. Wrap in try/except to match the same-diff fix applied
+    # to the equity_reconstruction spot_fee path (F-08).
+    _pnl_values: list[float] = []
+    for _p in closed:
+        _raw_pnl = _p.get("realized_pnl")
+        if _raw_pnl is None:
+            continue
+        try:
+            _pnl_values.append(float(_raw_pnl))
+        except (TypeError, ValueError):
+            logger.warning(
+                "capital_weighted_roi: unparseable realized_pnl=%r for "
+                "position %s — excluded from sum",
+                _raw_pnl, _p.get("id"),
+            )
+    _sum_pnl = sum(_pnl_values)
+    _sum_notional = sum(
+        float(p["entry_price_avg"] or 0.0) * float(p.get("size_base") or p.get("quantity") or 0.0)
+        for p in closed
+        if p.get("entry_price_avg") and (p.get("size_base") or p.get("quantity"))
+    )
+    capital_weighted_roi = (
+        round(_sum_pnl / _sum_notional, 6) if _sum_notional > 0 else 0.0
+    )
+
     durations = []
     for p in closed:
         dur = p.get("duration_days")
@@ -482,6 +515,9 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
         "closed_positions": closed_count,
         "win_rate": round(win_rate, 4),
         "avg_roi": round(avg_roi, 6),
+        # NEW-C01-16: capital-weighted ROI alongside the unweighted avg_roi.
+        # avg_roi is kept for backward compatibility (existing dashboards read it).
+        "capital_weighted_roi": capital_weighted_roi,
         "avg_duration_days": round(avg_duration_days, 2),
         "long_count": long_count,
         "short_count": short_count,
@@ -662,7 +698,12 @@ async def _attribute_funding(
             def _fetch_funding(s=start, e=end):
                 return (
                     supabase.table("funding_fees")
-                    .select("symbol, amount, timestamp")
+                    # NEW-C30-02: include currency so we can skip
+                    # base-coin-denominated (inverse-perp) rows before
+                    # summing — previously only symbol/amount/timestamp were
+                    # selected, so a 0.0001 BTC row was silently added as $0.0001
+                    # into a USD funding_pnl column (magnitude ~5 orders wrong).
+                    .select("symbol, amount, timestamp, currency")
                     .eq("strategy_id", strategy_id)
                     .gte("timestamp", min_opened_at)
                     .lte("timestamp", max_closed_at)
@@ -701,14 +742,36 @@ async def _attribute_funding(
     # funding_pnl (a wrong-but-clean-looking ROI). Count the drops and surface
     # them so a half-corrupt funding feed is observable, mirroring the
     # all-or-nothing funding_attribution_failed flag.
+    #
+    # NEW-C30-02: funding_fees.currency is the settlement coin (USDT for linear
+    # perps, BTC/ETH for inverse perps). Summing raw amounts across currencies
+    # produces a magnitude error of ~5 orders of magnitude (0.0001 BTC ≈ $6
+    # but is added as $0.0001). Only sum rows whose currency is a USD-quote
+    # stablecoin; skip others and emit a DQ flag so the drop is observable.
+    _USD_QUOTE_CURRENCIES = frozenset({"USDT", "USDC", "BUSD", "USD", "TUSD", "FDUSD"})
     by_symbol: dict[str, list[tuple[datetime, Decimal]]] = defaultdict(list)
     funding_rows_unparseable = 0
+    funding_currency_unsupported_count = 0
     for row in funding_rows:
         sym = row.get("symbol", "")
         ts_raw = row.get("timestamp")
         amt_raw = row.get("amount")
         if not sym or ts_raw is None or amt_raw is None:
             funding_rows_unparseable += 1
+            continue
+        # NEW-C30-02: skip base-coin-denominated rows (inverse perps).
+        currency = (row.get("currency") or "").upper()
+        if currency and currency not in _USD_QUOTE_CURRENCIES:
+            funding_currency_unsupported_count += 1
+            # silent-failure/F-07: was logger.debug — invisible in production.
+            # The parallel guard in EquityCurveBuilder.attach_funding correctly
+            # logs at WARNING. Use the same level so operators can see which
+            # symbols are affected without enabling DEBUG logging.
+            logger.warning(
+                "funding attribution: skipped row currency=%r for symbol=%s "
+                "(strategy %s) — not a USD-quote stablecoin",
+                currency, sym, strategy_id,
+            )
             continue
         try:
             ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
@@ -723,6 +786,14 @@ async def _attribute_funding(
     if funding_rows_unparseable and flags is not None:
         flags["funding_rows_unparseable"] = (
             flags.get("funding_rows_unparseable", 0) + funding_rows_unparseable
+        )
+    if funding_currency_unsupported_count and flags is not None:
+        # NEW-C30-02: surface skipped inverse-perp funding rows so the
+        # dashboard can warn that funding_pnl EXCLUDES inverse-perp funding
+        # (partial data) rather than silently mis-summing it.
+        flags["funding_currency_unsupported"] = (
+            flags.get("funding_currency_unsupported", 0)
+            + funding_currency_unsupported_count
         )
 
     # Sort each symbol's timeline once — supports linear scan per position.
