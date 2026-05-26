@@ -369,6 +369,13 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
   if (exchanges) chips.push(exchanges);
   if (leverage) chips.push(`leverage ${leverage}`);
 
+  // Only api_verified strategies have AUM/capacity/leverage/exchanges
+  // confirmed by platform data. For csv_uploaded and self_reported tiers the
+  // values are author-declared free-text — surface a "self-reported" qualifier
+  // beside the chip line and the AUM/capacity chip so readers aren't misled
+  // into treating them as verified facts. (NEW-C20-02)
+  const isSelfReported = payload.trustTier !== "api_verified";
+
   return (
     <header className="border-b border-text pb-6">
       <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
@@ -383,6 +390,18 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
           <div className="mt-3 flex flex-wrap items-center gap-2 sm:gap-3">
             <TrustTierLabel trustTier={payload.trustTier} />
             <span className="text-[12px] text-text-secondary">{chips.length > 0 ? chips.join(" · ") : "—"}</span>
+            {isSelfReported && chips.length > 0 && (
+              <span
+                className="text-[10px] font-mono uppercase tracking-[0.14em] px-1.5 py-0.5 rounded-sm"
+                style={{
+                  color: "var(--color-warning, #B45309)",
+                  background: "color-mix(in srgb, var(--color-warning, #B45309) 12%, transparent)",
+                }}
+                title="These fields (exchanges, leverage, markets) are author-declared and have not been verified by Quantalyze"
+              >
+                self-reported
+              </span>
+            )}
           </div>
           {payload.description && (
             <p className="mt-3 sm:mt-4 text-[13px] sm:text-[14px] leading-relaxed text-text-2 italic font-serif">
@@ -393,7 +412,11 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
         <div className="text-left sm:text-right flex flex-row sm:flex-col items-start sm:items-end gap-6 sm:gap-3 flex-wrap">
           <FreshnessChip computedAt={payload.computedAt} />
           {payload.aum != null && (
-            <CapacityChip aum={payload.aum} maxCapacity={payload.maxCapacity} />
+            <CapacityChip
+              aum={payload.aum}
+              maxCapacity={payload.maxCapacity}
+              selfReported={isSelfReported}
+            />
           )}
         </div>
       </div>
@@ -445,8 +468,18 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
 /**
  * AUM + capacity utilization bar. Falls back to AUM-only when max_capacity
  * is not declared. Bar fills accent for healthy utilization, warning above 80%.
+ * When selfReported=true (non-api_verified tier), labels the values as
+ * author-declared to prevent them from reading as verified figures. (NEW-C20-02)
  */
-function CapacityChip({ aum, maxCapacity }: { aum: number; maxCapacity: number | null }) {
+function CapacityChip({
+  aum,
+  maxCapacity,
+  selfReported = false,
+}: {
+  aum: number;
+  maxCapacity: number | null;
+  selfReported?: boolean;
+}) {
   const utilization = maxCapacity && maxCapacity > 0 ? Math.min(1, aum / maxCapacity) : null;
   const tone =
     utilization == null ? "var(--color-accent)" :
@@ -455,7 +488,9 @@ function CapacityChip({ aum, maxCapacity }: { aum: number; maxCapacity: number |
     "var(--color-accent)";
   return (
     <div className="min-w-[160px]">
-      <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">AUM</p>
+      <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
+        AUM{selfReported && <span className="ml-1 normal-case" style={{ color: "var(--color-warning, #B45309)" }}>(self-reported)</span>}
+      </p>
       <p className="mt-1 text-[13px] font-mono tabular-nums text-text-secondary">
         {formatUsdCompact(aum)}
         {maxCapacity != null && (
