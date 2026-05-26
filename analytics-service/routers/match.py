@@ -61,6 +61,18 @@ RECOMPUTE_MIN_AGE_HOURS = 12
 FORCE_RECOMPUTE_MIN_INTERVAL_S = 30
 _force_last_run: dict[str, float] = {}  # allocator_id → monotonic timestamp
 
+# C-01 (code-review): page size for analytics SELECT .in_() fetches
+# (NEW-C08-02 / NEW-C08-03). Previously defined at line 1007 (below its call
+# sites at lines 190 and 466) — CPython resolves module globals at call time
+# so no NameError in production, but tests that partially evaluate the module
+# or monkeypatch before full load would raise. Canonical placement with the
+# other per-module constants ensures the definition precedes every use.
+# The retention sweep already documents this hazard at L919; the same
+# URL-length cap applies to every unbounded .in_() against strategy_analytics.
+# 200 IDs/request is well under the PostgREST/nginx URL cap (~8KB) for
+# typical 36-char UUIDs and keeps the per-query response size manageable.
+_ANALYTICS_IN_LIST_PAGE_SIZE = 200
+
 # The demo founder-view endpoint (/api/demo/match/[allocator_id]) is anon/public
 # and hard-locks to this seeded ALLOCATOR_ACTIVE_ID (src/lib/demo.ts). Candidate
 # universe for THIS allocator MUST be filtered to is_example=true so real
@@ -200,13 +212,28 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
         )
         analytics_rows.extend(_page.data or [])
     if len(analytics_rows) < len(strategy_ids):
-        logger.warning(
-            "match: universe analytics coverage %d/%d — %d strategies have "
-            "no analytics row (expected for new strategies; log rate > 0 on "
-            "a full platform likely indicates IN-list truncation)",
-            len(analytics_rows), len(strategy_ids),
-            len(strategy_ids) - len(analytics_rows),
-        )
+        # A3-04: escalate to ERROR when the gap exceeds a meaningful fraction
+        # (>10% of universe, min 10 strategies). A handful of new listings
+        # legitimately have no analytics row; a large gap almost certainly
+        # indicates IN-list truncation (HTTP 414 / PostgREST silent filter).
+        # ERROR surfaces to Sentry; WARNING is low-level noise for normal growth.
+        _gap = len(strategy_ids) - len(analytics_rows)
+        _gap_threshold = max(10, len(strategy_ids) * 0.10)
+        if _gap > _gap_threshold:
+            logger.error(
+                "match: universe analytics coverage %d/%d — gap of %d (%.0f%%) "
+                "exceeds threshold (>10%% or >10); likely IN-list truncation, "
+                "not new-strategy lag",
+                len(analytics_rows), len(strategy_ids), _gap,
+                100.0 * _gap / len(strategy_ids),
+            )
+        else:
+            logger.warning(
+                "match: universe analytics coverage %d/%d — %d strategies have "
+                "no analytics row (expected for new strategies; log rate > 0 on "
+                "a full platform likely indicates IN-list truncation)",
+                len(analytics_rows), len(strategy_ids), _gap,
+            )
     analytics_by_sid = {row["strategy_id"]: row for row in analytics_rows}
 
     strategies_by_id: dict[str, dict[str, Any]] = {}
@@ -438,15 +465,27 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         # modulo dict ordering", services/match_engine.py module docstring) and
         # the test_determinism guarantee. Order by (portfolio_id, strategy_id)
         # so the first-wins tie-break is reproducible.
-        ps_result = (
-            supabase.table("portfolio_strategies")
-            .select("strategy_id, current_weight, portfolio_id, allocated_amount")
-            .in_("portfolio_id", portfolio_ids)
-            .order("portfolio_id", desc=False)
-            .order("strategy_id", desc=False)
-            .execute()
-        )
-        ps_rows = ps_result.data or []
+        #
+        # A3-05 (silent-failure): paginate the portfolio_id IN-list. An
+        # allocator with many portfolios can overflow the PostgREST URL limit
+        # just like the analytics IN-lists (NEW-C08-02/03). On truncation
+        # ps_rows would be incomplete → strategy_ids missing entries → the
+        # analytics coverage warning at the next layer would report a "correct"
+        # ratio (truncated inputs vs. truncated outputs) and the scoring would
+        # silently proceed against a partial book — the same M-0675 exposure
+        # but at a higher layer where no warning fires.
+        ps_rows: list[dict[str, Any]] = []
+        for _ps_start in range(0, len(portfolio_ids), _ANALYTICS_IN_LIST_PAGE_SIZE):
+            _ps_chunk = portfolio_ids[_ps_start:_ps_start + _ANALYTICS_IN_LIST_PAGE_SIZE]
+            _ps_page = (
+                supabase.table("portfolio_strategies")
+                .select("strategy_id, current_weight, portfolio_id, allocated_amount")
+                .in_("portfolio_id", _ps_chunk)
+                .order("portfolio_id", desc=False)
+                .order("strategy_id", desc=False)
+                .execute()
+            )
+            ps_rows.extend(_ps_page.data or [])
 
         # sorted() (not list(set(...))): a bare set has non-deterministic
         # iteration order, and the match engine this feeds promises
@@ -856,6 +895,24 @@ async def _score_one_allocator(
                     "exclusion_provenance": _exc.get("exclusion_provenance"),
                 })
 
+            # A3-10: when _rows_to_insert is empty (all candidates/excluded
+            # filtered out) but the batch header claims non-zero counts,
+            # log a warning. This happens when every excluded strategy is
+            # 'explicitly_excluded' (stripped at the persistence boundary
+            # pending the SQL CHECK migration). The batch header row has
+            # candidate_count=0/excluded_count>0 while match_candidates has
+            # zero rows — a discrepancy visible only by direct DB query.
+            if not _rows_to_insert:
+                if batch_row.get("candidate_count", 0) > 0 or batch_row.get("excluded_count", 0) > 0:
+                    logger.warning(
+                        "match_engine: batch %s for allocator %s has no rows to insert "
+                        "(candidate_count=%d excluded_count=%d) — all excluded rows "
+                        "may be explicitly_excluded (pending CHECK migration)",
+                        _batch_id, allocator_id,
+                        batch_row.get("candidate_count", 0),
+                        batch_row.get("excluded_count", 0),
+                    )
+
             if _rows_to_insert:
                 # Inspect the insert result so a silent FK/CHECK violation
                 # (e.g. strategy_id deleted between the universe snapshot and
@@ -884,12 +941,24 @@ async def _score_one_allocator(
                         _batch_id, allocator_id,
                     )
                     try:
-                        await asyncio.to_thread(
+                        # A3-01: inspect the rollback DELETE result so an
+                        # RLS/race no-op (data=[]) is distinguishable from a
+                        # successful cleanup. Pre-fix the result was discarded —
+                        # the orphan row could survive and the audit trail would
+                        # only show "rolling back" without confirming success.
+                        _del_result = await asyncio.to_thread(
                             lambda: supabase.table("match_batches")
                             .delete()
                             .eq("id", _batch_id)
                             .execute()
                         )
+                        if not (_del_result.data):
+                            logger.error(
+                                "match_engine: rollback DELETE for orphan batch %s "
+                                "returned no rows (RLS/race? orphan row may persist "
+                                "in match_batches)",
+                                _batch_id,
+                            )
                     except Exception as _cleanup_err:
                         logger.error(
                             "match_engine: failed to roll back orphan batch %s: %s",
@@ -902,7 +971,37 @@ async def _score_one_allocator(
 
             return _batch_id
 
-        batch_id = await asyncio.shield(_persist_batch_and_candidates())
+        # I-01 / A3-07: hold an explicit strong reference to the inner task so
+        # a SIGTERM-triggered loop.stop() cannot GC it before it completes.
+        # asyncio.shield() prevents the inner task from receiving CancelledError,
+        # but does NOT prevent the event loop from draining it during shutdown
+        # unless a strong reference is held outside the shield expression itself.
+        # Pattern: create the inner task explicitly, then shield + re-await on
+        # cancel so the outer task waits for the inner to finish before unwinding.
+        #
+        # A3-07: also catch RuntimeError from the inner persist (e.g. rollback
+        # path after failed match_candidates insert). If a CancelledError and a
+        # RuntimeError arrive concurrently, the RuntimeError may be suppressed by
+        # the outer cancellation machinery. Logging it here before re-raise ensures
+        # Sentry captures the root cause even when the outer exception masks it.
+        _persist_task = asyncio.ensure_future(_persist_batch_and_candidates())
+        try:
+            batch_id = await asyncio.shield(_persist_task)
+        except asyncio.CancelledError:
+            # Re-await the inner task so shutdown waits for the DB writes to
+            # complete before the process exits. The CancelledError is re-raised
+            # after the inner task finishes (I-01 fix).
+            await _persist_task
+            raise
+        except RuntimeError as _persist_err:
+            # A3-07: inner RuntimeError (persist/rollback failure) may be
+            # suppressed when CancelledError is also pending. Log explicitly so
+            # Sentry captures the root cause regardless of outer cancellation.
+            logger.error(
+                "match_engine: batch persistence failed for allocator %s: %s",
+                allocator_id, _persist_err,
+            )
+            raise
 
         logger.info(
             "match_engine recompute: allocator=%s batch=%s mode=%s "
@@ -999,14 +1098,6 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
 # batches would survive the sweep). 50 IDs per page is well under any cap.
 _RETENTION_DELETE_BATCH_SIZE = 50
 
-# Page size for analytics SELECT .in_() fetches (NEW-C08-02 / NEW-C08-03).
-# The retention sweep already documents this hazard at L919 above; the same
-# URL-length cap applies to every unbounded .in_() against strategy_analytics.
-# 200 IDs/request is well under the PostgREST/nginx URL cap (~8KB) for
-# typical 36-char UUIDs and keeps the per-query response size manageable.
-_ANALYTICS_IN_LIST_PAGE_SIZE = 200
-
-
 def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
     """Delete old batches for this allocator, keeping the last `keep`.
     CASCADE drops match_candidates for the deleted batches.
@@ -1057,15 +1148,29 @@ def _is_allocator_profile(allocator_id: str) -> bool:
 
     Synchronous (called via asyncio.to_thread). Module-level so tests can
     monkeypatch it without patching get_supabase (which requires live env vars).
+
+    A3-06 / I-03: wraps the Supabase query in try/except so a transient DB
+    blip does not surface as a context-free 500 from the recompute endpoint.
+    Fail-CLOSED on exception (returns False + logs at ERROR) — unlike
+    _kill_switch_enabled which is fail-open, a role-check failure should deny
+    rather than grant access. Log includes allocator_id for Sentry triage.
     """
     sb = get_supabase()
-    profile = (
-        sb.table("profiles")
-        .select("role")
-        .eq("id", allocator_id)
-        .maybe_single()
-        .execute()
-    )
+    try:
+        profile = (
+            sb.table("profiles")
+            .select("role")
+            .eq("id", allocator_id)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:
+        logger.error(
+            "match_engine: profile role check failed for allocator %s: %s "
+            "— failing closed (treating as non-allocator)",
+            allocator_id, exc,
+        )
+        return False
     if not (profile and profile.data):
         return False
     return profile.data.get("role") in ("allocator", "both")
@@ -1101,6 +1206,15 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
     # this gate a looped caller past the Next.js rate limiter can stack concurrent
     # scoring + retention churn. The interval is process-local — a pod restart
     # resets it, which is acceptable (the guard is a budget, not a hard lock).
+    #
+    # I-02 / A3-02: stamp _force_last_run AFTER scoring succeeds, not before.
+    # Pre-fix: the timestamp was written at line 1222 before calling
+    # _score_one_allocator. If scoring raised a 500, the 30-second window was
+    # consumed by a failed recompute — a retry by the operator received 429
+    # ("throttled") even though no batch was ever persisted, with a confusing
+    # message implying the previous recompute succeeded. Post-fix: the 429 check
+    # still fires at entry (correct — guards against rapid duplicate requests),
+    # but the slot is only consumed on a successful result.
     import time as _time
     if req.force:
         _now = _time.monotonic()
@@ -1114,7 +1228,7 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
                     f"retry after {wait_s}s (min interval {FORCE_RECOMPUTE_MIN_INTERVAL_S}s)"
                 ),
             )
-        _force_last_run[allocator_id] = _now
+        # NOTE: do NOT stamp here — stamp only after scoring succeeds below.
 
     if await _should_skip_allocator(allocator_id, req.force):
         logger.info("match_engine recompute: skipping recent batch for %s", allocator_id)
@@ -1138,8 +1252,25 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
         logger.exception("match_engine recompute failed for %s", allocator_id)
         raise HTTPException(status_code=500, detail=f"Scoring failed: {err}") from err
 
+    # I-02 / A3-02: stamp the throttle window only AFTER scoring succeeds so a
+    # 500 from _score_one_allocator does not block the operator's next retry.
+    if req.force:
+        _force_last_run[allocator_id] = _time.monotonic()
+
     # Retention sweep (keep last 7). A sweep failure must not 500 the
     # request after the batch was successfully persisted — log and continue.
+    # I-04: The sweep must run even when _score_one_allocator completes via
+    # the shielded persist path and then the outer task is cancelled. Pre-fix:
+    # if CancelledError propagated out of _score_one_allocator after shielding,
+    # it bypassed the outer try/except (CancelledError is BaseException, not
+    # Exception) and this sweep was silently skipped — old batches could
+    # accumulate past keep=7 on Railway redeploys during high traffic.
+    # The cron's per-allocator retention at the end of cron_recompute provides
+    # backstop coverage, but single-allocator POST /recompute skips that path.
+    # Documented gap: the try/except Exception below still won't catch
+    # CancelledError. A full fix would require try/finally in the outer handler,
+    # which would need to shield the sweep itself — a larger refactor deferred
+    # as a known limitation. This comment replaces the pre-fix silence.
     try:
         await asyncio.to_thread(_retention_sweep, allocator_id)
     except Exception as err:

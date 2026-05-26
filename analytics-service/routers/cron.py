@@ -706,9 +706,24 @@ async def cron_sync():
             # per-key sync results we already collected. Record the
             # error in the response and short-circuit the recompute
             # branch instead of letting the exception propagate.
+            #
+            # A3-03: include page-context in the log so the blast radius is
+            # visible. Pre-fix the log only showed the exception type, making
+            # it impossible to determine which chunk failed and how many
+            # portfolio_ids had already been successfully collected before the
+            # failure — those are silently dropped when we reset to [].
+            _ps_collected = len(ps_data) if "ps_data" in dir() else 0
+            _n_strat_pages = (
+                (len(synced_strategy_ids) + _CRON_IN_LIST_PAGE_SIZE - 1)
+                // _CRON_IN_LIST_PAGE_SIZE
+            )
             logger.exception(
-                "cron_sync: recompute lookup failed (%s) — sync results preserved",
+                "cron_sync: recompute lookup failed (%s) — "
+                "%d portfolio_ids already collected (from %d strategy pages) will be dropped; "
+                "sync results preserved",
                 type(exc).__name__,
+                _ps_collected,
+                _n_strat_pages,
             )
             portfolio_recomputes_error = f"{type(exc).__name__}: {exc}"
             portfolio_ids = []

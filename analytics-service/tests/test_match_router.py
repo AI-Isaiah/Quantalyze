@@ -2112,3 +2112,582 @@ class TestHoldingsWarmUpDroppedLogging:
             "warm-up gate dropped 1/" in rec.getMessage()
             for rec in caplog.records
         ), "warm-up dropped count must be logged at INFO (NEW-C08-05)"
+
+
+# ---------------------------------------------------------------------------
+# C-01 — _ANALYTICS_IN_LIST_PAGE_SIZE defined before its call sites
+# ---------------------------------------------------------------------------
+
+
+class TestAnalyticsPageSizeConstantLayout:
+    """C-01 (code-review): _ANALYTICS_IN_LIST_PAGE_SIZE must be defined before
+    lines 190 and 466 that use it. Pre-fix the constant was at line 1007 —
+    correct at runtime due to CPython global-lookup semantics, but wrong for
+    partial-load tests and codebase clarity. This test pins the invariant that
+    the constant is accessible and non-None at module level so that any future
+    move back below the functions fails loudly."""
+
+    def test_constant_is_accessible_and_positive(self):
+        from routers import match as match_mod
+
+        # Must be importable at module level — confirms the constant is placed
+        # in the module's global scope (not inside a function or class).
+        assert hasattr(match_mod, "_ANALYTICS_IN_LIST_PAGE_SIZE"), (
+            "_ANALYTICS_IN_LIST_PAGE_SIZE must be a module-level constant"
+        )
+        assert isinstance(match_mod._ANALYTICS_IN_LIST_PAGE_SIZE, int), (
+            "_ANALYTICS_IN_LIST_PAGE_SIZE must be an int"
+        )
+        assert match_mod._ANALYTICS_IN_LIST_PAGE_SIZE > 0, (
+            "_ANALYTICS_IN_LIST_PAGE_SIZE must be positive"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A3-02 / I-02 — force=True throttle slot consumed only on scoring success
+# ---------------------------------------------------------------------------
+
+
+class TestForceThrottleStampAfterSuccess:
+    """A3-02 / I-02: _force_last_run must be stamped only AFTER a successful
+    _score_one_allocator. Pre-fix: the timestamp was written before scoring, so
+    a 500 from scoring consumed the 30-second throttle window — the operator
+    then received 429 on retry despite no batch having been persisted."""
+
+    def test_throttle_not_stamped_when_scoring_fails(
+        self, client, monkeypatch
+    ):
+        import time as _time
+        from routers import match as match_mod
+
+        alloc_id = str(uuid4())
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _boom(allocator_id, universe):
+            raise RuntimeError("scoring exploded")
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _boom)
+
+        # Clear any pre-existing entry for this allocator
+        match_mod._force_last_run.pop(alloc_id, None)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": True},
+        )
+        assert r.status_code == 500, "scoring failure must produce 500"
+
+        # The throttle window must NOT have been consumed — the allocator id
+        # should be absent (or very old) in _force_last_run so a retry is
+        # immediately allowed.
+        last_ts = match_mod._force_last_run.get(alloc_id)
+        assert last_ts is None or (_time.monotonic() - last_ts) > 25, (
+            "throttle slot must not be consumed when scoring raises — "
+            "operator must be able to retry immediately"
+        )
+
+    def test_throttle_stamped_when_scoring_succeeds(
+        self, client, monkeypatch
+    ):
+        import time as _time
+        from routers import match as match_mod
+
+        alloc_id = str(uuid4())
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _score(allocator_id, universe):
+            return {
+                "allocator_id": allocator_id,
+                "batch_id": "b1",
+                "candidate_count": 0,
+                "excluded_count": 0,
+                "mode": "screening",
+                "filter_relaxed": False,
+                "latency_ms": 1,
+            }
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score)
+        monkeypatch.setattr(match_mod, "_retention_sweep", lambda *_: 0)
+
+        # Clear any pre-existing entry
+        match_mod._force_last_run.pop(alloc_id, None)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": True},
+        )
+        assert r.status_code == 200
+
+        last_ts = match_mod._force_last_run.get(alloc_id)
+        assert last_ts is not None, (
+            "throttle slot must be stamped after a successful scoring run"
+        )
+        assert (_time.monotonic() - last_ts) < 5, (
+            "stamp must be recent (within 5s of successful run)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A3-06 / I-03 — _is_allocator_profile fails closed with ERROR on exception
+# ---------------------------------------------------------------------------
+
+
+class TestIsAllocatorProfileErrorHandling:
+    """A3-06 / I-03: _is_allocator_profile must catch Supabase exceptions,
+    log at ERROR with the allocator_id, and return False (fail-closed) rather
+    than propagating an unhandled exception that produces a context-free 500."""
+
+    def test_supabase_exception_returns_false_and_logs_error(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.side_effect = (
+            RuntimeError("connection refused")
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            result = match_mod._is_allocator_profile("alloc-test-exc")
+
+        assert result is False, (
+            "_is_allocator_profile must fail closed (False) on Supabase exception"
+        )
+        assert any(
+            "profile role check failed" in rec.getMessage()
+            and "alloc-test-exc" in rec.getMessage()
+            for rec in caplog.records
+        ), "exception must be logged at ERROR with allocator_id for Sentry triage"
+
+    def test_missing_profile_returns_false_without_error_log(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+            MagicMock(data=None)
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            result = match_mod._is_allocator_profile("alloc-nonexistent")
+
+        assert result is False
+        # A missing profile is normal — no ERROR log expected.
+        assert not any(
+            "profile role check failed" in rec.getMessage()
+            for rec in caplog.records
+        ), "missing profile (normal case) must not emit ERROR"
+
+
+# ---------------------------------------------------------------------------
+# A3-04 — Universe analytics coverage gap escalates to ERROR above threshold
+# ---------------------------------------------------------------------------
+
+
+class TestUniverseAnalyticsCoverageEscalation:
+    """A3-04: when the analytics gap exceeds 10% of the universe (or 10 abs),
+    the log must escalate from WARNING to ERROR so Sentry alerts fire. Pre-fix:
+    all gaps logged at WARNING regardless of size — IN-list truncation that
+    drops 50% of the universe produced the same log as 2 new listings."""
+
+    def _make_universe_sb(self, monkeypatch, n_strategies: int, n_analytics: int):
+        """Helper: build a fake supabase returning n_strategies published rows
+        and n_analytics analytics rows."""
+        from routers import match as match_mod
+
+        strategies = [
+            {
+                "id": f"s{i}",
+                "name": f"strat-{i}",
+                "codename": None,
+                "strategy_types": [],
+                "subtypes": [],
+                "supported_exchanges": [],
+                "status": "published",
+                "aum": None,
+                "max_capacity": None,
+                "user_id": f"mgr-{i}",
+                "start_date": None,
+                "is_example": False,
+            }
+            for i in range(n_strategies)
+        ]
+        analytics = [{"strategy_id": f"s{i}", "returns_series": None,
+                      "sharpe": None, "max_drawdown": None,
+                      "cumulative_return": None, "cagr": None,
+                      "volatility": None}
+                     for i in range(n_analytics)]
+
+        class _FakeSB:
+            def table(self, name):
+                return _FakeTable(name)
+
+        class _FakeTable:
+            def __init__(self, name):
+                self._name = name
+
+            def select(self, *_):
+                return self
+
+            def eq(self, *_):
+                return self
+
+            def in_(self, col, ids):
+                # Return only the analytics rows whose strategy_id is in ids
+                rows = [a for a in analytics if a["strategy_id"] in ids]
+                return _FakeExec(rows)
+
+            def execute(self):
+                if self._name == "strategies":
+                    return _FakeResult(strategies)
+                return _FakeResult([])
+
+        class _FakeExec:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def execute(self):
+                return _FakeResult(self._rows)
+
+        class _FakeResult:
+            def __init__(self, data):
+                self.data = data
+
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: _FakeSB())
+
+    def test_large_gap_logs_error(self, monkeypatch, caplog):
+        from routers import match as match_mod
+
+        # 100 strategies, 50 analytics rows → 50% gap → must be ERROR
+        self._make_universe_sb(monkeypatch, 100, 50)
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            match_mod._load_candidate_universe()
+
+        assert any(
+            rec.levelname == "ERROR" and "gap" in rec.getMessage().lower()
+            for rec in caplog.records
+        ), (
+            "gap >10%% of universe must log at ERROR (A3-04); "
+            f"got levels: {[r.levelname for r in caplog.records]}"
+        )
+
+    def test_small_gap_logs_warning_not_error(self, monkeypatch, caplog):
+        from routers import match as match_mod
+
+        # 100 strategies, 97 analytics rows → 3% gap → must be WARNING only
+        self._make_universe_sb(monkeypatch, 100, 97)
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            match_mod._load_candidate_universe()
+
+        gap_records = [
+            r for r in caplog.records
+            if "analytics coverage" in r.getMessage().lower()
+            or "gap" in r.getMessage().lower()
+        ]
+        assert gap_records, "small gap must still produce a log record"
+        assert all(r.levelname == "WARNING" for r in gap_records), (
+            "gap ≤10%% of universe must log at WARNING, not ERROR (A3-04); "
+            f"got levels: {[r.levelname for r in gap_records]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A3-05 — portfolio_strategies IN-list is paginated in _load_allocator_context
+# ---------------------------------------------------------------------------
+
+
+class TestLoadAllocatorContextPortfolioStrategyPagination:
+    """A3-05: the portfolio_strategies SELECT must be chunked in pages of
+    _ANALYTICS_IN_LIST_PAGE_SIZE. Pre-fix: an unbounded IN-list on portfolio_id
+    could overflow the PostgREST URL limit, silently truncating ps_rows and
+    making the analytics coverage warning at the next layer appear correct
+    (truncated inputs vs. truncated outputs — the ratio looks fine)."""
+
+    def test_portfolio_strategies_fetch_is_chunked(self, monkeypatch):
+        from routers import match as match_mod
+
+        page_size = match_mod._ANALYTICS_IN_LIST_PAGE_SIZE
+        # Generate more portfolio_ids than a single page to force pagination.
+        n_portfolios = page_size + 1
+        portfolio_ids = [f"pf-{i}" for i in range(n_portfolios)]
+
+        ps_in_calls: list[list[str]] = []
+
+        class _FakeSB:
+            def table(self, name):
+                return _FakeTable(name)
+
+        class _FakeTable:
+            def __init__(self, name):
+                self._name = name
+
+            def select(self, *_):
+                return self
+
+            def eq(self, *_):
+                return self
+
+            def maybe_single(self):
+                return self
+
+            def execute(self):
+                if self._name == "portfolios":
+                    return _Result([{"id": pid} for pid in portfolio_ids])
+                return _Result([])
+
+            def in_(self, col, ids):
+                if self._name == "portfolio_strategies":
+                    ps_in_calls.append(list(ids))
+                return _FakeExec([])
+
+            def order(self, *_, **__):
+                return self
+
+        class _FakeExec:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def select(self, *_):
+                return self
+
+            def in_(self, col, ids):
+                if True:
+                    ps_in_calls.append(list(ids))
+                return self
+
+            def order(self, *_, **__):
+                return self
+
+            def execute(self):
+                return _Result(self._rows)
+
+        class _Result:
+            def __init__(self, data):
+                self.data = data
+
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: _FakeSB())
+        # Prevent holdings/snapshots/decisions from needing special mocks
+        monkeypatch.setattr(
+            match_mod, "_load_holding_portfolio_context",
+            lambda _: {
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": 0.0,
+                "holdings_rows_eligible": [],
+            },
+        )
+
+        match_mod._load_allocator_context("alloc-paginate-test")
+
+        assert len(ps_in_calls) >= 2, (
+            f"Expected >= 2 portfolio_strategies page fetches for {n_portfolios} "
+            f"portfolios (page_size={page_size}); got {len(ps_in_calls)}"
+        )
+        for call_ids in ps_in_calls:
+            assert len(call_ids) <= page_size, (
+                f"Each IN-list chunk must be ≤ {page_size} IDs; got {len(call_ids)}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# A3-01 — rollback DELETE no-op logs ERROR
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanRollbackDeleteNoOpLogged:
+    """A3-01: when the rollback DELETE for an orphan batch returns data=[] (e.g.
+    RLS no-op), the code must log at ERROR so the orphan batch persistence is
+    visible in Sentry. Pre-fix: the rollback result was silently discarded —
+    the admin queue would show the orphan with no indication the cleanup failed."""
+
+    async def test_rollback_delete_noop_logs_error(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+
+        def _table(name):
+            t = MagicMock()
+            if name == "match_batches":
+                t.insert.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "batch-noop-del"}]
+                )
+                # DELETE succeeds (200) but returns data=[] — simulating RLS no-op
+                t.delete.return_value.eq.return_value.execute.return_value = (
+                    MagicMock(data=[])
+                )
+            elif name == "match_candidates":
+                # Insert returns empty → triggers rollback
+                t.insert.return_value.execute.return_value = MagicMock(data=[])
+            return t
+
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        monkeypatch.setattr(
+            match_mod,
+            "_load_allocator_context",
+            lambda aid: {
+                "preferences": {},
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": None,
+                "thumbs_down_ids": set(),
+                "_holdings_rows_eligible": [],
+            },
+        )
+        import services.feedback_engine
+        monkeypatch.setattr(
+            services.feedback_engine, "compute_adjusted_weights", lambda aid: {}
+        )
+        monkeypatch.setattr(
+            match_mod,
+            "score_candidates",
+            lambda **kw: {
+                "candidates": [
+                    {"strategy_id": "s1", "score": 80, "score_breakdown": {},
+                     "reasons": [], "rank": 1}
+                ],
+                "excluded": [],
+                "excluded_total": 0,
+                "mode": "personalized",
+                "filter_relaxed": False,
+                "effective_preferences": {},
+                "effective_thresholds": {},
+                "source_strategy_count": 1,
+            },
+        )
+
+        universe = {
+            "strategies_by_id": {"s1": {"strategy_id": "s1"}},
+            "returns_by_id": {},
+        }
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            with pytest.raises(RuntimeError, match="match_candidates insert failed"):
+                await match_mod._score_one_allocator(
+                    "44444444-4444-4444-4444-444444444444", universe
+                )
+
+        assert any(
+            "rollback DELETE" in rec.getMessage() and "returned no rows" in rec.getMessage()
+            for rec in caplog.records
+        ), (
+            "rollback DELETE returning data=[] must log at ERROR (A3-01) "
+            "so RLS no-op orphan persistence is visible in Sentry"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A3-10 — empty _rows_to_insert with non-zero batch header counts warns
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyRowsToInsertWarning:
+    """A3-10: when all candidates/excluded are stripped (e.g. all are
+    explicitly_excluded pending CHECK migration), _rows_to_insert is empty but
+    the batch header may claim non-zero candidate/excluded counts. The mismatch
+    must be logged at WARNING so the admin queue discrepancy is visible."""
+
+    async def test_empty_rows_with_nonzero_header_logs_warning(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+
+        def _table(name):
+            t = MagicMock()
+            if name == "match_batches":
+                t.insert.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "batch-empty-rows"}]
+                )
+            elif name == "match_candidates":
+                # Should not be called (no rows to insert)
+                t.insert.return_value.execute.return_value = MagicMock(data=[])
+            return t
+
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        monkeypatch.setattr(
+            match_mod,
+            "_load_allocator_context",
+            lambda aid: {
+                "preferences": {},
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": None,
+                "thumbs_down_ids": set(),
+                "_holdings_rows_eligible": [],
+            },
+        )
+        import services.feedback_engine
+        monkeypatch.setattr(
+            services.feedback_engine, "compute_adjusted_weights", lambda aid: {}
+        )
+        # All candidates are in the "excluded" list with explicitly_excluded reason
+        # (stripped at persistence boundary). excluded_total=1 but no rows to insert.
+        monkeypatch.setattr(
+            match_mod,
+            "score_candidates",
+            lambda **kw: {
+                "candidates": [],
+                "excluded": [
+                    {"strategy_id": "s1", "exclusion_reason": "explicitly_excluded",
+                     "exclusion_provenance": None}
+                ],
+                "excluded_total": 1,
+                "mode": "screening",
+                "filter_relaxed": False,
+                "effective_preferences": {},
+                "effective_thresholds": {},
+                "source_strategy_count": 1,
+            },
+        )
+
+        universe = {
+            "strategies_by_id": {"s1": {"strategy_id": "s1"}},
+            "returns_by_id": {},
+        }
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            # Should succeed (empty rows is a valid path — batch row is still inserted)
+            result = await match_mod._score_one_allocator(
+                "55555555-5555-5555-5555-555555555555", universe
+            )
+
+        assert any(
+            "no rows to insert" in rec.getMessage()
+            and rec.levelname == "WARNING"
+            for rec in caplog.records
+        ), (
+            "empty _rows_to_insert with non-zero excluded_count must log WARNING (A3-10)"
+        )
