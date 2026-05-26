@@ -363,6 +363,147 @@ class TestValidateKeyPermissions:
 
 
 # ---------------------------------------------------------------------------
+# NEW-C13-10: credential / HMAC-signature redaction in logged exceptions
+# ---------------------------------------------------------------------------
+
+
+class TestC1310CredentialRedaction:
+    """NEW-C13-10 — ccxt NetworkError/AuthError for signed requests embed
+    the request URL in str(e), which ends with `&signature=<HMAC-SHA256>`.
+    These exceptions must be scrubbed before logging.
+
+    Pre-fix: validate_key_permissions used logger.exception() passing exc
+    directly, which logs the full traceback (including str(exc)) via the
+    stdlib formatter — bypassing the structlog redact processor.
+
+    Post-fix: every exception log in exchange.py routes str(exc) through
+    scrub_freeform_string so the HMAC is replaced with REDACTED.
+    """
+
+    @pytest.mark.asyncio
+    async def test_auth_error_does_not_log_raw_signature(self, caplog) -> None:
+        """When fetch_balance raises AuthenticationError embedding a
+        &signature= value, the logged message must contain REDACTED,
+        not the raw HMAC.
+        """
+        import logging
+        from services.exchange import validate_key_permissions
+
+        FAKE_HMAC = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234"
+        exc_msg = (
+            f"binance POST https://api.binance.com/api/v3/account"
+            f"?timestamp=1700000000000&signature={FAKE_HMAC}"
+            f" 401 Null APIError"
+        )
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "binance"
+        mock_exchange.load_markets = AsyncMock(return_value={})
+        mock_exchange.fetch_balance = AsyncMock(
+            side_effect=ccxt_async.AuthenticationError(exc_msg)
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await validate_key_permissions(mock_exchange)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "AUTH_FAILED"
+
+        # All captured log records must NOT contain the raw HMAC.
+        for record in caplog.records:
+            assert FAKE_HMAC not in record.getMessage(), (
+                f"Raw HMAC signature leaked into log: {record.getMessage()!r}"
+            )
+
+        # At least one record must contain REDACTED (proof scrubbing fired).
+        assert any(
+            "REDACTED" in record.getMessage()
+            for record in caplog.records
+        ), (
+            "No REDACTED token found in log output — scrub_freeform_string "
+            "was not applied to the AuthenticationError message (NEW-C13-10)."
+        )
+
+    @pytest.mark.asyncio
+    async def test_network_error_does_not_log_raw_signature(self, caplog) -> None:
+        """Same contract as auth error — NetworkError for signed requests
+        also embeds &signature= in str(exc) (observed on Binance SIGNED endpoints).
+        """
+        import logging
+        from services.exchange import validate_key_permissions
+
+        FAKE_HMAC = "deadbeef" * 8
+        exc_msg = (
+            f"GET https://api.binance.com/api/v3/openOrders"
+            f"?timestamp=1700000000000&signature={FAKE_HMAC}"
+            f" connection timeout"
+        )
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "binance"
+        mock_exchange.load_markets = AsyncMock(return_value={})
+        mock_exchange.fetch_balance = AsyncMock(
+            side_effect=ccxt_async.NetworkError(exc_msg)
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await validate_key_permissions(mock_exchange)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "NETWORK_UNAVAILABLE"
+
+        for record in caplog.records:
+            assert FAKE_HMAC not in record.getMessage(), (
+                f"Raw HMAC leaked into log on NetworkError: {record.getMessage()!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_load_markets_failure_does_not_log_raw_signature(self, caplog) -> None:
+        """load_markets exception message is also scrubbed before logging
+        and before being placed into result['markets_error'].
+        """
+        import logging
+        from services.exchange import validate_key_permissions
+
+        FAKE_HMAC = "cafebabe" * 8
+        exc_msg = (
+            f"GET https://api.bybit.com/v5/asset/coin/query-info"
+            f"?api_key=MYKEY&signature={FAKE_HMAC} 403 forbidden"
+        )
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.load_markets = AsyncMock(
+            side_effect=ccxt_async.RateLimitExceeded(exc_msg)
+        )
+        mock_exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 100}})
+
+        with patch(
+            "services.key_permissions.detect_permissions",
+            new=AsyncMock(return_value={
+                "read": True, "trade": False,
+                "withdraw": False, "probe_error": False,
+            }),
+        ):
+            with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+                result = await validate_key_permissions(mock_exchange)
+
+        assert result["valid"] is True  # load_markets failure is swallowed
+        assert result["markets_loaded"] is False
+        markets_error = result.get("markets_error") or ""
+
+        # markets_error must be scrubbed before persisting.
+        assert FAKE_HMAC not in markets_error, (
+            f"Raw HMAC leaked into result['markets_error']: {markets_error!r}"
+        )
+
+        for record in caplog.records:
+            assert FAKE_HMAC not in record.getMessage(), (
+                f"Raw HMAC leaked into log on load_markets: {record.getMessage()!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # fetch_raw_trades
 # ---------------------------------------------------------------------------
 

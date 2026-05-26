@@ -609,15 +609,19 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
             # for keys without scope on the markets-meta endpoint.
             # `fetch_balance()` is the real validation, and per-exchange
             # permission probes don't depend on markets being loaded.
+            # NEW-C13-10: scrub before logging — load_markets on a signed
+            # endpoint can return ccxt exceptions embedding request URLs.
+            from .redact import scrub_freeform_string
+            _scrubbed_load = scrub_freeform_string(str(load_exc))
             logger.warning(
                 "validate_key_permissions: load_markets failed on %s — %s: %s; "
                 "continuing with fetch_balance (markets_loaded=False)",
                 exchange.id,
                 type(load_exc).__name__,
-                load_exc,
+                _scrubbed_load,
             )
             result["markets_error"] = (
-                f"{type(load_exc).__name__}: {load_exc}"
+                f"{type(load_exc).__name__}: {_scrubbed_load}"
             )
         # Note: every other exception class (NetworkError, AuthenticationError,
         # ExchangeNotAvailable, etc.) is intentionally allowed to propagate
@@ -634,10 +638,15 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         # Right credentials, wrong scope (or IP allowlist mismatch on
         # exchanges that map IP-block to PermissionDenied). Must precede
         # AuthenticationError because PermissionDenied subclasses it.
-        logger.exception(
-            "validate_key_permissions: ccxt.PermissionDenied on %s — %s",
-            exchange.id,
-            exc,
+        # NEW-C13-10: scrub the exception message before logging — ccxt
+        # embeds the request URL (including &signature=<HMAC-SHA256>) in
+        # NetworkError/PermissionDenied/AuthenticationError messages.
+        # logger.exception() passes exc_info=True + str(exc) to the stdlib
+        # formatter, bypassing the structlog redact processor entirely.
+        from .redact import scrub_freeform_string
+        logger.warning(
+            "validate_key_permissions: ccxt.PermissionDenied on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
             "Key denied permission. Confirm the key has read-only scope "
@@ -647,10 +656,10 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         return result
     except ccxt.AuthenticationError as exc:
         # Genuine bad credentials, signature mismatch, expired key.
-        logger.exception(
-            "validate_key_permissions: ccxt.AuthenticationError on %s — %s",
-            exchange.id,
-            exc,
+        from .redact import scrub_freeform_string
+        logger.warning(
+            "validate_key_permissions: ccxt.AuthenticationError on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = "Authentication failed. Check your API key and secret."
         result["error_code"] = "AUTH_FAILED"
@@ -660,10 +669,10 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         # because retrying immediately won't help (typically a geo / ASN
         # block on the egress IP). Must precede NetworkError /
         # RateLimitExceeded since DDoSProtection subclasses NetworkError.
-        logger.exception(
-            "validate_key_permissions: ccxt.DDoSProtection on %s — %s",
-            exchange.id,
-            exc,
+        from .redact import scrub_freeform_string
+        logger.warning(
+            "validate_key_permissions: ccxt.DDoSProtection on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
             "Exchange blocked the validation request at the edge "
@@ -675,10 +684,10 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         # Real rate-limit OR (per-exchange) the documented Bybit quirk
         # where 403 on a scoped endpoint surfaces as RateLimitExceeded.
         # Must precede NetworkError since RateLimitExceeded subclasses it.
-        logger.exception(
-            "validate_key_permissions: ccxt.RateLimitExceeded on %s — %s",
-            exchange.id,
-            exc,
+        from .redact import scrub_freeform_string
+        logger.warning(
+            "validate_key_permissions: ccxt.RateLimitExceeded on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
             "Exchange rate-limited the validation request. Wait a moment "
@@ -690,10 +699,10 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     except ccxt.ExchangeNotAvailable as exc:
         # Exchange is down (5xx, maintenance window, regional outage).
         # Must precede NetworkError since ExchangeNotAvailable subclasses it.
-        logger.exception(
-            "validate_key_permissions: ccxt.ExchangeNotAvailable on %s — %s",
-            exchange.id,
-            exc,
+        from .redact import scrub_freeform_string
+        logger.warning(
+            "validate_key_permissions: ccxt.ExchangeNotAvailable on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
             "Exchange is currently unavailable. Try again in a few minutes."
@@ -703,10 +712,10 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     except ccxt.NetworkError as exc:
         # Transport-level (timeout, DNS, TLS, connection reset). Not a
         # credential problem. Backstop for the network family.
-        logger.exception(
-            "validate_key_permissions: ccxt.NetworkError on %s — %s",
-            exchange.id,
-            exc,
+        from .redact import scrub_freeform_string
+        logger.warning(
+            "validate_key_permissions: ccxt.NetworkError on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
             "Network error reaching the exchange. Check connectivity "
@@ -726,11 +735,10 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         # distinct error_code so the Next layer can render an "unexpected"
         # envelope rather than misleading the user with a "verify
         # credentials" message.
-        logger.exception(
-            "validate_key_permissions: unexpected error on %s — %s: %s",
-            exchange.id,
-            type(exc).__name__,
-            exc,
+        from .redact import scrub_freeform_string
+        logger.warning(
+            "validate_key_permissions: unexpected error on %s — exc_class=%s scrubbed=%s",
+            exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
             "Key validation failed unexpectedly. Contact support if this "
@@ -824,10 +832,12 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         # partial series is not silently treated as complete.
                         # Pre-fix: warn+break returned a truncated series as
                         # canonical daily PnL, feeding wrong Sharpe/equity.
+                        # NEW-C13-10: scrub before logging.
+                        from .redact import scrub_freeform_string
                         logger.error(
-                            "OKX bills fetch failed for %s page %d: %s — "
+                            "OKX bills fetch failed for %s page %d: exc_class=%s scrubbed=%s — "
                             "re-raising (partial daily_pnl rejected)",
-                            inst_type, page, str(e),
+                            inst_type, page, type(e).__name__, scrub_freeform_string(str(e)),
                         )
                         raise
 
@@ -872,10 +882,12 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                                 break
                         except Exception as e:
                             # NEW-C13-04: same rationale as the bills path.
+                            # NEW-C13-10: scrub before logging.
+                            from .redact import scrub_freeform_string
                             logger.error(
-                                "OKX archive bills fetch failed for %s: %s — "
+                                "OKX archive bills fetch failed for %s: exc_class=%s scrubbed=%s — "
                                 "re-raising (partial daily_pnl rejected)",
-                                inst_type, str(e),
+                                inst_type, type(e).__name__, scrub_freeform_string(str(e)),
                             )
                             raise
                     if type_count > 0:
@@ -1331,7 +1343,12 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
         # NEW-C13-07: stamp a DQ flag before returning the partial series.
         # Pre-fix the caller couldn't distinguish "little PnL" from "crashed
         # halfway" — the partial daily_pnl was treated as complete.
-        logger.error("fetch_daily_pnl failed: %s", str(e))
+        # NEW-C13-10: ccxt signed requests embed &signature=<HMAC> in str(e).
+        from .redact import scrub_freeform_string
+        logger.error(
+            "fetch_daily_pnl failed: exc_class=%s scrubbed=%s",
+            type(e).__name__, scrub_freeform_string(str(e)),
+        )
         _record_dq_flag("daily_pnl_fetch_error", True)
 
     return daily_pnl
@@ -1377,7 +1394,13 @@ async def fetch_raw_trades(
         else:
             logger.warning("fetch_raw_trades: unsupported exchange %s", exchange.id)
     except Exception as e:
-        logger.error("fetch_raw_trades failed for %s: %s", exchange.id, str(e))
+        # NEW-C13-10: scrub before logging — ccxt signed requests embed
+        # &signature=<HMAC-SHA256> in str(e) on NetworkError/AuthError.
+        from .redact import scrub_freeform_string
+        logger.error(
+            "fetch_raw_trades failed for %s: exc_class=%s scrubbed=%s",
+            exchange.id, type(e).__name__, scrub_freeform_string(str(e)),
+        )
         raise
 
     logger.info(
@@ -1449,8 +1472,14 @@ async def _fetch_raw_trades_binance(
                 "Binance cold start: discovered %d symbols from positions", len(symbols)
             )
         except Exception as e:
-            logger.warning("Binance cold start position fetch failed: %s", str(e))
-            raise ColdStartSymbolDiscoveryError(str(e)) from e
+            # NEW-C13-10: scrub before logging.
+            from .redact import scrub_freeform_string
+            _scrubbed = scrub_freeform_string(str(e))
+            logger.warning(
+                "Binance cold start position fetch failed: exc_class=%s scrubbed=%s",
+                type(e).__name__, _scrubbed,
+            )
+            raise ColdStartSymbolDiscoveryError(_scrubbed) from e
 
         # G12.B.1 closed-position edge case: fetch_positions only returns
         # currently-open positions, so a strategy that closed everything
@@ -1749,9 +1778,12 @@ async def _fetch_raw_trades_okx_inst_type(
             prev_cursor = new_cursor
             cursor = new_cursor
         except Exception as e:
+            # NEW-C13-10: scrub before logging — ccxt signed requests embed
+            # &signature=<HMAC-SHA256> in str(e).
+            from .redact import scrub_freeform_string
             logger.error(
-                "OKX fills fetch failed page %d instType=%s (re-raising): %s",
-                page, inst_type, str(e),
+                "OKX fills fetch failed page %d instType=%s (re-raising): exc_class=%s scrubbed=%s",
+                page, inst_type, type(e).__name__, scrub_freeform_string(str(e)),
             )
             raise
 
@@ -1916,9 +1948,11 @@ async def _fetch_raw_trades_bybit(
         except Exception as e:
             # Re-raise per-page failures (C-0227) — same rationale as the
             # OKX branch.
+            # NEW-C13-10: scrub before logging.
+            from .redact import scrub_freeform_string
             logger.error(
-                "Bybit execution list failed page %d (re-raising to fail the sync): %s",
-                page, str(e),
+                "Bybit execution list failed page %d (re-raising to fail the sync): exc_class=%s scrubbed=%s",
+                page, type(e).__name__, scrub_freeform_string(str(e)),
             )
             raise
 
@@ -2121,11 +2155,15 @@ async def fetch_usdt_balance_with_status(
     try:
         balance = await exchange.fetch_balance()
     except Exception as e:
-        # Use exception() to capture the full traceback so operators can
-        # tell auth failures (revoked key) from rate-limit surges from
-        # network drops without re-running the job. The pre-fix
-        # warning(str(e)) lost the stack and obscured root cause.
-        logger.exception("Could not fetch account balance: %s", str(e))
+        # NEW-C13-10: ccxt NetworkError/AuthError for signed requests embed
+        # &signature=<HMAC-SHA256> in str(e). Use scrub_freeform_string and
+        # log at WARNING with exc_class for triage (auth failure vs rate-limit
+        # vs network drop) without leaking the HMAC to Railway stdout / Sentry.
+        from .redact import scrub_freeform_string
+        logger.warning(
+            "Could not fetch account balance: exc_class=%s scrubbed=%s",
+            type(e).__name__, scrub_freeform_string(str(e)),
+        )
         return None, True
     try:
         usdt_total = balance.get("total", {}).get("USDT", 0)
@@ -2134,8 +2172,10 @@ async def fetch_usdt_balance_with_status(
     except (TypeError, ValueError, AttributeError) as e:
         # Malformed response shape from a misbehaving exchange / mock —
         # treat as an error read, not as a legitimate "no balance".
-        logger.exception(
-            "Malformed balance response shape: %s", str(e)
+        from .redact import scrub_freeform_string
+        logger.error(
+            "Malformed balance response shape: exc_class=%s scrubbed=%s",
+            type(e).__name__, scrub_freeform_string(str(e)),
         )
         return None, True
     # Successful read, but USDT balance is zero / absent. Legitimate
