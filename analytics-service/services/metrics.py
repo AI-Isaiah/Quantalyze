@@ -391,9 +391,13 @@ def compute_all_metrics(
     # NEW-C02-04: filter empty calendar buckets (fabricated 0.0 from sparse
     # trade calendars). resample inserts one row per calendar period; empty
     # groups produce product() == 1 - 1 == 0.0, a phantom break-even month.
+    # CR-I3 (review 2026-05-26): also guard all-NaN windows — (1+NaN).prod()
+    # returns 1.0 in pandas (NaN treated as multiplicative identity), producing
+    # a phantom 0.0 month for periods that consist entirely of NaN-gap days.
+    # Use x.notna().any() so only months with at least one real return are kept.
     monthly_rets = (
         returns.resample("ME")
-        .apply(lambda x: (1 + x).prod() - 1 if len(x) > 0 else float("nan"))
+        .apply(lambda x: (1 + x).prod() - 1 if x.notna().any() else float("nan"))
         .dropna()
     )
     monthly = _monthly_returns_grid_from_series(monthly_rets)
@@ -858,22 +862,38 @@ def compute_risk_of_ruin(
 
     NEW-C02-01: gate the decaying branch on `p > q` (i.e. p > 0.5); result
     is also clamped to [0, 1] as a defence-in-depth safeguard.
+
+    CR-C1 (specialist review 2026-05-26): This implementation is win-rate-only
+    (Cox-Miller / gambler's ruin formula). It is valid only when p > 0.5
+    (q/p < 1, so exponentiation decays). For strategies with p <= 0.5 AND a
+    genuine positive Kelly edge (p*r > q — e.g. 45%-win / 10:1-payoff, common
+    in trend-following), returning 1.0 (certain ruin) would be factually wrong
+    and misleading. Instead we return None so the UI can render "N/A — formula
+    requires win rate > 50%". Strategies with p <= 0.5 AND no Kelly edge
+    (p*r <= q) do face near-certain ruin and get 1.0.
     """
     p = win_rate
     q = 1.0 - p
-    r = payoff_ratio  # kept for API compatibility; not used in gate
+    r = payoff_ratio
     loss_levels = [0.10, 0.20, 0.30, 0.50, 1.00]
 
     results: list[dict[str, float | None]] = []
     for level in loss_levels:
         if p <= 0 or avg_trade_size <= 0:
-            prob = _safe_float(1.0)
+            prob: float | None = _safe_float(1.0)
         elif p > q:
             # q/p is in (0, 1) when p > 0.5, so exponentiation decays safely.
             exponent = min(level / max(avg_trade_size, 0.001), 500)
             raw = (q / p) ** exponent
             prob = _safe_float(min(max(raw, 0.0), 1.0))
+        elif p * r > q:
+            # Positive Kelly edge but p <= 0.5: Cox-Miller formula is not valid
+            # here (q/p >= 1 → exponentiation explodes). Return None so the UI
+            # shows "N/A — formula requires win rate > 50%" rather than a
+            # misleading "100% ruin" for trend-following profiles.
+            prob = None
         else:
+            # No positive edge (p*r <= q): genuine ruin territory.
             prob = _safe_float(1.0)
         results.append({
             "loss_pct": _safe_float(level * 100),
@@ -1296,10 +1316,11 @@ def _return_quantiles(
     q = returns.quantile([0, 0.25, 0.5, 0.75, 1]).tolist()
     result["Daily"] = [float(v) for v in q]
 
-    # Weekly — filter empty calendar buckets (NEW-C02-04)
+    # Weekly — filter empty and all-NaN calendar buckets (NEW-C02-04, CR-I3)
+    # CR-I3: guard all-NaN windows the same as monthly (x.notna().any()).
     weekly = (
         returns.resample("W")
-        .apply(lambda x: (1 + x).prod() - 1 if len(x) > 0 else float("nan"))
+        .apply(lambda x: (1 + x).prod() - 1 if x.notna().any() else float("nan"))
         .dropna()
     )
     if len(weekly) >= 4:
@@ -1307,10 +1328,11 @@ def _return_quantiles(
         result["Weekly"] = [float(v) for v in q]
 
     # Monthly — reuse caller's pre-computed series when available (NEW-C02-11)
+    # CR-I3: guard all-NaN windows with x.notna().any() (mirrors monthly_rets above).
     if monthly_rets is None:
         monthly_rets = (
             returns.resample("ME")
-            .apply(lambda x: (1 + x).prod() - 1 if len(x) > 0 else float("nan"))
+            .apply(lambda x: (1 + x).prod() - 1 if x.notna().any() else float("nan"))
             .dropna()
         )
     if len(monthly_rets) >= 3:

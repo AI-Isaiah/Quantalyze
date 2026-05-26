@@ -386,17 +386,24 @@ def _compute_position_side_volume_pcts(
     long_volume = 0.0
     short_volume = 0.0
     attributed_total = 0.0
+    cost_parse_failed = 0
     for f in fills:
         ts = _parse(f.get("timestamp") or f.get("filled_at"))
         if not ts:
             continue
         # NEW-C02-07: guard cost cast with same try/except as _compute_volume_metrics;
         # one malformed fill must not nuke the entire long/short attribution.
+        # SF-H2 (review 2026-05-26): also guard float("nan")/float("inf") — these
+        # parse without raising TypeError/ValueError but poison accumulated totals.
         raw_cost = f.get("cost")
         try:
-            cost = abs(float(raw_cost)) if raw_cost is not None else 0.0
+            parsed_cost = abs(float(raw_cost)) if raw_cost is not None else 0.0
+            cost = parsed_cost if math.isfinite(parsed_cost) else 0.0
+            if not math.isfinite(parsed_cost):
+                cost_parse_failed += 1
         except (TypeError, ValueError):
             cost = 0.0
+            cost_parse_failed += 1
         for opened, closed, side in windows:
             if ts < opened:
                 continue
@@ -408,6 +415,16 @@ def _compute_position_side_volume_pcts(
             else:
                 short_volume += cost
             break  # first matching window wins; positions don't overlap by design
+
+    # SF-H1 (review 2026-05-26): emit warning when cost parse failures occurred
+    # so operators can distinguish clean runs from degraded attribution.
+    if cost_parse_failed > 0:
+        logger.warning(
+            "_compute_position_side_volume_pcts: %d fill(s) had non-numeric or "
+            "non-finite cost (contributed 0 to attribution); long/short pcts may "
+            "be skewed.",
+            cost_parse_failed,
+        )
 
     if attributed_total <= 0:
         return {"long_volume_pct": 0.0, "short_volume_pct": 0.0}
@@ -650,12 +667,21 @@ def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
     monthly: dict[str, float] = defaultdict(float)
     ts_skipped = 0
 
+    notional_parse_failed = 0
     for f in fills:
         raw_notional = f.get("notional_usd", 0.0)
         try:
-            notional = abs(float(raw_notional)) if raw_notional is not None else 0.0
+            parsed_notional = abs(float(raw_notional)) if raw_notional is not None else 0.0
+            # SF-H2 (review 2026-05-26): float("nan")/"Infinity" parse without raising;
+            # guard with isfinite so they don't poison gross_volume / mean_size.
+            if math.isfinite(parsed_notional):
+                notional = parsed_notional
+            else:
+                notional = 0.0
+                notional_parse_failed += 1
         except (TypeError, ValueError):
             notional = 0.0
+            notional_parse_failed += 1
         gross_volume += notional
 
         ts = f.get("filled_at") or f.get("created_at") or ""
@@ -671,6 +697,16 @@ def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
     mean_size = gross_volume / n if n else 0.0
     daily_avg = sum(daily.values()) / len(daily) if daily else 0.0
     monthly_avg = sum(monthly.values()) / len(monthly) if monthly else 0.0
+
+    # SF-H1 (review 2026-05-26): warn on non-finite/malformed notional, mirroring
+    # the timestamp-coverage warning already present below.
+    if notional_parse_failed > 0:
+        logger.warning(
+            "_compute_volume_aggregator: %d fill(s) had non-numeric or non-finite "
+            "notional_usd (contributed 0 to gross_volume); volume metrics may be "
+            "understated.",
+            notional_parse_failed,
+        )
 
     result: dict[str, float] = {
         "gross_volume_usd": gross_volume,
@@ -728,6 +764,7 @@ def _compute_trade_mix(
             "short": _empty_bucket(),
         }
 
+    notional_parse_failed = 0
     for f in fills:
         side = f.get("side")
         if side == "buy":
@@ -738,11 +775,18 @@ def _compute_trade_mix(
             continue
         # NEW-C02-09: guard notional cast (mirrors _compute_volume_metrics policy);
         # a malformed notional_usd contributes 0 to total_notional, not a crash.
+        # SF-H2 (review 2026-05-26): also guard float("nan")/float("inf").
         raw_notional = f.get("notional_usd", 0.0)
         try:
-            notional = abs(float(raw_notional)) if raw_notional is not None else 0.0
+            parsed_notional = abs(float(raw_notional)) if raw_notional is not None else 0.0
+            if math.isfinite(parsed_notional):
+                notional = parsed_notional
+            else:
+                notional = 0.0
+                notional_parse_failed += 1
         except (TypeError, ValueError):
             notional = 0.0
+            notional_parse_failed += 1
 
         if has_maker_taker:
             is_maker = f.get("is_maker")
@@ -755,6 +799,15 @@ def _compute_trade_mix(
 
         buckets[bucket_key]["count"] += 1
         buckets[bucket_key]["total_notional"] += notional
+
+    # SF-H1 (review 2026-05-26): emit warning when notional parse failures occurred.
+    if notional_parse_failed > 0:
+        logger.warning(
+            "_compute_trade_mix: %d fill(s) had non-numeric or non-finite "
+            "notional_usd (contributed 0 to total_notional); trade mix may be "
+            "understated.",
+            notional_parse_failed,
+        )
 
     return buckets
 

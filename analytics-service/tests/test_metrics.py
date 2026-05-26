@@ -1467,18 +1467,25 @@ from services.metrics import compute_risk_of_ruin  # noqa: E402
 
 
 def test_risk_of_ruin_low_winrate_high_payoff_clamped():
-    """NEW-C02-01: 40%-win / 3:1-payoff (positive edge, p < 0.5) must NOT emit
-    probabilities above 1.0.  Old code gated on p*r>q (1.2>0.6 = True) but
-    computed (q/p)^exp = (0.6/0.4)^exp = 1.5^exp which explodes.
-    Fixed gate: p > q (0.4 > 0.6 is False) → returns 1.0 for all levels.
+    """NEW-C02-01 / CR-C1: 40%-win / 3:1-payoff (positive Kelly edge, p < 0.5).
+
+    Old code gated on p*r>q (1.2>0.6 = True) but computed (q/p)^exp =
+    (0.6/0.4)^exp = 1.5^exp which explodes to values far above 1.0.
+
+    CR-C1 (specialist review 2026-05-26) refines the p <= 0.5 branch: for a
+    strategy with positive Kelly edge (p*r > q), the Cox-Miller formula is not
+    valid (q/p >= 1). Instead of silently returning 1.0 (misleading: trend-
+    following strategies with 40%-win / 3:1-payoff are NOT certain-ruin), we
+    return None so the UI can render "N/A — formula requires win rate > 50%".
     """
     result = compute_risk_of_ruin(win_rate=0.40, payoff_ratio=3.0, avg_trade_size=0.01)
     for entry in result:
         prob = entry["probability"]
-        assert prob is not None, "probability must not be None"
-        assert 0.0 <= prob <= 1.0, (
-            f"risk_of_ruin probability out of [0,1]: {prob} "
-            f"(NEW-C02-01 regression — old gate p*r>q allowed q/p>1 explosion)"
+        # CR-C1: positive-edge sub-50%-win → None (N/A), not 1.0 (misleading) or >1.0
+        assert prob is None, (
+            f"risk_of_ruin probability should be None for positive-edge sub-50%-win "
+            f"strategy (CR-C1 regression — got {prob!r}; old code returned >1.0 or "
+            "1.0 without checking Kelly edge)"
         )
 
 
@@ -1502,6 +1509,18 @@ def test_risk_of_ruin_zero_winrate_returns_one():
     result = compute_risk_of_ruin(win_rate=0.0, payoff_ratio=2.0, avg_trade_size=0.01)
     for entry in result:
         assert entry["probability"] == 1.0
+
+
+def test_risk_of_ruin_low_winrate_no_edge_returns_one():
+    """CR-C1: 40%-win / 0.5:1-payoff — no positive Kelly edge (p*r=0.2 < q=0.6).
+    Genuine ruin territory — should return 1.0, not None."""
+    result = compute_risk_of_ruin(win_rate=0.40, payoff_ratio=0.5, avg_trade_size=0.01)
+    for entry in result:
+        prob = entry["probability"]
+        assert prob == 1.0, (
+            f"risk_of_ruin must return 1.0 for no-edge sub-50%-win strategy "
+            f"(CR-C1 regression — got {prob!r})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1649,4 +1668,89 @@ def test_return_quantiles_accepts_precomputed_monthly(golden_returns):
     assert result_with.get("Monthly") == result_without.get("Monthly"), (
         "Monthly quantiles differ when monthly_rets passed vs computed internally "
         "(NEW-C02-11 regression)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CR-I1 (code-review): flat day between two losses must break the streak
+# (test coverage gap identified by specialist review 2026-05-26)
+# ---------------------------------------------------------------------------
+
+
+def test_consecutive_losses_flat_day_breaks_streak():
+    """CR-I1: [-0.02, 0.0, -0.01] → consecutive_losses=1, not 2.
+
+    A zero-return day (is_negative=0) creates a group boundary in the
+    is_negative cumsum grouper, so the two single-day loss runs are
+    separate groups with max=1. Locks in the flat-day-breaks-streak
+    semantics.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=3)
+    returns = pd.Series([-0.02, 0.0, -0.01], index=dates)
+    result = compute_all_metrics(returns)
+    mj = result["metrics_json"]
+    assert mj["consecutive_losses"] == 1, (
+        f"consecutive_losses={mj['consecutive_losses']}; expected 1 — "
+        "flat day between two loss days must break the streak (CR-I1)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# SF-M3 (silent-failure): NaN gap day between losses — documents intended
+# behavior (gap day breaks streak, consistent with win-streak behaviour)
+# ---------------------------------------------------------------------------
+
+
+def test_consecutive_losses_nan_gap_breaks_streak():
+    """SF-M3: [-0.01, NaN, -0.01, -0.01] → documents streak behavior.
+
+    NaN maps to 0 in is_negative, so a NaN gap day creates a group boundary
+    (same as a flat day). The run [-0.01, NaN, -0.01, -0.01] becomes two
+    groups: {0: 1-day loss} and {2-3: 2-day loss} → consecutive_losses=2.
+    This is intentional: NaN gaps break streaks (consistent with win-streak
+    treatment). The old code counted NaN as a loss (consecutive_losses=4).
+    """
+    dates = pd.bdate_range("2024-01-01", periods=4)
+    returns = pd.Series([-0.01, float("nan"), -0.01, -0.01], index=dates)
+    result = compute_all_metrics(returns)
+    mj = result["metrics_json"]
+    # Group 1 = day 0 (sum=1); gap NaN makes day 1 a new group; group 2+3 (sum=2)
+    assert mj["consecutive_losses"] == 2, (
+        f"consecutive_losses={mj['consecutive_losses']}; expected 2 — "
+        "NaN gap day breaks streak into max-2-day run (SF-M3; old code returned 4)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CR-I3 (code-review): all-NaN monthly window must NOT produce phantom 0.0
+# ---------------------------------------------------------------------------
+
+
+def test_monthly_rets_all_nan_window_not_phantom_zero():
+    """CR-I3: a month where every value is NaN (gap days, no real trades)
+    must be dropped from monthly_rets, not appear as phantom 0.0.
+
+    (1+NaN).prod() returns 1.0 in pandas — prod() treats NaN as 1 in its
+    accumulation. The len(x) > 0 guard (NEW-C02-04) is insufficient because
+    len includes NaN-indexed rows. The x.notna().any() guard drops these.
+    """
+    import services.metrics as metrics_module
+    # Jan has real returns; Feb is entirely NaN (gap month); Mar has real returns
+    jan_dates = pd.bdate_range("2024-01-15", periods=3)
+    mar_dates = pd.bdate_range("2024-03-15", periods=3)
+    # NaN entries for Feb — using a DatetimeIndex with NaN-valued series
+    feb_dates = pd.bdate_range("2024-02-12", periods=2)
+    all_dates = jan_dates.tolist() + feb_dates.tolist() + mar_dates.tolist()
+    values = [0.005, 0.005, 0.005, float("nan"), float("nan"), 0.005, 0.005, 0.005]
+    returns = pd.Series(values, index=pd.DatetimeIndex(all_dates))
+
+    monthly_rets = (
+        returns.resample("ME")
+        .apply(lambda x: (1 + x).prod() - 1 if x.notna().any() else float("nan"))
+        .dropna()
+    )
+    # Only Jan and Mar should survive; Feb (all-NaN) must be dropped
+    assert len(monthly_rets) == 2, (
+        f"Expected 2 real months (Jan+Mar), got {len(monthly_rets)} — "
+        "all-NaN month produced phantom entry (CR-I3 regression)"
     )

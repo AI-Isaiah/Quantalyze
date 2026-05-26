@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import math
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -4404,3 +4405,110 @@ async def test_csv_sibling_upsert_failure_keeps_complete_status():
         f"Sibling-table RPC failure must NOT overwrite status to 'failed'; "
         f"got statuses: {upsert_statuses} (NEW-C02-06)"
     )
+
+
+# ---------------------------------------------------------------------------
+# SF-H2: float("nan") / float("inf") must not bypass guards in the three
+#         new cost/notional sites (specialist review 2026-05-26)
+# ---------------------------------------------------------------------------
+
+
+def test_position_side_volume_pcts_nan_cost_coerced_to_zero():
+    """SF-H2: float('nan') in cost field must be coerced to 0, not poison
+    attributed_total (NaN <= 0 evaluates False, silently computing NaN/NaN=NaN)."""
+    from services.analytics_runner import _compute_position_side_volume_pcts
+
+    fills = [
+        {"timestamp": "2024-01-15T10:00:00+00:00", "cost": float("nan")},
+        {"timestamp": "2024-01-16T10:00:00+00:00", "cost": 500.0},
+    ]
+    positions = [
+        {
+            "opened_at": "2024-01-01T00:00:00+00:00",
+            "closed_at": "2024-01-31T00:00:00+00:00",
+            "side": "long",
+        }
+    ]
+    result = _compute_position_side_volume_pcts(fills, positions)
+    # NaN fill must contribute 0; only 500.0 fill counts → long_pct=1.0
+    assert math.isfinite(result["long_volume_pct"]), (
+        f"long_volume_pct is non-finite ({result['long_volume_pct']}) — "
+        "NaN cost bypassed guard and poisoned attributed_total (SF-H2)"
+    )
+    assert result["long_volume_pct"] == pytest.approx(1.0), (
+        "NaN cost fill must contribute 0 to attribution; only 500.0 fill counts"
+    )
+
+
+def test_position_side_volume_pcts_inf_cost_coerced_to_zero():
+    """SF-H2: float('inf') in cost field must be coerced to 0."""
+    from services.analytics_runner import _compute_position_side_volume_pcts
+
+    fills = [
+        {"timestamp": "2024-01-15T10:00:00+00:00", "cost": float("inf")},
+        {"timestamp": "2024-01-16T10:00:00+00:00", "cost": 200.0},
+    ]
+    positions = [
+        {
+            "opened_at": "2024-01-01T00:00:00+00:00",
+            "closed_at": "2024-01-31T00:00:00+00:00",
+            "side": "long",
+        }
+    ]
+    result = _compute_position_side_volume_pcts(fills, positions)
+    assert math.isfinite(result["long_volume_pct"]), (
+        f"long_volume_pct is non-finite — Inf cost bypassed guard (SF-H2)"
+    )
+
+
+def test_volume_aggregator_nan_notional_coerced_to_zero():
+    """SF-H2: float('nan') in notional_usd must be coerced to 0, not poison
+    gross_volume (which would make mean_size / daily_avg NaN)."""
+    from services.analytics_runner import _compute_volume_aggregator
+
+    fills = [
+        {"notional_usd": float("nan"), "filled_at": "2024-01-15T10:00:00+00:00"},
+        {"notional_usd": 1000.0, "filled_at": "2024-01-15T11:00:00+00:00"},
+    ]
+    result = _compute_volume_aggregator(fills)
+    assert math.isfinite(result["gross_volume_usd"]), (
+        f"gross_volume_usd is non-finite ({result['gross_volume_usd']}) — "
+        "NaN notional bypassed guard and poisoned gross_volume (SF-H2)"
+    )
+    assert result["gross_volume_usd"] == pytest.approx(1000.0), (
+        "NaN notional must contribute 0; only 1000.0 counts"
+    )
+
+
+def test_volume_aggregator_inf_notional_coerced_to_zero():
+    """SF-H2: float('inf') in notional_usd must be coerced to 0."""
+    from services.analytics_runner import _compute_volume_aggregator
+
+    fills = [
+        {"notional_usd": float("inf"), "filled_at": "2024-01-15T10:00:00+00:00"},
+        {"notional_usd": 500.0, "filled_at": "2024-01-15T11:00:00+00:00"},
+    ]
+    result = _compute_volume_aggregator(fills)
+    assert math.isfinite(result["gross_volume_usd"]), (
+        f"gross_volume_usd is non-finite — Inf notional bypassed guard (SF-H2)"
+    )
+    assert result["gross_volume_usd"] == pytest.approx(500.0)
+
+
+def test_trade_mix_nan_notional_coerced_to_zero():
+    """SF-H2: float('nan') in notional_usd for _compute_trade_mix must be
+    coerced to 0 rather than accumulating into total_notional."""
+    from services.analytics_runner import _compute_trade_mix
+
+    fills = [
+        {"side": "buy", "notional_usd": float("nan"), "is_maker": True},
+        {"side": "sell", "notional_usd": 300.0, "is_maker": False},
+    ]
+    result = _compute_trade_mix(fills, has_maker_taker=True)
+    assert math.isfinite(result["long_maker"]["total_notional"]), (
+        f"long_maker total_notional is non-finite — NaN notional bypassed guard (SF-H2)"
+    )
+    assert result["long_maker"]["total_notional"] == pytest.approx(0.0), (
+        "NaN notional must contribute 0 to total_notional"
+    )
+    assert result["short_taker"]["total_notional"] == pytest.approx(300.0)
