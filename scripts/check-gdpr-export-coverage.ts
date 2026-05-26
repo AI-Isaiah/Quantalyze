@@ -583,12 +583,28 @@ export function extractUserTablesFromMigration(
   const createTableRe =
     /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"[a-z0-9_]+"|[a-z0-9_]+)\.)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s*\(([\s\S]*?)\n\s*\)\s*;/gi;
 
-  // A column declaration that references profiles(id) or auth.users(id).
-  // Covers: user_id, allocator_id, uploaded_by, created_by, invited_by.
-  // We match on the USER-ID intent columns only — FKs like "strategy_id"
-  // to profiles don't exist in this codebase.
+  // A column declaration that identifies a user.  Two match shapes:
+  //
+  //   1. FK-reference form (any intent column + REFERENCES auth.users|profiles):
+  //      user_id UUID ... REFERENCES auth.users(id)
+  //      allocator_id UUID ... REFERENCES profiles(id)
+  //      etc. — covers the wide set of intent columns.
+  //
+  //   2. Bare-UUID form (user_id / allocator_id + UUID NOT NULL, no inline FK):
+  //      NEW-C16-06 (audit 2026-05-26, MED conf-8): `audit_log` and
+  //      `audit_log_cold` use `user_id UUID NOT NULL` WITHOUT an inline
+  //      REFERENCES clause (the FK is enforced at the DB level, not inline
+  //      in the DDL). The FK-only regex was blind to these tables — a
+  //      user-owned table with a bare user_id escaped the drift guard and
+  //      any future `user_id UUID`-without-inline-FK table would do the
+  //      same. We widen to also match the two canonical bare-uuid owner
+  //      columns; EXCLUDED_TABLES suppresses false positives for audit
+  //      infrastructure tables and other legitimate non-owned bare columns.
+  //
+  // The alternation uses `(?:...|...)` so the overall re is tested once
+  // per body (both shapes are tried before returning false).
   const userColumnRe =
-    /\b(user_id|allocator_id|invited_by|created_by|uploaded_by|decided_by|edited_by_user_id|processed_by|updated_by|granted_by)\s+UUID[^,]*REFERENCES\s+(?:auth\.users|profiles)\b/i;
+    /(?:\b(user_id|allocator_id|invited_by|created_by|uploaded_by|decided_by|edited_by_user_id|processed_by|updated_by|granted_by)\s+UUID[^,]*REFERENCES\s+(?:auth\.users|profiles)\b|\b(user_id|allocator_id)\s+UUID\s+NOT\s+NULL\b)/i;
 
   createTableRe.lastIndex = 0;
   let match: RegExpExecArray | null;
