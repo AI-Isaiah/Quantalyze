@@ -2028,17 +2028,6 @@ export const getMyAllocationDashboard = cache(
       // pre-migration-011. Consumed by the V2 MandateSnapshot widget via
       // lib/mandate-gates.ts.
       mandate,
-      // Phase 11 / D-02 — server-side COUNT of api_keys rows for the
-      // visibility predicate of OnboardingBanner (S1) and
-      // MandateQuickSetCard (S2). RLS-scoped via the user-scoped client
-      // (api_keys has an owner-self-SELECT policy). NOT cached client-side
-      // (D-02 LOCKED forbids localStorage). Note: a separate `apiKeys`
-      // array fetch already runs above to project the full per-key columns
-      // — we keep the count query as a distinct head-only round-trip so
-      // (a) it's a single integer over the wire even when a user has many
-      // keys, and (b) the count number remains correct under RLS even if
-      // future projection-column changes alter the array length.
-      apiKeysCountRes,
       // G-1 fix — hoisted to Step 1 so the outcomes payload is identical in
       // both the !portfolio (fresh allocator) branch and the portfolio
       // branch. Uses admin client because match_decisions has no allocator-
@@ -2086,10 +2075,6 @@ export const getMyAllocationDashboard = cache(
         .eq("allocator_id", userId)
         .not("original_holding_ref", "is", null),
       getOwnPreferences(supabase, userId),
-      supabase
-        .from("api_keys")
-        .select("id", { count: "exact", head: true })
-        .eq("user_id", userId),
       admin
         .from("bridge_outcomes")
         .select(
@@ -2248,12 +2233,14 @@ export const getMyAllocationDashboard = cache(
     assertOk(phase09MatchDecisionsRes, "match_decisions");
     assertOk(outcomesFullRes, "bridge_outcomes");
 
-    // Phase 11 / D-02 — server-side COUNT result (head:true returns no rows;
-    // the `count` field is the authoritative integer). PostgREST can return
-    // null for `count` on transport error — coalesce to 0 so downstream
-    // visibility predicates (apiKeysCount === 0) treat unknowable as
-    // "show the onboarding nudge", which is a safer default than hiding it.
-    const apiKeysCount = apiKeysCountRes.count ?? 0;
+    // Phase 11 / D-02 — derive apiKeysCount from the already-fetched,
+    // already-error-checked `apiKeys` array (getUserApiKeys throws on error).
+    // NEW-C03-04: the previous separate head-only COUNT probe used
+    // `apiKeysCountRes.count ?? 0`, which silently produced 0 on any
+    // transient RLS/network failure — firing the OnboardingBanner +
+    // MandateQuickSetCard "connect your first exchange" empty-state for an
+    // allocator who has keys, with nothing logged.
+    const apiKeysCount = apiKeys.length;
     // Phase 11 / D-04 — derive once via the pure helper (W-02 unit-tested).
     const mandateIsSet = deriveMandateIsSet(mandate);
 
