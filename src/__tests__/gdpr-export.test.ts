@@ -799,16 +799,31 @@ describe("collectUserExportBundle — H-0456 ORDER BY determinism regression", (
   });
 });
 
-describe("collectUserExportBundle — H-0456 getOrderColumn per-table column (specialist apply, pr-test HIGH conf-9)", () => {
-  it("audit_log projection sorts by created_at; every other table by id", async () => {
+describe("collectUserExportBundle — H-0456 / NEW-C16-01 getOrderColumn per-table column (specialist apply, pr-test HIGH conf-9)", () => {
+  it("audit_log sorts by created_at; id-less tables sort by their override column; every other table by id", async () => {
     // Spy on `.order(col, ...)` invocations and capture the column
     // passed for each table. The audit_log projected source MUST sort
-    // by `created_at` (so size-cap truncation is chronological);
-    // every other table MUST sort by `id` (UUID PK).
+    // by `created_at` (so size-cap truncation is chronological); the
+    // four id-less tables MUST sort by their NOT-NULL override column
+    // (NEW-C16-01 — a `.order("id")` against them raises Postgres
+    // 42703 and 500s every export); every other table MUST sort by
+    // `id` (UUID PK).
     const orderCalls: Array<{ table: string; col: string }> = [];
+    // Indirect parent probes (strategies, portfolios) MUST return at
+    // least one id so the indirect CHILD select (e.g. portfolio_strategies)
+    // actually fires its `.in().order()` — otherwise the child order
+    // column would never be exercised and a regression there would
+    // slip through. Every other table returns no rows.
+    const PARENT_TABLES = new Set(["strategies", "portfolios"]);
     const mock = {
       from: (table: string) => {
-        const limit = async () => ({ data: [], error: null });
+        const limit = async () =>
+          PARENT_TABLES.has(table)
+            ? {
+                data: [{ id: "11111111-1111-1111-1111-111111111111" }],
+                error: null,
+              }
+            : { data: [], error: null };
         return {
           select: () => ({
             eq: () => ({
@@ -838,10 +853,30 @@ describe("collectUserExportBundle — H-0456 getOrderColumn per-table column (sp
     expect(auditCalls.length).toBeGreaterThanOrEqual(1);
     for (const c of auditCalls) expect(c.col).toBe("created_at");
 
-    // Every non-audit_log .order() call uses 'id'.
-    const nonAudit = orderCalls.filter((c) => c.table !== "audit_log");
-    expect(nonAudit.length).toBeGreaterThan(0);
-    for (const c of nonAudit) expect(c.col).toBe("id");
+    // NEW-C16-01: the four id-less tables order by their explicit
+    // NOT-NULL column — NEVER "id" (which would 42703).
+    const idLessOrderColumns: Record<string, string> = {
+      user_app_roles: "granted_at",
+      user_favorites: "created_at",
+      allocator_preferences: "updated_at",
+      portfolio_strategies: "added_at",
+      allocator_equity_snapshots: "asof",
+      investor_attestations: "attested_at",
+      organization_members: "joined_at",
+    };
+    for (const [table, expectedCol] of Object.entries(idLessOrderColumns)) {
+      const calls = orderCalls.filter((c) => c.table === table);
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+      for (const c of calls) expect(c.col).toBe(expectedCol);
+    }
+
+    // Every remaining table (has a UUID PK) sorts by 'id'.
+    const idLessTables = new Set(Object.keys(idLessOrderColumns));
+    const idTables = orderCalls.filter(
+      (c) => c.table !== "audit_log" && !idLessTables.has(c.table),
+    );
+    expect(idTables.length).toBeGreaterThan(0);
+    for (const c of idTables) expect(c.col).toBe("id");
   });
 });
 

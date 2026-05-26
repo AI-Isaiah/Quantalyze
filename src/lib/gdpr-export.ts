@@ -1399,26 +1399,68 @@ interface FetchRowsResult {
 }
 
 /**
+ * Tables in USER_EXPORT_TABLES that have NO `id` column, mapped to the
+ * NOT-NULL column that supplies their deterministic ORDER BY instead.
+ *
+ * NEW-C16-01 (audit 2026-05-26, CRITICAL): the previous
+ * `getOrderColumn` returned `"id"` for every non-audit spec on the
+ * stale assumption that "every user-owned table has an `id` UUID
+ * column". FOUR manifest tables have composite/natural PKs and NO `id`
+ * column — verified against `src/lib/database.types.ts`:
+ *   - `user_app_roles`       PK (user_id, role)        — order by granted_at
+ *   - `user_favorites`       PK (user_id, strategy_id) — order by created_at
+ *   - `allocator_preferences` keyed on user_id         — order by updated_at
+ *   - `portfolio_strategies` PK (portfolio_id, strategy_id) — order by added_at
+ *   - `allocator_equity_snapshots` PK (allocator_id, asof) — order by asof
+ *   - `investor_attestations` PK (user_id)             — order by attested_at
+ *   - `organization_members` PK (organization_id, user_id) — order by joined_at
+ * A `.order("id")` against any of them raised Postgres 42703
+ * (`column "id" does not exist`), which `fetchRowsForSpec` surfaced as
+ * a `fetch_error` → `partial: true` → the route returned HTTP 500
+ * (`export_partial`) for EVERY user on EVERY call. The unit suite
+ * mocked `.order()` as a no-op so the regression shipped green; the
+ * `gdpr-export-schema.test.ts` schema-validation test now pins each
+ * order column against `database.types.ts` so a mock cannot mask it.
+ *
+ * Each chosen column is `NOT NULL` in the table's Row type, so the
+ * ORDER BY is total (no NULL-ordering ambiguity) and deterministic.
+ *
+ * Exported so the schema-validation regression test
+ * (`gdpr-export-schema.test.ts`) can assert each override column
+ * actually exists on its table in `database.types.ts` — a pure mock
+ * cannot reproduce the 42703 these overrides exist to prevent.
+ */
+export const ORDER_COLUMN_OVERRIDES: Readonly<Record<string, string>> = {
+  user_app_roles: "granted_at",
+  user_favorites: "created_at",
+  allocator_preferences: "updated_at",
+  portfolio_strategies: "added_at",
+  allocator_equity_snapshots: "asof",
+  investor_attestations: "attested_at",
+  organization_members: "joined_at",
+};
+
+/**
  * The Postgres column that determines stable ORDER BY for a given
  * spec. Audit 2026-05-07 H-0456: PostgreSQL does NOT guarantee row
  * order without an explicit ORDER BY, so two calls to the same export
  * can return DIFFERENT 50K subsets for a user with >50K rows. The
  * size-cap truncation also depends on this ordering — without it the
  * bundle is non-deterministic. We sort by `created_at` for the audit
- * trail tables and by `id` for everything else. The first sort key is
- * a NULLS-LAST so rows without a `created_at` (legacy seed rows in
- * test fixtures) don't crash the SELECT planner.
+ * trail tables, by an explicit override for the four id-less tables
+ * (see ORDER_COLUMN_OVERRIDES), and by `id` for everything else.
  */
-function getOrderColumn(spec: UserExportTable): string {
+export function getOrderColumn(spec: UserExportTable): string {
   // audit_log entries have created_at as their natural time-ordering
-  // field. For everything else `id` is a stable UUID PK and a
-  // sufficient deterministic sort key (every user-owned table in
-  // this codebase has an `id` UUID column — verified against
-  // database.types.ts at audit time).
+  // field.
   if (spec.kind === "projected" && spec.source_table === "audit_log") {
     return "created_at";
   }
-  return "id";
+  // NEW-C16-01: the column the SELECT actually orders by is on
+  // `spec.table` for direct/projected specs AND for the indirect CHILD
+  // select. Look it up by the bundle-facing table name; fall back to
+  // the UUID PK `id` for every table that has one.
+  return ORDER_COLUMN_OVERRIDES[spec.table] ?? "id";
 }
 
 async function fetchRowsForSpec(
