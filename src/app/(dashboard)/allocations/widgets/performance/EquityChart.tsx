@@ -351,6 +351,17 @@ export function localDateFromISO(s: string): Date {
   return new Date(s);
 }
 
+/**
+ * NEW-C23-02: local today-midnight — use instead of `new Date()` for the
+ * CustomRangePicker `max` bound. `new Date()` carries the current wall-clock
+ * time, which mixed with a local-midnight `min` produces time-of-day-dependent
+ * day counts and disabled-cell math near the rounding seam.
+ */
+export function localMidnightToday(): Date {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
 function firstDate(points: DailyPoint[]): Date {
   if (points.length === 0) return new Date();
   return localDateFromISO(points[0].date);
@@ -1095,7 +1106,10 @@ export function EquityChart({
               onClose={() => setPickerOpen(false)}
               onApply={applyCustom}
               min={firstDate(composite)}
-              max={new Date()}
+              // NEW-C23-02: local today-midnight instead of wall-clock new Date().
+              // Mixing a UTC-midnight min with a wall-clock max produced
+              // time-of-day-dependent day counts and disabled-cell math.
+              max={localMidnightToday()}
               initialRange={customRange}
             />
           )}
@@ -1963,7 +1977,10 @@ export default function EquityChartWidget({ data }: WidgetProps) {
                 onClose={() => setPickerOpen(false)}
                 onApply={applyCustom}
                 min={minDate}
-                max={new Date()}
+                // NEW-C23-02: local today-midnight (consistent with the
+                // localDateFromISO convention used for `min`) so day counts
+                // and disabled-cell comparisons are time-of-day immune.
+                max={localMidnightToday()}
                 initialRange={customRange}
               />
             )}
