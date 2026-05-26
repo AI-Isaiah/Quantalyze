@@ -1837,14 +1837,21 @@ async def _fetch_current_equity(
             # effort — a missing ticker records the asset as unpriced so
             # the caller can decide whether to trust the anchor.
             px = 0.0
+            _ticker_fetch_failed = False
             try:
                 t = await exchange.fetch_ticker(f"{asset_upper}/USDT")
                 px = float((t or {}).get("last") or 0.0) if isinstance(t, dict) else 0.0
             except Exception:  # noqa: BLE001
                 px = 0.0
-            # NEW-C01-02: track assets that had a positive qty but priced
-            # to zero (ticker failure → anchor understates equity).
-            if px == 0.0:
+                _ticker_fetch_failed = True
+            # NEW-C01-02 (silent-failure/F-06 fix): track assets that priced
+            # to zero because of a FETCH FAILURE (auth error, network error,
+            # missing ticker) — those represent unknown equity that could cause
+            # the anchor to understate the true total. A genuine zero (delisted
+            # token, or exchange returns 0.0 as last price) contributes 0 to
+            # the anchor regardless, so skipping the anchor for it is wrong.
+            # Only mark as partial_unpriced when the ticker fetch failed.
+            if _ticker_fetch_failed:
                 partial_unpriced.add(asset_upper)
             total += q * px
 
