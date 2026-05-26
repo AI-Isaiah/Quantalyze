@@ -212,11 +212,23 @@ export function SyncProgress({
     }
 
     const supabase = createClient();
-    const { data } = await supabase
+    // FINDING-2: destructure error from strategy_analytics poll query. Pre-fix:
+    // {error} was discarded, so RLS regression / network timeout / PostgREST 5xx
+    // were indistinguishable from a legitimately-missing row and silently
+    // consumed grace polls. PGRST116 (0 rows via .single()) is the expected
+    // "row not yet created" case — log everything else.
+    const { data, error: pollErr } = await supabase
       .from("strategy_analytics")
       .select("computation_status, computation_error, computed_at")
       .eq("strategy_id", strategyId)
       .single();
+    if (pollErr && pollErr.code !== "PGRST116") {
+      console.error(
+        `[SyncProgress] strategy_analytics poll failed [strategy_id=${strategyId}]:`,
+        pollErr.message,
+        pollErr.code,
+      );
+    }
 
     // NEW-C37-01: after grace period, treat a permanently-missing row as a
     // failure so the poller breaks out with a recoverable error surface

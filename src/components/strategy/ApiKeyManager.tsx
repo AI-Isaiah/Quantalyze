@@ -53,10 +53,18 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     // Project only the allowlist — never `.select("*")` on api_keys from a
     // user-scoped client. Migration 027 (SEC-005) revokes SELECT on the
     // encrypted columns; `.select("*")` would silently return NULL for them.
-    const { data } = await supabase
+    // FINDING-3: destructure error from api_keys SELECT and log on failure.
+    // Pre-fix: {error} was discarded; on RLS regression/session expiry/network
+    // error the key list silently stayed stale with no log entry and no user
+    // feedback. The if(data) guard below still correctly short-circuits on
+    // failure — this adds the missing observability.
+    const { data, error: keysErr } = await supabase
       .from("api_keys")
       .select(API_KEY_USER_COLUMNS)
       .order("created_at", { ascending: false });
+    if (keysErr) {
+      console.error("[ApiKeyManager] api_keys fetch failed:", keysErr.message);
+    }
     if (data) {
       setKeys(data);
       // NEW-C37-04: derive lastSyncAt from the key that was actually synced
@@ -85,6 +93,11 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       router.refresh();
     } else if (status === "error") {
       setSyncingKeyId(null);
+      // FINDING-8: when the poller times out (SyncProgress fires onStatusChange("error")
+      // after POLL_MAX_ATTEMPTS without any syncError from the catch block),
+      // syncError stays null and the UI shows "Sync failed" with no detail text.
+      // Fill a default message for the timeout case so the user has actionable context.
+      setSyncError((prev) => prev ?? "Analytics computation timed out. Please retry or contact support.");
     }
   }, [router, loadKeys, lastAttemptedKeyId]);
 
@@ -161,8 +174,11 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ strategy_id: strategyId }),
-        }).catch(() => {
-          // Non-critical: user can resync later
+        }).catch((err) => {
+          // FINDING-10: log failure so operators can diagnose why a newly-added
+          // key never synced. Non-critical UX (user can resync manually), but
+          // the empty catch previously left zero evidence of 401/403/500 errors.
+          console.warn("[ApiKeyManager] background sync after key add failed:", err);
         });
       }
 
@@ -178,7 +194,18 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
 
   async function handleLinkKey(keyId: string) {
     const supabase = createClient();
-    await supabase.from("strategies").update({ api_key_id: keyId }).eq("id", strategyId);
+    // C1/FINDING-4: destructure and throw on error so handleSyncTrades
+    // cannot proceed to /api/keys/sync against the wrong api_key_id when
+    // the link update is denied (RLS violation, stale session, wrong
+    // strategyId). Pre-fix: the {error} return was silently discarded —
+    // the same pre-fix scenario that NEW-C37-03 fixed for handleAddKey.
+    const { error: linkError } = await supabase
+      .from("strategies")
+      .update({ api_key_id: keyId })
+      .eq("id", strategyId);
+    if (linkError) {
+      throw new Error(`Failed to link key to strategy: ${linkError.message}`);
+    }
     router.refresh();
   }
 

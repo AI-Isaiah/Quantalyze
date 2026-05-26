@@ -416,16 +416,18 @@ function buildMetadataUpdatePayload(
   if (metadata.leverage_range !== undefined) {
     updatePayload.leverage_range = metadata.leverage_range;
   }
-  // NEW-C14-03: aum/max_capacity are validated strings that parseCsvMetadata
-  // already confirmed are finite, non-negative, and < MAX_DOLLAR_VALUE.
-  // parseMoney converts them to numbers for the DB INSERT.
+  // NEW-C14-03 / I1: aum/max_capacity are validated strings that
+  // parseCsvMetadata already confirmed are finite, non-negative, and <
+  // MAX_DOLLAR_VALUE. Skip parseMoney on this validated path — parseMoney
+  // returns null for empty-string ("" → !value guard) so the wrapping
+  // null-check was load-bearing only by coincidence. Using Number() directly
+  // removes the implicit second validation layer and makes the intent
+  // unambiguous: the string is known-good and the conversion always succeeds.
   if (metadata.aum !== undefined) {
-    const aumNum = parseMoney(metadata.aum);
-    if (aumNum !== null) updatePayload.aum = aumNum;
+    updatePayload.aum = Number(metadata.aum);
   }
   if (metadata.max_capacity !== undefined) {
-    const capacityNum = parseMoney(metadata.max_capacity);
-    if (capacityNum !== null) updatePayload.max_capacity = capacityNum;
+    updatePayload.max_capacity = Number(metadata.max_capacity);
   }
   return updatePayload;
 }
@@ -1039,11 +1041,28 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         const admin = createAdminClient();
         // strategy_verifications.wizard_session_id is the UNIQUE-indexed column
         // (migration 104). strategy_id is the FK to strategies.id.
-        const { data: verRow } = await admin
+        // FINDING-1: destructure error from admin SELECT so a PostgREST
+        // error (PGRST116, PGRST301, RLS misconfiguration, network 5xx) is
+        // logged and captured rather than silently falling through to the
+        // CSV_DUPLICATE_SESSION 409. Pre-fix: {data:null,error:{...}} was
+        // indistinguishable from a genuine "not found" result, so the user
+        // received ok:false instead of the correct idempotent ok:true, and
+        // the SELECT failure left zero trace in logs.
+        const { data: verRow, error: verLookupErr } = await admin
           .from("strategy_verifications")
           .select("strategy_id")
           .eq("wizard_session_id", wizard_session_id)
           .maybeSingle();
+        if (verLookupErr) {
+          console.error(
+            `[strategies/csv-finalize] 23505 idempotent-recovery SELECT failed [correlation_id=${correlation_id}]:`,
+            verLookupErr.message,
+          );
+          captureToSentry(verLookupErr, {
+            tags: { surface: "csv-finalize", step: "23505-recovery-lookup" },
+            extra: { correlation_id, wizard_session_id },
+          });
+        }
         if (verRow?.strategy_id) {
           return NextResponse.json(
             {

@@ -289,9 +289,20 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
       if (!event.persisted) return;
       // Fire-and-forget: check LS for a draft pointer. If absent, the wizard
       // was finalized — route to /strategies to prevent re-submit.
+      // FINDING-5: wrap in try/catch so a loadWizardState exception (localStorage
+      // access denied in strict browser policy, JSON parse error on corrupted
+      // value) doesn't silently swallow and leave the Submit button active.
+      // Fail-safe: redirect on throw to prevent the duplicate-submit the guard
+      // was added to prevent.
       void (async () => {
-        const loaded = await loadWizardState();
-        if (!loaded?.strategyId && !loaded?.wizardSessionId) {
+        try {
+          const loaded = await loadWizardState();
+          if (!loaded?.strategyId && !loaded?.wizardSessionId) {
+            router.push("/strategies");
+          }
+        } catch (err) {
+          console.error("[wizard] bfcache restore loadWizardState threw:", err);
+          // Fail safe: redirect to prevent re-submit of an already-finalized wizard.
           router.push("/strategies");
         }
       })();
