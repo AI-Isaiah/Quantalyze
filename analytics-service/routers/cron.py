@@ -91,6 +91,22 @@ CRON_RECOMPUTE_CONCURRENCY = 2
 # have to store and search.
 RECOMPUTE_FAILURE_CAP = 50
 
+# NEW-C32-02: cap the `results` list in the cron response body.
+# `failures` is capped but `results` was unbounded — the LARGER payload
+# (one full dict per active key with per-strategy stats), scaling 1:1 with
+# active keys. During a platform-wide incident this produces the exact
+# unbounded body the failures cap was introduced to prevent.
+# Priority: non-ok statuses first (error/timeout/partial/key_revoked), then ok.
+RESULTS_CAP = 50
+
+# NEW-C32-01: page size for IN-list fetches in the portfolio recompute cascade.
+# `synced_strategy_ids` and `candidate_portfolio_ids` are unbounded — they grow
+# 1:1 with active keys × strategies. PostgREST serialises the IN list into the
+# URL; on a large platform book this 414s (or silently truncates) and some
+# portfolios skip their recompute. Reuses the 50-id chunk size already
+# documented at routers/match.py (C-retention fix) and match.py:L874.
+_CRON_IN_LIST_PAGE_SIZE = 50
+
 # Wire-format status values for a per-key sync result. Annotated on
 # `_sync_single_key` / `_sync_key_with_timeout` returns so misspelled
 # comparisons (`"OK"`, `"errored"`) are caught at type-check time
@@ -642,14 +658,23 @@ async def cron_sync():
     portfolio_recomputes_error: str | None = None
     if synced_strategy_ids:
         try:
-            ps_rows = (
-                supabase.table("portfolio_strategies")
-                .select("portfolio_id")
-                .in_("strategy_id", synced_strategy_ids)
-                .execute()
-            )
+            # NEW-C32-01: paginate the synced_strategy_ids IN-list.
+            # An unbounded list grows 1:1 with active keys × strategies and
+            # can exceed the PostgREST URL limit (HTTP 414 / silent truncation),
+            # silently dropping affected portfolios from the recompute cascade.
+            # match.py:L874 already documents this hazard; same fix here.
+            ps_data: list[dict] = []
+            for _page_start in range(0, len(synced_strategy_ids), _CRON_IN_LIST_PAGE_SIZE):
+                _chunk = synced_strategy_ids[_page_start:_page_start + _CRON_IN_LIST_PAGE_SIZE]
+                _page = (
+                    supabase.table("portfolio_strategies")
+                    .select("portfolio_id")
+                    .in_("strategy_id", _chunk)
+                    .execute()
+                )
+                ps_data.extend(_page.data or [])
             candidate_portfolio_ids = list(
-                set(r["portfolio_id"] for r in (ps_rows.data or []))
+                set(r["portfolio_id"] for r in ps_data)
             )
 
             # Second round-trip filters out is_test=true portfolios. We
@@ -657,16 +682,25 @@ async def cron_sync():
             # embedded-resource filter, but a simple .in_() on the
             # already-deduped candidate id list is clearer and survives
             # supabase-py syntax churn.
+            # NEW-C32-01 (continued): also paginate candidate_portfolio_ids.
             portfolio_ids: list[str] = []
             if candidate_portfolio_ids:
-                real_rows = (
-                    supabase.table("portfolios")
-                    .select("id")
-                    .in_("id", candidate_portfolio_ids)
-                    .eq("is_test", False)
-                    .execute()
-                )
-                portfolio_ids = [r["id"] for r in (real_rows.data or [])]
+                real_data: list[dict] = []
+                for _page_start in range(
+                    0, len(candidate_portfolio_ids), _CRON_IN_LIST_PAGE_SIZE
+                ):
+                    _chunk = candidate_portfolio_ids[
+                        _page_start:_page_start + _CRON_IN_LIST_PAGE_SIZE
+                    ]
+                    _page = (
+                        supabase.table("portfolios")
+                        .select("id")
+                        .in_("id", _chunk)
+                        .eq("is_test", False)
+                        .execute()
+                    )
+                    real_data.extend(_page.data or [])
+                portfolio_ids = [r["id"] for r in real_data]
         except Exception as exc:
             # A Supabase blip on the recompute lookup must NOT lose the
             # per-key sync results we already collected. Record the
@@ -874,6 +908,22 @@ async def cron_sync():
             "total_failures": 0,
         }
 
+    # NEW-C32-02: cap the results list. `all_results` scales 1:1 with active
+    # keys (each entry has per-strategy stats), so a large platform-wide
+    # incident produces an unbounded body — the exact scenario the
+    # RECOMPUTE_FAILURE_CAP was introduced to prevent, but for a LARGER
+    # payload. Prefer non-ok statuses so the body is maximally diagnostic.
+    _NON_OK_STATUSES = {"error", "timeout", "key_revoked", "transient_failure", "partial"}
+    non_ok_results = [r for r in all_results if r.get("status") in _NON_OK_STATUSES]
+    ok_results = [r for r in all_results if r.get("status") not in _NON_OK_STATUSES]
+    if len(all_results) > RESULTS_CAP:
+        # Fill cap with non-ok first, then ok results.
+        capped_results = (non_ok_results + ok_results)[:RESULTS_CAP]
+        results_truncated = True
+    else:
+        capped_results = all_results
+        results_truncated = False
+
     return {
         "synced": synced,
         "partial": partial,
@@ -883,7 +933,9 @@ async def cron_sync():
         "transient": transient,
         "total_keys": len(keys),
         "total_trades": total_trades,
+        "total_results": len(all_results),
+        "results_truncated": results_truncated,
         "duration_s": overall_duration,
-        "results": all_results,
+        "results": capped_results,
         "portfolio_recomputes": portfolio_recomputes,
     }
