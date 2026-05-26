@@ -3019,10 +3019,15 @@ class TestFetchDailyPnlBybitFailLoud:
             "silent-failure sweep) so operators can distinguish 'Bybit "
             "blip / auth fail' from 'no closed positions on the account'."
         )
-        # Pin structured-logging contract: exc_info must carry the traceback.
-        assert any(r.exc_info is not None for r in matching), (
-            "Bybit closed_pnl WARNING must use exc_info=True so operators "
-            "get the traceback in Railway logs, not just the message"
+        # silent-failure/F-05 HMAC-leak fix: exc_info must NOT be set on
+        # this inner warning — exc_info=True embeds the full exception string
+        # including &signature=<HMAC-SHA256> from ccxt NetworkError URLs,
+        # bypassing the redact processor (NEW-C13-10 / red-team/H-3).
+        # The scrubbed message in exc_class=.../scrubbed=... args is sufficient.
+        assert all(r.exc_info is None for r in matching), (
+            "Bybit closed_pnl WARNING must NOT use exc_info=True — "
+            "ccxt exception strings can contain HMAC signatures "
+            "(silent-failure/F-05, NEW-C13-10)"
         )
         # Pin the boundary: the inner WARNING must be THE log — the
         # outer wrapper's ERROR ('fetch_daily_pnl failed') must NOT

@@ -1333,10 +1333,19 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     _bybit_rows_dropped_unparseable_ts,
                 )
                 daily_pnl.extend(converted_rows)
+            except ccxt.RateLimitExceeded:
+                raise  # silent-failure/F-05: must propagate to _stamp_429 path
             except Exception as exc:  # noqa: BLE001
+                # silent-failure/F-05: use scrub_freeform_string and drop
+                # exc_info=True — passing exc_info embeds the full exception
+                # string including &signature=<HMAC-SHA256> from ccxt URLs
+                # (NEW-C13-10). The outer handler already covers propagated
+                # errors; this inner handler covers per-window math errors.
+                from .redact import scrub_freeform_string
                 logger.warning(
-                    "Bybit closed_pnl fetch / ISO-conversion failed: %s",
-                    exc, exc_info=True,
+                    "Bybit closed_pnl fetch / ISO-conversion failed: "
+                    "exc_class=%s scrubbed=%s",
+                    type(exc).__name__, scrub_freeform_string(str(exc)),
                 )
 
     except Exception as e:
