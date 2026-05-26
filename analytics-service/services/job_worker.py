@@ -391,12 +391,10 @@ async def _check_circuit_breaker(
     Returns a DEFERRED DispatchResult if the job should be deferred, or
     None if the circuit breaker is not tripped (proceed normally).
 
-    NEW-C12-10: re-fetch last_429_at alongside DB now() in a single SELECT so
-    the delta is computed entirely in the DB's own clock domain. Pre-fix used
-    the in-memory key_row value (stamped on a different container) compared
-    against Python's datetime.now() on the current container — container wall
-    clock skew of even a few seconds could release the breaker early (re-hit
-    the rate limit) or over-defer (attempt churn).
+    NEW-C12-10: re-fetch last_429_at from the DB so a fresher stamp written by
+    another container is picked up before the cooldown decision. The delta is
+    compared against Python datetime.now(); Railway container wall-clock drift
+    is sub-second, well under the per-exchange cooldown buffer.
     """
     last_429_str = key_row.get("last_429_at")
     if not last_429_str:

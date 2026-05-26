@@ -40,6 +40,7 @@ from services.job_worker import (
     _stamp_429,
     classify_exception,
 )
+from services.redact import scrub_freeform_string
 
 if TYPE_CHECKING:
     from services.ingestion.adapter import MetricsSnapshot, Position
@@ -146,6 +147,14 @@ PERP_AMT_CTVAL_DIVERGENCE_THRESHOLD: float = 0.05
 # cost/price but emit an audit signal so table-drift surfaces before
 # the curve goes visibly wrong.
 PERP_AMT_CTVAL_DRIFT_WARN_THRESHOLD: float = 0.01
+
+# Plausibility bounds for amt_from_cost = cost/price on unknown perps.
+# Upper bound covers high-ctVal memecoins (OKX SHIB ctVal=1,000,000, PEPE
+# ctVal≈50M): SHIB at $0.00001, cost=$10 → amt_from_cost=1,000,000, which
+# is within 1e9. Lower bound rejects sub-nanogram quantities that indicate
+# corrupt cost fields. See _resolve_perp_amt_base / NEW-C01-13 / red-team H-1.
+_PERP_AMT_FROM_COST_MIN: float = 1e-9
+_PERP_AMT_FROM_COST_MAX: float = 1e9
 
 OKX_PERP_CONTRACT_SIZE: dict[str, float] = {
     "BTC/USDT:USDT": 0.01,
@@ -378,34 +387,19 @@ def _resolve_perp_amt_base(
         ctval = OKX_PERP_CONTRACT_SIZE.get(raw_symbol)
 
     if ctval is None:
-        # NEW-C01-13: no ctVal cover — `amt_from_cost = cost/price` is
-        # unbounded for unknown perp listings (a garbage `cost` from the
-        # exchange or an adversarial value could produce a 100×–10000×
-        # phantom position that poisons the curve and the unbounded
-        # anchor offset). Apply a plausibility bound: reject sizes
-        # outside [1e-4, 1e4] base-units (covers every known crypto
-        # contract spec from SHIB ctVal=1000000 to BTC ctVal=0.01).
-        # Sizes outside this range are likely contract-count errors —
-        # skip with a DQ flag rather than corrupting the replay state.
-        # red-team/H-1 (NEW-C01-13 fix): the original bound 1e4 was too tight.
-        # For high-ctVal memecoins (OKX SHIB ctVal=1,000,000, PEPE ctVal≈50M),
-        # cost/price = notional/price can easily exceed 1e4.  Example: SHIB at
-        # $0.00001, cost=$10 → amt_from_cost = 1,000,000 >> 1e4 → fill dropped.
-        # Raise the upper bound to 1e9 (1 billion base units), which covers the
-        # full OKX memecoin ctVal range while still rejecting obviously garbage
-        # values (e.g., a malformed cost field producing 1e15 units).
-        _AMT_FROM_COST_MAX = 1e9
-        _AMT_FROM_COST_MIN = 1e-9
-        if not (_AMT_FROM_COST_MIN <= amt_from_cost <= _AMT_FROM_COST_MAX):
-            # NEW-C01-13: amt_from_cost out of plausible range — skip and
-            # log. DQ flag is propagated via caller's unknown_perp_symbols
-            # accumulator; this function has no ContextVar channel.
+        # No ctVal cover — apply a plausibility bound on amt_from_cost = cost/price
+        # to reject obviously corrupt values (phantom position risk). Bounds are
+        # [_PERP_AMT_FROM_COST_MIN, _PERP_AMT_FROM_COST_MAX]; see module-level
+        # constants for rationale (NEW-C01-13 / red-team H-1).
+        if not (_PERP_AMT_FROM_COST_MIN <= amt_from_cost <= _PERP_AMT_FROM_COST_MAX):
+            # DQ flag propagated via caller's unknown_perp_symbols accumulator;
+            # this function has no ContextVar channel.
             logger.warning(
                 "_resolve_perp_amt_base: %s amt_from_cost=%.8g outside "
                 "plausible range [%.0e, %.0e] — skipping fill to avoid "
-                "phantom position (unknown_perp_implausible_size, NEW-C01-13)",
+                "phantom position (unknown_perp_implausible_size)",
                 raw_symbol, amt_from_cost,
-                _AMT_FROM_COST_MIN, _AMT_FROM_COST_MAX,
+                _PERP_AMT_FROM_COST_MIN, _PERP_AMT_FROM_COST_MAX,
             )
             return 0.0, _PerpAmtSource.FALLBACK_AMOUNT, None
         return amt_from_cost, _PerpAmtSource.COST_DIV_PRICE, None
@@ -1749,8 +1743,7 @@ async def _fetch_and_price_window(
             )
             # M-1 / H-02: stamp DQ telemetry so the admin health card can
             # distinguish "anchor succeeded" from "anchor skipped due to
-            # partial ticker failures". The comment on NEW-C01-02/C01-03
-            # promised this flag but it was never written.
+            # partial ticker failures".
             _anchor_skipped_partial_ticker = sorted(anchor_partial_symbols)
             _anchor_skipped_implausible = False
         elif _implausible_anchor:
@@ -2020,7 +2013,6 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
             # of logger.exception — logger.exception (exc_info=True) embeds the
             # full exception string including ccxt NetworkError URLs with
             # &signature=<HMAC-SHA256>, bypassing the redact processor (H-3).
-            from .redact import scrub_freeform_string
             logger.warning(
                 "reconstruct_allocator_history unhandled exception "
                 "allocator=%s key=%s venue=%s exc_class=%s scrubbed=%s",
@@ -2109,7 +2101,6 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
         # Same surfacing pattern as the fetch-window catch — log before
         # sanitisation but use warning + scrub instead of logger.exception
         # to avoid HMAC leakage via exc_info=True (red-team/H-3). H-1172.
-        from .redact import scrub_freeform_string
         logger.warning(
             "reconstruct_allocator_history persist phase unhandled exception "
             "allocator=%s key=%s venue=%s exc_class=%s scrubbed=%s",

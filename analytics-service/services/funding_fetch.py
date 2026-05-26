@@ -42,6 +42,7 @@ import ccxt.async_support as ccxt
 
 from services.db import db_execute
 from services.exchange import EXCHANGE_CLASSES, create_exchange
+from services.redact import scrub_freeform_string
 
 logger = logging.getLogger("quantalyze.analytics.funding_fetch")
 
@@ -61,7 +62,8 @@ MAX_PAGES = 200
 # NEW-C30-01: Bybit V5 /account/transaction-log caps any single request
 # to a 7-day startTime→endTime window.  Walking multiple windows is
 # required for any backfill or stale-checkpoint sync older than 7 days.
-# Mirror the fix already applied to fetch_daily_pnl (exchange.py:1154).
+# Mirrors the same fix applied to fetch_daily_pnl (BYBIT_PNL_WINDOW_MS in
+# exchange.py fetch_daily_pnl).
 BYBIT_FUNDING_WINDOW_MS: int = 7 * 24 * 60 * 60 * 1000  # 7-day cap per request
 # When since_ms is None (first-ever sync), default to 365 days back so a
 # new API key on a 1-year-old account captures its full history without
@@ -598,7 +600,7 @@ async def fetch_funding_bybit(
     (BYBIT_PNL_WINDOW_MS). Fix: walk [start_ms, now_ms] in 7-day windows,
     passing both ``startTime`` and ``endTime`` for each window. Cursor-
     based pagination continues within each window. Default since_ms=None
-    to 365 days back (mirrors exchange.py:1146 rationale).
+    to 365 days back (mirrors the default lookback in fetch_daily_pnl).
 
     Uses cursor-based pagination within each 7-day window.
     """
@@ -663,7 +665,6 @@ async def fetch_funding_bybit(
                     # C13-10 scope (funding_fetch): the signed Bybit
                     # transaction-log endpoint embeds &signature=<HMAC-SHA256>
                     # in error URLs; scrub before logging.
-                    from .redact import scrub_freeform_string
                     if category == "inverse":
                         # review/H-03: remove page_idx==0 guard — a
                         # PermissionDenied/BadRequest on any page for the
@@ -694,7 +695,6 @@ async def fetch_funding_bybit(
                     )
                     raise
                 except ccxt.PermissionDenied as exc:
-                    from .redact import scrub_freeform_string
                     if category == "inverse":
                         # review/H-03: same fix as BadRequest above — remove
                         # page_idx==0 guard so any page of the inverse category
@@ -722,7 +722,6 @@ async def fetch_funding_bybit(
                 except Exception as exc:
                     # C-0322 / H-1103: was warn+break (partial truncation).
                     # Re-raise so the worker classifies as transient-failed.
-                    from .redact import scrub_freeform_string
                     logger.error(
                         "Bybit funding fetch failed page %d category=%s "
                         "window=[%s,%s] for strategy %s: exc_class=%s "
