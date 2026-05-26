@@ -4183,3 +4183,224 @@ class TestLoadPositionTimeSeriesNavSafety:
         assert "position_snapshots" in error_msg, (
             f"Expected truncation hint in computation_error; got: {error_msg!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C02-07: _compute_position_side_volume_pcts — malformed cost guard
+# ---------------------------------------------------------------------------
+
+
+def test_position_side_volume_pcts_malformed_cost_does_not_raise():
+    """NEW-C02-07: a single fill with non-numeric cost must NOT raise —
+    it must contribute 0 to the attribution totals."""
+    from services.analytics_runner import _compute_position_side_volume_pcts
+
+    fills = [
+        {"timestamp": "2024-01-15T10:00:00+00:00", "cost": "NOT_A_NUMBER"},
+        {"timestamp": "2024-01-16T10:00:00+00:00", "cost": 500.0},
+    ]
+    positions = [
+        {
+            "opened_at": "2024-01-01T00:00:00+00:00",
+            "closed_at": "2024-01-31T00:00:00+00:00",
+            "side": "long",
+        }
+    ]
+    # Must not raise; malformed fill contributes cost=0
+    result = _compute_position_side_volume_pcts(fills, positions)
+    # Only the 500.0 fill attributed → long_volume_pct = 1.0 (100%), short = 0.0
+    assert result["long_volume_pct"] == pytest.approx(1.0), (
+        f"long_volume_pct={result['long_volume_pct']} — malformed cost fill "
+        "must not alter attribution of valid fills (NEW-C02-07)"
+    )
+    assert result["short_volume_pct"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# NEW-C02-08 / C02-09 / C02-10: _compute_volume_aggregator — guarded notional,
+# single-pass, turnover_timestamp_coverage flag
+# ---------------------------------------------------------------------------
+
+
+def test_volume_aggregator_malformed_notional_does_not_raise():
+    """NEW-C02-09: non-numeric notional_usd must contribute 0, not crash."""
+    from services.analytics_runner import _compute_volume_aggregator
+
+    fills = [
+        {"notional_usd": "NOT_A_NUMBER", "filled_at": "2024-01-15T10:00:00+00:00"},
+        {"notional_usd": 1000.0, "filled_at": "2024-01-15T11:00:00+00:00"},
+    ]
+    result = _compute_volume_aggregator(fills)
+    # Malformed fill contributes 0; only 1000.0 counts
+    assert result["gross_volume_usd"] == pytest.approx(1000.0), (
+        "malformed notional_usd must contribute 0 to gross_volume (NEW-C02-09)"
+    )
+
+
+def test_volume_aggregator_emits_coverage_flag_on_missing_timestamps():
+    """NEW-C02-08: when some fills lack timestamps, turnover_timestamp_coverage
+    must be present in the result and be < 1.0."""
+    from services.analytics_runner import _compute_volume_aggregator
+
+    fills = [
+        {"notional_usd": 1000.0, "filled_at": "2024-01-15T10:00:00+00:00"},
+        {"notional_usd": 500.0, "filled_at": None},  # no timestamp
+        {"notional_usd": 300.0},                     # no timestamp key
+    ]
+    result = _compute_volume_aggregator(fills)
+    assert "turnover_timestamp_coverage" in result, (
+        "turnover_timestamp_coverage must be emitted when fills lack timestamps "
+        "(NEW-C02-08 regression)"
+    )
+    coverage = result["turnover_timestamp_coverage"]
+    # 1 of 3 fills has a timestamp → 1/3 ≈ 0.3333
+    assert coverage == pytest.approx(1 / 3, abs=1e-3), (
+        f"Expected coverage ≈ 0.333, got {coverage}"
+    )
+
+
+def test_volume_aggregator_no_coverage_flag_when_all_timestamped():
+    """NEW-C02-08: when all fills have timestamps, turnover_timestamp_coverage
+    must NOT be emitted (coverage=1.0 is the happy path)."""
+    from services.analytics_runner import _compute_volume_aggregator
+
+    fills = [
+        {"notional_usd": 1000.0, "filled_at": "2024-01-15T10:00:00+00:00"},
+        {"notional_usd": 500.0, "filled_at": "2024-01-16T10:00:00+00:00"},
+    ]
+    result = _compute_volume_aggregator(fills)
+    assert "turnover_timestamp_coverage" not in result, (
+        "turnover_timestamp_coverage must not appear when all fills are timestamped "
+        "(NEW-C02-08)"
+    )
+
+
+def test_volume_aggregator_single_pass_gross_matches_turnover_subset(sample_fills):
+    """NEW-C02-10: gross_volume computed in the single pass must equal the sum
+    of all notional_usd values, identical to the pre-refactor two-pass result."""
+    from services.analytics_runner import _compute_volume_aggregator
+
+    result = _compute_volume_aggregator(sample_fills)
+    expected_gross = sum(abs(float(f["notional_usd"])) for f in sample_fills)
+    assert result["gross_volume_usd"] == pytest.approx(expected_gross), (
+        "gross_volume_usd must equal sum of all notionals after single-pass "
+        "refactor (NEW-C02-10)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C02-09: _compute_trade_mix — guarded notional cast
+# ---------------------------------------------------------------------------
+
+
+def test_trade_mix_malformed_notional_does_not_raise():
+    """NEW-C02-09: non-numeric notional_usd in _compute_trade_mix must contribute
+    0 to total_notional, not crash the whole run."""
+    from services.analytics_runner import _compute_trade_mix
+
+    fills = [
+        {"side": "buy", "notional_usd": "BAD", "is_maker": True},
+        {"side": "sell", "notional_usd": 200.0, "is_maker": False},
+    ]
+    result = _compute_trade_mix(fills, has_maker_taker=True)
+    # long_maker: count=1, total_notional=0 (bad → 0); short_taker: count=1, total_notional=200
+    assert result["long_maker"]["count"] == 1
+    assert result["long_maker"]["total_notional"] == pytest.approx(0.0), (
+        "malformed notional must contribute 0 to total_notional (NEW-C02-09)"
+    )
+    assert result["short_taker"]["total_notional"] == pytest.approx(200.0)
+
+
+# ---------------------------------------------------------------------------
+# NEW-C02-06: CSV sibling upsert must not flip computation_status to 'failed'
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_csv_sibling_upsert_failure_keeps_complete_status():
+    """NEW-C02-06: if the sibling-table RPC raises after _mark_complete, the
+    strategy must remain 'complete' (not be overwritten to 'failed').
+    Mirrors the exchange runner's sibling-failure handling."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import pandas as pd
+    import numpy as np
+
+    from services.analytics_runner import run_csv_strategy_analytics
+    from services.metrics import MetricsResult
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ] * 5  # 15 rows
+
+    upsert_statuses: list[str] = []
+
+    # Build supabase mock that tracks upsert statuses and fails on the RPC call
+    sb = MagicMock()
+    table_mock = MagicMock()
+    sb.table.return_value = table_mock
+
+    # select chain for the strategy existence probe + data load
+    select_chain = MagicMock()
+    eq_chain = MagicMock()
+    order_chain = MagicMock()
+    order_chain.execute.return_value = MagicMock(data=rows)
+    range_chain = MagicMock()
+    range_chain.execute.return_value = MagicMock(data=rows)
+    order_chain.range.return_value = range_chain
+    eq_chain.order.return_value = order_chain
+    select_chain.eq.return_value = eq_chain
+    table_mock.select.return_value = select_chain
+
+    def upsert_side_effect(payload, **kwargs):
+        status = payload.get("computation_status")
+        if status:
+            upsert_statuses.append(status)
+        m = MagicMock()
+        m.execute = MagicMock(return_value=MagicMock(data=[]))
+        return m
+
+    table_mock.upsert.side_effect = upsert_side_effect
+
+    # RPC blip: sibling upsert fails
+    rpc_mock = MagicMock()
+    rpc_mock.execute.side_effect = RuntimeError("simulated RPC blip (NEW-C02-06)")
+    sb.rpc.return_value = rpc_mock
+
+    # MetricsResult WITH sibling_kinds so the RPC path is exercised
+    def _make_result_with_siblings():
+        return MetricsResult(
+            metrics_json={
+                "cumulative_return": 0.1, "cagr": 0.12, "volatility": 0.2,
+                "sharpe": 1.5, "sortino": 2.0, "calmar": 1.0,
+                "max_drawdown": -0.05, "max_drawdown_duration_days": 5,
+                "six_month_return": 0.06, "sparkline_returns": [],
+                "sparkline_drawdown": [], "metrics_json": {},
+                "returns_series": [], "drawdown_series": [],
+                "monthly_returns": {}, "rolling_metrics": {}, "return_quantiles": {},
+            },
+            sibling_kinds={"rolling_sharpe": []},  # non-empty → triggers RPC
+        )
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_make_result_with_siblings()):
+        result = await run_csv_strategy_analytics("test-csv-c02-06")
+
+    # Must have returned complete despite sibling failure
+    assert result == {"status": "complete", "strategy_id": "test-csv-c02-06"}, (
+        f"run_csv_strategy_analytics must return 'complete' when sibling RPC fails; "
+        f"got {result} (NEW-C02-06 regression)"
+    )
+    # Must have written 'complete' status — never 'failed'
+    assert "complete" in upsert_statuses, (
+        f"Expected at least one 'complete' upsert; got: {upsert_statuses}"
+    )
+    assert "failed" not in upsert_statuses, (
+        f"Sibling-table RPC failure must NOT overwrite status to 'failed'; "
+        f"got statuses: {upsert_statuses} (NEW-C02-06)"
+    )

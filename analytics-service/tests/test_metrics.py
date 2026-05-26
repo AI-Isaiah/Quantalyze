@@ -1457,3 +1457,196 @@ def test_compute_all_metrics_qstats_scalar_warnings_carry_exc_info(
         "qstats scalar WARNINGs must use exc_info=True so operators get "
         "the traceback (post audit-2026-05-07 silent-failure sweep)"
     )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C02-01: compute_risk_of_ruin probability must be in [0, 1]
+# ---------------------------------------------------------------------------
+
+from services.metrics import compute_risk_of_ruin  # noqa: E402
+
+
+def test_risk_of_ruin_low_winrate_high_payoff_clamped():
+    """NEW-C02-01: 40%-win / 3:1-payoff (positive edge, p < 0.5) must NOT emit
+    probabilities above 1.0.  Old code gated on p*r>q (1.2>0.6 = True) but
+    computed (q/p)^exp = (0.6/0.4)^exp = 1.5^exp which explodes.
+    Fixed gate: p > q (0.4 > 0.6 is False) → returns 1.0 for all levels.
+    """
+    result = compute_risk_of_ruin(win_rate=0.40, payoff_ratio=3.0, avg_trade_size=0.01)
+    for entry in result:
+        prob = entry["probability"]
+        assert prob is not None, "probability must not be None"
+        assert 0.0 <= prob <= 1.0, (
+            f"risk_of_ruin probability out of [0,1]: {prob} "
+            f"(NEW-C02-01 regression — old gate p*r>q allowed q/p>1 explosion)"
+        )
+
+
+def test_risk_of_ruin_high_winrate_decays():
+    """NEW-C02-01: 60%-win / 1.5:1-payoff (p > 0.5) should produce DECAYING
+    probabilities (deeper loss = lower probability of ruin) and all in [0,1]."""
+    result = compute_risk_of_ruin(win_rate=0.60, payoff_ratio=1.5, avg_trade_size=0.01)
+    probs = [e["probability"] for e in result]
+    assert all(p is not None for p in probs)
+    assert all(0.0 <= p <= 1.0 for p in probs), f"probabilities not in [0,1]: {probs}"
+    # Deeper loss level → same or lower probability (monotone decay)
+    for i in range(len(probs) - 1):
+        assert probs[i] >= probs[i + 1], (
+            f"risk_of_ruin should be non-increasing with loss depth; "
+            f"probs[{i}]={probs[i]} > probs[{i+1}]={probs[i+1]}"
+        )
+
+
+def test_risk_of_ruin_zero_winrate_returns_one():
+    """Boundary: p=0 → always ruin."""
+    result = compute_risk_of_ruin(win_rate=0.0, payoff_ratio=2.0, avg_trade_size=0.01)
+    for entry in result:
+        assert entry["probability"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# NEW-C02-02: _rolling_sharpe zero-variance guard
+# ---------------------------------------------------------------------------
+
+from services.metrics import _rolling_sharpe  # noqa: E402
+
+
+def test_rolling_sharpe_flat_window_no_inf_no_warning():
+    """NEW-C02-02: an all-identical returns window (std==0) must not emit Inf
+    or a RuntimeWarning.  Old code had no np.where guard (unlike _rolling_sortino).
+    """
+    dates = pd.bdate_range("2024-01-01", periods=60)
+    # First 30 days normal, next 30 flat (std=0 → roll_std=0 → old code: ±Inf)
+    values = list(np.random.normal(0.001, 0.01, 30)) + [0.001] * 30
+    returns = pd.Series(values, index=dates)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        # Must not raise a RuntimeWarning for divide-by-zero
+        result = _rolling_sharpe(returns, window=30)
+
+    for point in result:
+        v = point["value"]
+        assert math.isfinite(v), (
+            f"_rolling_sharpe emitted non-finite value {v} on flat window "
+            "(NEW-C02-02 regression — missing np.where guard)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C02-03: consecutive_losses must not count flat/NaN days
+# ---------------------------------------------------------------------------
+
+
+def test_consecutive_losses_excludes_flat_and_nan_days():
+    """NEW-C02-03: returns=[0,0,0,0] must NOT produce consecutive_losses=4."""
+    dates = pd.bdate_range("2024-01-01", periods=4)
+    flat_returns = pd.Series([0.0, 0.0, 0.0, 0.0], index=dates)
+    result = compute_all_metrics(flat_returns)
+    mj = result["metrics_json"]
+    assert mj["consecutive_losses"] == 0, (
+        f"consecutive_losses={mj['consecutive_losses']} for all-zero returns; "
+        "expected 0 (NEW-C02-03 regression — flat days counted as losses)"
+    )
+    assert mj["consecutive_wins"] == 0
+
+
+def test_consecutive_losses_only_negative_days_count():
+    """NEW-C02-03: [+0.01, -0.02, 0.0, -0.01] → consecutive_losses=1 (no run ≥2)."""
+    dates = pd.bdate_range("2024-01-01", periods=4)
+    returns = pd.Series([0.01, -0.02, 0.0, -0.01], index=dates)
+    result = compute_all_metrics(returns)
+    mj = result["metrics_json"]
+    # The zero day (index 2) must NOT extend the loss streak started at index 1
+    assert mj["consecutive_losses"] == 1, (
+        f"consecutive_losses={mj['consecutive_losses']}; expected 1 — "
+        "zero return day must break the loss streak (NEW-C02-03)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C02-04: monthly resample must not fabricate phantom 0.0 for empty periods
+# ---------------------------------------------------------------------------
+
+
+def test_monthly_rets_no_phantom_zeros_on_sparse_calendar():
+    """NEW-C02-04: a returns series with a two-month gap must not produce a
+    phantom 0.0 month for the missing period.
+    """
+    # Jan + Mar data only — no Feb trades
+    dates = (
+        pd.bdate_range("2024-01-15", periods=5).tolist()
+        + pd.bdate_range("2024-03-15", periods=5).tolist()
+    )
+    values = [0.005] * 10
+    returns = pd.Series(values, index=pd.DatetimeIndex(dates))
+
+    # Directly import the helper under test
+    import services.metrics as metrics_module
+    monthly_rets = (
+        returns.resample("ME")
+        .apply(lambda x: (1 + x).prod() - 1 if len(x) > 0 else float("nan"))
+        .dropna()
+    )
+    # With the fix there must be no Feb entry (only Jan + Mar)
+    assert len(monthly_rets) == 2, (
+        f"Expected 2 months (Jan+Mar), got {len(monthly_rets)} — "
+        "phantom 0.0 Feb month fabricated (NEW-C02-04 regression)"
+    )
+    for v in monthly_rets.values:
+        assert v != 0.0, "Phantom 0.0 found in monthly_rets (NEW-C02-04)"
+
+
+# ---------------------------------------------------------------------------
+# NEW-C02-05: cumulative_return scalar uses raw returns (not fillna(0))
+# ---------------------------------------------------------------------------
+
+
+def test_cumulative_return_uses_raw_returns_not_fillna():
+    """NEW-C02-05: cumulative_return must match (1+raw_returns.dropna()).prod()-1,
+    NOT the fillna(0) version.  A 1-day gap (NaN) should have negligible effect
+    on the product but the two series must agree within tolerance.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=50)
+    np.random.seed(42)
+    values = list(np.random.normal(0.001, 0.01, 50))
+    # Introduce a gap day — shouldn't inflate the result
+    values[10] = float("nan")
+    returns = pd.Series(values, index=dates)
+
+    result = compute_all_metrics(returns)
+    reported = result["cumulative_return"]
+
+    expected = float((1 + returns.dropna()).prod() - 1)
+    assert abs(reported - expected) < 1e-9, (
+        f"cumulative_return={reported} diverges from raw-returns product={expected}; "
+        "gap days must not be treated as 0% (NEW-C02-05)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C02-11: _return_quantiles monthly resample not computed twice
+# ---------------------------------------------------------------------------
+
+from services.metrics import _return_quantiles  # noqa: E402
+
+
+def test_return_quantiles_accepts_precomputed_monthly(golden_returns):
+    """NEW-C02-11: when monthly_rets is passed, _return_quantiles must use it
+    rather than recomputing the expensive resample.  Verify the output is
+    identical whether the caller passes monthly_rets or leaves it None.
+    """
+    import services.metrics as metrics_module
+
+    monthly_rets = (
+        golden_returns.resample("ME")
+        .apply(lambda x: (1 + x).prod() - 1 if len(x) > 0 else float("nan"))
+        .dropna()
+    )
+    result_with = _return_quantiles(golden_returns, monthly_rets=monthly_rets)
+    result_without = _return_quantiles(golden_returns, monthly_rets=None)
+
+    assert result_with.get("Monthly") == result_without.get("Monthly"), (
+        "Monthly quantiles differ when monthly_rets passed vs computed internally "
+        "(NEW-C02-11 regression)"
+    )

@@ -366,8 +366,12 @@ def compute_all_metrics(
     returns_for_chart = returns.fillna(0)
 
     # Core metrics (safe_float handles NaN/Inf from quantstats)
+    # NEW-C02-05: cumulative_return scalar uses raw returns (NaN-dropped, same
+    # as cagr/sharpe/sortino) so all headline KPIs share one NaN policy.
+    # returns_for_chart (fillna(0)) is chart-only — it bridges gap days to keep
+    # the equity curve continuous; the ranking scalar must not use it.
     cumulative = (1 + returns_for_chart).cumprod()
-    total_return = _safe_float(cumulative.iloc[-1] - 1)
+    total_return = _safe_float((1 + returns.dropna()).prod() - 1)
     cagr = _safe_float(qs.stats.cagr(returns))
     volatility = _safe_float(qs.stats.volatility(returns))
     sharpe = _safe_float(qs.stats.sharpe(returns))
@@ -384,7 +388,14 @@ def compute_all_metrics(
     dd_duration = _max_dd_duration(dd_series)
 
     # Monthly returns (computed once, reused for grid + best/worst + VaR)
-    monthly_rets = returns.resample("ME").apply(lambda x: (1 + x).prod() - 1)
+    # NEW-C02-04: filter empty calendar buckets (fabricated 0.0 from sparse
+    # trade calendars). resample inserts one row per calendar period; empty
+    # groups produce product() == 1 - 1 == 0.0, a phantom break-even month.
+    monthly_rets = (
+        returns.resample("ME")
+        .apply(lambda x: (1 + x).prod() - 1 if len(x) > 0 else float("nan"))
+        .dropna()
+    )
     monthly = _monthly_returns_grid_from_series(monthly_rets)
 
     # Rolling metrics
@@ -394,8 +405,8 @@ def compute_all_metrics(
         "sharpe_365d": _rolling_sharpe(returns, 365),
     }
 
-    # Return quantiles
-    quantiles = _return_quantiles(returns)
+    # Return quantiles — pass pre-computed monthly_rets to avoid double resample (NEW-C02-11)
+    quantiles = _return_quantiles(returns, monthly_rets=monthly_rets)
 
     # Equity curve + drawdown as time series.
     # H-0715 defense-in-depth: scrub NaN/Inf at the helper boundary, not just at
@@ -609,11 +620,15 @@ def compute_all_metrics(
             metrics_json["risk_of_ruin"] = compute_risk_of_ruin(wr, pr, avg_size)
 
     # Consecutive streaks
+    # NEW-C02-03: `is_loss` uses strict `< 0` (mirrors `losses = returns[returns < 0]`
+    # at the wins/losses split above). The prior `~is_positive` absorbed flat (0.0)
+    # and NaN-gap days as losses, asymmetric with `consecutive_wins` (strict > 0).
     is_positive = (returns > 0).astype(int)
+    is_negative = (returns < 0).astype(int)
     streaks = is_positive.groupby((is_positive != is_positive.shift()).cumsum())
     win_streaks = streaks.sum()
-    loss_streaks = (~is_positive.astype(bool)).astype(int).groupby(
-        (is_positive != is_positive.shift()).cumsum()
+    loss_streaks = is_negative.groupby(
+        (is_negative != is_negative.shift()).cumsum()
     ).sum()
     metrics_json["consecutive_wins"] = int(win_streaks.max()) if len(win_streaks) > 0 else 0
     metrics_json["consecutive_losses"] = int(loss_streaks.max()) if len(loss_streaks) > 0 else 0
@@ -835,21 +850,29 @@ def compute_risk_of_ruin(
 ) -> list[dict[str, float | None]]:
     """Cox-Miller analytical approximation for probability of reaching various loss levels.
 
-    If p * r > q the strategy has a positive edge and ruin probability decays
-    exponentially with loss depth.  Otherwise ruin is certain at every level.
+    The decaying-ruin branch requires p > q (win rate strictly above 0.5) so
+    that q/p is in (0, 1) and (q/p)^exponent decays toward 0. The original
+    guard `p*r > q` (positive edge) is INSUFFICIENT: a 40%-win / 3:1-payoff
+    strategy satisfies 1.2 > 0.6 yet q/p = 1.5 → the exponentiation explodes
+    to values far above 1.0, which is not a valid probability.
+
+    NEW-C02-01: gate the decaying branch on `p > q` (i.e. p > 0.5); result
+    is also clamped to [0, 1] as a defence-in-depth safeguard.
     """
     p = win_rate
     q = 1.0 - p
-    r = payoff_ratio
+    r = payoff_ratio  # kept for API compatibility; not used in gate
     loss_levels = [0.10, 0.20, 0.30, 0.50, 1.00]
 
     results: list[dict[str, float | None]] = []
     for level in loss_levels:
         if p <= 0 or avg_trade_size <= 0:
             prob = _safe_float(1.0)
-        elif p * r > q:
+        elif p > q:
+            # q/p is in (0, 1) when p > 0.5, so exponentiation decays safely.
             exponent = min(level / max(avg_trade_size, 0.001), 500)
-            prob = _safe_float((q / p) ** exponent)
+            raw = (q / p) ** exponent
+            prob = _safe_float(min(max(raw, 0.0), 1.0))
         else:
             prob = _safe_float(1.0)
         results.append({
@@ -1038,12 +1061,21 @@ def _finalize_rolling(series: pd.Series) -> list[SeriesPoint]:
 
 
 def _rolling_sharpe(returns: pd.Series, window: int) -> list[SeriesPoint]:
-    """Compute rolling annualized Sharpe using vectorized pandas rolling."""
+    """Compute rolling annualized Sharpe using vectorized pandas rolling.
+
+    NEW-C02-02: mirror the zero-variance guard from `_rolling_sortino_from_components`.
+    When roll_std == 0 (flat / all-identical window) the unguarded division
+    emits a RuntimeWarning and produces ±Inf, which _finalize_rolling scrubs
+    to NaN — silently dropping the point. Using np.where avoids the warning
+    and makes the intent explicit.
+    """
     if len(returns) < window:
         return []
     roll_mean = returns.rolling(window).mean()
     roll_std = returns.rolling(window).std()
-    return _finalize_rolling((roll_mean / roll_std) * np.sqrt(252))
+    ratio = np.where(roll_std > 0, roll_mean / roll_std, np.nan)
+    ratio_series = pd.Series(ratio, index=returns.index)
+    return _finalize_rolling(ratio_series * np.sqrt(252))
 
 
 def _rolling_sortino_from_components(
@@ -1245,24 +1277,44 @@ def _rolling_correlation(a: pd.Series, b: pd.Series, window: int) -> list[Series
     return _finalize_rolling(a.rolling(window).corr(b))
 
 
-def _return_quantiles(returns: pd.Series) -> dict[str, list[float]]:
-    """Box plot data for different time periods."""
+def _return_quantiles(
+    returns: pd.Series,
+    monthly_rets: pd.Series | None = None,
+) -> dict[str, list[float]]:
+    """Box plot data for different time periods.
+
+    NEW-C02-11: accept pre-computed `monthly_rets` (already filtered for empty
+    buckets by the caller) to avoid recomputing the expensive monthly resample.
+    When None (legacy / direct callers), falls back to computing locally.
+
+    NEW-C02-04: weekly resample also filters empty calendar buckets with
+    `if len(x) > 0` to avoid phantom 0.0 periods on sparse trade calendars.
+    """
     result: dict[str, list[float]] = {}
 
     # Daily
     q = returns.quantile([0, 0.25, 0.5, 0.75, 1]).tolist()
     result["Daily"] = [float(v) for v in q]
 
-    # Weekly
-    weekly = returns.resample("W").apply(lambda x: (1 + x).prod() - 1)
+    # Weekly — filter empty calendar buckets (NEW-C02-04)
+    weekly = (
+        returns.resample("W")
+        .apply(lambda x: (1 + x).prod() - 1 if len(x) > 0 else float("nan"))
+        .dropna()
+    )
     if len(weekly) >= 4:
         q = weekly.quantile([0, 0.25, 0.5, 0.75, 1]).tolist()
         result["Weekly"] = [float(v) for v in q]
 
-    # Monthly
-    monthly = returns.resample("ME").apply(lambda x: (1 + x).prod() - 1)
-    if len(monthly) >= 3:
-        q = monthly.quantile([0, 0.25, 0.5, 0.75, 1]).tolist()
+    # Monthly — reuse caller's pre-computed series when available (NEW-C02-11)
+    if monthly_rets is None:
+        monthly_rets = (
+            returns.resample("ME")
+            .apply(lambda x: (1 + x).prod() - 1 if len(x) > 0 else float("nan"))
+            .dropna()
+        )
+    if len(monthly_rets) >= 3:
+        q = monthly_rets.quantile([0, 0.25, 0.5, 0.75, 1]).tolist()
         result["Monthly"] = [float(v) for v in q]
 
     return result
