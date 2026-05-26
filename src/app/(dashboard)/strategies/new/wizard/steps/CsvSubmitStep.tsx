@@ -129,6 +129,7 @@ export function CsvSubmitStep({
       });
 
       const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
         strategy_id?: unknown;
         status?: unknown;
         code?: string;
@@ -140,7 +141,12 @@ export function CsvSubmitStep({
         error?: string;
       };
 
-      if (!res.ok) {
+      // NEW-C14-01: 409 with ok:true is an idempotent success — the route
+      // found the pre-existing strategy_id for this wizard_session_id.
+      // Treat it as a successful finalize so the user lands on /strategies.
+      const isIdempotentSuccess = res.status === 409 && data.ok === true;
+
+      if (!res.ok && !isIdempotentSuccess) {
         const errEnvelope: ValidationEnvelope = {
           code: data.code ?? "CSV_SUBMIT_FAILED",
           human_message:
@@ -156,8 +162,34 @@ export function CsvSubmitStep({
           step: "csv_submit",
           code: errEnvelope.code,
         });
-        setSubmitting(false);
+        // NEW-C14-01: re-enable Submit on errors that are safe to retry.
+        // The route is now idempotent for wizard_session_id conflicts
+        // (23505 → 409), so retrying after CSV_FINALIZE_FAIL is safe.
+        // Keep button disabled for:
+        //   CSV_PERSIST_FAIL — strategy exists but series not saved, contact support.
+        //   CSV_DUPLICATE_SESSION — admin lookup failed after 23505; retrying will
+        //     hit 23505 again and loop indefinitely. The error copy already says
+        //     "Refresh the page to see your submitted strategy."
+        //     RED-TEAM-L2: without this guard, Submit was re-enabled and the user
+        //     could trigger an infinite 23505 → lookup-fails → 409 CSV_DUPLICATE_SESSION
+        //     → re-enabled Submit cycle.
+        if (
+          data.code !== "CSV_PERSIST_FAIL" &&
+          data.code !== "CSV_DUPLICATE_SESSION"
+        ) {
+          setSubmitting(false);
+        }
         return;
+      }
+
+      // FINDING-6: on the 409 idempotent-success path, explicitly log if
+      // strategy_id is absent or non-UUID before the generic check below
+      // surfaces the error. This distinguishes "admin lookup silently failed
+      // and returned a corrupted shape" from "route returned 200 with no id".
+      // The /uuid4/ regex matches the standard uuid4 format produced by the DB.
+      if (isIdempotentSuccess && (typeof data.strategy_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(data.strategy_id ?? ""))) {
+        console.error("[wizard:CsvSubmitStep] 409 idempotent but strategy_id missing or non-UUID", { strategy_id: data.strategy_id, correlation_id: data.correlation_id });
+        // Fall through to the generic defensive check below which surfaces the error to the user.
       }
 
       // Defensive: route returned 200 but missing strategy_id.

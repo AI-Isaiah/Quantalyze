@@ -99,6 +99,57 @@ describe("SignupForm — repeated-signup UX guard", () => {
     expect(container.textContent).not.toMatch(/already exists/i);
   });
 
+  it("NEW-C15-02: shows 'already exists' when Supabase returns user with identities ABSENT (undefined)", async () => {
+    // Pre-fix guard was `data.user.identities && data.user.identities.length === 0`.
+    // When identities is undefined, the truthiness check evaluates to false, the
+    // branch is skipped, and execution falls to "Check your email" — but no email
+    // is sent. Post-fix: absent identities is treated as duplicate-email signal.
+    signUpMock.mockResolvedValueOnce({
+      data: {
+        // identities field is absent (GoTrue config variant)
+        user: { id: "existing-uid" },
+        session: null,
+      },
+      error: null,
+    });
+
+    const { container, getByText } = render(<SignupForm />);
+    fillForm(container);
+    fireEvent.click(getByText("Create account"));
+
+    await waitFor(() => {
+      expect(container.textContent).toMatch(/already exists/i);
+    });
+    expect(container.textContent).not.toMatch(/check your email/i);
+    expect(pushMock).not.toHaveBeenCalled();
+  });
+
+  it("NEW-C15-02: shows generic error (not 'check your email') when Supabase returns no user, no session, no error", async () => {
+    // The server-side no-op state: Supabase returns {user:null, session:null}
+    // with no error. Pre-fix the form fell through to "Check your email" —
+    // but no email was sent (account limbo state). Post-fix: a distinct
+    // generic error message is shown and the anomaly is logged.
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    signUpMock.mockResolvedValueOnce({
+      data: { user: null, session: null },
+      error: null,
+    });
+
+    const { container, getByText } = render(<SignupForm />);
+    fillForm(container);
+    fireEvent.click(getByText("Create account"));
+
+    await waitFor(() => {
+      expect(container.textContent).toMatch(/something went wrong/i);
+    });
+    expect(container.textContent).not.toMatch(/check your email/i);
+    expect(pushMock).not.toHaveBeenCalled();
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[SignupForm] signUp returned no user, session, or error",
+    );
+    consoleSpy.mockRestore();
+  });
+
   it("routes to /pending-approval when session is returned immediately (auto-confirm path)", async () => {
     // Updated 2026-05-21 (v0.24.5.18): SignupForm now routes to
     // /pending-approval instead of /onboarding so the universal-approval

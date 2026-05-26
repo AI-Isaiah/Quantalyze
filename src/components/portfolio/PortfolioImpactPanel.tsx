@@ -6,6 +6,7 @@ import type {
   SimulatorDeltas,
   TimeSeriesPoint,
 } from "@/lib/types";
+import { DELTA_UNITS } from "@/lib/api/simulatorSchema";
 import type { SimulatorResponseOk } from "@/lib/api/simulatorSchema";
 
 interface PortfolioImpactPanelProps {
@@ -293,6 +294,35 @@ function NonOkState({ data }: { data: SimulatorCandidate }) {
 }
 
 function SuccessBody({ data }: { data: SimulatorResponseOk }) {
+  // NEW-C11-05: belt-and-suspenders guard for future schema relaxation.
+  //
+  // I3 review note: the SimulatorOkBranch refine already hard-rejects
+  // `overlap_days < 30` at parse time, so in the current schema this branch
+  // is unreachable for the `overlap_days < 30` arm. If the schema parse
+  // throws (degenerate producer response), the caller catches and renders the
+  // generic error state — it never reaches SuccessBody at all.
+  //
+  // This guard is intentionally retained as belt-and-suspenders: if the
+  // ok-branch refine is ever relaxed or a future schema migration widens the
+  // accepted range, this runtime check prevents a degenerate parsed row from
+  // rendering ±0 chips as a confident projection. The `allDeltasNull` arm
+  // catches a future case where all metrics fail to compute but the schema
+  // still emits `status:"ok"` (today impossible under the refine).
+  const allDeltasNull =
+    data.deltas.sharpe_delta === null &&
+    data.deltas.dd_delta === null &&
+    data.deltas.corr_delta === null &&
+    data.deltas.concentration_delta === null;
+  if (data.overlap_days < 30 || allDeltasNull) {
+    return (
+      <div className="rounded-lg border border-border bg-page px-4 py-3">
+        <p className="text-sm text-text-secondary">
+          Not enough overlapping history to compute reliable projections.
+          Requires at least 30 trading days of overlap with your portfolio.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="space-y-5">
       {data.partial_history && (
@@ -307,6 +337,12 @@ function SuccessBody({ data }: { data: SimulatorResponseOk }) {
   );
 }
 
+// NEW-C11-04: PartialHistoryBanner previously said "only {overlapDays} overlapping
+// trading days" which implied both sides are measured over those days. In reality,
+// `current_*` metrics use the full portfolio window while `proposed_*` use the
+// overlap window — the wording implied a symmetric short window that doesn't exist.
+// Clarify that the overlap applies to the candidate side only until window alignment
+// is implemented (NEW-C11-03, Python-side fix).
 function PartialHistoryBanner({ overlapDays }: { overlapDays: number }) {
   return (
     <div
@@ -314,8 +350,10 @@ function PartialHistoryBanner({ overlapDays }: { overlapDays: number }) {
       role="note"
     >
       <strong className="font-medium">Partial history:</strong>{" "}
-      only {overlapDays} overlapping trading days. Deltas become more
-      reliable as the candidate accumulates more history.
+      the candidate has only {overlapDays} overlapping trading days with your
+      portfolio. Current metrics use your full history; proposed metrics use
+      the shorter overlap window. Deltas mix two different periods — treat them
+      as directional signals, not precise measurements.
     </div>
   );
 }
@@ -327,39 +365,42 @@ function PartialHistoryBanner({ overlapDays }: { overlapDays: number }) {
 type DeltaChip = {
   key: string;
   label: string;
-  value: number;
+  // NEW-C11-01: null = not computable (operand metric was None upstream).
+  value: number | null;
   format: "ratio" | "percent";
   hint: string;
 };
 
+// NEW-C11-06: read units from DELTA_UNITS (single source of truth in simulatorSchema.ts)
+// so this table and buildDeltaAnnouncement can't drift independently.
 function deltaChips(deltas: SimulatorDeltas): DeltaChip[] {
   return [
     {
       key: "sharpe",
       label: "Sharpe",
       value: deltas.sharpe_delta,
-      format: "ratio",
+      format: DELTA_UNITS.sharpe_delta,
       hint: "Change in portfolio Sharpe ratio.",
     },
     {
       key: "maxdd",
       label: "MaxDD",
       value: deltas.dd_delta,
-      format: "percent",
+      format: DELTA_UNITS.dd_delta,
       hint: "Positive = shallower maximum drawdown.",
     },
     {
       key: "correlation",
       label: "Correlation",
       value: deltas.corr_delta,
-      format: "ratio",
+      format: DELTA_UNITS.corr_delta,
       hint: "Positive = lower average pairwise correlation.",
     },
     {
       key: "concentration",
       label: "Concentration",
       value: deltas.concentration_delta,
-      format: "ratio",
+      format: DELTA_UNITS.concentration_delta,
       hint: "Positive = less concentrated (lower HHI).",
     },
   ];
@@ -382,24 +423,33 @@ function DeltaHero({ deltas }: { deltas: SimulatorDeltas }) {
 }
 
 function DeltaChipCard({ chip }: { chip: DeltaChip }) {
-  const improving = chip.value > 0;
-  const neutral = chip.value === 0;
-  const color = neutral
-    ? "text-text-secondary"
-    : improving
-      ? "text-positive"
-      : "text-negative";
-  const accent = neutral
+  // NEW-C11-01: null = not computable — 4th state distinct from neutral/improving/regressing.
+  // NEW-C11-02: corr_delta=null when current portfolio has <2 strategies (no baseline pair).
+  const notComputable = chip.value === null;
+  // Narrow on chip.value directly (not via !notComputable) so TS strips the
+  // `null` from `number | null` — the boolean indirection defeats narrowing.
+  const improving = chip.value !== null && chip.value > 0;
+  const neutral = chip.value !== null && chip.value === 0;
+  const color = notComputable
+    ? "text-text-muted"
+    : neutral
+      ? "text-text-secondary"
+      : improving
+        ? "text-positive"
+        : "text-negative";
+  const accent = notComputable
     ? "border-border"
-    : improving
-      ? "border-positive/30"
-      : "border-negative/30";
+    : neutral
+      ? "border-border"
+      : improving
+        ? "border-positive/30"
+        : "border-negative/30";
   // DESIGN.md muted teal accent bar for improving chips.
   const teal = "#1B6B5A";
   return (
     <div
       className={`rounded-lg border ${accent} bg-surface px-3 py-3`}
-      title={chip.hint}
+      title={notComputable ? `${chip.hint} (not computable — operand metric unavailable)` : chip.hint}
     >
       <div className="flex items-center justify-between">
         <p className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
@@ -420,7 +470,10 @@ function DeltaChipCard({ chip }: { chip: DeltaChip }) {
   );
 }
 
-function formatDelta(value: number, format: "ratio" | "percent"): string {
+// NEW-C11-01: null renders as "—" (em dash) — visually distinct from ±0.000
+// so the allocator cannot mistake "not computable" for "no impact."
+function formatDelta(value: number | null, format: "ratio" | "percent"): string {
+  if (value === null) return "—";
   const sign = value > 0 ? "+" : value < 0 ? "" : "±";
   if (format === "percent") {
     return `${sign}${(value * 100).toFixed(2)}%`;
@@ -439,14 +492,30 @@ function EquityOverlay({
   current: TimeSeriesPoint[];
   proposed: TimeSeriesPoint[];
 }) {
-  // Build a merged x-axis of all unique dates across both series so the
-  // overlay stays aligned even when the proposed curve starts later
-  // (candidate has a shorter history).
   // Merged x-axis of all unique dates across both series keeps the overlay
   // aligned when the proposed curve starts later (candidate has shorter history).
+  // NEW-C11-08: building the Map with new Map(arr.map(...)) silently drops
+  // duplicate dates (last-write-wins). Warn unconditionally when a collision is
+  // detected so a producer-side date-normalization regression is observable in
+  // production logs, not just in dev/test. A duplicate date is a data integrity
+  // signal (DST boundary drift, normalization regression) — not a developer hint.
+  // SF-F5: the original NODE_ENV guard meant the production chart silently
+  // rendered incorrect data (last-write-wins) with no operator signal. Removed.
   const merged = useMemo(() => {
-    const mapCurrent = new Map(current.map((p) => [p.date, p.value]));
-    const mapProposed = new Map(proposed.map((p) => [p.date, p.value]));
+    function buildDateMap(points: TimeSeriesPoint[], label: string) {
+      const map = new Map<string, number>();
+      for (const p of points) {
+        if (map.has(p.date)) {
+          console.warn(
+            `[EquityOverlay] duplicate date "${p.date}" in ${label} series — last-write-wins`,
+          );
+        }
+        map.set(p.date, p.value);
+      }
+      return map;
+    }
+    const mapCurrent = buildDateMap(current, "current");
+    const mapProposed = buildDateMap(proposed, "proposed");
     const dates = Array.from(
       new Set([...mapCurrent.keys(), ...mapProposed.keys()]),
     ).sort();
@@ -599,27 +668,35 @@ function buildPath(points: ([number, number] | null)[]): string | null {
 // ARIA announcement
 // ---------------------------------------------------------------------------
 
+// NEW-C11-06: read units from DELTA_UNITS — same map as deltaChips() so the two
+// can't drift independently.
 function buildDeltaAnnouncement(deltas: SimulatorDeltas): string {
   const parts = [
-    formatAnnouncementChip("Sharpe", deltas.sharpe_delta, "ratio"),
-    formatAnnouncementChip("Max drawdown", deltas.dd_delta, "percent"),
-    formatAnnouncementChip("Correlation", deltas.corr_delta, "ratio"),
-    formatAnnouncementChip("Concentration", deltas.concentration_delta, "ratio"),
+    formatAnnouncementChip("Sharpe", deltas.sharpe_delta, DELTA_UNITS.sharpe_delta),
+    formatAnnouncementChip("Max drawdown", deltas.dd_delta, DELTA_UNITS.dd_delta),
+    formatAnnouncementChip("Correlation", deltas.corr_delta, DELTA_UNITS.corr_delta),
+    formatAnnouncementChip("Concentration", deltas.concentration_delta, DELTA_UNITS.concentration_delta),
   ];
   return `Simulation complete. ${parts.join(". ")}.`;
 }
 
 function formatAnnouncementChip(
   label: string,
-  value: number,
+  value: number | null,
   format: "ratio" | "percent",
 ): string {
+  // NEW-C11-01: null delta = not computable, emit a distinct phrase.
+  if (value === null) return `${label} not computable`;
   const direction =
     value > 0 ? "improved" : value < 0 ? "regressed" : "unchanged";
   if (value === 0) return `${label} unchanged`;
+  // NEW-C11-07: use Math.abs() so the word ("improved"/"regressed") carries
+  // the sign once — "regressed by 0.50%" is unambiguous; "regressed by -0.50%"
+  // is a double-negative that screen-reader users hear as an improvement.
+  const magnitude = Math.abs(value);
   const delta =
     format === "percent"
-      ? `${value > 0 ? "+" : ""}${(value * 100).toFixed(2)}%`
-      : `${value > 0 ? "+" : ""}${value.toFixed(3)}`;
+      ? `${(magnitude * 100).toFixed(2)}%`
+      : `${magnitude.toFixed(3)}`;
   return `${label} ${direction} by ${delta}`;
 }

@@ -72,6 +72,12 @@ interface ExchangeConnection {
   // AllocatorSyncStatus.helperOverride so it takes precedence over computed
   // helper text.
   helper_override: string | null;
+  // NEW-C29-02 (client-only — NOT persisted to DB): true for rows optimistically
+  // inserted before the DB replica confirms them. The merge effect retains rows
+  // with this flag until their id appears in the server snapshot, preventing
+  // a router.refresh() that resolves before replica propagation from dropping
+  // the row from local state.
+  pending_insert?: boolean;
 }
 
 /**
@@ -138,22 +144,45 @@ function normalizeInitialKey(
   k: InitialKey,
   prev?: ExchangeConnection,
 ): ExchangeConnection {
+  // M1 (red-team): if the local state already cleared disconnected_at (the
+  // reconnect RPC succeeded and we optimistically set disconnected_at=null +
+  // sync_status="syncing"), do NOT let a stale server snapshot from a replica
+  // that hasn't caught up yet overwrite it with the old non-null timestamp.
+  // Guard: prev had disconnected_at=null AND sync_status="syncing" AND the
+  // server is still reporting a non-null disconnected_at → keep local null
+  // so the row stays in the active list and the Reconnect button stays
+  // disabled. The 5-second poll will pick up the committed server value once
+  // the replica propagates; until then, local truth wins.
+  const isReconnectInFlight =
+    prev !== undefined &&
+    prev.disconnected_at === null &&
+    prev.sync_status === "syncing" &&
+    !prev.pending_insert &&
+    k.disconnected_at != null;
+
   return {
     id: k.id,
     exchange: k.exchange,
     label: k.label,
     is_active: k.is_active,
-    sync_status: k.sync_status,
+    // When a reconnect is in-flight, preserve the optimistic sync_status
+    // ("syncing") rather than reverting to the stale server value.
+    sync_status: isReconnectInFlight ? prev!.sync_status : k.sync_status,
     last_sync_at: k.last_sync_at,
     account_balance_usdt: k.account_balance_usdt,
     created_at: k.created_at,
     sync_error: k.sync_error ?? null,
     last_429_at: k.last_429_at ?? null,
-    disconnected_at: k.disconnected_at ?? null,
+    // M1: preserve local null (reconnect in-flight) against stale server snapshot.
+    disconnected_at: isReconnectInFlight ? null : (k.disconnected_at ?? null),
     // Landmine 8 + f8/f4 preservation: client-only fields carry over across
     // router.refresh() server-state cycles when the row id matches.
     queued_next_attempt_at: prev?.queued_next_attempt_at ?? null,
     helper_override: prev?.helper_override ?? null,
+    // NEW-C29-02: a row that arrives in the server snapshot is no longer pending.
+    // pending_insert is cleared when the server confirms the id (this call
+    // happens when the row appears in initialKeys).
+    pending_insert: false,
   };
 }
 
@@ -241,36 +270,57 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
   }
 
   async function handleReconnect(keyId: string) {
-    // Optimistic: clear disconnected_at + flip to syncing so the pill
-    // renders immediately. Server reset of sync_error + sync_status='idle'
-    // lands via the reconnect RPC; the subsequent sync POST (mirrors
-    // handleAddKey) flips sync_status to 'syncing' on the server.
-    setKeys((prev) =>
-      prev.map((k) =>
-        k.id === keyId
-          ? {
-              ...k,
-              disconnected_at: null,
-              sync_status: "syncing",
-              sync_error: null,
-              helper_override: null,
-            }
-          : k,
-      ),
-    );
+    // M2 (red-team): capture the original disconnected_at BEFORE the optimistic
+    // update so the revert path can restore it exactly. Pre-fix: revert stamped
+    // `new Date().toISOString()` — the "Disconnected Nd ago" label showed
+    // "just now" even when the key had been disconnected for days.
+    let originalDisconnectedAt: string | null = null;
+    setKeys((prev) => {
+      // Read the current value while atomically applying the optimistic update.
+      // Optimistic: clear disconnected_at + flip to syncing so the pill
+      // renders immediately. Server reset of sync_error + sync_status='idle'
+      // lands via the reconnect RPC; the subsequent sync POST (mirrors
+      // handleAddKey) flips sync_status to 'syncing' on the server.
+      return prev.map((k) => {
+        if (k.id === keyId) {
+          originalDisconnectedAt = k.disconnected_at;
+          return {
+            ...k,
+            disconnected_at: null,
+            sync_status: "syncing",
+            sync_error: null,
+            helper_override: null,
+          };
+        }
+        return k;
+      });
+    });
 
     const { error: rpcErr } = await supabase.rpc(
       "reconnect_allocator_api_key",
       { p_api_key_id: keyId },
     );
     if (rpcErr) {
-      // Revert on failure.
+      // SF-F3: log the RPC error before reverting so operators can see
+      // whether this is a permissions failure, network blip, deleted row,
+      // or constraint violation — previously rpcErr was silently absorbed
+      // with only a generic UI string, leaving no operator signal.
+      console.error("[AllocatorExchangeManager] handleReconnect RPC failed:", {
+        keyId,
+        code: rpcErr.code,
+        message: rpcErr.message,
+        hint: rpcErr.hint,
+      });
+      // Revert on failure — restore the original disconnected_at so the
+      // "Disconnected Nd ago" label stays accurate (M2 fix).
       setKeys((prev) =>
         prev.map((k) =>
           k.id === keyId
             ? {
                 ...k,
-                disconnected_at: new Date().toISOString(),
+                // M2: use the captured original timestamp, not a fresh one.
+                disconnected_at:
+                  originalDisconnectedAt ?? new Date().toISOString(),
                 sync_status: "idle",
                 helper_override: "Reconnect failed — try again",
               }
@@ -301,7 +351,11 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
           ),
         );
       }
-    } catch {
+    } catch (syncErr) {
+      // SF-F4: log the network/fetch error so operators can distinguish a
+      // transient network partition from a config regression — previously a
+      // bare catch {} absorbed TypeError/DOMException with no signal.
+      console.error("[AllocatorExchangeManager] handleReconnect sync POST failed:", syncErr);
       setKeys((prev) =>
         prev.map((k) =>
           k.id === keyId
@@ -325,12 +379,29 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
   // for matching ids (f8 / f4). Done during render (not an effect) so the
   // merged state is visible on the same commit — avoids the cascading-render
   // penalty of setState-in-useEffect (react-hooks/set-state-in-effect).
+  //
+  // NEW-C29-02: make the merge ADDITIVE — preserve locally-inserted rows
+  // flagged pending_insert=true until the server snapshot contains a row
+  // with the same id. Without this, a router.refresh() that resolves
+  // before the DB replica propagates the new row drops it from local state
+  // (appears to vanish for 1-2s then reappears on the next 5s poll tick).
   const [prevInitialKeys, setPrevInitialKeys] = useState(initialKeys);
   if (prevInitialKeys !== initialKeys) {
     setPrevInitialKeys(initialKeys);
     setKeys((prev) => {
       const byId = new Map(prev.map((k) => [k.id, k]));
-      return initialKeys.map((k) => normalizeInitialKey(k, byId.get(k.id)));
+      const serverIds = new Set(initialKeys.map((k) => k.id));
+      const merged = initialKeys.map((k) => normalizeInitialKey(k, byId.get(k.id)));
+      // Retain any locally-inserted rows that haven't appeared on the server yet.
+      // SF-F8: use === true (not truthy) so that undefined (absent field) is
+      // explicitly non-matching. The cast was redundant — pending_insert is
+      // already declared optional on ExchangeConnection — and masked the risk
+      // that a future interface removal would silently break the merge logic
+      // (undefined && ... evaluates falsy without a type error).
+      const pending = prev.filter(
+        (k) => k.pending_insert === true && !serverIds.has(k.id),
+      );
+      return [...pending, ...merged];
     });
   }
 
@@ -509,8 +580,13 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
       // BEFORE awaiting the POST (so the f4 error surfaces on the row's
       // aria-live helper line rather than blocking the modal). Finally,
       // await the sync request per f4.
-      const newRow = normalizeInitialKey(inserted as InitialKey);
-      newRow.sync_status = "syncing";
+      // NEW-C29-02: stamp pending_insert=true so the merge effect retains this
+      // row even if router.refresh() resolves before the replica propagates it.
+      const newRow: ExchangeConnection = {
+        ...normalizeInitialKey(inserted as InitialKey),
+        sync_status: "syncing",
+        pending_insert: true,
+      };
       setKeys((prev) => [newRow, ...prev]);
       setShowForm(false);
       setFormLoading(false);
@@ -738,9 +814,20 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
                       {formatRelative(key.last_sync_at)}
                     </p>
                   </div>
+                  {/* NEW-C29-01: guard against double-click firing the RPC twice.
+                      sync_status is already flipped to "syncing" optimistically
+                      before the RPC in handleReconnect, so this disabled check
+                      prevents a second click from queuing a duplicate RPC +
+                      sync POST and racing against the first. */}
                   <Button
                     variant="primary"
+                    disabled={key.sync_status === "syncing"}
                     aria-label={`Reconnect ${key.exchange} key`}
+                    title={
+                      key.sync_status === "syncing"
+                        ? "Reconnect in progress"
+                        : undefined
+                    }
                     onClick={() => handleReconnect(key.id)}
                   >
                     Reconnect

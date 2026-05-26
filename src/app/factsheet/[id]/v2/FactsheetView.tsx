@@ -17,6 +17,11 @@ import { MasterBrush } from "./MasterBrush";
 import { StressWindowsPanel } from "./StressWindowsPanel";
 import { CollapsibleSection, FACTSHEET_OPEN_ALL_EVENT } from "./CollapsibleSection";
 import { LazyMount } from "./LazyMount";
+// IMPORTANT-1/FINDING-8 (b06-codereview/silentfailure): Import the single-source
+// formatters from format.ts so FactsheetView uses the same implementation that
+// the audit tests cover. The private pct/pctSigned/num copies below were
+// equivalent today but divergences would silently escape test coverage.
+import { pct, pctSigned, ratio as num } from "./format";
 
 /**
  * Code-split the three heaviest panels off the initial route bundle. These
@@ -218,7 +223,13 @@ export function FactsheetBody({
             >
               <StressWindowsPanel />
             </CollapsibleSection>
-            {hasComparator && (
+            {/* FINDING-2 (b06-silentfailure): Gate signatures on ingestSource === "api"
+                in addition to hasComparator. Event signatures stitch the internal BTC
+                fixture alongside the strategy returns; for CSV strategies with too few
+                observations aggregate() fills empty trace populations with all-zero
+                arrays — fabricating a flat zero band line indistinguishable from a
+                real observation at 0% delta. Suppress for CSV to prevent false panels. */}
+            {hasComparator && payload.ingestSource === "api" && (
               <CollapsibleSection
                 id="factsheet-signatures"
                 title="Returns Signatures"
@@ -247,7 +258,10 @@ export function FactsheetBody({
           <MetricsColumn />
         </div>
 
-        {!hideAllocatorSection && (
+        {/* AllocatorSection uses demo blended portfolios — derivable data only
+            for api-ingested strategies. Suppress for CSV uploads per the
+            no-invented-data contract. (NEW-C20-01) */}
+        {!hideAllocatorSection && payload.ingestSource === "api" && (
           <div id="factsheet-allocator" className="mt-12">
             <LazyMount minHeight={400}>
               <AllocatorSection />
@@ -282,13 +296,17 @@ function PerformanceCharts() {
   // fields were added would crash readers. The cache key was bumped in
   // the same commit so this should only hit during the 1h TTL drain; if
   // it ever fires steady-state, the warn below surfaces the schema drift.
+  // Conservative fallback: `enough: false` so panels hide + "Not enough data"
+  // shows when the window is unknown. The old `enough: true` default caused
+  // rolling panels to render with a fabricated warmup label for any payload
+  // that predated the rollingWindow field. (NEW-C20-03)
   const roll: RollWindowPick = payload.rollingWindow
-    ?? { window: ROLL_WINDOW_6MO, label: "6mo", enough: true };
+    ?? { window: ROLL_WINDOW_6MO, label: "6mo", enough: false };
   const beta: RollWindowPick = payload.rollingBetaWindow
-    ?? { window: ROLL_WINDOW_90D, label: "90d", enough: true };
+    ?? { window: ROLL_WINDOW_90D, label: "90d", enough: false };
   React.useEffect(() => {
     if (!payload.rollingWindow || !payload.rollingBetaWindow) {
-      console.warn(
+      console.error(
         "[factsheet/v2] PerformanceCharts — payload missing rollingWindow/rollingBetaWindow; rendering with defaults. Bump factsheet-v2-payload cache key if this persists.",
         { strategyId: payload.strategyId },
       );
@@ -365,6 +383,20 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
   if (exchanges) chips.push(exchanges);
   if (leverage) chips.push(`leverage ${leverage}`);
 
+  // Only api_verified strategies have AUM/capacity/leverage/exchanges
+  // confirmed by platform data. For csv_uploaded and self_reported tiers the
+  // values are author-declared free-text — surface a "self-reported" qualifier
+  // beside the chip line and the AUM/capacity chip so readers aren't misled
+  // into treating them as verified facts. (NEW-C20-02)
+  //
+  // FINDING-3 (b06-silentfailure): trustTier=null means UNVERIFIED — the
+  // strategy has never been through any verification step. "Self-reported" is
+  // the specific trust-tier value "self_reported" or "csv_uploaded", meaning the
+  // author explicitly declared the values. A null strategy gets no qualifier
+  // (TrustTierLabel already handles the null case), not a false "self-reported".
+  const isSelfReported =
+    payload.trustTier === "csv_uploaded" || payload.trustTier === "self_reported";
+
   return (
     <header className="border-b border-text pb-6">
       <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
@@ -379,6 +411,18 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
           <div className="mt-3 flex flex-wrap items-center gap-2 sm:gap-3">
             <TrustTierLabel trustTier={payload.trustTier} />
             <span className="text-[12px] text-text-secondary">{chips.length > 0 ? chips.join(" · ") : "—"}</span>
+            {isSelfReported && chips.length > 0 && (
+              <span
+                className="text-[10px] font-mono uppercase tracking-[0.14em] px-1.5 py-0.5 rounded-sm"
+                style={{
+                  color: "var(--color-warning, #B45309)",
+                  background: "color-mix(in srgb, var(--color-warning, #B45309) 12%, transparent)",
+                }}
+                title="These fields (exchanges, leverage, markets) are author-declared and have not been verified by Quantalyze"
+              >
+                self-reported
+              </span>
+            )}
           </div>
           {payload.description && (
             <p className="mt-3 sm:mt-4 text-[13px] sm:text-[14px] leading-relaxed text-text-2 italic font-serif">
@@ -389,7 +433,11 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
         <div className="text-left sm:text-right flex flex-row sm:flex-col items-start sm:items-end gap-6 sm:gap-3 flex-wrap">
           <FreshnessChip computedAt={payload.computedAt} />
           {payload.aum != null && (
-            <CapacityChip aum={payload.aum} maxCapacity={payload.maxCapacity} />
+            <CapacityChip
+              aum={payload.aum}
+              maxCapacity={payload.maxCapacity}
+              selfReported={isSelfReported}
+            />
           )}
         </div>
       </div>
@@ -405,25 +453,60 @@ function formatUsdCompact(v: number): string {
   return `$${v.toFixed(0)}`;
 }
 
+// Epoch sentinel value used by the server when analytics.computed_at is null.
+// Render "not computed" UI instead of the alarming "Jan 1, 1970" date.
+// (RED-TEAM-M4, FINDING-5)
+const EPOCH_SENTINEL = "1970-01-01T00:00:00Z";
+
 /**
  * Data freshness — institutional buyers reject stale reports.
  * Green ≤ 3d, amber 3-7d, red >7d. Date below.
  */
 function FreshnessChip({ computedAt }: { computedAt: string }) {
-  const d = new Date(computedAt);
-  // useState initializer runs once per mount so render stays pure — Date.now()
-  // would otherwise be flagged as impure-in-render. Hour resolution is fine
-  // for the "fresh / stale / old" bucketing.
+  // Hooks must run unconditionally and in the same order every render, so this
+  // useState is hoisted ABOVE the EPOCH_SENTINEL early-return below
+  // (react-hooks/rules-of-hooks). The initializer runs once per mount so render
+  // stays pure — Date.now() inline would be flagged impure-in-render. Hour
+  // resolution is fine for the "fresh / stale / old" bucketing; nowMs is only
+  // consumed on the non-sentinel path.
   const [nowMs] = React.useState(() => Date.now());
+  // Epoch sentinel means analytics.computed_at was null server-side — the
+  // strategy hasn't been computed yet. Render a graceful "not computed" chip
+  // rather than surfacing "Jan 1, 1970 (~20000d)" which looks like a data
+  // bug to institutional viewers. (RED-TEAM-M4)
+  if (computedAt === EPOCH_SENTINEL) {
+    return (
+      <div>
+        <div className="flex items-center justify-end gap-1.5 text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
+          <span aria-hidden className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: "var(--color-text-muted)" }} />
+          Computed · not yet
+        </div>
+        <p className="mt-1 text-[13px] font-mono tabular-nums text-text-secondary">
+          N/A
+        </p>
+      </div>
+    );
+  }
+  const d = new Date(computedAt);
   const days = (nowMs - d.getTime()) / 86_400_000;
+  // A future computedAt (days < 0) means the upstream series window is ahead
+  // of now — treat as neutral/suspicious, never "fresh". (NEW-C20-07)
   const tone =
-    !Number.isFinite(days) ? "neutral" : days <= 3 ? "fresh" : days <= 7 ? "stale" : "old";
+    !Number.isFinite(days) ? "neutral"
+    : days < 0 ? "future"
+    : days <= 3 ? "fresh"
+    : days <= 7 ? "stale"
+    : "old";
   const toneColor =
     tone === "fresh" ? "var(--color-positive)" :
     tone === "stale" ? "var(--color-warning, #B45309)" :
     tone === "old" ? "var(--color-negative)" : "var(--color-text-muted)";
   const label =
-    tone === "fresh" ? "fresh" : tone === "stale" ? "stale" : tone === "old" ? "old" : "—";
+    tone === "fresh" ? "fresh"
+    : tone === "stale" ? "stale"
+    : tone === "old" ? "old"
+    : tone === "future" ? "future — check data"
+    : "—";
   return (
     <div>
       <div className="flex items-center justify-end gap-1.5 text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
@@ -432,7 +515,7 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
       </div>
       <p className="mt-1 text-[13px] font-mono tabular-nums text-text-secondary">
         {formatIsoDate(computedAt)}
-        {Number.isFinite(days) && <span className="ml-1 text-text-muted">({Math.round(days)}d)</span>}
+        {Number.isFinite(days) && days >= 0 && <span className="ml-1 text-text-muted">({Math.round(days)}d)</span>}
       </p>
     </div>
   );
@@ -441,8 +524,18 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
 /**
  * AUM + capacity utilization bar. Falls back to AUM-only when max_capacity
  * is not declared. Bar fills accent for healthy utilization, warning above 80%.
+ * When selfReported=true (non-api_verified tier), labels the values as
+ * author-declared to prevent them from reading as verified figures. (NEW-C20-02)
  */
-function CapacityChip({ aum, maxCapacity }: { aum: number; maxCapacity: number | null }) {
+function CapacityChip({
+  aum,
+  maxCapacity,
+  selfReported = false,
+}: {
+  aum: number;
+  maxCapacity: number | null;
+  selfReported?: boolean;
+}) {
   const utilization = maxCapacity && maxCapacity > 0 ? Math.min(1, aum / maxCapacity) : null;
   const tone =
     utilization == null ? "var(--color-accent)" :
@@ -451,7 +544,9 @@ function CapacityChip({ aum, maxCapacity }: { aum: number; maxCapacity: number |
     "var(--color-accent)";
   return (
     <div className="min-w-[160px]">
-      <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">AUM</p>
+      <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
+        AUM{selfReported && <span className="ml-1 normal-case" style={{ color: "var(--color-warning, #B45309)" }}>(self-reported)</span>}
+      </p>
       <p className="mt-1 text-[13px] font-mono tabular-nums text-text-secondary">
         {formatUsdCompact(aum)}
         {maxCapacity != null && (
@@ -479,25 +574,35 @@ function KpiStrip() {
 
   // 9 cells when a comparator is active (mockup contract). When NONE, the
   // α + IR slots collapse — render 7 cells instead of leaving empty space.
+  //
+  // Tone is computed ONLY when the underlying value is finite — a NaN/Inf
+  // metric formats to "—" but would otherwise render that dash with a red
+  // "negative" tint, which conveys a false signal. Also: max_dd at exactly
+  // 0 (no drawdown observed) gets no negative tint — a zero isn't bad. (NEW-C20-09)
+  const signTone = (v: number | null | undefined): "positive" | "negative" | undefined =>
+    v != null && Number.isFinite(v) ? (v >= 0 ? "positive" : "negative") : undefined;
+  const maxDdTone = (v: number | null | undefined): "negative" | undefined =>
+    v != null && Number.isFinite(v) && v < 0 ? "negative" : undefined;
+
   const items: Array<{ label: string; value: string; tone?: "positive" | "negative" }> = [
-    { label: "Cum. Return", value: pctSigned(m.cum_ret, 1), tone: m.cum_ret >= 0 ? "positive" : "negative" },
-    { label: "CAGR", value: pctSigned(m.cagr, 1), tone: m.cagr >= 0 ? "positive" : "negative" },
+    { label: "Cum. Return", value: pctSigned(m.cum_ret, 1), tone: signTone(m.cum_ret) },
+    { label: "CAGR", value: pctSigned(m.cagr, 1), tone: signTone(m.cagr) },
     { label: "Sharpe", value: num(m.sharpe) },
     { label: "Sortino", value: num(m.sortino) },
     { label: "Calmar", value: num(m.calmar) },
-    { label: "Max DD", value: pct(m.max_dd, 1), tone: "negative" },
+    { label: "Max DD", value: pct(m.max_dd, 1), tone: maxDdTone(m.max_dd) },
     { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
   ];
   if (j && cmpKey !== "none") {
     items.push({
       label: `α vs ${cn}`,
       value: pctSigned(j.alpha, 1),
-      tone: j.alpha >= 0 ? "positive" : "negative",
+      tone: signTone(j.alpha),
     });
     items.push({
       label: `IR vs ${cn}`,
       value: num(j.info_ratio),
-      tone: j.info_ratio >= 0 ? "positive" : "negative",
+      tone: signTone(j.info_ratio),
     });
   }
   // Responsive grid: 9 cells need narrower cells on lg. Use grid-cols-9 only
@@ -541,6 +646,21 @@ function KpiStrip() {
           </div>
         ))}
       </div>
+      {/* Short-track caveat: annualized CAGR/Sharpe/Sortino/Calmar/Ann.Vol
+          are statistically unreliable with fewer than 252 observations (~1y).
+          Surface the same warning here at the hero strip so mobile users who
+          never scroll to the MetricsColumn right-rail still see it. (NEW-C20-08) */}
+      {m.n < 252 && (
+        <p
+          className="px-3 sm:px-4 py-2 text-[10px] font-mono"
+          style={{
+            borderTop: "1px solid var(--color-border)",
+            color: "var(--color-warning, #B45309)",
+          }}
+        >
+          ⚠ Only {m.n} observation{m.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
+        </p>
+      )}
     </section>
   );
 }
@@ -554,16 +674,27 @@ function KpiStrip() {
  * on narrow widths.
  */
 function SectionNav() {
+  const payload = usePayload();
+  const { key: cmpKey } = useActiveComparator();
+  // FINDING-10 (b06-silentfailure): Filter out sections whose content is
+  // conditionally suppressed so the nav doesn't contain dead anchors.
+  // "Allocator" is only rendered when ingestSource === "api" (no-invented-data).
+  // "Signatures" is only rendered when hasComparator AND ingestSource === "api".
+  const hasComparator = cmpKey !== "none";
   const sections: { id: string; label: string }[] = React.useMemo(() => [
     { id: "factsheet-perf", label: "Performance" },
     { id: "factsheet-dist", label: "Distribution" },
     { id: "factsheet-heatmaps", label: "Heatmaps" },
     { id: "factsheet-stress", label: "Stress" },
-    { id: "factsheet-signatures", label: "Signatures" },
+    ...(hasComparator && payload.ingestSource === "api"
+      ? [{ id: "factsheet-signatures", label: "Signatures" }]
+      : []),
     { id: "factsheet-streak", label: "Streaks" },
-    { id: "factsheet-allocator", label: "Allocator" },
+    ...(payload.ingestSource === "api"
+      ? [{ id: "factsheet-allocator", label: "Allocator" }]
+      : []),
     { id: "factsheet-metrics", label: "Metrics" },
-  ], []);
+  ], [payload.ingestSource, hasComparator]);
   const [active, setActive] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -658,7 +789,13 @@ function ShareLinkButton({ strategyId }: { strategyId: string }) {
         setCopied(true);
         window.setTimeout(() => setCopied(false), 1500);
       },
-      () => { /* clipboard denied — fall back silently */ },
+      () => {
+        // FINDING-9 (b06-silentfailure): Log so we can track clipboard
+        // denial rates (common on non-HTTPS or when permission is denied).
+        // Don't set copied=true so the button label stays "Copy share link"
+        // and the user knows they need to copy manually.
+        console.warn("[factsheet] clipboard.writeText denied", { strategyId });
+      },
     );
     trackFactsheetEvent("factsheet_v2_share_copy", { strategy_id: strategyId });
   }, [strategyId]);
@@ -830,20 +967,9 @@ function FactsheetFooter({ payload }: { payload: FactsheetPayload }) {
   );
 }
 
-function pct(v: number, dp = 2): string {
-  if (!Number.isFinite(v)) return "—";
-  return `${(v * 100).toFixed(dp)}%`;
-}
-
-function pctSigned(v: number, dp = 2): string {
-  if (!Number.isFinite(v)) return "—";
-  return (v >= 0 ? "+" : "") + (v * 100).toFixed(dp) + "%";
-}
-
-function num(v: number): string {
-  if (!Number.isFinite(v)) return "—";
-  return v.toFixed(2);
-}
+// pct / pctSigned / num are imported from "./format" at the top of this file.
+// (IMPORTANT-1/FINDING-8 — b06-codereview/silentfailure): removed private
+// copies to ensure a single implementation is tested by audit-c20.test.ts.
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 

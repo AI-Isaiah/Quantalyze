@@ -148,6 +148,18 @@ vi.mock("@/lib/supabase/server", () => {
   };
 });
 
+// NEW-C10-01: route now imports createAdminClient for logAuditEventAsUser.
+// Stub it with the same rpc surface as the user client so audit calls
+// (log_audit_event_service) are recorded in supabaseState.rpcCalls.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      supabaseState.rpcCalls.push({ name, args });
+      return { data: null, error: null };
+    },
+  }),
+}));
+
 // notifyFounderGeneric is fire-and-forget — stub so tests don't try to
 // actually send Resend mail.
 vi.mock("@/lib/email", () => ({
@@ -300,8 +312,12 @@ describe("POST /api/account/deletion-request", () => {
   // Sprint 6 Task 7.1a — audit log pilot. The 3 pilot events are fire-and-
   // forget (queueMicrotask-scheduled) so they do NOT block the response, but
   // they MUST still fire on the happy path.
+  //
+  // NEW-C10-01 (audit-2026-05-26): route now uses logAuditEventAsUser (service-
+  // role, JWT-immune) so the RPC is log_audit_event_service, not log_audit_event.
+  // The p_user_id param carries the acting user's id for forensic attribution.
   describe("audit-log emission (Task 7.1a)", () => {
-    it("emits deletion.request.create via log_audit_event RPC after insert", async () => {
+    it("emits deletion.request.create via log_audit_event_service RPC after insert", async () => {
       const { POST } = await import("./route");
       const res = await POST(makeRequest());
       expect(res.status).toBe(200);
@@ -311,10 +327,11 @@ describe("POST /api/account/deletion-request", () => {
       await drainAuditMicrotasks();
 
       const auditCall = supabaseState.rpcCalls.find(
-        (c) => c.name === "log_audit_event",
+        (c) => c.name === "log_audit_event_service",
       );
       expect(auditCall).toBeDefined();
       expect(auditCall!.args).toMatchObject({
+        p_user_id: authUser.id,
         p_action: "deletion.request.create",
         p_entity_type: "data_deletion_request",
         p_entity_id: "req-1",
@@ -332,7 +349,7 @@ describe("POST /api/account/deletion-request", () => {
       expect(first.status).toBe(200);
       await drainAuditMicrotasks();
       expect(
-        supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event"),
+        supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event_service"),
       ).toHaveLength(1);
 
       // Second POST hits the dedup branch — no new insert, no new audit.
@@ -344,7 +361,7 @@ describe("POST /api/account/deletion-request", () => {
 
       // Still only one audit emission.
       expect(
-        supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event"),
+        supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event_service"),
       ).toHaveLength(1);
     });
   });

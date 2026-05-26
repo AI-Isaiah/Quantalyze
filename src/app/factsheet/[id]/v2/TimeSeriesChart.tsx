@@ -695,7 +695,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
                   fill="var(--color-negative)"
                   opacity={0.85}
                 >
-                  #{i + 1} {(p.depth * 100).toFixed(1)}%
+                  #{i + 1} {Number.isFinite(p.depth) ? `${(p.depth * 100).toFixed(1)}%` : "—"}
                 </text>
               )}
             </g>

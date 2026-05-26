@@ -119,7 +119,16 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
         .eq("status", "published");
 
   const { data: strategies, error } = await query;
-  if (error || !strategies) return null;
+  // NEW-C03-05: split error vs genuinely-empty so a transient DB/RLS outage
+  // is logged rather than silently appearing as "market too small to rank".
+  // captureToSentry ensures ops alerting fires (console.error alone is only
+  // visible in a Vercel log-tail session; Sentry creates an actionable event).
+  if (error) {
+    console.error("[queries.getPercentiles] supabase error:", error.message ?? error);
+    captureToSentry(error, { tags: { op: "getPercentiles" }, level: "error" });
+    return null;
+  }
+  if (!strategies) return null;
   if (strategies.length < 5) return null;
 
   // Extract analytics for each strategy
@@ -234,7 +243,17 @@ export async function getPopulatedCategorySlugs(): Promise<string[]> {
     .select("discovery_categories!inner(slug)")
     .eq("status", "published");
 
-  if (error || !data) return [];
+  // NEW-C03-06: split error vs empty so a transient DB failure is logged
+  // rather than silently appearing as "no published strategies anywhere",
+  // which renders the discovery navigation empty with no ops signal.
+  // captureToSentry ensures ops alerting fires even when no one is tailing
+  // Vercel logs (empty discovery nav would look like a data problem otherwise).
+  if (error) {
+    console.error("[queries.getPopulatedCategorySlugs] supabase error:", error.message ?? error);
+    captureToSentry(error, { tags: { op: "getPopulatedCategorySlugs" }, level: "error" });
+    return [];
+  }
+  if (!data) return [];
 
   const slugs = new Set<string>();
   for (const row of data) {
@@ -383,10 +402,19 @@ export async function getStrategyDetail(
     ? "*, discovery_categories!inner(slug), strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)"
     : "*, strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)";
 
+  // NEW-C03-03 / NEW-C38-01: add the `status='published'` predicate as
+  // defence-in-depth mirror of all sibling fetchers (getPublicStrategyDetail,
+  // getFactsheetDetail, getStrategyDetailV2). Without it, RLS
+  // `strategies_read` returns the owner's own draft/pending_review rows and
+  // the discovery detail page renders full institutional CTAs for an
+  // unapproved strategy while /factsheet/[id] correctly 404s — the two
+  // surfaces disagree on what is "live". A future RLS widening would also
+  // instantly leak every draft's chart suite through this function alone.
   let query = supabase
     .from("strategies")
     .select(baseSelect)
-    .eq("id", strategyId);
+    .eq("id", strategyId)
+    .eq("status", "published");
 
   if (expectedCategorySlug) {
     query = query.eq("discovery_categories.slug", expectedCategorySlug);
@@ -400,7 +428,24 @@ export async function getStrategyDetail(
     .limit(1, { referencedTable: "strategy_verifications" })
     .single();
 
-  if (error || !strategy) return null;
+  // F-07: split error vs not-found so DB/RLS/network failures are logged and
+  // captured rather than silently rendering the same not-found UI. PGRST116
+  // ("no rows found") is the expected .single() path when the strategy does
+  // not exist or is unpublished — that still returns null cleanly without log.
+  if (error) {
+    // PGRST116 = .single() found no rows (expected "not found" path).
+    const isNotFound =
+      (error as unknown as { code?: string }).code === "PGRST116";
+    if (!isNotFound) {
+      console.error(
+        "[queries.getStrategyDetail] supabase error:",
+        error.message ?? error,
+      );
+      captureToSentry(error, { tags: { op: "getStrategyDetail" }, level: "error" });
+    }
+    return null;
+  }
+  if (!strategy) return null;
 
   // Phase 15 / CSV-03: pick the most-recent verification row's trust_tier.
   // In Phase 15 there's at most ONE row per strategy_id (finalize_csv_strategy
@@ -996,7 +1041,15 @@ export async function getUserPortfolios(): Promise<PortfolioWithCount[]> {
     .eq("user_id", user.id)
     .order("created_at", { ascending: false });
 
-  if (error || !portfolios) return [];
+  // NEW-C03-07: mirror getRealPortfolio (L1161) — log + throw so the error
+  // boundary fires instead of rendering "create your first portfolio" for a
+  // user who has portfolios. A transient outage/RLS/schema-drift on the
+  // portfolios table was previously indistinguishable from "no portfolios."
+  if (error) {
+    console.error("[queries.getUserPortfolios] supabase error:", error.message ?? error);
+    throw new Error(`getUserPortfolios failed: ${error.message ?? "unknown supabase error"}`);
+  }
+  if (!portfolios) return [];
 
   return portfolios.map((p) => ({
     id: p.id,
@@ -1017,7 +1070,16 @@ export async function getDecks(): Promise<DeckWithCount[]> {
     .select("*, deck_strategies(strategy_id)")
     .order("created_at", { ascending: false });
 
-  if (error || !decks) return [];
+  // NEW-C03-08: split error vs empty so a transient DB failure is logged
+  // rather than silently appearing as "no decks exist."
+  // captureToSentry ensures ops alerting fires so an outage on the decks
+  // table doesn't silently look like "no decks exist" indefinitely.
+  if (error) {
+    console.error("[queries.getDecks] supabase error:", error.message ?? error);
+    captureToSentry(error, { tags: { op: "getDecks" }, level: "error" });
+    return [];
+  }
+  if (!decks) return [];
 
   return decks.map((d) => ({
     id: d.id,
@@ -1152,21 +1214,76 @@ export async function getAllocationEvents(portfolioId: string) {
 
 export async function getAllocatorAggregates(userId: string) {
   const supabase = await createClient();
-  const { data: portfolios } = await supabase
+  // F-05: destructure error from both fetches so DB failures don't silently
+  // look like "user has no portfolios" or "analytics not yet computed".
+  const { data: portfolios, error: portfoliosError } = await supabase
     .from("portfolios")
     .select("id, name, description, created_at")
     .eq("user_id", userId);
 
+  if (portfoliosError) {
+    console.error(
+      "[queries.getAllocatorAggregates] portfolios fetch failed:",
+      portfoliosError.message ?? portfoliosError,
+    );
+    throw new Error(
+      `getAllocatorAggregates portfolios failed: ${portfoliosError.message ?? "unknown supabase error"}`,
+    );
+  }
   if (!portfolios?.length) return { portfolios: [], analytics: [] };
 
   const portfolioIds = portfolios.map((p) => p.id);
-  const { data: analytics } = await supabase
+  // NEW-C03-11: collapse to latest analytics row per portfolio to avoid
+  // unbounded result sets when portfolio_analytics accumulates historical
+  // snapshots.  The .order+.limit bounds the DB scan; the Map dedup keeps
+  // only the freshest row per portfolio_id in application code.
+  //
+  // code-review M: use a fixed cap (500) instead of portfolioIds.length * 10.
+  // The formula can be defeated by one data-heavy portfolio (e.g. 1 portfolio
+  // with 11+ analytics rows silently cuts off other portfolios). 500 is
+  // generous for any realistic user (<<50 portfolios × <10 relevant rows each).
+  const { data: analyticsRaw, error: analyticsError } = await supabase
     .from("portfolio_analytics")
     .select("*")
     .in("portfolio_id", portfolioIds)
-    .order("computed_at", { ascending: false });
+    .order("computed_at", { ascending: false })
+    .limit(500);
 
-  return { portfolios, analytics: (analytics ?? []) as PortfolioAnalytics[] };
+  if (analyticsError) {
+    console.error(
+      "[queries.getAllocatorAggregates] portfolio_analytics fetch failed:",
+      analyticsError.message ?? analyticsError,
+    );
+  }
+
+  // Deduplicate: first occurrence per portfolio_id is the latest (DESC order).
+  const seen = new Set<string>();
+  const analytics = (analyticsRaw ?? []).filter((row) => {
+    if (seen.has(row.portfolio_id)) return false;
+    seen.add(row.portfolio_id);
+    return true;
+  });
+
+  // F-08: warn when the dedup result is smaller than the requested set.
+  // Two causes: (a) limit(500) truncated the result and some portfolios have
+  // no latest-row in the window (genuine data loss); (b) a portfolio was
+  // recently created and the analytics job has not yet run (no rows exist).
+  // Include both counts so ops can distinguish truncation from "new portfolio."
+  if (seen.size < portfolioIds.length) {
+    const missingCount = portfolioIds.length - seen.size;
+    console.warn(
+      "[queries.getAllocatorAggregates] some portfolios have no analytics row " +
+        "(new portfolios with no job run yet, or limit(500) truncation)",
+      {
+        requested: portfolioIds.length,
+        resolved: seen.size,
+        missing: missingCount,
+        rawRowCount: (analyticsRaw ?? []).length,
+      },
+    );
+  }
+
+  return { portfolios, analytics: analytics as PortfolioAnalytics[] };
 }
 
 // =========================================================================
@@ -1305,6 +1422,12 @@ export interface MyAllocationDashboardPayload {
       > | null;
     };
   }>;
+  // NEW-C03-09: widen the inline type to include all columns projected by
+  // getUserApiKeys. The previous 8-field subset dropped disconnected_at,
+  // sync_error, and last_429_at — the three columns that drive the
+  // Disconnected/Reconnect UI, rate-limited cooldown countdown, and
+  // sync-error messaging. Without them the revoked-key treatment silently
+  // degraded (JSDoc on getUserApiKeys notes disconnected_at drives Reconnect).
   apiKeys: Array<{
     id: string;
     exchange: string;
@@ -1314,6 +1437,12 @@ export interface MyAllocationDashboardPayload {
     last_sync_at: string | null;
     account_balance_usdt: number | null;
     created_at: string;
+    /** Phase 06 / migration 066 — sanitised error message from the sync worker. */
+    sync_error: string | null;
+    /** Phase 06 / ISSUE-006 / migration 068 — last ccxt 429 timestamp. */
+    last_429_at: string | null;
+    /** Migration 075 — non-null = key is soft-disconnected; drives Reconnect UI. */
+    disconnected_at: string | null;
   }>;
   alertCount: {
     critical: number;
@@ -1361,19 +1490,20 @@ export interface MyAllocationDashboardPayload {
     venue: string;
     holding_type: "spot" | "derivative";
     api_key_id: string;
-    // Derivative-only fields. Spot rows leave these absent or null.
-    // Fields are optional in the TS type so legacy test fixtures (created
-    // before the 2026-05-20 split) continue to compile — the dashboard
-    // query selects them unconditionally, so production payloads always
-    // populate them.
+    // NEW-C03-10: these fields are now required-but-nullable (not optional).
+    // The optionality existed only so legacy fixtures compiled, but it
+    // collapsed "absent" vs "present-and-null" and forced `?? null` everywhere
+    // on a money-display contract. The dashboard query selects them
+    // unconditionally so production payloads always populate all three.
+    // Legacy fixtures must supply explicit null values.
     //   - `side`: 'long'/'short' for derivatives, 'flat' for spot.
     //   - `entry_price`: CCXT entryPrice for derivatives; NULL for spot.
     //   - `unrealized_pnl_usd`: CCXT unrealizedPnl for derivatives; NULL
     //     for spot. THIS is the equity contribution for a derivative
     //     position — NOT `value_usd`, which is the notional contract size.
-    side?: "long" | "short" | "flat";
-    entry_price?: number | null;
-    unrealized_pnl_usd?: number | null;
+    side: "long" | "short" | "flat" | null;
+    entry_price: number | null;
+    unrealized_pnl_usd: number | null;
   }>;
   /** Row count in allocator_equity_snapshots for this allocator — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
   snapshotCount: number;
@@ -1689,12 +1819,43 @@ export function reconstructHoldingReturnsByScopeRef(
  * Returns the empty-default shape when no holdings have ≥2 returns
  * (warm-up case).
  */
+/**
+ * NEW-C03-01: Equity contribution by holding type.
+ *
+ *   - Spot: `value_usd` (marked fair value — this IS the equity contribution).
+ *   - Derivative: `unrealized_pnl_usd` (the actual equity contribution).
+ *     `value_usd` on a derivative is the NOTIONAL contract size — e.g. a 10x
+ *     perp with $5M notional has ~$500k of margin/equity at stake, not $5M.
+ *     Using notional inflates AUM by the leverage factor and dominates the
+ *     per-holding weights used by computeScenario.
+ *
+ * Shorts: unrealized_pnl_usd is negative for a losing short. We include the
+ * full signed value so the short's equity impact is reflected in the weight
+ * (a deeply-negative short has near-zero positive weight, which is correct).
+ * We don't clamp to 0 here — callers that need a non-negative weight for the
+ * scenario can normalise after the fact.
+ *
+ * @internal Exported for unit testing only (NEW-C03-01 regression).
+ */
+export function holdingEquityContribution(h: MyAllocationDashboardPayload["holdingsSummary"][number]): number {
+  if (h.holding_type === "derivative") {
+    // unrealized_pnl_usd is required-but-nullable (never absent in production
+    // payloads; null for spot rows or when the sync worker has not yet written
+    // a P&L value). Fall back to 0 rather than notional when null — better
+    // to exclude a derivative than to treat notional as equity.
+    const pnl = h.unrealized_pnl_usd ?? 0;
+    return Number.isFinite(pnl) ? pnl : 0;
+  }
+  return Number.isFinite(h.value_usd) ? h.value_usd : 0;
+}
+
 function liveBaselineMetricsFromHoldings(
   holdingsSummary: MyAllocationDashboardPayload["holdingsSummary"],
   holdingReturnsByScopeRef: Record<string, DailyPoint[]>,
 ): MyAllocationDashboardPayload["liveBaselineMetrics"] {
+  // NEW-C03-01: Use equity contribution (not notional) for AUM and weights.
   const totalAum = holdingsSummary.reduce(
-    (s, h) => s + (Number.isFinite(h.value_usd) ? h.value_usd : 0),
+    (s, h) => s + holdingEquityContribution(h),
     0,
   );
   const emptyDefault: MyAllocationDashboardPayload["liveBaselineMetrics"] = {
@@ -1733,8 +1894,13 @@ function liveBaselineMetricsFromHoldings(
   }
   if (strategies.length === 0) return emptyDefault;
 
-  // All-enabled, value-weighted live set (mirrors the all-on default the
+  // All-enabled, equity-weighted live set (mirrors the all-on default the
   // composer shows on first paint). Weights normalize inside computeScenario.
+  // NEW-C03-01: use holdingEquityContribution (not value_usd) so derivatives
+  // are weighted by unrealized_pnl_usd rather than notional contract size.
+  // We clamp negative equity (deeply-losing short) to 0 for the weight so
+  // the composite curve isn't distorted by negative-weight slots — the short's
+  // daily returns already reflect its P&L direction in the equity curve.
   const selected: Record<string, boolean> = {};
   const weights: Record<string, number> = {};
   const startDates: Record<string, string> = {};
@@ -1742,7 +1908,7 @@ function liveBaselineMetricsFromHoldings(
     const scopeRef = `holding:${h.venue}:${h.symbol}:${h.holding_type}`;
     if (!holdingReturnsByScopeRef[scopeRef]) continue;
     selected[scopeRef] = true;
-    weights[scopeRef] = Math.max(0, h.value_usd ?? 0);
+    weights[scopeRef] = Math.max(0, holdingEquityContribution(h));
   }
   const state: ScenarioState = { selected, weights, startDates };
   const cache = buildDateMapCache(strategies);
@@ -1804,7 +1970,9 @@ function derivePhase07Fields(
     holding_type: "spot" | "derivative";
     asof: string;
     api_key_id: string;
-    side: "long" | "short" | "flat";
+    // M-04: nullable to match allocator_holdings DB column (spot rows have
+    // side=null from the sync worker).
+    side: "long" | "short" | "flat" | null;
     entry_price: number | null;
     unrealized_pnl_usd: number | null;
   }>,
@@ -1852,17 +2020,27 @@ function derivePhase07Fields(
     ),
   ).sort();
 
-  // Collapse holdings to latest-asof-per-symbol via linear scan of the
-  // max-asof comparator. Input order is IRRELEVANT for correctness — the
-  // `.order("asof", { ascending: false })` clause on the PostgREST query
-  // above is a log-inspection hedge (newest rows render first in debug
-  // dumps), not a correctness requirement. Do NOT flip the comparator to
-  // "first-seen wins" thinking ordering is guaranteed — removing `.order()`
-  // would silently regress that assumption.
+  // Collapse holdings to latest-asof-per-{venue}:{symbol}:{holding_type}
+  // via linear scan of the max-asof comparator. Input order is IRRELEVANT
+  // for correctness — the `.order("asof", { ascending: false })` clause on
+  // the PostgREST query above is a log-inspection hedge (newest rows render
+  // first in debug dumps), not a correctness requirement. Do NOT flip the
+  // comparator to "first-seen wins" thinking ordering is guaranteed —
+  // removing `.order()` would silently regress that assumption.
+  //
+  // NEW-C03-02: Key by `${venue}:${symbol}:${holding_type}`, not just
+  // `symbol`. Keying on symbol alone silently collapsed multi-venue
+  // (Binance BTC + OKX BTC) and spot+derivative (BTC-spot + BTC-perp)
+  // holdings to a single row — only the latest-asof survived, so a whole
+  // exchange's position could disappear from the dashboard and the
+  // surviving venue could flip between page loads. The scope_ref keyspace
+  // used everywhere else in the pipeline already uses this triple-key
+  // format (see reconstructHoldingReturnsByScopeRef, buildHoldingRef).
   const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
   for (const r of holdingsRows) {
-    const existing = holdingsMap.get(r.symbol);
-    if (!existing || r.asof > existing.asof) holdingsMap.set(r.symbol, r);
+    const key = `${r.venue}:${r.symbol}:${r.holding_type}`;
+    const existing = holdingsMap.get(key);
+    if (!existing || r.asof > existing.asof) holdingsMap.set(key, r);
   }
   const holdingsSummary = Array.from(holdingsMap.values()).map((r) => ({
     symbol: r.symbol,
@@ -1974,17 +2152,6 @@ export const getMyAllocationDashboard = cache(
       // pre-migration-011. Consumed by the V2 MandateSnapshot widget via
       // lib/mandate-gates.ts.
       mandate,
-      // Phase 11 / D-02 — server-side COUNT of api_keys rows for the
-      // visibility predicate of OnboardingBanner (S1) and
-      // MandateQuickSetCard (S2). RLS-scoped via the user-scoped client
-      // (api_keys has an owner-self-SELECT policy). NOT cached client-side
-      // (D-02 LOCKED forbids localStorage). Note: a separate `apiKeys`
-      // array fetch already runs above to project the full per-key columns
-      // — we keep the count query as a distinct head-only round-trip so
-      // (a) it's a single integer over the wire even when a user has many
-      // keys, and (b) the count number remains correct under RLS even if
-      // future projection-column changes alter the array length.
-      apiKeysCountRes,
       // G-1 fix — hoisted to Step 1 so the outcomes payload is identical in
       // both the !portfolio (fresh allocator) branch and the portfolio
       // branch. Uses admin client because match_decisions has no allocator-
@@ -2032,10 +2199,6 @@ export const getMyAllocationDashboard = cache(
         .eq("allocator_id", userId)
         .not("original_holding_ref", "is", null),
       getOwnPreferences(supabase, userId),
-      supabase
-        .from("api_keys")
-        .select("id", { count: "exact", head: true })
-        .eq("user_id", userId),
       admin
         .from("bridge_outcomes")
         .select(
@@ -2184,22 +2347,21 @@ export const getMyAllocationDashboard = cache(
 
     // audit-2026-05-07 G8.A.1 (P34) — Step 1 explicit error checks.
     // Same `assertOk` helper Step 2 uses below; we're a single function
-    // so DRY both waves through one helper. `apiKeysCountRes` is
-    // intentionally left lenient — its `.count` already coalesces to 0
-    // below and we prefer to render the onboarding nudge over an error
-    // page when the count probe fails.
+    // so DRY both waves through one helper.
     assertOk(phase07EquityRes, "allocator_equity_snapshots");
     assertOk(phase07HoldingsRes, "allocator_holdings");
     assertOk(phase09MatchBatchRes, "match_batches");
     assertOk(phase09MatchDecisionsRes, "match_decisions");
     assertOk(outcomesFullRes, "bridge_outcomes");
 
-    // Phase 11 / D-02 — server-side COUNT result (head:true returns no rows;
-    // the `count` field is the authoritative integer). PostgREST can return
-    // null for `count` on transport error — coalesce to 0 so downstream
-    // visibility predicates (apiKeysCount === 0) treat unknowable as
-    // "show the onboarding nudge", which is a safer default than hiding it.
-    const apiKeysCount = apiKeysCountRes.count ?? 0;
+    // Phase 11 / D-02 — derive apiKeysCount from the already-fetched,
+    // already-error-checked `apiKeys` array (getUserApiKeys throws on error).
+    // NEW-C03-04: the previous separate head-only COUNT probe used
+    // `apiKeysCountRes.count ?? 0`, which silently produced 0 on any
+    // transient RLS/network failure — firing the OnboardingBanner +
+    // MandateQuickSetCard "connect your first exchange" empty-state for an
+    // allocator who has keys, with nothing logged.
+    const apiKeysCount = apiKeys.length;
     // Phase 11 / D-04 — derive once via the pure helper (W-02 unit-tested).
     const mandateIsSet = deriveMandateIsSet(mandate);
 
@@ -2218,7 +2380,10 @@ export const getMyAllocationDashboard = cache(
       holding_type: "spot" | "derivative";
       asof: string;
       api_key_id: string;
-      side: "long" | "short" | "flat";
+      // M-04: allocator_holdings.side is nullable (spot holdings have side=null
+      // from the sync worker). The output interface already accepts null; this
+      // intermediate cast must match so downstream code cannot assume non-null.
+      side: "long" | "short" | "flat" | null;
       entry_price: number | null;
       unrealized_pnl_usd: number | null;
     }>;
@@ -2279,6 +2444,12 @@ export const getMyAllocationDashboard = cache(
           .from("strategies")
           .select("id, name, codename, disclosure_tier")
           .in("id", candidateIds)
+          // NEW-C03-03 defence-in-depth: only surface published strategies.
+          // candidateIds come from match_batches JSONB and may reference
+          // strategies that were archived/reverted to draft after the compute
+          // job ran. Without this gate the strategy id (UUID) and codename are
+          // returned to the RSC payload even for non-published rows.
+          .eq("status", "published")
       : {
           data: [] as Array<{
             id: string;
@@ -2390,14 +2561,21 @@ export const getMyAllocationDashboard = cache(
     }
 
     // Step 2: parallel fetch everything. The admin client is used for
-    // portfolio_analytics and portfolio_strategies (daily_returns is
-    // column-level REVOKE'd from anon/authenticated per migration 010) and
-    // for the match_decisions read — that table does not have an allocator-
-    // self-SELECT RLS policy, so a user-scoped client returns 0 rows even for
-    // the allocator's own intros. The bridge_outcomes and bridge_outcome_dismissals
-    // fan-outs run through the user-scoped client because migration 059 gave
-    // each table an owner-select policy; RLS then enforces the allocator_id
-    // gate as defence-in-depth.
+    // portfolio_analytics and portfolio_strategies because these tables are
+    // owned by service_role with RLS policies that only grant SELECT to the
+    // owning user; the admin client bypasses RLS and an explicit
+    // .eq("portfolio_id", portfolio.id) ownership gate enforces tenancy.
+    // NOTE (NEW-C03-12): the prior comment claimed daily_returns was
+    // "column-level REVOKE'd from authenticated per migration 010" — no such
+    // REVOKE exists in any migration; that claim was stale. The admin-client
+    // usage here is justified solely by the RLS + ownership-gate pattern
+    // above, NOT by a column-level privilege restriction.
+    // The match_decisions read also uses the admin client because that table
+    // does not have an allocator-self-SELECT RLS policy, so a user-scoped
+    // client returns 0 rows even for the allocator's own intros. The
+    // bridge_outcomes and bridge_outcome_dismissals fan-outs run through the
+    // user-scoped client because migration 059 gave each table an owner-select
+    // policy; RLS then enforces the allocator_id gate as defence-in-depth.
     // NOTE: `apiKeys` is already fetched above in the Phase 07 parallel
     // round; we reuse that result here instead of firing a second
     // getUserApiKeys query. Destructure naming is preserved by
