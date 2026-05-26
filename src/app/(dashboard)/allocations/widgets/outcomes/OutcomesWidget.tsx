@@ -172,33 +172,37 @@ function WidgetHeader({ pendingCount }: { pendingCount: number }) {
  *
  * KPI numbers come from computeOutcomeKPIs (Phase 5 contract preserved).
  */
-type OutcomeCounts = { settled: number; pendingCycle: number };
-
 function KpiStrip({
   kpis,
-  counts,
 }: {
   kpis: OutcomeKPIs;
-  counts: OutcomeCounts;
 }) {
   return (
     <div className="grid grid-cols-3 border-b border-[var(--color-border)]">
+      {/* NEW-C27-01: relabeled "(90d)" → "(latest)" to match mostMatureDelta
+          semantics (prefers 180d > 90d > 30d). A row with only delta_30d is
+          included; a row with delta_180d contributes that value, not 90d.
+          NEW-C27-02: sub-label uses kpis.winRateDenominator — the count of
+          mature allocated rows the rate is actually computed over — instead of
+          counts.settled (rows with delta_90d != null, a different predicate). */}
       <KpiCell
-        label="Hit rate (90d)"
+        label="Hit rate (latest)"
         value={
           kpis.winRate === null
             ? "—"
             : `${Math.round(kpis.winRate * 100)}%`
         }
-        sub={`${counts.settled} settled`}
+        sub={`${kpis.winRateDenominator} settled`}
       />
+      {/* NEW-C27-01: same "(90d)" → "(latest)" fix on the avg-alpha cell.
+          NEW-C27-03: unified pending definition — both cells now use
+          kpis.pendingCount (allocated rows with percent>=1, all deltas null),
+          the same population used by the hit-rate computation. Removes the
+          contradictory "3 pending" vs "7 pending cycle" pair. */}
       <KpiCell
-        label="Avg realized α (90d)"
+        label="Avg realized α (latest)"
         value={formatPercent(kpis.avgRealizedDelta, 1)}
-        sub={`Avg realized delta: ${formatPercent(
-          kpis.avgRealizedDelta,
-          1,
-        )} · ${kpis.pendingCount} pending`}
+        sub={`${kpis.pendingCount} pending`}
         tone={
           kpis.avgRealizedDelta == null
             ? "neutral"
@@ -211,7 +215,7 @@ function KpiStrip({
       <KpiCell
         label="Total outcomes"
         value={String(kpis.totalOutcomes)}
-        sub={`${counts.pendingCycle} pending cycle`}
+        sub={`${kpis.pendingCount} awaiting maturity`}
         divider
       />
     </div>
@@ -789,15 +793,9 @@ export default function OutcomesWidget({ data }: WidgetProps) {
     [outcomes],
   );
 
-  const outcomeCounts = useMemo<OutcomeCounts>(() => {
-    let settled = 0;
-    let pendingCycle = 0;
-    for (const o of outcomes ?? []) {
-      if (o.delta_90d != null) settled++;
-      if (o.kind === "allocated" && o.delta_90d == null) pendingCycle++;
-    }
-    return { settled, pendingCycle };
-  }, [outcomes]);
+  // NEW-C27-02/C27-03: outcomeCounts removed — KpiStrip now derives all
+  // sub-label counts from kpis (winRateDenominator / pendingCount) so there
+  // is a single population definition for each KPI and its sub-label.
 
   // Phase 11 / UI-BLOCK-01 — wire WidgetState v2 behind the feature flag.
   // OutcomesWidget has 4 real branches (error / loading / empty /
@@ -905,7 +903,7 @@ export default function OutcomesWidget({ data }: WidgetProps) {
   const populated = (
     <div className="flex h-full flex-col">
       <WidgetHeader pendingCount={kpis.pendingCount} />
-      <KpiStrip kpis={kpis} counts={outcomeCounts} />
+      <KpiStrip kpis={kpis} />
       <div className="flex-1 overflow-auto">
         <table className="w-full border-collapse text-[13px]">
           <thead>
@@ -968,6 +966,21 @@ export default function OutcomesWidget({ data }: WidgetProps) {
         </table>
       </div>
       {outcomes.length === 200 && <TruncationFooter />}
+      {/* NEW-C27-04: disclose that the headline hit rate / alpha KPIs exclude
+          sub-1% positions and rejected decisions. The table shows ALL rows
+          (including those filtered by the D-08 rule), so without this note
+          the headline numbers appear to contradict the visible evidence. */}
+      <div
+        className="border-t border-[var(--color-border)] px-5 py-2"
+        style={{ backgroundColor: "var(--color-page)" }}
+      >
+        <span
+          className="text-[11px]"
+          style={{ color: "var(--color-text-muted)" }}
+        >
+          Hit rate and avg α exclude positions under 1% and rejected decisions
+        </span>
+      </div>
     </div>
   );
 

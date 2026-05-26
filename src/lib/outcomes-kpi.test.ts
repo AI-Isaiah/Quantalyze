@@ -27,17 +27,18 @@ function makeOutcome(overrides: Partial<BridgeOutcome>): BridgeOutcome {
 }
 
 describe("computeOutcomeKPIs", () => {
-  it("case 1 — empty outcomes -> { totalOutcomes: 0, winRate: null, avgRealizedDelta: null, pendingCount: 0 }", () => {
+  it("case 1 — empty outcomes -> { totalOutcomes: 0, winRate: null, avgRealizedDelta: null, pendingCount: 0, winRateDenominator: 0 }", () => {
     const result = computeOutcomeKPIs([]);
     expect(result).toEqual({
       totalOutcomes: 0,
       winRate: null,
       avgRealizedDelta: null,
       pendingCount: 0,
+      winRateDenominator: 0,
     });
   });
 
-  it("case 2 — single allocated win (delta_30d=0.04, percent=12) -> totalOutcomes=1, winRate=1.0, avgRealizedDelta=0.04, pendingCount=0", () => {
+  it("case 2 — single allocated win (delta_30d=0.04, percent=12) -> totalOutcomes=1, winRate=1.0, avgRealizedDelta=0.04, pendingCount=0, winRateDenominator=1", () => {
     const result = computeOutcomeKPIs([
       makeOutcome({ id: "o1", percent_allocated: 12, delta_30d: 0.04 }),
     ]);
@@ -46,10 +47,11 @@ describe("computeOutcomeKPIs", () => {
       winRate: 1.0,
       avgRealizedDelta: 0.04,
       pendingCount: 0,
+      winRateDenominator: 1,
     });
   });
 
-  it("case 3 — single allocated loss (delta_30d=-0.03) -> winRate=0.0, avgRealizedDelta=-0.03", () => {
+  it("case 3 — single allocated loss (delta_30d=-0.03) -> winRate=0.0, avgRealizedDelta=-0.03, winRateDenominator=1", () => {
     const result = computeOutcomeKPIs([
       makeOutcome({ id: "o1", percent_allocated: 12, delta_30d: -0.03 }),
     ]);
@@ -58,6 +60,7 @@ describe("computeOutcomeKPIs", () => {
       winRate: 0.0,
       avgRealizedDelta: -0.03,
       pendingCount: 0,
+      winRateDenominator: 1,
     });
   });
 
@@ -72,6 +75,7 @@ describe("computeOutcomeKPIs", () => {
     expect(result.winRate).toBe(0.75);
     expect(result.avgRealizedDelta).toBeCloseTo(0.01, 10); // (0.02+0.04+0.06-0.08)/4
     expect(result.pendingCount).toBe(0);
+    expect(result.winRateDenominator).toBe(4);
   });
 
   it("case 5 — allocated pending (all deltas null) -> excluded from denominator; pendingCount=1, totalOutcomes counted", () => {
@@ -89,6 +93,7 @@ describe("computeOutcomeKPIs", () => {
       winRate: null,
       avgRealizedDelta: null,
       pendingCount: 1,
+      winRateDenominator: 0,
     });
   });
 
@@ -101,6 +106,7 @@ describe("computeOutcomeKPIs", () => {
       winRate: null,
       avgRealizedDelta: null,
       pendingCount: 0,
+      winRateDenominator: 0,
     });
   });
 
@@ -120,6 +126,7 @@ describe("computeOutcomeKPIs", () => {
       winRate: 1.0,
       avgRealizedDelta: 0.04,
       pendingCount: 0,
+      winRateDenominator: 1,
     });
   });
 
@@ -127,5 +134,35 @@ describe("computeOutcomeKPIs", () => {
     const outcomes = fixture.outcomes as unknown as BridgeOutcome[];
     const result = computeOutcomeKPIs(outcomes);
     expect(result).toEqual(fixture.expected);
+  });
+
+  // NEW-C27-01 regression: a row with ONLY delta_30d (no delta_90d/delta_180d)
+  // IS included in the win-rate denominator (mostMatureDelta falls back to 30d).
+  // Before the label fix, the KPI was still "(90d)" but this row was counted —
+  // this test pins that a 30d-only row contributes to the hit rate, confirming
+  // the "latest" label semantics.
+  it("NEW-C27-01 regression: row with only delta_30d IS counted in winRateDenominator (most-mature fallback)", () => {
+    const result = computeOutcomeKPIs([
+      makeOutcome({ id: "o1", percent_allocated: 10, delta_30d: 0.05, delta_90d: null, delta_180d: null }),
+    ]);
+    // delta_30d-only row contributes to the rate via mostMatureDelta.
+    expect(result.winRateDenominator).toBe(1);
+    expect(result.winRate).toBe(1.0);
+  });
+
+  // NEW-C27-02 regression: winRateDenominator must equal the count of rows
+  // actually feeding the win-rate numerator, not the count with delta_90d != null.
+  it("NEW-C27-02 regression: winRateDenominator == mature-allocated count, not delta_90d count", () => {
+    const outcomes = [
+      // Allocated, percent=2, only delta_30d — mature (30d fallback).
+      makeOutcome({ id: "o1", percent_allocated: 2, delta_30d: 0.05, delta_90d: null }),
+      // Allocated, percent=5, delta_90d present — mature.
+      makeOutcome({ id: "o2", percent_allocated: 5, delta_90d: 0.08, delta_30d: null }),
+    ];
+    const result = computeOutcomeKPIs(outcomes);
+    // Both rows are mature; winRateDenominator=2.
+    // But counts.settled (old code) = 1 (only o2 has delta_90d != null).
+    expect(result.winRateDenominator).toBe(2);
+    expect(result.winRate).toBe(1.0);
   });
 });

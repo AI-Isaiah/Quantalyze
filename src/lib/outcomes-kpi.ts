@@ -20,6 +20,14 @@ export type OutcomeKPIs = {
   avgRealizedDelta: number | null;
   /** D-14 sub-label source: count of allocated rows with percent>=1 but all three deltas NULL. */
   pendingCount: number;
+  /**
+   * NEW-C27-02: denominator of winRate — count of mature allocated rows
+   * (percent>=1, at least one non-null delta) that the rate is computed over.
+   * Returned so consumers can show a consistent "N settled" sub-label for the
+   * hit-rate KPI cell using the same population as the rate itself, rather than
+   * counting a different slice (e.g. rows with delta_90d != null).
+   */
+  winRateDenominator: number;
 };
 
 function mostMatureDelta(o: BridgeOutcome): number | null {
@@ -62,7 +70,7 @@ export function computeOutcomeKPIs(outcomes: BridgeOutcome[]): OutcomeKPIs {
   const pendingCount = allocatedSized.length - mature.length;
 
   if (mature.length === 0) {
-    return { totalOutcomes, winRate: null, avgRealizedDelta: null, pendingCount };
+    return { totalOutcomes, winRate: null, avgRealizedDelta: null, pendingCount, winRateDenominator: 0 };
   }
 
   const deltas = mature
@@ -75,5 +83,5 @@ export function computeOutcomeKPIs(outcomes: BridgeOutcome[]): OutcomeKPIs {
   const winRate = wins / deltas.length;
   const avgRealizedDelta = pairwiseSum(deltas) / deltas.length;
 
-  return { totalOutcomes, winRate, avgRealizedDelta, pendingCount };
+  return { totalOutcomes, winRate, avgRealizedDelta, pendingCount, winRateDenominator: deltas.length };
 }
