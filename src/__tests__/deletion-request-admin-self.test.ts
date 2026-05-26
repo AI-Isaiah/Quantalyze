@@ -147,6 +147,10 @@ function makeAdminClient() {
     },
     rpc: (fn: string, args: unknown) => {
       if (fn === "sanitize_user") return sanitizeUserRpcMock(args);
+      // NEW-C10-01: reject route switched to logAuditEventAsUser which calls
+      // adminClient.rpc("log_audit_event_service"). Route it to logAuditRpcMock
+      // so existing rejection-audit assertions can find the call.
+      if (fn === "log_audit_event_service") return logAuditRpcMock(fn, args);
       throw new Error(`Unexpected admin RPC: ${fn}`);
     },
   };
@@ -182,7 +186,7 @@ vi.mock("next/server", async (orig) => {
   };
 });
 
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 function makeRequest(
   requestId: string,
@@ -641,18 +645,20 @@ describe("POST /api/admin/deletion-requests/[id]/reject — self-action guard (C
     expect(res.status).toBe(200);
 
     // M-0008: bounded poll (see note above) — fail-loud on a missing emission.
+    // NEW-C10-01: reject route now calls logAuditEventAsUser → adminClient.rpc
+    // "log_audit_event_service" (service-role path). Look for that RPC name.
     await vi.waitFor(() =>
       expect(
         logAuditRpcMock.mock.calls.find(
           (c) =>
-            c[0] === "log_audit_event" &&
+            c[0] === "log_audit_event_service" &&
             c[1]?.p_action === "deletion.request.reject",
         ),
       ).toBeDefined(),
     );
 
     const rejectAudit = logAuditRpcMock.mock.calls.find(
-      (c) => c[0] === "log_audit_event" && c[1]?.p_action === "deletion.request.reject",
+      (c) => c[0] === "log_audit_event_service" && c[1]?.p_action === "deletion.request.reject",
     );
     expect(rejectAudit).toBeDefined();
     expect(rejectAudit![1]).toMatchObject({
@@ -665,6 +671,56 @@ describe("POST /api/admin/deletion-requests/[id]/reject — self-action guard (C
         reason: "user re-engaged with product",
       }),
     });
+  });
+
+  /**
+   * NEW-C36-01 (audit 2026-05-26, LOW conf-9): reject route must pass `req`
+   * to requireAdmin so the defense-in-depth CSRF arm fires even if the outer
+   * withRole wrapper is later refactored away. This test mocks the OUTER CSRF
+   * (assertSameOriginMock) to pass, but makes requireAdmin's INNER CSRF check
+   * return a 403 for a cross-origin request — asserting the reject route
+   * calls requireAdmin(supabase, user, req) and returns the 403.
+   *
+   * The test differentiates the two CSRF layers: outer (withRole via
+   * assertSameOriginMock) → inner (requireAdmin via assertSameOriginMock
+   * returning a non-null NextResponse the second time it's called).
+   */
+  it("NEW-C36-01: requireAdmin CSRF arm fires on reject even when outer CSRF is mocked off (defense-in-depth)", async () => {
+    requestLoadMock.mockResolvedValue({
+      data: {
+        id: "req-csrf-test",
+        user_id: "target-csrf-user",
+        requested_at: new Date().toISOString(),
+        completed_at: null,
+        rejected_at: null,
+      },
+      error: null,
+    });
+
+    // Outer CSRF (withRole's assertSameOrigin call) passes on first call.
+    // requireAdmin calls assertSameOrigin a SECOND time (defense-in-depth);
+    // simulate that second call returning a CSRF error response.
+    let csrfCallCount = 0;
+    assertSameOriginMock.mockImplementation(() => {
+      csrfCallCount++;
+      if (csrfCallCount >= 2) {
+        // requireAdmin's inner check fires — return a CSRF rejection.
+        return NextResponse.json(
+          { error: "Cross-origin request blocked" },
+          { status: 403 },
+        );
+      }
+      return null; // outer withRole check passes
+    });
+
+    const { POST } = await loadRejectRoute();
+    const req = makeRequest("req-csrf-test", {}, "reject");
+    const res = await POST(req, makeParamsCtx({ id: "req-csrf-test" }));
+
+    // requireAdmin's inner CSRF arm must have fired and returned 403.
+    expect(res.status).toBe(403);
+    // The request row must NOT have been updated — CSRF rejection is pre-mutation.
+    expect(requestUpdateMock).not.toHaveBeenCalled();
   });
 
   it("emits deletion.request.reject with reason=null when no reason provided", async () => {
@@ -685,18 +741,20 @@ describe("POST /api/admin/deletion-requests/[id]/reject — self-action guard (C
     expect(res.status).toBe(200);
 
     // M-0008: bounded poll (see note above) — fail-loud on a missing emission.
+    // NEW-C10-01: reject route now calls logAuditEventAsUser → adminClient.rpc
+    // "log_audit_event_service" (service-role path). Look for that RPC name.
     await vi.waitFor(() =>
       expect(
         logAuditRpcMock.mock.calls.find(
           (c) =>
-            c[0] === "log_audit_event" &&
+            c[0] === "log_audit_event_service" &&
             c[1]?.p_action === "deletion.request.reject",
         ),
       ).toBeDefined(),
     );
 
     const rejectAudit = logAuditRpcMock.mock.calls.find(
-      (c) => c[0] === "log_audit_event" && c[1]?.p_action === "deletion.request.reject",
+      (c) => c[0] === "log_audit_event_service" && c[1]?.p_action === "deletion.request.reject",
     );
     expect(rejectAudit).toBeDefined();
     expect(

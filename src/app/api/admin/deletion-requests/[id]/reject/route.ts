@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withRole, requireAdmin } from "@/lib/auth";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 import {
   adminActionLimiter,
   checkLimit,
@@ -69,7 +69,16 @@ export const POST = withRole<{ id: string }>("admin")(
     // requireAdmin TOCTOU re-check BEFORE consuming a rate-limit token.
     // Mirrors approve's red-team-MED ordering — a demoted admin must
     // not touch the rate-limit bucket before being told 403.
-    const adminGuard = await requireAdmin(supabase, user);
+    //
+    // NEW-C36-01 (audit 2026-05-26, LOW conf-9): pass `req` so requireAdmin
+    // re-runs assertSameOrigin as a defense-in-depth CSRF arm on this
+    // mutating path — matching the symmetry the docstring claims and that
+    // approve already enforces. Without `req`, a future refactor that drops
+    // the outer withRole CSRF wrapper would leave this irreversible-adjacent
+    // path (permanent Art. 17 denial) with zero CSRF defense while approve
+    // remains protected. The req arg is optional on requireAdmin (so older
+    // callers remain compatible); new mutating call sites MUST pass it.
+    const adminGuard = await requireAdmin(supabase, user, req);
     if (adminGuard) return adminGuard;
 
     // audit-2026-05-07 red-team-HIGH (reject-asymmetry-vs-approve-hardening):
@@ -164,8 +173,15 @@ export const POST = withRole<{ id: string }>("admin")(
     // when the CAS won — the loser of a race has nothing honest to
     // claim about who rejected the request (the winning admin already
     // owns that row).
+    //
+    // NEW-C10-01 (audit-2026-05-26 security): switched from logAuditEvent
+    // (user-scoped, deferred after()) to logAuditEventAsUser (service-role)
+    // so the RPC does not depend on auth.uid() resolving from an admin JWT
+    // that may expire between response flush and after() settle. Deletion
+    // rejection is a security-critical write — a missed audit row is
+    // unacceptable.
     if (rowsAffected > 0) {
-      logAuditEvent(supabase, {
+      logAuditEventAsUser(admin, user.id, {
         action: "deletion.request.reject",
         entity_type: "data_deletion_request",
         entity_id: requestId,

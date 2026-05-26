@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.24.9.11] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: admin security (batch b02)
+- Ghost-admin revoke now actually clears `profiles.is_admin=FALSE` (service-role) before the role DELETE — previously a 409 left the flag TRUE permanently (C17-01, red-team C-01)
+- TOCTOU `requireAdmin` re-check uses a fresh `getUser()` immediately before the DELETE; fail-closed on infra error; last-admin lockout dedup via Set union (C17-05/06, H-01/02)
+- verify-strategy response allowlist prevents credential leak; `metrics_snapshot` sanitized for unauthenticated callers (C35-01, H-04)
+- partner-import input validation + audit hardening (500 not 207 on audit failure); send-intro validates strategy + RPC-shape-drift guard (C28, C34)
+
+
+## [0.24.9.10] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: match claim-dedupe SQL (batch b10)
+- New migration `20260526100000_claim_dedupe_done_pending_children_guard.sql`: `claim_compute_jobs` deduped CTE now excludes candidates when a `running`/`done_pending_children` row exists for the same `(kind, partition_col)`, and the UPDATE re-checks `status IN ('pending','failed_retry')` — closes the 23505 unique-index violation race (NEW-C39-01 + red-team TOCTOU). SECURITY DEFINER/search_path/GRANT-REVOKE preserved vs mig 117; format-agnostic proconfig assertion.
+
+
+## [0.24.9.9] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: auth / audit / preferences (batch b08)
+- Auth: `withRole` requireApproval gate + fail-closed `assertProfileApproved`; `_approvalGate` promise evicts on rejection (was a permanent-503 DoS); `isAdminUser` direct-query delegation (C15-01/04, red-team)
+- Audit: security mutations now use service-scoped `logAuditEventAsUser`; awaited Sentry + central metadata cap + proto-poison guard; explicit 28000/42501 dispatch branches (C10-01/02/03/05/06, red-team)
+- Preferences API: validation + rate-limit (503 on misconfig) + error logging (C07-01..05)
+- New migration `20260526095850_log_audit_event_null_auth_errcode.sql` (ERRCODE-anchored null-auth handling) — auto-applies to prod
+
+
+## [0.24.9.8] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: GDPR export (batch b01)
+- **CRITICAL:** schema-aware export ORDER BY — `getOrderColumn` no longer `.order("id")` on id-less tables that 500'd every Art.15/20 export (NEW-C16-01)
+- Export now covers audit_log_cold archive, positions/position_snapshots, csv_daily_returns; audit-log widened to entity/metadata-target rows (C16-02/03/04/09)
+- Redact cross-party identifiers in match tables + bridge_outcome_dismissals (PII) (C16-05/08)
+- Global stable sort + memory-bounded chunked indirect fetch; admin self-deletion-reject hardening (C16-07/10, C36-01)
+
+
 All notable changes to Quantalyze will be documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

@@ -78,6 +78,42 @@ export async function POST(req: NextRequest) {
 }
 
 /**
+ * H-04 (red-team HIGH): sanitize a metrics_snapshot value received from the
+ * Railway process-key service before returning it to an unauthenticated caller.
+ *
+ * Allowed leaf types: number | string | boolean | null.
+ * Arrays and plain objects are walked recursively; any leaf that does not
+ * satisfy the allowed types is replaced with null so the shape is preserved
+ * without leaking opaque blobs.
+ *
+ * This is intentionally strict: a Railway regression that embeds an object
+ * with sensitive fields (api_key, tokens, etc.) inside a metric key produces
+ * null at that key rather than a passthrough.
+ */
+function sanitizeMetricsSnapshot(value: unknown): unknown {
+  if (
+    value === null ||
+    typeof value === "number" ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(sanitizeMetricsSnapshot);
+  }
+  if (typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      result[k] = sanitizeMetricsSnapshot(v);
+    }
+    return result;
+  }
+  // Drop functions, symbols, undefined, etc.
+  return null;
+}
+
+/**
  * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
  * `flow_type=teaser`. Source is the user-supplied exchange (already validated
  * against SUPPORTED_EXCHANGES above).
@@ -148,17 +184,45 @@ async function unifiedVerifyStrategyHandler(
   const publicToken = crypto.randomBytes(32).toString("base64url");
   const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
 
+  // M-03 (red-team MEDIUM): createAdminClient() was moved outside try/catch
+  // to "fail loud" on config errors. But in this unauthenticated public route
+  // an unhandled throw produces a framework-caught 500 that may expose the
+  // stack trace or env var name to callers. Use explicit catch-and-rethrow
+  // with a structured 500 body so config failures are loud in logs/Sentry
+  // without leaking internals to the unauthenticated browser.
+  let admin: ReturnType<typeof createAdminClient>;
   try {
-    const admin = createAdminClient();
-    // @audit-skip: unauthenticated public endpoint (no user session). The
-    // strategy_verifications row carries no PII (only a public_token +
-    // status), and audit_log requires a user_id which the unauthenticated
-    // teaser caller cannot provide. Mirrors the legacy verify-strategy
-    // path's @audit-skip rationale; landing-page-lead audit lands in
-    // PostHog per ADR-0023 §3, not audit_log.
+    admin = createAdminClient();
+  } catch (configErr) {
+    console.error("[verify-strategy] createAdminClient config error:", configErr);
+    return NextResponse.json(
+      { error: "Verification service misconfigured" },
+      { status: 500 },
+    );
+  }
+  // @audit-skip: unauthenticated public endpoint (no user session). The
+  // strategy_verifications row carries no PII (only a public_token +
+  // status), and audit_log requires a user_id which the unauthenticated
+  // teaser caller cannot provide. Mirrors the legacy verify-strategy
+  // path's @audit-skip rationale; landing-page-lead audit lands in
+  // PostHog per ADR-0023 §3, not audit_log.
+  //
+  // NEW-C35-02 (red-team M conf=8): force trust_tier="self_reported" for the
+  // teaser flow, flag-invariant. The upstream /process-key sets "api_verified"
+  // for any non-csv source (teaser is always a real exchange), but an unproven
+  // landing-page key has not been verified against a real strategy — badging it
+  // "api_verified" violates the no-invented-data trust chain. Override the tier
+  // to "self_reported" here so the persisted grade is identical regardless of
+  // which backbone path executed.
+  // @audit-skip: unauthenticated public endpoint — no user_id available (see full rationale above).
+  try {
     const { error: persistError } = await admin
       .from("strategy_verifications")
-      .update({ public_token: publicToken, expires_at: expiresAt })
+      .update({
+        public_token: publicToken,
+        expires_at: expiresAt,
+        trust_tier: "self_reported",
+      })
       .eq("id", verificationId);
     if (persistError) {
       console.error(
@@ -178,12 +242,38 @@ async function unifiedVerifyStrategyHandler(
     );
   }
 
-  return NextResponse.json({
-    ...upstream,
+  // NEW-C35-01 (red-team H conf=8): never spread the raw upstream body.
+  // The upstream /process-key teaser response includes `encrypted_credentials`
+  // (KEK-wrapped api_key/secret/passphrase), `fingerprint`, and other internal
+  // fields. Spreading them all echoed credential ciphertext to an unauthenticated
+  // browser. Mirror the legacy path's explicit allowlist — return only the fields
+  // the landing form actually needs.
+  const responseBody: Record<string, unknown> = {
     verification_id: verificationId,
     public_token: publicToken,
     expires_at: expiresAt,
-  });
+  };
+  // H-04 (red-team HIGH): metrics_snapshot was passed through as `unknown`
+  // with no shape validation. If the Railway process-key service embeds
+  // sensitive fields (api_key, api_secret, internal tokens) inside
+  // metrics_snapshot — due to a bug or compromise — they would leak to
+  // unauthenticated browsers. The allowlist for the outer response body
+  // provides no protection for nested objects.
+  //
+  // Fix: walk metrics_snapshot and allow ONLY numeric, boolean, string, null,
+  // or arrays/objects whose leaves also satisfy those types. Any key whose
+  // value is a nested object or array is recursively sanitised; any non-
+  // primitive leaf that is not a number/string/boolean/null is dropped.
+  // This enforces the invariant "metrics are numbers/strings" at this
+  // boundary regardless of the Railway service's internals.
+  if (upstream.metrics_snapshot !== undefined) {
+    responseBody.metrics_snapshot = sanitizeMetricsSnapshot(upstream.metrics_snapshot);
+  }
+  // status is informational and contains no credentials.
+  if (typeof upstream.status === "string") {
+    responseBody.status = upstream.status;
+  }
+  return NextResponse.json(responseBody);
 }
 
 /**
