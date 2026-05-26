@@ -34,6 +34,7 @@ import {
   EXPORT_PER_TABLE_ROW_CAP,
   EXPORT_SIZE_CAP_BYTES,
   EXPORT_PARENT_ID_IN_CHUNK,
+  REDACTED_PLACEHOLDER,
   type ExportBundle,
   type UserExportTable,
 } from "@/lib/gdpr-export";
@@ -82,6 +83,34 @@ describe("USER_EXPORT_TABLES manifest invariants", () => {
   it("EXPORT_PER_TABLE_ROW_CAP and EXPORT_SIZE_CAP_BYTES are sane", () => {
     expect(EXPORT_PER_TABLE_ROW_CAP).toBeGreaterThanOrEqual(1000);
     expect(EXPORT_SIZE_CAP_BYTES).toBe(100 * 1024 * 1024);
+  });
+
+  it("NEW-C16-04: positions + position_snapshots are strategy-scoped indirect export entries (not dropped)", () => {
+    // Both FK strategy_id NOT NULL -> strategies — the same indirect
+    // shape as trades. Pre-fix they were EXCLUDED with a factually-wrong
+    // "portfolio-scoped" rationale and a user's live positions +
+    // historical snapshots (Art. 15 trading data) were entirely absent.
+    for (const table of ["positions", "position_snapshots"] as const) {
+      const entry = USER_EXPORT_TABLES.find((t) => t.table === table);
+      expect(entry, `${table} missing from USER_EXPORT_TABLES`).toBeDefined();
+      expect(entry!.kind).toBe("indirect");
+      if (entry!.kind === "indirect") {
+        expect(entry!.via_column).toBe("strategy_id");
+        expect(entry!.parent_table).toBe("strategies");
+        expect(entry!.parent_user_column).toBe("user_id");
+      }
+    }
+  });
+
+  it("NEW-C16-04: positions + position_snapshots are no longer in the coverage-hook EXCLUDED_TABLES", async () => {
+    // The CI hook's EXCLUDED_TABLES must NOT still suppress these — a
+    // stale exclusion would re-open the gap (the hook can't flag a
+    // strategy_id-scoped table on its own; see NEW-C16-06).
+    const { EXCLUDED_TABLES } = await import(
+      "../../scripts/check-gdpr-export-coverage"
+    );
+    expect(EXCLUDED_TABLES).not.toHaveProperty("positions");
+    expect(EXCLUDED_TABLES).not.toHaveProperty("position_snapshots");
   });
 });
 
@@ -134,6 +163,14 @@ function makeMockClient(
             projection === "id" ? parentIdResolver(table) : directResolver(table);
           return {
             eq: () => ({
+              order: () => ({ limit: limitFn }),
+              limit: limitFn,
+            }),
+            // NEW-C16-02: audit_log_for_user now filters via `.or()`
+            // (actor OR entity OR metadata-target) instead of `.eq()`.
+            // The mock mirrors `.eq()` so the projected fetch resolves
+            // the seeded rows for the source table.
+            or: () => ({
               order: () => ({ limit: limitFn }),
               limit: limitFn,
             }),
@@ -359,6 +396,11 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
             order: () => ({ limit: delayedLimit }),
             limit: delayedLimit,
           }),
+          // NEW-C16-02: audit_log_for_user filters via `.or()`.
+          or: () => ({
+            order: () => ({ limit: delayedLimit }),
+            limit: delayedLimit,
+          }),
           in: () => ({
             order: () => ({ limit: delayedLimit }),
             limit: delayedLimit,
@@ -393,6 +435,11 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
         return {
           select: () => ({
             eq: () => ({
+              order: () => ({ limit }),
+              limit,
+            }),
+            // NEW-C16-02: audit_log_for_user filters via `.or()`.
+            or: () => ({
               order: () => ({ limit }),
               limit,
             }),
@@ -445,6 +492,11 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
               order: () => ({ limit }),
               limit,
             }),
+            // NEW-C16-02: audit_log_for_user filters via `.or()`.
+            or: () => ({
+              order: () => ({ limit }),
+              limit,
+            }),
             in: () => ({
               order: () => ({ limit: indirectLimit }),
               limit: indirectLimit,
@@ -471,6 +523,11 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
       from: () => ({
         select: () => ({
           eq: () => ({
+            order: () => ({ limit: emptyLimit }),
+            limit: emptyLimit,
+          }),
+          // NEW-C16-02: audit_log_for_user filters via `.or()`.
+          or: () => ({
             order: () => ({ limit: emptyLimit }),
             limit: emptyLimit,
           }),
@@ -584,6 +641,11 @@ describe("collectUserExportBundle — M-0520 indirect parent error fails loud (n
               order: () => ({ limit }),
               limit,
             }),
+            // NEW-C16-02: audit_log_for_user filters via `.or()`.
+            or: () => ({
+              order: () => ({ limit }),
+              limit,
+            }),
             in: () => ({
               order: () => ({ limit: indirectLimit }),
               limit: indirectLimit,
@@ -623,10 +685,11 @@ describe("collectUserExportBundle — H-0453 parent_id_truncated regression", ()
     // on every child table that uses that parent.
     //
     // Indirect manifest entries (strategies parents: strategy_analytics,
-    // trades, funding_fees, reconciliation_reports; portfolios parents:
-    // portfolio_strategies, portfolio_analytics, portfolio_alerts,
-    // allocation_events, weight_snapshots) — each child should reflect
-    // the truncation flag for its parent.
+    // trades, funding_fees, reconciliation_reports, positions,
+    // position_snapshots; portfolios parents: portfolio_strategies,
+    // portfolio_analytics, portfolio_alerts, allocation_events,
+    // weight_snapshots) — each child should reflect the truncation flag
+    // for its parent.
     const parentRows = Array.from({ length: 2000 }, (_, i) => ({
       id: `parent-${i}`,
     }));
@@ -669,6 +732,10 @@ describe("collectUserExportBundle — H-0453 parent_id_truncated regression", ()
         "trades",
         "funding_fees",
         "reconciliation_reports",
+        "positions",
+        "position_snapshots",
+        // NEW-C16-09: csv_daily_returns is strategy-scoped indirect.
+        "csv_daily_returns",
         "portfolio_strategies",
         "portfolio_analytics",
         "portfolio_alerts",
@@ -799,19 +866,44 @@ describe("collectUserExportBundle — H-0456 ORDER BY determinism regression", (
   });
 });
 
-describe("collectUserExportBundle — H-0456 getOrderColumn per-table column (specialist apply, pr-test HIGH conf-9)", () => {
-  it("audit_log projection sorts by created_at; every other table by id", async () => {
+describe("collectUserExportBundle — H-0456 / NEW-C16-01 getOrderColumn per-table column (specialist apply, pr-test HIGH conf-9)", () => {
+  it("audit_log sorts by created_at; id-less tables sort by their override column; every other table by id", async () => {
     // Spy on `.order(col, ...)` invocations and capture the column
     // passed for each table. The audit_log projected source MUST sort
-    // by `created_at` (so size-cap truncation is chronological);
-    // every other table MUST sort by `id` (UUID PK).
+    // by `created_at` (so size-cap truncation is chronological); the
+    // four id-less tables MUST sort by their NOT-NULL override column
+    // (NEW-C16-01 — a `.order("id")` against them raises Postgres
+    // 42703 and 500s every export); every other table MUST sort by
+    // `id` (UUID PK).
     const orderCalls: Array<{ table: string; col: string }> = [];
+    // Indirect parent probes (strategies, portfolios) MUST return at
+    // least one id so the indirect CHILD select (e.g. portfolio_strategies)
+    // actually fires its `.in().order()` — otherwise the child order
+    // column would never be exercised and a regression there would
+    // slip through. Every other table returns no rows.
+    const PARENT_TABLES = new Set(["strategies", "portfolios"]);
     const mock = {
       from: (table: string) => {
-        const limit = async () => ({ data: [], error: null });
+        const limit = async () =>
+          PARENT_TABLES.has(table)
+            ? {
+                data: [{ id: "11111111-1111-1111-1111-111111111111" }],
+                error: null,
+              }
+            : { data: [], error: null };
         return {
           select: () => ({
             eq: () => ({
+              order: (col: string) => {
+                orderCalls.push({ table, col });
+                return { limit };
+              },
+              limit,
+            }),
+            // NEW-C16-02: audit_log_for_user filters via `.or()` — record
+            // its order column the same way so the audit_log assertion
+            // (sorts by created_at) still fires.
+            or: () => ({
               order: (col: string) => {
                 orderCalls.push({ table, col });
                 return { limit };
@@ -832,16 +924,210 @@ describe("collectUserExportBundle — H-0456 getOrderColumn per-table column (sp
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await collectUserExportBundle(mock as any, "dddddddd-dddd-dddd-dddd-dddddddddddd");
 
-    // audit_log (the projected source for audit_log_for_user) sorts
-    // by created_at — chronological packing of the size-cap tail.
-    const auditCalls = orderCalls.filter((c) => c.table === "audit_log");
-    expect(auditCalls.length).toBeGreaterThanOrEqual(1);
+    // audit_log (hot) + audit_log_cold (NEW-C16-03 archive) sort by
+    // created_at — chronological packing of the size-cap tail.
+    const auditTables = new Set(["audit_log", "audit_log_cold"]);
+    const auditCalls = orderCalls.filter((c) => auditTables.has(c.table));
+    expect(auditCalls.length).toBeGreaterThanOrEqual(2);
     for (const c of auditCalls) expect(c.col).toBe("created_at");
 
-    // Every non-audit_log .order() call uses 'id'.
-    const nonAudit = orderCalls.filter((c) => c.table !== "audit_log");
-    expect(nonAudit.length).toBeGreaterThan(0);
-    for (const c of nonAudit) expect(c.col).toBe("id");
+    // NEW-C16-01: the four id-less tables order by their explicit
+    // NOT-NULL column — NEVER "id" (which would 42703).
+    const idLessOrderColumns: Record<string, string> = {
+      user_app_roles: "granted_at",
+      user_favorites: "created_at",
+      allocator_preferences: "updated_at",
+      portfolio_strategies: "added_at",
+      allocator_equity_snapshots: "asof",
+      investor_attestations: "attested_at",
+      organization_members: "joined_at",
+      // NEW-C16-09: csv_daily_returns has composite PK (strategy_id, date) — no id.
+      csv_daily_returns: "date",
+    };
+    for (const [table, expectedCol] of Object.entries(idLessOrderColumns)) {
+      const calls = orderCalls.filter((c) => c.table === table);
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+      for (const c of calls) expect(c.col).toBe(expectedCol);
+    }
+
+    // Every remaining table (has a UUID PK) sorts by 'id'.
+    const idLessTables = new Set(Object.keys(idLessOrderColumns));
+    const idTables = orderCalls.filter(
+      (c) => !auditTables.has(c.table) && !idLessTables.has(c.table),
+    );
+    expect(idTables.length).toBeGreaterThan(0);
+    for (const c of idTables) expect(c.col).toBe("id");
+  });
+});
+
+describe("collectUserExportBundle — NEW-C16-02 audit_log widened to entity/metadata-target rows (HIGH)", () => {
+  it("fetches audit_log via `.or()` covering actor + entity + metadata-target, not a bare `.eq()`", async () => {
+    // Pre-fix the audit_log_for_user source SELECT used
+    // `.eq("user_id", subject)`, so admin-on-subject rows (user_id=ADMIN,
+    // entity_id=subject) were never fetched and silently absent from the
+    // export despite the projection being entitled to keep them. The fix
+    // widens the SQL predicate to MATCH redactAuditLogForUser's retention
+    // criteria. This test pins that audit_log is queried through `.or()`
+    // (NOT `.eq()`) and that the filter string covers all three
+    // directions.
+    const SUBJECT = "55555555-5555-5555-5555-555555555555";
+    const ADMIN = "99999999-9999-9999-9999-999999999999";
+    // The admin-on-subject row: actor is the ADMIN, the subject is the
+    // ENTITY. A bare `.eq("user_id", subject)` would NEVER return it.
+    const adminOnSubjectRow = {
+      id: "audit-1",
+      user_id: ADMIN,
+      action: "role.grant",
+      entity_type: "user",
+      entity_id: SUBJECT,
+      metadata: { granted_by: ADMIN, role: "allocator" },
+      created_at: "2026-05-01T00:00:00Z",
+    };
+
+    let auditOrFilter: string | null = null;
+    let auditUsedEq = false;
+    const mock = {
+      from: (table: string) => {
+        const empty = async () => ({ data: [], error: null });
+        const auditRows = async () => ({
+          data: [adminOnSubjectRow],
+          error: null,
+        });
+        return {
+          select: () => ({
+            eq: () => {
+              if (table === "audit_log") auditUsedEq = true;
+              return {
+                order: () => ({ limit: empty }),
+                limit: empty,
+              };
+            },
+            or: (filter: string) => {
+              if (table === "audit_log") auditOrFilter = filter;
+              return {
+                order: () => ({
+                  limit: table === "audit_log" ? auditRows : empty,
+                }),
+                limit: table === "audit_log" ? auditRows : empty,
+              };
+            },
+            in: () => ({
+              order: () => ({ limit: empty }),
+              limit: empty,
+            }),
+          }),
+        };
+      },
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, SUBJECT);
+
+    // The audit_log source MUST be queried via `.or()`, never the
+    // actor-only `.eq()`.
+    expect(auditUsedEq).toBe(false);
+    expect(auditOrFilter).not.toBeNull();
+    // The `.or()` filter covers all three retention directions.
+    expect(auditOrFilter).toContain(`user_id.eq.${SUBJECT}`);
+    expect(auditOrFilter).toContain(
+      `and(entity_id.eq.${SUBJECT},entity_type.eq.user)`,
+    );
+    expect(auditOrFilter).toContain(
+      `metadata->>target_user_id.eq.${SUBJECT}`,
+    );
+
+    // The admin-on-subject row reaches the projection and is exported.
+    const auditTable = bundle.tables.find(
+      (t) => t.table === "audit_log_for_user",
+    );
+    expect(auditTable).toBeDefined();
+    expect(auditTable!.row_count).toBe(1);
+    const row = auditTable!.rows[0] as Record<string, unknown>;
+    expect(row.id).toBe("audit-1");
+    expect(row.entity_id).toBe(SUBJECT);
+    // Entity-only retention scrubs the cross-party actor user_id and the
+    // admin UUID in metadata (existing redaction contract, NEW-C16-02
+    // does not weaken it).
+    expect(row.user_id).toBe(REDACTED_PLACEHOLDER);
+    expect((row.metadata as Record<string, unknown>).granted_by).toBe(
+      REDACTED_PLACEHOLDER,
+    );
+  });
+});
+
+describe("collectUserExportBundle — NEW-C16-03 audit_log_cold archive is exported (HIGH)", () => {
+  it("manifest projects audit_log_cold via the same redactor + entity/metadata widening", () => {
+    const cold = USER_EXPORT_TABLES.find(
+      (t) => t.kind === "projected" && t.source_table === "audit_log_cold",
+    );
+    expect(cold, "audit_log_cold not in USER_EXPORT_TABLES").toBeDefined();
+    if (cold && cold.kind === "projected") {
+      // Distinct bundle name so it does not collide with the hot
+      // projection.
+      expect(cold.table).toBe("audit_log_cold_for_user");
+      expect(cold.user_column).toBe("user_id");
+      // Same redactor as hot — cross-party PII scrub is identical.
+      expect(cold.project).toBe(
+        (
+          USER_EXPORT_TABLES.find(
+            (t) => t.kind === "projected" && t.source_table === "audit_log",
+          ) as { project: unknown }
+        ).project,
+      );
+      // Same entity/metadata-target widening (NEW-C16-02) so old
+      // admin-on-subject rows in the archive are not silently dropped.
+      expect(typeof cold.or_filter).toBe("function");
+      const filter = cold.or_filter!("abc");
+      expect(filter).toContain("user_id.eq.abc");
+      expect(filter).toContain("and(entity_id.eq.abc,entity_type.eq.user)");
+      expect(filter).toContain("metadata->>target_user_id.eq.abc");
+    }
+  });
+
+  it("an archived (cold) row reaches the bundle as audit_log_cold_for_user", async () => {
+    // Pre-fix the export read ONLY the hot table, so an account >2yr old
+    // received a bundle missing its oldest (most forensically-relevant)
+    // entries with no `partial` signal. This drives a mock whose
+    // audit_log_cold source returns one archived row and asserts it lands.
+    const SUBJECT = "77777777-7777-7777-7777-777777777777";
+    const coldRow = {
+      id: "cold-1",
+      user_id: SUBJECT,
+      action: "role.grant",
+      entity_type: "strategy",
+      entity_id: "strat-9",
+      metadata: { role: "manager" },
+      created_at: "2023-01-01T00:00:00Z",
+    };
+    const mock = {
+      from: (table: string) => {
+        const empty = async () => ({ data: [], error: null });
+        const coldRows = async () => ({ data: [coldRow], error: null });
+        const resolver = table === "audit_log_cold" ? coldRows : empty;
+        return {
+          select: () => ({
+            eq: () => ({ order: () => ({ limit: empty }), limit: empty }),
+            or: () => ({
+              order: () => ({ limit: resolver }),
+              limit: resolver,
+            }),
+            in: () => ({ order: () => ({ limit: empty }), limit: empty }),
+          }),
+        };
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, SUBJECT);
+    const coldTable = bundle.tables.find(
+      (t) => t.table === "audit_log_cold_for_user",
+    );
+    expect(coldTable, "audit_log_cold_for_user absent from bundle").toBeDefined();
+    expect(coldTable!.row_count).toBe(1);
+    const out = coldTable!.rows[0] as Record<string, unknown>;
+    expect(out.id).toBe("cold-1");
+    // Subject is the actor here, so user_id is preserved (own data).
+    expect(out.user_id).toBe(SUBJECT);
+    expect(bundle.partial).toBe(false);
   });
 });
 
@@ -1250,6 +1536,11 @@ describe("collectUserExportBundle — indirect null parent IDs are tolerated (re
                 order: () => ({ limit }),
                 limit,
               }),
+              // NEW-C16-02: audit_log_for_user filters via `.or()`.
+              or: () => ({
+                order: () => ({ limit }),
+                limit,
+              }),
               in: () => ({
                 order: () => ({
                   limit: table === "trades" ? childLimit : emptyLimit,
@@ -1448,6 +1739,164 @@ describe("collectUserExportBundle — chunked indirect IN under proxy limits (re
     // Total ids processed must reflect every parent (1200)
     const total = inCalls.reduce((s, n) => s + n, 0);
     expect(total).toBe(1200);
+  });
+
+  it("NEW-C16-07: multi-chunk indirect fetch is globally sorted post-collection, not chunk-ordered", async () => {
+    // Scenario: 2 chunks of parent IDs. Chunk 1 (parents p-0..p-499) returns
+    // child rows with id/orderCol values "t-Z" (lexically LAST). Chunk 2
+    // (parents p-500..p-999) returns child rows with id "t-A" (lexically
+    // FIRST). Pre-fix the cap sliced the concatenation — chunk 1 rows all had
+    // a high orderCol so if the cap was hit, chunk 1 rows (which come first in
+    // the concatenation) would survive while chunk 2 rows (t-A, which are
+    // globally older) would be dropped. The fix sorts globally BEFORE capping.
+    //
+    // We seed 3 rows from chunk 1 (id: t-Z2, t-Z1, t-Z0 — lexically late)
+    // and 3 from chunk 2 (id: t-A2, t-A1, t-A0 — lexically early). Global
+    // sort ascending should order t-A0 < t-A1 < t-A2 < t-Z0 < t-Z1 < t-Z2.
+
+    const chunk1ParentRows = Array.from({ length: EXPORT_PARENT_ID_IN_CHUNK }, (_, i) => ({
+      id: `p-${i}`,
+    }));
+    const chunk2ParentRows = Array.from({ length: 3 }, (_, i) => ({
+      id: `p-${EXPORT_PARENT_ID_IN_CHUNK + i}`,
+    }));
+    const allParentRows = [...chunk1ParentRows, ...chunk2ParentRows];
+
+    // Chunk 1 children — lexically LAST orderCol values
+    const chunk1Children = [
+      { id: "t-Z2", strategy_id: "p-0" },
+      { id: "t-Z1", strategy_id: "p-1" },
+      { id: "t-Z0", strategy_id: "p-2" },
+    ];
+    // Chunk 2 children — lexically FIRST orderCol values
+    const chunk2Children = [
+      { id: "t-A2", strategy_id: `p-${EXPORT_PARENT_ID_IN_CHUNK}` },
+      { id: "t-A1", strategy_id: `p-${EXPORT_PARENT_ID_IN_CHUNK + 1}` },
+      { id: "t-A0", strategy_id: `p-${EXPORT_PARENT_ID_IN_CHUNK + 2}` },
+    ];
+
+    // Separate counter per table so other indirect tables don't interfere.
+    const tradesInCallCount = { v: 0 };
+    const mock = {
+      from: (table: string) => {
+        const probeLimit = async () => ({ data: allParentRows, error: null });
+        const emptyLimit = async () => ({ data: [], error: null });
+        return {
+          select: (projection: string) => {
+            const limit =
+              projection === "id" && table === "strategies"
+                ? probeLimit
+                : emptyLimit;
+            return {
+              eq: () => ({
+                order: () => ({ limit }),
+                limit,
+              }),
+              in: (_col: string, _ids: unknown[]) => {
+                if (table !== "trades") {
+                  return {
+                    order: () => ({ limit: emptyLimit }),
+                    limit: emptyLimit,
+                  };
+                }
+                const chunkIdx = tradesInCallCount.v++;
+                const rows = chunkIdx === 0 ? chunk1Children : chunk2Children;
+                return {
+                  order: () => ({
+                    limit: async () => ({ data: rows, error: null }),
+                  }),
+                  limit: async () => ({ data: rows, error: null }),
+                };
+              },
+            };
+          },
+        };
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "17171717-1717-1717-1717-171717171717");
+
+    const tradesEntry = bundle.tables.find((t) => t.table === "trades");
+    expect(tradesEntry).toBeDefined();
+    // All 6 rows must be present (well under the cap).
+    expect(tradesEntry!.row_count).toBe(6);
+    const ids = (tradesEntry!.rows as Array<{ id: string }>).map((r) => r.id);
+    // Global sort: t-A0, t-A1, t-A2 come before t-Z0, t-Z1, t-Z2.
+    // Without the fix, the order would be t-Z2, t-Z1, t-Z0, t-A2, t-A1, t-A0
+    // (chunk 1 first, then chunk 2).
+    expect(ids).toEqual(["t-A0", "t-A1", "t-A2", "t-Z0", "t-Z1", "t-Z2"]);
+  });
+
+  it("NEW-C16-10: indirect fetch stops accumulating after the first chunk that exceeds the cap (memory bound)", async () => {
+    // Red-team M conf=9: the original NEW-C16-07 fix fetched
+    // EXPORT_PER_TABLE_ROW_CAP rows PER chunk (no early exit), accumulating
+    // up to 4 × 50K rows in the heap before the post-sort splice truncated.
+    // The fix breaks out of the chunk loop as soon as aggregated.length >
+    // EXPORT_PER_TABLE_ROW_CAP, bounding memory to cap + one chunk's rows.
+    //
+    // This test verifies that when chunk 1 already returns > cap rows,
+    // chunk 2 is NOT fetched (the mock tracks which chunks were called).
+
+    // 2 chunks of parents
+    const chunk1Parents = Array.from({ length: EXPORT_PARENT_ID_IN_CHUNK }, (_, i) => ({
+      id: `q-${i}`,
+    }));
+    const chunk2Parents = [{ id: `q-${EXPORT_PARENT_ID_IN_CHUNK}` }];
+    const allParents = [...chunk1Parents, ...chunk2Parents];
+
+    // Chunk 1 returns cap + 1 rows — triggers early-exit.
+    const cap = EXPORT_PER_TABLE_ROW_CAP;
+    const chunk1Children = Array.from({ length: cap + 1 }, (_, i) => ({
+      id: `r-${String(i).padStart(6, "0")}`,
+      strategy_id: `q-${i % EXPORT_PARENT_ID_IN_CHUNK}`,
+    }));
+    const chunk2Children = [{ id: "r-chunk2-sentinel", strategy_id: `q-${EXPORT_PARENT_ID_IN_CHUNK}` }];
+
+    const tradesChunkCalls: number[] = [];
+    const mock = {
+      from: (table: string) => {
+        return {
+          select: (projection: string) => {
+            const probeLimit = async () => ({ data: allParents, error: null });
+            const emptyLimit = async () => ({ data: [], error: null });
+            const limit =
+              projection === "id" && table === "strategies"
+                ? probeLimit
+                : emptyLimit;
+            return {
+              eq: () => ({ order: () => ({ limit }), limit }),
+              in: (_col: string, _ids: unknown[]) => {
+                if (table !== "trades") {
+                  return { order: () => ({ limit: emptyLimit }), limit: emptyLimit };
+                }
+                const callIdx = tradesChunkCalls.length;
+                tradesChunkCalls.push(callIdx);
+                const rows = callIdx === 0 ? chunk1Children : chunk2Children;
+                return {
+                  order: () => ({ limit: async () => ({ data: rows, error: null }) }),
+                  limit: async () => ({ data: rows, error: null }),
+                };
+              },
+            };
+          },
+        };
+      },
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "18181818-1818-1818-1818-181818181818");
+
+    // Only chunk 1 should have been fetched; chunk 2 is skipped by early-exit.
+    expect(tradesChunkCalls.length).toBe(1);
+
+    const tradesEntry = bundle.tables.find((t) => t.table === "trades");
+    expect(tradesEntry).toBeDefined();
+    // Row count is capped at EXPORT_PER_TABLE_ROW_CAP.
+    expect(tradesEntry!.row_count).toBe(cap);
+    expect(tradesEntry!.truncated_at_cap).toBe(true);
+    // The chunk-2 sentinel must NOT appear (chunk 2 was not fetched).
+    const ids = (tradesEntry!.rows as Array<{ id: string }>).map((r) => r.id);
+    expect(ids).not.toContain("r-chunk2-sentinel");
   });
 });
 

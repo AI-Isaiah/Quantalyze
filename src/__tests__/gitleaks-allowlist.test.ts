@@ -81,6 +81,10 @@ const EXPECTED_ALLOWLIST_FIXTURES: Array<{
     relPath: "analytics-service/tests/test_encryption.py",
   },
   {
+    label: "Cluster-19 portfolio router test noop-limiter shim (batch a4)",
+    relPath: "analytics-service/tests/test_c19_portfolio_fixes.py",
+  },
+  {
     label: "package-lock integrity hashes (high-entropy noise)",
     relPath: "package-lock.json",
   },

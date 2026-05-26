@@ -192,27 +192,114 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
 
     # 1. validate
     val = await adapter.validate(request)
-    if not val.valid:
-        supabase.rpc(
-            "transition_strategy_verification",
-            {
-                "p_verification_id": verification_id,
-                "p_new_status": "draft",
-                "p_metadata": {
-                    "errors": [
-                        {
-                            "code": val.error_code,
-                            "human_message": val.human_message,
-                        }
-                    ]
-                },
-            },
-        ).execute()
-        permanent_codes = {"AUTH_FAILED", "PERMISSION_DENIED"}
+
+    # C-1 (red-team): probe_error=True means detect_permissions() hit a
+    # transient network/WAF failure and returned _FAIL_CLOSED
+    # {read:T, trade:T, withdraw:T, probe_error:T}. exchange.py derives
+    # read_only=False + error_code="WITHDRAW_SCOPE" from those fail-closed
+    # defaults — NOT from real scope evidence. Treating those as a
+    # permanent scope rejection would permanently ban a legitimately
+    # read-only key that happened to hit an exchange 502. Bail out early
+    # with transient so the worker retries the whole probe.
+    # Defensive: only inspect debug_context when it is actually a dict
+    # (CSV/mock adapters may leave it None or MagicMock in tests).
+    _debug = val.debug_context if isinstance(val.debug_context, dict) else {}
+    _probe_error = bool(_debug.get("probe_error", False))
+    if _probe_error:
+        log.warning(
+            "process_key_long.probe_error_transient",
+            error_code=val.error_code,
+            verification_id=verification_id,
+            correlation_id=correlation_id,
+        )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
-            error_message=f"validate failed: {val.error_code}",
-            error_kind="permanent" if val.error_code in permanent_codes else "transient",
+            error_message="validate: probe_error — transient permission-probe failure",
+            error_kind="transient",
+        )
+
+    # Unified rejection gate: covers both ordinary validation failures
+    # (not val.valid — e.g. AUTH_FAILED, PERMISSION_DENIED) and
+    # NEW-C31-01: write-capable key scope violations that must be caught
+    # BEFORE any encryption step. The read_only arm only blocks on
+    # explicit False — None (CSV, scope not applicable) is not rejected.
+    # The error_code arm fires even when read_only is True (IMP-2: a
+    # broker that sets a scope error_code without clearing read_only=True
+    # must still be rejected — see test "error_code_wins").
+    _scope_rejected = (
+        not val.valid
+        or val.read_only is False
+        or val.error_code in {"TRADE_SCOPE", "WITHDRAW_SCOPE"}
+    )
+    if _scope_rejected:
+        # SF-2: use VALIDATION_UNEXPECTED as the fallback — it is a registered
+        # WizardErrorCode (adapter.py:74) and has defined copy in wizardErrors.ts.
+        # "VALIDATION_FAILED" is not registered, causing a silent blank UI state.
+        # _is_unexpected_fallback tracks whether the VALIDATION_UNEXPECTED code
+        # was chosen by us as a fallback (val.error_code was None → write-capable
+        # key with no scope code) vs set by the adapter for a genuine unexpected
+        # exception. Only the fallback case is permanent — an adapter-set
+        # VALIDATION_UNEXPECTED may be a transient exchange error (M-1 fix).
+        _is_unexpected_fallback = (val.error_code is None)
+        _reject_code = val.error_code or "VALIDATION_UNEXPECTED"
+        # SF-1 + SF-4: security-sensitive scope rejection must be observable;
+        # log verification_id + correlation_id so the operator can correlate
+        # this worker event with the user's submission (DispatchResult does not
+        # carry tracing fields, so the log entry is the authoritative trace anchor).
+        log.warning(
+            "process_key_long.write_capable_key_rejected",
+            reject_code=_reject_code,
+            read_only=val.read_only,
+            is_unexpected_fallback=_is_unexpected_fallback,
+            verification_id=verification_id,
+            correlation_id=correlation_id,
+        )
+        # SF-3: wrap the RPC call so a Supabase failure does not leave the
+        # verification in limbo AND swallow the security outcome. Best-effort
+        # transition: returning FAILED to the dispatcher is more important
+        # than atomicity with the DB state machine.
+        try:
+            supabase.rpc(
+                "transition_strategy_verification",
+                {
+                    "p_verification_id": verification_id,
+                    "p_new_status": "draft",
+                    "p_metadata": {
+                        "errors": [
+                            {
+                                "code": _reject_code,
+                                "human_message": val.human_message,
+                            }
+                        ]
+                    },
+                },
+            ).execute()
+        except Exception as _rpc_err:
+            log.error(
+                "process_key_long.scope_rejection_rpc_failed",
+                reject_code=_reject_code,
+                verification_id=verification_id,
+                correlation_id=correlation_id,
+                error=str(_rpc_err),
+            )
+        # IMP-1 (M-1 fix): VALIDATION_UNEXPECTED is permanent ONLY when it
+        # is our own fallback for read_only=False + no error_code — i.e. the
+        # adapter confirmed write scope but did not set an error_code. When the
+        # adapter itself sets VALIDATION_UNEXPECTED (unexpected exception during
+        # validate), the failure MAY be transient (e.g. ccxt.ExchangeNotAvailable
+        # not in the typed exception hierarchy) and must remain retryable.
+        permanent_codes = {
+            "AUTH_FAILED", "PERMISSION_DENIED",
+            "TRADE_SCOPE", "WITHDRAW_SCOPE",
+        }
+        _is_permanent = (
+            _reject_code in permanent_codes
+            or (_reject_code == "VALIDATION_UNEXPECTED" and _is_unexpected_fallback)
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=f"validate failed: {_reject_code}",
+            error_kind="permanent" if _is_permanent else "transient",
         )
 
     supabase.rpc(

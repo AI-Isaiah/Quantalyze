@@ -674,8 +674,29 @@ class TestExchangeErrorHandling:
         assert result == []
 
     @pytest.mark.asyncio
-    async def test_okx_partial_failure_preserves_collected_data(self):
-        """If archive API fails but recent succeeded, we keep the recent bills."""
+    async def test_okx_archive_failure_rejects_entire_fetch(self):
+        """NEW-C13-04: OKX archive failure must re-raise rather than silently
+        treating the partial (recent-only) bills series as canonical daily PnL.
+
+        Pre-fix behaviour (origin/main): archive exception → warn+break →
+        return partial data.  That made the caller believe the PnL series was
+        complete, feeding a truncated (and wrong) Sharpe / equity curve.
+
+        Post-fix behaviour: archive exception → re-raise → outer handler in
+        fetch_daily_pnl catches it → stamps daily_pnl_fetch_error DQ flag →
+        returns [] so the worker can distinguish "no PnL data yet" from "PnL
+        data fetch failed and must be retried".
+
+        The test intentionally does NOT assert the recent-bills data is
+        preserved: the fail-loud contract requires the entire result to be
+        rejected when any page of the fetch fails, because the caller cannot
+        know which inst_type page failed or how much history is missing.
+        """
+        from services.exchange import get_and_clear_last_dq_flags
+
+        # Drain any flags from a previous test.
+        get_and_clear_last_dq_flags()
+
         exchange = _make_okx_exchange()
         ts = _ts(2024, 2, 1, 10)
 
@@ -693,6 +714,18 @@ class TestExchangeErrorHandling:
         since_ms = int((datetime.now(timezone.utc) - timedelta(days=120)).timestamp() * 1000)
         result = await fetch_daily_pnl(exchange, since_ms)
 
-        # Recent bill should still be present despite archive failure
-        assert len(result) == 1
-        assert result[0]["price"] == pytest.approx(72.0)  # 75 + (-3)
+        # NEW-C13-04: entire result must be rejected — partial series must
+        # not be returned as if it were complete history.
+        assert result == [], (
+            "Archive failure must cause fetch_daily_pnl to return [] (fail-loud). "
+            f"Got {result!r} — pre-C13-04 warn+break behaviour regressed."
+        )
+
+        # NEW-C13-07: outer handler must stamp daily_pnl_fetch_error so the
+        # worker can distinguish a crash from a strategy that genuinely has
+        # no trades yet.
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("daily_pnl_fetch_error") is True, (
+            "daily_pnl_fetch_error DQ flag must be set on archive failure. "
+            f"Got flags={flags!r}"
+        )

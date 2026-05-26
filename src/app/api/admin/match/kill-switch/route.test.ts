@@ -82,6 +82,26 @@ vi.mock("@/lib/audit", async () => {
         metadata: event.metadata ?? {},
       });
     },
+    // NEW-C10-01: route switched to logAuditEventAsUser (service-role path).
+    // Intercept here so tests can assert on emitted events without the real
+    // adminClient.rpc("log_audit_event_service") path running.
+    logAuditEventAsUser: (
+      _adminClient: unknown,
+      _actingUserId: string,
+      event: {
+        action: string;
+        entity_type: string;
+        entity_id: string;
+        metadata?: Record<string, unknown>;
+      },
+    ) => {
+      auditEmissions.push({
+        action: event.action,
+        entity_type: event.entity_type,
+        entity_id: event.entity_id,
+        metadata: event.metadata ?? {},
+      });
+    },
   };
 });
 

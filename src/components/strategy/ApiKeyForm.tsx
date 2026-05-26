@@ -28,6 +28,14 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
   const [apiSecret, setApiSecret] = useState("");
   const [passphrase, setPassphrase] = useState("");
 
+  // NEW-C37-06: scrub plaintext secrets and invoke the parent cancel handler.
+  function handleCancel() {
+    setApiKey("");
+    setApiSecret("");
+    setPassphrase("");
+    onCancel();
+  }
+
   const needsPassphrase = exchange === "okx";
 
   // NEW-C29-03 / I1: zero out all plaintext credential fields on unmount,
@@ -45,21 +53,25 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    await onSubmit({ exchange, label, apiKey, apiSecret, passphrase });
-    // On a successful round-trip the parent closes the modal and unmounts this
-    // component, triggering the cleanup above. On validation failure the modal
-    // stays open for retry — the plaintext stays available for the next attempt.
-  }
-
-  // NEW-C29-03: also scrub on explicit Cancel before calling onCancel, so the
-  // fields are cleared synchronously before the parent re-renders.
-  // I1: include apiKey so all credential-bearing fields are cleared, matching
-  // the stated scrub intent and the unmount cleanup above.
-  function handleCancel() {
-    setApiKey("");
-    setApiSecret("");
-    setPassphrase("");
-    onCancel();
+    // NEW-C37-02: block Enter-key double-submit. `loading` is the
+    // in-flight guard; rejecting here before the async onSubmit call means
+    // two rapid Enter presses cannot race past the parent's setLoading(true)
+    // re-render and fire two validate-and-encrypt requests.
+    if (loading) return;
+    try {
+      await onSubmit({ exchange, label, apiKey, apiSecret, passphrase });
+    } finally {
+      // NEW-C37-06 + NEW-C29-03: scrub plaintext secrets from component state
+      // after the parent resolves, whether success or failure. On success the
+      // form unmounts shortly after (showForm → false), but on failure it stays
+      // mounted — leaving apiKey/apiSecret/passphrase in state indefinitely
+      // while the user reads the error message. Together with the unmount
+      // cleanup and handleCancel scrub above, this bounds the longest-lived
+      // in-memory plaintext copy to the call.
+      setApiKey("");
+      setApiSecret("");
+      setPassphrase("");
+    }
   }
 
   return (

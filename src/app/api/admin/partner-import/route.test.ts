@@ -141,6 +141,14 @@ vi.mock("@/lib/csrf", () => ({
 vi.mock("@/lib/ratelimit", () => ({
   adminActionLimiter: {},
   checkLimit: async () => STATE.checkLimitResult,
+  // silent-failure-hunter HIGH fix (Finding 6): the route now calls
+  // isRateLimitMisconfigured to distinguish 503 (Upstash outage) from
+  // 429 (quota exhaustion). Expose it in the mock — returns true only
+  // when reason='ratelimit_misconfigured', mirroring the real implementation.
+  isRateLimitMisconfigured: (
+    rl: { success: boolean; reason?: string },
+  ): boolean =>
+    rl.success === false && rl.reason === "ratelimit_misconfigured",
 }));
 
 vi.mock("@/lib/supabase/admin-users", () => ({
@@ -176,6 +184,26 @@ vi.mock("@/lib/audit", async () => {
     ...actual,
     logAuditEvent: (
       _client: unknown,
+      event: {
+        action: string;
+        entity_type: string;
+        entity_id: string;
+        metadata?: Record<string, unknown>;
+      },
+    ) => {
+      auditEmissions.push({
+        action: event.action,
+        entity_type: event.entity_type,
+        entity_id: event.entity_id,
+        metadata: event.metadata ?? {},
+      });
+    },
+    // NEW-C28-05/C28-06: route now calls emitAsUser directly (awaited).
+    // Intercept so the tests can observe audit emissions and the route
+    // doesn't fail due to a missing Supabase connection in the test env.
+    emitAsUser: async (
+      _client: unknown,
+      _userId: string,
       event: {
         action: string;
         entity_type: string;
@@ -799,5 +827,188 @@ describe("POST /api/admin/partner-import — audit-2026-05-07 cluster A", () => 
     const body = await res.json();
     // 4 rows: 1 header-as-data + 3 real data rows.
     expect(body.strategies_created).toBe(4);
+  });
+});
+
+/**
+ * NEW-C28-01: ticket_size_usd invariant — negative values and values >1e9
+ * must be rejected (row dropped → surfaces in allocators_rows_skipped).
+ *
+ * NEW-C28-02: mandate_archetype length cap — rows with >500 chars are dropped.
+ *
+ * NEW-C28-03: strategy_name validation — rows with >80 chars or embedded
+ * control chars (\r\n\0) are dropped.
+ *
+ * NEW-C28-04: row count cap — requests exceeding MAX_IMPORT_ROWS get 400
+ * before any GoTrue calls fire.
+ *
+ * NEW-C28-05/06: audit emit is now awaited via emitAsUser so a failure
+ * surfaces as 5xx. The test validates that emitAsUser is called (not the
+ * fire-and-forget wrappers) by checking auditEmissions after the call.
+ */
+describe("NEW-C28 — partner-import input validation and audit fixes", () => {
+  it("C28-01: negative ticket_size_usd row is silently dropped (allocators_rows_skipped +1)", async () => {
+    const allocatorsCsv = [
+      "allocator_email,mandate_archetype,ticket_size_usd",
+      "bad@x,family_office,-500",
+    ].join("\n");
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo",
+        managers_csv: "",
+        allocators_csv: allocatorsCsv,
+      }),
+    );
+    // Both CSVs empty after filtering → 400 "Both CSVs are empty"
+    // because the only allocator row was dropped.
+    expect([400, 200]).toContain(res.status);
+    const body = await res.json();
+    if (res.status === 200) {
+      expect(body.allocators_created).toBe(0);
+      expect(body.allocators_rows_skipped).toBeGreaterThanOrEqual(1);
+    } else {
+      expect(body.error).toMatch(/empty/i);
+    }
+  });
+
+  it("C28-01: ticket_size_usd > 1e9 row is dropped", async () => {
+    const allocatorsCsv = [
+      "allocator_email,mandate_archetype,ticket_size_usd",
+      "big@x,endowment,99999999999999",
+    ].join("\n");
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo",
+        managers_csv: "",
+        allocators_csv: allocatorsCsv,
+      }),
+    );
+    expect([400, 200]).toContain(res.status);
+    const body = await res.json();
+    if (res.status === 200) {
+      expect(body.allocators_created).toBe(0);
+    } else {
+      expect(body.error).toMatch(/empty/i);
+    }
+  });
+
+  it("C28-02: mandate_archetype > 500 chars row is dropped", async () => {
+    const longMandate = "A".repeat(501);
+    const allocatorsCsv = [
+      "allocator_email,mandate_archetype,ticket_size_usd",
+      `long@x,${longMandate},1000000`,
+    ].join("\n");
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo",
+        managers_csv: "",
+        allocators_csv: allocatorsCsv,
+      }),
+    );
+    expect([400, 200]).toContain(res.status);
+    const body = await res.json();
+    if (res.status === 200) {
+      expect(body.allocators_created).toBe(0);
+    }
+  });
+
+  it("C28-02: mandate_archetype ≤ 500 chars is accepted", async () => {
+    const okMandate = "A".repeat(500);
+    const allocatorsCsv = [
+      "allocator_email,mandate_archetype,ticket_size_usd",
+      `ok@x,${okMandate},1000000`,
+    ].join("\n");
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo",
+        managers_csv: "",
+        allocators_csv: allocatorsCsv,
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).allocators_created).toBe(1);
+  });
+
+  it("C28-03: strategy_name > 80 chars row is dropped (managers_rows_skipped +1)", async () => {
+    const longName = "S".repeat(81);
+    const managersCsv = [
+      "manager_email,strategy_name,disclosure_tier",
+      `mgr@x,${longName},exploratory`,
+    ].join("\n");
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo",
+        managers_csv: managersCsv,
+        allocators_csv: "",
+      }),
+    );
+    expect([400, 200]).toContain(res.status);
+    const body = await res.json();
+    if (res.status === 200) {
+      expect(body.strategies_created).toBe(0);
+      expect(body.managers_rows_skipped).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("C28-03: strategy_name with embedded NUL char is dropped", async () => {
+    // Use a NUL byte (\0) which survives the CSV line-split (parseCsv splits
+    // on \n, not \0) so the row reaches the schema mapper and the \0-guard fires.
+    const managersCsv = [
+      "manager_email,strategy_name,disclosure_tier",
+      "mgr@x,Bad\x00Name,exploratory",
+    ].join("\n");
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo",
+        managers_csv: managersCsv,
+        allocators_csv: "",
+      }),
+    );
+    // Either 400 (both empty after filtering) or 200 with 0 strategies created
+    expect([400, 200]).toContain(res.status);
+    const body = await res.json();
+    if (res.status === 200) {
+      expect(body.strategies_created).toBe(0);
+    }
+  });
+
+  it("C28-04: returns 400 too_many_rows when total rows exceed MAX_IMPORT_ROWS", async () => {
+    // Build a CSV with 600 manager rows (well above MAX_IMPORT_ROWS=500)
+    const rows = ["manager_email,strategy_name,disclosure_tier"];
+    for (let i = 0; i < 501; i++) {
+      rows.push(`mgr${i}@x,Strategy ${i},exploratory`);
+    }
+    const managersCsv = rows.join("\n");
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo",
+        managers_csv: managersCsv,
+        allocators_csv: "",
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe("too_many_rows");
+    expect(body.max_rows).toBe(500);
+    // No managers must have been created — the gate fires BEFORE phase 1
+    expect(STATE.insertedProfiles).toHaveLength(0);
+  });
+
+  it("C28-05/06: success path emits audit via emitAsUser (awaited, not fire-and-forget)", async () => {
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo",
+        managers_csv: SAMPLE_MANAGERS_CSV,
+        allocators_csv: SAMPLE_ALLOCATORS_CSV,
+      }),
+    );
+    expect(res.status).toBe(200);
+    // The emitAsUser mock captures into auditEmissions — if the route used
+    // the fire-and-forget logAuditEvent wrapper instead, the emission would
+    // be scheduled via after() and the auditEmissions array would be empty
+    // in this synchronous test context.
+    expect(auditEmissions).toHaveLength(1);
+    expect(auditEmissions[0].action).toBe("admin.partner_import");
+    expect(auditEmissions[0].metadata.partial_completion).toBe(false);
   });
 });
