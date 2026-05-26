@@ -84,6 +84,34 @@ describe("USER_EXPORT_TABLES manifest invariants", () => {
     expect(EXPORT_PER_TABLE_ROW_CAP).toBeGreaterThanOrEqual(1000);
     expect(EXPORT_SIZE_CAP_BYTES).toBe(100 * 1024 * 1024);
   });
+
+  it("NEW-C16-04: positions + position_snapshots are strategy-scoped indirect export entries (not dropped)", () => {
+    // Both FK strategy_id NOT NULL -> strategies — the same indirect
+    // shape as trades. Pre-fix they were EXCLUDED with a factually-wrong
+    // "portfolio-scoped" rationale and a user's live positions +
+    // historical snapshots (Art. 15 trading data) were entirely absent.
+    for (const table of ["positions", "position_snapshots"] as const) {
+      const entry = USER_EXPORT_TABLES.find((t) => t.table === table);
+      expect(entry, `${table} missing from USER_EXPORT_TABLES`).toBeDefined();
+      expect(entry!.kind).toBe("indirect");
+      if (entry!.kind === "indirect") {
+        expect(entry!.via_column).toBe("strategy_id");
+        expect(entry!.parent_table).toBe("strategies");
+        expect(entry!.parent_user_column).toBe("user_id");
+      }
+    }
+  });
+
+  it("NEW-C16-04: positions + position_snapshots are no longer in the coverage-hook EXCLUDED_TABLES", async () => {
+    // The CI hook's EXCLUDED_TABLES must NOT still suppress these — a
+    // stale exclusion would re-open the gap (the hook can't flag a
+    // strategy_id-scoped table on its own; see NEW-C16-06).
+    const { EXCLUDED_TABLES } = await import(
+      "../../scripts/check-gdpr-export-coverage"
+    );
+    expect(EXCLUDED_TABLES).not.toHaveProperty("positions");
+    expect(EXCLUDED_TABLES).not.toHaveProperty("position_snapshots");
+  });
 });
 
 /**
@@ -657,10 +685,11 @@ describe("collectUserExportBundle — H-0453 parent_id_truncated regression", ()
     // on every child table that uses that parent.
     //
     // Indirect manifest entries (strategies parents: strategy_analytics,
-    // trades, funding_fees, reconciliation_reports; portfolios parents:
-    // portfolio_strategies, portfolio_analytics, portfolio_alerts,
-    // allocation_events, weight_snapshots) — each child should reflect
-    // the truncation flag for its parent.
+    // trades, funding_fees, reconciliation_reports, positions,
+    // position_snapshots; portfolios parents: portfolio_strategies,
+    // portfolio_analytics, portfolio_alerts, allocation_events,
+    // weight_snapshots) — each child should reflect the truncation flag
+    // for its parent.
     const parentRows = Array.from({ length: 2000 }, (_, i) => ({
       id: `parent-${i}`,
     }));
@@ -703,6 +732,8 @@ describe("collectUserExportBundle — H-0453 parent_id_truncated regression", ()
         "trades",
         "funding_fees",
         "reconciliation_reports",
+        "positions",
+        "position_snapshots",
         "portfolio_strategies",
         "portfolio_analytics",
         "portfolio_alerts",

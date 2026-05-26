@@ -588,6 +588,28 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
     parent_table: "strategies",
     parent_user_column: "user_id",
   },
+  // NEW-C16-04 (audit 2026-05-26, HIGH): positions + position_snapshots
+  // are strategy-scoped user trading data (FK strategy_id NOT NULL ->
+  // strategies), the same indirect shape as trades. They were wrongly
+  // EXCLUDED from the export ("Portfolio-scoped... indirect via
+  // portfolios" — wrong on both counts), so a user's live positions and
+  // historical position snapshots (Art. 15 personal trading data) were
+  // entirely absent. Sanitize side is covered by the existing PRESERVE
+  // rows in the sanitize_user matrix.
+  {
+    kind: "indirect",
+    table: "positions",
+    via_column: "strategy_id",
+    parent_table: "strategies",
+    parent_user_column: "user_id",
+  },
+  {
+    kind: "indirect",
+    table: "position_snapshots",
+    via_column: "strategy_id",
+    parent_table: "strategies",
+    parent_user_column: "user_id",
+  },
   // Portfolio-scoped data
   {
     kind: "indirect",

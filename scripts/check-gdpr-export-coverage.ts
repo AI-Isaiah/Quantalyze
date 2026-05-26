@@ -154,14 +154,16 @@ export const EXCLUDED_TABLES: Record<string, { reason: string }> = {
   // The new stale-EXCLUDED_TABLES check would fail on it. Removed
   // to restore CI green; if a future migration creates the table,
   // re-add this entry.
-  position_snapshots: {
-    reason:
-      "Portfolio-scoped historical snapshots. Indirect via portfolios; not a direct user table.",
-  },
-  positions: {
-    reason:
-      "Portfolio-scoped holdings. Indirect via portfolios; not a direct user table.",
-  },
+  // NEW-C16-04 (audit 2026-05-26): positions + position_snapshots were
+  // EXCLUDED with a FACTUALLY WRONG rationale ("Portfolio-scoped...
+  // indirect via portfolios"). Both FK `strategy_id NOT NULL REFERENCES
+  // strategies` — the identical indirect shape as trades / funding_fees
+  // / strategy_analytics — so a user's live positions + historical
+  // snapshots (Art. 15 personal trading data) were entirely absent from
+  // the export. They are now IndirectUserTable entries in
+  // USER_EXPORT_TABLES (strategy_id -> strategies.user_id) and covered
+  // by the existing `positions`/`position_snapshots | PRESERVE` rows in
+  // the sanitize_user matrix. Do NOT re-add them here.
   used_ack_tokens: {
     reason:
       "Idempotency guard for alert-ack tokens. System bookkeeping; no user PII.",
