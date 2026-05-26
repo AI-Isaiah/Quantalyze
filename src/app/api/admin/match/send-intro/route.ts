@@ -368,6 +368,63 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  // NEW-C34-01 / NEW-C34-02 (red-team H conf=8): validate strategy_id before
+  // the RPC. The route uses the service-role admin client which BYPASSES RLS,
+  // so it must enforce the status/existence guard explicitly.
+  //
+  // C34-01: a withdrawn/draft/rejected strategy must not trigger intro emails
+  // (irreversible PII disclosure). Reject unless status='published'.
+  //
+  // C34-02: strategy_id is shape-validated only above; the RPC INSERTs with no
+  // FK-existence surface to the caller. A non-existent strategy_id would commit
+  // a bridge_outcomes-feeding decision pointing at nothing while
+  // dispatchAdminIntroEmails silently returns ("strategy not found") — the
+  // route reports success, no emails go out, lineage is corrupted.
+  {
+    const { data: strategyRow, error: strategyLookupErr } = await admin
+      .from("strategies")
+      .select("id, user_id, status")
+      .eq("id", body.strategy_id)
+      .maybeSingle();
+    if (strategyLookupErr) {
+      console.error(
+        "[api/admin/match/send-intro] strategy lookup failed:",
+        strategyLookupErr,
+      );
+      return NextResponse.json(
+        { error: "Failed to verify strategy" },
+        { status: 500 },
+      );
+    }
+    if (!strategyRow) {
+      return NextResponse.json(
+        {
+          error: "strategy_id does not exist",
+          code: "strategy_not_found",
+        },
+        { status: 400 },
+      );
+    }
+    if (strategyRow.status !== "published") {
+      return NextResponse.json(
+        {
+          error: `Cannot send intro for a strategy with status '${strategyRow.status}' — strategy must be published`,
+          code: "strategy_not_published",
+        },
+        { status: 400 },
+      );
+    }
+    if (!strategyRow.user_id) {
+      return NextResponse.json(
+        {
+          error: "strategy_id has no associated manager — cannot send intro",
+          code: "strategy_no_manager",
+        },
+        { status: 400 },
+      );
+    }
+  }
+
   const { data, error } = await admin.rpc("send_intro_with_decision", {
     p_allocator_id: body.allocator_id,
     p_strategy_id: body.strategy_id,
@@ -421,27 +478,53 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // service-role admin client but has already validated the acting
   // admin's JWT (isAdminUser check above). entity_id pins to the
   // contact_request row created by the RPC.
+  //
+  // NEW-C34-03 (red-team M conf=8): when was_already_sent=true the RPC
+  // returned the EXISTING row; no new note was applied and no new email was
+  // sent. Logging "intro.send" for a no-op fabricates a fresh-send audit
+  // record — audit_log accumulates multiple intro.send rows for one real
+  // intro and a corrected note is silently dropped. Emit the distinct
+  // "intro.resend_noop" action so forensics can distinguish first-send from
+  // re-send attempts, and surface note_applied:false to the response so the
+  // admin UI can warn that the note was not applied.
   if (row?.contact_request_id && user?.id) {
-    logAuditEventAsUser(admin, user.id, {
-      action: "intro.send",
-      entity_type: "contact_request",
-      entity_id: row.contact_request_id,
-      metadata: {
-        path: "admin",
-        allocator_id: body.allocator_id,
-        strategy_id: body.strategy_id,
-        original_strategy_id: body.original_strategy_id,
-        candidate_id: body.candidate_id,
-        was_already_sent: wasAlreadySent,
-        match_decision_id: row?.match_decision_id ?? null,
-        // admin_note is bounded by ADMIN_NOTE_MAX above; we record only
-        // the length, not the content, so the audit row stays small AND
-        // doesn't store free-text the founder hasn't approved for the
-        // audit trail. Length lets forensics correlate "intro sent with
-        // an unusually long note" without re-reading the body.
-        admin_note_length: body.admin_note.length,
-      },
-    });
+    if (wasAlreadySent) {
+      logAuditEventAsUser(admin, user.id, {
+        action: "intro.resend_noop",
+        entity_type: "contact_request",
+        entity_id: row.contact_request_id,
+        metadata: {
+          path: "admin",
+          allocator_id: body.allocator_id,
+          strategy_id: body.strategy_id,
+          original_strategy_id: body.original_strategy_id,
+          candidate_id: body.candidate_id,
+          note_applied: false,
+          admin_note_length: body.admin_note.length,
+        },
+      });
+    } else {
+      logAuditEventAsUser(admin, user.id, {
+        action: "intro.send",
+        entity_type: "contact_request",
+        entity_id: row.contact_request_id,
+        metadata: {
+          path: "admin",
+          allocator_id: body.allocator_id,
+          strategy_id: body.strategy_id,
+          original_strategy_id: body.original_strategy_id,
+          candidate_id: body.candidate_id,
+          was_already_sent: false,
+          match_decision_id: row?.match_decision_id ?? null,
+          // admin_note is bounded by ADMIN_NOTE_MAX above; we record only
+          // the length, not the content, so the audit row stays small AND
+          // doesn't store free-text the founder hasn't approved for the
+          // audit trail. Length lets forensics correlate "intro sent with
+          // an unusually long note" without re-reading the body.
+          admin_note_length: body.admin_note.length,
+        },
+      });
+    }
   }
 
   // audit-2026-05-07 fix-loop C-0049 — Dispatch emails on first-time sends.
@@ -480,6 +563,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     contact_request_id: row?.contact_request_id,
     match_decision_id: row?.match_decision_id,
     was_already_sent: wasAlreadySent,
+    // NEW-C34-03: surface note_applied so the UI can warn when a re-send
+    // did not apply the new note (was_already_sent=true → RPC returned the
+    // old row unchanged, note was silently dropped).
+    note_applied: !wasAlreadySent,
   });
 }
 

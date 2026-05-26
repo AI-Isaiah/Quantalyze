@@ -61,6 +61,15 @@ const candidateState = vi.hoisted<{
   valid: new Map<string, string>([["cand-1", "alloc-1"]]),
   errored: false,
 }));
+// NEW-C34-01 / NEW-C34-02: strategy validation state. Controls what the
+// maybeSingle() lookup returns for the introduced strategy_id.
+const strategyValidationState = vi.hoisted<{
+  row: { id: string; user_id: string | null; status: string } | null;
+  errored: boolean;
+}>(() => ({
+  row: { id: "strat-1", user_id: "mgr-1", status: "published" },
+  errored: false,
+}));
 const rpcState = vi.hoisted<{
   data: unknown;
   error: unknown;
@@ -290,7 +299,13 @@ vi.mock("@/lib/supabase/admin", () => ({
       if (table === "strategies") {
         return {
           select: () => ({
-            eq: () => ({
+            eq: (_col: string, _id: string) => ({
+              // NEW-C34-01/C34-02: strategy validation uses .maybeSingle()
+              maybeSingle: async () =>
+                strategyValidationState.errored
+                  ? { data: null, error: { message: "pg-down" } }
+                  : { data: strategyValidationState.row, error: null },
+              // dispatchAdminIntroEmails uses .single()
               single: async () => ({
                 data: {
                   id: "strat-1",
@@ -361,6 +376,8 @@ function resetState() {
   holdingsState.errored = false;
   candidateState.valid = new Map<string, string>([["cand-1", "alloc-1"]]);
   candidateState.errored = false;
+  strategyValidationState.row = { id: "strat-1", user_id: "mgr-1", status: "published" };
+  strategyValidationState.errored = false;
   rpcState.data = [
     {
       contact_request_id: "cr-1",
@@ -992,5 +1009,131 @@ describe("POST /api/admin/match/send-intro — success path", () => {
     const meta = (auditCalls[0].event as { metadata: Record<string, unknown> })
       .metadata;
     expect(meta.candidate_id).toBeNull();
+  });
+});
+
+/**
+ * NEW-C34-01 (red-team H conf=8): strategy_id must have status='published'
+ * before the RPC. The route bypasses RLS via the service-role admin client,
+ * so it must enforce the status gate explicitly.
+ *
+ * NEW-C34-02 (red-team H conf=8): strategy_id existence and manager ownership
+ * must be validated before the RPC to prevent corrupted bridge_outcomes lineage.
+ *
+ * NEW-C34-03 (red-team M conf=8): was_already_sent must emit "intro.resend_noop"
+ * not "intro.send" to avoid fabricated fresh-send audit records.
+ */
+describe("NEW-C34-01/C34-02 — strategy_id validation before RPC send", () => {
+  beforeEach(() => {
+    resetState();
+    vi.resetModules();
+  });
+
+  it("returns 400 strategy_not_found when strategy_id does not exist", async () => {
+    strategyValidationState.row = null;
+    const { POST } = await importRoute();
+    const res = await POST(makeReq());
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe("strategy_not_found");
+    // RPC must NOT have been called — no contact_request_id in response
+    expect(body.contact_request_id).toBeUndefined();
+  });
+
+  it("returns 400 strategy_not_published when strategy status is 'withdrawn'", async () => {
+    strategyValidationState.row = { id: "strat-1", user_id: "mgr-1", status: "withdrawn" };
+    const { POST } = await importRoute();
+    const res = await POST(makeReq());
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe("strategy_not_published");
+    expect(body.error).toContain("withdrawn");
+  });
+
+  it("returns 400 strategy_not_published when strategy status is 'draft'", async () => {
+    strategyValidationState.row = { id: "strat-1", user_id: "mgr-1", status: "draft" };
+    const { POST } = await importRoute();
+    const res = await POST(makeReq());
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe("strategy_not_published");
+  });
+
+  it("returns 400 strategy_no_manager when strategy has no user_id", async () => {
+    strategyValidationState.row = { id: "strat-1", user_id: null, status: "published" };
+    const { POST } = await importRoute();
+    const res = await POST(makeReq());
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe("strategy_no_manager");
+  });
+
+  it("returns 500 when strategy lookup errors", async () => {
+    strategyValidationState.errored = true;
+    const { POST } = await importRoute();
+    const res = await POST(makeReq());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toMatch(/verify strategy/i);
+  });
+
+  it("passes through to RPC when strategy is published with a manager", async () => {
+    // Happy path: published strategy with manager must reach the RPC.
+    strategyValidationState.row = { id: "strat-1", user_id: "mgr-1", status: "published" };
+    const { POST } = await importRoute();
+    const res = await POST(makeReq());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.contact_request_id).toBe("cr-1");
+  });
+});
+
+describe("NEW-C34-03 — was_already_sent emits intro.resend_noop not intro.send", () => {
+  beforeEach(() => {
+    resetState();
+    vi.resetModules();
+  });
+
+  it("emits intro.resend_noop with note_applied=false when was_already_sent=true", async () => {
+    rpcState.data = [
+      {
+        contact_request_id: "cr-existing",
+        match_decision_id: "md-existing",
+        was_already_sent: true,
+      },
+    ];
+    const { POST } = await importRoute();
+    const res = await POST(makeReq());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.was_already_sent).toBe(true);
+    expect(body.note_applied).toBe(false);
+    // Must emit resend_noop, NOT intro.send
+    expect(auditCalls.length).toBe(1);
+    const event = auditCalls[0].event as {
+      action: string;
+      metadata: Record<string, unknown>;
+    };
+    expect(event.action).toBe("intro.resend_noop");
+    expect(event.metadata.note_applied).toBe(false);
+    expect(event.metadata).not.toHaveProperty("was_already_sent");
+  });
+
+  it("emits intro.send (not intro.resend_noop) when was_already_sent=false", async () => {
+    rpcState.data = [
+      {
+        contact_request_id: "cr-1",
+        match_decision_id: "md-1",
+        was_already_sent: false,
+      },
+    ];
+    const { POST } = await importRoute();
+    const res = await POST(makeReq());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.note_applied).toBe(true);
+    expect(auditCalls.length).toBe(1);
+    const event = auditCalls[0].event as { action: string };
+    expect(event.action).toBe("intro.send");
   });
 });
