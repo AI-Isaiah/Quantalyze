@@ -32,7 +32,14 @@ export function formatNumber(value: number | null | undefined, decimals = 2): st
 export function formatCurrency(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "—";
   if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `$${(value / 1_000).toFixed(0)}K`;
+  // NEW-C09-12: use toFixed(1) to preserve ≥1 sig-fig so $1,500 renders as
+  // "$1.5K" instead of "$2K" (toFixed(0) rounds to the nearest $1K, which
+  // overstates by up to ~33%). Strip the redundant ".0" suffix for round
+  // thousands so $250,000 stays "$250K" rather than "$250.0K".
+  if (value >= 1_000) {
+    const kStr = (value / 1_000).toFixed(1);
+    return `$${kStr.endsWith(".0") ? kStr.slice(0, -2) : kStr}K`;
+  }
   return `$${value.toFixed(0)}`;
 }
 

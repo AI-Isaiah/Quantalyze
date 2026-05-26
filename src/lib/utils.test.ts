@@ -106,6 +106,29 @@ describe("formatCurrency", () => {
   it("regression (M-0085): formatCurrency(-Infinity) returns the em-dash", () => {
     expect(formatCurrency(Number.NEGATIVE_INFINITY)).toBe("—");
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // NEW-C09-12 regression guard: the thousands branch must NOT round
+  // to the nearest K — that overstates values by up to ~33% on a
+  // real-money surface. The old `toFixed(0)` implementation rendered
+  // $1,500 as "$2K" and $1,499 as "$1K" (both off by ~33%). The fix
+  // uses toFixed(1) to preserve one decimal of precision.
+  // These assertions fail against the old toFixed(0) implementation:
+  //   $1,500 → "$2K" (wrong) vs "$1.5K" (correct)
+  //   $1,499 → "$1K" (wrong) vs "$1.5K" (correct, 1.499 rounds to 1.5)
+  // ─────────────────────────────────────────────────────────────────
+  it("regression (NEW-C09-12): formatCurrency(1500) renders $1.5K not $2K", () => {
+    expect(formatCurrency(1_500)).toBe("$1.5K");
+  });
+  it("regression (NEW-C09-12): formatCurrency(1499) renders $1.5K not $1K", () => {
+    expect(formatCurrency(1_499)).toBe("$1.5K");
+  });
+  it("regression (NEW-C09-12): round thousands still omit the decimal ($250K)", () => {
+    expect(formatCurrency(250_000)).toBe("$250K");
+  });
+  it("regression (NEW-C09-12): exact 1K rounds cleanly ($1K not $1.0K)", () => {
+    expect(formatCurrency(1_000)).toBe("$1K");
+  });
 });
 
 describe("metricColor", () => {
