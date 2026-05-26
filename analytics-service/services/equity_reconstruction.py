@@ -2460,18 +2460,8 @@ class EquityCurveBuilder:
 
         positions = self.reconstruct_positions()
 
-        realized_by_date: dict[date, float] = defaultdict(float)
-        for pos in positions:
-            if pos.status == "closed" and pos.closed_at and pos.pnl is not None:
-                closed_at = pos.closed_at
-                if isinstance(closed_at, datetime):
-                    if closed_at.tzinfo is None:
-                        closed_at = closed_at.replace(tzinfo=timezone.utc)
-                    d = closed_at.astimezone(timezone.utc).date()
-                else:
-                    continue
-                realized_by_date[d] += float(pos.pnl)
-
+        # Compute the date window first so the string-closed_at fallback
+        # can book unparseable positions on last_d (NEW-C01-08).
         first = min(t.timestamp for t in self.trades)
         last = max(t.timestamp for t in self.trades)
         if first.tzinfo is None:
@@ -2480,6 +2470,38 @@ class EquityCurveBuilder:
             last = last.replace(tzinfo=timezone.utc)
         first_d = first.astimezone(timezone.utc).date()
         last_d = last.astimezone(timezone.utc).date()
+
+        realized_by_date: dict[date, float] = defaultdict(float)
+        for pos in positions:
+            if pos.status == "closed" and pos.closed_at and pos.pnl is not None:
+                closed_at = pos.closed_at
+                if isinstance(closed_at, datetime):
+                    if closed_at.tzinfo is None:
+                        closed_at = closed_at.replace(tzinfo=timezone.utc)
+                    d = closed_at.astimezone(timezone.utc).date()
+                elif isinstance(closed_at, str):
+                    # NEW-C01-08: _match_positions_fifo emits ISO string
+                    # closed_at values; silently continuing (pre-fix) dropped
+                    # all PnL for such positions, diverging the curve from
+                    # to_metrics_snapshot (which counts them). Parse instead
+                    # and fall back to the last day on parse failure.
+                    try:
+                        closed_dt = datetime.fromisoformat(
+                            closed_at.replace("Z", "+00:00")
+                        )
+                        if closed_dt.tzinfo is None:
+                            closed_dt = closed_dt.replace(tzinfo=timezone.utc)
+                        d = closed_dt.astimezone(timezone.utc).date()
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "EquityCurveBuilder: closed_at %r unparseable — "
+                            "booking PnL %.6f on last bar (NEW-C01-08)",
+                            closed_at, float(pos.pnl),
+                        )
+                        d = last_d
+                else:
+                    continue
+                realized_by_date[d] += float(pos.pnl)
         idx = pd.date_range(first_d, last_d, freq="D")
 
         df = pd.DataFrame({"date": idx})
