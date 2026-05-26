@@ -178,12 +178,26 @@ async function unifiedVerifyStrategyHandler(
     );
   }
 
-  return NextResponse.json({
-    ...upstream,
+  // NEW-C35-01 (red-team H conf=8): never spread the raw upstream body.
+  // The upstream /process-key teaser response includes `encrypted_credentials`
+  // (KEK-wrapped api_key/secret/passphrase), `fingerprint`, and other internal
+  // fields. Spreading them all echoed credential ciphertext to an unauthenticated
+  // browser. Mirror the legacy path's explicit allowlist — return only the fields
+  // the landing form actually needs.
+  const responseBody: Record<string, unknown> = {
     verification_id: verificationId,
     public_token: publicToken,
     expires_at: expiresAt,
-  });
+  };
+  // metrics_snapshot is safe and needed by the verification status card.
+  if (upstream.metrics_snapshot !== undefined) {
+    responseBody.metrics_snapshot = upstream.metrics_snapshot;
+  }
+  // status is informational and contains no credentials.
+  if (typeof upstream.status === "string") {
+    responseBody.status = upstream.status;
+  }
+  return NextResponse.json(responseBody);
 }
 
 /**
