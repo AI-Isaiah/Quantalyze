@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.9.15] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: analytics runner + risk metrics (batch a2)
+- risk-of-ruin semantics corrected: `p==0.5` (no edge) returns `None` rather than a misleading `1.0`; a `r=0` decay yields a low ruin estimate instead of certain ruin (red-team)
+- metrics hardened with `isfinite` guards; phantom-NaN months no longer leak into monthly-return series; streak computation + test coverage gaps closed (NEW-C02-01…11, C14-metrics)
+- analytics_runner remediation across the C2 + C14 metric findings
+
+
 ## [0.24.9.14] - 2026-05-26
 ### Fixed — audit-2026-05-07 cluster review: analytics recon/ingestion silent-failure sweep (batch a1)
 - equity reconstruction: guard `spot_fee` / `realized_pnl` float() against non-numeric exchange fields; only mark `partial_unpriced` on a genuine ticker-fetch failure (not a true zero price); skip anchor when `hit_terminus=True` so unified-margin OKX/Bybit uPnL is not double-counted (F-06/F-08/F-09/F-11, C01-05)
