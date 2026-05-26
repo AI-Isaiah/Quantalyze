@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.9.14] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: analytics recon/ingestion silent-failure sweep (batch a1)
+- equity reconstruction: guard `spot_fee` / `realized_pnl` float() against non-numeric exchange fields; only mark `partial_unpriced` on a genuine ticker-fetch failure (not a true zero price); skip anchor when `hit_terminus=True` so unified-margin OKX/Bybit uPnL is not double-counted (F-06/F-08/F-09/F-11, C01-05)
+- exchange layer: Bybit `closed_pnl` inner except re-raises `RateLimitExceeded` instead of swallowing it; OKX partial-failure now re-raises rather than returning a silent truncated page (F-05, C13-04)
+- job worker: log when `_update_cursor` skips the DB write so a stalled/stagnant cursor is observable (F-04)
+- review + red-team hardening across db / funding_fetch / position_reconstruction; equity-curve golden fixtures refreshed to the corrected reconstruction
+
+
 ## [0.24.9.13] - 2026-05-26
 ### Fixed — audit-2026-05-07 cluster review: analytics credential + simulator integrity (batch a5)
 - `process_key` and `long_fetch` ingestion now reject write-capable / trade-enabled exchange API keys BEFORE encryption+persistence — a key with withdrawal/trade scope is refused at the boundary instead of being stored (NEW-C31-01)
