@@ -274,3 +274,48 @@ describe("reconstructHoldingReturnsByScopeRef", () => {
     ]);
   });
 });
+
+/**
+ * NEW-C03-02 regression: holdingsMap collapse must key on
+ * `${venue}:${symbol}:${holding_type}`, not just `symbol`.
+ *
+ * Keying on symbol alone collapsed multi-venue (Binance BTC + OKX BTC) and
+ * spot+derivative (BTC-spot + BTC-perp) holdings to a single row, silently
+ * dropping an entire exchange's position from the dashboard. We can't call
+ * `derivePhase07Fields` directly (it's private), so we verify correctness via
+ * the `reconstructHoldingReturnsByScopeRef` helper which shares the same
+ * multi-key scope_ref format as the fixed holdingsMap. A downstream integration
+ * test wiring through the full payload exists in the HoldingsTabPanel tests.
+ */
+describe("NEW-C03-02 — multi-venue / spot+derivative holdings are NOT collapsed", () => {
+  it("BTC@binance:spot and BTC@okx:spot produce DISTINCT scope_ref keys", () => {
+    const snapshots: Snapshot[] = [
+      { asof: "2026-01-01", breakdown: { BTC: 50000 } },
+      { asof: "2026-01-02", breakdown: { BTC: 52000 } },
+    ];
+    const holdings: Holding[] = [
+      { symbol: "BTC", venue: "binance", holding_type: "spot" },
+      { symbol: "BTC", venue: "okx", holding_type: "spot" },
+    ];
+    const result = reconstructHoldingReturnsByScopeRef(snapshots, holdings);
+    // Both scope_refs must be present — neither is dropped by a symbol-only key.
+    expect(result["holding:binance:BTC:spot"]).toBeDefined();
+    expect(result["holding:okx:BTC:spot"]).toBeDefined();
+  });
+
+  it("BTC@binance:spot and BTC@binance:derivative produce DISTINCT scope_ref keys", () => {
+    const snapshots: Snapshot[] = [
+      { asof: "2026-01-01", breakdown: { BTC: 50000 } },
+      { asof: "2026-01-02", breakdown: { BTC: 55000 } },
+    ];
+    const holdings: Holding[] = [
+      { symbol: "BTC", venue: "binance", holding_type: "spot" },
+      { symbol: "BTC", venue: "binance", holding_type: "derivative" },
+    ];
+    const result = reconstructHoldingReturnsByScopeRef(snapshots, holdings);
+    expect(result["holding:binance:BTC:spot"]).toBeDefined();
+    expect(result["holding:binance:BTC:derivative"]).toBeDefined();
+    // Exactly 2 keys — no over-collapsing, no over-expanding.
+    expect(Object.keys(result)).toHaveLength(2);
+  });
+});

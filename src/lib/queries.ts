@@ -1861,17 +1861,27 @@ function derivePhase07Fields(
     ),
   ).sort();
 
-  // Collapse holdings to latest-asof-per-symbol via linear scan of the
-  // max-asof comparator. Input order is IRRELEVANT for correctness — the
-  // `.order("asof", { ascending: false })` clause on the PostgREST query
-  // above is a log-inspection hedge (newest rows render first in debug
-  // dumps), not a correctness requirement. Do NOT flip the comparator to
-  // "first-seen wins" thinking ordering is guaranteed — removing `.order()`
-  // would silently regress that assumption.
+  // Collapse holdings to latest-asof-per-{venue}:{symbol}:{holding_type}
+  // via linear scan of the max-asof comparator. Input order is IRRELEVANT
+  // for correctness — the `.order("asof", { ascending: false })` clause on
+  // the PostgREST query above is a log-inspection hedge (newest rows render
+  // first in debug dumps), not a correctness requirement. Do NOT flip the
+  // comparator to "first-seen wins" thinking ordering is guaranteed —
+  // removing `.order()` would silently regress that assumption.
+  //
+  // NEW-C03-02: Key by `${venue}:${symbol}:${holding_type}`, not just
+  // `symbol`. Keying on symbol alone silently collapsed multi-venue
+  // (Binance BTC + OKX BTC) and spot+derivative (BTC-spot + BTC-perp)
+  // holdings to a single row — only the latest-asof survived, so a whole
+  // exchange's position could disappear from the dashboard and the
+  // surviving venue could flip between page loads. The scope_ref keyspace
+  // used everywhere else in the pipeline already uses this triple-key
+  // format (see reconstructHoldingReturnsByScopeRef, buildHoldingRef).
   const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
   for (const r of holdingsRows) {
-    const existing = holdingsMap.get(r.symbol);
-    if (!existing || r.asof > existing.asof) holdingsMap.set(r.symbol, r);
+    const key = `${r.venue}:${r.symbol}:${r.holding_type}`;
+    const existing = holdingsMap.get(key);
+    if (!existing || r.asof > existing.asof) holdingsMap.set(key, r);
   }
   const holdingsSummary = Array.from(holdingsMap.values()).map((r) => ({
     symbol: r.symbol,
