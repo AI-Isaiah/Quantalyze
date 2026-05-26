@@ -528,25 +528,35 @@ function KpiStrip() {
 
   // 9 cells when a comparator is active (mockup contract). When NONE, the
   // α + IR slots collapse — render 7 cells instead of leaving empty space.
+  //
+  // Tone is computed ONLY when the underlying value is finite — a NaN/Inf
+  // metric formats to "—" but would otherwise render that dash with a red
+  // "negative" tint, which conveys a false signal. Also: max_dd at exactly
+  // 0 (no drawdown observed) gets no negative tint — a zero isn't bad. (NEW-C20-09)
+  const signTone = (v: number): "positive" | "negative" | undefined =>
+    Number.isFinite(v) ? (v >= 0 ? "positive" : "negative") : undefined;
+  const maxDdTone = (v: number): "negative" | undefined =>
+    Number.isFinite(v) && v < 0 ? "negative" : undefined;
+
   const items: Array<{ label: string; value: string; tone?: "positive" | "negative" }> = [
-    { label: "Cum. Return", value: pctSigned(m.cum_ret, 1), tone: m.cum_ret >= 0 ? "positive" : "negative" },
-    { label: "CAGR", value: pctSigned(m.cagr, 1), tone: m.cagr >= 0 ? "positive" : "negative" },
+    { label: "Cum. Return", value: pctSigned(m.cum_ret, 1), tone: signTone(m.cum_ret) },
+    { label: "CAGR", value: pctSigned(m.cagr, 1), tone: signTone(m.cagr) },
     { label: "Sharpe", value: num(m.sharpe) },
     { label: "Sortino", value: num(m.sortino) },
     { label: "Calmar", value: num(m.calmar) },
-    { label: "Max DD", value: pct(m.max_dd, 1), tone: "negative" },
+    { label: "Max DD", value: pct(m.max_dd, 1), tone: maxDdTone(m.max_dd) },
     { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
   ];
   if (j && cmpKey !== "none") {
     items.push({
       label: `α vs ${cn}`,
       value: pctSigned(j.alpha, 1),
-      tone: j.alpha >= 0 ? "positive" : "negative",
+      tone: signTone(j.alpha),
     });
     items.push({
       label: `IR vs ${cn}`,
       value: num(j.info_ratio),
-      tone: j.info_ratio >= 0 ? "positive" : "negative",
+      tone: signTone(j.info_ratio),
     });
   }
   // Responsive grid: 9 cells need narrower cells on lg. Use grid-cols-9 only
