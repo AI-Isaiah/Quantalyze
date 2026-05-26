@@ -127,6 +127,28 @@ export type GetUserRolesResult =
  * fresh-per-request before landing such a refactor. Cross-request
  * caching (JWT custom claims, Edge Config) is tracked as a Sprint 7
  * follow-up — see ADR-0005.
+ *
+ * NEW-C15-03 (audit-2026-05-26 red-team): INTRA-REQUEST TOCTOU WINDOW.
+ * The memo FREEZES the role set for the lifetime of the SupabaseClient
+ * used in a given request. A role REVOKE that lands between the outer
+ * `withRole` gate and a subsequent `getUserRoles`/`requireRole` call on
+ * the SAME client (e.g. inside an `after()`-deferred task, or a long-
+ * running streaming response) will NOT be observed — the cached promise
+ * returns the pre-revoke role set. This creates an intra-request
+ * staleness window that `requireAdmin` (which always re-queries fresh)
+ * does NOT share, so the two verification paths DISAGREE after a revoke.
+ *
+ * MANDATORY RULE: privileged RPCs (sanitize_user, log_audit_event_service,
+ * or any SECURITY DEFINER function) MUST be gated by `requireAdmin` or
+ * `isAdminUser` — NOT by `getUserRoles`/`requireRole` after the initial
+ * `withRole` check. These helpers issue a fresh DB query and are
+ * unaffected by the memo. See {@link requireAdmin} for the recommended
+ * TOCTOU-close pattern.
+ *
+ * Use {@link getUserRoles} only for read-only authorization decisions
+ * that can tolerate the intra-request window (e.g. reading the role set
+ * to shape a UI response, where a stale 'admin' grants no extra write
+ * privilege beyond what is already gated at the RPC level).
  */
 const rolesByClient = new WeakMap<SupabaseClient, Map<string, Promise<GetUserRolesResult>>>();
 
