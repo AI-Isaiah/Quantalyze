@@ -44,6 +44,10 @@ const KEYS = [
     last_sync_at: "2026-05-21T00:00:00Z",
     account_balance_usdt: 1000,
     created_at: "2026-04-01T00:00:00Z",
+    // NEW-C03-09: fields now required on MyAllocationDashboardPayload.apiKeys
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
   },
   {
     id: "k2",
@@ -54,6 +58,9 @@ const KEYS = [
     last_sync_at: "2026-05-21T00:00:00Z",
     account_balance_usdt: 500,
     created_at: "2026-04-15T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
   },
 ];
 

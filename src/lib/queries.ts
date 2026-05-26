@@ -1341,6 +1341,12 @@ export interface MyAllocationDashboardPayload {
       > | null;
     };
   }>;
+  // NEW-C03-09: widen the inline type to include all columns projected by
+  // getUserApiKeys. The previous 8-field subset dropped disconnected_at,
+  // sync_error, and last_429_at — the three columns that drive the
+  // Disconnected/Reconnect UI, rate-limited cooldown countdown, and
+  // sync-error messaging. Without them the revoked-key treatment silently
+  // degraded (JSDoc on getUserApiKeys notes disconnected_at drives Reconnect).
   apiKeys: Array<{
     id: string;
     exchange: string;
@@ -1350,6 +1356,12 @@ export interface MyAllocationDashboardPayload {
     last_sync_at: string | null;
     account_balance_usdt: number | null;
     created_at: string;
+    /** Phase 06 / migration 066 — sanitised error message from the sync worker. */
+    sync_error: string | null;
+    /** Phase 06 / ISSUE-006 / migration 068 — last ccxt 429 timestamp. */
+    last_429_at: string | null;
+    /** Migration 075 — non-null = key is soft-disconnected; drives Reconnect UI. */
+    disconnected_at: string | null;
   }>;
   alertCount: {
     critical: number;
