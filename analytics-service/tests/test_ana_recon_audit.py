@@ -314,27 +314,39 @@ def test_c01_18_intra_day_sort_stable_secondary_key():
 
 
 # ---------------------------------------------------------------------------
-# NEW-C12-01 — Phase-2 RateLimitExceeded swallowed by inner except
+# NEW-C12-01 — Phase-2 RateLimitExceeded re-raised to outer handler
 # ---------------------------------------------------------------------------
 
 
-def test_c12_01_phase2_rate_limit_inner_except_documented():
-    """NEW-C12-01: documents that ccxt.RateLimitExceeded raised inside
-    fetch_raw_trades is caught by the inner `except Exception` before
-    reaching the outer `except ccxt.RateLimitExceeded` that stamps 429.
+def test_c12_01_phase2_rate_limit_reaches_outer_handler():
+    """NEW-C12-01: ccxt.RateLimitExceeded raised inside fetch_raw_trades
+    must propagate past the inner `except Exception` so the outer
+    `except ccxt.RateLimitExceeded` can stamp last_429_at and trip the
+    circuit breaker.
 
-    This test verifies the exception hierarchy that makes it exploitable.
-    A real fix requires re-ordering or split handling.
+    Verified by inspecting the source: the inner handler now has an explicit
+    `except ccxt.RateLimitExceeded: ... raise` BEFORE `except Exception`.
     """
     import ccxt
+    import inspect
+    from services import job_worker
 
     # Verify RateLimitExceeded IS a subclass of Exception (the bug precondition)
-    assert issubclass(ccxt.RateLimitExceeded, Exception), (
-        "ccxt.RateLimitExceeded must be a subclass of Exception "
-        "for NEW-C12-01 to be exploitable"
+    assert issubclass(ccxt.RateLimitExceeded, Exception)
+
+    # Verify the fix is present: find run_sync_trades_job source and check
+    # that the RateLimitExceeded except clause appears before the broad except.
+    src = inspect.getsource(job_worker.run_sync_trades_job)
+    rl_pos = src.find("except ccxt.RateLimitExceeded")
+    broad_pos = src.find("except Exception as e")
+    assert rl_pos != -1, "except ccxt.RateLimitExceeded not found in run_sync_trades_job"
+    assert broad_pos != -1, "except Exception as e not found in run_sync_trades_job"
+    # The RateLimitExceeded handler must appear BEFORE the broad Exception handler
+    # in the Phase-2 inner try block to intercept before the broad clause.
+    assert rl_pos < broad_pos, (
+        f"NEW-C12-01 fix not present: RateLimitExceeded handler at pos {rl_pos} "
+        f"must come before broad Exception handler at pos {broad_pos}"
     )
-    # Post-fix: the inner except should re-raise RateLimitExceeded before
-    # the outer except Exception catches it.
 
 
 # ---------------------------------------------------------------------------

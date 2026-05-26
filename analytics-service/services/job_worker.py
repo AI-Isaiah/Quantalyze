@@ -724,6 +724,16 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                     # fee_currency_mismatch*), so this is effectively a
                     # union.
                     exchange_dq_flags.update(fetch_raw_dq_flags)
+            except ccxt.RateLimitExceeded:
+                # NEW-C12-01: RateLimitExceeded (⊂ Exception) was previously
+                # absorbed by the broad `except Exception` below, so the outer
+                # `except ccxt.RateLimitExceeded` at the top-level try never
+                # ran → _stamp_429 was never called → circuit breaker never
+                # tripped → next job immediately re-hammered the exchange.
+                # Re-raise here so the outer handler stamps the 429 and the
+                # circuit breaker fires.
+                get_and_clear_last_dq_flags()
+                raise
             except Exception as e:
                 # Drain even on failure so a partial accumulation does not
                 # leak into the next call on this asyncio task. The drained
