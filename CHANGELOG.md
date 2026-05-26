@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.9.16] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: analytics match + cron router (batch a3)
+- match recompute cron: chunk oversized IN-list fetches (avoids PostgREST URL/row limits) and cap the results array; count actual DELETE rows; log warm-up drops (NEW-C08-02…05, NEW-C32-01/02)
+- match router: role-check enforcement, force-throttle guard, `asyncio.shield` around the critical recompute section, demo_only wiring (NEW-C08-06/07/09/10)
+- review + red-team hardening of the match/cron paths (H-1/H-2/M-1/M-2/M-3/L-1/L-2)
+
+
 ## [0.24.9.15] - 2026-05-26
 ### Fixed — audit-2026-05-07 cluster review: analytics runner + risk metrics (batch a2)
 - risk-of-ruin semantics corrected: `p==0.5` (no edge) returns `None` rather than a misleading `1.0`; a `r=0` decay yields a low ruin estimate instead of certain ruin (red-team)
