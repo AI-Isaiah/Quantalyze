@@ -403,13 +403,22 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   );
 
   if (rpcErr) {
+    // The RPC is SECURITY DEFINER and its RAISE EXCEPTION messages
+    // (migration 082/131) echo internal state — the literal holding_ref,
+    // strategy_id, row index, and the `auth.uid() <> p_allocator_id` guard
+    // text — plus any raw Postgres constraint/column names on an unexpected
+    // error. Echoing rpcErr.message verbatim to an allocator client leaked
+    // that schema detail (api-contract M-0295). Log the full message
+    // server-side for diagnostics; return a stable, non-leaking message to
+    // the client (matches the allocator/holdings/sync sibling and the
+    // "Malformed RPC envelope" branch below).
     console.error("scenario_commit RPC error", {
       user: user.id,
       message: rpcErr.message,
       code: rpcErr.code,
     });
     return NextResponse.json(
-      { error: "Commit failed", message: rpcErr.message },
+      { error: "Commit failed", message: "Could not commit scenario. Try again in a moment." },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
