@@ -1696,6 +1696,10 @@ async def _fetch_and_price_window(
     # own number. Breakdown gets a "STARTING_BALANCE" entry so the
     # components still sum to value_usd.
     anchor, anchor_partial_symbols = await _fetch_current_equity(exchange, venue)
+    # M-1 / H-02: initialise anchor-skip DQ fields (populated inside the block
+    # below when skipping fires; remain empty/False when anchor is not attempted).
+    _anchor_skipped_partial_ticker: list[str] = []
+    _anchor_skipped_implausible: bool = False
     if rows and anchor is not None:
         last_value = float(rows[-1].get("value_usd") or 0.0)
         offset = anchor - last_value
@@ -1716,20 +1720,31 @@ async def _fetch_and_price_window(
                 len(anchor_partial_symbols),
                 sorted(anchor_partial_symbols),
             )
+            # M-1 / H-02: stamp DQ telemetry so the admin health card can
+            # distinguish "anchor succeeded" from "anchor skipped due to
+            # partial ticker failures". The comment on NEW-C01-02/C01-03
+            # promised this flag but it was never written.
+            _anchor_skipped_partial_ticker = sorted(anchor_partial_symbols)
+            _anchor_skipped_implausible = False
         elif _implausible_anchor:
             logger.warning(
                 "anchor: offset=%.2f exceeds 5× last_value=%.2f — "
                 "skipping anchor (anchor_offset_implausible)",
                 offset, last_value,
             )
-        elif abs(offset) > 0.005:
-            for r in rows:
-                r["value_usd"] = round(float(r["value_usd"] or 0.0) + offset, 2)
-                bd = dict(r.get("breakdown") or {})
-                bd["STARTING_BALANCE"] = round(
-                    float(bd.get("STARTING_BALANCE", 0.0)) + offset, 2,
-                )
-                r["breakdown"] = _cap_breakdown(bd)
+            _anchor_skipped_partial_ticker = []
+            _anchor_skipped_implausible = True
+        else:
+            _anchor_skipped_partial_ticker = []
+            _anchor_skipped_implausible = False
+            if abs(offset) > 0.005:
+                for r in rows:
+                    r["value_usd"] = round(float(r["value_usd"] or 0.0) + offset, 2)
+                    bd = dict(r.get("breakdown") or {})
+                    bd["STARTING_BALANCE"] = round(
+                        float(bd.get("STARTING_BALANCE", 0.0)) + offset, 2,
+                    )
+                    r["breakdown"] = _cap_breakdown(bd)
 
     # NEW-C01-11: when hit_terminus, the replay starts from quantities={}
     # (zero cash) because the pre-terminus deposit that funds open perps
@@ -1755,6 +1770,10 @@ async def _fetch_and_price_window(
         # NEW-C01-11: dashboard must suppress absolute-level/drawdown before
         # the terminus if this is True.
         "pre_terminus_balance_unknown": hit_terminus,
+        # M-1 / H-02: anchor-skip DQ flags so the admin health card can
+        # distinguish "anchor succeeded" from "anchor skipped".
+        "anchor_partial_ticker_symbols": _anchor_skipped_partial_ticker,
+        "anchor_offset_implausible": _anchor_skipped_implausible,
     }
     return rows, hit_terminus, telemetry
 
@@ -1802,6 +1821,16 @@ async def _fetch_current_equity(
                 continue
             asset_upper = str(asset).upper()
             if asset_upper in STABLECOINS:
+                total += q
+                continue
+            # red-team/H-2: _EXTRA_STABLECOIN_SUFFIXES (USDE, PYUSD, USDB)
+            # are NOT in STABLECOINS (by design — they drive symbol-suffix
+            # logic not price-skip logic). But they ARE stable-value assets.
+            # Without this guard, fetch_ticker("USDE/USDT") is attempted; on
+            # venues without a liquid pair it fails → partial_unpriced.add →
+            # anchor unconditionally skipped for every OKX account holding
+            # USDe collateral (extremely common). Treat them as $1 per unit.
+            if any(asset_upper == suf for suf in _EXTRA_STABLECOIN_SUFFIXES):
                 total += q
                 continue
             # Price non-stablecoin spot via a single ticker call. Best-
@@ -2113,6 +2142,10 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
             # NEW-C01-11: flag propagated so dashboard can suppress
             # absolute-level/drawdown display before the terminus.
             "pre_terminus_balance_unknown": telemetry.get("pre_terminus_balance_unknown", False),
+            # M-1 / H-02: anchor-skip DQ flags so the admin health card can
+            # distinguish "anchor succeeded" from "anchor skipped".
+            "anchor_partial_ticker_symbols": telemetry.get("anchor_partial_ticker_symbols", []),
+            "anchor_offset_implausible": telemetry.get("anchor_offset_implausible", False),
         },
     )
     logger.info(
