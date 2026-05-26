@@ -218,9 +218,14 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
             error_kind="transient",
         )
 
-    # NEW-C31-01: reject write-capable keys BEFORE any encryption step.
-    # val.read_only is None for CSV (not applicable); only block on
-    # explicit False (exchange key with trade/withdraw scope confirmed).
+    # Unified rejection gate: covers both ordinary validation failures
+    # (not val.valid — e.g. AUTH_FAILED, PERMISSION_DENIED) and
+    # NEW-C31-01: write-capable key scope violations that must be caught
+    # BEFORE any encryption step. The read_only arm only blocks on
+    # explicit False — None (CSV, scope not applicable) is not rejected.
+    # The error_code arm fires even when read_only is True (IMP-2: a
+    # broker that sets a scope error_code without clearing read_only=True
+    # must still be rejected — see test "error_code_wins").
     _scope_rejected = (
         not val.valid
         or val.read_only is False

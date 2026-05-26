@@ -49,10 +49,8 @@ class TestSimulateAddCandidate:
             assert key in result["deltas"]
             assert isinstance(result["deltas"][key], float)
 
-        # Before / after curves are present and aligned (they may differ in
-        # length because the "before" curve uses the full intersected window
-        # of existing strategies while the "after" curve is the 3-way
-        # intersection, but both must be non-empty for a happy path).
+        # Both curves cover the same candidate∩portfolio intersection
+        # window (NEW-C11-03 fix) and must be non-empty for a happy path.
         assert len(result["equity_curve_current"]) > 0
         assert len(result["equity_curve_proposed"]) > 0
         for point in result["equity_curve_current"]:
