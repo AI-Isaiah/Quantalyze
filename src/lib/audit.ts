@@ -129,6 +129,14 @@ export function classifyAuditEmitError(
  * (DSN misconfig, network down) never masks the original audit-emit
  * exception. Mirrors the lazy-import pattern in
  * `src/app/api/for-quants-lead/route.ts` and `src/app/error.tsx`.
+ *
+ * NEW-C10-03 (audit-2026-05-26 red-team): the prior implementation used
+ * `void import(...)...` which returns synchronously — the in-flight
+ * dynamic-import promise was detached before captureException resolved.
+ * Under `after()` on a cold-finish the lambda can be reaped before Sentry
+ * flushes, producing a double silent failure: no audit row AND no Sentry
+ * event. Fixed by returning the import chain as a Promise (awaited by the
+ * caller) so the `waitUntil` window stays open until capture settles.
  */
 function reportToSentry(
   err: unknown,
@@ -137,23 +145,19 @@ function reportToSentry(
     extra?: Record<string, unknown>;
     level?: "fatal" | "error" | "warning";
   } = {},
-): void {
-  try {
-    void import("@sentry/nextjs")
-      .then((Sentry) => {
-        try {
-          Sentry.captureException(err, options);
-        } catch {
-          // Sentry SDK threw — swallow. The caller has already logged
-          // the original error to stderr via the stable `[audit]` prefix.
-        }
-      })
-      .catch(() => {
-        // Sentry import failed — swallow. Same reasoning.
-      });
-  } catch {
-    // import() construction failed (extremely unlikely) — swallow.
-  }
+): Promise<void> {
+  return import("@sentry/nextjs")
+    .then((Sentry) => {
+      try {
+        Sentry.captureException(err, options);
+      } catch {
+        // Sentry SDK threw — swallow. The caller has already logged
+        // the original error to stderr via the stable `[audit]` prefix.
+      }
+    })
+    .catch(() => {
+      // Sentry import failed — swallow. Same reasoning.
+    });
 }
 
 /**
@@ -555,8 +559,17 @@ export function capAuditMetadata<T>(value: T, depth = 0): T {
     return value.map((v) => capAuditMetadata(v, depth + 1)) as unknown as T;
   }
   if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
+    // NEW-C10-06 (audit-2026-05-26 red-team): use Object.create(null) so the
+    // accumulator has no prototype to pollute. Skip reserved property names
+    // but PRESERVE them as a forensic sentinel (silent erasure is the worse
+    // failure for an audit boundary) so the audit row still records the datum.
+    const out = Object.create(null) as Record<string, unknown>;
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (k === "__proto__" || k === "constructor" || k === "prototype") {
+        // Store under a safe sentinel key so the value is not silently lost.
+        out[`__sanitized_key_${k}`] = capAuditMetadata(v, depth + 1);
+        continue;
+      }
       out[k] = capAuditMetadata(v, depth + 1);
     }
     return out as unknown as T;
@@ -666,11 +679,15 @@ export async function emit(
   let rpcError: { code?: string | null; message?: string } | null = null;
   let thrown: unknown = null;
   try {
+    // NEW-C10-05 (audit-2026-05-26 security+code-review): apply capAuditMetadata
+    // centrally so ALL emit paths are bounded — not just the opt-in callers
+    // (previously only partner-import called it). This is pure + idempotent:
+    // partner-import can keep its explicit capAuditMetadata call without penalty.
     const { error } = await client.rpc("log_audit_event", {
       p_action: event.action,
       p_entity_type: event.entity_type,
       p_entity_id: event.entity_id,
-      p_metadata: event.metadata ?? {},
+      p_metadata: capAuditMetadata(event.metadata ?? {}),
     });
     rpcError = error;
   } catch (err) {
@@ -702,7 +719,8 @@ export async function emit(
       "[audit] log_audit_event permission_denied (re-throwing):",
       { ...eventContext, code: rpcError?.code, message: rpcError?.message },
     );
-    reportToSentry(errForDispatch, {
+    // NEW-C10-03: await so the `waitUntil` window stays open until capture settles.
+    await reportToSentry(errForDispatch, {
       tags: {
         audit_permission_denied: "true",
         audit_path: "log_audit_event",
@@ -723,7 +741,8 @@ export async function emit(
         transient_failure_count: auditEmitTransientFailures,
       },
     );
-    reportToSentry(errForDispatch, {
+    // NEW-C10-03: await so the `waitUntil` window stays open until capture settles.
+    await reportToSentry(errForDispatch, {
       tags: { audit_emit_transient: "true", audit_path: "log_audit_event" },
       extra: eventContext,
       level: "error",
@@ -742,7 +761,8 @@ export async function emit(
         (thrown instanceof Error ? thrown.message : String(thrown)),
     },
   );
-  reportToSentry(errForDispatch, {
+  // NEW-C10-03: await so the `waitUntil` window stays open until capture settles.
+  await reportToSentry(errForDispatch, {
     tags: { audit_path: "log_audit_event" },
     extra: eventContext,
     level: "error",
@@ -763,12 +783,13 @@ export async function emitAsUser(
   let rpcError: { code?: string | null; message?: string } | null = null;
   let thrown: unknown = null;
   try {
+    // NEW-C10-05: capAuditMetadata applied centrally — same rationale as emit().
     const { error } = await adminClient.rpc("log_audit_event_service", {
       p_user_id: actingUserId,
       p_action: event.action,
       p_entity_type: event.entity_type,
       p_entity_id: event.entity_id,
-      p_metadata: event.metadata ?? {},
+      p_metadata: capAuditMetadata(event.metadata ?? {}),
     });
     rpcError = error;
   } catch (err) {
@@ -801,7 +822,8 @@ export async function emitAsUser(
       "[audit] log_audit_event_service permission_denied (re-throwing):",
       { ...eventContext, code: rpcError?.code, message: rpcError?.message },
     );
-    reportToSentry(errForDispatch, {
+    // NEW-C10-03: await so the `waitUntil` window stays open until capture settles.
+    await reportToSentry(errForDispatch, {
       tags: {
         audit_permission_denied: "true",
         audit_path: "log_audit_event_service",
@@ -822,7 +844,8 @@ export async function emitAsUser(
         transient_failure_count: auditEmitTransientFailures,
       },
     );
-    reportToSentry(errForDispatch, {
+    // NEW-C10-03: await so the `waitUntil` window stays open until capture settles.
+    await reportToSentry(errForDispatch, {
       tags: {
         audit_emit_transient: "true",
         audit_path: "log_audit_event_service",
@@ -843,7 +866,8 @@ export async function emitAsUser(
         (thrown instanceof Error ? thrown.message : String(thrown)),
     },
   );
-  reportToSentry(errForDispatch, {
+  // NEW-C10-03: await so the `waitUntil` window stays open until capture settles.
+  await reportToSentry(errForDispatch, {
     tags: { audit_path: "log_audit_event_service" },
     extra: eventContext,
     level: "error",
