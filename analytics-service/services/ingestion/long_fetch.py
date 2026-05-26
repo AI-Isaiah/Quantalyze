@@ -192,7 +192,16 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
 
     # 1. validate
     val = await adapter.validate(request)
-    if not val.valid:
+    # NEW-C31-01: reject write-capable keys BEFORE any encryption step.
+    # val.read_only is None for CSV (not applicable); only block on
+    # explicit False (exchange key with trade/withdraw scope confirmed).
+    _scope_rejected = (
+        not val.valid
+        or val.read_only is False
+        or val.error_code in {"TRADE_SCOPE", "WITHDRAW_SCOPE"}
+    )
+    if _scope_rejected:
+        _reject_code = val.error_code or "VALIDATION_FAILED"
         supabase.rpc(
             "transition_strategy_verification",
             {
@@ -201,18 +210,18 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
                 "p_metadata": {
                     "errors": [
                         {
-                            "code": val.error_code,
+                            "code": _reject_code,
                             "human_message": val.human_message,
                         }
                     ]
                 },
             },
         ).execute()
-        permanent_codes = {"AUTH_FAILED", "PERMISSION_DENIED"}
+        permanent_codes = {"AUTH_FAILED", "PERMISSION_DENIED", "TRADE_SCOPE", "WITHDRAW_SCOPE"}
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
-            error_message=f"validate failed: {val.error_code}",
-            error_kind="permanent" if val.error_code in permanent_codes else "transient",
+            error_message=f"validate failed: {_reject_code}",
+            error_kind="permanent" if _reject_code in permanent_codes else "transient",
         )
 
     supabase.rpc(

@@ -690,7 +690,16 @@ async def process_key(
 
     # validate
     val = await adapter.validate(submission)
-    if not val.valid:
+    # NEW-C31-01: reject write-capable keys BEFORE any encryption step.
+    # val.read_only is None for CSV (not applicable); only block on
+    # explicit False (exchange key with trade/withdraw scope confirmed).
+    _scope_rejected = (
+        not val.valid
+        or val.read_only is False
+        or val.error_code in {"TRADE_SCOPE", "WITHDRAW_SCOPE"}
+    )
+    if _scope_rejected:
+        _reject_code = val.error_code or "VALIDATION_FAILED"
         supabase.rpc(
             "transition_strategy_verification",
             {
@@ -699,7 +708,7 @@ async def process_key(
                 "p_metadata": {
                     "errors": [
                         {
-                            "code": val.error_code,
+                            "code": _reject_code,
                             "human_message": val.human_message,
                         }
                     ]
@@ -707,7 +716,7 @@ async def process_key(
             },
         ).execute()
         return _envelope_error(
-            val.error_code, val.human_message, correlation_id, verification_id
+            _reject_code, val.human_message, correlation_id, verification_id
         )
 
     supabase.rpc(

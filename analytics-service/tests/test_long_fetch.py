@@ -332,6 +332,147 @@ def test_timeout_per_kind_set():
     assert TIMEOUT_PER_KIND["process_key_long"] == 30 * 60
 
 
+# ---------------------------------------------------------------------------
+# NEW-C31-01 — scope gate regression (read_only=False must be rejected)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_code,read_only",
+    [
+        ("TRADE_SCOPE", False),
+        ("WITHDRAW_SCOPE", False),
+        ("WITHDRAW_SCOPE", True),  # edge: error_code wins even if read_only is True
+    ],
+    ids=["trade_scope", "withdraw_scope", "error_code_wins"],
+)
+async def test_long_fetch_rejects_write_capable_key(
+    error_code: str, read_only: bool
+) -> None:
+    """NEW-C31-01 regression: a key returning TRADE_SCOPE or WITHDRAW_SCOPE
+    must be rejected by long_fetch BEFORE encryption, transitioning the
+    verification back to 'draft'.
+
+    Pre-fix: only `not val.valid` was tested; val.read_only=False / a
+    TRADE_SCOPE error_code passed silently through to fetch_raw and
+    encryption because validate_key_permissions sets valid=True the moment
+    fetch_balance() succeeds and only then derives the scope error.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-scope",
+        "kind": "process_key_long",
+        "strategy_id": "s-scope",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-scope",
+            "source": "binance",
+            "flow_type": "onboard",
+            "correlation_id": "cid-scope",
+            "context": {"strategy_id": "s-scope"},
+        },
+    }
+
+    scope_adapter = MagicMock()
+    scope_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,  # fetch_balance succeeded — adapter says valid
+            read_only=read_only,
+            error_code=error_code,
+            human_message="Key has trading permissions.",
+            debug_context={},
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=scope_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    # Must fail permanently — scope violations are not transient.
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+
+    # fetch_raw MUST NOT have been called — no broker round-trip after rejection.
+    scope_adapter.fetch_raw.assert_not_called()
+
+    # Verification must have been transitioned back to draft.
+    rpc_names = [c.args[0] for c in sb.rpc.call_args_list]
+    assert "transition_strategy_verification" in rpc_names, (
+        "Scope rejection must call transition_strategy_verification to set "
+        "status=draft. Pre-fix: the validate-failure path was bypassed and "
+        "the row was left in whatever pre-validate state it had."
+    )
+    # Find the draft transition and confirm it carries the scope error code.
+    for call in sb.rpc.call_args_list:
+        if call.args and call.args[0] == "transition_strategy_verification":
+            meta = call.args[1].get("p_metadata", {})
+            if call.args[1].get("p_new_status") == "draft":
+                errors = meta.get("errors", [])
+                assert errors, "Draft transition must carry the scope error code"
+                assert errors[0]["code"] == error_code
+                break
+    else:
+        raise AssertionError("No draft transition RPC found")
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_csv_read_only_none_not_rejected() -> None:
+    """NEW-C31-01 guard: read_only=None (CSV path) must NOT be rejected by
+    the scope gate — only explicit False is a disqualifier for exchange keys."""
+    from services.ingestion.adapter import ValidationResult, MetricsSnapshot, Fingerprint
+
+    job = {
+        "id": "job-csv-ok",
+        "kind": "process_key_long",
+        "strategy_id": "s-csv",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-csv-ok",
+            "source": "csv",
+            "flow_type": "onboard",
+            "correlation_id": "cid-csv",
+            "context": {"strategy_id": "s-csv"},
+        },
+    }
+
+    fake_metrics = MagicMock()
+    fake_metrics.__dict__ = {
+        "sharpe": None, "twr": None, "ytd": None,
+        "max_drawdown": None, "total_pnl": None,
+        "trade_count": 0, "win_rate": None,
+    }
+    fake_fp = MagicMock()
+    fake_fp.to_jsonb.return_value = {"version": 1}
+
+    csv_adapter = MagicMock()
+    csv_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=None,  # CSV: N/A
+            error_code=None,
+            human_message=None,
+            debug_context={},
+        )
+    )
+    csv_adapter.fetch_raw = AsyncMock(return_value=[])
+    csv_adapter.compute_metrics = MagicMock(return_value=fake_metrics)
+    csv_adapter.compute_fingerprint = MagicMock(return_value=fake_fp)
+    csv_adapter.reconstruct_positions = AsyncMock(return_value=[])
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=csv_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    # CSV with read_only=None must NOT be rejected — pipeline should proceed.
+    csv_adapter.fetch_raw.assert_awaited_once()
+
+
 def test_long_fetch_uses_shared_metrics_encoder() -> None:
     """WR-05 regression (REVIEW.md 2026-05-08).
 
