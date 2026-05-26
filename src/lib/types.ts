@@ -1625,7 +1625,19 @@ export interface PositionSnapshot {
 export function signedExposureUsd(s: PositionSnapshot): number {
   const mag = s.size_usd ?? 0;
   if (s.side === "flat") return 0;
-  return s.side === "short" ? -mag : mag;
+  if (s.side === "short") return -mag;
+  if (s.side === "long") return mag;
+  // SF-7 fix: unknown side values (e.g. "liquidated", null from a future schema
+  // extension) previously fell through to return +mag, silently inflating the
+  // net-exposure chart by treating unknowns as longs. Return 0 (fail-safe) and
+  // warn so engineering sees schema drift before it corrupts allocator metrics.
+  if (typeof console !== "undefined") {
+    console.warn(
+      "[signedExposureUsd] unknown side value; treating as 0 to avoid inflating net exposure",
+      { side: s.side, symbol: s.symbol },
+    );
+  }
+  return 0;
 }
 
 /**
@@ -1635,7 +1647,16 @@ export function signedExposureUsd(s: PositionSnapshot): number {
 export function signedExposureBase(s: PositionSnapshot): number {
   const mag = s.size_base ?? 0;
   if (s.side === "flat") return 0;
-  return s.side === "short" ? -mag : mag;
+  if (s.side === "short") return -mag;
+  if (s.side === "long") return mag;
+  // SF-7 fix: mirrors signedExposureUsd — unknown side returns 0 with a warn.
+  if (typeof console !== "undefined") {
+    console.warn(
+      "[signedExposureBase] unknown side value; treating as 0 to avoid inflating net exposure",
+      { side: s.side, symbol: s.symbol },
+    );
+  }
+  return 0;
 }
 
 export interface WeightSnapshot {

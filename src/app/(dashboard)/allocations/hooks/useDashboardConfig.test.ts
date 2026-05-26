@@ -737,6 +737,46 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
     expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBeFalsy();
   });
 
+  it("C1/SF-1: forward-compat — hook shows persisted tiles (not defaults) + mutations never write back", () => {
+    // C1/SF-1: a newer build wrote a blob with future tiles. The OLD build
+    // must:
+    //   (a) display the user's actual persisted tiles — NOT defaultV2Config()
+    //   (b) NEVER write to localStorage, even after a user mutation (e.g.
+    //       setTimeframe), so future-build additive fields are preserved.
+    //
+    // Regression: before this fix the hook loaded defaultV2Config() and the
+    // first mutation overwrote the newer-build blob with current defaults.
+    vi.useFakeTimers();
+    try {
+      const futureTile = { k: "kpi-strip", w: 4 };
+      seedV2Blob([futureTile], { layoutVersion: 9999 });
+      // Record the blob BEFORE mounting so we can assert it's unchanged after.
+      const blobBefore = store.get(STORAGE_KEY);
+
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
+
+      // (a) The hook's config must contain the PERSISTED tile, not defaults.
+      expect(result.current.config.tiles.some((t) => t.k === "kpi-strip")).toBe(true);
+
+      // (b) A user mutation must NOT write to localStorage.
+      act(() => {
+        result.current.setTimeframe("1M");
+      });
+      act(() => {
+        vi.runAllTimers();
+      });
+
+      // Blob is unchanged — no write occurred despite the timeframe mutation.
+      expect(store.get(STORAGE_KEY)).toBe(blobBefore);
+      unmount();
+
+      // Unmount-flush also must not write (the beforeunload/pagehide path).
+      expect(store.get(STORAGE_KEY)).toBe(blobBefore);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("loadV2Config: a v2 blob carrying legacy-shape tiles sets legacy_in_v2_blob recovery flag", () => {
     seedV2Blob([
       // v4 shape mixed with v3 (legacy) shape — looksLikeLegacyTile trips

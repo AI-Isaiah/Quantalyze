@@ -103,10 +103,16 @@ export type WealthPoint = DailyPoint & { readonly __wealthBrand: true };
  * (suggests the input is already in wealth form OR is deeply underwater).
  */
 export function toWealth(points: DailyPoint[]): WealthPoint[] {
-  if (points.length > 0 && points[0].value < 0.5) {
+  // C2/SF-4 fix: threshold was 0.5, which fired a false-positive warn for any
+  // strategy whose cumulative wealth at t=0 is below 50% (e.g. a –55% drawdown
+  // strategy has wealth[0] ≈ 0.45, legitimately below 0.5 after +1 conversion).
+  // Raw RETURN-form arrays start at 0.xx or negative, so they're well below
+  // 0.1 — tightening to 0.1 correctly catches miscalls without false-positives
+  // for deeply-underwater but correctly-converted WEALTH arrays.
+  if (points.length > 0 && points[0].value < 0.1) {
     if (typeof console !== "undefined") {
       console.warn(
-        "[EquityChart] toWealth: first value < 0.5 — check whether input is already in wealth form.",
+        "[EquityChart] toWealth: first value < 0.1 — input is likely raw RETURN-form (not wealth). Did you forget to call toWealth() or add +1?",
         { first: points[0] },
       );
     }
@@ -348,7 +354,20 @@ export function localDateFromISO(s: string): Date {
     return new Date(y, m - 1, d);
   }
   // Non-ISO fallback — defer to the Date constructor (mirrors parseISO).
-  return new Date(s);
+  // SF-10 fix: warn when the fallback is triggered, mirroring parseISO's
+  // deduped-warn pattern. A malformed date here silently produces an Invalid
+  // Date that disables all calendar cells before 1970 with no diagnostic.
+  const fallback = new Date(s);
+  if (typeof console !== "undefined") {
+    if (!parseISOWarnedRef.has(`localDateFromISO:${s}`)) {
+      parseISOWarnedRef.add(`localDateFromISO:${s}`);
+      console.warn(
+        "[EquityChart] localDateFromISO — non-ISO input, falling back to Date constructor",
+        { input: s, valid: !isNaN(fallback.getTime()) },
+      );
+    }
+  }
+  return fallback;
 }
 
 /**
@@ -1478,12 +1497,33 @@ export function EquityChart({
               if (!parseISOWarnedRef.has(`portNaN:${badDate}`)) {
                 parseISOWarnedRef.add(`portNaN:${badDate}`);
                 console.warn(
-                  "[EquityChart] non-finite normalised portfolio value at hover index — suppressing tooltip",
+                  "[EquityChart] non-finite normalised portfolio value at hover index — showing unavailable tooltip",
                   { date: badDate, raw: visible[i]?.value },
                 );
               }
             }
-            return null;
+            // SF-9 fix: return a minimal tooltip body instead of null so the
+            // allocator understands why no data appears at the crosshair position,
+            // rather than seeing a crosshair with no popup and no explanation.
+            return (
+              <div
+                style={{
+                  position: "absolute",
+                  top: 8,
+                  left: Math.min(Math.max(x(i) + 10, 8), width - 200),
+                  background: "var(--color-surface)",
+                  border: "1px solid var(--color-border)",
+                  borderRadius: 6,
+                  padding: "8px 10px",
+                  fontSize: 12,
+                  boxShadow: "0 4px 16px rgba(0,0,0,0.08)",
+                  pointerEvents: "none",
+                  color: "var(--color-text-muted)",
+                }}
+              >
+                Data unavailable for this date
+              </div>
+            );
           }
           const portPct = (portNorm - 1) * 100;
           const benchNorm =
@@ -1567,12 +1607,15 @@ export function EquityChart({
           <div
             aria-label={`Narrow range: ±${((naturalRange / 2) * 100).toFixed(2)}%`}
             data-testid="equity-chart-narrow-range"
+            className="font-mono"
             style={{
               position: "absolute",
               top: 6,
               left: pad.l + 4,
               fontSize: 10,
-              fontFamily: "var(--font-mono)",
+              // I2 fix: removed inline fontFamily — use Tailwind `font-mono`
+              // class (Geist Mono, per DESIGN.md) to match the rest of the
+              // codebase's pattern and avoid a fragile Next.js internal var.
               color: "var(--color-text-muted)",
               background: "var(--color-surface)",
               border: "1px solid var(--color-border)",
@@ -1743,7 +1786,21 @@ function isEquityChartWidgetData(v: unknown): v is EquityChartWidgetData {
 }
 
 export default function EquityChartWidget({ data }: WidgetProps) {
-  const d: EquityChartWidgetData = isEquityChartWidgetData(data) ? data : {};
+  // SF-5 fix: log when a non-null payload fails the shape guard so engineering
+  // sees server API / schema drift before it becomes a silent "warming up" state
+  // that never resolves. The actual fallback to {} (empty state) is correct and
+  // unchanged — we just make the failure visible.
+  const d: EquityChartWidgetData = isEquityChartWidgetData(data)
+    ? data
+    : (() => {
+        if (data != null && typeof console !== "undefined") {
+          console.warn(
+            "[EquityChartWidget] received malformed data payload; rendering empty state",
+            { data },
+          );
+        }
+        return {} as EquityChartWidgetData;
+      })();
   const showBench = useTweakValue("showBench");
 
   // Stabilize the array reference so downstream useMemo deps (minDate,

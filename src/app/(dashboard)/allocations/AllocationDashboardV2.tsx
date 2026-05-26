@@ -168,8 +168,13 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           data-testid="dashboard-recovery-banner"
           className="mb-3 flex items-center justify-between rounded-md border px-4 py-2 text-sm"
           style={{
-            background: "color-mix(in srgb, var(--color-warning) 8%, transparent)",
-            borderColor: "color-mix(in srgb, var(--color-warning) 30%, transparent)",
+            // I3 fix: use explicit DESIGN.md tokens instead of ad-hoc color-mix().
+            // --color-warning-bg (#FEF3C7) and --color-warning-border (#FDE68A)
+            // were added in Phase 09.1 UI-FLAG-01 for exactly this use case.
+            // color-mix() produced a different tint (#FDF5E8) from the named
+            // tokens, causing a visual inconsistency with HoldingsTable warning chips.
+            background: "var(--color-warning-bg)",
+            borderColor: "var(--color-warning-border)",
             color: "var(--color-text-secondary)",
           }}
         >

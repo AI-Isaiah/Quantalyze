@@ -348,4 +348,28 @@ describe("NetExposure — NEW-C21-01 signed exposure (longs vs shorts cancel)", 
     expect(signedExposureUsd(snapshots[1])).toBe(-50000); // short: negative
     expect(signedExposureUsd(snapshots[0]) + signedExposureUsd(snapshots[1])).toBe(0);
   });
+
+  it("SF-7: signedExposureUsd — unknown/future side value returns 0, not +mag (fail-safe, not inflate)", () => {
+    // SF-7 regression: before the fix, the fallthrough arm returned `+mag`
+    // for any side value not matching "flat" or "short" — so an unknown
+    // value like "liquidated" (future schema) or undefined from a backfill
+    // row silently treated the position as long, inflating net exposure.
+    // The correct fail-safe is 0: don't add phantom longs to the chart.
+    const snapshot = {
+      id: "x",
+      strategy_id: "s1",
+      snapshot_date: "2024-01-01",
+      symbol: "BTC",
+      side: "liquidated" as unknown as "long" | "short" | "flat",
+      size_usd: 10000,
+      size_base: 0.2,
+      entry_price: 50000,
+      mark_price: 50000,
+      unrealized_pnl: 0,
+      exchange: null,
+      computed_at: "2024-01-01T00:00:00Z",
+      created_at: "2024-01-01T00:00:00Z",
+    };
+    expect(signedExposureUsd(snapshot)).toBe(0);
+  });
 });

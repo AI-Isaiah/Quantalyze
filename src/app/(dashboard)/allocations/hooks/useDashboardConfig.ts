@@ -144,6 +144,20 @@ function loadLegacyConfig(): LegacyDashboardConfig {
     if (raw) {
       const parsed = JSON.parse(raw) as LegacyDashboardConfig;
       if (parsed.layoutVersion !== LAYOUT_VERSION_LEGACY) {
+        // SF-3 fix: bring legacy hook's version-mismatch reset to parity with
+        // V2 hook — captureToSentry so engineering sees it if the hook is ever
+        // re-activated. Dormant post-v0.15.7.0 but still exported.
+        captureToSentry(
+          new Error("dashboard layout reset (legacy): version_reset"),
+          {
+            level: "warning",
+            tags: { area: "dashboard-config", reason: "legacy_version_reset" },
+            extra: {
+              persisted: parsed.layoutVersion,
+              expected: LAYOUT_VERSION_LEGACY,
+            },
+          },
+        );
         return { tiles: LEGACY_DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION_LEGACY };
       }
       if (Array.isArray(parsed.tiles) && parsed.tiles.length > 0) {
@@ -157,6 +171,11 @@ function loadLegacyConfig(): LegacyDashboardConfig {
     if (typeof console !== "undefined") {
       console.warn("[useDashboardConfig] loadLegacyConfig failed; falling back to defaults", err);
     }
+    // SF-3 fix: captureToSentry mirrors V2 hook's catch-path treatment.
+    captureToSentry(err ?? new Error("dashboard loadLegacyConfig failed"), {
+      level: "warning",
+      tags: { area: "dashboard-config", reason: "legacy_parse_failed" },
+    });
   }
   return { tiles: LEGACY_DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION_LEGACY };
 }
@@ -481,8 +500,13 @@ function defaultV2Config(): DashboardConfig {
  * `wasReset: true` means the returned `config` is the default layout, NOT
  * the user's persisted layout — callers in cross-tab sync paths skip
  * adopting a reset result to avoid clobbering valid in-memory state.
+ *
+ * `readOnly: true` is a SEPARATE flag meaning "display the persisted blob
+ * but never write to localStorage" — set only for forward-compat when a
+ * newer build's blob has a higher layoutVersion. Unlike `wasReset`, the
+ * config here IS the user's actual persisted layout (not defaults).
  */
-type LoadV2Result = { config: DashboardConfig; wasReset: boolean };
+type LoadV2Result = { config: DashboardConfig; wasReset: boolean; readOnly?: boolean };
 
 function loadV2ConfigResult(): LoadV2Result {
   if (typeof window === "undefined") {
@@ -505,9 +529,12 @@ function loadV2ConfigResult(): LoadV2Result {
             { persisted: parsed.layoutVersion, thisVersion: LAYOUT_VERSION },
           );
         }
-        // Return with wasReset: true so the hook skips the persist effect on
-        // mount (observe-without-write) — the blob's future fields stay intact.
-        return { config: defaultV2Config(), wasReset: true };
+        // C1/SF-1 fix: return the ACTUAL persisted tiles so the user sees their
+        // layout, not empty defaults. readOnly: true suppresses all writes via
+        // the readOnlyMode ref in useDashboardConfigV2, so future-build additive
+        // fields are never stripped by this older tab's persist path.
+        // wasReset is false — the user's layout was NOT reset, just read-only.
+        return { config: parsed as DashboardConfig, wasReset: false, readOnly: true };
       }
       // Reset on layoutVersion mismatch (Voice-D8 precedent).
       if (parsed.layoutVersion !== LAYOUT_VERSION) {
@@ -663,6 +690,7 @@ function loadV2ConfigResult(): LoadV2Result {
       tags: { area: "dashboard-config", reason: "parse_failed" },
     });
     setRecoveryFlag("parse_failed");
+    return { config: defaultV2Config(), wasReset: true };
   }
   return { config: defaultV2Config(), wasReset: true };
 }
@@ -682,9 +710,9 @@ function persistV2(config: DashboardConfig): void {
     // "settings reset themselves" complaint. Distinguish the two common
     // cases (quota vs unavailability) and surface either one to the
     // console so the failure has a paper trail.
+    const isQuota =
+      err instanceof DOMException && err.name === "QuotaExceededError";
     if (typeof console !== "undefined") {
-      const isQuota =
-        err instanceof DOMException && err.name === "QuotaExceededError";
       console.warn(
         isQuota
           ? "[useDashboardConfigV2] localStorage write failed (quota exceeded); preferences will not persist"
@@ -692,6 +720,16 @@ function persistV2(config: DashboardConfig): void {
         err,
       );
     }
+    // SF-2 fix: asymmetry with load path fixed — write failures now go to
+    // Sentry so engineering can see "layout resets itself" from quota/private-
+    // mode users, not only from load failures.
+    captureToSentry(err ?? new Error("dashboard persistV2 failed"), {
+      level: "warning",
+      tags: {
+        area: "dashboard-config",
+        reason: isQuota ? "persist_quota" : "persist_failed",
+      },
+    });
   }
 }
 
@@ -739,6 +777,15 @@ export function consumeDashboardRecoveryFlag(): DashboardRecoveryReason | null {
         err,
       );
     }
+    // SF-8 fix: close the observability gap — a corrupt-blob reset sets the
+    // flag, but if sessionStorage is locked (private mode / iframe sandbox)
+    // the read fails silently and the user never sees the recovery banner.
+    // Sentry captures the read failure so engineering knows the full
+    // reset→flag→banner pipeline broke, even when the banner can't appear.
+    captureToSentry(err ?? new Error("dashboard consumeDashboardRecoveryFlag failed"), {
+      level: "warning",
+      tags: { area: "dashboard-config", reason: "recovery_flag_read_failed" },
+    });
     return null;
   }
 }
@@ -766,7 +813,21 @@ export interface UseDashboardConfigV2Return {
 const PERSIST_DEBOUNCE_MS = 150;
 
 export function useDashboardConfigV2(): UseDashboardConfigV2Return {
-  const [config, setConfig] = useState<DashboardConfig>(loadV2Config);
+  // C1/SF-1 fix: call loadV2ConfigResult() directly so we can capture wasReset
+  // at hook init time. The shim loadV2Config() discarded wasReset, causing the
+  // hook to initialise with defaultV2Config() in forward-compat mode — the
+  // user's newer-build layout was thrown away and the next user mutation would
+  // overwrite the newer blob with old-version defaults. Now we:
+  //   (a) initialise config from the actual persisted tiles (not defaults), and
+  //   (b) set readOnlyMode when wasReset is true so NO path ever writes to
+  //       localStorage while in forward-compat mode, preserving all future-build
+  //       additive fields the newer blob contains.
+  const initResult = loadV2ConfigResult();
+  const [config, setConfig] = useState<DashboardConfig>(initResult.config);
+  // readOnlyMode: true when we loaded a forward-compat (newer-build) blob.
+  // A ref (not state) so changes don't trigger re-renders — this is a
+  // mount-time invariant that never changes during the hook's lifetime.
+  const readOnlyMode = useRef(initResult.readOnly === true);
 
   // Phase A3 — same observe-without-write guard as the legacy hook. Mounting
   // V2 against a v3 (legacy-shape) blob must not overwrite the persisted
@@ -815,6 +876,11 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
       hasMutated.current = true;
       return;
     }
+    // C1/SF-1 fix: never write to localStorage when in forward-compat read-only
+    // mode (a newer build wrote a higher layoutVersion). Writing here would
+    // down-convert the newer blob to this build's LAYOUT_VERSION, silently
+    // stripping fields added by the newer build.
+    if (readOnlyMode.current) return;
     // pendingConfigRef is already synced by the action callback; the
     // effect's job is purely to (re)schedule the debounced write.
     if (persistTimerRef.current !== null) {
@@ -840,6 +906,10 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
   // removeEventListener pair.
   useEffect(() => {
     function flush() {
+      // C1/SF-1 fix: skip the flush entirely in forward-compat read-only mode.
+      // A tab-close while viewing a newer-build layout must not overwrite the
+      // blob — the only correct action is no-op.
+      if (readOnlyMode.current) return;
       if (persistTimerRef.current !== null) {
         clearTimeout(persistTimerRef.current);
         persistTimerRef.current = null;
