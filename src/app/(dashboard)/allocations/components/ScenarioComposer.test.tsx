@@ -168,6 +168,10 @@ const HOLDING_BTC = {
   quantity: 1,
   mark_price_usd: 60_000,
   api_key_id: "key-binance",
+  // NEW-C03-10: required-but-nullable fields
+  side: null as "long" | "short" | "flat" | null,
+  entry_price: null as number | null,
+  unrealized_pnl_usd: null as number | null,
 };
 const HOLDING_ETH = {
   symbol: "ETH",
@@ -177,6 +181,10 @@ const HOLDING_ETH = {
   quantity: 10,
   mark_price_usd: 3_000,
   api_key_id: "key-binance",
+  // NEW-C03-10: required-but-nullable fields
+  side: null as "long" | "short" | "flat" | null,
+  entry_price: null as number | null,
+  unrealized_pnl_usd: null as number | null,
 };
 const HOLDING_SOL = {
   symbol: "SOL",
@@ -186,6 +194,10 @@ const HOLDING_SOL = {
   quantity: 100,
   mark_price_usd: 100,
   api_key_id: "key-binance",
+  // NEW-C03-10: required-but-nullable fields
+  side: null as "long" | "short" | "flat" | null,
+  entry_price: null as number | null,
+  unrealized_pnl_usd: null as number | null,
 };
 const HOLDING_BTC_OKX = {
   symbol: "BTC",
@@ -195,6 +207,10 @@ const HOLDING_BTC_OKX = {
   quantity: 0.33,
   mark_price_usd: 60_000,
   api_key_id: "key-okx",
+  // NEW-C03-10: required-but-nullable fields
+  side: null as "long" | "short" | "flat" | null,
+  entry_price: null as number | null,
+  unrealized_pnl_usd: null as number | null,
 };
 
 const FLAGGED_BTC: FlaggedHolding = {

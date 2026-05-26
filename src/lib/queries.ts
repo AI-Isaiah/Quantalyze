@@ -1409,19 +1409,20 @@ export interface MyAllocationDashboardPayload {
     venue: string;
     holding_type: "spot" | "derivative";
     api_key_id: string;
-    // Derivative-only fields. Spot rows leave these absent or null.
-    // Fields are optional in the TS type so legacy test fixtures (created
-    // before the 2026-05-20 split) continue to compile — the dashboard
-    // query selects them unconditionally, so production payloads always
-    // populate them.
+    // NEW-C03-10: these fields are now required-but-nullable (not optional).
+    // The optionality existed only so legacy fixtures compiled, but it
+    // collapsed "absent" vs "present-and-null" and forced `?? null` everywhere
+    // on a money-display contract. The dashboard query selects them
+    // unconditionally so production payloads always populate all three.
+    // Legacy fixtures must supply explicit null values.
     //   - `side`: 'long'/'short' for derivatives, 'flat' for spot.
     //   - `entry_price`: CCXT entryPrice for derivatives; NULL for spot.
     //   - `unrealized_pnl_usd`: CCXT unrealizedPnl for derivatives; NULL
     //     for spot. THIS is the equity contribution for a derivative
     //     position — NOT `value_usd`, which is the notional contract size.
-    side?: "long" | "short" | "flat";
-    entry_price?: number | null;
-    unrealized_pnl_usd?: number | null;
+    side: "long" | "short" | "flat" | null;
+    entry_price: number | null;
+    unrealized_pnl_usd: number | null;
   }>;
   /** Row count in allocator_equity_snapshots for this allocator — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
   snapshotCount: number;

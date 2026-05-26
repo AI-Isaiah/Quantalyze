@@ -37,6 +37,10 @@ function buildHolding(
     venue: "binance",
     holding_type: "spot",
     api_key_id: "ak-1",
+    // NEW-C03-10: required-but-nullable fields
+    side: null,
+    entry_price: null,
+    unrealized_pnl_usd: null,
     ...overrides,
   };
 }

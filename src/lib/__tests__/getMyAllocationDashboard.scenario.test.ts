@@ -294,6 +294,9 @@ describe("NEW-C03-01 — holdingEquityContribution: derivatives use unrealized_p
       quantity: 1,
       mark_price_usd: 50000,
       api_key_id: "key-1",
+      side: "flat",
+      entry_price: null,
+      unrealized_pnl_usd: null,
     };
     expect(holdingEquityContribution(h)).toBe(50000);
   });
@@ -334,21 +337,6 @@ describe("NEW-C03-01 — holdingEquityContribution: derivatives use unrealized_p
     expect(holdingEquityContribution(h)).toBe(0);
   });
 
-  it("derivative with missing unrealized_pnl_usd field: returns 0 (legacy fixture compat)", () => {
-    // Pre-split fixtures omit the optional field entirely.
-    const h: H = {
-      symbol: "SOL",
-      venue: "binance",
-      holding_type: "derivative",
-      value_usd: 800_000,
-      quantity: 100,
-      mark_price_usd: 100,
-      api_key_id: "key-3",
-      // unrealized_pnl_usd deliberately absent
-    };
-    expect(holdingEquityContribution(h)).toBe(0);
-  });
-
   it("spot holding with NaN value_usd: returns 0", () => {
     const h: H = {
       symbol: "BTC",
@@ -358,6 +346,9 @@ describe("NEW-C03-01 — holdingEquityContribution: derivatives use unrealized_p
       quantity: 1,
       mark_price_usd: null,
       api_key_id: "key-1",
+      side: "flat",
+      entry_price: null,
+      unrealized_pnl_usd: null,
     };
     expect(holdingEquityContribution(h)).toBe(0);
   });
