@@ -161,7 +161,10 @@ vi.mock("@/lib/supabase/admin", () => ({
               error: adminMockState.rolesReadError,
             });
             // First .eq() — shape (1) awaits this directly; shape (2)
-            // chains another .eq() + .maybeSingle().
+            // chains another .eq() + .maybeSingle(); shape (3-non-head)
+            // chains .neq() for the last-admin count dedup query:
+            //   .select("user_id").eq("role","admin").neq("user_id", X)
+            //   → awaited directly, returns { data: [{user_id},...], error }
             return {
               eq: (...args: unknown[]) => {
                 void args;
@@ -178,6 +181,20 @@ vi.mock("@/lib/supabase/admin", () => ({
                       error: adminMockState.preExistingGrantError,
                     }),
                   }),
+                  // shape (3-non-head): .neq() for last-admin count dedup
+                  // Returns surviving role-admin rows as an array so the
+                  // route can union them with the profile-admin set.
+                  neq: async () => ({
+                    data: adminMockState.lastAdminCountError
+                      ? null
+                      : Array.from(
+                          { length: adminMockState.survivingRoleAdmins },
+                          (_, i) => ({
+                            user_id: `surviving-role-admin-${i}`,
+                          }),
+                        ),
+                    error: adminMockState.lastAdminCountError ?? null,
+                  }),
                 };
                 return node;
               },
@@ -187,18 +204,28 @@ vi.mock("@/lib/supabase/admin", () => ({
       }
       if (table === "profiles") {
         return {
-          // The route issues THREE distinct select shapes against profiles:
+          // The route issues FOUR distinct operations against profiles:
           //   (A) Existence check:   select("id").eq("id",X).maybeSingle()
           //   (B) is_admin check:    select("is_admin").eq("id",X).maybeSingle()
-          //   (C) Last-admin count:  select("id",{count,head}).eq("is_admin",true).neq("id",X)
-          //       → awaited directly as { data, error } (head:true → data=null, count in .length)
+          //   (C) Last-admin count:  select("id").eq("is_admin",true).neq("id",X)
+          //       → awaited directly, returns { data: [{id},...], error }
+          //       (route unions these with role-admin rows in JS to deduplicate)
+          //   (D) Ghost-admin clear: update({is_admin:false}).eq("id",X)
+          //       → awaited directly, returns { error }
           // We inspect the first argument to select() to distinguish (A)/(B) from (C).
+          //
+          // NOTE: the old Shape (C) assumed head:true — the route was updated (C-01
+          // red-team fix) to use plain array selects so the JS set-union dedup works.
+          // The head path is kept for safety but is no longer reached by route code.
+          update: (_vals: Record<string, unknown>) => ({
+            // Shape (D): ghost-admin flag clear.
+            // update({ is_admin: false }).eq("id", targetUserId) → { error }
+            eq: async () => ({
+              error: null,
+            }),
+          }),
           select: (cols: string, opts?: { count?: string; head?: boolean }) => {
-            // Shape (C): head-only count query.
-            // Supabase head:true → data=null, count in the `count` field.
-            // Pre-fix the mock returned { data: Array.from({length:N}) } which
-            // masked the CRITICAL-1 bug (route used data?.length, always 0 for
-            // real HEAD responses). Fixed mock returns { count: N, data: null }.
+            // Shape (C) head variant — kept for safety, not reached by current route.
             if (opts?.head) {
               const countVal = adminMockState.lastAdminCountError
                 ? null
@@ -210,9 +237,8 @@ vi.mock("@/lib/supabase/admin", () => ({
                 }),
               };
             }
-            // Shape (A) / (B): .eq().maybeSingle()
+            // Shape (B): is_admin lookup → .eq().maybeSingle()
             if (cols === "is_admin") {
-              // C17-01 is_admin lookup
               return {
                 eq: () => ({
                   maybeSingle: async () => ({
@@ -226,14 +252,30 @@ vi.mock("@/lib/supabase/admin", () => ({
                 }),
               };
             }
-            // Default: existence check (cols="id")
+            // Shape (A) / (C): cols="id"
+            // (A): .eq("id",X).maybeSingle()       — profile existence check
+            // (C): .eq("is_admin",true).neq("id",X) — last-admin count dedup
+            // Distinguish by whether .neq() is chained (C) or .maybeSingle() (A).
             return {
               eq: () => ({
+                // Shape (A): awaited via .maybeSingle()
                 maybeSingle: async () => ({
                   data: adminMockState.profileExists
                     ? { id: "00000000-0000-0000-0000-000000000999" }
                     : null,
                   error: null,
+                }),
+                // Shape (C): awaited via .neq(), returns surviving profile-admin rows
+                neq: async () => ({
+                  data: adminMockState.lastAdminCountError
+                    ? null
+                    : Array.from(
+                        { length: adminMockState.survivingProfileAdmins },
+                        (_, i) => ({
+                          id: `surviving-profile-admin-${i}`,
+                        }),
+                      ),
+                  error: adminMockState.lastAdminCountError ?? null,
                 }),
               }),
             };
@@ -1763,14 +1805,21 @@ describe("NEW-C17-05 — requireAdmin TOCTOU re-check before mutation", () => {
     // Simulate a concurrent admin revoke that stripped the actor's admin
     // status between the withRole wrapper check and the service-role mutation.
     // Set actorIsAdmin=false so the hoisted vi.mock("@/lib/admin") returns
-    // isAdminUser=false — requireAdmin fires → 403 before the mutation runs.
+    // isAdminUser=false — requireAdmin TOCTOU re-check fires → 403 before
+    // the DELETE runs.
     //
-    // Pre-fix: no re-check → upsertSpy called → 200.
-    // Post-fix: re-check fires → 403 Forbidden, upsertSpy not called.
+    // The TOCTOU re-check (route.ts ~L835) only runs on the REVOKE path,
+    // immediately before the service-role DELETE. We must send action:revoke
+    // (non-admin role so the self-revoke guard and last-admin guard are
+    // bypassed) to reach that checkpoint.
+    //
+    // Pre-fix: no re-check → DELETE runs → 200.
+    // Post-fix: re-check fires → 403 Forbidden, DELETE not reached.
     adminLibState.actorIsAdmin = false;
+    adminMockState.rolesRows = [];
     const { POST } = await import("./route");
     const res = await POST(
-      makeReq({ action: "grant", role: "analyst" }),
+      makeReq({ action: "revoke", role: "analyst" }),
       makeCtx(),
     );
     expect(res.status).toBe(403);
@@ -1807,20 +1856,31 @@ describe("NEW-C17-01 — ghost-admin revoke refused with 409", () => {
     vi.resetModules();
   });
 
-  it("revoke admin on ghost-admin (is_admin=TRUE) returns 409 revoke_admin_ineffective", async () => {
+  it("revoke admin on ghost-admin (is_admin=TRUE) clears the flag and returns 200", async () => {
+    // C-01 (red-team): the previous behaviour was to block with 409
+    // `revoke_admin_ineffective` leaving the ghost-admin permanently
+    // privileged — the endpoint detected the condition but never fixed it.
+    // The red-team pass changed the contract: the route now clears
+    // profiles.is_admin=FALSE via the service-role client as an atomic
+    // prerequisite step, then proceeds with the user_app_roles DELETE.
+    // This fully removes access regardless of which signal was authoritative.
+    //
+    // Verify: flag-clear succeeds + DELETE runs + post-read shows no admin
+    // → 200 with unified { user_id, roles[] } envelope.
     adminMockState.targetIsAdmin = true;
+    adminMockState.rolesRows = []; // post-delete re-read: role removed
     const { POST } = await import("./route");
     const res = await POST(
       makeReq({ action: "revoke", role: "admin" }),
       makeCtx(),
     );
-    // Pre-fix: returns 200 after DELETE. Post-fix: 409 before DELETE.
-    expect(res.status).toBe(409);
+    // C-01: 200 — ghost-admin flag cleared + role row deleted.
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.code).toBe("revoke_admin_ineffective");
-    expect(body.error).toMatch(/profiles\.is_admin=TRUE/i);
-    // The DELETE must NOT have run.
-    expect(upsertSpy).not.toHaveBeenCalled();
+    expect(body).toEqual({
+      user_id: "00000000-0000-0000-0000-000000000999",
+      roles: [],
+    });
   });
 
   it("revoke admin on non-ghost-admin (is_admin=FALSE) proceeds normally", async () => {
