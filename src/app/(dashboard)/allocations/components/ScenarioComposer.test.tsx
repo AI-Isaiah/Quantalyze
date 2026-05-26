@@ -1691,4 +1691,158 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       screen.getByText(/Illustrative shape only — no live capital connected/i),
     ).toBeInTheDocument();
   });
+
+  // -------------------------------------------------------------------------
+  // F-01 regression — empty diff guard is NOT silent
+  //
+  // Scenario: seed a draft whose fingerprint MATCHES the current holdings
+  // (so the draft is loaded as-is, no fingerprint mismatch banner), but
+  // includes an extra toggle-off entry for a holding NOT in holdingsSummary.
+  // diffCount counts the stale toggle as 1 diff → button enabled.
+  // handleCommit's holdingsSummary.find() skips the stale holding →
+  // diffs.length===0 → F-01 guard fires.
+  //
+  // Before this fix: handleCommit returned silently with no user feedback.
+  // After: it calls setCommitError so an alert appears.
+  // -------------------------------------------------------------------------
+  it("F-01: handleCommit with stale toggle (holding no longer in holdingsSummary) shows 'Nothing to commit' error", () => {
+    const payload = makePayload();
+    const STALE_REF = "holding:kraken:DOT:spot"; // NOT in holdingsSummary
+
+    // Fingerprint for makePayload()'s holdingsSummary [BTC, ETH, SOL]:
+    // sorted("BTC:binance:spot", "ETH:binance:spot", "SOL:binance:spot")
+    const MATCHING_FP = "BTC:binance:spot|ETH:binance:spot|SOL:binance:spot";
+
+    lsStore.set(
+      `allocations.scenario_v0_15.${ALLOCATOR_A}`,
+      JSON.stringify({
+        schema_version: 1,
+        // Correct fingerprint → draft is loaded, no mismatch banner.
+        init_holdings_fingerprint: MATCHING_FP,
+        toggleByScopeRef: {
+          [REF_BTC]: true,
+          [REF_ETH]: true,
+          [REF_SOL]: true,
+          // Extra stale entry toggled off — not in holdingsSummary.
+          // diffCount will count this as 1 diff, enabling the button.
+          [STALE_REF]: false,
+        },
+        addedStrategies: [],
+        // Value-proportional defaults for makePayload() holdings (total=100k):
+        //   BTC=60k→0.6, ETH=30k→0.3, SOL=10k→0.1
+        // handleCommit's voluntary_modify loop computes the same defaults and
+        // compares per-row; matching weights → no voluntary_modify diffs.
+        weightOverrides: {
+          [REF_BTC]: 0.6,
+          [REF_ETH]: 0.3,
+          [REF_SOL]: 0.1,
+        },
+        lastEditedAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    const onCommitRequested = vi.fn();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        useInternalCommitDrawer={false}
+        onCommitRequested={onCommitRequested}
+      />,
+    );
+
+    // No fingerprint mismatch banner (fingerprint matches).
+    expect(
+      screen.queryByText(/Your live holdings have changed/i),
+    ).toBeNull();
+
+    // Footer Commit must be enabled (diffCount=1 from the stale toggle).
+    const commitBtn = screen.getByTestId("scenario-footer-commit") as HTMLButtonElement;
+    expect(commitBtn.disabled).toBe(false);
+
+    act(() => {
+      fireEvent.click(commitBtn);
+    });
+
+    // F-01: error banner must appear (not a silent return).
+    const alerts = screen.getAllByRole("alert");
+    expect(
+      alerts.some((a) => /Nothing to commit/i.test(a.textContent ?? "")),
+    ).toBe(true);
+    // onCommitRequested must NOT be called (no diffs to hand off).
+    expect(onCommitRequested).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // F-02 regression — voluntary_modify zero-size gate
+  // Before this fix: a weight change on a holding with value_usd=0 produced
+  // a voluntary_modify with size_at_decision_usd:0 and passed it to the
+  // commit drawer (cron division-by-zero hazard). After: it surfaces an error.
+  // -------------------------------------------------------------------------
+  it("F-02: voluntary_modify for zero-value holding → named error, no commit", () => {
+    // Payload with one holding at value_usd=0.
+    const payload = makePayload({
+      holdingsSummary: [
+        { ...HOLDING_BTC, value_usd: 0 }, // zero value
+        HOLDING_ETH,
+        HOLDING_SOL,
+      ],
+    });
+    const onCommitRequested = vi.fn();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        useInternalCommitDrawer={false}
+        onCommitRequested={onCommitRequested}
+      />,
+    );
+
+    // Change BTC weight — BTC has value_usd=0, so modify diff must be rejected.
+    const btcInput = screen.getByLabelText(/BTC weight/i) as HTMLInputElement;
+    fireEvent.change(btcInput, { target: { value: "0.800" } });
+
+    // Also toggle ETH off so diffCount>0 and the footer enables.
+    fireEvent.click(
+      screen.getByRole("switch", { name: /Toggle ETH on\/off in scenario/i }),
+    );
+
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    // F-02: error must reference the zero-value holding.
+    const alerts = screen.getAllByRole("alert");
+    expect(
+      alerts.some((a) =>
+        /zero USD value|can't record a weight change/i.test(a.textContent ?? ""),
+      ),
+    ).toBe(true);
+    // Commit must not proceed.
+    expect(onCommitRequested).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // IMP-3 regression — commitError clears unconditionally on weight <= 1
+  // Before this fix: after a >1 paste the state layer clamped to 1.0 and
+  // fired handleWeightChange(ref, 1.0). With `else if (commitError)`, the
+  // stale "clamped" error stuck until another input event.
+  // -------------------------------------------------------------------------
+  it("IMP-3: clamped-error is cleared when a valid (<=1) weight is subsequently entered", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const btcInput = screen.getByLabelText(/BTC weight/i) as HTMLInputElement;
+
+    // Trigger the >1 error.
+    fireEvent.change(btcInput, { target: { value: "1.5" } });
+    expect(screen.getByRole("alert").textContent).toMatch(/clamped to 1/i);
+
+    // Enter a valid weight — error must disappear.
+    fireEvent.change(btcInput, { target: { value: "0.5" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
 });

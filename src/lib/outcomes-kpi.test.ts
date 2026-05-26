@@ -165,4 +165,37 @@ describe("computeOutcomeKPIs", () => {
     expect(result.winRateDenominator).toBe(2);
     expect(result.winRate).toBe(1.0);
   });
+
+  // F-10 regression: the guard `if (deltas.length === 0)` returns null for
+  // winRate and avgRealizedDelta instead of NaN. Today this path is
+  // unreachable via normal input (the mature filter guarantees at least one
+  // non-null delta, and mostMatureDelta preserves it). The guard is defensive:
+  // if the filter logic ever changes such that `mature.length > 0` but all
+  // `mostMatureDelta` calls return null, the function must return null NOT NaN.
+  //
+  // We test the invariant across the currently-reachable near-edges: any path
+  // that could plausibly produce a 0-denominator must return null, not NaN.
+  it("F-10: zero-denominator paths return null (not NaN) for winRate and avgRealizedDelta", () => {
+    // Pending row (mature.length=0 → early return) — confirms the early guard.
+    const pending = computeOutcomeKPIs([
+      makeOutcome({ id: "p1", percent_allocated: 10, delta_30d: null, delta_90d: null, delta_180d: null }),
+    ]);
+    expect(pending.winRate).toBeNull();
+    expect(pending.avgRealizedDelta).toBeNull();
+    // Explicit check: null, not NaN.
+    expect(pending.winRate !== null ? isNaN(pending.winRate) : false).toBe(false);
+
+    // Below-1pct row (allocatedSized.length=0 → mature.length=0 → early return).
+    const tiny = computeOutcomeKPIs([
+      makeOutcome({ id: "t1", percent_allocated: 0.5, delta_30d: 0.04 }),
+    ]);
+    expect(tiny.winRate).toBeNull();
+    expect(tiny.avgRealizedDelta).toBeNull();
+
+    // Empty input — all counts zero.
+    const empty = computeOutcomeKPIs([]);
+    expect(empty.winRate).toBeNull();
+    expect(empty.avgRealizedDelta).toBeNull();
+    expect(empty.winRateDenominator).toBe(0);
+  });
 });

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AllocatorPreferences } from "@/lib/preferences";
 import { SELF_EDITABLE_PREFERENCE_FIELDS } from "@/lib/preferences";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 export type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -155,11 +156,22 @@ export function useMandateAutoSave(
   // Terminal failure for a field: surface the inline error, flip the form-level
   // banner to "error", and release the in-flight marker. Centralising the trio
   // guarantees savingFields is always cleared on a terminal outcome.
+  // F-04/F-05: also capture to Sentry so that mandate save exhaustion (network,
+  // 5xx, or 429 budget) is observable in production — without this, a systemic
+  // route regression exhausts all retries with zero signal to engineers.
   const failTerminal = useCallback(
-    (fieldName: MandateField, message: string) => {
+    (fieldName: MandateField, message: string, originalError?: unknown) => {
       setFieldErrors((prev) => ({ ...prev, [fieldName]: message }));
       setSaveState("error");
       removeSavingField(fieldName);
+      captureToSentry(
+        originalError ?? new Error(`Mandate autosave terminal failure: ${fieldName}`),
+        {
+          tags: { hook: "useMandateAutoSave", field: fieldName },
+          extra: { message },
+          level: "error",
+        },
+      );
     },
     [removeSavingField],
   );
@@ -203,8 +215,13 @@ export function useMandateAutoSave(
         // that timestamp before sending this request. This prevents N concurrent
         // fields from all re-hitting the limiter on the same retry window.
         const rateLimitedUntil = rateLimitedUntilRef.current;
-        if (rateLimitedUntil > Date.now()) {
-          const waitMs = rateLimitedUntil - Date.now();
+        // IMP-2: snapshot once so the guard and the sleep duration use the
+        // same timestamp — a second Date.now() call could return a slightly
+        // smaller value under heavy load and produce a near-zero or negative
+        // waitMs (benign for wait(), but misleading about what fired).
+        const nowBeforeRateWait = Date.now();
+        if (rateLimitedUntil > nowBeforeRateWait) {
+          const waitMs = rateLimitedUntil - nowBeforeRateWait;
           await wait(waitMs, mountAbortRef.current.signal);
           if (mountAbortRef.current.signal.aborted) {
             return { ok: false, reason: "cancelled", message: "Cancelled." };
@@ -215,15 +232,15 @@ export function useMandateAutoSave(
         }
 
         let res: Response;
-        // NEW-C05-06: track whether this attempt was aborted by the timeout
-        // (vs. component unmount) so we don't retry on mount-abort, but DO
-        // retry on timeout (a transient hang is different from unmount).
-        let timedOut = false;
         // Per-attempt timeout controller. Combined with the component-lifetime
         // mountAbortRef so EITHER the 12s timeout OR unmount cancels the fetch.
+        // IMP-1: the previous `timedOut` flag was set inside the setTimeout
+        // callback but never read in the catch block — both the timeout-abort
+        // and pure-network-error paths fell through identically to the same
+        // retry logic, so the variable was dead discriminator code. Removed to
+        // eliminate the misleading "intent to branch" signal.
         const attemptController = new AbortController();
         const timeout = setTimeout(() => {
-          timedOut = true;
           attemptController.abort();
         }, FETCH_TIMEOUT_MS);
         // Wire mount-abort into this attempt signal.
@@ -239,13 +256,14 @@ export function useMandateAutoSave(
           });
         } catch {
           // Network error or AbortError (12s timeout OR component unmounted).
-          // NEW-C05-06: only retry on timeout-abort; treat mount-abort as cancelled.
+          // mount-abort means the component is gone — exit silently; timeout or
+          // pure network error is transient and should retry.
           if (mountAbortRef.current.signal.aborted) {
             // Component unmounted — exit silently, no setState on dead component.
             return { ok: false, reason: "cancelled", message: "Cancelled." };
           }
-          // timedOut=true: per-attempt 12s timeout; !timedOut: pure network error
-          // (e.g. offline). Both are transient — retry with exponential backoff.
+          // Per-attempt 12s timeout OR pure network error (e.g. offline).
+          // Both are transient — retry with exponential backoff.
           // mount-abort is handled above and never reaches here.
           if (attempt < MAX_ATTEMPTS) {
             await wait(1000 * Math.pow(2, attempt - 1), mountAbortRef.current.signal);

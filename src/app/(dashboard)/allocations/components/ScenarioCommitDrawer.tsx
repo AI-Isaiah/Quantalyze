@@ -31,6 +31,7 @@ import {
   type RejectionReason,
 } from "@/lib/bridge-outcome-schema";
 import type { ScenarioCommitDiff } from "./ScenarioComposer";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 // pr189-followup M13 (type-design-analyzer MED/8) — narrow
 // `rejection_reason` from `string?` to the `RejectionReason` enum so the
@@ -504,9 +505,49 @@ export function ScenarioCommitDrawer({
     // Either way the user MUST NOT retry from this drawer.
     const isContractViolation =
       res.ok && json.recorded !== diffs.length && noErrors;
+
+    // F-07: a structural mismatch (right count, wrong indices or kinds) is also
+    // unsafe to retry — the server may have committed rows under wrong identifiers.
+    // Previously this fell through to failureReason:"generic" which tells the user
+    // "retry is safe." Route it to "partial" instead, which carries the same
+    // "do NOT retry" copy path as a count mismatch.
+    const isStructuralMismatch =
+      res.ok &&
+      json.results !== undefined &&
+      !resultsStructurallyMatch &&
+      json.recorded === diffs.length;
+
+    // F-03: server contract violations (structural mismatch + count mismatch)
+    // are bugs the server should never produce. Capture to Sentry so engineers
+    // see these events in production rather than only hearing about them via
+    // user support escalations.
+    if (!fullSuccess) {
+      if (isStructuralMismatch) {
+        captureToSentry(
+          new Error("ScenarioCommitDrawer: structural mismatch in commit results"),
+          {
+            tags: { component: "ScenarioCommitDrawer", check: "C18-12" },
+            extra: {
+              submitted_count: diffs.length,
+              results_count: json.results?.length,
+              recorded: json.recorded,
+            },
+          },
+        );
+      } else if (isContractViolation) {
+        captureToSentry(
+          new Error("ScenarioCommitDrawer: recorded count violates single-tx contract"),
+          {
+            tags: { component: "ScenarioCommitDrawer", check: "C18-12" },
+            extra: { submitted: diffs.length, recorded: json.recorded },
+          },
+        );
+      }
+    }
+
     setState({
       kind: "failure",
-      failureReason: isContractViolation ? "partial" : "generic",
+      failureReason: isStructuralMismatch || isContractViolation ? "partial" : "generic",
       response: json,
     });
   }

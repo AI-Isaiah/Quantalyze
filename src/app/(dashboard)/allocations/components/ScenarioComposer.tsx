@@ -304,6 +304,10 @@ export function ScenarioComposer({
 
   function handleWeightChange(scopeRef: string, weight: number) {
     if (!Number.isFinite(weight)) {
+      // F-08: log non-finite weight so a regression (broken input component,
+      // computation producing NaN/Infinity) is visible in production console
+      // rather than silently swallowed.
+      console.warn("[ScenarioComposer] handleWeightChange received non-finite weight", { scopeRef, weight });
       setCommitError(
         "Invalid weight — enter a value between 0 and 1. The previous value was kept.",
       );
@@ -319,7 +323,12 @@ export function ScenarioComposer({
       setCommitError(
         "Weight clamped to 1 — the maximum allocation is 100% of portfolio AUM.",
       );
-    } else if (commitError) {
+    } else {
+      // IMP-3: unconditionally clear any stale clamp-error on in-range weights
+      // (including weight === 1). The `else if (commitError)` pattern was
+      // insufficient: after a >1 paste the state layer clamps to 1.0, triggering
+      // another handleWeightChange(ref, 1.0) — weight > 1 is false, but the stale
+      // "clamped" error message would persist until the next input event.
       setCommitError(null);
     }
     scenario.setWeightOverride(scopeRef, weight);
@@ -652,12 +661,24 @@ export function ScenarioComposer({
       const currentWeight = scenario.draft.weightOverrides[ref] ?? 0;
       const defaultWeight = defaultWeightsForCommit[ref] ?? 0;
       if (Math.abs(currentWeight - defaultWeight) <= 1e-6) continue;
+      // F-02: apply the same per-row size gate that protects voluntary_add diffs.
+      // A voluntary_modify diff with size_at_decision_usd=0 reaches the daily-delta
+      // cron, which divides realized PnL by that size → division-by-zero. A zero
+      // value_usd can arise from sold-down or coingecko_fallback rows.
+      const modifySize = Number.isFinite(h.value_usd) ? h.value_usd : 0;
+      if (modifySize <= 0) {
+        setCommitError(
+          `Can't record a weight change for "${ref}": holding has zero USD value. ` +
+            `Remove or skip this holding before committing.`,
+        );
+        return;
+      }
       diffs.push({
         kind: "voluntary_modify",
         holding_ref: ref,
         new_weight: currentWeight,
         percent_allocated: currentWeight * 100,
-        size_at_decision_usd: Number.isFinite(h.value_usd) ? h.value_usd : 0,
+        size_at_decision_usd: modifySize,
       });
     }
 
@@ -695,7 +716,15 @@ export function ScenarioComposer({
     }
 
     // NEW-C18-13: guard empty diff set — nothing to commit.
+    // F-01: replace the silent return with a user-facing error. A zero-diff
+    // commit can happen legitimately (e.g. all weight changes within epsilon),
+    // but if scenario.diffCount > 0 the footer reported pending changes that
+    // handleCommit computed as empty — that specific case is a data-model
+    // inconsistency worth surfacing to the user.
     if (diffs.length === 0) {
+      setCommitError(
+        "Nothing to commit — the scenario has no changes. Adjust holdings or weights and try again.",
+      );
       return;
     }
 

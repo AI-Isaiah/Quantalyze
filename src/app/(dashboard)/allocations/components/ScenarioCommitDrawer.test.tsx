@@ -1121,6 +1121,103 @@ describe("partial-commit detection — over-recorded direction (server bug)", ()
   });
 });
 
+// ===========================================================================
+// F-07 regression — structural mismatch routes to "partial" not "generic"
+//
+// Before this fix: a response with recorded===diffs.length but wrong indices
+// or kinds fell through to failureReason:"generic" which tells the user
+// "retry is safe." After: isStructuralMismatch → failureReason:"partial".
+// ===========================================================================
+
+describe("F-07 — structural mismatch (right count, wrong indices) → partial failure (do NOT retry)", () => {
+  it("server returns recorded:N with mismatched result indices → data-failure-reason='partial'", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        // 2 diffs: index 0 and 1. Server returns index 1 twice (duplicate) —
+        // count matches (2) but index 0 is absent. Structural mismatch.
+        JSON.stringify({
+          recorded: 2,
+          results: [
+            { index: 1, kind: "voluntary_add", match_decision_id: "a", bridge_outcome_id: "b" },
+            { index: 1, kind: "voluntary_add", match_decision_id: "c", bridge_outcome_id: "d" },
+          ],
+          errors: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF, VA_DIFF]}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF, VA_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+    const err = screen.getByTestId("commit-drawer-error");
+    // F-07: structural mismatch must use failureReason="partial" ("do NOT retry")
+    // not failureReason="generic" ("retry is safe").
+    expect(err.getAttribute("data-failure-reason")).toBe("partial");
+    // onSubmitSuccess must NOT fire.
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("server returns recorded:N with kind mismatch → data-failure-reason='partial'", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        // 1 diff: voluntary_remove. Server returns index 0 with wrong kind.
+        JSON.stringify({
+          recorded: 1,
+          results: [
+            { index: 0, kind: "voluntary_add", match_decision_id: "a", bridge_outcome_id: "b" },
+          ],
+          errors: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+    const err = screen.getByTestId("commit-drawer-error");
+    expect(err.getAttribute("data-failure-reason")).toBe("partial");
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("Idempotency-Key reset on close → reopen (new batch gets a fresh key)", () => {
   it("closing the drawer and reopening with the same diffs content mints a NEW key", async () => {
     vi.useRealTimers();
