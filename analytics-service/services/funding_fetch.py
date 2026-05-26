@@ -664,13 +664,20 @@ async def fetch_funding_bybit(
                     # transaction-log endpoint embeds &signature=<HMAC-SHA256>
                     # in error URLs; scrub before logging.
                     from .redact import scrub_freeform_string
-                    if category == "inverse" and page_idx == 0:
+                    if category == "inverse":
+                        # review/H-03: remove page_idx==0 guard — a
+                        # PermissionDenied/BadRequest on any page for the
+                        # inverse category means the key lacks inverse scope.
+                        # The old guard only skipped on page 0; a 52-window walk
+                        # could trigger the error on page 1 of window 1 after
+                        # one successful page, causing a hard raise instead of a
+                        # graceful skip.
                         logger.warning(
                             "Bybit inverse category returned BadRequest for "
-                            "strategy %s (likely API key lacks inverse "
+                            "strategy %s page %d (likely API key lacks inverse "
                             "permission); skipping inverse: exc_class=%s "
                             "scrubbed=%s",
-                            strategy_id,
+                            strategy_id, page_idx,
                             type(exc).__name__,
                             scrub_freeform_string(str(exc)),
                         )
@@ -688,12 +695,15 @@ async def fetch_funding_bybit(
                     raise
                 except ccxt.PermissionDenied as exc:
                     from .redact import scrub_freeform_string
-                    if category == "inverse" and page_idx == 0:
+                    if category == "inverse":
+                        # review/H-03: same fix as BadRequest above — remove
+                        # page_idx==0 guard so any page of the inverse category
+                        # that fails with PermissionDenied gracefully skips.
                         logger.warning(
                             "Bybit inverse category PermissionDenied for "
-                            "strategy %s; skipping inverse: exc_class=%s "
-                            "scrubbed=%s",
-                            strategy_id,
+                            "strategy %s page %d; skipping inverse: "
+                            "exc_class=%s scrubbed=%s",
+                            strategy_id, page_idx,
                             type(exc).__name__,
                             scrub_freeform_string(str(exc)),
                         )

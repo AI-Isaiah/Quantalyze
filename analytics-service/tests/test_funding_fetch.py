@@ -1382,18 +1382,21 @@ class TestFundingFeeRowTypedDict:
 # ---------------------------------------------------------------------------
 
 
-class TestBybitInverseMidPaginationRaises:
-    """specialist:testing (funding_fetch.py:542): the inverse-category
-    BadRequest tolerance is intentionally narrow — only page_idx==0 is
-    treated as 'inverse not enabled'. A BadRequest mid-pagination on
-    inverse (e.g. expired cursor) MUST re-raise so the whole job is
-    classified transient-failed and retried. Without this regression
-    test a future refactor could broaden the guard to all pages and
-    silently truncate inverse-funding history.
+class TestBybitInverseMidPaginationSkips:
+    """review/H-03: a PermissionDenied or BadRequest on ANY inverse-category
+    page must gracefully skip (not raise). The old page_idx==0 guard was too
+    narrow: a 52-window walk triggers an error on page 1 of window 1 after
+    one successful page, raising instead of skipping. Any BadRequest/
+    PermissionDenied on inverse means the key lacks inverse scope — treat
+    all pages symmetrically.
+
+    This replaces TestBybitInverseMidPaginationRaises which tested the old
+    (wrong) behavior of raising on page>0.
     """
 
     @pytest.mark.asyncio
-    async def test_inverse_bad_request_mid_pagination_raises(self) -> None:
+    async def test_inverse_bad_request_mid_pagination_skips(self) -> None:
+        """review/H-03: BadRequest on inverse page 1 must skip, not raise."""
         import ccxt.async_support as ccxt_mod
 
         linear_empty = {"result": {"list": [], "nextPageCursor": ""}}
@@ -1425,17 +1428,18 @@ class TestBybitInverseMidPaginationRaises:
         )
 
         # NEW-C30-01: recent since_ms (1h ago) so only 1 window per category.
-        # With since_ms=None the 365-day walk consumes indices 0..51 on
-        # linear and the inverse pages would never be reached. Using a tight
-        # window guarantees: index 0 = linear window 0, index 1 = inverse
-        # window 0 (page 0), index 2 = inverse window 0 (page 1 → raises).
         import time as _time
         recent_since_ms = int(_time.time() * 1000) - 60 * 60 * 1000  # 1h ago
 
-        with pytest.raises(ccxt_mod.BadRequest):
-            await fetch_funding_bybit(
-                mock_exchange, STRATEGY_ID, since_ms=recent_since_ms
-            )
+        # review/H-03: must NOT raise — inverse BadRequest on any page is a skip.
+        result = await fetch_funding_bybit(
+            mock_exchange, STRATEGY_ID, since_ms=recent_since_ms
+        )
+        # The call must complete and return (possibly empty or partial) results.
+        assert isinstance(result, list), (
+            "review/H-03: fetch_funding_bybit must return a list when "
+            "inverse BadRequest fires on page > 0"
+        )
 
 
 class TestDroppedRowCounterOKXAndBybit:
