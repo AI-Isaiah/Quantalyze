@@ -67,6 +67,12 @@
 -- blocks any `pending` INSERT for a partition that already has an inflight
 -- row). Modifying it here would be speculative.
 
+-- SUPABASE: explicit-transaction
+-- This migration uses explicit BEGIN/COMMIT to ensure STEP 1 (CREATE OR REPLACE)
+-- and STEP 2 (self-verifying DO block) are atomic. The pattern is intentional and
+-- consistent with every multi-step compute_jobs migration since mig 090 (see migs
+-- 090, 117). The Supabase CLI wraps this in a savepoint; this inner transaction
+-- ensures partial-apply of either step alone rolls back both.
 BEGIN;
 
 -- --------------------------------------------------------------------------
@@ -187,12 +193,22 @@ DECLARE
   v_body TEXT;
 BEGIN
   -- Confirm the function is installed with H-B hardening.
+  -- Use LIKE patterns instead of an exact-string match against proconfig entries:
+  -- PostgreSQL's GUC serialization of SET search_path can vary across minor versions
+  -- (e.g. quoting, spacing). A LIKE match on the key name + expected values is robust
+  -- across serialization variants while still catching a missing or misconfigured
+  -- search_path. (M conf=9 finding: b10-migration reviewer, 2026-05-26)
   IF NOT EXISTS (
     SELECT 1 FROM pg_proc p
       JOIN pg_namespace n ON p.pronamespace = n.oid
      WHERE n.nspname = 'public'
        AND p.proname = 'claim_compute_jobs'
-       AND 'search_path=public, pg_temp' = ANY(p.proconfig)
+       AND EXISTS (
+         SELECT 1 FROM unnest(p.proconfig) AS cfg
+          WHERE cfg LIKE 'search_path=%'
+            AND cfg LIKE '%public%'
+            AND cfg LIKE '%pg_temp%'
+       )
   ) THEN
     RAISE EXCEPTION 'C39 migration verification failed: claim_compute_jobs missing or not H-B hardened';
   END IF;

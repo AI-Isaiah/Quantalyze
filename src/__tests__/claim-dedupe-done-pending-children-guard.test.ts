@@ -174,6 +174,26 @@ describe("C39 / NEW-C39-01 — offline SQL structural invariants", () => {
     expect(sql).toMatch(/SET search_path = public, pg_temp/i);
   });
 
+  // ---------------------------------------------------------------------------
+  // M conf=9 fix (b10-migration reviewer, 2026-05-26): the self-verifier DO
+  // block must use LIKE pattern matching against proconfig entries rather than
+  // an exact-string comparison. An exact match can silently pass or fail
+  // depending on PostgreSQL minor-version GUC serialization differences.
+  // ---------------------------------------------------------------------------
+  it("C39: self-verifier uses LIKE pattern for proconfig check (not exact-string = ANY)", () => {
+    const sql = readMigration(MIG_C39);
+    // The old fragile pattern must NOT be present.
+    expect(sql).not.toMatch(
+      /'search_path=public, pg_temp'\s*=\s*ANY\s*\(\s*p\.proconfig\s*\)/i,
+    );
+    // The robust LIKE-based pattern must be present instead.
+    expect(sql).toMatch(/cfg\s+LIKE\s+'search_path=%'/i);
+    expect(sql).toMatch(/cfg\s+LIKE\s+'%public%'/i);
+    expect(sql).toMatch(/cfg\s+LIKE\s+'%pg_temp%'/i);
+    // The unnest(p.proconfig) form must be used.
+    expect(sql).toMatch(/unnest\s*\(\s*p\.proconfig\s*\)/i);
+  });
+
   it("C39: attempts = attempts + 1 unconditional increment is preserved", () => {
     const sql = readMigration(MIG_C39);
     expect(sql).toMatch(/attempts\s*=\s*attempts\s*\+\s*1/i);
