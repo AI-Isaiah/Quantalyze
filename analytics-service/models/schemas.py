@@ -84,6 +84,7 @@ class PortfolioOptimizerRequest(BaseModel):
     @classmethod
     def _validate_user_id_field(cls, v: Optional[str]) -> Optional[str]:
         return _validate_user_id(v)
+
     # Custom optimizer weights, keyed by strategy_id. Validated by the
     # field_validator below + the handler's per-portfolio key-scoping.
     # Audit 2026-05-07 H-0589: an unvalidated dict allowed NaN/Inf/string

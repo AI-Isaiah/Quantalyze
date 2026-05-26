@@ -782,8 +782,10 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         overlap_df = pd.DataFrame(strategy_returns).dropna()
         cov_history_sufficient = len(overlap_df) > 5
         if cov_history_sufficient:
-            # Build w_arr aligned to overlap_df columns (may differ from df columns
-            # if dropna removed a column — reuse ordered_sids for consistency).
+            # Build weights aligned to overlap_df columns.  overlap_df is built
+            # from the same strategy_returns dict as df, so columns are identical;
+            # we re-derive the list here to keep overlap_sids / overlap_weights
+            # self-consistent rather than relying on the outer ordered_sids.
             overlap_sids = list(overlap_df.columns)
             overlap_weights = [weights.get(sid, 0) for sid in overlap_sids]
             cov_matrix = overlap_df.cov().values
@@ -1895,9 +1897,8 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
             req.portfolio_id, bridge_missing_analytics_sids,
         )
 
-    # Combined set of strategies excluded from scoring.
-    bridge_all_missing_sids = bridge_missing_returns_sids + bridge_missing_analytics_sids
-    bridge_partial_data = bool(bridge_all_missing_sids)
+    # partial_data is True when any strategy was excluded from scoring.
+    bridge_partial_data = bool(bridge_missing_returns_sids or bridge_missing_analytics_sids)
 
     if not portfolio_returns:
         raise HTTPException(status_code=400, detail="No returns data available")
