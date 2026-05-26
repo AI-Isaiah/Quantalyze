@@ -545,28 +545,41 @@ describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () 
   });
 
   // ---------------------------------------------------------------------------
-  // M-0055 — the "Add to scenario" handler is wrapped in try/finally
-  // (BridgeDrawer.tsx:148-157, explicitly added as a review-pass P2 fix) so
-  // that `onClose` ALWAYS runs even when the host callback throws
-  // synchronously. Without the finally, an exception in onAddToScenario would
-  // strand the drawer open with no dismiss path. The T_AS* cases only cover
-  // the happy path; this case pins the defensive contract.
+  // H-0085 (supersedes the old M-0055 try/finally contract) — the audit ruled
+  // the previous "always onClose via finally, even on throw" shape a Rule 12
+  // (Fail loud) violation: `addStrategyBridge` throwing (quota exceeded,
+  // duplicate strategy_id, malformed state) would dismiss the drawer cleanly
+  // while the strategy was silently NOT added — the allocator saw success.
+  //
+  // CORRECTED contract (mirrors handleSendIntro's {ok:false} path):
+  //   - the throw is CAUGHT inside handleAddToScenario (no window 'error'),
+  //   - onClose is NOT called (drawer stays open),
+  //   - the error message surfaces in the confirm stage's role="alert",
+  //   - on a NON-throwing call, onClose still fires (happy path, T_AS4).
+  //
+  // This test FAILS against the pre-fix try/finally code (which called onClose
+  // and let the throw escape to the window 'error' event).
   // ---------------------------------------------------------------------------
-  it("M-0055 — onAddToScenario throwing still fires onClose (try/finally guard)", () => {
+  it("H-0085 — a SYNCHRONOUSLY-throwing onAddToScenario keeps the drawer open + surfaces the error (defensive net)", () => {
+    // NOTE: this mock throws SYNCHRONOUSLY — it pins the defensive catch in
+    // handleAddToScenario. The PRODUCTION callback (the useScenarioState hook's
+    // `addStrategyBridge`, which runs the pure transform inside `setDraft`)
+    // throws (if ever) in a render-phase setState updater handled by the route
+    // error boundary, NOT by this synchronous catch; that path is intentionally
+    // not exercised here.
     const onAddToScenario = vi.fn(() => {
       throw new Error("host blew up");
     });
     const onClose = vi.fn();
-    // React 19 routes an exception thrown inside an event handler through its
-    // own dispatch + window `error` event (reportError) rather than re-throwing
-    // synchronously to fireEvent. Install a capturing listener that swallows
-    // the reported error so it doesn't surface as an unhandled rejection /
-    // false-positive test failure — the production behaviour under test is
-    // "onClose runs anyway via the finally", not the throw itself.
-    const captured: ErrorEvent[] = [];
+    // Guard against a regression to the OLD behaviour: if the throw were to
+    // escape the handler again (try/finally with no catch), React 19 would
+    // route it to the window 'error' event. Capture any such escape so the
+    // test fails loudly rather than crashing the runner — but the fix means
+    // nothing should be captured (the throw is handled in-component).
+    const escaped: ErrorEvent[] = [];
     const handler = (e: ErrorEvent) => {
       if (e.error instanceof Error && e.error.message === "host blew up") {
-        captured.push(e);
+        escaped.push(e);
         e.preventDefault();
       }
     };
@@ -588,13 +601,37 @@ describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () 
     } finally {
       window.removeEventListener("error", handler);
     }
-    // The callback threw, but the `finally` in handleAddToScenario fired
-    // onClose first — so the drawer never strands open on a host exception.
+    // The callback was invoked exactly once...
+    expect(onAddToScenario).toHaveBeenCalledTimes(1);
+    // ...but because it threw, the drawer must NOT close (Fail loud).
+    expect(onClose).not.toHaveBeenCalled();
+    // The failure is surfaced to the allocator via the existing alert region,
+    // not swallowed — and the throw was handled in-component (did not escape).
+    expect(screen.getByRole("alert")).toHaveTextContent("host blew up");
+    expect(escaped.length).toBe(0);
+    // Drawer stays on the confirm stage so the allocator can see the error.
+    expect(screen.getByText("Confirm intro")).toBeInTheDocument();
+  });
+
+  it("H-0085 — non-throwing onAddToScenario still closes the drawer (happy path preserved)", () => {
+    const onAddToScenario = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={onClose}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+        onAddToScenario={onAddToScenario}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    fireEvent.click(screen.getByTestId("bridge-add-to-scenario"));
     expect(onAddToScenario).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
-    // And the thrown error genuinely propagated (proving the finally ran in
-    // the presence of a real exception, not because the callback succeeded).
-    expect(captured.length).toBeGreaterThan(0);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   // ---------------------------------------------------------------------------
@@ -607,7 +644,7 @@ describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () 
   // re-appears on the next confirm view.
   // ---------------------------------------------------------------------------
   it(
-    "M-0057: error surfaced on a failed Send intro is NOT cleared when going Back then re-entering confirm — fix in follow-up (Back handler should setError(null))",
+    "M-0057: backing out of confirm drops the prior Send-intro error so no stale alert re-appears when re-entering confirm",
     async () => {
       mockSendBridgeIntro.mockResolvedValueOnce({
         ok: false,

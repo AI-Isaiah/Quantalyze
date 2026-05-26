@@ -7,9 +7,9 @@
  * and traceable to a numeric threshold.
  *
  * The full insight strip on /demo renders the OUTPUT of this module as a
- * row of one-sentence statements. If a rule fires zero insights, the
- * caller (`<InsightStrip>`) shows the fallback "No unusual activity"
- * sentence so the strip never silently disappears.
+ * row of one-sentence statements. When zero insights fire (and there are no
+ * flagged holdings), `<InsightStrip>` renders nothing — there is no
+ * "No unusual activity" empty-state copy.
  */
 
 import type { PortfolioAnalytics } from "./types";

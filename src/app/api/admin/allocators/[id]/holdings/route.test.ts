@@ -20,6 +20,20 @@ import { NextRequest } from "next/server";
  *   TC6 — 200 happy path with embedded-join normalization (object form
  *         AND array form, plus the Unnamed-strategy fallback).
  *   TC7 — CSRF short-circuit fires before auth/admin work.
+ *
+ * audit-2026-05-07 batch2 hi-fix (H-0211 / H-0212 / H-0213 / M-0261):
+ *   TC8  — 400 "id must be a UUID" when the id segment is a non-UUID
+ *          string, BEFORE any auth/admin/PII work (M-0261; closes the
+ *          22P02-as-500 leak + narrows the H-0212 enumeration surface).
+ *   TC9  — 429 Too many requests with Retry-After when adminActionLimiter
+ *          denies (H-0211/H-0213 enumeration cap).
+ *   TC10 — the limiter runs AFTER the admin gate: a non-admin 403s and
+ *          never consumes/probes the admin bucket (checkLimit not called).
+ *   TC11 — 503 ratelimit_misconfigured (NOT 429) when the limiter is
+ *          unconfigured in production — fail-CLOSED, so a misconfig can't
+ *          silently uncap the route.
+ *   TC12 — both 200 paths set `Cache-Control: private, no-store` (H-0212;
+ *          forbids proxy/CDN caching of per-user portfolio composition).
  */
 
 // admin.ts / supabase admin.ts pull in "server-only" which throws under
@@ -55,6 +69,11 @@ const STATE = vi.hoisted(() => ({
   // Track whether the admin client was constructed at all — the 401/403
   // paths must short-circuit BEFORE the PII source is touched.
   adminClientCreated: false,
+  // Rate-limit result returned by the mocked checkLimit. Default success so
+  // the original TC1..TC7 (which predate the limiter) keep passing.
+  rateLimitResult: { success: true } as
+    | { success: true }
+    | { success: false; retryAfter: number; reason?: "ratelimit_misconfigured" },
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -107,6 +126,19 @@ vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: () => STATE.csrfResponse,
 }));
 
+// Mock the limiter so 429 / 503-misconfig are deterministic. The real
+// `isRateLimitMisconfigured` is a pure predicate over the result shape, so
+// we re-implement it here rather than importActual (which would pull in the
+// Upstash module). `checkLimit` records its invocation so TC10 can prove the
+// limiter is gated behind the admin check.
+const mockCheckLimit = vi.fn(async () => STATE.rateLimitResult);
+vi.mock("@/lib/ratelimit", () => ({
+  adminActionLimiter: {},
+  checkLimit: mockCheckLimit,
+  isRateLimitMisconfigured: (r: { success: boolean; reason?: string }) =>
+    r.success === false && r.reason === "ratelimit_misconfigured",
+}));
+
 function makeRequest(): NextRequest {
   return new NextRequest(
     `http://localhost:3000/api/admin/allocators/${ALLOCATOR_ID}/holdings`,
@@ -125,7 +157,10 @@ beforeEach(() => {
   STATE.rowsResult = { data: [], error: null };
   STATE.csrfResponse = null;
   STATE.adminClientCreated = false;
+  STATE.rateLimitResult = { success: true };
   mockIsAdminUser.mockImplementation(async () => STATE.isAdmin);
+  mockCheckLimit.mockClear();
+  mockCheckLimit.mockImplementation(async () => STATE.rateLimitResult);
 });
 
 afterEach(() => {
@@ -248,5 +283,83 @@ describe("GET /api/admin/allocators/[id]/holdings — H-0215", () => {
     // CSRF deny must precede any auth/admin work.
     expect(mockIsAdminUser).not.toHaveBeenCalled();
     expect(STATE.adminClientCreated).toBe(false);
+  });
+
+  it("TC8 — 400 'id must be a UUID' for a non-UUID id, before any auth/admin/PII work (M-0261)", async () => {
+    // A non-UUID id used to flow into `.eq('user_id', id)` and surface as a
+    // 22P02-cast 500 (info leak) while also widening the H-0212 enumeration
+    // surface. The UUID guard must reject it as a 400 BEFORE CSRF/auth/admin
+    // and BEFORE the service-role client is constructed.
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams("not-a-uuid"));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("id must be a UUID");
+    expect(mockIsAdminUser).not.toHaveBeenCalled();
+    expect(mockCheckLimit).not.toHaveBeenCalled();
+    expect(STATE.adminClientCreated).toBe(false);
+  });
+
+  it("TC9 — 429 Too many requests with Retry-After when the admin limiter denies (H-0211/H-0213)", async () => {
+    // The enumeration cap: once the adminActionLimiter bucket is exhausted,
+    // a compromised admin session must be throttled rather than free to walk
+    // every allocator UUID. The PII admin client must NOT be reached.
+    STATE.rateLimitResult = { success: false, retryAfter: 17 };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(ALLOCATOR_ID));
+    expect(res.status).toBe(429);
+    expect((await res.json()).error).toBe("Too many requests");
+    expect(res.headers.get("Retry-After")).toBe("17");
+    expect(STATE.adminClientCreated).toBe(false);
+  });
+
+  it("TC10 — the limiter runs AFTER the admin gate: a non-admin 403s and never touches the admin bucket", async () => {
+    // Ordering invariant: if checkLimit ran before the isAdminUser gate, a
+    // non-admin could consume/probe the shared admin bucket (a cross-tenant
+    // DoS + a timing oracle). The deny must short-circuit at 403 with the
+    // limiter untouched.
+    STATE.isAdmin = false;
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(ALLOCATOR_ID));
+    expect(res.status).toBe(403);
+    expect(mockCheckLimit).not.toHaveBeenCalled();
+    expect(STATE.adminClientCreated).toBe(false);
+  });
+
+  it("TC11 — 503 ratelimit_misconfigured (not 429) when the limiter is unconfigured (fail-CLOSED)", async () => {
+    // P709 fail-CLOSED: a production deploy with no Upstash env must surface
+    // a 503 so the canary/health check sees the outage, rather than a 429
+    // that masks an uncapped route as ordinary throttling.
+    STATE.rateLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(ALLOCATOR_ID));
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("ratelimit_misconfigured");
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(STATE.adminClientCreated).toBe(false);
+  });
+
+  it("TC12 — both 200 paths set Cache-Control: private, no-store (H-0212)", async () => {
+    const { GET } = await import("./route");
+
+    // Empty-portfolio 200.
+    STATE.portfolioResult = { data: null, error: null };
+    const emptyRes = await GET(makeRequest(), withParams(ALLOCATOR_ID));
+    expect(emptyRes.status).toBe(200);
+    expect(emptyRes.headers.get("Cache-Control")).toBe("private, no-store");
+
+    // Populated 200.
+    STATE.portfolioResult = { data: { id: PORTFOLIO_ID }, error: null };
+    STATE.rowsResult = {
+      data: [{ strategy_id: "s1", strategy: { id: "s1", name: "Alpha" } }],
+      error: null,
+    };
+    const fullRes = await GET(makeRequest(), withParams(ALLOCATOR_ID));
+    expect(fullRes.status).toBe(200);
+    expect(fullRes.headers.get("Cache-Control")).toBe("private, no-store");
   });
 });

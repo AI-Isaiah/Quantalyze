@@ -1180,6 +1180,44 @@ describe("T_R21 — RPC error 500 path", () => {
     // back. The route does not need to do anything else — the cache stays
     // clean.
   });
+
+  // M-0295 (api-contract) — the RPC is SECURITY DEFINER and its RAISE
+  // EXCEPTION messages (migration 082/131) embed internal state: the literal
+  // holding_ref, strategy_id, row index, the `auth.uid() <> p_allocator_id`
+  // guard text, plus raw Postgres constraint/column names on an unexpected
+  // error. The route must NOT echo rpcErr.message to the allocator client —
+  // it logs the full message server-side and returns a stable, opaque body.
+  // This test fails if a regression re-introduces the raw-message echo.
+  it("does NOT leak the raw RPC error message to the client (M-0295)", async () => {
+    const leak =
+      "commit_scenario_batch[index=0]: holding_ref holding:binance:BTC:spot not owned by allocator a1b2c3d4";
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockRpc.mockResolvedValueOnce({
+      data: null,
+      error: { code: "P0001", message: leak },
+    });
+
+    const res = await POST(mkReq({ diffs: [VALID_VR] }));
+    expect(res.status).toBe(500);
+
+    const body = await res.json();
+    // Stable, opaque client message — the schema-bearing RPC string must be
+    // fully absent from BOTH fields of the response body.
+    expect(body.error).toBe("Commit failed");
+    expect(body.message).not.toContain("holding_ref");
+    expect(body.message).not.toContain("binance");
+    expect(body.message).not.toContain("commit_scenario_batch");
+    expect(body.message).not.toBe(leak);
+    expect(JSON.stringify(body)).not.toContain(leak);
+
+    // The full message is still logged server-side for diagnostics — the
+    // fix suppresses client leakage, not observability.
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "scenario_commit RPC error",
+      expect.objectContaining({ message: leak, user: "alloc-A" }),
+    );
+    consoleSpy.mockRestore();
+  });
 });
 
 // ===========================================================================

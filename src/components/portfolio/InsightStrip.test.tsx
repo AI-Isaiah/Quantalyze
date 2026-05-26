@@ -306,3 +306,97 @@ describe("InsightStrip — H-1083 BridgeTrigger integration", () => {
     expect(screen.getAllByRole("button", { name: /Find Replacement/i })).toHaveLength(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// H-1080 / H-1082 — compute is short-circuited + memoized
+// ---------------------------------------------------------------------------
+//
+// The strip is mounted inside a `"use client"` shell (AllocationDashboardV2)
+// and re-renders on every parent state change PLUS the 30s router.refresh on
+// Overview. Two correctness requirements:
+//   1. computeAllInsights must be called UNCONDITIONALLY — even on null
+//      `analytics`. computeRebalanceDrift is analytics-INDEPENDENT (it keys on
+//      portfolioStrategies + portfolioAgeDays), so a `analytics === null ? []`
+//      short-circuit would silently drop a live rebalance-drift insight.
+//   2. The result must be memoized so an unrelated parent re-render (same
+//      inputs) does not re-run the rules.
+
+describe("InsightStrip — H-1080/H-1082 compute called unconditionally + memoized", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("calls computeAllInsights even when analytics is null (rebalance-drift is analytics-independent, so null must not short-circuit)", () => {
+    const spy = vi.spyOn(insightsModule, "computeAllInsights");
+    render(
+      <InsightStrip
+        analytics={null}
+        portfolioId="p-1"
+        portfolioStrategies={[]}
+        portfolioAgeDays={30}
+      />,
+    );
+    // The prior `analytics === null ? []` short-circuit skipped the engine and
+    // silently dropped the analytics-INDEPENDENT rebalance-drift insight. The
+    // call must happen with the real args regardless of null analytics.
+    expect(spy).toHaveBeenCalledWith(null, [], 30);
+  });
+
+  it("does not re-run computeAllInsights when an unrelated prop is unchanged across re-render (memoized)", () => {
+    const analytics = buildAnalytics();
+    const spy = vi
+      .spyOn(insightsModule, "computeAllInsights")
+      .mockReturnValue([]);
+
+    const { rerender } = render(
+      <InsightStrip analytics={analytics} portfolioId="p-1" flaggedCount={1} />,
+    );
+    const callsAfterFirstRender = spy.mock.calls.length;
+
+    // Re-render with the SAME analytics identity and inputs (simulates a
+    // parent re-render that didn't touch the insight inputs). With a useMemo
+    // keyed on [analytics, portfolioStrategies, portfolioAgeDays, max] the
+    // memo holds and the rule engine is not re-run.
+    rerender(
+      <InsightStrip analytics={analytics} portfolioId="p-1" flaggedCount={1} />,
+    );
+
+    expect(spy.mock.calls.length).toBe(callsAfterFirstRender);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M-0441 / L-0026 — dead `{false ? ... : ...}` branch removed
+// ---------------------------------------------------------------------------
+//
+// The empty-state copy "No unusual activity in the trailing window." was left
+// behind the dead literal `{false ? <p>…</p> : <ul>…</ul>}` ternary after PR3
+// silenced the strip via an early `return null`. The branch can never execute,
+// and the stale JSDoc claimed a fallback the component no longer renders. These
+// tests pin that the fallback copy is unreachable across the exact states the
+// audit flagged so a future maintainer can't accidentally resurrect it.
+
+describe("InsightStrip — M-0441/L-0026 no unreachable empty-state copy", () => {
+  it("renders nothing (not the fallback paragraph) when insights empty and flaggedCount is 0", () => {
+    const { container } = render(
+      <InsightStrip analytics={buildAnalytics()} portfolioId="p-1" flaggedCount={0} />,
+    );
+    expect(container.firstChild).toBeNull();
+    expect(
+      screen.queryByText(/No unusual activity in the trailing window/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("never renders the 'No unusual activity' fallback when the section IS shown", () => {
+    // flaggedCount > 0 forces the section open with an empty insight list —
+    // the exact case the dead `false` branch pretended to handle. The list
+    // must render directly with no fallback paragraph.
+    render(
+      <InsightStrip analytics={buildAnalytics()} portfolioId="p-1" flaggedCount={2} />,
+    );
+    expect(screen.getByRole("list")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/No unusual activity in the trailing window/),
+    ).not.toBeInTheDocument();
+  });
+});

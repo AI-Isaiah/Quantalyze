@@ -40,6 +40,12 @@ const STATE = vi.hoisted(() => ({
   strategiesDeleteCalls: [] as Array<{ column: string; value: unknown }>,
   // api_keys reference count returned by the head/select for cleanup.
   apiKeyRefCount: 1 as number,
+  // H-0314: inject an error on the api_keys ref-count head/select. When
+  // set, the mock resolves { count: null, error } — exactly what
+  // PostgREST returns on a failed count query. The route must treat this
+  // as "cannot prove the key is orphaned" and SKIP the api_keys delete,
+  // not coalesce null→0 and yank a key sibling strategies still share.
+  apiKeyRefCountError: null as { message: string } | null,
   // Captured api_keys deletes (cleanup branch).
   apiKeysDeleteCalls: [] as Array<{ column: string; value: unknown }>,
   // H-0312: inject a failure on the api_keys delete to exercise the
@@ -71,10 +77,21 @@ vi.mock("@/lib/supabase/server", () => ({
         });
         const buildRefCountChain = () => ({
           eq: (_column: string, _value: unknown) => ({
-            // The route awaits the .eq() chain directly — model that
-            // by exposing a thenable that resolves to { count }.
-            then: (resolve: (v: { count: number }) => void) =>
-              resolve({ count: STATE.apiKeyRefCount }),
+            // The route awaits the .eq() chain directly — model that by
+            // exposing a thenable that resolves to { count, error }. On a
+            // PostgREST count failure `count` comes back null alongside the
+            // error, so when an error is injected we force count→null to
+            // faithfully reproduce the null-coalesce hazard the route guards.
+            then: (
+              resolve: (v: {
+                count: number | null;
+                error: { message: string } | null;
+              }) => void,
+            ) =>
+              resolve({
+                count: STATE.apiKeyRefCountError ? null : STATE.apiKeyRefCount,
+                error: STATE.apiKeyRefCountError,
+              }),
           }),
         });
         const buildDeleteChain = () => ({
@@ -161,6 +178,7 @@ beforeEach(() => {
   STATE.draftRow = null;
   STATE.strategiesDeleteCalls = [];
   STATE.apiKeyRefCount = 1;
+  STATE.apiKeyRefCountError = null;
   STATE.apiKeysDeleteCalls = [];
   STATE.apiKeysDeleteError = null;
   STATE.auditCalls = [];
@@ -386,6 +404,44 @@ describe("DELETE /api/strategies/draft/[id] — api_keys cleanup (H-0312)", () =
       (c) => c.action === "api_key.revoke",
     );
     expect(revokeAudit).toBeUndefined();
+  });
+
+  it("does NOT delete the api_keys row when the ref-count query itself errors (H-0314)", async () => {
+    // The ref-count query is the ONLY signal that decides whether the
+    // linked key is orphaned. If it errors, `count` is null. A naive
+    // `(count ?? 0) === 0` would coalesce that to 0 and DELETE the key —
+    // even if sibling strategies still reference it — silently NULLing
+    // their api_key_id via ON DELETE SET NULL and breaking their sync.
+    // The route must treat a failed ref-count as "cannot prove orphaned"
+    // and skip the delete entirely. Without the fix this test fails:
+    // the delete fires and the revoke audit is emitted off a null count.
+    STATE.user = { id: OWNER_ID };
+    STATE.draftRow = {
+      id: DRAFT_ID,
+      user_id: OWNER_ID,
+      source: "wizard",
+      status: "draft",
+      api_key_id: API_KEY_ID,
+    };
+    STATE.apiKeyRefCountError = { message: "ref-count query blew up" };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { DELETE } = await import("./route");
+    const res = await DELETE(makeDeleteReq(), makeCtx());
+
+    // The strategy row is already gone — the request still succeeds.
+    expect(res.status).toBe(200);
+    expect((await res.json()).deleted).toBe(true);
+
+    // CRITICAL: the api_keys delete must NOT have fired. A possibly-shared
+    // key cannot be revoked on the strength of an errored (null) count.
+    expect(STATE.apiKeysDeleteCalls.length).toBe(0);
+    // And no revoke audit — nothing was revoked.
+    const revokeAudit = STATE.auditCalls.find(
+      (c) => c.action === "api_key.revoke",
+    );
+    expect(revokeAudit).toBeUndefined();
+    warnSpy.mockRestore();
   });
 
   it("treats an api_keys delete failure as non-fatal — still returns 200", async () => {
