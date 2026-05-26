@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.9.12] - 2026-05-26
+### Fixed — audit-2026-05-07 cluster review: analytics portfolio router IDOR + data integrity (batch a4)
+- `/portfolio-analytics` and `/portfolio-optimizer` now enforce caller ownership: a `user_id` that does not own the portfolio gets a 404 (was IDOR — any authenticated user could read/optimize another user's portfolio) (NEW-C19-01)
+- `portfolio_bridge` surfaces `partial_data` + `computed_from_n_of_m` when strategies are missing returns_series, and returns `status="incumbent_no_data"` (not a misleading empty "complete") when the incumbent has no returns (NEW-C19-02/03)
+- covariance history gate uses pairwise OVERLAP (dropna), not UNION length; AUM collection uses `is not None` so a $0 strategy is counted as a known reporter (NEW-C19-04/06)
+- `portfolio_optimizer` logs dropped strategies at WARNING and surfaces `computed_strategy_count` / `expected_strategy_count`; `_build_normalized_weights` treats `current_weight=0` as explicit 0.0 and warns when all strategies are paused (NEW-C19-05/09, SF-F3)
+
+
 ## [0.24.9.11] - 2026-05-26
 ### Fixed — audit-2026-05-07 cluster review: admin security (batch b02)
 - Ghost-admin revoke now actually clears `profiles.is_admin=FALSE` (service-role) before the role DELETE — previously a 409 left the flag TRUE permanently (C17-01, red-team C-01)
