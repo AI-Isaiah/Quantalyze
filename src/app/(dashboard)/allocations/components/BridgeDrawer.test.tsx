@@ -562,10 +562,11 @@ describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () 
   // ---------------------------------------------------------------------------
   it("H-0085 — a SYNCHRONOUSLY-throwing onAddToScenario keeps the drawer open + surfaces the error (defensive net)", () => {
     // NOTE: this mock throws SYNCHRONOUSLY — it pins the defensive catch in
-    // handleAddToScenario. The PRODUCTION callback (addStrategyBridge) throws
-    // (if ever) inside a setState updater, i.e. a render-phase error handled by
-    // the route error boundary, NOT by this synchronous catch; that path is
-    // intentionally not exercised here.
+    // handleAddToScenario. The PRODUCTION callback (the useScenarioState hook's
+    // `addStrategyBridge`, which runs the pure transform inside `setDraft`)
+    // throws (if ever) in a render-phase setState updater handled by the route
+    // error boundary, NOT by this synchronous catch; that path is intentionally
+    // not exercised here.
     const onAddToScenario = vi.fn(() => {
       throw new Error("host blew up");
     });

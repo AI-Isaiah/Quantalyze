@@ -173,11 +173,12 @@ export function BridgeDrawer({
     // SYNCHRONOUSLY, surface the message into the confirm stage's existing
     // role="alert" and KEEP the drawer open (a bare try/finally that always
     // `onClose()`d would dismiss the drawer while the add silently failed).
-    // Only close on success. NOTE: the production callback
-    // (scenario-state.ts `addStrategyBridge`) mutates through a `setState`
-    // updater, so a throw THERE is a render-phase error handled by the route
-    // error boundary — NOT by this synchronous catch. This catch is a
-    // defensive net for a callback that throws on the spot.
+    // Only close on success. NOTE: in production `onAddToScenario` is wired
+    // (in ScenarioComposer) to the useScenarioState hook's `addStrategyBridge`,
+    // which runs the pure scenario-state transform inside a `setDraft` updater
+    // — so a throw THERE is a render-phase error handled by the route error
+    // boundary, NOT by this synchronous catch. This catch is a defensive net
+    // for a callback that throws on the spot.
     try {
       onAddToScenario(buildHoldingRef(selected), {
         id: selected.top_candidate_strategy_id,
