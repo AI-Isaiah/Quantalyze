@@ -120,6 +120,30 @@ def _coerce_finite_float(value: Any, label: str) -> float:
     return out
 
 
+def _parse_iso_utc(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp string to a tz-aware UTC datetime.
+
+    Returns None when `value` is falsy or unparseable, so callers can
+    distinguish a usable instant from corrupt input instead of letting a
+    raw, unvalidated string flow downstream. Naive datetimes are assumed
+    UTC (mirrors the per-row parse convention used throughout
+    `_attribute_funding`). Trailing 'Z' is normalized to '+00:00' for
+    `datetime.fromisoformat`, which does not accept 'Z' on older runtimes.
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    # Normalize an aware non-UTC offset to UTC so the return is literally UTC
+    # (matches the docstring + batch-2 _parse_supabase_ts). The instant is
+    # unchanged, so min/max + PostgREST comparisons are unaffected.
+    return dt.astimezone(timezone.utc)
+
+
 def _emit_capped_flag_list(
     flags: dict[str, Any], name: str, lst: list[str]
 ) -> None:
@@ -301,7 +325,9 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
         else:
             aggregated_data_quality_flags[k] = v
 
-    await _attribute_funding(strategy_id, all_positions, supabase)
+    await _attribute_funding(
+        strategy_id, all_positions, supabase, aggregated_data_quality_flags
+    )
 
     # Audit-2026-05-07 G12.C.1/C.2: atomic DELETE+INSERT via RPC. The RPC
     # signature mirrors the column list of the previous direct INSERT so
@@ -491,7 +517,10 @@ def _strip_non_db_keys(pos: dict) -> dict:
 
 
 async def _attribute_funding(
-    strategy_id: str, positions: list[dict], supabase
+    strategy_id: str,
+    positions: list[dict],
+    supabase,
+    flags: dict[str, Any] | None = None,
 ) -> None:
     """Sum funding_fees into each position's funding_pnl column.
 
@@ -504,9 +533,23 @@ async def _attribute_funding(
     Mutates the positions list in place. Called after FIFO matching and
     before DB persist in reconstruct_positions.
 
+    `flags`, when supplied, is the strategy-level
+    `aggregated_data_quality_flags` dict. On a swallowed funding-fetch
+    failure we set `flags['funding_attribution_failed'] = True` (Audit
+    H-1094) so the silent funding_pnl=0 degradation is observable to
+    analytics_runner (which lifts it into
+    `strategy_analytics.data_quality_flags`) instead of letting the
+    dashboard claim "ROI excludes funding" when funding could not be
+    loaded at all. Corrupt position timestamps are counted per-position in
+    `flags['funding_window_corrupt_position']` (Audit H-1097). Funding rows
+    dropped from the sum because their OWN timestamp/amount is corrupt are
+    counted in `flags['funding_rows_unparseable']` — a partial under-count of
+    funding_pnl, distinct from the all-or-nothing `funding_attribution_failed`.
+
     Failure mode: if funding_fees fetch errors (e.g. RLS misconfig, table
     missing on a stale staging DB), each position keeps funding_pnl=0
-    rather than blocking the entire reconstruction. Logged as warning.
+    rather than blocking the entire reconstruction. Logged as warning and
+    surfaced via the DQ flag above.
     """
     if not positions:
         return
@@ -523,29 +566,87 @@ async def _attribute_funding(
     # was NULL/empty → position_open_time=None). This computation sits before
     # the DB-fetch try/except below, so the ValueError would escape and crash
     # the whole reconstruction — violating this function's documented
-    # fail-soft contract (positions keep funding_pnl=0). Materialize the valid
-    # opens and return early when none exist: with no lower bound there is no
-    # funding window to attribute, and every position already defaults to
-    # funding_pnl=0.
-    valid_opens = [p["opened_at"] for p in positions if p.get("opened_at")]
-    if not valid_opens:
+    # fail-soft contract (positions keep funding_pnl=0).
+    #
+    # Audit H-1097: compute the bounds from PARSED datetimes, not raw string
+    # min/max. The pre-fix code took the lexical min/max of opened_at /
+    # closed_at strings and injected them straight into PostgREST .gte/.lte.
+    # A SINGLE corrupt closed_at (e.g. a space instead of 'T', or a Unix-ms
+    # int-as-string) could be lexically-max yet parse-invalid as TIMESTAMPTZ,
+    # making PostgREST 400 the whole range scan — which the broad `except`
+    # below then swallows, silently zeroing funding for EVERY position. By
+    # parsing first, only positions with a valid timestamp contribute to the
+    # bounds; corrupt-but-present timestamps are counted (not injected raw)
+    # so one poison-pill row can no longer take down the strategy's funding.
+    open_dts: list[datetime] = []
+    close_dts: list[datetime] = []
+    corrupt_window_positions = 0
+    for p in positions:
+        pos_corrupt = False
+        opened_raw = p.get("opened_at")
+        if opened_raw:
+            opened_dt = _parse_iso_utc(opened_raw)
+            if opened_dt is None:
+                pos_corrupt = True
+            else:
+                open_dts.append(opened_dt)
+        closed_raw = p.get("closed_at")
+        if not closed_raw:
+            # Open position (or no recorded close): upper bound is now.
+            close_dts.append(now)
+        else:
+            closed_dt = _parse_iso_utc(closed_raw)
+            if closed_dt is None:
+                # Corrupt close: the per-position scan below falls THIS row's
+                # window back to `now`, so the query upper bound MUST also cover
+                # `now` — otherwise the fetch window ends before this position's
+                # window and its funding is silently dropped (a quieter
+                # recurrence of the H-1097 poison-pill, e.g. a clean early close
+                # + a later corrupt-close position). Mirror the per-position
+                # fallback here instead of dropping the bound.
+                pos_corrupt = True
+                close_dts.append(now)
+            else:
+                close_dts.append(closed_dt)
+        # Count per POSITION, not per timestamp: a position with BOTH opened_at
+        # and closed_at corrupt is ONE corrupt position, not two (the flag is a
+        # position-keyed count summed into strategy_analytics.data_quality_flags).
+        if pos_corrupt:
+            corrupt_window_positions += 1
+
+    if corrupt_window_positions and flags is not None:
+        flags["funding_window_corrupt_position"] = (
+            flags.get("funding_window_corrupt_position", 0)
+            + corrupt_window_positions
+        )
+
+    if not open_dts:
         # Fail-soft, consistent with the funding_fees-fetch-failure path below:
-        # no position has a usable opened_at (every fill carried a NULL/empty
-        # timestamp), so there is no lower window bound to attribute funding
-        # against. Surface it at WARNING — matching this function's documented
-        # fail-soft logging convention — so the all-positions-null-timestamp
-        # corruption is observable rather than a silent no-op, then leave every
-        # position's funding_pnl at its 0 default.
+        # no position has a usable (parseable) opened_at, so there is no lower
+        # window bound to attribute funding against. This is the WORST funding
+        # degradation (the entire lower bound is unrecoverable), so surface it
+        # both at WARNING and via the same DQ flag as the fetch-failure path —
+        # otherwise the dashboard sees a clean flag blob and implies the
+        # strategy simply paid no funding. Then leave every funding_pnl at 0.
+        if flags is not None:
+            flags["funding_attribution_failed"] = True
         logger.warning(
-            "funding attribution skipped for strategy %s: all %d positions have "
-            "a falsy opened_at — funding_pnl stays 0",
-            strategy_id, len(positions),
+            "funding attribution skipped for strategy %s: no position has a "
+            "parseable opened_at (%d positions, %d with corrupt timestamps) — "
+            "funding_pnl stays 0",
+            strategy_id, len(positions), corrupt_window_positions,
         )
         return
-    min_opened_at = min(valid_opens)
-    max_closed_at = max(
-        (p.get("closed_at") or now.isoformat()) for p in positions
-    )
+    # Serialize the parsed bounds back to canonical ISO-8601 so PostgREST
+    # always receives a valid TIMESTAMPTZ literal. close_dts is guaranteed
+    # non-empty TODAY: every position appends exactly one entry above (a parsed
+    # close, or `now` for an open OR corrupt-close position), and reaching here
+    # requires open_dts non-empty ⇒ positions non-empty. So `else now` is
+    # UNREACHABLE today — kept only so a future refactor that stops every
+    # position contributing a close bound degrades to `now` instead of a
+    # max([]) ValueError before the DB try/except below.
+    min_opened_at = min(open_dts).isoformat()
+    max_closed_at = (max(close_dts) if close_dts else now).isoformat()
 
     # Page size for funding_fees fetch. Small enough to stay well under
     # PostgREST's per-response limit; used in tests via patching.
@@ -581,34 +682,58 @@ async def _attribute_funding(
             "positions will get funding_pnl=0",
             strategy_id, exc,
         )
+        # Audit H-1094: surface the silent funding_pnl=0 degradation as a
+        # data-quality flag (mirrors breakeven_positions / fills_dropped_no_symbol).
+        # analytics_runner lifts inner trade_metrics flags into
+        # strategy_analytics.data_quality_flags, so the dashboard can warn that
+        # ROI excludes funding because funding could NOT be loaded — instead of
+        # implying the strategy simply paid none.
+        if flags is not None:
+            flags["funding_attribution_failed"] = True
         return
 
     if not funding_rows:
         return
 
     # Group funding rows by symbol for fast lookup during position scan.
+    # Audit H-1094 (extended): a funding row with a missing/corrupt timestamp or
+    # non-numeric amount is dropped from the sum — which silently UNDER-counts
+    # funding_pnl (a wrong-but-clean-looking ROI). Count the drops and surface
+    # them so a half-corrupt funding feed is observable, mirroring the
+    # all-or-nothing funding_attribution_failed flag.
     by_symbol: dict[str, list[tuple[datetime, Decimal]]] = defaultdict(list)
+    funding_rows_unparseable = 0
     for row in funding_rows:
         sym = row.get("symbol", "")
         ts_raw = row.get("timestamp")
         amt_raw = row.get("amount")
         if not sym or ts_raw is None or amt_raw is None:
+            funding_rows_unparseable += 1
             continue
         try:
             ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
             amt = Decimal(str(amt_raw))
-        except Exception:
+        except Exception:  # noqa: BLE001 — keep fail-soft; the row is counted
+            funding_rows_unparseable += 1
             continue
         by_symbol[sym].append((ts, amt))
+
+    if funding_rows_unparseable and flags is not None:
+        flags["funding_rows_unparseable"] = (
+            flags.get("funding_rows_unparseable", 0) + funding_rows_unparseable
+        )
 
     # Sort each symbol's timeline once — supports linear scan per position.
     for sym in by_symbol:
         by_symbol[sym].sort(key=lambda x: x[0])
 
-    now_utc = datetime.now(timezone.utc)
-
+    # Reuse the single `now` sampled before the fetch (above) as the
+    # open/corrupt-close upper bound — sampling a second `now` here would let a
+    # funding row in the micro-gap between the two be inside a per-position
+    # window yet outside the (earlier) fetch bound, silently dropping it. One
+    # `now` keeps the fetch bound and the per-position scan identical.
     for pos in positions:
         symbol = pos.get("symbol", "")
         opened_at_raw = pos.get("opened_at")
@@ -633,9 +758,9 @@ async def _attribute_funding(
                 if closed_dt.tzinfo is None:
                     closed_dt = closed_dt.replace(tzinfo=timezone.utc)
             except Exception:
-                closed_dt = now_utc
+                closed_dt = now
         else:
-            closed_dt = now_utc
+            closed_dt = now
 
         total = Decimal(0)
         for ts, amt in by_symbol.get(symbol, []):
