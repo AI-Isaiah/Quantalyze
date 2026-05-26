@@ -165,6 +165,7 @@ BEGIN
    WHERE id IN (
      SELECT cj.id FROM compute_jobs cj
       WHERE cj.id IN (SELECT id FROM deduped)
+        AND cj.status IN ('pending', 'failed_retry')  -- H-1/M-1: re-check status after CTE snapshot+lock to guard against concurrent status transitions
       ORDER BY cj.next_attempt_at
       LIMIT p_batch_size
       FOR UPDATE SKIP LOCKED
@@ -203,6 +204,7 @@ BEGIN
       JOIN pg_namespace n ON p.pronamespace = n.oid
      WHERE n.nspname = 'public'
        AND p.proname = 'claim_compute_jobs'
+       AND pg_get_function_identity_arguments(p.oid) = 'p_batch_size integer, p_worker_id text'  -- M-3: pin to exact signature to avoid false-pass under future overloads
        AND EXISTS (
          SELECT 1 FROM unnest(p.proconfig) AS cfg
           WHERE cfg LIKE 'search_path=%'

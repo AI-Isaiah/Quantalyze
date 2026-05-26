@@ -200,6 +200,45 @@ describe("C39 / NEW-C39-01 — offline SQL structural invariants", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // H-1/M-1 fix (red-team b10, 2026-05-26): the UPDATE WHERE clause must
+  // re-check status IN ('pending', 'failed_retry') after the CTE snapshot and
+  // FOR UPDATE SKIP LOCKED lock. This guards against any concurrent status
+  // transition between CTE evaluation and the lock being taken.
+  // ---------------------------------------------------------------------------
+  it("C39: UPDATE WHERE clause includes status IN ('pending', 'failed_retry') re-check guard", () => {
+    const sql = readMigration(MIG_C39);
+    // The sub-SELECT that feeds the UPDATE WHERE id IN (...) must include
+    // a status filter so a concurrently-transitioned row is never blindly
+    // flipped to 'running'.
+    expect(sql).toMatch(
+      /cj\.status\s+IN\s*\(\s*'pending'\s*,\s*'failed_retry'\s*\)/i,
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // M-3 fix (red-team b10, 2026-05-26): the self-verifier's proconfig EXISTS
+  // check must pin to the exact function signature to avoid a false-pass if a
+  // future migration adds a same-named overload without SET search_path.
+  // ---------------------------------------------------------------------------
+  it("C39: self-verifier proconfig check is pinned to (p_batch_size integer, p_worker_id text) signature", () => {
+    const sql = readMigration(MIG_C39);
+    // Must appear inside the proconfig EXISTS block (not only in the body
+    // retrieval query). Both occurrences share the same literal, so a single
+    // match is sufficient — the test will catch removal of either.
+    const pinLiteral =
+      "pg_get_function_identity_arguments(p.oid) = 'p_batch_size integer, p_worker_id text'";
+    // Count occurrences — expect at least 2 (proconfig check + body retrieval).
+    const count = (sql.match(
+      /pg_get_function_identity_arguments\s*\(\s*p\.oid\s*\)\s*=\s*'p_batch_size integer, p_worker_id text'/gi,
+    ) ?? []).length;
+    expect(
+      count,
+      `expected at least 2 occurrences of the signature pin (proconfig + body retrieval), got ${count}`,
+    ).toBeGreaterThanOrEqual(2);
+    void pinLiteral; // referenced above via regex
+  });
+
+  // ---------------------------------------------------------------------------
   // Negative guard: the NULL-skip branch form must NOT be inverted.
   // ---------------------------------------------------------------------------
   it("C39: NULL-skip branch uses IS NULL OR form (not IS NOT NULL)", () => {
