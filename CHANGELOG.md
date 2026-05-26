@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.9.20] - 2026-05-27
+### Fixed — audit-2026-05-07 cluster review: allocation queries + formatting (batch b03)
+- `getAllocatorAggregates` collapsed to latest-per-portfolio (no double-count across stale rows); corrected a stale REVOKE comment (NEW-C03-11/12)
+- flagged-holdings candidate-strategy SELECT now gates on `status=published` (defence-in-depth — archived/draft candidates no longer surface their id/codename) (NEW-C03-03)
+- `formatThousands` uses `toFixed(1)` to avoid ≥33% overstatement; negative-currency formatting fix (NEW-C09-12)
+- Sentry coverage + error-handling + stale-comment cleanup across queries; review + red-team hardening (H-01/H-02/M-01…M-04)
+
+
 ## [0.24.9.19] - 2026-05-27
 ### Fixed — audit-2026-05-07 cluster review: factsheet two-tier data integrity (batch b06)
 - factsheet v2 gates non-derivable panels for CSV-ingested strategies via an `ingestSource` discriminator — CSV (daily-return series only) hides panels that require API-level trade/position data instead of fabricating them (NEW-C20-01)

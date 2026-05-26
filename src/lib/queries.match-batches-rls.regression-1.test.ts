@@ -108,6 +108,12 @@ const authedRows: Record<string, unknown[]> = {
     {
       id: "strat-top-candidate",
       name: "Polaris Cross-Exchange Arb",
+      // NEW-C03-03 (batch b03): the candidate-strategies SELECT now gates on
+      // status=published (defence-in-depth — a candidate archived/reverted to
+      // draft after the compute job ran must not surface). The fixture marks
+      // the candidate published so the flagged-holding path still exercises the
+      // populated branch this regression guards.
+      status: "published",
       // audit-2026-05-07 G8.A.2 (P35) follow-up: candidate-strategies
       // SELECT now co-fetches `codename` + `disclosure_tier` and routes
       // through `displayStrategyName`, so the seeded fixture has to
@@ -148,6 +154,12 @@ const adminRows: Record<string, unknown[]> = {
     {
       id: "strat-top-candidate",
       name: "Polaris Cross-Exchange Arb",
+      // NEW-C03-03 (batch b03): the candidate-strategies SELECT now gates on
+      // status=published (defence-in-depth — a candidate archived/reverted to
+      // draft after the compute job ran must not surface). The fixture marks
+      // the candidate published so the flagged-holding path still exercises the
+      // populated branch this regression guards.
+      status: "published",
       // audit-2026-05-07 G8.A.2 (P35) follow-up: candidate-strategies
       // SELECT now co-fetches `codename` + `disclosure_tier` and routes
       // through `displayStrategyName`, so the seeded fixture has to
