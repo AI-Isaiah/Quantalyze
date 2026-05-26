@@ -2480,8 +2480,9 @@ class EquityCurveBuilder:
       - services.exchange.fetch_mark_prices(instruments) (60s in-process
         cache)
 
-    Sharpe matches an independently-computed quantstats reference
-    (qs.stats.sharpe(returns, periods=252)) within ±0.05.
+    Sharpe uses `periods=365` (calendar-daily crypto). Matches
+    `qs.stats.sharpe(returns, periods=365)` within ±0.10 (tolerance
+    widened from ±0.05 after C01-14/C01-15; see test_equity_curve_builder.py).
     """
 
     # Synthetic starting NAV used when the caller does not supply one.
