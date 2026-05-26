@@ -749,7 +749,11 @@ async def _attribute_funding(
         currency = (row.get("currency") or "").upper()
         if currency and currency not in _USD_QUOTE_CURRENCIES:
             funding_currency_unsupported_count += 1
-            logger.debug(
+            # silent-failure/F-07: was logger.debug — invisible in production.
+            # The parallel guard in EquityCurveBuilder.attach_funding correctly
+            # logs at WARNING. Use the same level so operators can see which
+            # symbols are affected without enabling DEBUG logging.
+            logger.warning(
                 "funding attribution: skipped row currency=%r for symbol=%s "
                 "(strategy %s) — not a USD-quote stablecoin",
                 currency, sym, strategy_id,
