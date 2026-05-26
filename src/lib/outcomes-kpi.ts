@@ -20,6 +20,19 @@ export type OutcomeKPIs = {
   avgRealizedDelta: number | null;
   /** D-14 sub-label source: count of allocated rows with percent>=1 but all three deltas NULL. */
   pendingCount: number;
+  /**
+   * NEW-C27-02: denominator of winRate — count of mature allocated rows
+   * (percent>=1, at least one non-null delta) that contributed a numeric delta
+   * to the win-rate calculation (= `deltas.length` after the `mostMatureDelta`
+   * filter). In practice equals `mature.length` because `mostMatureDelta` can
+   * only return null when all three delta fields are null, but the `mature`
+   * filter already guarantees at least one is non-null. Returned explicitly so
+   * consumers can show a consistent "N settled" sub-label using the SAME
+   * population as the rate itself rather than a different slice (e.g. rows with
+   * delta_90d != null). Do NOT substitute `mature.length` — if the `mature`
+   * filter or `mostMatureDelta` logic ever changes the two could diverge.
+   */
+  winRateDenominator: number;
 };
 
 function mostMatureDelta(o: BridgeOutcome): number | null {
@@ -62,12 +75,22 @@ export function computeOutcomeKPIs(outcomes: BridgeOutcome[]): OutcomeKPIs {
   const pendingCount = allocatedSized.length - mature.length;
 
   if (mature.length === 0) {
-    return { totalOutcomes, winRate: null, avgRealizedDelta: null, pendingCount };
+    return { totalOutcomes, winRate: null, avgRealizedDelta: null, pendingCount, winRateDenominator: 0 };
   }
 
   const deltas = mature
     .map(mostMatureDelta)
     .filter((d): d is number => d !== null);
+
+  // F-10: guard against a future change to the `mature` filter or
+  // `mostMatureDelta` that produces a non-empty `mature` but an empty `deltas`.
+  // Today this is unreachable (see winRateDenominator docstring), but the guard
+  // is cheap and makes the null-return invariant explicit — without it, a
+  // hypothetical `deltas.length === 0` would produce `winRate: NaN` and
+  // `avgRealizedDelta: NaN` instead of the correct `null` return.
+  if (deltas.length === 0) {
+    return { totalOutcomes, winRate: null, avgRealizedDelta: null, pendingCount, winRateDenominator: 0 };
+  }
 
   // D-12 revised: strict > 0 for win (Phase 4 _success_value parity).
   // D-02 revised (Voice-D6) locks the same rule for the status pill.
@@ -75,5 +98,5 @@ export function computeOutcomeKPIs(outcomes: BridgeOutcome[]): OutcomeKPIs {
   const winRate = wins / deltas.length;
   const avgRealizedDelta = pairwiseSum(deltas) / deltas.length;
 
-  return { totalOutcomes, winRate, avgRealizedDelta, pendingCount };
+  return { totalOutcomes, winRate, avgRealizedDelta, pendingCount, winRateDenominator: deltas.length };
 }

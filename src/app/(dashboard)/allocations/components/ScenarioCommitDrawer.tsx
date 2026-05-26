@@ -31,6 +31,7 @@ import {
   type RejectionReason,
 } from "@/lib/bridge-outcome-schema";
 import type { ScenarioCommitDiff } from "./ScenarioComposer";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 // pr189-followup M13 (type-design-analyzer MED/8) — narrow
 // `rejection_reason` from `string?` to the `RejectionReason` enum so the
@@ -464,8 +465,31 @@ export function ScenarioCommitDrawer({
     // or rolls back the WHOLE batch. `recorded === diffs.length` is the only
     // signal that all rows landed.
     const noErrors = !json.errors || json.errors.length === 0;
+
+    // NEW-C18-12: also verify structural match — the result set must cover
+    // every submitted index exactly once with the matching kind. A right-count
+    // / wrong-index response is accepted as success by a count-only check but
+    // silently skips one diff and double-records another.
+    const resultsStructurallyMatch = (() => {
+      if (!json.results || json.results.length !== diffs.length) return false;
+      const expectedIndices = new Set(diffs.map((_, i) => i));
+      for (const r of json.results) {
+        if (!expectedIndices.has(r.index)) return false;
+        if (r.kind !== diffs[r.index]?.kind) return false;
+        expectedIndices.delete(r.index);
+      }
+      return expectedIndices.size === 0;
+    })();
+
     const fullSuccess =
-      res.ok && json.recorded === diffs.length && noErrors;
+      res.ok &&
+      json.recorded === diffs.length &&
+      noErrors &&
+      // Only apply the structural check when the route returns a results array.
+      // If results is absent (older route version or external call) fall back
+      // to the count-only check to avoid false failures on a count-matching
+      // response with no per-row detail.
+      (json.results === undefined || resultsStructurallyMatch);
 
     if (fullSuccess) {
       idempotencyKeyRef.current = null;
@@ -481,9 +505,78 @@ export function ScenarioCommitDrawer({
     // Either way the user MUST NOT retry from this drawer.
     const isContractViolation =
       res.ok && json.recorded !== diffs.length && noErrors;
+
+    // F-07: a structural mismatch (right count, wrong indices or kinds) is also
+    // unsafe to retry — the server may have committed rows under wrong identifiers.
+    // Previously this fell through to failureReason:"generic" which tells the user
+    // "retry is safe." Route it to "partial" instead, which carries the same
+    // "do NOT retry" copy path as a count mismatch.
+    const isStructuralMismatch =
+      res.ok &&
+      json.results !== undefined &&
+      !resultsStructurallyMatch &&
+      json.recorded === diffs.length;
+
+    // F-03: server contract violations (structural mismatch + count mismatch)
+    // are bugs the server should never produce. Capture to Sentry so engineers
+    // see these events in production rather than only hearing about them via
+    // user support escalations.
+    // M-5 (red-team): also capture when the server returns a non-ok status but
+    // still includes a results array that is structurally wrong — e.g. HTTP 500
+    // with {recorded:N, results:[duplicate-index,...]}. isStructuralMismatch and
+    // isContractViolation both require res.ok=true, so without this branch a
+    // non-ok structurally-wrong response would silently produce no Sentry event.
+    if (!fullSuccess) {
+      if (isStructuralMismatch) {
+        captureToSentry(
+          new Error("ScenarioCommitDrawer: structural mismatch in commit results"),
+          {
+            tags: { component: "ScenarioCommitDrawer", check: "C18-12" },
+            extra: {
+              submitted_count: diffs.length,
+              results_count: json.results?.length,
+              recorded: json.recorded,
+            },
+          },
+        );
+      } else if (isContractViolation) {
+        captureToSentry(
+          new Error("ScenarioCommitDrawer: recorded count violates single-tx contract"),
+          {
+            tags: { component: "ScenarioCommitDrawer", check: "C18-12" },
+            extra: { submitted: diffs.length, recorded: json.recorded },
+          },
+        );
+      } else if (
+        !res.ok &&
+        json.results !== undefined &&
+        !resultsStructurallyMatch
+      ) {
+        // Non-ok response carrying a structurally-wrong results array: the server
+        // errored AND returned mis-matched indices/kinds. Capture as a warning
+        // (not error — the status code already signals failure) so engineers can
+        // correlate server-side anomalies with client-observed structural drift.
+        captureToSentry(
+          new Error(
+            `ScenarioCommitDrawer: non-ok response (${res.status}) with structural mismatch in results`,
+          ),
+          {
+            tags: { component: "ScenarioCommitDrawer", check: "C18-12-nonok" },
+            extra: {
+              status: res.status,
+              submitted_count: diffs.length,
+              results_count: json.results?.length,
+              recorded: json.recorded,
+            },
+            level: "warning",
+          },
+        );
+      }
+    }
+
     setState({
       kind: "failure",
-      failureReason: isContractViolation ? "partial" : "generic",
+      failureReason: isStructuralMismatch || isContractViolation ? "partial" : "generic",
       response: json,
     });
   }

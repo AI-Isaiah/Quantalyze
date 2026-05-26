@@ -183,18 +183,19 @@ export type ScenarioCommitDiff =
  * `ScenarioCommitDiff` is the WIRE contract for the server, not the
  * producer contract for the composer.
  *
- * Exporting both makes the producer/consumer seam explicit: a future
- * producer that wants to construct `voluntary_modify` or `bridge_recommended`
- * (currently unreachable from this composer) must consciously widen the
- * return type, surfacing the missing percent_allocated / holding_ref
- * normalisation contract at the type level.
+ * NEW-C18-01: ComposerProducedDiff is widened to include VoluntaryModifyDiff
+ * now that handleCommit emits weight-change diffs. The seam is still narrower
+ * than the full wire contract (bridge_recommended is not produced here).
  *
  * The drawer still consumes the full `ScenarioCommitDiff[]` because it
  * has to render and submit any kind (including future kinds wired by
  * other producers). The seam is producer-side narrowness, not consumer-
  * side narrowness.
  */
-export type ComposerProducedDiff = VoluntaryRemoveDiff | VoluntaryAddDiff;
+export type ComposerProducedDiff =
+  | VoluntaryRemoveDiff
+  | VoluntaryAddDiff
+  | VoluntaryModifyDiff;
 
 export interface ScenarioComposerProps {
   payload: MyAllocationDashboardPayload;
@@ -303,12 +304,33 @@ export function ScenarioComposer({
 
   function handleWeightChange(scopeRef: string, weight: number) {
     if (!Number.isFinite(weight)) {
+      // F-08: log non-finite weight so a regression (broken input component,
+      // computation producing NaN/Infinity) is visible in production console
+      // rather than silently swallowed.
+      console.warn("[ScenarioComposer] handleWeightChange received non-finite weight", { scopeRef, weight });
       setCommitError(
         "Invalid weight — enter a value between 0 and 1. The previous value was kept.",
       );
       return;
     }
-    if (commitError) setCommitError(null);
+    // NEW-C18-07: surface an explicit error when the user enters a value >1
+    // (e.g. via paste). The state layer (setWeightOverride → clampWeight) silently
+    // clamps to 1, so without this check a weight of 1.5 appears to commit at 100%
+    // AUM with no feedback. Showing the error makes the clamping visible and
+    // consistent with the non-finite path above. The value is still forwarded so
+    // the input snaps to the clamped value instead of freezing.
+    if (weight > 1) {
+      setCommitError(
+        "Weight clamped to 1 — the maximum allocation is 100% of portfolio AUM.",
+      );
+    } else {
+      // IMP-3: unconditionally clear any stale clamp-error on in-range weights
+      // (including weight === 1). The `else if (commitError)` pattern was
+      // insufficient: after a >1 paste the state layer clamps to 1.0, triggering
+      // another handleWeightChange(ref, 1.0) — weight > 1 is false, but the stale
+      // "clamped" error message would persist until the next input event.
+      setCommitError(null);
+    }
     scenario.setWeightOverride(scopeRef, weight);
   }
 
@@ -576,15 +598,29 @@ export function ScenarioComposer({
   }, [liveMetricsForKpi, scenarioMetrics]);
 
   // -------------------------------------------------------------------------
-  // Build Commit diffs and route to onCommitRequested. Plan 07 replaces this
-  // wiring with the real ScenarioCommitDrawer.
+  // Build commit diffs and route to the ScenarioCommitDrawer (Plan 07).
   // -------------------------------------------------------------------------
+  // NEW-C18-01: pre-compute the default holding weights (value-proportional
+  // from holdingsSummary) so handleCommit can detect weight changes and emit
+  // voluntary_modify diffs without re-deriving the full default draft.
+  const defaultWeightsForCommit = useMemo(() => {
+    const total = holdingsSummary.reduce(
+      (s, h) => s + (Number.isFinite(h.value_usd) ? h.value_usd : 0),
+      0,
+    );
+    const weights: Record<string, number> = {};
+    for (const h of holdingsSummary) {
+      const ref = buildHoldingRef({
+        venue: h.venue,
+        symbol: h.symbol,
+        holding_type: h.holding_type,
+      });
+      weights[ref] = total > 0 ? (Number.isFinite(h.value_usd) ? h.value_usd : 0) / total : 0;
+    }
+    return weights;
+  }, [holdingsSummary]);
+
   function handleCommit() {
-    // pr189-followup H6 — narrow to ComposerProducedDiff at the producer
-    // seam. Today only voluntary_remove + voluntary_add are constructed
-    // here; if a future change attempts voluntary_modify / bridge_recommended
-    // construction in this function, the type will reject it and surface
-    // the missing-kind contract at the seam.
     const diffs: ComposerProducedDiff[] = [];
     for (const [scopeRef, on] of Object.entries(scenario.draft.toggleByScopeRef)) {
       if (on) continue;
@@ -610,6 +646,44 @@ export function ScenarioComposer({
       });
     }
 
+    // NEW-C18-01: emit voluntary_modify for every enabled live holding whose
+    // weight differs from its initial (default) weight by more than epsilon.
+    // This covers the rebalance case: user sees projected KPIs shift, clicks
+    // Commit, expects the rebalance to be recorded — previously it was silently
+    // dropped. Only applies to enabled holdings (toggle=ON); toggled-OFF
+    // holdings are already captured as voluntary_remove above.
+    for (const h of holdingsSummary) {
+      const ref = buildHoldingRef({
+        venue: h.venue,
+        symbol: h.symbol,
+        holding_type: h.holding_type,
+      });
+      const isOn = scenario.draft.toggleByScopeRef[ref] !== false;
+      if (!isOn) continue;
+      const currentWeight = scenario.draft.weightOverrides[ref] ?? 0;
+      const defaultWeight = defaultWeightsForCommit[ref] ?? 0;
+      if (Math.abs(currentWeight - defaultWeight) <= 1e-6) continue;
+      // F-02: apply the same per-row size gate that protects voluntary_add diffs.
+      // A voluntary_modify diff with size_at_decision_usd=0 reaches the daily-delta
+      // cron, which divides realized PnL by that size → division-by-zero. A zero
+      // value_usd can arise from sold-down or coingecko_fallback rows.
+      const modifySize = Number.isFinite(h.value_usd) ? h.value_usd : 0;
+      if (modifySize <= 0) {
+        setCommitError(
+          `Can't record a weight change for "${ref}": holding has zero USD value. ` +
+            `Remove or skip this holding before committing.`,
+        );
+        return;
+      }
+      diffs.push({
+        kind: "voluntary_modify",
+        holding_ref: ref,
+        new_weight: currentWeight,
+        percent_allocated: currentWeight * 100,
+        size_at_decision_usd: modifySize,
+      });
+    }
+
     // Refuse the commit when scenarioAum<=0 with voluntary_adds present:
     // every add row would land with size_at_decision_usd:0 and the
     // downstream daily-delta cron divides realized PnL by that size →
@@ -625,12 +699,37 @@ export function ScenarioComposer({
 
     for (const a of scenario.draft.addedStrategies) {
       const weight = scenario.draft.weightOverrides[a.id] ?? 0;
+      // NEW-C18-05: per-row size gate — reject a voluntary_add whose computed
+      // size is zero or non-finite. The existing scenarioAum>0 guard prevents
+      // division-by-zero in the cron, but a weight=0 add still lands with
+      // size:0. Gate on the product to close that specific gap.
+      const size = weight * scenarioAum;
+      if (!Number.isFinite(size) || size <= 0) {
+        setCommitError(
+          `Can't record a scenario commit: strategy "${a.name}" has a zero allocation size. Set a non-zero weight before submitting.`,
+        );
+        return;
+      }
       diffs.push({
         kind: "voluntary_add",
         strategy_id: a.id,
-        size_at_decision_usd: weight * scenarioAum,
+        size_at_decision_usd: size,
       });
     }
+
+    // NEW-C18-13: guard empty diff set — nothing to commit.
+    // F-01: replace the silent return with a user-facing error. A zero-diff
+    // commit can happen legitimately (e.g. all weight changes within epsilon),
+    // but if scenario.diffCount > 0 the footer reported pending changes that
+    // handleCommit computed as empty — that specific case is a data-model
+    // inconsistency worth surfacing to the user.
+    if (diffs.length === 0) {
+      setCommitError(
+        "Nothing to commit — the scenario has no changes. Adjust holdings or weights and try again.",
+      );
+      return;
+    }
+
     // Review-pass P2 fix — single-source the commit-drawer surface. When
     // `useInternalCommitDrawer === true` (default) the composer owns the
     // drawer and SUPPRESSES the legacy onCommitRequested callback so a
@@ -742,6 +841,7 @@ export function ScenarioComposer({
 
       {scenario.fingerprintMismatch && (
         <div
+          id="scenario-fingerprint-mismatch-banner"
           role="alert"
           className="mt-4 rounded-md border border-warning bg-[rgba(217,119,6,0.08)] p-3 text-sm text-text-primary"
         >
@@ -793,7 +893,7 @@ export function ScenarioComposer({
           equityDailyPoints={equityDailyPoints}
           scenarioSeries={scenarioWealthSeries}
         />
-        <div className="h-[300px]">
+        <div className="h-[300px] relative">
           {/* DrawdownChart extends WidgetProps (data + timeframe + width + height
               required for the legacy widget-grid path). On the Scenario tab
               we feed the f7 parallel-prop (`equityDailyPoints`) so the
@@ -806,6 +906,19 @@ export function ScenarioComposer({
             equityDailyPoints={equityDailyPoints}
             scenarioDailyPoints={scenarioDailyPointsForDrawdown}
           />
+          {/* NEW-C18-14: when scenarioAum=0 the drawdown is scaled against a
+              synthetic $1 baseline so the chart still renders the projected
+              SHAPE rather than a flat zero. Disclose this to the allocator so
+              they don't mistake an illustrative curve for one backed by real
+              capital. */}
+          {scenarioAum <= 0 && (
+            <div
+              aria-live="polite"
+              className="pointer-events-none absolute bottom-2 left-0 right-0 text-center text-[11px] text-text-muted"
+            >
+              Illustrative shape only — no live capital connected
+            </div>
+          )}
         </div>
       </div>
 
@@ -892,6 +1005,10 @@ export function ScenarioComposer({
         deltaSummary={deltaSummary}
         onResetRequested={() => setResetModalOpen(true)}
         onCommitRequested={handleCommit}
+        // NEW-C18-10: block commit while a fingerprint mismatch is unresolved.
+        // The user has been shown a banner and must choose Reset or Keep before
+        // committing against a potentially stale snapshot.
+        commitBlocked={scenario.fingerprintMismatch}
       />
 
       <StrategyBrowseDrawer
@@ -943,6 +1060,9 @@ export function ScenarioComposer({
         onClose={() => setCommitDrawerOpen(false)}
         diffs={commitDiffs}
         onSubmitSuccess={() => {
+          // NEW-C18-13: clear stale commitDiffs so a subsequent drawer open
+          // does not re-submit already-committed rows under a fresh key.
+          setCommitDiffs([]);
           scenario.reset();
         }}
       />

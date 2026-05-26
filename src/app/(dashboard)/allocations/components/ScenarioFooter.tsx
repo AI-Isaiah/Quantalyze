@@ -47,6 +47,12 @@ export interface ScenarioFooterProps {
   deltaSummary: ScenarioFooterDeltaItem[];
   onResetRequested: () => void;
   onCommitRequested: () => void;
+  /**
+   * NEW-C18-10: when true the Commit button is disabled regardless of diffCount.
+   * Used to block commit while a fingerprint mismatch is unresolved — the user
+   * has been shown a banner; they must choose Reset or Keep before proceeding.
+   */
+  commitBlocked?: boolean;
 }
 
 const FOOTER_STYLE: CSSProperties = {
@@ -67,6 +73,7 @@ export function ScenarioFooter({
   deltaSummary,
   onResetRequested,
   onCommitRequested,
+  commitBlocked = false,
 }: ScenarioFooterProps) {
   const hasDiffs = diffCount > 0;
   const significant = deltaSummary.filter((d) => d.tier !== "muted");
@@ -120,7 +127,8 @@ export function ScenarioFooter({
         <button
           type="button"
           onClick={onCommitRequested}
-          disabled={!hasDiffs}
+          disabled={!hasDiffs || commitBlocked}
+          aria-describedby={commitBlocked ? "scenario-fingerprint-mismatch-banner" : undefined}
           className="rounded-md bg-accent px-4 py-1.5 text-sm font-medium text-white hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="scenario-footer-commit"
         >

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AllocatorPreferences } from "@/lib/preferences";
 import { SELF_EDITABLE_PREFERENCE_FIELDS } from "@/lib/preferences";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 export type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -76,11 +77,29 @@ export function useMandateAutoSave(
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(initialLastSavedAt);
   const [savingFields, setSavingFields] = useState<Set<MandateField>>(new Set());
 
+  // NEW-C05-07: shared rate-limit gate across all concurrent field saves.
+  // When ANY field save receives a 429, all subsequent saves for the same
+  // component instance await this timestamp before attempting a fetch. This
+  // prevents the N-field thundering herd (each field reads the same
+  // Retry-After, sleeps identically, and retries simultaneously) from
+  // re-tripping the limiter on the very next attempt.
+  const rateLimitedUntilRef = useRef<number>(0);
+
   // 2s fade-timer for "saved" -> "idle" transition (WizardChrome toast shape).
+  // NEW-C05-05: gate the idle transition on savingFields.size === 0 so a
+  // fast-finishing field cannot flip the form-level status to idle while
+  // another field is still in-flight. The ref mirrors savingFields synchronously
+  // so the setTimeout callback can read it without a stale closure.
+  const savingFieldsSizeRef = useRef<number>(0);
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (saveState === "saved") {
-      fadeTimerRef.current = setTimeout(() => setSaveState("idle"), 2000);
+      fadeTimerRef.current = setTimeout(() => {
+        // NEW-C05-05: only revert to idle when no other field is still saving.
+        if (savingFieldsSizeRef.current === 0) {
+          setSaveState("idle");
+        }
+      }, 2000);
     }
     return () => {
       if (fadeTimerRef.current) {
@@ -120,11 +139,16 @@ export function useMandateAutoSave(
 
   // Release a field from the in-flight set (no-op if absent). Every terminal
   // outcome routes through here so the per-field saving spinner can never stick.
+  // NEW-C05-05: also decrements savingFieldsSizeRef so the idle-transition gate
+  // (in the fade timer) sees an accurate count without a stale closure.
   const removeSavingField = useCallback((fieldName: MandateField) => {
     setSavingFields((prev) => {
       if (!prev.has(fieldName)) return prev;
       const next = new Set(prev);
       next.delete(fieldName);
+      // Decrement synchronously so setTimeout in the "saved" fade-timer reads 0
+      // only after the last field is actually removed.
+      savingFieldsSizeRef.current = next.size;
       return next;
     });
   }, []);
@@ -132,11 +156,31 @@ export function useMandateAutoSave(
   // Terminal failure for a field: surface the inline error, flip the form-level
   // banner to "error", and release the in-flight marker. Centralising the trio
   // guarantees savingFields is always cleared on a terminal outcome.
+  // F-04/F-05: also capture to Sentry so that mandate save exhaustion (network,
+  // 5xx, or 429 budget) is observable in production — without this, a systemic
+  // route regression exhausts all retries with zero signal to engineers.
+  // M-2 (red-team): accept an optional sentryLevel override so expected client
+  // errors (400 validation, 401 auth) are captured as "warning" rather than
+  // "error" — preventing these routine user-side events from polluting the Sentry
+  // error budget and masking genuine server failures.
   const failTerminal = useCallback(
-    (fieldName: MandateField, message: string) => {
+    (
+      fieldName: MandateField,
+      message: string,
+      originalError?: unknown,
+      sentryLevel?: "error" | "warning",
+    ) => {
       setFieldErrors((prev) => ({ ...prev, [fieldName]: message }));
       setSaveState("error");
       removeSavingField(fieldName);
+      captureToSentry(
+        originalError ?? new Error(`Mandate autosave terminal failure: ${fieldName}`),
+        {
+          tags: { hook: "useMandateAutoSave", field: fieldName },
+          extra: { message },
+          level: sentryLevel ?? "error",
+        },
+      );
     },
     [removeSavingField],
   );
@@ -153,6 +197,9 @@ export function useMandateAutoSave(
       setSavingFields((prev) => {
         const next = new Set(prev);
         next.add(fieldName);
+        // NEW-C05-05: keep ref in sync so the "saved" fade-timer gate sees the
+        // correct count synchronously without a stale closure.
+        savingFieldsSizeRef.current = next.size;
         return next;
       });
       clearError(fieldName);
@@ -172,11 +219,39 @@ export function useMandateAutoSave(
           return { ok: false, reason: "cancelled", message: "Cancelled." };
         }
 
+        // NEW-C05-07: honor the shared rate-limit gate. If another concurrent
+        // field save received a 429 and set rateLimitedUntilRef, wait until
+        // that timestamp before sending this request. This prevents N concurrent
+        // fields from all re-hitting the limiter on the same retry window.
+        const rateLimitedUntil = rateLimitedUntilRef.current;
+        // IMP-2: snapshot once so the guard and the sleep duration use the
+        // same timestamp — a second Date.now() call could return a slightly
+        // smaller value under heavy load and produce a near-zero or negative
+        // waitMs (benign for wait(), but misleading about what fired).
+        const nowBeforeRateWait = Date.now();
+        if (rateLimitedUntil > nowBeforeRateWait) {
+          const waitMs = rateLimitedUntil - nowBeforeRateWait;
+          await wait(waitMs, mountAbortRef.current.signal);
+          if (mountAbortRef.current.signal.aborted) {
+            return { ok: false, reason: "cancelled", message: "Cancelled." };
+          }
+          if (generationRef.current[fieldName] !== gen) {
+            return { ok: false, reason: "superseded", message: "Superseded." };
+          }
+        }
+
         let res: Response;
         // Per-attempt timeout controller. Combined with the component-lifetime
         // mountAbortRef so EITHER the 12s timeout OR unmount cancels the fetch.
+        // IMP-1: the previous `timedOut` flag was set inside the setTimeout
+        // callback but never read in the catch block — both the timeout-abort
+        // and pure-network-error paths fell through identically to the same
+        // retry logic, so the variable was dead discriminator code. Removed to
+        // eliminate the misleading "intent to branch" signal.
         const attemptController = new AbortController();
-        const timeout = setTimeout(() => attemptController.abort(), FETCH_TIMEOUT_MS);
+        const timeout = setTimeout(() => {
+          attemptController.abort();
+        }, FETCH_TIMEOUT_MS);
         // Wire mount-abort into this attempt signal.
         const onMountAbort = () => attemptController.abort();
         mountAbortRef.current.signal.addEventListener("abort", onMountAbort, { once: true });
@@ -190,10 +265,15 @@ export function useMandateAutoSave(
           });
         } catch {
           // Network error or AbortError (12s timeout OR component unmounted).
-          // If unmounted, exit silently — no state updates on dead component.
+          // mount-abort means the component is gone — exit silently; timeout or
+          // pure network error is transient and should retry.
           if (mountAbortRef.current.signal.aborted) {
+            // Component unmounted — exit silently, no setState on dead component.
             return { ok: false, reason: "cancelled", message: "Cancelled." };
           }
+          // Per-attempt 12s timeout OR pure network error (e.g. offline).
+          // Both are transient — retry with exponential backoff.
+          // mount-abort is handled above and never reaches here.
           if (attempt < MAX_ATTEMPTS) {
             await wait(1000 * Math.pow(2, attempt - 1), mountAbortRef.current.signal);
             if (mountAbortRef.current.signal.aborted) {
@@ -231,7 +311,34 @@ export function useMandateAutoSave(
         }
 
         if (res.status === 429) {
-          const retryAfter = Number(res.headers.get("Retry-After") ?? "5");
+          // NEW-C05-01: parse Retry-After safely. The header may be an integer
+          // seconds count OR an HTTP-date string. Number("Mon, 26 May…") = NaN.
+          // Fall back to 5s on NaN/negative; clamp to [1, 30] so a hostile
+          // server cannot pin this hook for minutes.
+          const rawRetryAfter = res.headers.get("Retry-After");
+          let retryAfterSec = rawRetryAfter !== null ? Number(rawRetryAfter) : NaN;
+          if (!Number.isFinite(retryAfterSec) || retryAfterSec <= 0) {
+            // HTTP-date or invalid value: derive seconds from the Date header
+            // if available, otherwise default to 5s.
+            const dateHeader = res.headers.get("Date");
+            const retryDateMs = rawRetryAfter ? Date.parse(rawRetryAfter) : NaN;
+            const baseDateMs = dateHeader ? Date.parse(dateHeader) : NaN;
+            if (Number.isFinite(retryDateMs) && Number.isFinite(baseDateMs)) {
+              retryAfterSec = Math.max(1, Math.ceil((retryDateMs - baseDateMs) / 1000));
+            } else {
+              retryAfterSec = 5;
+            }
+          }
+          retryAfterSec = Math.min(Math.max(retryAfterSec, 1), 30);
+
+          // NEW-C05-07: update the shared rate-limit gate so all concurrent
+          // field saves for this component also wait out the limiter window
+          // before retrying, preventing the N-field thundering herd.
+          rateLimitedUntilRef.current = Math.max(
+            rateLimitedUntilRef.current,
+            Date.now() + retryAfterSec * 1000,
+          );
+
           // Budget exhausted: terminate cleanly. Falling through the loop would
           // leave the field pinned in savingFields and a message falsely
           // promising a retry that will never run.
@@ -246,17 +353,24 @@ export function useMandateAutoSave(
               ok: false,
               reason: "throttled",
               message: "Saving too fast. Please wait a moment and try again.",
-              retryAfter,
+              retryAfter: retryAfterSec,
             };
           }
-          setFieldErrors((prev) => ({
-            ...prev,
-            [fieldName]: `Saving too fast. Will retry in ${retryAfter}s.`,
-          }));
-          setSaveState("error");
+          // NEW-C05-03: only write the transient retry-error to state when we
+          // are still the active generation for this field. A concurrent save()
+          // that bumped the generation already owns the field's UI state; writing
+          // here would clobber the newer save's message and leave a stale error
+          // visible after the newer save succeeds.
+          if (generationRef.current[fieldName] === gen) {
+            setFieldErrors((prev) => ({
+              ...prev,
+              [fieldName]: `Saving too fast. Will retry in ${retryAfterSec}s.`,
+            }));
+            setSaveState("error");
+          }
           // Cap a hostile/huge Retry-After so the hook can't be pinned for
           // minutes; the abort-aware wait() also resolves immediately on unmount.
-          await wait(Math.min(retryAfter, 30) * 1000, mountAbortRef.current.signal);
+          await wait(retryAfterSec * 1000, mountAbortRef.current.signal);
           if (mountAbortRef.current.signal.aborted) {
             return { ok: false, reason: "cancelled", message: "Cancelled." };
           }
@@ -277,7 +391,10 @@ export function useMandateAutoSave(
           }
           const msg = (body?.error as string | undefined) ?? "Couldn't save";
           const reason = res.status === 401 ? "auth" : "validation";
-          failTerminal(fieldName, `${msg}. Try again.`);
+          // M-2 (red-team): 400 (validation) and 401 (session-expired) are
+          // expected client-side outcomes — capture as "warning" not "error" so
+          // they don't inflate the Sentry error budget or mask genuine failures.
+          failTerminal(fieldName, `${msg}. Try again.`, undefined, "warning");
           return { ok: false, reason, message: `${msg}. Try again.` };
         }
 

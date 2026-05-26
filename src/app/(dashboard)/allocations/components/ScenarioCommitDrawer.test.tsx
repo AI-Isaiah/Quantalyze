@@ -37,6 +37,15 @@ import type { ScenarioCommitDiff } from "./ScenarioComposer";
 
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 
+// M-5 (red-team): hoist module-level mock so captureToSentry calls are
+// observable. Existing tests do NOT assert on Sentry, so this is additive-safe.
+const drawerSentryCalls: Array<{ err: unknown; options: { level?: string; tags?: Record<string, string> } }> = [];
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: (err: unknown, options: { level?: string; tags?: Record<string, string> }) => {
+    drawerSentryCalls.push({ err, options });
+  },
+}));
+
 const VR_DIFF: ScenarioCommitDiff = {
   kind: "voluntary_remove",
   holding_ref: "holding:binance:BTC:spot",
@@ -1121,6 +1130,103 @@ describe("partial-commit detection — over-recorded direction (server bug)", ()
   });
 });
 
+// ===========================================================================
+// F-07 regression — structural mismatch routes to "partial" not "generic"
+//
+// Before this fix: a response with recorded===diffs.length but wrong indices
+// or kinds fell through to failureReason:"generic" which tells the user
+// "retry is safe." After: isStructuralMismatch → failureReason:"partial".
+// ===========================================================================
+
+describe("F-07 — structural mismatch (right count, wrong indices) → partial failure (do NOT retry)", () => {
+  it("server returns recorded:N with mismatched result indices → data-failure-reason='partial'", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        // 2 diffs: index 0 and 1. Server returns index 1 twice (duplicate) —
+        // count matches (2) but index 0 is absent. Structural mismatch.
+        JSON.stringify({
+          recorded: 2,
+          results: [
+            { index: 1, kind: "voluntary_add", match_decision_id: "a", bridge_outcome_id: "b" },
+            { index: 1, kind: "voluntary_add", match_decision_id: "c", bridge_outcome_id: "d" },
+          ],
+          errors: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF, VA_DIFF]}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF, VA_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+    const err = screen.getByTestId("commit-drawer-error");
+    // F-07: structural mismatch must use failureReason="partial" ("do NOT retry")
+    // not failureReason="generic" ("retry is safe").
+    expect(err.getAttribute("data-failure-reason")).toBe("partial");
+    // onSubmitSuccess must NOT fire.
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("server returns recorded:N with kind mismatch → data-failure-reason='partial'", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        // 1 diff: voluntary_remove. Server returns index 0 with wrong kind.
+        JSON.stringify({
+          recorded: 1,
+          results: [
+            { index: 0, kind: "voluntary_add", match_decision_id: "a", bridge_outcome_id: "b" },
+          ],
+          errors: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+    const err = screen.getByTestId("commit-drawer-error");
+    expect(err.getAttribute("data-failure-reason")).toBe("partial");
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("Idempotency-Key reset on close → reopen (new batch gets a fresh key)", () => {
   it("closing the drawer and reopening with the same diffs content mints a NEW key", async () => {
     vi.useRealTimers();
@@ -1282,3 +1388,176 @@ describe("AbortError swallow leaves the drawer alive (does not transition to fai
   });
 });
 
+// ===========================================================================
+// NEW-C18-12 — structural success gate: right count / wrong index must fail
+//
+// Before this fix fullSuccess was gated only on `recorded === diffs.length`.
+// A server bug that records N rows but with wrong indices/kinds would still
+// produce `recorded=N` and the drawer would collapse to the success card,
+// silently accepting a commit that skipped one diff and double-recorded another.
+// The structural check asserts that `result[i].index ∈ {0..length-1}` and
+// `result[i].kind === diffs[result[i].index].kind`.
+// ===========================================================================
+
+describe("NEW-C18-12 — structural success gate: right count / wrong index rejects", () => {
+  it("server returns recorded=N with mismatched result.index → failure, onSubmitSuccess NOT called", async () => {
+    vi.useRealTimers();
+    const diffs = [VR_DIFF, VA_DIFF]; // 2 diffs: indices 0, 1
+
+    // Server returns recorded=2 (matching count) but result indices are
+    // [0, 2] — index 2 does not exist in a 2-diff batch (max valid = 1).
+    // This simulates a server off-by-one or wrong-index bug.
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          recorded: 2,
+          results: [
+            { index: 0, kind: "voluntary_remove" },
+            { index: 2, kind: "voluntary_add" }, // invalid index
+          ],
+          errors: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={diffs}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs(diffs);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      // The success card must NOT appear — structural mismatch is a failure.
+      expect(screen.queryByTestId("commit-drawer-success")).toBeNull();
+    });
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("server returns recorded=N with wrong kind on a result → failure, onSubmitSuccess NOT called", async () => {
+    vi.useRealTimers();
+    const diffs = [VR_DIFF, VA_DIFF]; // index 0 = voluntary_remove, index 1 = voluntary_add
+
+    // Server returns correct indices but swapped kinds.
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          recorded: 2,
+          results: [
+            { index: 0, kind: "voluntary_add" }, // wrong kind for index 0
+            { index: 1, kind: "voluntary_remove" }, // wrong kind for index 1
+          ],
+          errors: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={diffs}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs(diffs);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-success")).toBeNull();
+    });
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+});
+
+// ===========================================================================
+// M-5 (red-team) — Sentry capture for non-ok responses with structural mismatch
+//
+// Before: isStructuralMismatch and isContractViolation both require res.ok=true,
+// so a server returning HTTP 500 with a structurally-wrong results body would
+// reach the Sentry block but fire no event — silently swallowed.
+// After: an additional else-if branch captures a level:"warning" Sentry event
+// for non-ok responses that still carry a structurally-wrong results array.
+// ===========================================================================
+describe("M-5 (red-team) — non-ok response with structural mismatch fires Sentry warning", () => {
+  beforeEach(() => {
+    // Clear the shared collector between tests.
+    drawerSentryCalls.length = 0;
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("HTTP 500 with structurally-wrong results array fires captureToSentry at level:warning", async () => {
+    vi.useRealTimers();
+    // Server returns 500 (non-ok) but still populates a results array with
+    // duplicate indices — structural mismatch + non-ok. The previous code
+    // silently swallowed this with no Sentry event.
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          recorded: 2,
+          results: [
+            { index: 1, kind: "voluntary_add", match_decision_id: "a", bridge_outcome_id: "b" },
+            { index: 1, kind: "voluntary_add", match_decision_id: "c", bridge_outcome_id: "d" },
+          ],
+          errors: ["internal server error"],
+        }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF, VA_DIFF]}
+        onSubmitSuccess={vi.fn()}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF, VA_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+
+    // M-5: the Sentry capture must have fired with level:"warning" for this
+    // non-ok + structural-mismatch combination.
+    const warnCalls = drawerSentryCalls.filter(
+      (c) =>
+        c.options.level === "warning" &&
+        c.options.tags?.["check"] === "C18-12-nonok",
+    );
+    expect(warnCalls.length).toBeGreaterThan(0);
+  });
+});
