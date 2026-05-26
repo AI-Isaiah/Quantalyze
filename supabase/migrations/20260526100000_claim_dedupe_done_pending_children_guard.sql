@@ -39,11 +39,15 @@
 -- What this migration does
 -- ------------------------
 -- 1. CREATE OR REPLACE `claim_compute_jobs` (non-priority, last replaced in
---    mig 117) to add a `NOT EXISTS` guard in the `deduped` CTE. The guard
---    excludes a candidate row when the same `(kind, partition_col)` already
---    has a row in `status IN ('running', 'done_pending_children')`. This
---    supersedes both the H-1240 running-watchdog guard and the NEW-C39-01
---    done_pending_children gap.
+--    mig 117) with two additions over mig 117:
+--    (a) A `NOT EXISTS` guard per partition column in the `deduped` CTE.
+--        The guard excludes a candidate row when the same `(kind, partition_col)`
+--        already has a row in `status IN ('running', 'done_pending_children')`.
+--        Neither `running` nor `done_pending_children` coexistence was guarded
+--        in the deduped CTE before this migration (closes NEW-C39-01).
+--    (b) A `cj.status IN ('pending', 'failed_retry')` re-check in the UPDATE
+--        WHERE sub-SELECT, applied after the CTE snapshot and FOR UPDATE SKIP
+--        LOCKED lock to guard against concurrent status transitions (H-1/M-1).
 --
 -- 2. The guard is applied per-partition-column independently (each has its
 --    own sub-SELECT). A candidate with `api_key_id IS NOT NULL` is excluded
@@ -51,8 +55,8 @@
 --    `(kind, api_key_id)`. NULL partition columns skip their respective
 --    guard (NULL is excluded from the relevant partial unique index).
 --
--- 3. All other semantics from mig 117 are preserved verbatim:
---    - `status IN ('pending', 'failed_retry')` candidate filter
+-- 3. All other semantics from mig 117 are preserved:
+--    - `status IN ('pending', 'failed_retry')` candidate filter (ranked CTE)
 --    - `claim_token = gen_random_uuid()` P97 fence
 --    - `attempts = attempts + 1`
 --    - `FOR UPDATE SKIP LOCKED` concurrency primitive
@@ -78,10 +82,12 @@ BEGIN;
 -- --------------------------------------------------------------------------
 -- STEP 1: claim_compute_jobs — add done_pending_children guard in deduped CTE
 -- --------------------------------------------------------------------------
--- Body mirrors migration 117 STEP 2 verbatim with one addition in the
--- `deduped` CTE: a NOT EXISTS sub-SELECT per partition column that
--- excludes candidates whose partition already has an inflight
--- (running or done_pending_children) row.
+-- Body mirrors migration 117 STEP 2 with two additions over mig 117:
+-- (1) `deduped` CTE: a NOT EXISTS sub-SELECT per partition column that
+--     excludes candidates whose partition already has a running or
+--     done_pending_children row.
+-- (2) UPDATE WHERE sub-SELECT: `cj.status IN ('pending', 'failed_retry')`
+--     re-check after the CTE snapshot and FOR UPDATE SKIP LOCKED lock.
 CREATE OR REPLACE FUNCTION claim_compute_jobs(
   p_batch_size INTEGER,
   p_worker_id  TEXT
