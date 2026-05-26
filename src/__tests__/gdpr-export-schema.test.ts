@@ -136,6 +136,8 @@ describe("gdpr-export schema validation — NEW-C16-01 order columns exist", () 
       allocator_equity_snapshots: "asof",
       investor_attestations: "attested_at",
       organization_members: "joined_at",
+      // NEW-C16-09: csv_daily_returns has composite PK (strategy_id, date) — no id.
+      csv_daily_returns: "date",
     };
     expect(ORDER_COLUMN_OVERRIDES).toEqual(expected);
 
@@ -164,5 +166,32 @@ describe("gdpr-export schema validation — NEW-C16-01 order columns exist", () 
         `${table} HAS an "id" column — the override is unnecessary and masks intent`,
       ).toBe(false);
     }
+  });
+
+  it("NEW-C16-11 (M conf=8): getOrderColumn for projected specs looks up ORDER_COLUMN_OVERRIDES by source_table, not spec.table", () => {
+    // Red-team M conf=8: pre-fix, getOrderColumn keyed ORDER_COLUMN_OVERRIDES
+    // on `spec.table` for all kinds. For projected specs the SELECT hits
+    // `spec.source_table`, so an override registered under the SOURCE name
+    // would silently fall through to 'id' when looked up by spec.table —
+    // triggering a runtime 42703 on any id-less source table whose bundle
+    // name differs from the source name. Today all non-audit projected specs
+    // have spec.table === spec.source_table, so the bug was latent.
+    //
+    // We simulate the divergence: a projected spec where the bundle-facing
+    // table name is a synthetic name that has no override entry, but whose
+    // source_table is the known id-less table "user_app_roles" (override:
+    // "granted_at"). getOrderColumn must return "granted_at" (looked up by
+    // source_table), NOT "id" (looked up by spec.table).
+    const syntheticSpec = {
+      kind: "projected" as const,
+      table: "user_app_roles_for_export", // synthetic bundle name, NO override entry
+      source_table: "user_app_roles",     // id-less; override "granted_at" registered here
+      user_column: "user_id",
+      project: (rows: unknown[]) => rows,
+    };
+    expect(getOrderColumn(syntheticSpec as unknown as UserExportTable)).toBe("granted_at");
+    // Also assert that looking up by spec.table would have given the wrong answer,
+    // proving the fix is load-bearing (not vacuously correct).
+    expect(ORDER_COLUMN_OVERRIDES["user_app_roles_for_export"]).toBeUndefined();
   });
 });

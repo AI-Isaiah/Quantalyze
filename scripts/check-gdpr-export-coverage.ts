@@ -309,6 +309,18 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
     reason:
       "Strategy-scoped historical analytics. Strategies are ANONYMIZE per matrix; the child rows survive keyed to the anonymized strategy id. Mirrors the trades ANONYMIZE policy.",
   },
+  // csv_daily_returns: NEW-C16-09 (audit 2026-05-26) — strategy-scoped
+  // daily-return series added by migration 20260522111839. The table
+  // declares `strategy_id NOT NULL REFERENCES strategies ON DELETE CASCADE`,
+  // so rows are automatically erased when the strategy is deleted / the user
+  // is sanitized (strategies ANONYMIZE → cascade removes child rows). The
+  // sanitize_user migration pre-dates this table (added 4 days ago) so it
+  // has no explicit matrix row; the CASCADE FK is the erasure mechanism.
+  // Mirrors the strategy_analytics allowlist pattern.
+  csv_daily_returns: {
+    reason:
+      "Strategy-scoped CSV daily-return series (migration 20260522111839). ON DELETE CASCADE from strategies ensures erasure when the parent strategy is deleted during sanitize. No explicit sanitize_user matrix row needed; mirrors strategy_analytics policy.",
+  },
 };
 
 /**

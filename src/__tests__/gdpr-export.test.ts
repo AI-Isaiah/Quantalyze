@@ -734,6 +734,8 @@ describe("collectUserExportBundle — H-0453 parent_id_truncated regression", ()
         "reconciliation_reports",
         "positions",
         "position_snapshots",
+        // NEW-C16-09: csv_daily_returns is strategy-scoped indirect.
+        "csv_daily_returns",
         "portfolio_strategies",
         "portfolio_analytics",
         "portfolio_alerts",
@@ -939,6 +941,8 @@ describe("collectUserExportBundle — H-0456 / NEW-C16-01 getOrderColumn per-tab
       allocator_equity_snapshots: "asof",
       investor_attestations: "attested_at",
       organization_members: "joined_at",
+      // NEW-C16-09: csv_daily_returns has composite PK (strategy_id, date) — no id.
+      csv_daily_returns: "date",
     };
     for (const [table, expectedCol] of Object.entries(idLessOrderColumns)) {
       const calls = orderCalls.filter((c) => c.table === table);
@@ -1821,6 +1825,78 @@ describe("collectUserExportBundle — chunked indirect IN under proxy limits (re
     // Without the fix, the order would be t-Z2, t-Z1, t-Z0, t-A2, t-A1, t-A0
     // (chunk 1 first, then chunk 2).
     expect(ids).toEqual(["t-A0", "t-A1", "t-A2", "t-Z0", "t-Z1", "t-Z2"]);
+  });
+
+  it("NEW-C16-10: indirect fetch stops accumulating after the first chunk that exceeds the cap (memory bound)", async () => {
+    // Red-team M conf=9: the original NEW-C16-07 fix fetched
+    // EXPORT_PER_TABLE_ROW_CAP rows PER chunk (no early exit), accumulating
+    // up to 4 × 50K rows in the heap before the post-sort splice truncated.
+    // The fix breaks out of the chunk loop as soon as aggregated.length >
+    // EXPORT_PER_TABLE_ROW_CAP, bounding memory to cap + one chunk's rows.
+    //
+    // This test verifies that when chunk 1 already returns > cap rows,
+    // chunk 2 is NOT fetched (the mock tracks which chunks were called).
+
+    // 2 chunks of parents
+    const chunk1Parents = Array.from({ length: EXPORT_PARENT_ID_IN_CHUNK }, (_, i) => ({
+      id: `q-${i}`,
+    }));
+    const chunk2Parents = [{ id: `q-${EXPORT_PARENT_ID_IN_CHUNK}` }];
+    const allParents = [...chunk1Parents, ...chunk2Parents];
+
+    // Chunk 1 returns cap + 1 rows — triggers early-exit.
+    const cap = EXPORT_PER_TABLE_ROW_CAP;
+    const chunk1Children = Array.from({ length: cap + 1 }, (_, i) => ({
+      id: `r-${String(i).padStart(6, "0")}`,
+      strategy_id: `q-${i % EXPORT_PARENT_ID_IN_CHUNK}`,
+    }));
+    const chunk2Children = [{ id: "r-chunk2-sentinel", strategy_id: `q-${EXPORT_PARENT_ID_IN_CHUNK}` }];
+
+    const tradesChunkCalls: number[] = [];
+    const mock = {
+      from: (table: string) => {
+        return {
+          select: (projection: string) => {
+            const probeLimit = async () => ({ data: allParents, error: null });
+            const emptyLimit = async () => ({ data: [], error: null });
+            const limit =
+              projection === "id" && table === "strategies"
+                ? probeLimit
+                : emptyLimit;
+            return {
+              eq: () => ({ order: () => ({ limit }), limit }),
+              in: (_col: string, _ids: unknown[]) => {
+                if (table !== "trades") {
+                  return { order: () => ({ limit: emptyLimit }), limit: emptyLimit };
+                }
+                const callIdx = tradesChunkCalls.length;
+                tradesChunkCalls.push(callIdx);
+                const rows = callIdx === 0 ? chunk1Children : chunk2Children;
+                return {
+                  order: () => ({ limit: async () => ({ data: rows, error: null }) }),
+                  limit: async () => ({ data: rows, error: null }),
+                };
+              },
+            };
+          },
+        };
+      },
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "18181818-1818-1818-1818-181818181818");
+
+    // Only chunk 1 should have been fetched; chunk 2 is skipped by early-exit.
+    expect(tradesChunkCalls.length).toBe(1);
+
+    const tradesEntry = bundle.tables.find((t) => t.table === "trades");
+    expect(tradesEntry).toBeDefined();
+    // Row count is capped at EXPORT_PER_TABLE_ROW_CAP.
+    expect(tradesEntry!.row_count).toBe(cap);
+    expect(tradesEntry!.truncated_at_cap).toBe(true);
+    // The chunk-2 sentinel must NOT appear (chunk 2 was not fetched).
+    const ids = (tradesEntry!.rows as Array<{ id: string }>).map((r) => r.id);
+    expect(ids).not.toContain("r-chunk2-sentinel");
   });
 });
 

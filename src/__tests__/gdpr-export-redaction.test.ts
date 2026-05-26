@@ -674,3 +674,72 @@ describe("redactAuditLogForUser — admin-actor UUID redaction (specialist apply
     expect((out[0].metadata as Record<string, unknown>).role).toBe("allocator");
   });
 });
+
+// ==========================================================================
+// NEW-C16-08 (red-team H conf=9): bridge_outcome_dismissals must be projected
+// ==========================================================================
+describe("NEW-C16-08 — bridge_outcome_dismissals exports strategy_id redacted (H conf=9)", () => {
+  it("manifest wires bridge_outcome_dismissals as projected, not direct", () => {
+    // Pre-fix: `{ kind: "direct", table: "bridge_outcome_dismissals", ... }` —
+    // exported the manager's strategy UUID raw. Any regulator comparing the raw
+    // bundle with a contact_requests bundle could reconstruct the manager's
+    // strategy inventory from the un-blanked FK. This test prevents the
+    // kind from silently reverting to "direct".
+    const entry = USER_EXPORT_TABLES.find(
+      (t) => t.table === "bridge_outcome_dismissals",
+    );
+    expect(entry, "bridge_outcome_dismissals missing from manifest").toBeDefined();
+    expect(entry!.kind).toBe("projected");
+  });
+
+  it("redactAllocatorMatchForUser blanks strategy_id on a bridge_outcome_dismissals row", () => {
+    // Regression: the projection function used by bridge_outcome_dismissals
+    // must blank strategy_id (the manager's cross-party FK). Pre-fix this
+    // row was exported raw.
+    const subject = "aaaa0000-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const managerStrategy = "bbbb1111-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    const rows = [
+      {
+        id: "dism-1",
+        allocator_id: subject,
+        strategy_id: managerStrategy,
+        dismissed_at: "2026-05-01T10:00:00Z",
+        expires_at: "2026-06-01T10:00:00Z",
+      },
+    ];
+    const out = redactAllocatorMatchForUser(rows, subject);
+    expect(out).toHaveLength(1);
+    // strategy_id (manager's FK) is blanked.
+    expect(out[0].strategy_id).toBe(REDACTED_PLACEHOLDER);
+    // allocator's own dismissal metadata is preserved.
+    expect(out[0].dismissed_at).toBe("2026-05-01T10:00:00Z");
+    expect(out[0].expires_at).toBe("2026-06-01T10:00:00Z");
+  });
+});
+
+// ==========================================================================
+// NEW-C16-09 (red-team H conf=8): csv_daily_returns in export manifest
+// ==========================================================================
+describe("NEW-C16-09 — csv_daily_returns present in export manifest (H conf=8)", () => {
+  it("csv_daily_returns appears in USER_EXPORT_TABLES as an indirect entry", () => {
+    // Pre-fix: absent entirely — a user's CSV daily-return series was
+    // silently omitted from every Art. 15 bundle. partial:false was still
+    // reported (no rows = no error signal).
+    const entry = USER_EXPORT_TABLES.find(
+      (t) => t.table === "csv_daily_returns",
+    );
+    expect(entry, "csv_daily_returns missing from manifest — Art. 15 bundle incomplete").toBeDefined();
+    expect(entry!.kind).toBe("indirect");
+  });
+
+  it("csv_daily_returns indirect entry scopes via strategy_id → strategies (user_id)", () => {
+    const entry = USER_EXPORT_TABLES.find(
+      (t) => t.table === "csv_daily_returns" && t.kind === "indirect",
+    );
+    expect(entry).toBeDefined();
+    if (entry?.kind !== "indirect") return;
+    expect(entry.via_column).toBe("strategy_id");
+    expect(entry.parent_table).toBe("strategies");
+    expect(entry.parent_user_column).toBe("user_id");
+  });
+});
