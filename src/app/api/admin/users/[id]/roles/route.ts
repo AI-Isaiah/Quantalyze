@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { withRole, APP_ROLES, type AppRole } from "@/lib/auth";
+import { withRole, requireAdmin, APP_ROLES, type AppRole } from "@/lib/auth";
+import { captureToSentry } from "@/lib/sentry-capture";
+import { createClient } from "@/lib/supabase/server";
 import {
   adminActionLimiter,
   checkLimit,
@@ -285,14 +287,24 @@ export const POST = withRole<{ id: string }>("admin")(
       );
     }
 
-    const targetUserId = params?.id;
+    const rawTargetUserId = params?.id;
 
-    if (!targetUserId) {
+    if (!rawTargetUserId) {
       return NextResponse.json(
         { error: "Missing target user id in path" },
         { status: 400 },
       );
     }
+
+    // NEW-C17-03 (code-review H conf=8): normalize targetUserId to lowercase
+    // ONCE, immediately after the null-check, so ALL subsequent comparisons
+    // (self-revoke guard, DB ops via .eq() which is UUID case-insensitive) use
+    // the canonical form. The path param is attacker-controlled; an uppercase
+    // variant of the admin's own UUID mismatches `targetUserId === user.id`
+    // (string comparison, case-sensitive) but matches the DELETE's `.eq()`
+    // (Postgres UUID comparison, case-insensitive) — allowing self-lockout
+    // through the exact self-revoke rail this guard exists to prevent.
+    const targetUserId = rawTargetUserId.toLowerCase();
 
     const rawBody = await req.json().catch(() => null);
     const parsed = BODY_SCHEMA.safeParse(rawBody);
@@ -320,10 +332,13 @@ export const POST = withRole<{ id: string }>("admin")(
     // the request IS well-formed, the action is just forbidden. Aligning
     // on 403 lets the UI use a single 4xx→message mapping for "this
     // self-action is forbidden — have another admin act."
+    //
+    // NEW-C17-03: targetUserId is now lowercase-normalized above so this
+    // string comparison is case-insensitive by construction.
     if (
       action === "revoke" &&
       role === "admin" &&
-      targetUserId === user.id
+      targetUserId === user.id.toLowerCase()
     ) {
       return NextResponse.json(
         {
@@ -332,6 +347,21 @@ export const POST = withRole<{ id: string }>("admin")(
         },
         { status: 403 },
       );
+    }
+
+    // NEW-C17-05 (security+red-team H conf=7): TOCTOU re-check — withRole
+    // verified admin status ONCE at the wrapper, but several awaited
+    // round-trips (checkLimit, profile lookup, pre-read) widen the window
+    // for a concurrent revoke to strip the actor's admin row before the
+    // service-role mutation. The re-check MUST use a FRESH client (not the
+    // per-request `supabase` from withRole context) so that any session
+    // invalidation or role revocation that happened since the initial
+    // getUser() is observable. The service-role admin client bypasses all
+    // RLS; a just-demoted admin must NOT reach it.
+    {
+      const freshClient = await createClient();
+      const toctouGuard = await requireAdmin(freshClient, user, req);
+      if (toctouGuard) return toctouGuard;
     }
 
     const admin = createAdminClient();
@@ -509,6 +539,30 @@ export const POST = withRole<{ id: string }>("admin")(
         );
       }
 
+      // NEW-C17-04 (security H conf=7): alert on every admin role grant
+      // so rogue self-elevation or bulk backdoor minting surfaces to
+      // on-call in real time. The role.grant audit row is already
+      // committed above; this is an ADDITIONAL observability signal, not
+      // a control-flow gate.  captureToSentry is fire-and-forget
+      // (best-effort) — a Sentry transport failure must NOT change the
+      // response the caller sees.
+      if (role === "admin") {
+        captureToSentry(
+          new Error(`[admin/users/roles] admin role granted to ${targetUserId} by ${user.id}`),
+          {
+            tags: {
+              area: "admin-roles",
+              action: "role.grant",
+              role: "admin",
+              granted_by: user.id,
+              target_user_id: targetUserId,
+            },
+            extra: { was_new_grant: wasNewGrant },
+            level: "warning",
+          },
+        );
+      }
+
       // P462 (audit-2026-05-07) — unify the response envelope across GET,
       // grant, and revoke. The UI's role panel uses the same parser for
       // all three: { user_id, roles: string[] }. Pre-fix grant returned
@@ -612,6 +666,114 @@ export const POST = withRole<{ id: string }>("admin")(
     }
 
     // action === "revoke"
+
+    // NEW-C17-01 (security H conf=8): for admin revocation only, check
+    // profiles.is_admin BEFORE the DELETE. The admin gate is an OR:
+    //   profiles.is_admin = TRUE  OR  user_app_roles.role = 'admin'
+    // Migration-054 backfilled is_admin=TRUE for historical admins without
+    // creating user_app_roles rows ("ghost-admins"). Deleting the
+    // user_app_roles row for such a user has no effect on their admin
+    // access — the route returns 200 "Revoked admin" and logs role.revoke,
+    // yet the target still passes every admin gate.  The fix: refuse with
+    // 409 (not 400/403 — the request is well-formed and the caller is
+    // authorized, but the operation cannot be completed via this endpoint)
+    // and instruct the operator to use the DB break-glass path instead.
+    if (role === "admin") {
+      const { data: profileRow, error: profileIsAdminErr } = await admin
+        .from("profiles")
+        .select("is_admin")
+        .eq("id", targetUserId)
+        .maybeSingle();
+      if (profileIsAdminErr) {
+        console.error(
+          "[admin/users/roles] revoke admin: profiles.is_admin lookup failed:",
+          {
+            target_user_id: targetUserId,
+            code: profileIsAdminErr.code,
+            message: profileIsAdminErr.message,
+          },
+        );
+        return NextResponse.json(
+          {
+            error: "Failed to verify admin profile flag before revoke",
+            code: "profile_read_failed",
+          },
+          { status: 500 },
+        );
+      }
+      if (profileRow?.is_admin === true) {
+        return NextResponse.json(
+          {
+            error:
+              "Cannot revoke admin role via this endpoint: target user has profiles.is_admin=TRUE (ghost-admin). " +
+              "Deleting the user_app_roles row would not remove access. " +
+              "Use the DB break-glass path (SET profiles.is_admin=FALSE) to demote this user.",
+            code: "revoke_admin_ineffective",
+          },
+          { status: 409 },
+        );
+      }
+
+      // NEW-C17-02 (red-team H conf=8): last-admin lockout guard.
+      // Count surviving admins across BOTH sources (profiles.is_admin=TRUE
+      // UNION user_app_roles.role='admin'), excluding the target.  If
+      // deleting this row would drop the surviving count to zero, refuse
+      // with 409 would_orphan_last_admin so the org cannot be stripped to
+      // zero reachable admins via this endpoint.
+      //
+      // We use two separate queries via the admin client (which bypasses
+      // RLS) rather than a UNION RPC so the result is accurate under
+      // concurrent grants/revokes.  A SECURITY DEFINER RPC that makes the
+      // count→delete atomic is the correct long-term fix (tracked in
+      // audit-2026-05-17 backlog); the guard here closes the immediate
+      // foot-gun within acceptable TOCTOU tolerance (admin-facing, low
+      // concurrency).
+      const [{ data: profileAdmins, error: profileAdminErr }, { data: roleAdmins, error: roleAdminErr }] =
+        await Promise.all([
+          admin
+            .from("profiles")
+            .select("id", { count: "exact", head: true })
+            .eq("is_admin", true)
+            .neq("id", targetUserId),
+          admin
+            .from("user_app_roles")
+            .select("user_id", { count: "exact", head: true })
+            .eq("role", "admin")
+            .neq("user_id", targetUserId),
+        ]);
+      if (profileAdminErr || roleAdminErr) {
+        const err = profileAdminErr ?? roleAdminErr;
+        console.error(
+          "[admin/users/roles] last-admin count query failed:",
+          { target_user_id: targetUserId, code: err?.code, message: err?.message },
+        );
+        return NextResponse.json(
+          {
+            error: "Failed to count surviving admins before revoke",
+            code: "last_admin_count_failed",
+          },
+          { status: 500 },
+        );
+      }
+      // Deduplicate: a user with both is_admin=TRUE and a user_app_roles row
+      // is counted twice above. We're conservative here: if either source
+      // reports > 0 survivors, the revoke is safe.  If both report 0 we
+      // refuse.  This may over-count (false "safe") but NEVER under-count
+      // (false "orphan"), which is the correct safety direction.
+      const survivingAdminCount = (profileAdmins?.length ?? 0) + (roleAdmins?.length ?? 0);
+      if (survivingAdminCount === 0) {
+        return NextResponse.json(
+          {
+            error:
+              "Cannot revoke: this is the last admin account. " +
+              "Grant admin to another user first.",
+            code: "would_orphan_last_admin",
+          },
+          { status: 409 },
+        );
+      }
+    }
+
     const { error, count } = await admin
       .from("user_app_roles")
       .delete({ count: "exact" })
@@ -805,6 +967,24 @@ export const POST = withRole<{ id: string }>("admin")(
               ? auditError.message
               : String(auditError),
         },
+      );
+    }
+
+    // NEW-C17-06 (silent-failure H conf=7): if the role is STILL held
+    // after the DELETE (e.g. a concurrent grant re-inserted the row
+    // between the DELETE and the post-mutation re-read), return 409 so
+    // the UI warns the operator instead of toasting a false "Revoked"
+    // success. The role.state_observed audit anchor above already
+    // recorded holds_role=true for the forensic trail.
+    if (holdsRoleAfterRevoke) {
+      return NextResponse.json(
+        {
+          error:
+            "Revoke committed but the role is still observed as held " +
+            "(possible concurrent re-grant). Refresh and retry if needed.",
+          code: "revoke_did_not_take",
+        },
+        { status: 409 },
       );
     }
 
