@@ -282,13 +282,17 @@ function PerformanceCharts() {
   // fields were added would crash readers. The cache key was bumped in
   // the same commit so this should only hit during the 1h TTL drain; if
   // it ever fires steady-state, the warn below surfaces the schema drift.
+  // Conservative fallback: `enough: false` so panels hide + "Not enough data"
+  // shows when the window is unknown. The old `enough: true` default caused
+  // rolling panels to render with a fabricated warmup label for any payload
+  // that predated the rollingWindow field. (NEW-C20-03)
   const roll: RollWindowPick = payload.rollingWindow
-    ?? { window: ROLL_WINDOW_6MO, label: "6mo", enough: true };
+    ?? { window: ROLL_WINDOW_6MO, label: "6mo", enough: false };
   const beta: RollWindowPick = payload.rollingBetaWindow
-    ?? { window: ROLL_WINDOW_90D, label: "90d", enough: true };
+    ?? { window: ROLL_WINDOW_90D, label: "90d", enough: false };
   React.useEffect(() => {
     if (!payload.rollingWindow || !payload.rollingBetaWindow) {
-      console.warn(
+      console.error(
         "[factsheet/v2] PerformanceCharts — payload missing rollingWindow/rollingBetaWindow; rendering with defaults. Bump factsheet-v2-payload cache key if this persists.",
         { strategyId: payload.strategyId },
       );
