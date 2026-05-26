@@ -105,8 +105,14 @@ BEGIN
     RAISE EXCEPTION 'Migration NEW-C10-04 failed: log_audit_event(text,text,uuid,jsonb) not found';
   END IF;
 
-  IF v_prosrc NOT LIKE '%invalid_authorization_specification%' THEN
-    RAISE EXCEPTION 'Migration NEW-C10-04 failed: log_audit_event body does not contain invalid_authorization_specification (28000). Body: %', left(v_prosrc, 200);
+  -- M-4 (red-team 2026-05-26): anchor to the full ERRCODE assignment string so
+  -- a comment containing "invalid_authorization_specification" (e.g. "-- was:
+  -- invalid_authorization_specification") cannot satisfy the check while the
+  -- actual ERRCODE has been silently reverted to 42501. The original substring
+  -- match `LIKE '%invalid_authorization_specification%'` would pass on a comment
+  -- hit even if the RAISE uses ERRCODE = 'insufficient_privilege'.
+  IF v_prosrc NOT LIKE '%ERRCODE = ''invalid_authorization_specification''%' THEN
+    RAISE EXCEPTION 'Migration NEW-C10-04 failed: log_audit_event body does not contain ERRCODE = ''invalid_authorization_specification'' (28000). Body: %', left(v_prosrc, 200);
   END IF;
 
   -- Ensure the old 42501 guard is gone from the NULL-auth branch.

@@ -18,12 +18,33 @@ type ApprovalGateModule = typeof import("@/lib/api/approval-gate");
 // same module object (benign today but wastes a parallel resolution). Storing the
 // Promise ensures at most one `import()` is ever initiated regardless of
 // concurrency — the second caller awaits the same in-flight promise.
+//
+// C-1 (red-team 2026-05-26): evict the promise on rejection so a transient
+// bundler-cache miss or cold-start import failure does not permanently cache a
+// rejected promise for the process lifetime. Without eviction, every subsequent
+// call returns the same rejected promise → permanent 503 on all withRole routes,
+// creating operational pressure to disable the approval gate. The eviction path
+// mirrors `getUserRolesResult`'s perUser?.delete(userId) eviction pattern.
 let _approvalGatePromise: Promise<ApprovalGateModule> | null = null;
 async function getApprovalGate(): Promise<ApprovalGateModule> {
   if (!_approvalGatePromise) {
-    _approvalGatePromise = import("@/lib/api/approval-gate");
+    _approvalGatePromise = import("@/lib/api/approval-gate").catch((err) => {
+      // Evict on failure so the next request retries the import rather than
+      // returning this rejected promise indefinitely (C-1 / red-team 2026-05-26).
+      _approvalGatePromise = null;
+      throw err;
+    });
   }
   return _approvalGatePromise;
+}
+
+/** Test-only reset hook. Mirrors __resetAuditEmitTransientFailuresForTests in audit.ts.
+ * H-1 (red-team 2026-05-26): module-level promise carries across Vitest isolated
+ * contexts when vi.resetModules() is not used. Expose a reset so test suites that
+ * call withRole without the approval-gate mock first don't leak state into
+ * subsequent suites that DO mock it. */
+export function __resetApprovalGatePromiseForTests(): void {
+  _approvalGatePromise = null;
 }
 
 // Re-exported here so server-side callers can keep using
@@ -654,7 +675,22 @@ export function withRole<P = Record<string, never>>(
             { status: 503 },
           );
         }
-        const denied = await gate.assertProfileApproved(supabase, user.id);
+        // H-2 (red-team 2026-05-26): assertProfileApproved can throw (DB error,
+        // unexpected null, RLS fault that throws rather than returning a
+        // NextResponse). Without a catch, the exception propagates unhandled out
+        // of withRole — indistinguishable from a crashed handler and untestable.
+        // Fail CLOSED: any throw from the gate function returns 503, same as the
+        // import-failure path above.
+        let denied: NextResponse | null;
+        try {
+          denied = await gate.assertProfileApproved(supabase, user.id);
+        } catch (gateErr) {
+          console.error("[auth/withRole] assertProfileApproved threw unexpectedly:", gateErr);
+          return NextResponse.json(
+            { error: "Service temporarily unavailable" },
+            { status: 503 },
+          );
+        }
         if (denied) return denied;
       }
 

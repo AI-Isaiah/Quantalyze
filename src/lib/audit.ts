@@ -133,7 +133,22 @@ export function classifyAuditEmitError(
   //       real grant-drift so the Sentry alert rule remains signal, not noise),
   //   (b) the row drop is treated as non-fatal (the request succeeded; the
   //       audit window simply expired).
+  //
+  // H-3 (red-team 2026-05-26): check BOTH the rpcError path (PostgREST error
+  // object) AND the thrown path (connection-level auth failure that rejects the
+  // fetch promise before PostgREST returns a JSON body). When 28000 arrives as
+  // a thrown exception the `err` carries `.code === "28000"` directly on the
+  // Error object (set by Object.assign in emit()'s errForDispatch construction);
+  // `rpcError` is null in that case. Without this second branch the thrown-path
+  // 28000 falls through to `unknown` and re-throws as a fatal event, defeating
+  // the noise-reduction goal of NEW-C10-04.
   if (rpcError && rpcError.code === "28000") {
+    return "unauthenticated";
+  }
+  if (
+    err instanceof Error &&
+    (err as Error & { code?: string }).code === "28000"
+  ) {
     return "unauthenticated";
   }
   if (err instanceof Error) {

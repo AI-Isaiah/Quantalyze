@@ -14,7 +14,8 @@ import {
   checkLimit,
   isRateLimitMisconfigured,
 } from "@/lib/ratelimit";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
  * RPC parameter bag for `update_allocator_mandates`. Each non-null
@@ -216,7 +217,15 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   }
 
   // Audit emission — fire-and-forget; grepped by audit-coverage.test.ts.
-  logAuditEvent(supabase, {
+  // C-2 (red-team 2026-05-26): switched from logAuditEvent (user-scoped,
+  // JWT-resolved in the deferred after() window) to logAuditEventAsUser
+  // (service-role, JWT-immune). `mandate_preference.update` is the primary
+  // write path for the preferences route and the exact failure mode NEW-C10-01
+  // was designed to close: an allocator with a short JWT TTL can get a 200
+  // response but no audit row when the JWT expires between response-flush and
+  // after() settle. The PR switched all other security-critical mutations but
+  // missed this call site.
+  logAuditEventAsUser(createAdminClient(), user.id, {
     action: "mandate_preference.update",
     entity_type: "allocator_preference_mandate",
     entity_id: user.id,

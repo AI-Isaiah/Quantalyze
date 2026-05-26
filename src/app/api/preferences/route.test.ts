@@ -59,9 +59,11 @@ const STATE = vi.hoisted(() => ({
   },
   csrfResponse: null as ReturnType<typeof import("next/server").NextResponse.json> | null,
   lastCheckLimitArg: null as unknown,
-  // M-0338(b): when set, the log_audit_event RPC throws a TRANSIENT-class
-  // error (network blip) which `emit()` swallows — proving the fire-and-
-  // forget audit path never changes the user-facing 200.
+  // M-0338(b): when set, the log_audit_event_service RPC throws a TRANSIENT-
+  // class error (network blip) which `emitAsUser()` swallows — proving the
+  // fire-and-forget audit path never changes the user-facing 200. C-2: now
+  // controls the admin-client (service-role) path after the switch to
+  // logAuditEventAsUser.
   auditRpcThrows: false,
 }));
 
@@ -75,13 +77,33 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
       STATE.rpcCalls.push({ name, args });
+      // C-2: log_audit_event_service (admin path) is now used instead.
+      // This branch is kept as a no-op stub in case other test paths call
+      // log_audit_event via the user-scoped client for non-preferences RPCs.
       if (name === "log_audit_event" && STATE.auditRpcThrows) {
-        // Transient-class failure (TypeError: fetch failed) — emit()
-        // swallows it without rethrowing, so no unhandled rejection.
         throw new TypeError("fetch failed");
       }
       const outcome = STATE.rpcState[name] ?? { data: null, error: null };
       return outcome;
+    },
+  }),
+}));
+
+// C-2 (red-team 2026-05-26): logAuditEventAsUser now uses the admin client
+// (service-role, JWT-immune). Mock createAdminClient so its rpc calls are
+// captured in STATE.rpcCalls alongside the user-scoped calls, and so
+// auditRpcThrows can exercise the fire-and-forget failure path (TC13).
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      STATE.rpcCalls.push({ name, args });
+      if (name === "log_audit_event_service" && STATE.auditRpcThrows) {
+        // Mirror the user-scoped auditRpcThrows behaviour: a transient
+        // network blip on the service-role audit path must not change the
+        // user-facing 200. emitAsUser() swallows TypeErrors.
+        throw new TypeError("fetch failed");
+      }
+      return { data: null, error: null };
     },
   }),
 }));
@@ -175,9 +197,15 @@ describe("PUT /api/preferences", () => {
       p_correlation_ceiling: 0.5,
     });
 
-    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    // C-2 (red-team 2026-05-26): audit now uses log_audit_event_service
+    // (service-role, JWT-immune) via logAuditEventAsUser. Also assert
+    // p_user_id is the acting user's id — the service-role RPC takes it
+    // as an explicit parameter unlike the user-scoped path which derives
+    // it from auth.uid().
+    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event_service");
     expect(auditCall).toBeDefined();
     expect(auditCall!.args).toMatchObject({
+      p_user_id: STATE.authUser!.id,
       p_action: "mandate_preference.update",
       p_entity_type: "allocator_preference_mandate",
       p_entity_id: STATE.authUser!.id,
@@ -207,7 +235,7 @@ describe("PUT /api/preferences", () => {
     // No p_max_weight key
     expect(updateCall!.args).not.toHaveProperty("p_max_weight");
 
-    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event_service");
     expect(auditCall).toBeDefined();
     expect(auditCall!.args.p_metadata).toMatchObject({
       fields: ["max_weight"],
@@ -312,7 +340,8 @@ describe("PUT /api/preferences", () => {
     expect(body.error).not.toMatch(/update_allocator_mandates/);
 
     await drainAuditMicrotasks();
-    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event")).toHaveLength(0);
+    // C-2: audit now uses log_audit_event_service; neither path should fire on error.
+    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event" || c.name === "log_audit_event_service")).toHaveLength(0);
   });
 
   it("TC7 — NEW-C07-02: RPC SQLSTATE 28000 after successful getUser returns 500 (infra fault, not unauthenticated)", async () => {
@@ -342,7 +371,8 @@ describe("PUT /api/preferences", () => {
     expect(body.error).toBe("Internal server error");
 
     await drainAuditMicrotasks();
-    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event")).toHaveLength(0);
+    // C-2: audit now uses log_audit_event_service; neither path should fire on error.
+    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event" || c.name === "log_audit_event_service")).toHaveLength(0);
   });
 
   it("TC8 — 500 unknown RPC error: generic message, no audit", async () => {
@@ -360,7 +390,8 @@ describe("PUT /api/preferences", () => {
     expect(body.error).toBe("Failed to save mandate");
 
     await drainAuditMicrotasks();
-    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event")).toHaveLength(0);
+    // C-2: audit now uses log_audit_event_service; neither path should fire on error.
+    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event" || c.name === "log_audit_event_service")).toHaveLength(0);
   });
 
   it("TC9 — CSRF short-circuits before auth/rpc/audit", async () => {
@@ -455,7 +486,7 @@ describe("PUT /api/preferences", () => {
     expect(updateCall!.args).not.toHaveProperty("p_founder_notes");
     expect(updateCall!.args).not.toHaveProperty("p_min_sharpe");
 
-    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event_service");
     expect(auditCall).toBeDefined();
     const metadata = auditCall!.args.p_metadata as {
       fields: string[];
@@ -487,7 +518,8 @@ describe("PUT /api/preferences", () => {
     expect(
       STATE.rpcCalls.some((c) => c.name === "update_allocator_mandates"),
     ).toBe(true);
-    expect(STATE.rpcCalls.some((c) => c.name === "log_audit_event")).toBe(true);
+    // C-2: audit now uses log_audit_event_service (service-role, JWT-immune).
+    expect(STATE.rpcCalls.some((c) => c.name === "log_audit_event_service")).toBe(true);
   });
 
   it("TC14 — M-0338(c): the audit entity_id is pinned to the authenticated user.id and a body-supplied entity_id cannot override it", async () => {
@@ -507,7 +539,8 @@ describe("PUT /api/preferences", () => {
     expect(res.status).toBe(200);
     await drainAuditMicrotasks();
 
-    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    // C-2: audit now uses log_audit_event_service (service-role, JWT-immune).
+    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event_service");
     expect(auditCall).toBeDefined();
     expect(auditCall!.args.p_entity_id).toBe(STATE.authUser!.id);
     expect(auditCall!.args.p_entity_id).not.toBe(
