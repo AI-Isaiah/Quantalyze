@@ -827,6 +827,86 @@ describe("<PortfolioImpactPanel>", () => {
   });
 
   // -------------------------------------------------------------------------
+  // NEW-C11-05 — degenerate ok row (overlap_days<30 or all-null deltas) renders
+  // the fallback copy, not ±0 chips as a confident projection.
+  // -------------------------------------------------------------------------
+
+  it("NEW-C11-05: ok row with overlap_days<30 renders fallback copy, not chips", async () => {
+    // Simulate a degenerate ok row that slips through schema validation
+    // (e.g. producer sends overlap_days=5 with status="ok").
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            status: "ok",
+            overlap_days: 5,
+            partial_history: true,
+            deltas: {
+              sharpe_delta: 0,
+              dd_delta: 0,
+              corr_delta: 0,
+              concentration_delta: 0,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Degenerate ok"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Not enough overlapping history/i),
+      ).toBeInTheDocument(),
+    );
+    // Must NOT render the delta chips as a confident projection.
+    expect(screen.queryByText("Projected impact")).toBeNull();
+    expect(screen.queryByText("±0.000")).toBeNull();
+  });
+
+  it("NEW-C11-05: ok row with all-null deltas renders fallback copy, not ±0 chips", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            deltas: {
+              sharpe_delta: null,
+              dd_delta: null,
+              corr_delta: null,
+              concentration_delta: null,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="All null deltas"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Not enough overlapping history/i),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("Projected impact")).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // NEW-C11-01 — null delta renders as "—" (not computable), not ±0.000
   // -------------------------------------------------------------------------
 

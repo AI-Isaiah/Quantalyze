@@ -293,6 +293,24 @@ function NonOkState({ data }: { data: SimulatorCandidate }) {
 }
 
 function SuccessBody({ data }: { data: SimulatorResponseOk }) {
+  // NEW-C11-05: defense-in-depth — if the schema's ok-branch refine is ever
+  // bypassed (e.g. producer drift before the next schema gate upgrade), guard
+  // against rendering ±0 chips as a confident projection for a degenerate row.
+  const allDeltasNull =
+    data.deltas.sharpe_delta === null &&
+    data.deltas.dd_delta === null &&
+    data.deltas.corr_delta === null &&
+    data.deltas.concentration_delta === null;
+  if (data.overlap_days < 30 || allDeltasNull) {
+    return (
+      <div className="rounded-lg border border-border bg-page px-4 py-3">
+        <p className="text-sm text-text-secondary">
+          Not enough overlapping history to compute reliable projections.
+          Requires at least 30 trading days of overlap with your portfolio.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="space-y-5">
       {data.partial_history && (

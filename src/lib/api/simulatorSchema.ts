@@ -71,6 +71,11 @@ const SimulatorCommonShape = {
   current: SimulatorMetricsSchema,
 } as const;
 
+// NEW-C11-05: tighten the ok-branch to reject degenerate results that slip
+// through if producer drift allows status="ok" with overlap_days=0 or all-null
+// metrics. overlap_days < 30 on an ok row is incoherent (insufficient_data
+// should have fired). At least one proposed metric must be non-null — an ok
+// result with all nulls would render ±0 chips as a confident projection.
 const SimulatorOkBranch = z
   .object({
     status: z.literal("ok"),
@@ -80,7 +85,22 @@ const SimulatorOkBranch = z
     equity_curve_current: z.array(EquityCurvePointSchema),
     equity_curve_proposed: z.array(EquityCurvePointSchema),
   })
-  .passthrough();
+  .passthrough()
+  .refine((d) => d.overlap_days >= 30, {
+    message: "ok status requires overlap_days >= 30 (insufficient_data should have fired)",
+    path: ["overlap_days"],
+  })
+  .refine(
+    (d) =>
+      d.proposed.sharpe !== null ||
+      d.proposed.max_drawdown !== null ||
+      d.proposed.avg_correlation !== null ||
+      d.proposed.concentration !== null,
+    {
+      message: "ok status requires at least one non-null proposed metric",
+      path: ["proposed"],
+    },
+  );
 
 const SimulatorInsufficientDataBranch = z
   .object({
