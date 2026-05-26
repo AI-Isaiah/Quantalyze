@@ -56,6 +56,64 @@ export type OverlaySeries = {
 
 export type CustomRange = { start: string; end: string };
 
+// ---------------------------------------------------------------------------
+// NEW-C04-04: branded VisibleAligned type
+//
+// `visibleBenchmarkNormalized`, overlay `series`, and `visibleNormalized`
+// are meaningful ONLY because element `i` shares the `visible[i]` date index.
+// Nothing at the type level ties their length/ordering to `visible`. A future
+// refactor that builds a series from a different window or ordering compiles
+// fine and silently reports the wrong day for that series.
+//
+// Brand them so only the projection memo (which provably re-emits every series
+// from the same `visible` slice) can produce them. External code that tries to
+// pass a raw `Array<number|null>` where `VisibleAligned<number|null>` is
+// expected gets a compile error.
+// ---------------------------------------------------------------------------
+
+/** A number array whose element `i` is provably co-indexed with `visible[i]`. */
+export type VisibleAligned<T> = T[] & { readonly __visibleAligned: true };
+
+/** Cast a series produced inside the projection memo to the branded type. */
+function alignedSeries<T>(arr: T[]): VisibleAligned<T> {
+  return arr as unknown as VisibleAligned<T>;
+}
+
+// ---------------------------------------------------------------------------
+// NEW-C04-03: branded WealthPoint type
+//
+// `computeScenario().equity_curve` produces cumulative RETURN values (e.g.
+// 0.18 = +18%). This chart needs cumulative WEALTH (starting at ~1.0). The
+// caller MUST convert via `toWealth()` before passing scenarioSeries. A raw
+// DailyPoint[] fails to typecheck so the silent 0%-baseline miscompare is
+// caught at compile time.
+//
+// `toWealth()` is the single constructor — all new call sites must go through
+// it; existing call sites (ScenarioComposer.tsx `value + 1`) are equivalent
+// and type-compatible via a cast (preferred: refactor to toWealth).
+// ---------------------------------------------------------------------------
+
+/** Branded DailyPoint in cumulative-WEALTH form (value starts near 1.0). */
+export type WealthPoint = DailyPoint & { readonly __wealthBrand: true };
+
+/**
+ * Convert a cumulative-RETURN point to WEALTH form.
+ * Pass `computeScenario().equity_curve` through this before forwarding to
+ * `scenarioSeries`. A cheap boundary warn fires when the first value is < 0.5
+ * (suggests the input is already in wealth form OR is deeply underwater).
+ */
+export function toWealth(points: DailyPoint[]): WealthPoint[] {
+  if (points.length > 0 && points[0].value < 0.5) {
+    if (typeof console !== "undefined") {
+      console.warn(
+        "[EquityChart] toWealth: first value < 0.5 — check whether input is already in wealth form.",
+        { first: points[0] },
+      );
+    }
+  }
+  return points.map((p) => ({ ...p, __wealthBrand: true as const }));
+}
+
 type Props = {
   equityDailyPoints: DailyPoint[];
   benchmark?: DailyPoint[];
@@ -70,16 +128,15 @@ type Props = {
    * **Caller contract (Pitfall 1 in 10-RESEARCH.md):**
    * `computeScenario().equity_curve` values are cumulative RETURN
    * (e.g. 0.18 = +18%). This chart expects cumulative WEALTH starting
-   * at ~1.0. The caller (Plan 06 ScenarioComposer) MUST convert via
-   * `{ date, value: point.value + 1 }` before passing here. Mismatch
-   * results in the overlay starting at 0% instead of 100% — a visible
-   * but silent miscompare.
+   * at ~1.0. Pass through `toWealth()` before forwarding here — the
+   * `WealthPoint` brand ensures mismatched raw RETURN arrays are caught
+   * at compile time rather than silently rendering a 0%-baseline overlay.
    *
    * Empty array (length=0) and `null` both hide the toggle and skip
    * the overlay render. Existing call sites that don't pass this prop
    * see zero behavior change.
    */
-  scenarioSeries?: DailyPoint[] | null;
+  scenarioSeries?: WealthPoint[] | null;
   /**
    * PR4 #1 — Controlled-state escape hatch for `EquityChartWidget`'s
    * single-row card header. When `period` is supplied, the chart treats
@@ -379,9 +436,40 @@ export function EquityChart({
   // the SAME `firstPositiveIdx` semantics consumed by EquityCurve.tsx
   // (lines 52-61); preserving it keeps zero-holdings / warm-up / stale
   // dimmer states rendering consistently across the legacy + V2 paths.
+  //
+  // NEW-C04-07: sort defensively by date before anchoring so out-of-order
+  // input (late-arriving backfill row appended at the end, unsorted merge)
+  // can't corrupt window endpoints, periodReturn, or tick bounds.
+  // sliceByPeriod uses `points[length-1].date` as chronological-last and
+  // the tick builder uses `visible[0]`/`visible[n-1]`, both of which assume
+  // ascending chronological order. The sort runs once per fresh reference;
+  // the anchorCache then collapses duplicate calls on the sorted array.
+  // A one-shot warn fires when an inversion is detected so the bad producer
+  // surfaces in dev without requiring a breakpoint.
+  const sortedEquityPoints = useMemo(() => {
+    if (equityDailyPoints.length < 2) return equityDailyPoints;
+    // Fast monotonicity check before allocating a sorted copy.
+    let monotonic = true;
+    for (let i = 1; i < equityDailyPoints.length; i++) {
+      if (equityDailyPoints[i].date < equityDailyPoints[i - 1].date) {
+        monotonic = false;
+        break;
+      }
+    }
+    if (monotonic) return equityDailyPoints;
+    if (typeof console !== "undefined") {
+      console.warn(
+        "[EquityChart] equityDailyPoints is not monotonically ascending — sorting defensively. " +
+          "Fix the producer to emit sorted data.",
+        { firstDate: equityDailyPoints[0].date, lastDate: equityDailyPoints[equityDailyPoints.length - 1].date },
+      );
+    }
+    return [...equityDailyPoints].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  }, [equityDailyPoints]);
+
   const composite = useMemo(
-    () => anchorFromFirstPositive(equityDailyPoints),
-    [equityDailyPoints],
+    () => anchorFromFirstPositive(sortedEquityPoints),
+    [sortedEquityPoints],
   );
 
   // Visible window after period filter.
@@ -517,7 +605,8 @@ export function EquityChart({
       return null;
     }
     const basePort = rawBasePort;
-    const visibleNormalized = visible.map((p) => p.value / basePort);
+    // NEW-C04-04: brand as VisibleAligned — produced directly from `visible`
+    const visibleNormalized: VisibleAligned<number> = alignedSeries(visible.map((p) => p.value / basePort));
 
     // ADVERSARIAL-EQ-5 — period total return for the always-visible
     // summary chip. The chip surfaces the end-of-window return for the
@@ -536,10 +625,19 @@ export function EquityChart({
       visibleBenchmark
         ? visibleBenchmark.find((v): v is number => v != null) ?? null
         : null;
-    const visibleBenchmarkNormalized: Array<number | null> | null =
+    // NEW-C04-04: brand as VisibleAligned so consumers can't accidentally
+    // pass a non-co-indexed series where this is expected.
+    const visibleBenchmarkNormalized: VisibleAligned<number | null> | null =
       visibleBenchmark && baseBench != null
-        ? visibleBenchmark.map((v) => (v == null ? null : v / baseBench))
+        ? alignedSeries(visibleBenchmark.map((v) => (v == null ? null : v / baseBench)))
         : null;
+    // NEW-C04-02: detect when the benchmark starts AFTER the portfolio
+    // window's first date (gap at index 0). When true, the "% since period
+    // start" comparison is apples-to-oranges — the benchmark is anchored to
+    // a later date. Surface this via a legend note so the reader knows before
+    // interpreting the relative slopes.
+    const benchmarkBaselineDiffers =
+      visibleBenchmark != null && visibleBenchmark[0] == null;
 
     // Y range over portfolio + benchmark + overlays (all period-relative
     // and centered on 1.0). Drop nulls AND non-finite values.
@@ -584,8 +682,16 @@ export function EquityChart({
     // clips the 0% tick off-screen.
     yMin = Math.min(yMin, 1);
     yMax = Math.max(yMax, 1);
+    // NEW-C04-08: capture the natural range BEFORE padding so we can annotate
+    // flat windows. A range < 2% (0.02 in ratio units) is "narrow" — the
+    // auto-fit axis would otherwise exaggerate a 0.1% move to fill the full
+    // chart height, making every flat window look eventful.
+    const naturalRange = yMax - yMin;
+    const narrowRange = naturalRange < 0.02; // < ±1% from baseline
     // 4% visual padding so the line doesn't kiss the top or bottom edge.
-    const yPadding = (yMax - yMin) * 0.04 || 0.002;
+    // Floor at 0.01 (1%) so the narrow-range annotation is meaningful.
+    const naturalPadding = naturalRange * 0.04;
+    const yPadding = naturalPadding > 0 ? naturalPadding : 0.01;
     yMin -= yPadding;
     yMax += yPadding;
     const yRange = yMax - yMin || 1;
@@ -683,8 +789,28 @@ export function EquityChart({
       return Array.from(ticks).sort((a, b) => a - b);
     })();
 
-    const x = (i: number) =>
-      n <= 1 ? pad.l + chartW / 2 : pad.l + (i / (n - 1)) * chartW;
+    // NEW-C04-06: map x by CALENDAR time, not array index.
+    //
+    // The previous index-based `x(i) = pad.l + (i/(n-1))*chartW` spaced
+    // every data point uniformly regardless of calendar distance — a 10-day
+    // gap and a 1-day gap occupied identical horizontal space, making slopes
+    // misleading. Month tick labels were positioned by real date epoch but the
+    // line was positioned by index, so they could disagree under non-uniform
+    // spacing (CSV gaps, benchmark missing-day nulls, etc.).
+    //
+    // Calendar scale: `x(i) = pad.l + ((epoch_i - firstEpoch) / totalMs) * chartW`.
+    // When the visible window is perfectly uniform (no gaps), this produces
+    // the same output as the index scale. When there are gaps it renders
+    // correct proportional spacing. Falls back to centre when n ≤ 1 or
+    // totalMs === 0 (single-point degenerate window).
+    const firstEpochX = n > 0 ? parseISO(visible[0].date) : 0;
+    const lastEpochX = n > 0 ? parseISO(visible[n - 1].date) : 0;
+    const totalMs = lastEpochX - firstEpochX;
+    const x = (i: number): number => {
+      if (n <= 1 || totalMs === 0) return pad.l + chartW / 2;
+      const e = parseISO(visible[i].date);
+      return pad.l + ((e - firstEpochX) / totalMs) * chartW;
+    };
     const y = (v: number) => pad.t + (1 - (v - yMin) / yRange) * chartH;
 
     const toPath = (arr: Array<number | null>) => {
@@ -794,6 +920,14 @@ export function EquityChart({
       toPath,
       toArea,
       ticks,
+      // NEW-C04-08: range annotation for flat windows
+      narrowRange,
+      naturalRange,
+      // NEW-C04-06: calendar scale epoch bounds for handleMove inversion
+      firstEpochX,
+      totalMs,
+      // NEW-C04-02: flag when benchmark baseline date differs from portfolio
+      benchmarkBaselineDiffers,
     };
     // `visible` already derives from `composite` (which derives from
     // `equityDailyPoints`), so it transitively covers any content change;
@@ -839,14 +973,36 @@ export function EquityChart({
     toPath,
     toArea,
     ticks,
+    narrowRange,
+    naturalRange,
+    firstEpochX,
+    totalMs,
+    benchmarkBaselineDiffers,
   } = projection;
 
   // ── Hover ─────────────────────────────────────────────────────────
+  // NEW-C04-06: x is now a calendar-time scale. Invert by mapping the
+  // pixel position back to a target epoch and finding the nearest visible
+  // data point. Clamp to [pad.l, pad.l+chartW] first so out-of-bounds
+  // mouse events don't produce an impossible target epoch.
   function handleMove(e: React.MouseEvent<SVGSVGElement>) {
+    if (n === 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const px = e.clientX - rect.left;
-    const i = Math.round(((px - pad.l) / chartW) * (n - 1));
-    if (i >= 0 && i < n) setHoverIdx(i);
+    if (n === 1) { setHoverIdx(0); return; }
+    // Clamp px to chart area
+    const clampedPx = Math.max(pad.l, Math.min(pad.l + chartW, px));
+    // Map pixel → target epoch
+    const targetEpoch = firstEpochX + ((clampedPx - pad.l) / chartW) * totalMs;
+    // Find the nearest index by absolute epoch distance
+    let bestIdx = 0;
+    let bestDelta = Infinity;
+    for (let j = 0; j < n; j++) {
+      const e2 = parseISO(visible[j].date);
+      const d = Math.abs(e2 - targetEpoch);
+      if (d < bestDelta) { bestDelta = d; bestIdx = j; }
+    }
+    setHoverIdx(bestIdx);
   }
 
   // ── Period toggle + range picker handlers ────────────────────────
@@ -1087,7 +1243,11 @@ export function EquityChart({
         {showBench && visibleBenchmarkNormalized && (
           <LegendSwatch
             color="var(--color-chart-benchmark)"
-            label="BTC"
+            label={
+              benchmarkBaselineDiffers
+                ? "BTC (later start)"
+                : "BTC"
+            }
             dashed
           />
         )}
@@ -1260,7 +1420,11 @@ export function EquityChart({
             }
           />
 
-          {/* Hover crosshair */}
+          {/* Hover crosshair — NEW-C04-01: gate circle on Number.isFinite so
+              a corrupt interior point (NaN/Inf survived normalisation) never
+              emits y(NaN) = NaN into a SVG attribute, producing an invisible
+              dot with no diagnostic. The vertical rule still renders so the
+              date tooltip fires at the right x position. */}
           {hoverIdx != null && hoverIdx < n && (
             <g>
               <line
@@ -1272,22 +1436,42 @@ export function EquityChart({
                 strokeWidth={1}
                 strokeDasharray="2 2"
               />
-              <circle
-                cx={x(hoverIdx)}
-                cy={y(visibleNormalized[hoverIdx])}
-                r={3.5}
-                fill="var(--color-chart-strategy)"
-                stroke="var(--color-surface)"
-                strokeWidth={1.5}
-              />
+              {Number.isFinite(visibleNormalized[hoverIdx]) && (
+                <circle
+                  cx={x(hoverIdx)}
+                  cy={y(visibleNormalized[hoverIdx])}
+                  r={3.5}
+                  fill="var(--color-chart-strategy)"
+                  stroke="var(--color-surface)"
+                  strokeWidth={1.5}
+                />
+              )}
             </g>
           )}
         </svg>
 
-        {/* Tooltip popover */}
+        {/* Tooltip popover — NEW-C04-01: gate on Number.isFinite(portNorm)
+            so a corrupt interior point that survived normalisation (NaN/Inf)
+            doesn't render "NaN%" to the allocator. The tooltip is simply
+            suppressed for that index; the one-shot warn fires once per bad
+            date so the case surfaces in local dev without flooding the log. */}
         {hoverIdx != null && hoverIdx < n && (() => {
           const i = hoverIdx;
-          const portPct = (visibleNormalized[i] - 1) * 100;
+          const portNorm = visibleNormalized[i];
+          if (!Number.isFinite(portNorm)) {
+            if (typeof console !== "undefined") {
+              const badDate = visible[i]?.date ?? String(i);
+              if (!parseISOWarnedRef.has(`portNaN:${badDate}`)) {
+                parseISOWarnedRef.add(`portNaN:${badDate}`);
+                console.warn(
+                  "[EquityChart] non-finite normalised portfolio value at hover index — suppressing tooltip",
+                  { date: badDate, raw: visible[i]?.value },
+                );
+              }
+            }
+            return null;
+          }
+          const portPct = (portNorm - 1) * 100;
           const benchNorm =
             visibleBenchmarkNormalized && visibleBenchmarkNormalized[i] != null
               ? visibleBenchmarkNormalized[i]!
@@ -1358,6 +1542,34 @@ export function EquityChart({
             </div>
           );
         })()}
+
+        {/* NEW-C04-08: flat-window range annotation — renders a small
+            "range: ±X%" badge in the top-left of the chart area so the
+            reader can interpret slope without a misleading-scale axis.
+            Only shown when the natural data range is < 2% (< 0.02 in
+            ratio units) — i.e. exactly the windows that auto-fit would
+            exaggerate into a dramatic-looking move. */}
+        {narrowRange && (
+          <div
+            aria-label={`Narrow range: ±${((naturalRange / 2) * 100).toFixed(2)}%`}
+            data-testid="equity-chart-narrow-range"
+            style={{
+              position: "absolute",
+              top: 6,
+              left: pad.l + 4,
+              fontSize: 10,
+              fontFamily: "var(--font-mono)",
+              color: "var(--color-text-muted)",
+              background: "var(--color-surface)",
+              border: "1px solid var(--color-border)",
+              borderRadius: 4,
+              padding: "1px 5px",
+              pointerEvents: "none",
+            }}
+          >
+            range: ±{((naturalRange / 2) * 100).toFixed(2)}%
+          </div>
+        )}
 
         {/* Stale dimmer — Phase 07 / 07-05 / D-10 visual half of the
             stale gate. Only the chart tile carries this; non-chart
@@ -1504,8 +1716,20 @@ interface EquityChartWidgetData {
   lastSyncAt?: string | null;
 }
 
+// NEW-C04-05: type guard so malformed/wrong-shape payloads fall to the
+// warm-up empty state rather than flowing into anchor/SVG math unchecked.
+function isEquityChartWidgetData(v: unknown): v is EquityChartWidgetData {
+  if (v == null || typeof v !== "object") return false;
+  const obj = v as Record<string, unknown>;
+  // Core field: equityDailyPoints must be an array if present.
+  if ("equityDailyPoints" in obj && !Array.isArray(obj.equityDailyPoints)) return false;
+  if ("btcBenchmark" in obj && obj.btcBenchmark != null && !Array.isArray(obj.btcBenchmark)) return false;
+  if ("equityOverlays" in obj && obj.equityOverlays != null && !Array.isArray(obj.equityOverlays)) return false;
+  return true;
+}
+
 export default function EquityChartWidget({ data }: WidgetProps) {
-  const d = (data ?? {}) as EquityChartWidgetData;
+  const d: EquityChartWidgetData = isEquityChartWidgetData(data) ? data : {};
   const showBench = useTweakValue("showBench");
 
   // Stabilize the array reference so downstream useMemo deps (minDate,
