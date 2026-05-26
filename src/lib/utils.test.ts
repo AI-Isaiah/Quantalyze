@@ -106,6 +106,62 @@ describe("formatCurrency", () => {
   it("regression (M-0085): formatCurrency(-Infinity) returns the em-dash", () => {
     expect(formatCurrency(Number.NEGATIVE_INFINITY)).toBe("—");
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // NEW-C09-12 regression guard: the thousands branch must NOT round
+  // to the nearest K — that overstates values by up to ~33% on a
+  // real-money surface. The old `toFixed(0)` implementation rendered
+  // $1,500 as "$2K" and $1,499 as "$1K" (both off by ~33%). The fix
+  // uses toFixed(1) to preserve one decimal of precision.
+  // These assertions fail against the old toFixed(0) implementation:
+  //   $1,500 → "$2K" (wrong) vs "$1.5K" (correct)
+  //   $1,499 → "$1K" (wrong) vs "$1.5K" (correct, 1.499 rounds to 1.5)
+  // ─────────────────────────────────────────────────────────────────
+  it("regression (NEW-C09-12): formatCurrency(1500) renders $1.5K not $2K", () => {
+    expect(formatCurrency(1_500)).toBe("$1.5K");
+  });
+  it("regression (NEW-C09-12): formatCurrency(1499) renders $1.5K not $1K", () => {
+    expect(formatCurrency(1_499)).toBe("$1.5K");
+  });
+  it("regression (NEW-C09-12): round thousands still omit the decimal ($250K)", () => {
+    expect(formatCurrency(250_000)).toBe("$250K");
+  });
+  it("regression (NEW-C09-12): exact 1K rounds cleanly ($1K not $1.0K)", () => {
+    expect(formatCurrency(1_000)).toBe("$1K");
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // code-review M: negative K/M values must format as "-$1.5K" / "-$2.5M"
+  // not "$-1500" / "$-2500000". The >= 1000 guards are never true for
+  // negatives so without explicit branches the fall-through produces a
+  // malformed dollar-sign placement.
+  // ─────────────────────────────────────────────────────────────────
+  it("negative thousands: -$1,500 renders as -$1.5K not $-1500", () => {
+    expect(formatCurrency(-1_500)).toBe("-$1.5K");
+  });
+  it("negative thousands: -$250,000 renders as -$250K", () => {
+    expect(formatCurrency(-250_000)).toBe("-$250K");
+  });
+  it("negative millions: -$2,500,000 renders as -$2.5M", () => {
+    expect(formatCurrency(-2_500_000)).toBe("-$2.5M");
+  });
+  it("regression (M-01): negative sub-thousand renders -$500 not $-500", () => {
+    expect(formatCurrency(-500)).toBe("-$500");
+  });
+  it("regression (M-01): negative sub-thousand -$999 renders correctly", () => {
+    expect(formatCurrency(-999)).toBe("-$999");
+  });
+  // ─────────────────────────────────────────────────────────────────
+  // M-02 regression guard: values near the K-to-M boundary must NOT
+  // render as "$1000K" / "-$1000K". (999_999.5 / 1000).toFixed(1) === "1000.0"
+  // which previously stripped to "1000" and produced "$1000K".
+  // ─────────────────────────────────────────────────────────────────
+  it("regression (M-02): K-to-M boundary 999_999.5 renders $1M not $1000K", () => {
+    expect(formatCurrency(999_999.5)).toBe("$1.0M");
+  });
+  it("regression (M-02): negative K-to-M boundary -999_999.5 renders -$1M not -$1000K", () => {
+    expect(formatCurrency(-999_999.5)).toBe("-$1.0M");
+  });
 });
 
 describe("metricColor", () => {

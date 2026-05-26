@@ -149,6 +149,10 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
       venue: "binance",
       holding_type: "spot",
       api_key_id: "key-binance",
+      // NEW-C03-10: required-but-nullable fields
+      side: null,
+      entry_price: null,
+      unrealized_pnl_usd: null,
     },
   ],
   snapshotCount: 30,
