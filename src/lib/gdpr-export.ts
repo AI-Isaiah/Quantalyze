@@ -400,6 +400,76 @@ export function redactContactRequestForUser(
 }
 
 /**
+ * Cross-party columns blanked by `redactAllocatorMatchForUser`.
+ *
+ * NEW-C16-05 (audit 2026-05-26, MED conf-8): `match_decisions`,
+ * `match_candidates`, and `bridge_outcomes` are owned by the subject
+ * (allocator_id = subject) but carry identifiers that belong to OTHER
+ * parties:
+ *   - `strategy_id` / `original_strategy_id` point at / describe the
+ *     MANAGER's strategy — the same cross-party `strategy_id` that
+ *     `redactContactRequestForUser` already blanks. Disclosing it lets
+ *     the subject derive the manager's strategy inventory.
+ *   - `decided_by` (match_decisions only) is set to the ADMIN's auth
+ *     UUID by the match console. It is the exact value
+ *     `AUDIT_METADATA_REDACT_KEYS` strips from audit_log metadata, so
+ *     shipping it raw in this bundle is an inconsistent application of
+ *     the same privacy invariant.
+ *
+ * The subject's OWN fields (rank, score, score_breakdown, reasons,
+ * decision, founder_note, notes, kind, status, deltas, timestamps) are
+ * preserved — they are the subject's own match/bridge state.
+ */
+const ALLOCATOR_MATCH_CROSS_PARTY_COLUMNS: readonly string[] = [
+  "strategy_id",
+  "original_strategy_id",
+];
+
+/**
+ * Projection helper — match_decisions / match_candidates /
+ * bridge_outcomes projected for the subject (the allocator).
+ *
+ * Keeps only rows where `allocator_id === subject`. Blanks the
+ * cross-party `strategy_id` / `original_strategy_id` (the manager's
+ * strategy) to the placeholder, and `decided_by` when it is present
+ * and not the subject (the admin's auth UUID). Mirrors
+ * `redactContactRequestForUser`.
+ *
+ * Exported for unit-test pinning.
+ */
+export function redactAllocatorMatchForUser(
+  rows: unknown[],
+  userId: string,
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    const row = r as Record<string, unknown>;
+    // Defense-in-depth: the SQL filter already scopes to the subject,
+    // but the projection re-checks (a future query change must not
+    // leak other allocators' rows).
+    if (row.allocator_id !== userId) continue;
+    const clone: Record<string, unknown> = { ...row };
+    for (const col of ALLOCATOR_MATCH_CROSS_PARTY_COLUMNS) {
+      if (col in clone && clone[col] !== null) {
+        clone[col] = REDACTED_PLACEHOLDER;
+      }
+    }
+    // decided_by is the ADMIN's auth UUID (match_decisions only). Blank
+    // it unless it happens to be the subject themselves.
+    if (
+      "decided_by" in clone &&
+      clone.decided_by !== null &&
+      clone.decided_by !== userId
+    ) {
+      clone.decided_by = REDACTED_PLACEHOLDER;
+    }
+    out.push(clone);
+  }
+  return out;
+}
+
+/**
  * Columns on `api_keys` that carry the at-rest-encrypted credential
  * blob or its envelope metadata. Even though they're ciphertext, GDPR
  * Art. 15/20 do NOT require returning them — the user already has the
@@ -511,12 +581,36 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
     project: redactContactRequestForUser,
   },
   { kind: "direct", table: "bridge_outcome_dismissals", user_column: "allocator_id" },
-  { kind: "direct", table: "bridge_outcomes", user_column: "allocator_id" },
+  // NEW-C16-05: bridge_outcomes carries cross-party strategy_id/original_strategy_id
+  // (manager's strategy) and no decided_by — projected to blank cross-party columns.
+  {
+    kind: "projected",
+    table: "bridge_outcomes",
+    source_table: "bridge_outcomes",
+    user_column: "allocator_id",
+    project: redactAllocatorMatchForUser,
+  },
   { kind: "direct", table: "data_deletion_requests", user_column: "user_id" },
   { kind: "direct", table: "investor_attestations", user_column: "user_id" },
   { kind: "direct", table: "match_batches", user_column: "allocator_id" },
-  { kind: "direct", table: "match_candidates", user_column: "allocator_id" },
-  { kind: "direct", table: "match_decisions", user_column: "allocator_id" },
+  // NEW-C16-05: match_candidates carries cross-party strategy_id/original_strategy_id
+  // (manager's strategy) — projected to blank cross-party columns.
+  {
+    kind: "projected",
+    table: "match_candidates",
+    source_table: "match_candidates",
+    user_column: "allocator_id",
+    project: redactAllocatorMatchForUser,
+  },
+  // NEW-C16-05: match_decisions carries cross-party strategy_id/original_strategy_id
+  // AND decided_by (the admin's auth UUID) — projected to blank all cross-party fields.
+  {
+    kind: "projected",
+    table: "match_decisions",
+    source_table: "match_decisions",
+    user_column: "allocator_id",
+    project: redactAllocatorMatchForUser,
+  },
   { kind: "direct", table: "organization_members", user_column: "user_id" },
   { kind: "direct", table: "portfolios", user_column: "user_id" },
   { kind: "direct", table: "profiles", user_column: "id" },

@@ -33,6 +33,7 @@ import {
   redactAuditLogForUser,
   redactApiKeysForUser,
   redactContactRequestForUser,
+  redactAllocatorMatchForUser,
   API_KEYS_REDACTED_COLUMNS,
   REDACTED_PLACEHOLDER,
 } from "@/lib/gdpr-export";
@@ -494,6 +495,98 @@ describe("collectUserExportBundle — api_keys ciphertext stripped end-to-end (s
     expect(row.exchange).toBe("binance");
     expect(row.label).toBe("main");
     expect(row.id).toBe("k1");
+  });
+});
+
+/**
+ * NEW-C16-05 (audit 2026-05-26, MED conf-8): match_decisions /
+ * match_candidates / bridge_outcomes carry cross-party identifiers.
+ * Regression suite for `redactAllocatorMatchForUser`.
+ */
+describe("redactAllocatorMatchForUser — cross-party field redaction (NEW-C16-05)", () => {
+  const subject = "allocator-subject-uuid";
+  const adminUuid = "admin-actor-uuid";
+  const managerStrategyId = "manager-strategy-uuid";
+
+  it("blanks strategy_id and original_strategy_id (manager's strategy)", () => {
+    const rows = [
+      {
+        id: "md-1",
+        allocator_id: subject,
+        strategy_id: managerStrategyId,
+        original_strategy_id: "original-manager-strategy-uuid",
+        rank: 1,
+        score: 0.9,
+        decision: "interested",
+      },
+    ];
+    const out = redactAllocatorMatchForUser(rows, subject);
+    expect(out).toHaveLength(1);
+    expect(out[0].strategy_id).toBe(REDACTED_PLACEHOLDER);
+    expect(out[0].original_strategy_id).toBe(REDACTED_PLACEHOLDER);
+    // Subject-owned fields survive.
+    expect(out[0].rank).toBe(1);
+    expect(out[0].score).toBe(0.9);
+    expect(out[0].decision).toBe("interested");
+  });
+
+  it("blanks decided_by when it is an admin UUID (not the subject)", () => {
+    const rows = [
+      {
+        id: "md-2",
+        allocator_id: subject,
+        strategy_id: managerStrategyId,
+        decided_by: adminUuid,
+      },
+    ];
+    const out = redactAllocatorMatchForUser(rows, subject);
+    expect(out).toHaveLength(1);
+    expect(out[0].decided_by).toBe(REDACTED_PLACEHOLDER);
+  });
+
+  it("preserves decided_by when it equals the subject (subject acted themselves)", () => {
+    const rows = [
+      {
+        id: "md-3",
+        allocator_id: subject,
+        strategy_id: managerStrategyId,
+        decided_by: subject,
+      },
+    ];
+    const out = redactAllocatorMatchForUser(rows, subject);
+    expect(out).toHaveLength(1);
+    expect(out[0].decided_by).toBe(subject);
+  });
+
+  it("drops rows where allocator_id !== subject (defense-in-depth)", () => {
+    const rows = [
+      { id: "own", allocator_id: subject, strategy_id: managerStrategyId },
+      { id: "other", allocator_id: "other-allocator-uuid", strategy_id: managerStrategyId },
+    ];
+    const out = redactAllocatorMatchForUser(rows, subject);
+    expect(out).toHaveLength(1);
+    expect(out[0].id).toBe("own");
+  });
+
+  it("manifest wires match_decisions as projected (not direct) — raw bundle must not contain decided_by admin UUID", () => {
+    const entry = USER_EXPORT_TABLES.find(
+      (t) => t.table === "match_decisions",
+    );
+    expect(entry?.kind).toBe("projected");
+  });
+
+  it("manifest wires match_candidates as projected (not direct)", () => {
+    const entry = USER_EXPORT_TABLES.find(
+      (t) => t.table === "match_candidates",
+    );
+    expect(entry?.kind).toBe("projected");
+  });
+
+  it("manifest wires bridge_outcomes as projected (not direct)", () => {
+    const entry = USER_EXPORT_TABLES.find(
+      (t) => t.table === "bridge_outcomes",
+    );
+    expect(entry?.kind).toBe("projected");
   });
 });
 
