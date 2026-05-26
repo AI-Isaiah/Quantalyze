@@ -678,23 +678,20 @@ function SectionNav() {
   // "Allocator" is only rendered when ingestSource === "api" (no-invented-data).
   // "Signatures" is only rendered when hasComparator AND ingestSource === "api".
   const hasComparator = cmpKey !== "none";
-  const sections: { id: string; label: string }[] = React.useMemo(() => {
-    const base: { id: string; label: string }[] = [
-      { id: "factsheet-perf", label: "Performance" },
-      { id: "factsheet-dist", label: "Distribution" },
-      { id: "factsheet-heatmaps", label: "Heatmaps" },
-      { id: "factsheet-stress", label: "Stress" },
-      ...(hasComparator && payload.ingestSource === "api"
-        ? [{ id: "factsheet-signatures", label: "Signatures" }]
-        : []),
-      { id: "factsheet-streak", label: "Streaks" },
-      ...(payload.ingestSource === "api"
-        ? [{ id: "factsheet-allocator", label: "Allocator" }]
-        : []),
-      { id: "factsheet-metrics", label: "Metrics" },
-    ];
-    return base;
-  }, [payload.ingestSource, hasComparator]);
+  const sections: { id: string; label: string }[] = React.useMemo(() => [
+    { id: "factsheet-perf", label: "Performance" },
+    { id: "factsheet-dist", label: "Distribution" },
+    { id: "factsheet-heatmaps", label: "Heatmaps" },
+    { id: "factsheet-stress", label: "Stress" },
+    ...(hasComparator && payload.ingestSource === "api"
+      ? [{ id: "factsheet-signatures", label: "Signatures" }]
+      : []),
+    { id: "factsheet-streak", label: "Streaks" },
+    ...(payload.ingestSource === "api"
+      ? [{ id: "factsheet-allocator", label: "Allocator" }]
+      : []),
+    { id: "factsheet-metrics", label: "Metrics" },
+  ], [payload.ingestSource, hasComparator]);
   const [active, setActive] = React.useState<string | null>(null);
 
   React.useEffect(() => {
