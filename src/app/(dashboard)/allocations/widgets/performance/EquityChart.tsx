@@ -99,8 +99,8 @@ export type WealthPoint = DailyPoint & { readonly __wealthBrand: true };
 /**
  * Convert a cumulative-RETURN point to WEALTH form.
  * Pass `computeScenario().equity_curve` through this before forwarding to
- * `scenarioSeries`. A cheap boundary warn fires when the first value is < 0.5
- * (suggests the input is already in wealth form OR is deeply underwater).
+ * `scenarioSeries`. A cheap boundary warn fires when the first value is < 0.05
+ * (reliable indicator of an unconverted RETURN-form array; see inline comment).
  */
 export function toWealth(points: DailyPoint[]): WealthPoint[] {
   // C2/SF-4 fix: threshold was 0.5, which fired a false-positive warn for any
@@ -845,8 +845,7 @@ export function EquityChart({
     // correct proportional spacing. Falls back to centre when n ≤ 1 or
     // totalMs === 0 (single-point degenerate window).
     const firstEpochX = n > 0 ? parseISO(visible[0].date) : 0;
-    const lastEpochX = n > 0 ? parseISO(visible[n - 1].date) : 0;
-    const totalMs = lastEpochX - firstEpochX;
+    const totalMs = n > 0 ? parseISO(visible[n - 1].date) - firstEpochX : 0;
     const x = (i: number): number => {
       if (n <= 1 || totalMs === 0) return pad.l + chartW / 2;
       const e = parseISO(visible[i].date);

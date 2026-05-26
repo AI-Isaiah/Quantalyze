@@ -423,6 +423,10 @@ function coerceTimeframe(value: unknown): string {
 // any downstream consumer that does `Object.assign(target, tile.config)`
 // or `lodash.merge(defaults, tile.config)` can't be poisoned.
 const PROTO_POISON_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+// NEW-C06-09: known top-level tile keys — extras are passed through for
+// forward-compat (see validateAndNormalizeTile). Declared at module scope so
+// the Set is allocated once rather than on every tile validation call.
+const KNOWN_TILE_KEYS = new Set(["k", "w", "config"]);
 
 function validateAndNormalizeTile(tile: unknown): TileConfig | null {
   if (!tile || typeof tile !== "object") return null;
@@ -442,7 +446,6 @@ function validateAndNormalizeTile(tile: unknown): TileConfig | null {
   // round-trip rather than silently stripped. The whitelist approach
   // ({k, w, config}) was destroying legit future fields each time an older
   // tab loaded a newer-build blob. Poison keys are still excluded below.
-  const KNOWN_TILE_KEYS = new Set(["k", "w", "config"]);
   const extra: Record<string, unknown> = {};
   for (const key of Object.keys(t)) {
     if (KNOWN_TILE_KEYS.has(key)) continue;
