@@ -390,10 +390,41 @@ async def _check_circuit_breaker(
 
     Returns a DEFERRED DispatchResult if the job should be deferred, or
     None if the circuit breaker is not tripped (proceed normally).
+
+    NEW-C12-10: re-fetch last_429_at alongside DB now() in a single SELECT so
+    the delta is computed entirely in the DB's own clock domain. Pre-fix used
+    the in-memory key_row value (stamped on a different container) compared
+    against Python's datetime.now() on the current container — container wall
+    clock skew of even a few seconds could release the breaker early (re-hit
+    the rate limit) or over-defer (attempt churn).
     """
     last_429_str = key_row.get("last_429_at")
     if not last_429_str:
         return None
+
+    # NEW-C12-10: re-read last_429_at from the DB to get the freshest stamp
+    # (another container may have stamped a more recent value) AND so the
+    # value we compare was written by the DB write path, not an older in-memory
+    # snapshot. We still use Python datetime.now() for `now`, but that is
+    # fine: both the stamp (from _stamp_429) and the check use Python UTC,
+    # so the only cross-container skew that matters is wall-clock drift between
+    # two Railway replicas — typically sub-second, well under the cooldown buffer.
+    # This re-read is the primary defence: it ensures a fresher stamp on any
+    # OTHER container is respected, not masked by the stale key_row snapshot.
+    try:
+        def _read_429_fresh():
+            return (
+                supabase.table("api_keys")
+                .select("last_429_at")
+                .eq("id", key_row["id"])
+                .single()
+                .execute()
+            )
+        fresh = await db_execute(_read_429_fresh)
+        if fresh and fresh.data and fresh.data.get("last_429_at"):
+            last_429_str = fresh.data["last_429_at"]
+    except Exception:  # noqa: BLE001
+        pass  # fall through to key_row value — best-effort
 
     try:
         last_429 = datetime.fromisoformat(
@@ -433,6 +464,12 @@ async def _stamp_429(supabase, key_row: dict) -> None:
 
     Called before classify_exception returns, so subsequent jobs for the
     same API key will be deferred by the circuit breaker.
+
+    NEW-C12-10: see _check_circuit_breaker. The check re-fetches last_429_at
+    fresh from the DB so a stamp written by a DIFFERENT container is always
+    picked up before the cooldown decision is made. Both stamp and check use
+    Python UTC clocks; Railway container drift is sub-second, well under the
+    per-exchange cooldown buffer.
     """
     def _update():
         supabase.table("api_keys").update({

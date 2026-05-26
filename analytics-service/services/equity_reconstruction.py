@@ -941,6 +941,18 @@ def _compute_daily_equity(
                 cost = float(ev.get("cost") or 0.0)
                 if not sym or amt <= 0:
                     continue
+                # NEW-C01-09: whitelist side to {buy, sell}. Pre-fix a perp
+                # fill with side=None/unknown silently opened a SHORT (the
+                # `else` branch of `signed = amt if side == "buy" else -amt`);
+                # a spot fill with unknown side was silently dropped but with
+                # no diagnostic. Either way the position state is corrupt.
+                if side not in ("buy", "sell"):
+                    logger.warning(
+                        "equity_reconstruction: skipping fill with unknown "
+                        "side=%r (symbol=%s) — expected 'buy' or 'sell'",
+                        side, raw_symbol,
+                    )
+                    continue
                 # WR-03: CCXT normalises linear perpetuals as "BTC/USDT:USDT"
                 # and inverse contracts as "BTC/USD:BTC". A naive split("/")[-1]
                 # would yield "USDT:USDT" and leak non-existent symbols into
@@ -1083,7 +1095,12 @@ def _compute_daily_equity(
                     # balance. Fee is quote-denominated on USDT-settled pairs
                     # (the overwhelmingly common case). Maker rebates (negative
                     # fee) correctly ADD back to quote. Absent/None → 0.
-                    spot_fee = float(ev.get("fee") or 0.0)
+                    # ccxt / DB can store fee as a numeric or as a dict
+                    # {"cost": <float>, "currency": <str>} — handle both.
+                    _fee_raw = ev.get("fee")
+                    if isinstance(_fee_raw, dict):
+                        _fee_raw = _fee_raw.get("cost") or 0.0
+                    spot_fee = float(_fee_raw or 0.0)
                     if side == "buy":
                         quantities[sym] = quantities.get(sym, 0.0) + amt
                         quantities[quote] = quantities.get(quote, 0.0) - cost - spot_fee
@@ -1170,10 +1187,17 @@ def _compute_daily_equity(
                 source = "coingecko_fallback"
             else:
                 source = "exchange_primary"
+            # NEW-C01-10: derive value_usd from the rounded breakdown values
+            # rather than from `total` (which accumulates unrounded floats).
+            # Pre-fix: breakdown entries were each round(usd, 2) but value_usd
+            # was round(total, 2) — the unrounded sum can diverge by cents from
+            # sum(breakdown.values()), making the total inconsistent with its
+            # own components.
+            capped_breakdown = _cap_breakdown(breakdown)
             rows.append({
                 "asof": iso,
-                "value_usd": round(total, 2),
-                "breakdown": _cap_breakdown(breakdown),
+                "value_usd": round(sum(capped_breakdown.values()), 2),
+                "breakdown": capped_breakdown,
                 "source": source,
             })
         cur = cur + timedelta(days=1)
@@ -2145,10 +2169,13 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)
 
+        # NEW-C01-10: same rounding-consistency fix as _compute_daily_equity —
+        # derive value_usd from the rounded breakdown sum, not raw total.
+        capped_bd = _cap_breakdown(breakdown)
         row = {
             "asof": today_iso,
-            "value_usd": round(total, 2),
-            "breakdown": _cap_breakdown(breakdown),
+            "value_usd": round(sum(capped_bd.values()), 2),
+            "breakdown": capped_bd,
             "source": "exchange_primary",
         }
         depth_months = history_depth_months_for_venue(venue)
@@ -2393,9 +2420,13 @@ class EquityCurveBuilder:
             all_positions.extend(matched)
 
         # Attach mark prices to open positions (BACKBONE-06).
+        # NEW-C01-07: collect symbols whose mark price is missing so we can
+        # emit a single warning rather than silently zero-ing unrealized_pnl.
+        mark_price_missing_symbols: set[str] = set()
         for pos in all_positions:
             if pos.get("status") == "open":
-                mark = self.mark_prices.get(pos.get("symbol", ""))
+                sym = pos.get("symbol", "")
+                mark = self.mark_prices.get(sym)
                 if mark is not None:
                     pos["mark_price"] = float(mark)
                     entry = float(pos.get("entry_price_avg") or 0.0)
@@ -2405,6 +2436,19 @@ class EquityCurveBuilder:
                         pos["unrealized_pnl"] = (mark - entry) * qty
                     else:
                         pos["unrealized_pnl"] = (entry - mark) * qty
+                else:
+                    # NEW-C01-07: mark price missing — unrealized_pnl will be
+                    # absent/zero, silently understating equity for this position.
+                    mark_price_missing_symbols.add(sym)
+
+        if mark_price_missing_symbols:
+            logger.warning(
+                "EquityCurveBuilder.reconstruct_positions: mark price missing "
+                "for %d open position symbol(s) %r — unrealized_pnl will be "
+                "absent (equity understated). Supply mark_prices= to fix.",
+                len(mark_price_missing_symbols),
+                sorted(mark_price_missing_symbols),
+            )
 
         positions_typed = [
             Position(**_position_dict_to_position_kwargs(p)) for p in all_positions
@@ -2596,17 +2640,37 @@ class EquityCurveBuilder:
         return float((1 + ytd_df["daily_return"]).prod() - 1)
 
     def compute_sharpe(
-        self, risk_free_rate: float = 0.0, periods: int = 252
+        self, risk_free_rate: float = 0.0, periods: int = 365
     ) -> float | None:
         """Annualized Sharpe ratio.
 
-        Matches ``qs.stats.sharpe(returns, periods=252)`` within ±0.05
-        (Assumption A2 verified by ``scripts/probe-quantstats-version.sh``).
+        NEW-C01-15: default changed from 252 to 365. The equity curve is
+        calendar-daily (freq="D", ~365 rows/yr on crypto which trades 24/7).
+        Using periods=252 (business-day convention) under-scales by
+        √(252/365)≈0.83. Callers that explicitly pass periods=252 are
+        unaffected.
+
+        NEW-C01-14: The forced day-0 zero return biases the ratio on sparse
+        series. Dropped the first row's zero if it is the seeded day-0 entry
+        (i.e., the first row has daily_return==0 and is an artefact of the
+        `.fillna(0.0)` seed). Calendar-gap filler zeros are intentionally
+        KEPT here because dropping ALL zeros would reduce an exchange-halt
+        month to zero observations, producing an infinite/NaN Sharpe — the
+        opposite distortion. The primary fix for filler-zero bias is
+        C01-15 (correct annualization factor) which reduces the gap.
         """
         df = self.to_equity_curve_daily()
         if df.empty or len(df) < 2:
             return None
         returns = df["daily_return"]
+        # NEW-C01-14: drop the day-0 forced-zero (first row only — seeded
+        # by `prev_equity.fillna(starting_nav)` → daily_pnl/starting_nav
+        # with daily_pnl=0 → return=0). Dropping only the FIRST zero avoids
+        # destabilizing the Sharpe on sparse fixtures with many gap-filler zeros.
+        if len(returns) > 1 and returns.iloc[0] == 0.0:
+            returns = returns.iloc[1:]
+        if len(returns) < 2:
+            return None
         excess = returns - (risk_free_rate / periods)
         std = excess.std()
         if std == 0 or math.isnan(std):

@@ -411,6 +411,25 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
     rois = [p.get("roi", 0) or 0 for p in closed]
     avg_roi = sum(rois) / len(rois) if rois else 0.0
 
+    # NEW-C01-16: capital-weighted ROI = total realized PnL / total entry
+    # notional. `avg_roi` (unweighted arithmetic mean) weights a $10 +500%
+    # position equally with a $1M +2% position; a $10 outlier can dominate.
+    # This variant reflects how much the strategy made per dollar deployed.
+    # Only include closed positions with both realized_pnl and notional > 0.
+    _sum_pnl = sum(
+        float(p["realized_pnl"])
+        for p in closed
+        if p.get("realized_pnl") is not None
+    )
+    _sum_notional = sum(
+        float(p["entry_price_avg"] or 0.0) * float(p.get("size_base") or p.get("quantity") or 0.0)
+        for p in closed
+        if p.get("entry_price_avg") and (p.get("size_base") or p.get("quantity"))
+    )
+    capital_weighted_roi = (
+        round(_sum_pnl / _sum_notional, 6) if _sum_notional > 0 else 0.0
+    )
+
     durations = []
     for p in closed:
         dur = p.get("duration_days")
@@ -482,6 +501,9 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
         "closed_positions": closed_count,
         "win_rate": round(win_rate, 4),
         "avg_roi": round(avg_roi, 6),
+        # NEW-C01-16: capital-weighted ROI alongside the unweighted avg_roi.
+        # avg_roi is kept for backward compatibility (existing dashboards read it).
+        "capital_weighted_roi": capital_weighted_roi,
         "avg_duration_days": round(avg_duration_days, 2),
         "long_count": long_count,
         "short_count": short_count,

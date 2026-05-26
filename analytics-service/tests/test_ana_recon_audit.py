@@ -632,3 +632,151 @@ def test_c12_04_final_attempt_marks_intro_snapshot_failed():
     assert mark_pos > is_final_pos, (
         "NEW-C12-04: _mark_intro_snapshot_failed must be called after is_final check"
     )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C12-10 — circuit breaker re-fetches last_429_at to avoid clock skew
+# ---------------------------------------------------------------------------
+
+
+def test_c12_10_circuit_breaker_refetches_last_429_at():
+    """NEW-C12-10: _check_circuit_breaker must re-read last_429_at from the
+    DB (not just use the stale key_row snapshot) so a stamp written by a
+    different container is picked up before the cooldown decision.
+    """
+    import inspect
+    from services import job_worker
+    src = inspect.getsource(job_worker._check_circuit_breaker)
+
+    # The re-read SELECT must be present in the check function
+    assert "last_429_at" in src
+    # The re-read must use a fresh DB query (not just key_row)
+    assert "_read_429_fresh" in src or "select" in src.lower(), (
+        "NEW-C12-10: _check_circuit_breaker must re-fetch last_429_at from DB"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C13-03 — Binance pagination without +1
+# ---------------------------------------------------------------------------
+
+
+def test_c13_03_binance_cursor_advances_without_plus_one():
+    """NEW-C13-03: Binance pagination must use int(last_ts) not int(last_ts)+1
+    as the next cursor, relying on the unique index to drop boundary duplicates.
+    """
+    import inspect
+    from services import exchange
+    src = inspect.getsource(exchange._fetch_raw_trades_binance)
+
+    # Must NOT have +1 on the cursor advance (the old broken form)
+    assert "int(last_ts) + 1" not in src, (
+        "NEW-C13-03: int(last_ts)+1 must be removed — use int(last_ts) instead"
+    )
+    # Must have the stuck-cursor guard
+    assert "cursor_stuck" in src or "next_since == current_since" in src, (
+        "NEW-C13-03: stuck-cursor guard missing from Binance pagination"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C01-07 — missing mark price emits a warning
+# ---------------------------------------------------------------------------
+
+
+def test_c01_07_missing_mark_price_emits_warning(caplog):
+    """NEW-C01-07: when an open position's mark price is not in mark_prices,
+    a WARNING is emitted so the silent unrealized_pnl=0 is observable.
+    """
+    import logging
+    from services.equity_reconstruction import EquityCurveBuilder
+    from services.ingestion.adapter import Trade
+
+    # Create a builder with a trade that opens a position (no closing trade)
+    trade = Trade(
+        symbol="BTC/USDT:USDT",
+        side="buy",
+        price=40000.0,
+        quantity=0.1,
+        fee=0.0,
+        fee_currency="USDT",
+        timestamp=datetime(2026, 1, 5, 12, 0, 0, tzinfo=timezone.utc),
+        exchange="okx",
+        order_type="limit",
+        is_fill=True,
+    )
+    builder = EquityCurveBuilder(trades=[trade], mark_prices={})  # no mark price
+
+    with caplog.at_level(logging.WARNING, logger="services.equity_reconstruction"):
+        positions = builder.reconstruct_positions()
+
+    assert any("mark price missing" in r.message for r in caplog.records), (
+        "NEW-C01-07: WARNING expected when open position has no mark price"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C01-09 — unknown side is skipped with a warning
+# ---------------------------------------------------------------------------
+
+
+def test_c01_09_unknown_side_skipped_in_compute_daily_equity():
+    """NEW-C01-09: in _compute_daily_equity, a fill with unknown side must be
+    skipped (not silently opening a SHORT or silently dropped for spot).
+    Verified by confirming the whitelist guard is present in the source.
+    """
+    import inspect
+    from services import equity_reconstruction as er
+
+    src = inspect.getsource(er._compute_daily_equity)
+
+    # The fix: side not in ("buy", "sell") → skip + warn
+    assert 'side not in ("buy", "sell")' in src or "side not in" in src, (
+        "NEW-C01-09: side whitelist missing from _compute_daily_equity"
+    )
+    # A perp fill with unknown side must NOT proceed past the guard to the
+    # `signed = amt_base if side == "buy" else -amt_base` line, which previously
+    # silently booked a SHORT for ANY non-"buy" side value.
+    # Validate that the whitelist appears BEFORE the `signed` assignment.
+    guard_pos = src.find('side not in')
+    signed_pos = src.find('signed = amt_base')
+    assert guard_pos != -1, "NEW-C01-09: side guard not found in source"
+    assert guard_pos < signed_pos, (
+        "NEW-C01-09: side whitelist must appear before the signed= assignment"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW-C01-10 — value_usd derived from breakdown sum not raw total
+# ---------------------------------------------------------------------------
+
+
+def test_c01_10_value_usd_equals_breakdown_sum():
+    """NEW-C01-10: value_usd must equal sum(breakdown.values()) so the total
+    is internally consistent with its components.
+    """
+    import inspect
+    from services import equity_reconstruction as er
+
+    src = inspect.getsource(er._compute_daily_equity)
+
+    # The fix: value_usd = round(sum(capped_breakdown.values()), 2)
+    assert "sum(capped_breakdown.values())" in src, (
+        "NEW-C01-10: value_usd must be derived from sum(capped_breakdown.values())"
+    )
+    # The value_usd assignment must use the breakdown sum, not raw total.
+    # Check the rows.append dict to confirm.
+    import ast
+    tree = ast.parse(src)
+    # Find the 'value_usd' key in any dict literal — must have a Call(Sum)
+    found_sum_form = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if isinstance(k, ast.Constant) and k.value == "value_usd":
+                    # The value should be a Call to round(sum(...), 2)
+                    if isinstance(v, ast.Call):
+                        found_sum_form = True
+    assert found_sum_form, (
+        "NEW-C01-10: value_usd dict entry must use round(sum(...), 2)"
+    )

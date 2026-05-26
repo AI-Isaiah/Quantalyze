@@ -1436,7 +1436,26 @@ async def _fetch_raw_trades_binance(
                     symbol, len(all_trades),
                 )
                 break
-            current_since = int(last_ts) + 1
+            # NEW-C13-03: advance cursor WITHOUT +1. The pre-fix `int(last_ts)+1`
+            # permanently skips fills that share the last fill's millisecond
+            # across a page boundary — a busy pair with many same-ms fills can
+            # lose a whole cluster. The exchange_fill_id unique index deduplicates
+            # genuinely re-fetched boundary fills, so +1 is not needed for
+            # correctness. Add a stuck-cursor guard so an exchange that returns a
+            # cursor-identical full page doesn't loop forever.
+            next_since = int(last_ts)
+            if next_since == current_since:
+                # Cursor did not advance — no progress is possible without +1.
+                # Emit a DQ flag (same truncation class as page-cap) and stop.
+                _record_dq_flag("binance_fill_cursor_stuck", True)
+                logger.warning(
+                    "Binance fetch_my_trades %s: cursor did not advance "
+                    "(last_ts=%d == current_since) on a full page — "
+                    "stopping to avoid infinite loop; possible truncation",
+                    symbol, next_since,
+                )
+                break
+            current_since = next_since
         else:
             logger.warning(
                 "Binance fetch_my_trades %s: hit %d-page cap; "

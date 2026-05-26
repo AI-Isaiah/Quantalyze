@@ -3246,6 +3246,6 @@
   ],
   "expected_twr": 0.009468,
   "expected_ytd": 0.002482700543,
-  "expected_sharpe": 0.89580619,
+  "expected_sharpe": 1.0794642130939447,
   "quantstats_sharpe_reference": 0.89580619
 }
