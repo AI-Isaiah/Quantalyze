@@ -600,4 +600,95 @@ describe("CustomRangePicker", () => {
       end: "2024-02-29",
     });
   });
+
+  // ─────────────────────────────────── H-1231 — parseISODate rollover guard
+  //
+  // parseISODate previously only checked Number.isFinite on the three
+  // components, then constructed `new Date(y, m-1, d)`. JS silently rolls
+  // out-of-range components over (2024-13-01 → Jan 2025; 2024-02-31 → Mar 2),
+  // so a malformed string handed to the parser yielded a real-but-wrong date.
+  //
+  // NOTE on reachability: the manual <input type="date"> controls cannot
+  // deliver a malformed string to parseISODate — the native date control only
+  // fires change with a valid YYYY-MM-DD or "" (verified against jsdom). The
+  // REACHABLE path that feeds raw strings into parseISODate is the
+  // `initialRange` prop, consumed by the start/end useState initializers
+  // (CustomRangePicker.tsx:95-108). These tests drive that path: a rollover-
+  // prone initialRange must NOT be silently coerced into a wrong-but-valid
+  // date; instead parseISODate returns null and the initializer falls back to
+  // the min/max bound. This is a defensive root-cause fix on the parsing
+  // primitive (H-1231).
+
+  it("H-1231 — initialRange.start of month 13 (2024-13-01) is rejected, not rolled to Jan 2025", () => {
+    const onApply = vi.fn();
+    const min = new Date(2024, 0, 1); // 2024-01-01
+    const max = new Date(2024, 11, 31); // 2024-12-31
+    const { getByRole } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={onApply}
+        min={min}
+        max={max}
+        // Pre-fix: parseISODate('2024-13-01') → new Date(2024,12,1) → Jan 1
+        // 2025, clamped to max → start becomes 2024-12-31 (a date nobody
+        // supplied). Post-fix: parseISODate returns null → start falls back to
+        // min (2024-01-01).
+        initialRange={{ start: "2024-13-01", end: "2024-06-30" }}
+      />,
+    );
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+    expect(onApply).toHaveBeenCalledTimes(1);
+    // Discriminating: start is the min fallback, NOT the clamped rollover.
+    expect(onApply.mock.calls[0][0]).toEqual({
+      start: "2024-01-01",
+      end: "2024-06-30",
+    });
+  });
+
+  it("H-1231 — initialRange.start of a non-existent calendar day (2024-02-31) is rejected, not rolled to Mar 2", () => {
+    const onApply = vi.fn();
+    const min = new Date(2024, 0, 1); // 2024-01-01
+    const max = new Date(2024, 11, 31); // 2024-12-31
+    const { getByRole } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={onApply}
+        min={min}
+        max={max}
+        // Pre-fix: new Date(2024, 1, 31) → Mar 2 2024 (in-range, no clamp) →
+        // start becomes 2024-03-02. Post-fix: round-trip check fails →
+        // parseISODate returns null → start falls back to min.
+        initialRange={{ start: "2024-02-31", end: "2024-06-30" }}
+      />,
+    );
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+    expect(onApply.mock.calls[0][0]).toEqual({
+      start: "2024-01-01",
+      end: "2024-06-30",
+    });
+  });
+
+  it("H-1231 — a valid initialRange (2024-02-29 leap day) still parses through unchanged", () => {
+    const onApply = vi.fn();
+    const min = new Date(2024, 0, 1);
+    const max = new Date(2024, 11, 31);
+    const { getByRole } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={onApply}
+        min={min}
+        max={max}
+        // 2024 is a leap year, so Feb 29 is a real day and must round-trip.
+        initialRange={{ start: "2024-02-29", end: "2024-03-15" }}
+      />,
+    );
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+    expect(onApply.mock.calls[0][0]).toEqual({
+      start: "2024-02-29",
+      end: "2024-03-15",
+    });
+  });
 });
