@@ -136,17 +136,33 @@ export function SyncProgress({
     let cancelled = false;
     async function fetchExchange() {
       const supabase = createClient();
-      const { data: strategy } = await supabase
+      // NEW-C37-05: destructure error from both queries and log/report on
+      // failure. Pre-fix: both {error} returns were discarded, so an RLS
+      // regression or network error produced a silently-wrong UI label
+      // ("Fetching trades...") with zero telemetry.
+      const { data: strategy, error: strategyErr } = await supabase
         .from("strategies")
         .select("api_key_id")
         .eq("id", strategyId)
         .single();
+      if (strategyErr) {
+        console.error(
+          `[SyncProgress] strategies lookup failed [strategy_id=${strategyId}]:`,
+          strategyErr.message,
+        );
+      }
       if (cancelled || !strategy?.api_key_id) return;
-      const { data: apiKey } = await supabase
+      const { data: apiKey, error: apiKeyErr } = await supabase
         .from("api_keys")
         .select("exchange")
         .eq("id", strategy.api_key_id)
         .single();
+      if (apiKeyErr) {
+        console.error(
+          `[SyncProgress] api_keys lookup failed [strategy_id=${strategyId}, api_key_id=${strategy.api_key_id}]:`,
+          apiKeyErr.message,
+        );
+      }
       if (!cancelled && apiKey?.exchange) {
         setExchangeName(apiKey.exchange.charAt(0).toUpperCase() + apiKey.exchange.slice(1));
       }
@@ -175,7 +191,26 @@ export function SyncProgress({
     };
   }, [isActive]);
 
+  // NEW-C37-01: poll attempt counter persists across re-renders so the
+  // timeout is measured in poll cycles, not wall-clock seconds. We use a
+  // ref (not state) so incrementing it doesn't trigger a re-render.
+  const pollAttemptsRef = useRef(0);
+  // After ~120 s (40 polls × 3 s) call onStatusChange("error") so the
+  // poller cannot run forever when the worker crashes, never claims the
+  // job, or the strategy_analytics row is missing.
+  const POLL_MAX_ATTEMPTS = 40;
+  // After a few initial polls a missing row is treated as a failure so
+  // the user sees a recoverable error instead of "Computing…" forever.
+  const MISSING_ROW_GRACE_POLLS = 3;
+
   const pollStatus = useCallback(async () => {
+    // NEW-C37-01: increment attempt count and short-circuit on timeout.
+    pollAttemptsRef.current += 1;
+    if (pollAttemptsRef.current > POLL_MAX_ATTEMPTS) {
+      onStatusChange?.("error");
+      return;
+    }
+
     const supabase = createClient();
     const { data } = await supabase
       .from("strategy_analytics")
@@ -183,7 +218,15 @@ export function SyncProgress({
       .eq("strategy_id", strategyId)
       .single();
 
-    if (!data) return;
+    // NEW-C37-01: after grace period, treat a permanently-missing row as a
+    // failure so the poller breaks out with a recoverable error surface
+    // instead of polling forever.
+    if (!data) {
+      if (pollAttemptsRef.current > MISSING_ROW_GRACE_POLLS) {
+        onStatusChange?.("error");
+      }
+      return;
+    }
 
     // audit-2026-05-07 C-0142: route DB status → UI status via the
     // discriminated converter. Adding a new ComputationStatus variant at
@@ -206,6 +249,8 @@ export function SyncProgress({
 
   useEffect(() => {
     if (isActive) {
+      // NEW-C37-01: reset attempt counter when a fresh poll cycle starts.
+      pollAttemptsRef.current = 0;
       intervalRef.current = setInterval(pollStatus, 3000);
     }
 

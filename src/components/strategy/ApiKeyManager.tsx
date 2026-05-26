@@ -48,7 +48,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const router = useRouter();
 
-  const loadKeys = useCallback(async () => {
+  const loadKeys = useCallback(async (opts?: { lastSyncedKeyId?: string }) => {
     const supabase = createClient();
     // Project only the allowlist — never `.select("*")` on api_keys from a
     // user-scoped client. Migration 027 (SEC-005) revokes SELECT on the
@@ -59,8 +59,15 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       .order("created_at", { ascending: false });
     if (data) {
       setKeys(data);
-      const current = data.find((k) => k.id === currentKeyId);
-      if (current?.last_sync_at) setLastSyncAt(current.last_sync_at);
+      // NEW-C37-04: derive lastSyncAt from the key that was actually synced
+      // (opts.lastSyncedKeyId) rather than always from currentKeyId. When the
+      // user clicks "Use & Sync" on a not-yet-current key, currentKeyId (a
+      // prop) does not change until router.refresh() completes; reading from
+      // it here would show the previously-linked key's timestamp immediately
+      // after a successful sync of a different key.
+      const targetKeyId = opts?.lastSyncedKeyId ?? currentKeyId;
+      const targetKey = data.find((k) => k.id === targetKeyId);
+      if (targetKey?.last_sync_at) setLastSyncAt(targetKey.last_sync_at);
     }
   }, [currentKeyId]);
 
@@ -72,12 +79,14 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     setSyncStatus(status);
     if (status === "complete") {
       setSyncingKeyId(null);
-      loadKeys();
+      // NEW-C37-04: pass the key that was actually synced so loadKeys can
+      // derive lastSyncAt from the correct row, not from currentKeyId.
+      loadKeys({ lastSyncedKeyId: lastAttemptedKeyId ?? undefined });
       router.refresh();
     } else if (status === "error") {
       setSyncingKeyId(null);
     }
-  }, [router, loadKeys]);
+  }, [router, loadKeys, lastAttemptedKeyId]);
 
   async function handleAddKey(data: {
     exchange: string;
@@ -86,6 +95,12 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     apiSecret: string;
     passphrase: string;
   }) {
+    // NEW-C37-02: guard at the top of handleAddKey so two rapid Enter
+    // presses (which fire before setLoading(true) re-renders) cannot race
+    // to POST /api/keys/validate-and-encrypt and create duplicate api_keys
+    // rows. The Connect button is already disabled via `loading`, but Enter
+    // inside an <Input> submits the form regardless and setLoading is async.
+    if (loading) return;
     setLoading(true);
     setError(null);
 
@@ -127,7 +142,19 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
 
       // Auto-link key to strategy and sync trades
       if (newKey) {
-        await supabase.from("strategies").update({ api_key_id: newKey.id }).eq("id", strategyId);
+        // NEW-C37-03: surface auto-link errors instead of swallowing them.
+        // Pre-fix: the {error} from the strategies.update was discarded; if
+        // RLS denied the update (stale cookie / not owner) the sync would
+        // run against the OLD api_key_id and present wrong data as success.
+        const { error: linkError } = await supabase
+          .from("strategies")
+          .update({ api_key_id: newKey.id })
+          .eq("id", strategyId);
+        if (linkError) {
+          throw new Error(
+            `Failed to link key to strategy: ${linkError.message}`,
+          );
+        }
 
         // Auto-sync trades in background (don't block the UI)
         fetch("/api/keys/sync", {
@@ -197,7 +224,9 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       // API returned success -- analytics may still be computing.
       // SyncProgress will poll strategy_analytics to track completion.
       setSyncStatus("computing");
-      await loadKeys();
+      // NEW-C37-04: pass the key being synced so lastSyncAt reads from
+      // the correct row.
+      await loadKeys({ lastSyncedKeyId: keyId });
       router.refresh();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Sync failed";
