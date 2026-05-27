@@ -38,7 +38,8 @@ import logging
 import math
 import os
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Literal, TypedDict
 
 from fastapi import HTTPException
 
@@ -50,6 +51,7 @@ from services.db import (
     paginated_select,
 )
 from services.metrics import _safe_float, compute_all_metrics
+from services.position_reconstruction import _normalize_side
 from services.transforms import trades_to_daily_returns_with_status
 
 logger = logging.getLogger("quantalyze.analytics.runner")
@@ -78,6 +80,134 @@ WIN_RATE_PERCENT_HEURISTIC_THRESHOLD = 1.5
 # is self-anchored against this cap. Changing this constant requires
 # regenerating the golden fixture in the same change. See H-0652.
 SQN_TRADE_COUNT_CAP = 100
+
+
+# Audit-2026-05-27 H-0651: the valid `strategy_analytics_series.kind` values.
+# `metrics_result.sibling_kinds` is mutated here and shipped to the
+# `upsert_strategy_analytics_series_batch` SECURITY DEFINER RPC, which
+# whitelists kinds server-side (migration 20260514045627 `v_allowlist`, which
+# the comment there pins as matching the Python HEAVY_KINDS verbatim). The two
+# kinds this module adds (exposure_series, turnover_series) need
+# position_snapshots data so compute_all_metrics can't produce them; the other
+# ten come from metrics.py. Typing the kind keys means a typo'd kind (e.g.
+# `exposure_serie`) — which the RPC would silently drop, blanking a panel —
+# surfaces at type-check time. Keep in sync with the RPC allowlist + metrics.py.
+SiblingKind = Literal[
+    "daily_returns_grid",
+    "rolling_sortino_3m",
+    "rolling_sortino_6m",
+    "rolling_sortino_12m",
+    "rolling_volatility_3m",
+    "rolling_volatility_6m",
+    "rolling_volatility_12m",
+    "rolling_alpha",
+    "rolling_beta",
+    "log_returns_series",
+    "exposure_series",
+    "turnover_series",
+]
+
+
+class DataQualityFlags(TypedDict, total=False):
+    """Audit-2026-05-27 M-0657: the string-keyed bag persisted to
+    `strategy_analytics.data_quality_flags` (JSONB the dashboard reads).
+
+    Pre-fix it was typed `dict | None` and mutated across ~8 regions of
+    `run_strategy_analytics` / `run_csv_strategy_analytics` PLUS lifted from
+    the producer via `_merge_into_top_level_flags`. A typo'd key (e.g.
+    `benchmark_unavailble`) silently flowed to JSONB and the dashboard chip
+    never fired. `total=False` because every key is conditional.
+
+    Keys are grouped by producer:
+      * directly assigned in analytics_runner (benchmark / position /
+        fills / volume / trade_mix / account-balance / heuristic / sibling);
+      * `csv_source` from run_csv_strategy_analytics;
+      * lifted from reconstruct_positions' aggregated flags and the turnover
+        series via `_merge_into_top_level_flags` (the `*_truncated{,_kept,
+        _total}` derived keys come from `_emit_capped_flag_list`).
+    A non-None merge can still introduce a key not listed here (the helper
+    iterates source.items() dynamically); the enumeration documents the
+    KNOWN contract so drift in the named producers is type-visible. New
+    producers that add a key MUST add it here.
+    """
+
+    # --- benchmark ---
+    benchmark_unavailable: bool
+    benchmark_note: str
+    # --- position reconstruction / snapshots (analytics_runner) ---
+    position_reconstruction_failed: bool
+    position_reconstruction_error: str
+    position_snapshots_unavailable: bool
+    position_snapshots_error: str
+    position_metrics_failed: bool
+    position_metrics_error: str
+    # --- fills fetch / volume ---
+    fills_fetch_failed: bool
+    fills_fetch_error: str
+    position_side_volume_failed: bool
+    position_side_volume_error: str
+    trade_mix_approximation: bool
+    fills_missing_is_maker_pct: float
+    # --- account balance / capital ---
+    account_balance_unavailable: bool
+    # Audit-2026-05-27 A1 (MED8): the stored account_balance_usdt was PRESENT
+    # but non-numeric (corrupt). Distinct from account_balance_unavailable
+    # ("no balance configured") and no_linked_api_key ("demo / no key").
+    account_balance_corrupt: bool
+    no_linked_api_key: bool
+    used_heuristic_capital: bool
+    balance_error: bool
+    # --- sibling-table batch upsert ---
+    sibling_kinds_failed: bool
+    sibling_kinds_error: str
+    # --- CSV provenance ---
+    csv_source: bool
+    # --- lifted from reconstruct_positions' aggregated_data_quality_flags ---
+    breakeven_positions: int
+    positions_missing_realized_pnl: int
+    fills_dropped_no_symbol: int
+    posSide_side_mismatch: bool
+    duration_parse_errors: int
+    zero_entry_price_dropped: int
+    malformed_fill_field_dropped: int
+    funding_attribution_failed: bool
+    funding_window_corrupt_position: int
+    funding_rows_unparseable: int
+    funding_currency_unsupported: int
+    exposure_metrics_skipped_shared_api_key: bool
+    exposure_metrics_apikey_lookup_failed: bool
+    exposure_metrics_no_snapshots: bool
+    # --- cardinality-cap truncation siblings (realized_pnl + exposure) ---
+    realized_pnl_per_trade_truncated: bool
+    realized_pnl_per_trade_truncated_kept: int
+    realized_pnl_per_trade_truncated_total: int
+    exposure_series_truncated: bool
+    exposure_series_truncated_kept: int
+    exposure_series_truncated_total: int
+    # --- lifted from compute_turnover_series_with_flags ---
+    turnover_gap_dates: list[str]
+    turnover_nav_missing_dates: list[str]
+    turnover_nav_invalid_dates: list[str]
+    turnover_series_dropped_dates: list[str]
+    turnover_missing_price_dates: list[str]
+    turnover_timestamp_coverage: float
+    # `_emit_capped_flag_list` emits `{name}_truncated{,_kept,_total}` for
+    # each of the five turnover lists above when they exceed the cap.
+    turnover_gap_dates_truncated: bool
+    turnover_gap_dates_truncated_kept: int
+    turnover_gap_dates_truncated_total: int
+    turnover_nav_missing_dates_truncated: bool
+    turnover_nav_missing_dates_truncated_kept: int
+    turnover_nav_missing_dates_truncated_total: int
+    turnover_nav_invalid_dates_truncated: bool
+    turnover_nav_invalid_dates_truncated_kept: int
+    turnover_nav_invalid_dates_truncated_total: int
+    turnover_series_dropped_dates_truncated: bool
+    turnover_series_dropped_dates_truncated_kept: int
+    turnover_series_dropped_dates_truncated_total: int
+    turnover_missing_price_dates_truncated: bool
+    turnover_missing_price_dates_truncated_kept: int
+    turnover_missing_price_dates_truncated_total: int
 
 
 def _merge_into_top_level_flags(
@@ -245,7 +375,10 @@ async def _load_position_time_series(
     for snap in snapshots:
         d = snap.get("snapshot_date")
         sym = snap.get("symbol")
-        side = (snap.get("side") or "").lower()
+        # Audit-2026-05-27 H-0650: shared normalization boundary (was
+        # `(snap.get("side") or "").lower()`). Behavior-identical for current
+        # lowercase/falsy input.
+        side = _normalize_side(snap.get("side"))
         size_raw = snap.get("size_usd")
         mark_raw = snap.get("mark_price")
         if not d or not sym:
@@ -369,7 +502,10 @@ def _compute_volume_metrics(fills: list[dict]) -> dict:
             # corruption is observable, not silently absorbed into a $0 volume.
             non_finite_costs += 1
             cost = 0.0
-        side = (fill.get("side") or "").lower()
+        # Audit-2026-05-27 H-0650: shared normalization boundary (was
+        # `(fill.get("side") or "").lower()`). Behavior-identical for current
+        # lowercase/falsy input.
+        side = _normalize_side(fill.get("side"))
         total_cost += cost
         if side == "buy":
             buy_cost += cost
@@ -419,9 +555,22 @@ def _compute_position_side_volume_pcts(
         if not ts:
             return None
         try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except (ValueError, TypeError):
             return None
+        # F6 (red-team HIGH8): normalize to tz-aware UTC. `fromisoformat` yields
+        # a NAIVE datetime for a date-only / offset-less string but an AWARE one
+        # for an offset-bearing string. The window comparisons below mix
+        # timestamps from `positions` (opened_at/closed_at) and `trades`
+        # (filled_at), which can disagree on tz-format → `TypeError: can't
+        # compare offset-naive and offset-aware` → swallowed by the broad except
+        # at the call site → position_side_volume_failed=True, silently dropping
+        # the long/short volume panel for the WHOLE strategy on valid data.
+        # Mirror the single-boundary normalization used elsewhere (match.py
+        # _parse_supabase_ts): promote naive → UTC, convert aware → UTC.
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
 
     windows: list[tuple[datetime, datetime | None, str]] = []
     for p in positions:
@@ -792,16 +941,53 @@ def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
     return result
 
 
+class TradeMixBucket(TypedDict):
+    """Audit-2026-05-27 M-0655: per-bucket shape for `_compute_trade_mix`.
+
+    Pre-fix `_compute_trade_mix` was annotated `-> dict[str, dict[str, float]]`,
+    but `count` is an `int` (`"count": 0` seed, `count += 1`) — only
+    `total_notional` is a float. The lying `float` annotation would mask a
+    consumer that did integer-only math on `count` (e.g. modulo) drifting if
+    the value were ever a float. Pin the precise per-field types.
+    """
+
+    count: int
+    total_notional: float
+
+
+# Audit-2026-05-27 M-0656: `_compute_trade_mix` returns one of two key sets,
+# selected by `has_maker_taker`. Both are `dict[str, TradeMixBucket]`; the
+# distinction is the KEY SET, not the value shape:
+#   - has_maker_taker=True  → {long_maker, long_taker, short_maker, short_taker}
+#   - has_maker_taker=False → {long, short}
+# A per-mode TypedDict (fixed keys, total=True) documents each contract while
+# keeping the runtime output (a plain dict) identical. The union alias is the
+# declared return type; callers narrow on the mode they requested.
+class TradeMix4Bucket(TypedDict):
+    long_maker: TradeMixBucket
+    long_taker: TradeMixBucket
+    short_maker: TradeMixBucket
+    short_taker: TradeMixBucket
+
+
+class TradeMix2Bucket(TypedDict):
+    long: TradeMixBucket
+    short: TradeMixBucket
+
+
+TradeMixResult = TradeMix4Bucket | TradeMix2Bucket
+
+
 def _compute_trade_mix(
     fills: list[dict], has_maker_taker: bool
-) -> dict[str, dict[str, float]]:
+) -> TradeMixResult:
     """Trade Mix breakdown by side × maker/taker.
 
     Bucket count branches off the is_maker audit outcome:
       - has_maker_taker=True  → 4 buckets (long_maker, long_taker, short_maker, short_taker)
       - has_maker_taker=False → 2 buckets fallback (long, short)
 
-    Each bucket: {count, total_notional}.
+    Each bucket: {count: int, total_notional: float} (TradeMixBucket).
 
     In 4-bucket mode, fills with `is_maker` missing/None are skipped — can't
     bucket without the flag. The audit gate only sets has_maker_taker=True
@@ -812,11 +998,15 @@ def _compute_trade_mix(
     (maker/taker fee-tier exposure vs entry direction).
     """
 
-    def _empty_bucket() -> dict[str, float]:
+    def _empty_bucket() -> TradeMixBucket:
         return {"count": 0, "total_notional": 0.0}
 
+    # Internal accumulator is keyed by str (the bucket key is computed from
+    # side × maker/taker below); the return type narrows to one of the two
+    # mode TypedDicts (M-0656). Runtime output is a plain dict, unchanged.
+    buckets: dict[str, TradeMixBucket]
     if has_maker_taker:
-        buckets: dict[str, dict[str, float]] = {
+        buckets = {
             "long_maker": _empty_bucket(),
             "long_taker": _empty_bucket(),
             "short_maker": _empty_bucket(),
@@ -830,7 +1020,15 @@ def _compute_trade_mix(
 
     notional_parse_failed = 0
     for f in fills:
-        side = f.get("side")
+        # Audit-2026-05-27 H-0650: normalize via the shared boundary BEFORE the
+        # buy/sell alias + bucket-key equality. Pre-fix this path read
+        # `f.get("side")` raw (the ONLY one of the three side-parse regimes
+        # that did NOT case-fold), so an uppercase `side="LONG"` matched
+        # neither `buy`/`sell` nor the lowercase bucket keys and was silently
+        # dropped from trade_mix. Folding case here aligns it with the
+        # FIFO / volume / snapshot regimes. Current lowercase input is
+        # unchanged (`"long"`/`"short"`/`"buy"`/`"sell"` fold to themselves).
+        side = _normalize_side(f.get("side"))
         if side == "buy":
             side = "long"
         elif side == "sell":
@@ -986,6 +1184,13 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # without falsely implying analytics ran with a degraded NAV.
         account_balance = None
         account_balance_unavailable = False
+        # Audit-2026-05-27 A1 (MED8): a non-numeric / corrupt
+        # api_keys.account_balance_usdt is DISTINCT from "no balance
+        # configured". Pre-fix `float(balance_raw)` raised inside the broad
+        # `except Exception` below and routed to account_balance_unavailable,
+        # conflating "stored value is garbage" (a data-integrity bug worth
+        # surfacing) with the documented no-balance/demo meaning of that flag.
+        account_balance_corrupt = False
         no_linked_api_key = False
         # Hoisted out of the try so the except handler can route based on
         # whether api_key_id was set BEFORE the throw — otherwise a fetch
@@ -1018,7 +1223,23 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                     else None
                 )
                 if balance_raw is not None:
-                    account_balance = float(balance_raw)
+                    # Audit-2026-05-27 A1 (MED8): narrow the cast so a corrupt
+                    # stored value (e.g. "", "N/A", "12.3USDT") raises HERE and
+                    # is routed to a DISTINCT account_balance_corrupt flag —
+                    # NOT swallowed by the broad except below and mislabeled as
+                    # account_balance_unavailable. account_balance stays None
+                    # (NAV proxy semantics unchanged, per _load_position_time_
+                    # series), but the corruption is surfaced for the owner UI.
+                    try:
+                        account_balance = float(balance_raw)
+                    except (TypeError, ValueError):
+                        account_balance_corrupt = True
+                        logger.warning(
+                            "Corrupt account_balance_usdt=%r for strategy %s "
+                            "(api_key %s) — not numeric; treating as unavailable "
+                            "for NAV but flagging distinctly",
+                            balance_raw, strategy_id, api_key_id,
+                        )
                 else:
                     # api_key exists but no balance configured. Post-C-0221
                     # NAV semantics are unchanged (always `max_gross_exposure`,
@@ -1101,13 +1322,20 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # local try so position-side failures do NOT block the qstats half;
         # they degrade gracefully via data_quality_flags.position_metrics_failed.
         from services.position_reconstruction import (
+            ExposureMetrics,
+            PositionTradeMetrics,
             reconstruct_positions,
             compute_exposure_metrics,
             compute_turnover_series_with_flags,
         )
 
-        trade_metrics_from_positions: dict = {}
-        exposure_metrics: dict = {}
+        # H-0638: consume the producer's typed contract (was bare `dict`).
+        trade_metrics_from_positions: PositionTradeMetrics = {}
+        # H-0658/H-0659: the producer never returns None, so the honest
+        # consumer type is `ExposureMetrics` (the `or {}` on the assignment
+        # below + the later `isinstance(..., dict)` guard are defensive, not a
+        # live None path). `{}` is a valid total=False ExposureMetrics.
+        exposure_metrics: ExposureMetrics = {}
         positions_by_date: dict[str, dict[str, float]] = {}
         prices_by_date: dict[str, dict[str, float]] = {}
         nav_by_date: dict[str, float] = {}
@@ -1328,15 +1556,23 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             if isinstance(exposure_metrics, dict)
             else None
         )
+        # Audit-2026-05-27 H-0651: pin the mutated kind keys to the SiblingKind
+        # Literal so a typo can't slip past into a kind the RPC silently drops.
         if exposure_series_payload:
-            metrics_result.sibling_kinds["exposure_series"] = (
+            _exposure_kind: SiblingKind = "exposure_series"
+            metrics_result.sibling_kinds[_exposure_kind] = (
                 exposure_series_payload
             )
         if turnover_series:
-            metrics_result.sibling_kinds["turnover_series"] = turnover_series
+            _turnover_kind: SiblingKind = "turnover_series"
+            metrics_result.sibling_kinds[_turnover_kind] = turnover_series
 
         # Build data quality flags (combine benchmark + position-side failures).
-        data_quality_flags: dict | None = None
+        # M-0657: typed bag (was `dict | None`) — see DataQualityFlags. The
+        # runtime value may still gain dynamically-merged producer keys via
+        # `_merge_into_top_level_flags`, so the type documents the known
+        # contract rather than sealing it.
+        data_quality_flags: DataQualityFlags | None = None
         if benchmark_stale or benchmark_rets is None:
             data_quality_flags = {
                 "benchmark_unavailable": True,
@@ -1409,6 +1645,11 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         if account_balance_unavailable:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["account_balance_unavailable"] = True
+        # Audit-2026-05-27 A1 (MED8): corrupt stored balance gets its OWN flag,
+        # not account_balance_unavailable — preserves the data-integrity signal.
+        if account_balance_corrupt:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["account_balance_corrupt"] = True
         if no_linked_api_key:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["no_linked_api_key"] = True
@@ -1419,13 +1660,15 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # The factsheet UI uses these keys to render an "approximate"
         # chip on CAGR/Sharpe rather than presenting them as canonical.
         #
-        # Suppress used_heuristic_capital when account_balance_unavailable
-        # OR no_linked_api_key already fires — the heuristic is the
-        # downstream consequence of those upstream states, not a distinct
-        # condition. Surfacing both would render two redundant
+        # Suppress used_heuristic_capital when account_balance_unavailable,
+        # account_balance_corrupt, OR no_linked_api_key already fires — the
+        # heuristic is the downstream consequence of those upstream states, not
+        # a distinct condition. Surfacing both would render two redundant
         # "approximate" chips on the factsheet for one underlying state.
         if returns_meta["used_heuristic_capital"] and not (
-            account_balance_unavailable or no_linked_api_key
+            account_balance_unavailable
+            or account_balance_corrupt
+            or no_linked_api_key
         ):
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["used_heuristic_capital"] = True
@@ -1736,7 +1979,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
 
         metrics_result = compute_all_metrics(returns, benchmark_rets)
 
-        data_quality_flags: dict = {"csv_source": True}
+        data_quality_flags: DataQualityFlags = {"csv_source": True}  # M-0657
         if benchmark_stale or benchmark_rets is None:
             data_quality_flags["benchmark_unavailable"] = True
             data_quality_flags["benchmark_note"] = "Benchmark data unavailable."

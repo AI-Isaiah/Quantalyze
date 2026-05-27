@@ -4,17 +4,43 @@ POST /api/match/recompute            Single-allocator recompute (called from Nex
 POST /api/match/cron-recompute       Daily cron that loops all allocators
 
 See docs/superpowers/plans/2026-04-07-perfect-match-engine.md Phase 2.
+
+TRUST BOUNDARY (H-0558 / M-0601)
+--------------------------------
+Every route here is gated ONLY by the global ``X-Service-Key`` middleware in
+``main.py`` — a single shared secret used across the entire analytics-service
+surface (cron worker, debug scripts, internal tools). There is NO per-user
+RBAC, no signed JWT, and no ``profiles.is_admin`` check inside FastAPI; trust
+that the caller is the legitimate Next.js admin gate is fully delegated to that
+shared secret.
+
+Consequences a caller MUST understand:
+  * ``recompute`` accepts ``allocator_id`` from the request body. It is
+    validated as an *allocator/both* profile (``_is_allocator_profile``) but is
+    NOT bound to a verified acting user — anyone holding SERVICE_KEY can
+    recompute ANY allocator's batch and (via ``force=True``) evict their
+    retention window.
+  * Do NOT forward an end-user-supplied ``allocator_id`` to this endpoint from
+    any non-admin Next.js route without first verifying admin authorization at
+    the Next.js layer.
+
+The defense-in-depth fix (forward the acting user's Supabase JWT and verify
+``profiles.is_admin`` server-side, or sign the (acting_user, allocator_id)
+tuple) is a cross-service change tracked outside this worktree. This docstring
+is the explicit trust contract the audit (M-0601) requires; the
+``_is_allocator_profile`` gate added below is the in-service hardening that
+stops non-allocator UUIDs from manufacturing batches.
 """
 
 import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from services.db import get_supabase
@@ -67,6 +93,49 @@ _force_last_run: dict[str, float] = {}  # allocator_id → monotonic timestamp
 # against. The lock is created on first use (defaultdict pattern).
 _force_lock: dict[str, asyncio.Lock] = {}
 
+
+def _prune_stale_force_entries(now: float | None = None) -> None:
+    """MA1 (red-team LOW9): evict stale per-allocator force-throttle state.
+
+    ``_force_last_run`` and ``_force_lock`` grow one permanent entry per
+    distinct allocator_id that ever hits the force=True path. Bounded by the
+    allocator population today, but unbounded in principle (e.g. a SERVICE_KEY
+    holder rotating allocator_ids). Called on the force path before the
+    check-then-stamp so the dicts stay proportional to *recently-active*
+    allocators, not all-time.
+
+    Eviction rule preserves throttle semantics exactly:
+      * A stamp is droppable only once it is OLDER than
+        FORCE_RECOMPUTE_MIN_INTERVAL_S — at that age it can no longer throttle
+        any future request (the gate compares ``now - stamp`` against the same
+        window), so removing it changes no decision. A *recent* stamp (still
+        inside the window) is retained so it keeps throttling.
+      * A lock is dropped only when it is (a) NOT currently held — an in-flight
+        request is inside ``async with _force_lock[id]`` — and (b) its allocator
+        has no surviving (recent) stamp. Dropping a held lock would let a
+        concurrent waiter acquire a *different* lock object, breaking the
+        atomicity M-1 added; dropping an unheld lock is safe because the next
+        force request lazily recreates one.
+    """
+    if now is None:
+        now = time.monotonic()
+    cutoff = FORCE_RECOMPUTE_MIN_INTERVAL_S
+    # Prune stamps that can no longer throttle (older than the window).
+    stale_ids = [
+        aid for aid, stamp in _force_last_run.items()
+        if now - stamp >= cutoff
+    ]
+    for aid in stale_ids:
+        del _force_last_run[aid]
+    # Prune idle locks whose allocator no longer has a live (recent) stamp.
+    # Iterate a snapshot of keys since we mutate the dict in the loop.
+    for aid in list(_force_lock.keys()):
+        if aid in _force_last_run:
+            continue  # still has a recent stamp → keep the matching lock
+        lock = _force_lock.get(aid)
+        if lock is not None and not lock.locked():
+            del _force_lock[aid]
+
 # C-01 (code-review): page size for analytics SELECT .in_() fetches
 # (NEW-C08-02 / NEW-C08-03). Previously defined at line 1007 (below its call
 # sites at lines 190 and 466) — CPython resolves module globals at call time
@@ -111,11 +180,43 @@ class RecomputeRequest(BaseModel):
 
 
 def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
-    """Convert [{date, value}, ...] JSONB records to a DatetimeIndex pd.Series."""
+    """Convert [{date, value}, ...] JSONB records to a DatetimeIndex pd.Series.
+
+    M-0604: ``returns_series`` is JSONB written by the analytics worker. A
+    single record missing ``date`` or ``value`` (legacy schema, partial
+    backfill, manual SQL fixup) must NOT crash the whole batch — the unguarded
+    ``r["date"]`` comprehension used to raise KeyError, propagate through
+    ``_load_candidate_universe`` / ``_load_allocator_context`` →
+    ``_score_one_allocator`` → ``recompute()`` and 500 the entire cron for
+    every allocator that touched the offending strategy. Skip malformed records
+    with a WARNING and continue; return None (treat as missing-returns, which
+    the engine handles via _compute_portfolio_fit_components) when no usable
+    record survives.
+    """
     if not isinstance(raw, list) or not raw:
         return None
-    dates = [r["date"] for r in raw]
-    vals = [r["value"] for r in raw]
+    dates: list[Any] = []
+    vals: list[Any] = []
+    dropped = 0
+    for r in raw:
+        if not isinstance(r, dict):
+            dropped += 1
+            continue
+        d = r.get("date")
+        v = r.get("value")
+        if d is None or v is None:
+            dropped += 1
+            continue
+        dates.append(d)
+        vals.append(v)
+    if dropped:
+        logger.warning(
+            "match: _records_to_series dropped %d/%d malformed record(s) for %s "
+            "(missing 'date'/'value' or non-dict)",
+            dropped, len(raw), name or "<unnamed>",
+        )
+    if not dates:
+        return None
     return pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
 
 
@@ -139,8 +240,14 @@ def _parse_supabase_ts(raw: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _kill_switch_enabled() -> bool:
-    """Check the kill switch. Returns True if the engine should run.
+def _engine_is_enabled() -> bool:
+    """Return True if the match engine should run (the kill switch is OFF).
+
+    M-0609: named to match the DB flag ``match_engine_enabled`` — an
+    engine-ON flag, not a kill-switch flag. The previous name
+    ``_kill_switch_enabled`` read inverted at every call site
+    (``if not _kill_switch_enabled(): skip``), which conventionally means "if
+    the kill switch is NOT enabled, skip" — the opposite of the actual logic.
 
     Fail-OPEN contract: any Supabase exception (network blip, RLS rejection,
     schema drift, table missing post-rollback) keeps the engine running and
@@ -162,6 +269,42 @@ def _kill_switch_enabled() -> bool:
             err,
         )
         return True
+
+
+# M-0603 (part 1): the cron's mid-run kill-switch re-check used to call
+# _engine_is_enabled() once PER allocator — one Supabase round-trip per loop
+# iteration just to read a single boolean (O(allocators) RTTs). Cache the
+# result for a short TTL so a founder who flips the switch mid-run is still
+# honored within KILL_SWITCH_CACHE_TTL_S, at the cost of at most one extra
+# query per TTL window rather than one per allocator. Process-local; the
+# cron is the only sustained-loop caller (the single POST /recompute path
+# reads it once and does not benefit, but is unharmed — a fresh process or a
+# stale-by-<TTL cache value is still correct enough for a one-shot request).
+KILL_SWITCH_CACHE_TTL_S = 30.0
+_kill_switch_cache: dict[str, float | bool] = {}  # {"at": monotonic, "value": bool}
+
+
+def _engine_is_enabled_cached() -> bool:
+    """TTL-cached view over _engine_is_enabled for the per-allocator cron loop.
+
+    Returns the cached value when it is younger than KILL_SWITCH_CACHE_TTL_S,
+    otherwise re-polls and refreshes the cache. The TTL bounds the staleness of
+    a mid-run flip to KILL_SWITCH_CACHE_TTL_S seconds.
+    """
+    now = time.monotonic()
+    cached_at = _kill_switch_cache.get("at")
+    if isinstance(cached_at, float) and (now - cached_at) < KILL_SWITCH_CACHE_TTL_S:
+        return bool(_kill_switch_cache.get("value", True))
+    value = _engine_is_enabled()
+    _kill_switch_cache["at"] = now
+    _kill_switch_cache["value"] = value
+    return value
+
+
+def _reset_kill_switch_cache() -> None:
+    """Clear the cache. Called at the top of each cron run so a fresh poll
+    happens immediately rather than honoring a value cached by a prior run."""
+    _kill_switch_cache.clear()
 
 
 def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
@@ -209,10 +352,12 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
         _chunk = strategy_ids[_page_start:_page_start + _ANALYTICS_IN_LIST_PAGE_SIZE]
         _page = (
             supabase.table("strategy_analytics")
-            .select(
-                "strategy_id, returns_series, sharpe, max_drawdown, "
-                "cumulative_return, cagr, volatility"
-            )
+            # M-0605: select ONLY the fields the engine consumes. The previous
+            # query also pulled cumulative_return, cagr, and volatility, none of
+            # which are read into strategies_by_id below — dead select fields
+            # that bloated every per-page response and misled readers about what
+            # the engine actually uses (sharpe, max_drawdown, returns_series).
+            .select("strategy_id, returns_series, sharpe, max_drawdown")
             .in_("strategy_id", _chunk)
             .execute()
         )
@@ -284,6 +429,16 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             "name": strategy.get("name"),
             "codename": strategy.get("codename"),
             "manager_id": strategy.get("user_id"),
+            # M-0605: this is the PER-STRATEGY reported AUM (strategies.aum), NOT
+            # the manager's total AUM across all their strategies. The engine's
+            # _compute_capacity_fit reads it as "how much of capacity does this
+            # ticket consume", which is a per-strategy capacity notion. The key
+            # name `manager_aum` is a historical misnomer; it is preserved here
+            # (rather than renamed to `strategy_aum`) because it is persisted
+            # verbatim into score_breakdown.raw.manager_aum and consumed by the
+            # TypeScript parity layer — renaming the JSONB key is a cross-runtime
+            # contract change tracked separately. Computing the TRUE manager_aum
+            # (SUM over strategies.user_id) is a behaviour change, also deferred.
             "manager_aum": float(strategy.get("aum")) if strategy.get("aum") else None,
             "strategy_type": primary_type,
             "subtype": primary_subtype,  # Phase 3 / SCORING-07
@@ -751,7 +906,20 @@ async def _score_one_allocator(
         overrides = await asyncio.to_thread(compute_adjusted_weights, allocator_id)
         # ctx["preferences"] can be None when the allocator has no
         # allocator_preferences row; normalize to {} before merging overrides.
+        #
+        # M-0602: coercing None → {} silently erases the legitimate signal
+        # "this allocator has not configured a mandate". The engine then scores
+        # with an all-default mandate and emits a batch indistinguishable from a
+        # configured allocator's. Log a structured INFO event so ops can tell
+        # "no mandate row" apart from "empty mandate" — important once an
+        # allocator with 5+ bridge_outcomes silently starts receiving
+        # feedback-tuned scores despite never opening the mandate UI.
         if ctx["preferences"] is None:
+            logger.info(
+                "match_engine: allocator %s scoring with DEFAULT mandate — no "
+                "allocator_preferences row exists (distinct from an empty mandate)",
+                allocator_id,
+            )
             ctx["preferences"] = {}
         ctx["preferences"]["scoring_weight_overrides"] = overrides or None
 
@@ -1079,7 +1247,19 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
         return False
     try:
         last_at = _parse_supabase_ts(last_row["computed_at"])
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError) as exc:
+        # M-0607: a malformed/NULL computed_at used to silently return False
+        # (don't skip) with NO log — every cron tick would then re-score this
+        # allocator forever, burning CPU/DB while "stale" data masqueraded as
+        # "fresh", with zero signal for an operator. Fail loud: log a WARNING
+        # with the bad value + allocator_id and force a recompute (returning
+        # False is the safe choice — we'd rather over-recompute a corrupted
+        # row than thrash silently or skip a genuinely-stale batch).
+        logger.warning(
+            "match_engine: bad computed_at %r for allocator %s last batch "
+            "— forcing recompute: %s",
+            last_row.get("computed_at"), allocator_id, exc,
+        )
         return False
     # Age guard FIRST: if the batch is already older than the threshold we
     # need to recompute anyway, so skip the second Supabase round-trip to
@@ -1125,43 +1305,107 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
 # batches would survive the sweep). 50 IDs per page is well under any cap.
 _RETENTION_DELETE_BATCH_SIZE = 50
 
+# Max batch-ids the retention SELECT will pull per allocator per run. The
+# sweep keeps the newest `keep` and deletes the rest; a single cron run only
+# ever adds ONE batch per allocator, so under steady state there is at most
+# one row to delete. This page bounds the SELECT so a backlog (e.g. retention
+# was disabled for a long window) is drained in bounded chunks across runs
+# rather than pulling unbounded history into Python in one call.
+_RETENTION_SELECT_PAGE_SIZE = 200
+
 def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
-    """Delete old batches for this allocator, keeping the last `keep`.
+    """Delete old batches for this allocator, keeping the newest `keep`.
     CASCADE drops match_candidates for the deleted batches.
 
     Returns the number of batches deleted.
+
+    F2 (red-team MED8): the prior implementation selected one page of deletable
+    rows via `.range(keep, keep + PAGE - 1)` over `computed_at DESC` and deleted
+    only that page per sweep. Under concurrent front-inserts (a new batch landing
+    between the SELECT and a subsequent run) the DESC offset shifts, so tail rows
+    could be skipped indefinitely and a backlog larger than one page would never
+    fully drain. Root-cause fix: drain the FULL backlog within a single sweep —
+    (1) pin the protected set (newest `keep` ids) ONCE, then (2) page the OLDEST
+    rows ascending, deleting any id not in the protected set, until a page returns
+    fewer than PAGE rows. Ascending order + the explicit protected-id filter make
+    the drain immune to front-inserts (new rows enter the newest end, never the
+    oldest page) and guarantee the newest `keep` are never touched and no row is
+    deleted twice.
     """
     supabase = get_supabase()
-    # Get all batches ordered by computed_at DESC
-    result = (
+
+    # --- Step 1: pin the protected set (newest `keep` ids) ONCE. ---
+    # These rows must never be deleted regardless of any concurrent inserts.
+    protected_result = (
         supabase.table("match_batches")
         .select("id")
         .eq("allocator_id", allocator_id)
         .order("computed_at", desc=True)
+        .range(0, keep - 1)
         .execute()
     )
-    rows = result.data or []
-    if len(rows) <= keep:
+    protected_ids = {row["id"] for row in (protected_result.data or [])}
+    # Fewer than `keep` total rows → nothing older to sweep.
+    if len(protected_ids) < keep:
         return 0
-    ids_to_delete = [row["id"] for row in rows[keep:]]
+
+    # --- Step 2: drain the oldest rows ascending until exhausted. ---
+    # Always read the oldest PAGE rows (ASC). After each DELETE those rows are
+    # gone, so the next ASC page exposes the next-oldest survivors — front
+    # inserts only ever push rows onto the newest (DESC) end, so they can never
+    # appear in (or shift) the oldest page. Bound the iteration count defensively
+    # so a pathological no-op DELETE (RLS regression that returns data=[] without
+    # actually deleting) cannot spin forever; the per-page < PAGE terminator is
+    # the normal exit.
     deleted = 0
-    # Paginate the DELETE so the IN-list URL stays bounded. Each chunk is
-    # its own request, so partial progress survives transient failures.
-    for start in range(0, len(ids_to_delete), _RETENTION_DELETE_BATCH_SIZE):
-        chunk = ids_to_delete[start:start + _RETENTION_DELETE_BATCH_SIZE]
-        del_result = supabase.table("match_batches").delete().in_("id", chunk).execute()
-        # NEW-C08-04: count actual deleted rows from the result, not len(chunk).
-        # A no-op DELETE (RLS regression, permission drift, CASCADE issue) returns
-        # 200 with data=[] — pre-fix we'd unconditionally add len(chunk) and
-        # surface retention_deleted=N while old batches accumulated unbounded.
-        actual_deleted = len(del_result.data or [])
-        if actual_deleted < len(chunk):
-            logger.error(
-                "match_engine: retention DELETE affected %d/%d rows for allocator %s "
-                "— possible RLS/permission regression; old batches may survive sweep",
-                actual_deleted, len(chunk), allocator_id,
-            )
-        deleted += actual_deleted
+    max_pages = 10_000  # hard ceiling; real backlogs are orders of magnitude smaller
+    for _ in range(max_pages):
+        page_result = (
+            supabase.table("match_batches")
+            .select("id")
+            .eq("allocator_id", allocator_id)
+            .order("computed_at", desc=False)
+            .range(0, _RETENTION_SELECT_PAGE_SIZE - 1)
+            .execute()
+        )
+        page_rows = page_result.data or []
+        if not page_rows:
+            break
+        # Exclude the pinned newest `keep` so they are never deleted even when
+        # the total count has shrunk to <= keep mid-drain.
+        ids_to_delete = [row["id"] for row in page_rows if row["id"] not in protected_ids]
+        page_was_full = len(page_rows) >= _RETENTION_SELECT_PAGE_SIZE
+
+        if not ids_to_delete:
+            # Every row on the oldest page is protected — nothing left to drain.
+            break
+
+        page_deleted = 0
+        # Paginate the DELETE so the IN-list URL stays bounded. Each chunk is
+        # its own request, so partial progress survives transient failures.
+        for start in range(0, len(ids_to_delete), _RETENTION_DELETE_BATCH_SIZE):
+            chunk = ids_to_delete[start:start + _RETENTION_DELETE_BATCH_SIZE]
+            del_result = supabase.table("match_batches").delete().in_("id", chunk).execute()
+            # NEW-C08-04: count actual deleted rows from the result, not len(chunk).
+            # A no-op DELETE (RLS regression, permission drift, CASCADE issue) returns
+            # 200 with data=[] — pre-fix we'd unconditionally add len(chunk) and
+            # surface retention_deleted=N while old batches accumulated unbounded.
+            actual_deleted = len(del_result.data or [])
+            if actual_deleted < len(chunk):
+                logger.error(
+                    "match_engine: retention DELETE affected %d/%d rows for allocator %s "
+                    "— possible RLS/permission regression; old batches may survive sweep",
+                    actual_deleted, len(chunk), allocator_id,
+                )
+            page_deleted += actual_deleted
+
+        deleted += page_deleted
+
+        # Termination: the page was not full (no more older rows to fetch), or a
+        # no-op DELETE made no progress (guard against an RLS-regression spin).
+        if not page_was_full or page_deleted == 0:
+            break
+
     return deleted
 
 
@@ -1241,7 +1485,7 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
             detail=f"allocator_id {allocator_id} is not an allocator profile",
         )
 
-    if not await asyncio.to_thread(_kill_switch_enabled):
+    if not await asyncio.to_thread(_engine_is_enabled):
         logger.info("match_engine recompute: kill switch off, skipping allocator=%s", allocator_id)
         return {"status": "disabled", "disabled": True}
 
@@ -1264,8 +1508,15 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
     # startup all read 0.0, pass the gate simultaneously, and queue on the
     # scoring semaphore — exactly the churn the throttle was designed to prevent.
     # Lock is created on first use (lazy initialisation keeps the module-level
-    # dict lean; locks are cheap and never removed).
+    # dict lean). Idle locks for stale allocators are pruned by
+    # _prune_stale_force_entries below — but never a *held* lock.
     if req.force:
+        # MA1: prune stale throttle state BEFORE touching this allocator's
+        # entries so the dicts stay bounded by recently-active allocators.
+        # Runs before creating/acquiring THIS allocator's lock; the prune
+        # never drops a held lock or a still-throttling (recent) stamp, so
+        # it cannot race with this request's own check-then-stamp below.
+        _prune_stale_force_entries()
         if allocator_id not in _force_lock:
             _force_lock[allocator_id] = asyncio.Lock()
         async with _force_lock[allocator_id]:
@@ -1340,7 +1591,12 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
 
 @router.get("/eval")
 async def eval_metrics(
-    lookback_days: int = 28,
+    # M-0608: enforce the 1..365 bound at the type layer via Query(ge=, le=)
+    # rather than an imperative `if lookback_days < 1 ...: raise` in the body.
+    # FastAPI emits an automatic 422 with structured loc/type detail (which the
+    # old hand-rolled 400 lacked), the constraint shows up in the OpenAPI schema
+    # downstream tooling consumes, and the branch can't be dropped in a refactor.
+    lookback_days: Annotated[int, Query(ge=1, le=365)] = 28,
     partner_tag: str | None = None,
 ) -> dict[str, Any]:
     """Compute hit-rate metrics for the /admin/match/eval dashboard.
@@ -1348,8 +1604,6 @@ async def eval_metrics(
     Optional `partner_tag` query param scopes the metrics to allocators tagged
     into a partner pilot (see migration 016 + /admin/partner-import).
     """
-    if lookback_days < 1 or lookback_days > 365:
-        raise HTTPException(status_code=400, detail="lookback_days must be between 1 and 365")
     try:
         return await asyncio.to_thread(
             compute_hit_rate_metrics, lookback_days, partner_tag
@@ -1397,9 +1651,14 @@ async def cron_recompute() -> dict[str, Any]:
             **extras,
         }
 
-    # _kill_switch_enabled does sync Supabase IO; off-load to keep the event
-    # loop unblocked.
-    if not await asyncio.to_thread(_kill_switch_enabled):
+    # M-0603 (part 1): reset the TTL cache so this run starts with a fresh
+    # poll rather than a value cached by a prior cron invocation, then use the
+    # cached accessor for the initial gate (seeds the cache) AND the mid-run
+    # re-check below — collapsing O(allocators) round-trips into one per TTL
+    # window. _engine_is_enabled does sync Supabase IO; off-load to keep the
+    # event loop unblocked.
+    _reset_kill_switch_cache()
+    if not await asyncio.to_thread(_engine_is_enabled_cached):
         logger.info("match_engine cron: kill switch off, skipping")
         return _early_return("disabled", disabled=True)
 
@@ -1453,12 +1712,28 @@ async def cron_recompute() -> dict[str, Any]:
     processed = 0
     skipped = 0
     failed = 0
+    # M-0603 (part 2): the retention sweep only needs to run for allocators
+    # that actually got a NEW batch this run — an allocator that was skipped
+    # (recent batch) or that failed scoring produced no new row, so its
+    # existing batch history is unchanged and re-sweeping it is wasted DB work.
+    # Track the set of allocators that successfully scored and sweep ONLY
+    # those (the comment at the old loop promised "per allocator that had a
+    # batch this run" but the code iterated every allocator).
+    swept_allocator_ids: list[str] = []
 
     for profile in allocators:
         allocator_id = profile["id"]
 
-        # Re-check kill switch mid-run (founder may flip it).
-        if not await asyncio.to_thread(_kill_switch_enabled):
+        # Re-check kill switch mid-run (founder may flip it). F1 (red-team
+        # MED8): use the UNCACHED _engine_is_enabled() here. The cached accessor
+        # (KILL_SWITCH_CACHE_TTL_S=30s) delayed honoring a mid-run safety-off by
+        # up to 30s of active scoring + persisting — a safety regression for a
+        # manual founder kill switch. One indexed boolean SELECT per allocator
+        # is negligible against the pandas scoring work in _score_one_allocator,
+        # so the safety re-check polls fresh every iteration. (The pre-loop gate
+        # at the top of cron_recompute still uses the cached accessor — it only
+        # seeds the value once and a sub-TTL staleness there is harmless.)
+        if not await asyncio.to_thread(_engine_is_enabled):
             logger.info("match_engine cron: kill switch flipped mid-run, aborting")
             break
 
@@ -1469,6 +1744,7 @@ async def cron_recompute() -> dict[str, Any]:
         try:
             await _score_one_allocator(allocator_id, universe)
             processed += 1
+            swept_allocator_ids.append(allocator_id)
         except Exception as err:
             logger.exception("match_engine cron: allocator %s failed: %s", allocator_id, err)
             failed += 1
@@ -1477,15 +1753,26 @@ async def cron_recompute() -> dict[str, Any]:
     # Retention sweep at end of cron. Log at ERROR so a silently-broken
     # sweep (RLS regression, FK error, URL truncation) lights up alerts
     # rather than getting buried.
+    #
+    # M-0611: fan the per-allocator sweeps out with asyncio.gather instead of
+    # awaiting them serially — they have no inter-dependencies, so the previous
+    # sequential loop spent O(swept) round-trips back-to-back. _retention_sweep
+    # is sync, so each runs in its own thread via asyncio.to_thread; gather with
+    # return_exceptions=True so one allocator's sweep failure cannot abort the
+    # rest (matching the old per-iteration try/except semantics).
     retention_total = 0
-    for profile in allocators:
-        try:
-            retention_total += await asyncio.to_thread(_retention_sweep, profile["id"])
-        except Exception as err:
+    sweep_results = await asyncio.gather(
+        *(asyncio.to_thread(_retention_sweep, aid) for aid in swept_allocator_ids),
+        return_exceptions=True,
+    )
+    for aid, sweep_result in zip(swept_allocator_ids, sweep_results):
+        if isinstance(sweep_result, Exception):
             logger.error(
                 "match_engine cron: retention sweep failed for %s: %s",
-                profile["id"], err,
+                aid, sweep_result,
             )
+        else:
+            retention_total += sweep_result
 
     duration_s = _duration()
 

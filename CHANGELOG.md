@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.24.9.31] - 2026-05-27
+### Fixed — analytics-service audit remediation batch 5 (multi-agent sweep + whole-file red team)
+Internal-only analytics-service hardening across 15 source files (no API/contract changes). Closed all verified CRITICAL/HIGH + MED≥8 + LOW≥9 findings in the batch's scope plus every issue surfaced by a whole-file adversarial red-team pass.
+
+**Type contracts (silent-drift prevention):** introduced accurate `TypedDict`/`Literal`/discriminated-union contracts at producer↔consumer boundaries — `PositionTradeMetrics`, `RealizedPnLRecord`, `PositionSide`, `SiblingKind`, `TradeMixBucket`/`TradeMix{2,4}Bucket`, `DataQualityFlags`, `ExposureMetrics` (analytics_runner/position_reconstruction); `AllocatorPreferences`, `ClaimedJob`, `BridgeOutcomeRow`+`RejectionReason`, `AuditAction`/`AuditEntityType` (TS-synced), `TradeMixFlag`, `PostgresUrl`.
+
+**Correctness:**
+- `position_reconstruction`: funding attribution now per-leg over half-open windows keyed by `(symbol, exchange)` — no more double-count on flips/same-symbol overlaps; `fill_count` includes partial reductions.
+- `metrics`: all benchmark-relative metrics (alpha/beta, correlation, info_ratio, treynor) now share one inner-join alignment (was inconsistent on calendar mismatch); catastrophic ≥100%-loss days clamped consistently across equity/drawdown/log series; fail-loud preconditions now also reject non-monotonic index.
+- `analytics_runner`: tz-naive/aware comparison no longer silently zeroes long/short volume attribution; mean trade size excludes zero-notional; malformed monetary fields surfaced not coerced; corrupt account_balance flagged distinctly.
+- `feedback_engine`: tied-max dimension attribution splits credit deterministically across all tied dims.
+- `equity_reconstruction`: skips the anchor offset when the replay hit unknown/inverse perps (was inflating the whole curve); `STARTING_BALANCE` protected from breakdown truncation.
+- `match`/`simulator`: mid-run kill-switch re-check is uncached (honors a safety-off immediately); retention sweep fully drains a backlog (no offset-skip under concurrent inserts); simulator rate limit is per-user (was per-IP → platform-wide starvation behind NAT); force-throttle state pruned (no unbounded growth).
+- `main_worker`: priority-claim RPC fallback no longer permanently latches on a transient 42883; daily enqueue gated so a same-day restart doesn't re-seed.
+
+**Security:**
+- `routers/portfolio`: exchange credentials are `SecretStr`; `_redact_credentials` re-hardened to scrub under SecretStr; the outer `verify_strategy` handler no longer logs raw exception text or stack-locals (credential leak to Sentry).
+- `scripts/phase12_deploy`: DB password no longer passed in `psql` argv (visible via `ps`/`/proc`) and stale `PG*` env stripped; psql stderr redacted.
+- `models/schemas`: UUID validation on portfolio/optimizer/bridge `portfolio_id`.
+
+**Migration:** `replace_allocator_equity_snapshots` — SECURITY DEFINER RPC doing the equity-snapshot purge+persist in one transaction, fixing a crash window that could wipe an allocator's entire equity history (migration-reviewer + rls-policy-auditor: clean, cross-tenant write structurally impossible, service_role-only).
+
 ## [0.24.9.30] - 2026-05-27
 ### Fixed — CSV upload wizard broken since unified-backbone flag flip (prod-down)
 - Every CSV upload at `/strategies/new` failed at step 1 with "Validation service returned an unexpected response" (`CSV_UPSTREAM_FAIL`) after `process_key_unified_backbone` flipped on **2026-05-25 15:51 UTC**. The unified `/process-key` validate-only path (`_run_validate_only`) ran `CsvAdapter.validate()`, which on success returned a bare `ValidationResult(valid=True, …)` and **discarded the `preview` + `daily_returns_series`** that `csv_validator.validate_csv()` had already computed. The wizard's `CsvUploadStep` does `if (!data.preview) → CSV_UPSTREAM_FAIL`, so it broke on every upload. The legacy `/csv/validate` path returned the full envelope, which is why uploads worked before the flag flip (last success 2026-05-25 07:27, hours before the flip).

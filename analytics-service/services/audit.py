@@ -56,7 +56,7 @@ The call returns `None`. Do not await it.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import httpx
@@ -111,6 +111,132 @@ audit_emit_transient_failures_total: int = 0
 #     observability blackhole P907 + P908 graded CRITICAL.
 _SQLSTATE_PERMISSION_DENIED = "42501"
 _SQLSTATE_INSUFFICIENT_PRIVILEGE_CLASS = "42"  # Class 42 — Syntax Error or Access Rule Violation
+
+
+# audit-2026-05-07 H-0656 / H-0657 / M-0660 (type-design + code-simplifier c9) —
+# Mirror the canonical TS audit taxonomy into the Python emitter so a typo'd
+# action / entity_type fails type-check instead of silently writing garbage to
+# audit_log (UPDATE/DELETE on audit_log are revoked by migration 049, so a bad
+# row survives indefinitely).
+#
+# The TS source of truth is `src/lib/audit.ts` — `AuditAction` and
+# `AuditEntityType` string-literal unions. These Python `Literal[...]` aliases
+# are kept byte-for-byte in sync with that file; the regression test
+# `TestAuditTaxonomySyncWithTypeScript` in tests/test_audit.py parses
+# src/lib/audit.ts and asserts the two vocabularies match, so a one-sided edit
+# (add to TS, forget Python, or vice versa) fails the suite.
+#
+# There is no mypy gate on this file in CI, so the annotations alone have no
+# runtime teeth — the sync test is what makes the contract enforceable: it
+# fails loudly the moment the canonical TS list and this list diverge.
+AuditAction = Literal[
+    # --- 7.1a pilot ---------------------------------------------------------
+    "api_key.decrypt",
+    "intro.send",
+    "intro.resend_noop",
+    "intro.send_failed",
+    "deletion.request.create",
+    # --- 7.2 RBAC -----------------------------------------------------------
+    "role.grant",
+    "role.revoke",
+    "role.state_observed",
+    "role.revoke_noop",
+    # --- 7.3 GDPR workflow --------------------------------------------------
+    "account.sanitize",
+    "account.export",
+    "account.export_refused",
+    "account.export_rate_limited",
+    "account.export_resigned",
+    "deletion.request.approve",
+    "deletion.request.reject",
+    # --- 7.1b TS fanout -----------------------------------------------------
+    "allocation.update",
+    "contact_request.status_change",
+    "portfolio_document.create",
+    "alert.acknowledge",
+    "allocator.approve",
+    "manager.approve",
+    "notification_preferences.update",
+    "attestation.accept",
+    "user_note.portfolio.update",
+    "user_note.holding.update",
+    "user_note.bridge_outcome.update",
+    "user_note.strategy.update",
+    "admin.kill_switch",
+    "match.decision_record",
+    "match.decision_delete",
+    "strategy.delete",
+    "strategy.approve",
+    "strategy.reject",
+    "api_key.revoke",
+    "trades.upload",
+    "admin.partner_import",
+    # --- /review follow-up (T4-C1 + T4-M6) ----------------------------------
+    "lead.process",
+    "lead.unprocess",
+    "sync.start",
+    # --- 7.1b Python cross-service (via log_audit_event_service) ------------
+    "bridge.score_candidates",
+    "simulator.run",
+    "optimizer.run",
+    "reconcile.compare",
+    # --- Bridge outcome tracker ---------------------------------------------
+    "bridge_outcome.record",
+    "bridge_outcome.update",
+    "bridge_outcome.dismiss",
+    # --- Sprint 8 Phase 2: Mandate profile builder -------------------------
+    "mandate_preference.update",
+    "mandate_preference.admin_update",
+    # --- Sprint 8 Phase 4: Feedback loop ------------------------------------
+    "feedback.overrides_updated",
+    # --- Phase 06: allocator API ingestion (INGEST-05 / -06 / -07) — D-18 ---
+    "allocator.holdings.sync_requested",
+    "allocator.holdings.sync_completed",
+    "allocator.holdings.sync_failed",
+    # --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ----------
+    "debug_key_flow.invoke",
+    # --- audit-2026-05-07 P700: break-glass ADMIN_EMAIL fallback grant ------
+    "admin.access.via_env_email_fallback",
+    # --- audit-2026-05-07 (admin-auth cluster): /api/admin/* probe anchor ---
+    "admin.access.denied",
+]
+
+AuditEntityType = Literal[
+    # --- 7.1a / 7.2 / 7.3 ---------------------------------------------------
+    "api_key",
+    "contact_request",
+    "data_deletion_request",
+    "user_app_role",
+    "user",
+    # --- 7.1b fanout entities -----------------------------------------------
+    "allocation",
+    "portfolio_document",
+    "alert",
+    "system_flag",
+    "match_decision",
+    "strategy",
+    "partner_import",
+    "user_note",
+    "investor_attestation",
+    "trades_upload",
+    # --- /review follow-up (T4-C1 + T4-M6) ----------------------------------
+    "for_quants_lead",
+    "sync",
+    # --- 7.1b Python cross-service entities ---------------------------------
+    "bridge_run",
+    "simulator_run",
+    "optimizer_run",
+    "reconcile_run",
+    # --- Bridge outcome tracker ---------------------------------------------
+    "bridge_outcome",
+    "bridge_outcome_dismissal",
+    # --- Sprint 8 Phase 2: Mandate profile builder -------------------------
+    "allocator_preference_mandate",
+    # --- Sprint 8 Phase 4: Feedback loop ------------------------------------
+    "allocator_preference_feedback",
+    # --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ----------
+    "debug_session",
+]
 
 
 def _is_permission_denied(exc: BaseException) -> bool:
@@ -170,8 +296,8 @@ def _is_transient_network_error(exc: BaseException) -> bool:
 
 def log_audit_event(
     user_id: str | UUID,
-    action: str,
-    entity_type: str,
+    action: AuditAction,
+    entity_type: AuditEntityType,
     entity_id: str | UUID,
     metadata: dict[str, Any] | None = None,
 ) -> None:
@@ -190,12 +316,15 @@ def log_audit_event(
         or empty — the service RPC would reject it with
         `invalid_parameter_value`, but we fail earlier with a clearer
         stack frame.
-    action : str
-        Namespaced `<subject>.<verb>` string from the canonical taxonomy.
+    action : AuditAction
+        Namespaced `<subject>.<verb>` literal from the canonical taxonomy
+        (`AuditAction`). Mirrors the TS `AuditAction` union in
+        `src/lib/audit.ts`; a value outside the union is a type error.
         See ADR-0023 §4 for the full list.
-    entity_type : str
-        Entity family, e.g. `bridge_run`, `simulator_run`. Must match a
-        `AuditEntityType` value on the TS side.
+    entity_type : AuditEntityType
+        Entity family literal (`AuditEntityType`), e.g. `bridge_run`,
+        `simulator_run`. Mirrors the TS `AuditEntityType` union in
+        `src/lib/audit.ts`.
     entity_id : str | UUID
         The row id the action acted on. Usually the portfolio id for
         bridge/simulator/optimizer, the strategy id for reconcile.
@@ -302,8 +431,8 @@ def log_audit_event(
 
 
 def _log_audit_throw(
-    action: str,
-    entity_type: str,
+    action: AuditAction,
+    entity_type: AuditEntityType,
     eid: str,
     uid: str,
     exc: BaseException,

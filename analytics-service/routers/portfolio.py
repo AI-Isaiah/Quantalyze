@@ -25,7 +25,6 @@ from models.schemas import (
 from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import get_supabase
-from services.encryption import decrypt_credentials, encrypt_credentials, get_kek
 from services.exchange import create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions
 from services.metrics import _safe_float, sanitize_metrics
 from services.portfolio_metrics import compute_twr, compute_mwr, compute_period_returns
@@ -333,7 +332,13 @@ def _verify_strategy_idempotency_lookup(
     if not entry:
         return None
     stored_at, response = entry
-    if time.monotonic() - stored_at > _VERIFY_STRATEGY_IDEMPOTENCY_TTL_SEC:
+    # F5(b) (red-team HIGH7): use wall clock (time.time()) for TTL comparison,
+    # consistent with the rate limiter (_check_*_rate). The prior monotonic
+    # clock restarts at 0 on a worker recycle / cold start, which can make a
+    # freshly-stored entry's `stored_at` read as far-future relative to the new
+    # process clock (or far-past), inconsistent with how the rest of this module
+    # measures elapsed time. Wall clock is process-portable.
+    if time.time() - stored_at > _VERIFY_STRATEGY_IDEMPOTENCY_TTL_SEC:
         _verify_strategy_idempotency.pop(key, None)
         return None
     return response
@@ -345,7 +350,9 @@ def _verify_strategy_idempotency_store(
     key = _verify_strategy_idempotency_key(email, exchange, api_key, ik)
     # Re-insert to preserve insertion-order LRU semantics.
     _verify_strategy_idempotency.pop(key, None)
-    _verify_strategy_idempotency[key] = (time.monotonic(), dict(response))
+    # F5(b): wall clock (time.time()) — consistent with the lookup TTL compare
+    # and the rate limiter; monotonic restarts at 0 on a worker recycle.
+    _verify_strategy_idempotency[key] = (time.time(), dict(response))
     while len(_verify_strategy_idempotency) > _VERIFY_STRATEGY_IDEMPOTENCY_CACHE_MAX:
         oldest = next(iter(_verify_strategy_idempotency))
         _verify_strategy_idempotency.pop(oldest, None)
@@ -479,18 +486,46 @@ def _trim_returns_series(raw_series: list | None, cap: int | None = None) -> lis
     return list(raw_series)
 
 
+def _unwrap_secret(value) -> str | None:
+    """Return the raw string behind a SecretStr (or a plain str), else None.
+
+    Audit H-0535 — VerifyStrategyRequest.api_key/api_secret/passphrase are now
+    pydantic.SecretStr. ``str(SecretStr)`` renders ``'**********'`` and a
+    SecretStr is NOT an instance of ``str``, so any consumer that needs the
+    raw bytes (the exchange handshake, the idempotency fingerprint, the log
+    scrubber) MUST call ``.get_secret_value()``. This helper centralizes the
+    unwrap so the three call sites stay in lockstep and tolerate a duck-typed
+    plain-string stand-in (the redaction unit tests pass a MagicMock).
+    """
+    if value is None:
+        return None
+    getter = getattr(value, "get_secret_value", None)
+    if callable(getter):
+        return getter()
+    if isinstance(value, str):
+        return value
+    return None
+
+
 def _redact_credentials(message: str, req: "VerifyStrategyRequest") -> str:
     """Strip raw api_key / api_secret / passphrase substrings from a log line.
 
     CCXT auth-error messages embed the api_key verbatim in signature-mismatch
     strings. Without redaction those land in Sentry breadcrumbs that the PII
     scrubber doesn't touch.
+
+    Audit H-0535 — the credential fields are pydantic.SecretStr. We unwrap via
+    ``_unwrap_secret`` (``.get_secret_value()``) BEFORE the substring match.
+    The previous ``isinstance(needle, str)`` guard would have silently skipped
+    every SecretStr (which is not a str), turning redaction OFF and re-leaking
+    the raw secret into logs/Sentry. The unwrap restores the scrub; the
+    ``len(...) >= 6`` floor still suppresses noisy short-string matches.
     """
     safe = message
     for needle in (
-        getattr(req, "api_key", None),
-        getattr(req, "api_secret", None),
-        getattr(req, "passphrase", None),
+        _unwrap_secret(getattr(req, "api_key", None)),
+        _unwrap_secret(getattr(req, "api_secret", None)),
+        _unwrap_secret(getattr(req, "passphrase", None)),
     ):
         if needle and isinstance(needle, str) and len(needle) >= 6:
             safe = safe.replace(needle, "[REDACTED]")
@@ -2089,6 +2124,15 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
     portfolio, and return the metrics. The verification_id is generated
     locally via uuid.uuid4().
     """
+    # Audit H-0535 — the credential fields are pydantic.SecretStr (so they
+    # never leak into repr/validation errors/tracebacks). Unwrap the raw
+    # values ONCE here for the handshake + idempotency-fingerprint consumers
+    # below. The SecretStr objects themselves remain on `req` for
+    # `_redact_credentials`, which unwraps them itself.
+    api_key = req.api_key.get_secret_value()
+    api_secret = req.api_secret.get_secret_value()
+    passphrase = req.passphrase.get_secret_value() if req.passphrase is not None else None
+
     # Defense-in-depth per-email rate limit (IP-only limit above is decorative
     # against rotated-IP attackers). Composed with the slowapi IP budget.
     if not _check_verify_strategy_email_rate((req.email or "").strip().lower()):
@@ -2108,13 +2152,13 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
     idempotency_key = (request.headers.get("Idempotency-Key") or "").strip()
     if idempotency_key:
         cached = _verify_strategy_idempotency_lookup(
-            req.email, req.exchange, req.api_key, idempotency_key,
+            req.email, req.exchange, api_key, idempotency_key,
         )
         if cached is not None:
             return {**cached, "idempotent_replay": True}
 
     try:
-        exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
+        exchange = create_exchange(req.exchange, api_key, api_secret, passphrase)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -2164,7 +2208,7 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
         logger.warning("verify_strategy %s failed: %s", verification_id, msg)
 
     try:
-        exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
+        exchange = create_exchange(req.exchange, api_key, api_secret, passphrase)
         try:
             trades = await fetch_all_trades(exchange)
             account_balance = await fetch_usdt_balance(exchange)
@@ -2316,18 +2360,26 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
         # retries (audit H-0592).
         if idempotency_key:
             _verify_strategy_idempotency_store(
-                req.email, req.exchange, req.api_key, idempotency_key, response,
+                req.email, req.exchange, api_key, idempotency_key, response,
             )
         return response
 
     except HTTPException:
         raise
     except Exception as exc:
+        # SECURITY F5(a) (red-team HIGH8 + HIGH7): this OUTER handler wraps the
+        # second compute block (fetch trades → score → match). CCXT fetch-time
+        # exceptions embed the api_key verbatim in their message, and
+        # `exc_info=True` ships the api_key/api_secret stack-locals to Sentry.
+        # The inner handlers (create_exchange, validate_key_permissions) already
+        # redact via `_redact_credentials(str(exc), req)` and do NOT set
+        # exc_info on the credential-bearing path — mirror them here: redact the
+        # message and drop exc_info so no raw secret or stack-local reaches the
+        # log record / Sentry breadcrumb.
         logger.error(
             "verify_strategy: computation failed for %s: %s",
             verification_id,
-            str(exc),
-            exc_info=True,
+            _redact_credentials(str(exc), req),
         )
         _fail_vr("Verification failed. Contact support if this persists.")
         raise HTTPException(status_code=500, detail="Strategy verification failed")

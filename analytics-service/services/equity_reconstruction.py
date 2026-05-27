@@ -448,16 +448,54 @@ def history_depth_months_for_venue(venue: str) -> int | None:
 # Raw-payload cap (matches allocator_positions.py pattern)
 # ---------------------------------------------------------------------------
 
+# L-0065: top-N truncation keeps at most this many symbols; also the
+# cardinality short-circuit floor below. Named so the two stay in lockstep —
+# the json.dumps cap-check is only meaningful past this count.
+_BREAKDOWN_TOP_N: int = 20
+
+# E3 (red-team MED8): keys that MUST survive _cap_breakdown truncation.
+# STARTING_BALANCE holds the anchor offset that reconciles the breakdown to
+# value_usd; __truncated__ is the sentinel signalling a capped breakdown.
+# Both are popped out before the top-N selection so they can never be evicted.
+_BREAKDOWN_PROTECTED_KEYS: tuple[str, ...] = ("STARTING_BALANCE", "__truncated__")
+
+
 def _cap_breakdown(breakdown: dict) -> dict:
+    # Audit 2026-05-07 L-0065: short-circuit on cardinality BEFORE serialising.
+    # The truncation branch keeps only the top _BREAKDOWN_TOP_N symbols, so a
+    # breakdown already at/below that count can never be truncated to anything
+    # smaller — `json.dumps` would run, find the encoding under the cap (a few
+    # ticker keys + float values stay well under RAW_PAYLOAD_CAP_BYTES), and
+    # return `breakdown` unchanged anyway. This helper is called per output row
+    # (~730/reconstruct) plus per refresh-snapshot and per anchor-adjusted row,
+    # fanned out across every connected api_key on the migration-078 deploy, so
+    # skipping the serialise on the dominant 1-3-symbol case removes real hot-
+    # path cost. Output semantics are identical: the truncation path (and its
+    # `__truncated__` flag) only ever fired for >_BREAKDOWN_TOP_N symbols.
+    if len(breakdown) <= _BREAKDOWN_TOP_N:
+        return breakdown
     encoded = json.dumps(breakdown, default=str)
     if len(encoded) <= RAW_PAYLOAD_CAP_BYTES:
         return breakdown
+    # E3 (red-team MED8): protected keys (STARTING_BALANCE, __truncated__) MUST
+    # survive truncation. STARTING_BALANCE carries the anchor offset that makes
+    # the breakdown reconcile to value_usd; if it gets evicted by the top-N
+    # selection the breakdown no longer sums to value_usd and reconciliation
+    # breaks. Pop the protected keys out BEFORE the top-N sort so they cannot
+    # compete for (or be displaced from) the top-N slots, then re-insert them.
+    # The existing __truncated__ sentinel is included so a re-cap of an
+    # already-truncated breakdown stays idempotent.
+    working = dict(breakdown)
+    protected = {
+        k: working.pop(k) for k in _BREAKDOWN_PROTECTED_KEYS if k in working
+    }
     # Keep top-N by absolute USD value so the dashboard tooltip still shows
     # the biggest contributions.
     top_symbols = sorted(
-        breakdown.items(), key=lambda kv: abs(float(kv[1] or 0)), reverse=True
-    )[:20]
+        working.items(), key=lambda kv: abs(float(kv[1] or 0)), reverse=True
+    )[:_BREAKDOWN_TOP_N]
     truncated = dict(top_symbols)
+    truncated.update(protected)
     truncated["__truncated__"] = True
     return truncated
 
@@ -1339,6 +1377,8 @@ async def persist_equity_snapshots(
             stamped,
             on_conflict="allocator_id,asof",
             ignore_duplicates=True,
+            count="exact",
+            returning="minimal",
         ).execute()
 
     # /investigate 2026-04-22: return the count Postgres ACTUALLY wrote,
@@ -1349,12 +1389,18 @@ async def persist_equity_snapshots(
     # count and can surface "reconstruct_complete but no rows written"
     # as a user-actionable signal.
     #
-    # /investigate 2026-05-15 (H-1159 / M-1025): prefer `res.count` when
-    # PostgREST returns it (we'd ideally request count='exact' but
-    # supabase-py doesn't accept that on the upsert builder, so we
-    # opportunistically use `count` if present and fall back to
-    # `len(data)`). Either signal collapses to zero on a clean DO-NOTHING
-    # so the audit-log contract holds.
+    # Audit 2026-05-07 L-0067 / M-1026: request `count='exact'` +
+    # `returning='minimal'` explicitly. supabase-py >= 2.x exposes both
+    # kwargs on the upsert builder (the older comment claiming otherwise
+    # predates the client upgrade and was factually stale). `returning=
+    # 'minimal'` stops PostgREST from echoing the full inserted-row
+    # representation (each row carries the JSONB breakdown — ~150B × up to
+    # 730 days × every connected api_key on a migration-078 fan-out) back
+    # over the wire just to be discarded by a len(). `count='exact'` makes
+    # the audit-log count the authoritative Postgres write count via
+    # `res.count` instead of the fragile len(res.data) PostgREST-
+    # representation contract. `_result_row_count` already prefers
+    # `res.count`; the `len(data)` fallback stays only for legacy mocks.
     res = await db_execute(_upsert)
     return _result_row_count(res)
 
@@ -1475,17 +1521,87 @@ async def _purge_allocator_equity_snapshots(
     audit log doesn't silently report ``stale_snapshots_purged=0`` when
     a real purge ran (the exact gap PR #68 already closed for
     ``persist_equity_snapshots``).
+
+    Audit 2026-05-07 L-0066 / L-0067: request ``count='exact'`` +
+    ``returning='minimal'`` so the deletion count comes from the
+    authoritative ``res.count`` (Content-Range) header rather than
+    ``len(res.data)`` — which silently reports 0 if a future client
+    version or call site reduces to ``return=minimal`` while rows were
+    actually wiped, hiding the wipe in the audit trail. ``minimal`` also
+    avoids materialising every deleted JSONB row back to the worker.
     """
     def _del():
         return (
             supabase.table("allocator_equity_snapshots")
-            .delete()
+            .delete(count="exact", returning="minimal")
             .eq("allocator_id", allocator_id)
             .execute()
         )
 
     res = await db_execute(_del)
     return _result_row_count(res)
+
+
+async def replace_equity_snapshots(
+    supabase: Any,
+    rows: list[dict],
+    allocator_id: str,
+    history_depth_months: int | None,
+) -> int:
+    """E4 (red-team HIGH8): atomic sole-key DELETE + INSERT via RPC.
+
+    Replaces the non-transactional ``_purge_allocator_equity_snapshots``
+    (DELETE) → ``persist_equity_snapshots`` (UPSERT) pair on the sole-key
+    recovery path. Those were two separate PostgREST round-trips; a
+    SIGKILL/OOM/redeploy BETWEEN them committed the DELETE but skipped the
+    INSERT, leaving the allocator with ZERO equity history. The
+    ``replace_allocator_equity_snapshots`` SECURITY DEFINER function does the
+    DELETE + INSERT in a single implicit transaction, so a crash can no longer
+    wipe history (migration 20260527102050).
+
+    Returns the number of rows the function inserted. The per-row
+    ``history_depth_months`` (WR-05) is computed server-side inside the RPC —
+    exchange_primary rows get ``history_depth_months``, all other sources get
+    NULL — so the row shape passed here only needs the four projected columns.
+    """
+    if not rows:
+        # Nothing to insert. The sole-key path still wants the stale rows gone,
+        # so call the RPC with an empty array — the function purges then
+        # inserts zero rows in one transaction (still atomic, no wipe-then-
+        # crash window because there is nothing to insert afterwards).
+        payload: list[dict] = []
+    else:
+        # Project ONLY the columns the RPC's jsonb_to_recordset reads. value_usd
+        # is already rounded to 2dp upstream; breakdown is the capped dict.
+        payload = [
+            {
+                "asof": r["asof"],
+                "value_usd": r["value_usd"],
+                "breakdown": r.get("breakdown"),
+                "source": r.get("source", "exchange_primary"),
+            }
+            for r in rows
+        ]
+
+    def _rpc():
+        return supabase.rpc(
+            "replace_allocator_equity_snapshots",
+            {
+                "p_allocator_id": allocator_id,
+                "p_rows": payload,
+                "p_depth_months": history_depth_months,
+            },
+        ).execute()
+
+    res = await db_execute(_rpc)
+    # The RPC RETURNS integer (rows inserted); supabase-py surfaces a scalar
+    # function result under res.data.
+    data = getattr(res, "data", None)
+    if isinstance(data, int):
+        return data
+    if isinstance(data, list) and data and isinstance(data[0], int):
+        return data[0]
+    return len(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -1707,6 +1823,13 @@ async def _fetch_and_price_window(
     # below when skipping fires; remain empty/False when anchor is not attempted).
     _anchor_skipped_partial_ticker: list[str] = []
     _anchor_skipped_implausible: bool = False
+    # E1/E2 (red-team HIGH7/MED8): initialise the "anchor skipped because the
+    # replay's absolute level is untrustworthy" DQ fields + the audited offset
+    # magnitude. ``_anchor_offset_skipped`` is the offset we WOULD have applied
+    # had we anchored; surfacing it lets an operator see how badly the replay
+    # disagreed with settled equity even though we declined to spread it.
+    _anchor_skipped_unreliable_replay: bool = False
+    _anchor_offset_skipped: float = 0.0
     if rows and anchor is not None:
         last_value = float(rows[-1].get("value_usd") or 0.0)
         offset = anchor - last_value
@@ -1720,6 +1843,19 @@ async def _fetch_and_price_window(
             last_value > 0
             and abs(offset) > 5.0 * abs(last_value)
         )
+        # E1 (HIGH7) / E2 (MED8): the anchor offset (anchor - last_value) is
+        # spread across EVERY row. That is only sound when the replay's
+        # absolute level is trustworthy. It is NOT trustworthy when the replay
+        # recorded any unknown-ctVal perp (priced via cost/price, which can
+        # leak contract counts) or any inverse perp (whose fills are skipped
+        # entirely — INVERSE_UNSUPPORTED — so the replay has no inverse state
+        # at all while _fetch_current_equity DOES add the live inverse uPnL to
+        # the anchor on non-unified venues). In both cases the offset is a
+        # systematic 2-4× inflation that can pass the 5× implausibility gate
+        # and corrupt the whole curve. Mirror the terminus-skip path: ship an
+        # unanchored series and stamp DQ telemetry. Clean spot / known-perp
+        # accounts (both symbol-sets empty) keep the current anchor behaviour.
+        _unreliable_replay = bool(unknown_perp_symbols) or bool(inverse_perp_symbols)
         if hit_terminus:
             # silent-failure/F-11: when OKX 90-day terminus was hit, the
             # replay started from quantities={} (zero cash). Every row's
@@ -1746,6 +1882,23 @@ async def _fetch_and_price_window(
             # partial ticker failures".
             _anchor_skipped_partial_ticker = sorted(anchor_partial_symbols)
             _anchor_skipped_implausible = False
+        elif _unreliable_replay:
+            # E1 (HIGH7) / E2 (MED8): unknown-ctVal perps and/or inverse perps
+            # in the replay → absolute level untrustworthy. Skip the anchor
+            # rather than spreading a 2-4× inflated offset across history.
+            # Surface the offset magnitude so the skip is auditable.
+            logger.warning(
+                "anchor: skipping — replay absolute level unreliable "
+                "(unknown_perp=%s inverse_perp=%s); offset=%.2f would have "
+                "been spread across %d rows (anchor_replay_unreliable)",
+                sorted(unknown_perp_symbols),
+                sorted(inverse_perp_symbols),
+                offset, len(rows),
+            )
+            _anchor_skipped_partial_ticker = []
+            _anchor_skipped_implausible = False
+            _anchor_skipped_unreliable_replay = True
+            _anchor_offset_skipped = round(offset, 2)
         elif _implausible_anchor:
             logger.warning(
                 "anchor: offset=%.2f exceeds 5× last_value=%.2f — "
@@ -1794,6 +1947,14 @@ async def _fetch_and_price_window(
         # distinguish "anchor succeeded" from "anchor skipped".
         "anchor_partial_ticker_symbols": _anchor_skipped_partial_ticker,
         "anchor_offset_implausible": _anchor_skipped_implausible,
+        # E1 (HIGH7) / E2 (MED8): anchor skipped because the replay's absolute
+        # level is untrustworthy (unknown-ctVal and/or inverse perps).
+        # ``anchor_offset_skipped_usd`` is the offset we declined to spread —
+        # a large magnitude here means the replay disagreed sharply with
+        # settled equity, which is exactly why anchoring would have inflated
+        # the whole curve.
+        "anchor_replay_unreliable": _anchor_skipped_unreliable_replay,
+        "anchor_offset_skipped_usd": _anchor_offset_skipped,
     }
     return rows, hit_terminus, telemetry
 
@@ -2051,15 +2212,19 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
     # so the dashboard serves the wrong curve indefinitely with no
     # user-actionable recovery path (migration 077 only covers the
     # hard-delete+cascade last-key path, leaving the "add new key" door
-    # wide open). Purge-then-upsert breaks the deadlock cleanly without
+    # wide open). Atomic replace breaks the deadlock cleanly without
     # regressing the T-07-V5b multi-key aggregation invariant — any
     # allocator with sibling keys keeps DO NOTHING semantics below.
-    # M-1029: wrap purge + persist in an outer try so a delete failure
-    # bubbles to ``reconstruct_failed`` instead of leaving the worker
-    # with a corrupted half-state (purge crashed → fresh rows would
-    # DO-NOTHING against leftover stale rows). The docstring on
-    # ``_purge_allocator_equity_snapshots`` already promises bubble
-    # semantics; this is the catch site that closes the contract.
+    # E4 (red-team HIGH8): the sole-key path now calls the atomic
+    # ``replace_allocator_equity_snapshots`` RPC (DELETE + INSERT in one
+    # transaction, migration 20260527102050) instead of separate
+    # ``_purge_allocator_equity_snapshots`` + ``persist_equity_snapshots``
+    # round-trips. The old two-call shape had a fatal window: a SIGKILL/OOM/
+    # redeploy AFTER the DELETE committed but BEFORE the UPSERT ran left the
+    # allocator with ZERO equity history. One transaction closes that window.
+    # M-1029: wrap the persist phase in an outer try so any failure bubbles to
+    # ``reconstruct_failed`` instead of leaving the worker with a corrupted
+    # half-state; this is the catch site that closes the contract.
     # SPEC-SFH-3 (specialist apply 2026-05-16): pre-initialise to a
     # fail-safe shape so the audit-metadata builder ~70 lines down
     # cannot NameError if a future refactor reorders the emit path
@@ -2069,6 +2234,9 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
     sibling_check = SiblingCheckResult(
         has_siblings=True, lookup_failed=False, error_message=None,
     )
+    # E4 (HIGH8): track whether the sole-key atomic-replace RPC ran so the
+    # audit trail can distinguish it from the multi-key DO-NOTHING path.
+    used_atomic_replace = False
     try:
         purged = 0
         sibling_check = await _allocator_has_other_api_keys(
@@ -2090,13 +2258,25 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
                 },
             )
         if not sibling_check.has_siblings:
-            purged = await _purge_allocator_equity_snapshots(
-                ctx.supabase, allocator_id,
+            # E4 (HIGH8): sole-key path — atomic DELETE + INSERT in one RPC.
+            # The purge now happens INSIDE the RPC transaction, so it is no
+            # longer a separately-measurable round-trip. The RPC returns the
+            # rows it inserted, which IS the new history depth; report that as
+            # ``days_written`` (the replacement happened atomically) and mirror
+            # it into ``stale_snapshots_purged`` for audit-trail
+            # continuity. ``atomic_replace=True`` lets operators distinguish
+            # the atomic path from the legacy purge+persist shape.
+            count = await replace_equity_snapshots(
+                ctx.supabase, rows, allocator_id, depth_months,
             )
-
-        count = await persist_equity_snapshots(
-            ctx.supabase, rows, allocator_id, depth_months,
-        )
+            purged = count
+            used_atomic_replace = True
+        else:
+            # Multi-key path: keep first-writer-wins ON CONFLICT DO NOTHING
+            # aggregation (T-07-V5b). No purge.
+            count = await persist_equity_snapshots(
+                ctx.supabase, rows, allocator_id, depth_months,
+            )
     except Exception as exc:  # noqa: BLE001
         # Same surfacing pattern as the fetch-window catch — log before
         # sanitisation but use warning + scrub instead of logger.exception
@@ -2169,6 +2349,10 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
         {
             "days_written": count,
             "stale_snapshots_purged": purged,
+            # E4 (HIGH8): True when the sole-key atomic replace_allocator_
+            # equity_snapshots RPC ran (DELETE + INSERT in one transaction)
+            # instead of the legacy separate purge + persist round-trips.
+            "atomic_replace": used_atomic_replace,
             "history_depth_months": depth_months,
             "okx_terminus_hit": hit_terminus,
             "venue": venue,
@@ -2188,6 +2372,11 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
             # distinguish "anchor succeeded" from "anchor skipped".
             "anchor_partial_ticker_symbols": telemetry.get("anchor_partial_ticker_symbols", []),
             "anchor_offset_implausible": telemetry.get("anchor_offset_implausible", False),
+            # E1 (HIGH7) / E2 (MED8): anchor skipped because the replay's
+            # absolute level is untrustworthy (unknown-ctVal/inverse perps);
+            # the offset magnitude we declined to spread is auditable here.
+            "anchor_replay_unreliable": telemetry.get("anchor_replay_unreliable", False),
+            "anchor_offset_skipped_usd": telemetry.get("anchor_offset_skipped_usd", 0.0),
         },
     )
     logger.info(

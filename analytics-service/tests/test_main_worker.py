@@ -1020,6 +1020,7 @@ class TestClaimRpcFallback:
         import main_worker
 
         main_worker._FALLBACK_CLAIM_RPC = False
+        main_worker._FALLBACK_LATCHED_AT = 0.0
 
     @pytest.mark.asyncio
     async def test_undefined_function_falls_back_to_legacy_rpc(self) -> None:
@@ -1169,3 +1170,369 @@ class TestClaimRpcFallback:
         import main_worker
 
         assert main_worker._FALLBACK_CLAIM_RPC is False
+
+    # -----------------------------------------------------------------------
+    # redteam-2026-05 W1 (MED8) — the latch must not be PERMANENT on a
+    # TRANSIENT 42883. A 42883 is raised transiently while a migration is
+    # mid-`CREATE OR REPLACE` (functions drop-recreate; migrations auto-apply
+    # on merge). Pre-fix, a single hit demoted the worker to the legacy claim
+    # for the process lifetime. Post-fix: (a) only a STRUCTURED SQLSTATE 42883
+    # latches (a message-only match falls back for one tick but never latches),
+    # and (b) even a structured latch self-heals after the re-probe interval.
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_message_only_42883_does_not_latch_permanently(self) -> None:
+        """A 42883 surfaced ONLY in the message string (no structured `.code`)
+        triggers the one-shot per-tick fallback but must NOT latch. The very
+        next tick must re-attempt the priority RPC — a transient drop during a
+        mid-`CREATE OR REPLACE` migration self-heals."""
+        import main_worker
+
+        # Plain exception with the canonical phrase in the message and NO
+        # structured `.code`/`.details` — exactly what a loose match sees.
+        transient_exc = RuntimeError(
+            "function public.claim_compute_jobs_with_priority(...) does not exist"
+        )
+
+        mock_supabase = MagicMock()
+        priority_chain = MagicMock()
+        # First tick: priority RPC transiently 42883s (message-only). Second
+        # tick: priority RPC succeeds (migration finished re-creating it).
+        priority_chain.execute.side_effect = [transient_exc, MagicMock(data=[])]
+        legacy_chain = MagicMock()
+        legacy_chain.execute.return_value = MagicMock(data=[])
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return priority_chain
+            return legacy_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock()):
+            # Tick 1: message-only 42883 → fallback for this tick only.
+            await dispatch_tick("worker-msg-only")
+            # The message-only match must NOT have latched.
+            assert main_worker._FALLBACK_CLAIM_RPC is False, (
+                "a message-only 42883 must not permanently latch the worker "
+                "into legacy claim mode"
+            )
+            mock_supabase.rpc.reset_mock()
+            # Tick 2: the priority RPC MUST be re-attempted (self-heal).
+            await dispatch_tick("worker-msg-only")
+
+        called = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert "claim_compute_jobs_with_priority" in called, (
+            "after a transient message-only 42883, the next tick must "
+            f"re-probe the priority RPC; got {called}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_structured_42883_latch_reprobes_after_interval(self) -> None:
+        """A STRUCTURED 42883 latches the worker to legacy claim — but the
+        latch self-heals: once `_FALLBACK_REPROBE_INTERVAL_S` has elapsed, the
+        next tick MUST re-attempt the priority RPC instead of staying demoted
+        for the process lifetime."""
+        from postgrest.exceptions import APIError
+
+        import main_worker
+
+        mock_supabase = MagicMock()
+        priority_chain = MagicMock()
+        # First priority attempt 42883s (structured). After the simulated
+        # re-probe window, the priority RPC is back and succeeds.
+        priority_chain.execute.side_effect = [
+            APIError({"message": "does not exist", "code": "42883"}),
+            MagicMock(data=[]),
+        ]
+        legacy_chain = MagicMock()
+        legacy_chain.execute.return_value = MagicMock(data=[])
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return priority_chain
+            return legacy_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock()):
+            # Tick 1 at t=1000: structured 42883 → latch.
+            with patch("main_worker.time.monotonic", return_value=1000.0):
+                await dispatch_tick("worker-reprobe")
+            assert main_worker._FALLBACK_CLAIM_RPC is True, (
+                "a structured 42883 must latch the fallback"
+            )
+
+            # Tick 2 still within the re-probe window → stays on legacy, does
+            # NOT touch the priority RPC.
+            mock_supabase.rpc.reset_mock()
+            with patch(
+                "main_worker.time.monotonic",
+                return_value=1000.0 + main_worker._FALLBACK_REPROBE_INTERVAL_S - 1.0,
+            ):
+                await dispatch_tick("worker-reprobe")
+            within = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+            assert "claim_compute_jobs_with_priority" not in within, (
+                "within the re-probe window the latch must skip the priority "
+                f"RPC; got {within}"
+            )
+
+            # Tick 3 AFTER the re-probe window → must re-attempt the priority
+            # RPC and clear the latch (self-heal).
+            mock_supabase.rpc.reset_mock()
+            with patch(
+                "main_worker.time.monotonic",
+                return_value=1000.0 + main_worker._FALLBACK_REPROBE_INTERVAL_S + 1.0,
+            ):
+                await dispatch_tick("worker-reprobe")
+
+        after = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert "claim_compute_jobs_with_priority" in after, (
+            "after the re-probe window elapses, the latch must self-heal and "
+            f"re-attempt the priority RPC; got {after}"
+        )
+        assert main_worker._FALLBACK_CLAIM_RPC is False, (
+            "a successful re-probe must clear the latch"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Claimed-row contract (audit-2026-05-07 H-0529)
+# ---------------------------------------------------------------------------
+# The claim RPCs RETURN SETOF compute_jobs, so each claimed row is a full
+# compute_jobs record. dispatch_tick dereferences `job["id"]` unconditionally
+# when building the mark_done / mark_failed closures and reads
+# `job.get("claim_token")` for the P97 fence. Before H-0529 the claim path was
+# typed `Any`, so a column rename in a future migration (e.g. RETURNS shape
+# `id` -> `job_id`) would surface as a runtime KeyError on the hot path rather
+# than a type error. `ClaimedJob` pins that contract. These tests encode the
+# intent: the keys the worker dereferences unconditionally MUST be required,
+# and the optional/defensive ones MUST be declared so the row shape stays a
+# single source of truth alongside the consumer.
+# ---------------------------------------------------------------------------
+
+
+class TestClaimedJobContract:
+    def test_id_is_required(self) -> None:
+        """`id` is dereferenced unconditionally (`j["id"]`, `job["id"]` in the
+        mark closures), so it MUST be a required key on ClaimedJob. If a future
+        edit demotes it to optional (or renames it), the worker's
+        `job["id"]` KeyError risk returns silently — this assertion is the
+        type-contract guard the finding asks for."""
+        from main_worker import ClaimedJob
+
+        assert "id" in ClaimedJob.__required_keys__, (
+            "ClaimedJob.id must be required — dispatch_tick indexes job['id'] "
+            "unconditionally when building mark_* RPC closures"
+        )
+
+    def test_fence_and_dispatch_keys_are_declared(self) -> None:
+        """`claim_token` (P97 fence, read via .get()) and `kind` (forwarded to
+        dispatch()) must be part of the declared contract so the row shape
+        documents every field the worker / dispatch consumer touches."""
+        from main_worker import ClaimedJob
+
+        declared = ClaimedJob.__required_keys__ | ClaimedJob.__optional_keys__
+        for key in ("claim_token", "kind", "strategy_id", "portfolio_id"):
+            assert key in declared, (
+                f"ClaimedJob must declare {key!r}: the worker or dispatch() "
+                f"reads it. Declared keys: {sorted(declared)}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_claimed_row_drives_id_and_claim_token_through_marks(self) -> None:
+        """A row shaped per ClaimedJob flows through dispatch_tick: `id` lands
+        in the mark_done RPC and `claim_token` is threaded through as
+        p_claim_token (the P97 fence). This pins that the worker reads the
+        ClaimedJob fields by their contracted names."""
+        job = {
+            "id": "cj-contract-1",
+            "kind": "compute_analytics",
+            "strategy_id": "strat-contract",
+            "claim_token": "tok-contract-xyz",
+        }
+        mock_supabase = MagicMock()
+        claim_chain = MagicMock()
+        claim_chain.execute.return_value = MagicMock(data=[job])
+        mark_chain = MagicMock()
+        mark_chain.execute.return_value = MagicMock(data=None)
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return claim_chain
+            return mark_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-contract")
+
+        mark_done_calls = [
+            c for c in mock_supabase.rpc.call_args_list
+            if c.args[0] == "mark_compute_job_done"
+        ]
+        assert len(mark_done_calls) == 1
+        params = mark_done_calls[0].args[1]
+        assert params["p_job_id"] == "cj-contract-1"
+        assert params["p_claim_token"] == "tok-contract-xyz"
+
+
+# ---------------------------------------------------------------------------
+# redteam-2026-05 W1 (LOW9) — daily-enqueue startup gate
+# ---------------------------------------------------------------------------
+# `daily_enqueue_loop` previously ran the FULL enqueue on EVERY worker startup.
+# Railway redeploys/crashes within one day therefore triggered multiple full
+# enqueue passes. The per-strategy partial-unique dedup only absorbs duplicates
+# while the prior batch is still IN-FLIGHT (status pending/running/
+# done_pending_children — migration 20260411144407); once those jobs complete,
+# a same-day re-seed inserts FRESH duplicate poll_positions jobs → queue
+# inflation. The startup tick is now gated on `_daily_enqueue_already_ran_today`
+# so a restart within the same UTC day does NOT re-seed; the genuine 24h
+# periodic tick is unaffected.
+# ---------------------------------------------------------------------------
+
+
+class TestDailyEnqueueStartupGate:
+    @staticmethod
+    def _supabase_with_latest(created_at):
+        """Build a mock supabase whose poll_positions/daily_loop query returns
+        a single row with the given created_at (or [] when None)."""
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        # The gate builds: table().select().eq().eq().order().limit().execute()
+        chain.select.return_value = chain
+        chain.eq.return_value = chain
+        chain.order.return_value = chain
+        chain.limit.return_value = chain
+        rows = [] if created_at is None else [{"created_at": created_at}]
+        chain.execute.return_value = MagicMock(data=rows)
+        mock_supabase.table.return_value = chain
+        return mock_supabase
+
+    @pytest.mark.asyncio
+    async def test_gate_true_when_already_enqueued_today(self) -> None:
+        """If the most-recent daily_loop poll_positions job was created earlier
+        today (UTC), the gate returns True → startup enqueue must be skipped."""
+        from datetime import datetime, timezone
+
+        from main_worker import _daily_enqueue_already_ran_today
+
+        today_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        mock_supabase = self._supabase_with_latest(today_iso)
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            assert await _daily_enqueue_already_ran_today() is True
+
+    @pytest.mark.asyncio
+    async def test_gate_false_when_last_enqueue_was_yesterday(self) -> None:
+        """A prior-day enqueue must NOT suppress today's startup seed."""
+        from datetime import datetime, timedelta, timezone
+
+        from main_worker import _daily_enqueue_already_ran_today
+
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+            microsecond=0
+        ).isoformat()
+        mock_supabase = self._supabase_with_latest(yesterday)
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            assert await _daily_enqueue_already_ran_today() is False
+
+    @pytest.mark.asyncio
+    async def test_gate_false_when_no_prior_enqueue(self) -> None:
+        """No daily_loop poll_positions job yet → gate must allow the seed."""
+        from main_worker import _daily_enqueue_already_ran_today
+
+        mock_supabase = self._supabase_with_latest(None)
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            assert await _daily_enqueue_already_ran_today() is False
+
+    @pytest.mark.asyncio
+    async def test_gate_fail_safe_on_error(self) -> None:
+        """Any error in the gate query (env unset, DB down) must FAIL SAFE to
+        False so the legitimate daily seed still fires — skipping it would be
+        the worse failure."""
+        from main_worker import _daily_enqueue_already_ran_today
+
+        with patch(
+            "main_worker.get_supabase",
+            side_effect=RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY required"),
+        ):
+            assert await _daily_enqueue_already_ran_today() is False
+
+    @pytest.mark.asyncio
+    async def test_startup_tick_skipped_when_gate_true(self) -> None:
+        """The whole point (LOW9): a restart within the same day must NOT run a
+        second full enqueue pass. With the gate True, daily_enqueue_loop's
+        startup tick must NOT call daily_enqueue_tick."""
+        import main_worker
+
+        original = main_worker.SHUTDOWN
+        main_worker.SHUTDOWN = asyncio.Event()
+        main_worker.SHUTDOWN.set()  # exit the loop after the (skipped) startup
+        try:
+            tick_calls = 0
+
+            async def _counting_tick() -> None:
+                nonlocal tick_calls
+                tick_calls += 1
+
+            with patch("main_worker.daily_enqueue_tick", new=_counting_tick), \
+                 patch(
+                     "main_worker._daily_enqueue_already_ran_today",
+                     new=AsyncMock(return_value=True),
+                 ):
+                loop_task = asyncio.create_task(
+                    main_worker.daily_enqueue_loop(interval=3600.0)
+                )
+                done, pending = await asyncio.wait({loop_task}, timeout=2.0)
+                for p in pending:
+                    p.cancel()
+
+            assert loop_task.done()
+            assert tick_calls == 0, (
+                "startup enqueue must be SKIPPED when the daily enqueue already "
+                f"ran today; daily_enqueue_tick was called {tick_calls} times"
+            )
+        finally:
+            main_worker.SHUTDOWN = original
+
+    @pytest.mark.asyncio
+    async def test_startup_tick_runs_when_gate_false(self) -> None:
+        """Conversely, a fresh day (gate False) must still run the startup
+        seed exactly once — the gate must not suppress legitimate seeding."""
+        import main_worker
+
+        original = main_worker.SHUTDOWN
+        main_worker.SHUTDOWN = asyncio.Event()
+        main_worker.SHUTDOWN.set()
+        try:
+            tick_calls = 0
+
+            async def _counting_tick() -> None:
+                nonlocal tick_calls
+                tick_calls += 1
+
+            with patch("main_worker.daily_enqueue_tick", new=_counting_tick), \
+                 patch(
+                     "main_worker._daily_enqueue_already_ran_today",
+                     new=AsyncMock(return_value=False),
+                 ):
+                loop_task = asyncio.create_task(
+                    main_worker.daily_enqueue_loop(interval=3600.0)
+                )
+                done, pending = await asyncio.wait({loop_task}, timeout=2.0)
+                for p in pending:
+                    p.cancel()
+
+            assert loop_task.done()
+            assert tick_calls == 1, (
+                f"startup enqueue must run once on a fresh day; got {tick_calls}"
+            )
+        finally:
+            main_worker.SHUTDOWN = original

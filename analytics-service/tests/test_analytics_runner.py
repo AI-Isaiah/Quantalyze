@@ -1238,6 +1238,105 @@ def test_trade_mix_4_bucket_skips_fills_missing_is_maker():
 
 
 # ---------------------------------------------------------------------------
+# Audit-2026-05-27 H-0650 / M-0655 / M-0656: trade_mix side-normalization +
+# typed bucket / mode contracts.
+# ---------------------------------------------------------------------------
+
+
+def test_trade_mix_uppercase_side_buckets_correctly_h0650():
+    """H-0650 regression: an uppercase `side="LONG"` must bucket into `long`.
+
+    Pre-fix `_compute_trade_mix` read `side = f.get("side")` with RAW equality
+    (the only one of the three side-parse regimes that did not case-fold), so
+    `"LONG"` matched neither buy/sell nor the lowercase bucket keys and was
+    SILENTLY DROPPED (count stayed 0). This test fails before the
+    `_normalize_side` fix and passes after.
+    """
+    from services.analytics_runner import _compute_trade_mix
+
+    fills = [
+        {"side": "LONG", "notional_usd": 1000.0},
+        {"side": "Short", "notional_usd": 400.0},
+        {"side": "SELL", "notional_usd": 250.0},  # sell alias, uppercase
+        {"side": "BUY", "notional_usd": 150.0},   # buy alias, uppercase
+    ]
+    result = _compute_trade_mix(fills, has_maker_taker=False)
+    # LONG + BUY-alias → long bucket (2 fills); Short + SELL-alias → short (2)
+    assert result["long"]["count"] == 2
+    assert abs(result["long"]["total_notional"] - 1150.0) < 1e-6
+    assert result["short"]["count"] == 2
+    assert abs(result["short"]["total_notional"] - 650.0) < 1e-6
+
+
+def test_trade_mix_lowercase_side_unchanged_h0650():
+    """H-0650 invariant: lowercase input produces IDENTICAL results to pre-fix.
+
+    The normalization helper is behavior-preserving for current
+    (lowercase/alias) input — only the uppercase edge case changes.
+    """
+    from services.analytics_runner import _compute_trade_mix
+
+    fills = [
+        {"side": "long", "notional_usd": 1000.0},
+        {"side": "buy", "notional_usd": 500.0},     # buy → long
+        {"side": "short", "notional_usd": 800.0},
+        {"side": "sell", "notional_usd": 600.0},    # sell → short
+    ]
+    result = _compute_trade_mix(fills, has_maker_taker=False)
+    assert result["long"]["count"] == 2
+    assert abs(result["long"]["total_notional"] - 1500.0) < 1e-6
+    assert result["short"]["count"] == 2
+    assert abs(result["short"]["total_notional"] - 1400.0) < 1e-6
+
+
+def test_trade_mix_count_is_int_not_float_m0655():
+    """M-0655 regression: `count` must be a Python int, not a float.
+
+    The bucket was annotated `dict[str, float]` but `count` is incremented as
+    an int. TradeMixBucket pins `count: int`; assert the runtime type so a
+    future refactor that coerces it to float (matching the lying annotation)
+    fails here.
+    """
+    from services.analytics_runner import _compute_trade_mix
+
+    fills = [
+        {"side": "long", "notional_usd": 1000.0},
+        {"side": "long", "notional_usd": 500.0},
+        {"side": "short", "notional_usd": 800.0},
+    ]
+    result = _compute_trade_mix(fills, has_maker_taker=False)
+    assert type(result["long"]["count"]) is int
+    assert type(result["short"]["count"]) is int
+    # total_notional remains a float.
+    assert isinstance(result["long"]["total_notional"], float)
+
+
+def test_trade_mix_mode_key_sets_m0656():
+    """M-0656: each mode returns EXACTLY its documented key set.
+
+    Pins the 4-bucket vs 2-bucket contract (TradeMix4Bucket / TradeMix2Bucket)
+    so a future change to either mode's key set is caught at runtime.
+    """
+    from services.analytics_runner import _compute_trade_mix
+
+    fills_mt = [
+        {"side": "long", "is_maker": True, "notional_usd": 1000.0},
+        {"side": "short", "is_maker": False, "notional_usd": 800.0},
+    ]
+    result_4 = _compute_trade_mix(fills_mt, has_maker_taker=True)
+    assert set(result_4.keys()) == {
+        "long_maker", "long_taker", "short_maker", "short_taker"
+    }
+
+    fills_2 = [
+        {"side": "long", "notional_usd": 1000.0},
+        {"side": "short", "notional_usd": 800.0},
+    ]
+    result_2 = _compute_trade_mix(fills_2, has_maker_taker=False)
+    assert set(result_2.keys()) == {"long", "short"}
+
+
+# ---------------------------------------------------------------------------
 # KPI-17: per-strategy is_maker coverage gate (_has_maker_taker_coverage)
 # ---------------------------------------------------------------------------
 
@@ -1401,6 +1500,57 @@ def test_position_side_volume_pcts_empty_inputs_return_zero():
     ) == {"long_volume_pct": 0.0, "short_volume_pct": 0.0}
 
 
+def test_position_side_volume_pcts_mixed_tz_naive_aware_no_crash():
+    """F6 (red-team HIGH8): a tz-naive position window vs tz-aware fill
+    timestamp (or vice-versa) must NOT raise. Pre-fix `_parse` returned a naive
+    datetime for an offset-less string and an aware one for an offset string, so
+    `ts < opened` raised `TypeError: can't compare offset-naive and
+    offset-aware`. That TypeError propagated out of this function and was caught
+    by the broad except at the call site → position_side_volume_failed=True,
+    silently dropping the long/short volume panel for the WHOLE strategy on
+    otherwise-valid data. Normalizing every parsed datetime to tz-aware UTC fixes
+    the comparison and preserves correct attribution."""
+    from services.analytics_runner import _compute_position_side_volume_pcts
+
+    # Position windows are tz-NAIVE (no offset); fills are tz-AWARE (Z/offset).
+    positions = [
+        {"side": "long", "opened_at": "2024-01-01T00:00:00",
+         "closed_at": "2024-01-02T00:00:00"},
+        {"side": "short", "opened_at": "2024-01-03T00:00:00",
+         "closed_at": "2024-01-04T00:00:00"},
+    ]
+    fills = [
+        {"side": "buy", "cost": 100.0, "timestamp": "2024-01-01T06:00:00Z"},
+        {"side": "sell", "cost": 100.0, "timestamp": "2024-01-01T18:00:00+00:00"},
+        {"side": "sell", "cost": 50.0, "timestamp": "2024-01-03T06:00:00Z"},
+        {"side": "buy", "cost": 50.0, "timestamp": "2024-01-03T18:00:00+00:00"},
+    ]
+    # Pre-fix this raises TypeError (offset-naive vs offset-aware).
+    result = _compute_position_side_volume_pcts(fills, positions)
+    # long = 200, short = 100, total = 300 → 0.6667 / 0.3333
+    assert abs(result["long_volume_pct"] - 0.6667) < 0.001
+    assert abs(result["short_volume_pct"] - 0.3333) < 0.001
+
+
+def test_position_side_volume_pcts_aware_window_naive_fill_no_crash():
+    """F6 (reverse polarity): tz-AWARE position windows vs tz-NAIVE fill
+    timestamps must also not raise and must attribute correctly."""
+    from services.analytics_runner import _compute_position_side_volume_pcts
+
+    positions = [
+        {"side": "long", "opened_at": "2024-01-01T00:00:00+00:00",
+         "closed_at": "2024-01-02T00:00:00+00:00"},
+    ]
+    fills = [
+        # Naive fill timestamps (no offset) — promoted to UTC by the fix.
+        {"side": "buy", "cost": 80.0, "timestamp": "2024-01-01T06:00:00"},
+        {"side": "sell", "cost": 20.0, "timestamp": "2024-01-01T18:00:00"},
+    ]
+    result = _compute_position_side_volume_pcts(fills, positions)
+    assert result["long_volume_pct"] == 1.0
+    assert result["short_volume_pct"] == 0.0
+
+
 def test_is_trade_mix_approximate_open_only_short_does_not_fire():
     """Open-only short (closed_at is None) does NOT trigger the chip — its
     sell fill is bucketed correctly as 'short' and there's no closing buy
@@ -1485,7 +1635,10 @@ def _build_balance_flag_mock_supabase(
     daily_pnl_rows: list[dict],
     sa_upsert_calls: list[dict],
     strategy_api_key_id: str | None,
-    api_key_balance: float | int | None = 10000.0,
+    # Accepts a non-numeric value too (A1 corrupt-balance test) — the runner
+    # must route a corrupt stored value to a distinct flag, so the mock must be
+    # able to seed one.
+    api_key_balance: float | int | str | None = 10000.0,
     api_keys_raises: bool = False,
     strategies_data_raises_on_get: bool = False,
 ):
@@ -1805,6 +1958,37 @@ async def test_balance_flag_routing_exception_with_no_api_key_emits_no_linked():
     flags = await _run_and_get_data_quality_flags(mock_supabase, sa_upsert_calls)
     assert flags.get("no_linked_api_key") is True
     assert "account_balance_unavailable" not in flags
+
+
+@pytest.mark.asyncio
+async def test_balance_flag_routing_corrupt_balance_emits_distinct_flag():
+    """Audit-2026-05-27 A1 (MED8): a PRESENT but non-numeric
+    account_balance_usdt (e.g. 'N/A', '', '12.3USDT') must surface a DISTINCT
+    `account_balance_corrupt` flag — NOT be conflated with
+    `account_balance_unavailable` (the documented "no balance configured"
+    state) by the broad except.
+
+    Pre-fix `float(balance_raw)` raised inside the broad `except Exception`,
+    which — because api_key_id was resolved — set account_balance_unavailable,
+    losing the data-integrity signal.
+
+    Fails without the fix: account_balance_corrupt is absent and
+    account_balance_unavailable=True instead.
+    """
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance="N/A",  # corrupt stored value
+    )
+    flags = await _run_and_get_data_quality_flags(mock_supabase, sa_upsert_calls)
+    assert flags.get("account_balance_corrupt") is True, (
+        f"corrupt balance must set account_balance_corrupt; got {flags!r}"
+    )
+    # Corruption must NOT be mislabeled as the no-balance / demo states.
+    assert "account_balance_unavailable" not in flags
+    assert "no_linked_api_key" not in flags
 
 
 # ---------------------------------------------------------------------------

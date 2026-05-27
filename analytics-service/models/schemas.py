@@ -2,7 +2,7 @@ import math
 import re
 import unicodedata
 import uuid as _uuid_mod
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
 from typing import Any, Literal, Optional
 
 
@@ -54,8 +54,40 @@ def _validate_user_id(v: Optional[str]) -> Optional[str]:
     return s
 
 
+def _validate_portfolio_id(v: str) -> str:
+    """Validate a required portfolio_id: must be a non-empty UUID string.
+
+    Audit H-0532 / H-0533: the DB column is ``portfolio_id UUID NOT NULL``
+    (migration 010), but the request schemas accepted any string, so a
+    malformed id flowed all the way to Supabase before failing with a
+    generic postgres error instead of a clean 422 at the boundary. We mirror
+    the ``_validate_user_id`` pattern (validate-and-return-str) rather than
+    switching to the ``uuid.UUID`` type so every downstream consumer in
+    routers/portfolio.py (``.eq("id", req.portfolio_id)``, audit
+    ``entity_id=req.portfolio_id``, f-string logging) keeps receiving a
+    ``str`` — the fix is at the edge, not a rippling type change.
+    """
+    if not isinstance(v, str):
+        raise ValueError("portfolio_id must be a string")
+    s = v.strip()
+    if not s:
+        raise ValueError("portfolio_id must not be empty")
+    try:
+        _uuid_mod.UUID(s)
+    except ValueError as exc:
+        raise ValueError(
+            f"portfolio_id must be a valid UUID (got {s!r})"
+        ) from exc
+    return s
+
+
 class PortfolioAnalyticsRequest(BaseModel):
     portfolio_id: str
+
+    @field_validator("portfolio_id")
+    @classmethod
+    def _validate_portfolio_id_field(cls, v: str) -> str:
+        return _validate_portfolio_id(v)
     # NEW-C19-01: user_id supplied by the Next.js caller so this service can
     # verify the portfolio belongs to the requesting user.  The X-Service-Key
     # middleware authenticates the CALLER (Next.js), not the end user; this
@@ -79,6 +111,11 @@ class PortfolioOptimizerRequest(BaseModel):
     # NEW-C19-01: same trust-boundary as PortfolioAnalyticsRequest.user_id.
     # C-001 (red-team): Optional — see PortfolioAnalyticsRequest.user_id comment.
     user_id: Optional[str] = None
+
+    @field_validator("portfolio_id")
+    @classmethod
+    def _validate_portfolio_id_field(cls, v: str) -> str:
+        return _validate_portfolio_id(v)
 
     @field_validator("user_id")
     @classmethod
@@ -120,6 +157,11 @@ class BridgeRequest(BaseModel):
     # M-001 (red-team): UUID-validated, same boundary as PortfolioAnalyticsRequest.
     user_id: str
 
+    @field_validator("portfolio_id")
+    @classmethod
+    def _validate_portfolio_id_field(cls, v: str) -> str:
+        return _validate_portfolio_id(v)
+
     @field_validator("user_id")
     @classmethod
     def _validate_user_id_field(cls, v: str) -> str:
@@ -151,9 +193,17 @@ class VerifyStrategyRequest(BaseModel):
     # that is not a user-submitted verify exchange.) The Literal 422s the bad
     # value at the boundary.
     exchange: Literal["binance", "okx", "bybit"]
-    api_key: str
-    api_secret: str
-    passphrase: Optional[str] = None  # OKX only
+    # Audit H-0535: wrap credentials in SecretStr so they never leak into
+    # ``repr(req)``, FastAPI validation-error messages, Sentry breadcrumbs, or
+    # tracebacks (a bare ``str`` prints verbatim). The consumers in
+    # routers/portfolio.py call ``.get_secret_value()`` at each use site
+    # (``create_exchange``, the idempotency fingerprint). CRITICAL: the
+    # ``_redact_credentials`` log scrubber must unwrap SecretStr before its
+    # substring match — a SecretStr is NOT a ``str`` so an ``isinstance(_, str)``
+    # guard would silently disable redaction and re-leak the secret.
+    api_key: SecretStr
+    api_secret: SecretStr
+    passphrase: Optional[SecretStr] = None  # OKX only
 
     @field_validator("email")
     @classmethod

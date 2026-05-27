@@ -144,6 +144,36 @@ class TestRunSqlProbe:
         with pytest.raises(RuntimeError, match="17 rows.*all metrics_json values are NULL"):
             dep._run_sql_probe()
 
+    def test_psql_failure_redacts_dsn_password_from_stderr(self, monkeypatch) -> None:
+        """SECURITY (2026-05-27): on a non-zero psql exit, the RuntimeError
+        must NOT carry an embedded DATABASE_URL password from psql's stderr.
+
+        psql echoes the connection URI back in stderr on auth / SSL / parse
+        failures, and this probe passes the DSN via `--dbname db_url`, so an
+        unredacted stderr would leak the password into the deploy log. The
+        raised message runs through phase12_kill_switch._redact_dsn (the same
+        scrubber the kill-switch uses), so the password and the full DSN are
+        replaced with the redaction placeholder."""
+        leaky_stderr = (
+            'psql: error: connection to server at "db.example.com" '
+            "(1.2.3.4), port 5432 failed: FATAL:  password authentication "
+            "failed for connection "
+            "postgresql://postgres:HUNTER2SECRET@db.example.com:5432/quantalyze"
+            "?sslmode=require"
+        )
+        self._stub_psql(monkeypatch, stdout="", returncode=2, stderr=leaky_stderr)
+        with pytest.raises(RuntimeError) as exc_info:
+            dep._run_sql_probe()
+        msg = str(exc_info.value)
+        # The password must NOT appear anywhere in the raised message.
+        assert "HUNTER2SECRET" not in msg, (
+            "DSN password leaked into the SQL-probe-failure RuntimeError; "
+            "psql stderr must be run through _redact_dsn before raising."
+        )
+        # And the full postgresql:// DSN is replaced by the redaction marker.
+        assert "postgresql://postgres:HUNTER2SECRET" not in msg
+        assert "<postgres-dsn-redacted>" in msg
+
     @pytest.mark.parametrize("visible_val", ["f", "false"])
     def test_relation_not_visible_raises_distinct_diagnostic(
         self, monkeypatch, visible_val: str
@@ -170,13 +200,23 @@ class TestRunSqlProbe:
         with pytest.raises(RuntimeError, match="timed out"):
             dep._run_sql_probe()
 
-    def test_psql_uses_dbname_flag(self, monkeypatch) -> None:
-        """Explicit --dbname is used rather than positional dbname."""
-        monkeypatch.setenv("DATABASE_URL", "postgresql://x/y")
-        captured: dict[str, list[str]] = {}
+    def test_dsn_password_not_in_argv_travels_via_env(self, monkeypatch) -> None:
+        """SECURITY F4 (red-team HIGH9): the DSN (with password) MUST NOT appear
+        in psql's argv — argv is world-readable via `ps auxe` / /proc/<pid>/
+        cmdline / CI logs. The connection params must travel via the
+        subprocess `env=` dict (PG* libpq vars), mirroring the sibling
+        phase12_kill_switch pattern.
+
+        Pre-fix the probe ran `psql --dbname <full-DSN>`, leaking the password
+        into argv verbatim."""
+        monkeypatch.setenv(
+            "DATABASE_URL",
+            "postgresql://postgres:HUNTER2SECRET@db.example.com:5432/postgres?sslmode=require",
+        )
+        captured: dict[str, object] = {}
 
         def fake_run(args, **kw):  # type: ignore[no-untyped-def]
-            captured["args"] = args
+            captured["args"] = list(args)
             captured["kwargs"] = kw
             return MagicMock(
                 returncode=0,
@@ -186,12 +226,149 @@ class TestRunSqlProbe:
 
         monkeypatch.setattr("scripts.phase12_deploy.subprocess.run", fake_run)
         dep._run_sql_probe()
-        assert "--dbname" in captured["args"]
-        idx = captured["args"].index("--dbname")
-        assert captured["args"][idx + 1] == "postgresql://x/y"
-        # H1: timeout kwarg must be forwarded to subprocess.run.
-        assert isinstance(captured["kwargs"].get("timeout"), int)
-        assert captured["kwargs"]["timeout"] > 0
+
+        argv = captured["args"]
+        # (a) The password — and the full DSN — must NOT appear anywhere in argv.
+        argv_joined = " ".join(argv)  # type: ignore[arg-type]
+        assert "HUNTER2SECRET" not in argv_joined, (
+            "DSN password leaked into psql argv (visible via ps/proc/CI logs)"
+        )
+        assert not any(str(a).startswith("postgresql://") for a in argv), (
+            "DSN must not be passed positionally / via --dbname in argv"
+        )
+        assert "--dbname" not in argv, "DSN must not ride in a --dbname argv arg"
+
+        # (b) The connection params must travel via the subprocess env.
+        env = captured["kwargs"].get("env")  # type: ignore[union-attr]
+        assert isinstance(env, dict), "subprocess.run must be called with env="
+        assert env.get("PGHOST") == "db.example.com"
+        assert env.get("PGUSER") == "postgres"
+        assert env.get("PGPASSWORD") == "HUNTER2SECRET"
+        assert env.get("PGDATABASE") == "postgres"
+        assert env.get("PGPORT") == "5432"
+        # Stale libpq fallback-file env must be neutralized.
+        assert env.get("PGPASSFILE") == ""
+        assert env.get("PGSERVICEFILE") == ""
+
+        # H1: timeout kwarg must still be forwarded to subprocess.run.
+        assert isinstance(captured["kwargs"].get("timeout"), int)  # type: ignore[union-attr]
+        assert captured["kwargs"]["timeout"] > 0  # type: ignore[index]
+
+    def test_stale_pg_env_stripped_before_overlay(self, monkeypatch) -> None:
+        """F4: a stale PGPASSWORD/PGUSER in the inherited env must NOT survive
+        into the subprocess env (it could silently authenticate as a different
+        role). Only the DSN-derived PG* values may reach psql."""
+        monkeypatch.setenv(
+            "DATABASE_URL", "postgresql://realuser:realpass@realhost:5432/realdb"
+        )
+        monkeypatch.setenv("PGPASSWORD", "STALE_INHERITED_PASS")
+        monkeypatch.setenv("PGUSER", "stale_user")
+        monkeypatch.setenv("PGSERVICE", "stale_service")
+        captured: dict[str, object] = {}
+
+        def fake_run(args, **kw):  # type: ignore[no-untyped-def]
+            captured["kwargs"] = kw
+            return MagicMock(
+                returncode=0,
+                stdout="relation_visible,t\nrow_security_active,f\np999,1\ncount,1\ntotal_rows,1\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr("scripts.phase12_deploy.subprocess.run", fake_run)
+        dep._run_sql_probe()
+
+        env = captured["kwargs"]["env"]  # type: ignore[index]
+        assert env["PGPASSWORD"] == "realpass", "DSN password must win, not the stale env"
+        assert env["PGUSER"] == "realuser"
+        assert "PGSERVICE" not in env, "stale PGSERVICE must be stripped, not inherited"
+
+
+# --- M-0639: DATABASE_URL scheme/host validation ---------------------------
+
+
+class TestValidatePostgresUrl:
+    """M-0639: the DSN handed to psql must be shape-checked first. A
+    non-postgres scheme or a host-less value (bare project ref, http://
+    paste) must be rejected with a clear error here rather than surfacing
+    as an opaque libpq failure once psql is invoked. Mirrors the scheme/
+    host contract of phase12_kill_switch._parse_postgres_url."""
+
+    @pytest.mark.parametrize(
+        "good",
+        [
+            "postgresql://u:p@h:5432/db",
+            "postgres://u:p@h:5432/db",
+            "postgresql://u:p@db.example.com:5432/postgres?sslmode=require",
+            "postgresql://only-host",
+        ],
+    )
+    def test_valid_postgres_url_passes_through_unchanged(self, good: str) -> None:
+        # Valid URLs must be returned verbatim (no normalization) so the
+        # value handed to psql is byte-identical to the operator's input.
+        assert dep._validate_postgres_url(good) == good
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["not-a-url", "mysql://u:p@h/d", "http://h/d", "abcd1234projectref", ""],
+    )
+    def test_non_postgres_scheme_rejected(self, bad: str) -> None:
+        with pytest.raises(ValueError, match="scheme|no host"):
+            dep._validate_postgres_url(bad)
+
+    def test_host_less_postgres_url_rejected(self) -> None:
+        """A postgres scheme with no host (`postgresql:///dbonly`) is
+        malformed — psql would otherwise fall back to a local socket and
+        connect to the WRONG database silently."""
+        with pytest.raises(ValueError, match="no host"):
+            dep._validate_postgres_url("postgresql:///dbonly")
+
+    def test_run_sql_probe_rejects_malformed_database_url(self, monkeypatch) -> None:
+        """Integration: a malformed DATABASE_URL must abort _run_sql_probe
+        with a clear ValueError before subprocess.run is ever called."""
+        monkeypatch.setenv("DATABASE_URL", "not-a-url")
+        called = {"ran": False}
+
+        def fake_run(*a, **kw):  # type: ignore[no-untyped-def]
+            called["ran"] = True
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("scripts.phase12_deploy.subprocess.run", fake_run)
+        with pytest.raises(ValueError, match="scheme"):
+            dep._run_sql_probe()
+        assert called["ran"] is False, "psql must NOT run on a malformed DSN"
+
+    def test_run_sql_probe_accepts_valid_database_url(self, monkeypatch) -> None:
+        """A valid postgres DSN must pass validation and reach subprocess.run."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h:5432/db")
+
+        def fake_run(*a, **kw):  # type: ignore[no-untyped-def]
+            return MagicMock(
+                returncode=0,
+                stdout="relation_visible,t\nrow_security_active,f\np999,1\ncount,1\ntotal_rows,1\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr("scripts.phase12_deploy.subprocess.run", fake_run)
+        p999, n = dep._run_sql_probe()
+        assert (p999, n) == (1.0, 1)
+
+
+# --- M-0636: TRADE_MIX flag is a closed Literal -----------------------------
+
+
+class TestTradeMixFlagLiteral:
+    """M-0636: the reader returns the closed two-value enum, not an arbitrary
+    string. Pin the reader's returned value so a future edit that admits
+    "FALSE"/"0"/"yes" is caught."""
+
+    @pytest.mark.parametrize("value", ["true", "false"])
+    def test_reader_returns_literal_value(self, monkeypatch, tmp_path, value: str) -> None:
+        todos = tmp_path / "TODOS.md"
+        todos.write_text(f"TRADE_MIX_HAS_MAKER_TAKER = {value}\n")
+        monkeypatch.setattr(dep, "TODOS_PATH", todos)
+        result = dep._read_trade_mix_flag_from_todos()
+        assert result == value
+        assert result in ("true", "false")
 
 
 # --- P2025: backfill failure → INCOMPLETE deploy --------------------------

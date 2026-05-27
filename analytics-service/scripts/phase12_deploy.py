@@ -31,6 +31,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Literal, NewType, cast
+from urllib.parse import urlparse
 
 # Co-located scripts; importing via the package path mirrors how
 # `python -m scripts.phase12_deploy` resolves them.
@@ -48,7 +50,18 @@ SQL_PROBE_PATH = Path(__file__).resolve().parent / "analyze_metrics_size.sql"
 
 # --- M-01: TRADE_MIX_HAS_MAKER_TAKER propagation ---------------------------
 
-def _read_trade_mix_flag_from_todos() -> str:
+# M-0636: the flag is a closed two-value enum, not an arbitrary string. The
+# regex below only ever captures "true"/"false", but typing the return as a
+# bare `str` would let a future edit return "TRUE"/"1"/"yes" and silently
+# bypass analytics_runner's `.lower() == "true"` parse on the consuming side.
+# Pinning the Literal makes any such drift a type-check failure. Note the
+# reader has NO default branch: a missing/absent flag raises rather than
+# silently defaulting to "false" (a false default would let a misconfigured
+# deploy run parity tests against the wrong bucket path).
+TradeMixFlag = Literal["true", "false"]
+
+
+def _read_trade_mix_flag_from_todos() -> TradeMixFlag:
     """M-01: TODOS.md is the canonical source-of-truth for the audit decision.
 
     Plan 12-01 Task 1 writes the literal line `TRADE_MIX_HAS_MAKER_TAKER = true|false`
@@ -75,10 +88,13 @@ def _read_trade_mix_flag_from_todos() -> str:
             f"{TODOS_PATH}. The audit decision must be explicit — refusing "
             f"to default a flag that governs Trade Mix bucketing in CI."
         )
-    return m.group(1)
+    # The regex alternation constrains the capture to exactly "true"/"false",
+    # but the type checker only sees `str` from `m.group(1)`. The cast pins
+    # the runtime-guaranteed Literal without changing the value (M-0636).
+    return cast(TradeMixFlag, m.group(1))
 
 
-def _write_env_test(flag: str) -> None:
+def _write_env_test(flag: TradeMixFlag) -> None:
     """M-01: write TRADE_MIX_HAS_MAKER_TAKER to .env.test (gitignored).
 
     Preserves any other keys already in .env.test so this script can be re-run
@@ -100,6 +116,40 @@ def _write_env_test(flag: str) -> None:
 
 
 # --- M-03: SQL probe -------------------------------------------------------
+
+# M-0639: a DATABASE_URL is documented as a postgres DSN. The NewType is
+# documentation-only (it is still a `str` at runtime); the validator below
+# returns it so a caller that threads the value onward carries the "this
+# string was shape-checked" intent in the type.
+PostgresUrl = NewType("PostgresUrl", str)
+
+
+def _validate_postgres_url(db_url: str) -> PostgresUrl:
+    """M-0639: reject a DATABASE_URL whose scheme is not postgres(ql) or
+    that lacks a host, before it is handed to `psql`.
+
+    Mirrors `phase12_kill_switch._parse_postgres_url`'s scheme/host checks.
+    The prior code passed `os.getenv("DATABASE_URL")` verbatim to
+    `subprocess.run(["psql", "--dbname", db_url, ...])` after only a falsy
+    guard — a value like a bare Supabase project ref ("abcd1234") or an
+    `http://` paste would reach psql and fail with an opaque libpq error
+    instead of a clear "malformed DSN" diagnostic here.
+
+    Returns the (unchanged) URL so callers can use it inline. Raises
+    ValueError on a non-postgres scheme or a missing host.
+    """
+    parsed = urlparse((db_url or "").strip())
+    if parsed.scheme not in ("postgresql", "postgres"):
+        raise ValueError(
+            f"phase12_deploy: DATABASE_URL has unrecognized scheme "
+            f"{parsed.scheme!r}; expected 'postgresql' or 'postgres'."
+        )
+    if not parsed.hostname:
+        raise ValueError(
+            "phase12_deploy: DATABASE_URL has no host component."
+        )
+    return PostgresUrl(db_url)
+
 
 def _parse_probe_value(raw: str) -> float:
     """Reject NaN/inf/negative probe values — they would poison the
@@ -136,6 +186,37 @@ def _run_sql_probe() -> tuple[float, int]:
             "phase12_deploy: DATABASE_URL (or SUPABASE_DB_URL) not set; "
             "cannot run pg_column_size SQL probe (M-03)."
         )
+    # M-0639: validate the DSN shape before handing it to psql. A non-postgres
+    # scheme or a host-less value (bare project ref, http:// paste) would
+    # otherwise reach psql and surface as an opaque libpq error.
+    db_url = _validate_postgres_url(db_url)
+    # SECURITY F4 (red-team HIGH9): the DSN MUST NOT travel in psql's argv —
+    # process argv is world-readable via `ps auxe`, /proc/<pid>/cmdline, and
+    # CI/Railway argv-capturing logs, so a password-bearing DATABASE_URL passed
+    # as `--dbname db_url` leaks verbatim. Mirror the sibling kill-switch's
+    # proven pattern (phase12_kill_switch.measure_p999_via_sql): parse the DSN
+    # into PG* libpq env vars, strip ALL stale PG*/PGPASSFILE/PGSERVICEFILE keys
+    # from the inherited env (so an inherited PGPASSWORD/PGUSER/PGSERVICE cannot
+    # silently redirect the connection), overlay the DSN-derived PG* vars, and
+    # pass them via subprocess.run(env=...). The connection params travel via
+    # env; argv carries only the SQL flags. Reuse the kill-switch helper rather
+    # than duplicating the parser.
+    try:
+        pg_env = phase12_kill_switch._parse_postgres_url(db_url)
+    except ValueError as exc:
+        # Don't propagate the raw URL — it may embed the password. The redactor
+        # is defense in depth on the exception text.
+        raise RuntimeError(
+            f"phase12_deploy: DATABASE_URL is malformed: "
+            f"{phase12_kill_switch._redact_dsn(str(exc))}"
+        ) from None
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("PG")}
+    subprocess_env = {
+        **clean_env,
+        "PGPASSFILE": "",
+        "PGSERVICEFILE": "",
+        **pg_env,
+    }
     sql = SQL_PROBE_PATH.read_text()
     # Bounded timeout (see phase12_kill_switch._resolve_probe_timeout_s)
     # so a hung connection cannot park the deploy with no diagnostic.
@@ -144,9 +225,10 @@ def _run_sql_probe() -> tuple[float, int]:
     timeout_s = phase12_kill_switch._resolve_probe_timeout_s()
     try:
         result = subprocess.run(
-            ["psql", "--dbname", db_url, "-tAF,", "-c", sql],
+            ["psql", "-tAF,", "-c", sql],
             capture_output=True, text=True, check=False,
             timeout=timeout_s,
+            env=subprocess_env,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
@@ -155,8 +237,16 @@ def _run_sql_probe() -> tuple[float, int]:
             f"strategy_analytics held under FOR UPDATE)"
         ) from exc
     if result.returncode != 0:
+        # SECURITY (2026-05-27): psql echoes the connection URI in stderr on
+        # auth / SSL / parse failures — and this probe passes the DSN via
+        # `--dbname db_url`, so a DATABASE_URL with an embedded password would
+        # otherwise leak verbatim into the deploy log via this RuntimeError.
+        # Run stderr through the sibling kill-switch's `_redact_dsn` (single
+        # source of truth for the postgresql:// + key=value password scrubbers)
+        # before raising — same hardening as phase12_kill_switch's H-0623 path.
         raise RuntimeError(
-            f"phase12_deploy: SQL probe failed: {result.stderr.strip()}"
+            f"phase12_deploy: SQL probe failed: "
+            f"{phase12_kill_switch._redact_dsn(result.stderr.strip())}"
         )
     parsed: dict[str, str] = {}
     for line in result.stdout.strip().splitlines():

@@ -73,6 +73,34 @@ def client(monkeypatch, supabase_mock):
     """
     from routers import simulator as simulator_router
 
+    # The simulator route is rate-limited via the process-wide canonical
+    # Limiter singleton (services.rate_limit.limiter) keyed on remote IP —
+    # which is the constant ``testclient`` for every TestClient request. The
+    # in-memory count therefore PERSISTS across tests in the session: enough
+    # body-posting tests (~20+, all sharing `simulator:ip:testclient`) tip the
+    # 20/hour ceiling and the later tests 429 instead of exercising their
+    # branch. Reset the limiter storage per test so each starts with a clean
+    # bucket — tests are already designed to be independent. (Sibling suites
+    # reset their own per-module caches the same way; see _reset_cache_for_tests
+    # in test_process_key.py.)
+    #
+    # Guarded `getattr`: other test modules (test_c19_portfolio_fixes,
+    # test_routers_audit_2026_05_17) globally rebind `slowapi.Limiter` to a
+    # `_NoopLimiter` shim that has no `.reset()`. When one of those runs first
+    # in the same session the canonical limiter may be a noop instance — which
+    # enforces no limit anyway, so there is nothing to reset. Only reset a real
+    # slowapi Limiter.
+    _reset = getattr(simulator_router.limiter, "reset", None)
+    if callable(_reset):
+        _reset()
+
+    # S1: the per-USER in-handler sliding-window limiter
+    # (_simulator_user_attempts) also persists across tests in the session —
+    # every test posts with user_id="u-1", so without a reset the 21st request
+    # in the session 429s before reaching its branch. Clear it per test, the
+    # same way the slowapi limiter is reset above.
+    simulator_router._simulator_user_attempts.clear()
+
     monkeypatch.setattr(
         "routers.simulator.get_supabase", lambda: supabase_mock
     )
@@ -152,15 +180,25 @@ def _table_router(sb: MagicMock, *, portfolio_data, candidate_data,
     )
 
     sa_table = MagicMock()
-    # Two distinct shapes off strategy_analytics: portfolio (.in_) and
-    # candidate (.eq.maybe_single). The .select() returns a chain that
-    # supports both terminal verbs.
+    # G15-011/G15-012 (audit-2026-05-07, M-0972/M-0973): the router now
+    # fetches portfolio strategies AND the candidate in ONE
+    # `.select(...).in_(portfolio_ids + [candidate_id])` query, then splits
+    # the rows locally by strategy_id. The single `.in_()` result therefore
+    # carries BOTH the portfolio rows and the candidate row.
+    #
+    # `sa_portfolio_data` = the portfolio-strategy analytics rows.
+    # `sa_candidate_data` = the candidate's analytics row, or None when the
+    #   candidate has NO analytics row at all (row-missing branch). When it
+    #   is a dict it's appended into the IN result so `candidate_row_present`
+    #   becomes True and the router falls into the empty/None returns_series
+    #   branch (or the happy path). When it is None the candidate id is
+    #   simply absent from the IN result — the row-missing 400 branch.
+    in_rows = list(sa_portfolio_data or [])
+    if sa_candidate_data is not None:
+        in_rows = in_rows + [sa_candidate_data]
     sa_select = MagicMock()
     sa_select.in_.return_value.execute.return_value = MagicMock(
-        data=sa_portfolio_data
-    )
-    sa_select.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
-        data=sa_candidate_data
+        data=in_rows
     )
     sa_table.select.return_value = sa_select
 
@@ -325,6 +363,67 @@ class TestCandidateAlreadyPresent:
         r = _post(client)
         assert r.status_code == 400
         assert "already in this portfolio" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Gather error-PRECEDENCE (MED8, 2026-05-27)
+# ---------------------------------------------------------------------------
+
+
+@_BODY_PARSER_SKIP
+class TestGatherErrorPrecedence:
+    """The three initial reads now run concurrently via ``asyncio.gather``
+    (G15-012), but the router's docstring promises the post-gather check
+    ORDER preserves the original error precedence:
+
+        portfolio-404  >  candidate-404  >  empty-portfolio-400
+
+    The existing per-branch tests each fail exactly ONE read, so a reorder
+    of the post-gather ``if`` checks would not be caught by them (with only
+    one failing read, any order yields the same status). These two tests
+    fail MULTIPLE reads at once so the precedence is pinned: they pass on
+    the current check order and would fail if the order were swapped (e.g.
+    if a future edit checked ``portfolio_strategies`` before
+    ``portfolio_result``, test (a) would return 400 instead of 404).
+    """
+
+    def test_all_three_reads_fail_portfolio_404_wins(self, client, supabase_mock):
+        """(a) portfolio missing AND candidate missing AND portfolio empty
+        → the portfolio-not-found 404 wins (first post-gather check). A
+        reorder that surfaced the candidate-404 or the empty-portfolio-400
+        first would break this."""
+        _table_router(
+            supabase_mock,
+            portfolio_data=None,            # ownership read fails
+            candidate_data=None,            # candidate read also fails
+            portfolio_strategies_data=[],   # portfolio is also empty
+            sa_portfolio_data=[],
+            sa_candidate_data=None,
+        )
+
+        r = _post(client)
+        assert r.status_code == 404
+        assert r.json()["detail"] == "Portfolio not found"
+
+    def test_candidate_missing_and_portfolio_empty_candidate_404_wins(
+        self, client, supabase_mock
+    ):
+        """(b) portfolio OK, candidate missing, portfolio empty → the
+        candidate-404 ('not published') wins over the empty-portfolio-400.
+        Pins that the candidate check is evaluated BEFORE the
+        portfolio_strategies check after the gather."""
+        _table_router(
+            supabase_mock,
+            portfolio_data={"id": "p-1"},   # ownership OK
+            candidate_data=None,            # candidate read fails
+            portfolio_strategies_data=[],   # portfolio is empty too
+            sa_portfolio_data=[],
+            sa_candidate_data=None,
+        )
+
+        r = _post(client)
+        assert r.status_code == 404
+        assert "not published" in r.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -1100,3 +1199,500 @@ class TestG15_007_ExceptionAuditAndCorrelationId:
         # The original 500 is preserved; the audit-emit failure was
         # logged but did not mask the synthetic ValueError.
         assert r.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 — M-0975 / M-0976: _records_to_series tolerates malformed
+# records instead of raising KeyError (unhandled 500)
+# ---------------------------------------------------------------------------
+
+
+class TestM0975_0976_RecordsToSeriesToleratesMalformed:
+    """M-0975 (type-design) + M-0976 (silent-failure-hunter) —
+    ``returns_series`` is worker-written JSONB. A single record missing
+    ``date`` or ``value`` (legacy schema, partial backfill, manual SQL
+    fixup) previously raised KeyError in the ``[r['date'] for r in raw]``
+    comprehension. That propagated up through ``portfolio_simulator`` as an
+    unhandled 500 — taking down the simulator for ANY portfolio that
+    contained one corrupted strategy row.
+
+    Post-fix the helper skips malformed entries (warns once) and keeps the
+    valid ones; it only returns None when NOTHING usable remains. Pre-fix
+    every test below raised KeyError / TypeError inside the comprehension.
+    """
+
+    def test_record_missing_value_key_is_skipped_not_raised(self):
+        from routers.simulator import _records_to_series
+
+        raw = [
+            {"date": "2026-01-01", "value": 0.01},
+            {"date": "2026-01-02"},  # missing 'value' — pre-fix KeyError
+            {"date": "2026-01-03", "value": 0.03},
+        ]
+        series = _records_to_series(raw, name="s-1")
+        assert series is not None
+        # The two well-formed records survive; the malformed one is dropped.
+        assert len(series) == 2
+
+    def test_record_missing_date_key_is_skipped_not_raised(self):
+        from routers.simulator import _records_to_series
+
+        raw = [
+            {"value": 0.01},  # missing 'date' — pre-fix KeyError
+            {"date": "2026-01-02", "value": 0.02},
+        ]
+        series = _records_to_series(raw, name="s-1")
+        assert series is not None
+        assert len(series) == 1
+
+    def test_non_dict_record_is_skipped_not_raised(self):
+        """A scalar / list element inside the JSONB array (storage drift)
+        must be skipped, not crash with TypeError in ``r.get``."""
+        from routers.simulator import _records_to_series
+
+        raw = [
+            {"date": "2026-01-01", "value": 0.01},
+            "not-a-dict",  # pre-fix: TypeError on str['date']
+            ["also", "not", "a", "dict"],
+            {"date": "2026-01-02", "value": 0.02},
+        ]
+        series = _records_to_series(raw, name="s-1")  # type: ignore[list-item]
+        assert series is not None
+        assert len(series) == 2
+
+    def test_all_records_malformed_returns_none(self):
+        """When every record is malformed the helper returns None so the
+        router falls into its 'No returns data available' 400 path — NOT a
+        500. This is the contract the finding asked for: degrade to 400,
+        don't crash to 500."""
+        from routers.simulator import _records_to_series
+
+        raw = [{"ts": "2026-01-01", "val": 0.01}, {"foo": "bar"}]
+        assert _records_to_series(raw, name="s-1") is None
+
+    @_BODY_PARSER_SKIP
+    def test_malformed_portfolio_returns_row_does_not_500(
+        self, client, supabase_mock
+    ):
+        """Integration: a single corrupted portfolio returns_series row
+        (legacy {ts,val} keys) must NOT 500 the whole simulator. Pre-fix
+        the KeyError propagated to an unhandled 500; post-fix the bad
+        record is skipped and the run proceeds on the remaining valid
+        strategy."""
+        self_good = _build_returns_records(60)
+        _table_router(
+            supabase_mock,
+            portfolio_data={"id": "p-1"},
+            candidate_data={
+                "id": "c-1", "name": "Candidate Alpha", "status": "published",
+            },
+            portfolio_strategies_data=[
+                {"strategy_id": "s-1", "current_weight": 0.5},
+                {"strategy_id": "s-2", "current_weight": 0.5},
+            ],
+            sa_portfolio_data=[
+                {
+                    "strategy_id": "s-1",
+                    # Legacy malformed shape — pre-fix this raised KeyError
+                    # and 500'd the endpoint for the whole portfolio.
+                    "returns_series": [{"ts": "2026-01-01", "val": 0.01}],
+                },
+                {"strategy_id": "s-2", "returns_series": self_good},
+            ],
+            sa_candidate_data={
+                "strategy_id": "c-1", "returns_series": _build_returns_records(60),
+            },
+        )
+
+        r = _post(client)
+        # The malformed s-1 row is skipped; s-2 + candidate carry the run.
+        assert r.status_code == 200, r.text
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 — M-0974: SimulatorRequest rejects empty-string ids (422)
+# ---------------------------------------------------------------------------
+
+
+class TestM0974_RequestFieldMinLength:
+    """M-0974 (type-design) — the request model used bare ``str`` for all
+    three ids, so an empty string parsed and fell through to a Supabase
+    no-rows query (a silent 404 instead of a clear 422). The fix mirrors
+    the TS contract (``z.string().min(1)``) with ``Field(min_length=1)``,
+    rejecting empty / NULL-byte-only ids at the Pydantic boundary.
+
+    Pre-fix every assertion below returned 404 (DB no-rows) or 400, not
+    the 422 the validation layer now produces.
+    """
+
+    def test_empty_portfolio_id_returns_422(self, client):
+        r = client.post(
+            "/api/simulator",
+            json={
+                "portfolio_id": "",
+                "candidate_strategy_id": "c-1",
+                "user_id": "u-1",
+            },
+        )
+        assert r.status_code == 422
+
+    def test_empty_candidate_strategy_id_returns_422(self, client):
+        r = client.post(
+            "/api/simulator",
+            json={
+                "portfolio_id": "p-1",
+                "candidate_strategy_id": "",
+                "user_id": "u-1",
+            },
+        )
+        assert r.status_code == 422
+
+    def test_empty_user_id_returns_422(self, client):
+        r = client.post(
+            "/api/simulator",
+            json={
+                "portfolio_id": "p-1",
+                "candidate_strategy_id": "c-1",
+                "user_id": "",
+            },
+        )
+        assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 — M-0972 / M-0973: single IN query + parallel fan-out
+# ---------------------------------------------------------------------------
+
+
+@_BODY_PARSER_SKIP
+class TestM0972_SingleStrategyAnalyticsQuery:
+    """M-0972 (performance) — portfolio + candidate returns must be fetched
+    in ONE ``strategy_analytics`` query (`.in_(portfolio_ids + [candidate])`)
+    instead of a portfolio ``.in_()`` followed by a separate candidate
+    ``.eq().maybe_single()``. Pre-fix the router issued two queries; the
+    candidate ``.maybe_single`` call is now gone.
+    """
+
+    def test_candidate_fetched_via_single_in_query(
+        self, client, supabase_mock
+    ):
+        """The candidate id is included in the strategy_analytics `.in_`
+        filter and NO separate `.eq().maybe_single()` candidate query is
+        issued against strategy_analytics."""
+        # Track the args passed to strategy_analytics .select().in_().
+        in_calls: list = []
+
+        sa_select = MagicMock()
+
+        def _capture_in(col, ids):
+            in_calls.append((col, list(ids)))
+            m = MagicMock()
+            m.execute.return_value = MagicMock(data=[
+                {"strategy_id": "s-1", "returns_series": _build_returns_records(60)},
+                {"strategy_id": "c-1", "returns_series": _build_returns_records(60)},
+            ])
+            return m
+
+        sa_select.in_.side_effect = _capture_in
+        # A maybe_single path MUST NOT be exercised post-fix. If the router
+        # regresses to the two-query shape this returns a MagicMock whose
+        # .data is itself a MagicMock (truthy) — but we assert on in_calls
+        # so the contract is pinned on the single-query shape directly.
+        sa_table = MagicMock()
+        sa_table.select.return_value = sa_select
+
+        portfolio_table = MagicMock()
+        portfolio_table.select.return_value.eq.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(
+            data={"id": "p-1"}
+        )
+        strategies_table = MagicMock()
+        strategies_table.select.return_value.eq.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
+            data={"id": "c-1", "name": "Cand", "status": "published"}
+        )
+        ps_table = MagicMock()
+        ps_table.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[{"strategy_id": "s-1", "current_weight": 1.0}]
+        )
+
+        def _by_name(name):
+            return {
+                "portfolios": portfolio_table,
+                "strategies": strategies_table,
+                "portfolio_strategies": ps_table,
+                "strategy_analytics": sa_table,
+            }.get(name, MagicMock())
+
+        supabase_mock.table.side_effect = _by_name
+
+        r = _post(client)
+        assert r.status_code == 200, r.text
+        # Exactly one strategy_analytics .in_ call, and it includes BOTH the
+        # portfolio strategy id and the candidate id.
+        assert len(in_calls) == 1, f"expected 1 in_ call, got {in_calls}"
+        _col, ids = in_calls[0]
+        assert "s-1" in ids
+        assert "c-1" in ids
+
+
+class TestM0973_IndependentFetchesParallelised:
+    """M-0973 (performance) — the three independent initial reads
+    (portfolio ownership, candidate published-check, portfolio_strategies)
+    must be fanned out concurrently via ``asyncio.gather`` over
+    ``asyncio.to_thread`` rather than awaited serially. We assert the
+    source uses the parallel shape (the latency win is otherwise invisible
+    to a black-box test, and a regression to the serial form would silently
+    re-introduce the ~90-180ms serial RTT the finding flagged)."""
+
+    def test_router_uses_asyncio_gather_for_initial_fetches(self):
+        import inspect
+
+        from routers import simulator as simulator_router
+
+        src = inspect.getsource(simulator_router.portfolio_simulator)
+        assert "asyncio.gather(" in src, (
+            "Initial independent reads must be fanned out with "
+            "asyncio.gather; a serial regression re-introduces the RTT "
+            "the M-0973 finding flagged."
+        )
+        assert "asyncio.to_thread(" in src, (
+            "The sync supabase-py client must be offloaded via "
+            "asyncio.to_thread so gather actually parallelises (and the "
+            "event loop is not blocked)."
+        )
+
+    @_BODY_PARSER_SKIP
+    def test_initial_fetches_run_concurrently(self, monkeypatch):
+        """Behavioural proof: the three initial reads overlap in time.
+
+        Each fetch sleeps briefly inside its thread; if the router awaited
+        them serially the total would be ~3×; concurrent fan-out keeps it
+        near 1×. We assert the concurrency window held rather than timing
+        the wall clock precisely (CI jitter), by counting the max number of
+        fetches in-flight simultaneously."""
+        import threading
+        import time
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from routers import simulator as simulator_router
+
+        in_flight = {"now": 0, "max": 0}
+        lock = threading.Lock()
+
+        class _SleepyChain:
+            """A chain whose terminal .execute() sleeps, recording overlap."""
+
+            def __init__(self, data):
+                self._data = data
+
+            def __getattr__(self, _name):
+                # Any chained verb (.select/.eq/.single/.maybe_single/.in_)
+                # returns self so the terminal .execute() is reachable.
+                return lambda *a, **k: self
+
+            def execute(self):
+                with lock:
+                    in_flight["now"] += 1
+                    in_flight["max"] = max(in_flight["max"], in_flight["now"])
+                time.sleep(0.05)
+                with lock:
+                    in_flight["now"] -= 1
+                return MagicMock(data=self._data)
+
+        def _by_name(name):
+            if name == "portfolios":
+                return _SleepyChain({"id": "p-1"})
+            if name == "strategies":
+                return _SleepyChain(
+                    {"id": "c-1", "name": "Cand", "status": "published"}
+                )
+            if name == "portfolio_strategies":
+                return _SleepyChain(
+                    [{"strategy_id": "s-1", "current_weight": 1.0}]
+                )
+            if name == "strategy_analytics":
+                return _SleepyChain([
+                    {"strategy_id": "s-1",
+                     "returns_series": _build_returns_records(60)},
+                    {"strategy_id": "c-1",
+                     "returns_series": _build_returns_records(60)},
+                ])
+            return _SleepyChain(None)
+
+        sb = MagicMock()
+        sb.table.side_effect = _by_name
+        monkeypatch.setattr("routers.simulator.get_supabase", lambda: sb)
+        monkeypatch.setattr(
+            "routers.simulator.log_audit_event", MagicMock(return_value=None)
+        )
+
+        app = FastAPI()
+        app.state.limiter = simulator_router.limiter
+        app.include_router(simulator_router.router)
+        tc = TestClient(app)
+
+        r = tc.post(
+            "/api/simulator",
+            json={
+                "portfolio_id": "p-1",
+                "candidate_strategy_id": "c-1",
+                "user_id": "u-1",
+            },
+        )
+        assert r.status_code == 200, r.text
+        # The three initial reads overlap → at least 2 in flight at once.
+        # A serial regression would cap max at 1.
+        assert in_flight["max"] >= 2, (
+            "Initial reads did not overlap — asyncio.gather fan-out "
+            f"regressed to serial awaits (max in-flight={in_flight['max']})."
+        )
+
+
+# ---------------------------------------------------------------------------
+# S1 (red-team MED8) — per-USER rate limit (not per-IP / NAT-shared)
+# ---------------------------------------------------------------------------
+
+
+class TestS1_PerUserRateLimit:
+    """S1 — the simulator's effective quota must be PER USER, keyed on the
+    server-set ``req.user_id``, not per remote IP.
+
+    Behind Vercel's egress NAT every tenant collapses into one shared IP
+    bucket, so the per-IP @limiter.limit("20/hour") starves all tenants once
+    the first few users each hour exhaust it. The in-handler
+    ``_check_simulator_user_rate`` gives each user_id an independent 20/hour
+    window. ``user_id`` is server-set by Next.js behind the X-Service-Key
+    boundary, so (unlike the rejected spoofable ``X-User-Id`` header) it is a
+    safe key here.
+    """
+
+    def _reset(self):
+        from routers import simulator as simulator_router
+        simulator_router._simulator_user_attempts.clear()
+
+    def test_single_user_exceeding_limit_gets_blocked(self):
+        from routers import simulator as simulator_router
+
+        self._reset()
+        limit = simulator_router._SIMULATOR_USER_RATE_LIMIT
+        # Exactly `limit` calls are admitted...
+        for i in range(limit):
+            assert simulator_router._check_simulator_user_rate("user-solo") is True, (
+                f"call {i + 1}/{limit} must be admitted (under budget)"
+            )
+        # ...the next one is rejected (caller maps False → HTTP 429).
+        assert simulator_router._check_simulator_user_rate("user-solo") is False, (
+            "the (limit+1)-th call within the window must be rejected"
+        )
+
+    def test_two_users_have_independent_quotas(self):
+        from routers import simulator as simulator_router
+
+        self._reset()
+        limit = simulator_router._SIMULATOR_USER_RATE_LIMIT
+        # Alice exhausts her entire window.
+        for _ in range(limit):
+            assert simulator_router._check_simulator_user_rate("alice") is True
+        assert simulator_router._check_simulator_user_rate("alice") is False, (
+            "alice is now over budget"
+        )
+        # Bob — a DIFFERENT user on the same shared NAT IP — is completely
+        # unaffected. This is the whole point of S1: one tenant exhausting the
+        # quota must NOT 429 another tenant. Pre-fix (per-IP keying) bob would
+        # already be 429'd because he shares alice's IP bucket.
+        assert simulator_router._check_simulator_user_rate("bob") is True, (
+            "bob must have his OWN quota — alice exhausting hers must not "
+            "starve him (the per-IP / NAT-shared-bucket bug S1 fixes)"
+        )
+
+    def test_missing_user_id_passes_through(self):
+        """SimulatorRequest enforces user_id min_length=1, so an empty user_id
+        never reaches here in practice; the defensive pass-through must not
+        crash."""
+        from routers import simulator as simulator_router
+
+        self._reset()
+        assert simulator_router._check_simulator_user_rate("") is True
+        assert simulator_router._check_simulator_user_rate(None) is True
+
+    def test_check_uses_wall_clock_not_monotonic(self):
+        """The window comparison must use wall clock (time.time) so a worker
+        recycle / cold start does not invalidate every stored timestamp (same
+        contract as routers/portfolio._check_sliding_window_rate)."""
+        import inspect
+
+        from routers import simulator as simulator_router
+
+        src = inspect.getsource(simulator_router._check_simulator_user_rate)
+        assert "time.time()" in src
+        assert "monotonic" not in src, (
+            "per-user simulator limiter must use wall clock; monotonic restarts "
+            "at 0 on a worker recycle and would free-refill every quota"
+        )
+
+    def test_cache_evicts_oldest_at_cap(self, monkeypatch):
+        """The per-user bucket dict is LRU-bounded so an attacker rotating
+        user_ids cannot grow it without bound (mirrors the portfolio limiter
+        cap)."""
+        from routers import simulator as simulator_router
+
+        self._reset()
+        # Shrink the cap so the test is fast.
+        monkeypatch.setattr(simulator_router, "_SIMULATOR_USER_CACHE_MAX", 5)
+        for i in range(20):
+            simulator_router._check_simulator_user_rate(f"user-{i}")
+        assert len(simulator_router._simulator_user_attempts) <= 5, (
+            "per-user bucket cache must be LRU-bounded so rotating user_ids "
+            "cannot leak unbounded memory"
+        )
+
+
+@_BODY_PARSER_SKIP
+class TestS1_PerUserRateLimitIntegration:
+    """S1 integration: the handler returns 429 for a user over budget, while a
+    different user on the same TestClient (same remote IP) sails through."""
+
+    def _stage(self, supabase_mock):
+        _table_router(
+            supabase_mock,
+            portfolio_data={"id": "p-1"},
+            candidate_data={
+                "id": "c-1", "name": "Candidate Alpha", "status": "published",
+            },
+            portfolio_strategies_data=[
+                {"strategy_id": "s-1", "current_weight": 0.6},
+                {"strategy_id": "s-2", "current_weight": 0.4},
+            ],
+            sa_portfolio_data=[
+                {"strategy_id": "s-1", "returns_series": _build_returns_records(60)},
+                {"strategy_id": "s-2", "returns_series": _build_returns_records(60)},
+            ],
+            sa_candidate_data={
+                "strategy_id": "c-1", "returns_series": _build_returns_records(60),
+            },
+        )
+
+    def test_over_budget_user_429s_other_user_unaffected(
+        self, client, supabase_mock
+    ):
+        from routers import simulator as simulator_router
+
+        self._stage(supabase_mock)
+        limit = simulator_router._SIMULATOR_USER_RATE_LIMIT
+
+        # Pre-fill alice's window to the cap so her NEXT real request 429s.
+        for _ in range(limit):
+            simulator_router._check_simulator_user_rate("alice")
+
+        # Alice is over budget → 429 (per-user enforcement, NOT the per-IP
+        # decorator, which is reset fresh by the fixture).
+        r_alice = _post(client, user_id="alice")
+        assert r_alice.status_code == 429, r_alice.text
+        assert "rate limit" in r_alice.json()["detail"].lower()
+
+        # Bob shares the SAME TestClient remote IP but has his own quota →
+        # 200. Pre-fix (per-IP keying) bob would also be 429'd. This is the
+        # NAT-shared-bucket starvation S1 eliminates.
+        r_bob = _post(client, user_id="bob")
+        assert r_bob.status_code == 200, r_bob.text

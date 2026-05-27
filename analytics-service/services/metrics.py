@@ -340,6 +340,45 @@ def compute_all_metrics(
     if len(returns) < 2:
         raise ValueError("Insufficient trade history. At least 2 trading days required.")
 
+    # Audit 2026-05-07 M-0693: fail-loud input-shape precondition (Rule 12).
+    # The body below assumes a DatetimeIndex (returns.index[-1].replace(day=1),
+    # .year, d.strftime in _daily_returns_grid_from_series / _format_series_points)
+    # and a float dtype (np.log1p in _log_returns_series, the resample/quantile
+    # paths). A plain RangeIndex or an int-dtype series previously failed DEEP
+    # inside a helper (TypeError swallowed by a per-scalar try/except, or silent
+    # truncation in np.log1p) — producing wrong output or a misattributed
+    # Railway log instead of a clear contract violation at the boundary. Check
+    # both at the top so the caller sees exactly which precondition was broken.
+    if not isinstance(returns.index, pd.DatetimeIndex):
+        raise TypeError(
+            "compute_all_metrics requires a DatetimeIndex on `returns`; got "
+            f"{type(returns.index).__name__}. The metrics pipeline indexes by "
+            "calendar date (mtd/ytd slices, monthly resample, per-date series)."
+        )
+    if not pd.api.types.is_float_dtype(returns):
+        raise TypeError(
+            "compute_all_metrics requires a float-dtype `returns` series; got "
+            f"dtype={returns.dtype}. Integer/object dtypes silently truncate in "
+            "np.log1p and the cumprod equity path — convert with "
+            "`returns.astype('float64')` at the ingestion boundary."
+        )
+    # F3 (red-team MED8): the body assumes the index is ASCENDING by date.
+    # mtd/ytd window construction reads `returns.index[-1]` as "most recent",
+    # and `tail(126)`/`tail(63)` (six_month/three_month) assume the LAST rows
+    # are the most recent. A descending or shuffled DatetimeIndex would pass the
+    # DatetimeIndex + float-dtype checks above yet silently produce wrong
+    # windows (e.g. mtd computed from the OLDEST month, three_month from the
+    # FIRST 63 days). Fail loud (Rule 12) so the caller fixes ordering at the
+    # ingestion boundary rather than shipping a mislabeled factsheet.
+    if not returns.index.is_monotonic_increasing:
+        raise ValueError(
+            "compute_all_metrics requires an ascending (monotonic-increasing) "
+            "DatetimeIndex on `returns`; the index is not sorted oldest-to-newest. "
+            "mtd/ytd slices and tail(126)/tail(63) windows assume the last rows "
+            "are the most recent — sort with `returns.sort_index()` at the "
+            "ingestion boundary."
+        )
+
     # Red-team F3: NaN in `returns` propagates through `cumprod` so one upstream
     # gap day silently truncates the equity curve at the gap (post-NaN rows
     # drop out at serialization). For chart-feeding paths, treat NaN as a
@@ -363,7 +402,17 @@ def compute_all_metrics(
             "(returns_len=%d). Equity curve may show sign flips — check upstream CSV.",
             catastrophic_count, len(returns),
         )
-    returns_for_chart = returns.fillna(0)
+    # F7 (red-team HIGH7): clamp the chart series' lower bound to _LOG_RETURN_FLOOR
+    # (= -1 + 1e-9) BEFORE the cumprod equity and to_drawdown_series. The log-
+    # returns chart already clamps in `_log_returns_series`, but the linear equity
+    # `(1+returns_for_chart).cumprod()` and `to_drawdown_series` only WARN above —
+    # an r <= -1 day produced a non-positive multiplier, giving a negative,
+    # sign-oscillating equity curve and a drawdown below -100%. Clamping here makes
+    # all three series (equity, drawdown, log-returns) treat a >=100%-loss day
+    # consistently: equity stays non-negative and drawdown is bounded at -1.0.
+    # No-op for normal data (every value > -1), so golden/parity fixtures are
+    # unaffected.
+    returns_for_chart = returns.fillna(0).clip(lower=_LOG_RETURN_FLOOR)
 
     # Core metrics (safe_float handles NaN/Inf from quantstats)
     # NEW-C02-05: cumulative_return scalar uses raw returns (NaN-dropped, same
@@ -717,21 +766,42 @@ def compute_all_metrics(
     # Benchmark metrics (single greeks() call for alpha + beta)
     if benchmark_returns is not None and len(benchmark_returns) > 0:
         try:
-            greeks = qs.stats.greeks(returns, benchmark_returns)
-            metrics_json["alpha"] = _safe_float(greeks.get("alpha", 0))
-            metrics_json["beta"] = _safe_float(greeks.get("beta", 0))
+            # M1 (red-team 2026-05-27): align ONCE on the inner-join
+            # intersection and feed the SAME (returns, benchmark) pair into
+            # EVERY benchmark-relative metric (alpha/beta via greeks,
+            # correlation, info_ratio, treynor) so they are mutually
+            # consistent — all computed over the exact same dates.
+            #
+            # Previously alpha/beta came from `qs.stats.greeks(returns,
+            # benchmark_returns)`, which internally calls quantstats'
+            # `_prepare_benchmark(benchmark, returns.index)` — reindexing the
+            # benchmark onto the strategy's FULL date range with bfill. The
+            # other metrics used `returns.align(benchmark, join="inner")` (the
+            # intersection only). On a calendar mismatch (24/7 crypto strategy
+            # vs a benchmark with weekend/holiday gaps) alpha/beta were over
+            # the gap-filled full range while correlation/info_ratio were over
+            # the shorter intersection — internally inconsistent, and IR's
+            # tracking error was on a silently-truncated sample. Feeding the
+            # single inner-join pair to greeks() too removes that skew. When
+            # the calendars already match (e.g. the golden fixture) the
+            # intersection equals the full range, so the stored values are
+            # unchanged.
             aligned = returns.align(benchmark_returns, join="inner")
-            if len(aligned[0]) > 1:
-                metrics_json["correlation"] = _safe_float(aligned[0].corr(aligned[1]))
-                excess = aligned[0] - aligned[1]
+            aligned_returns, aligned_benchmark = aligned[0], aligned[1]
+            if len(aligned_returns) > 1:
+                greeks = qs.stats.greeks(aligned_returns, aligned_benchmark)
+                metrics_json["alpha"] = _safe_float(greeks.get("alpha", 0))
+                metrics_json["beta"] = _safe_float(greeks.get("beta", 0))
+                metrics_json["correlation"] = _safe_float(aligned_returns.corr(aligned_benchmark))
+                excess = aligned_returns - aligned_benchmark
                 te = float(excess.std() * np.sqrt(252))
                 if te > 0:
                     metrics_json["info_ratio"] = _safe_float(excess.mean() * 252 / te)
                 beta = metrics_json.get("beta", 0)
                 if beta and beta != 0 and cagr is not None:
                     metrics_json["treynor"] = _safe_float(cagr / beta)
-            if len(aligned[0]) >= 90:
-                metrics_json["btc_rolling_correlation_90d"] = _rolling_correlation(aligned[0], aligned[1], 90)
+            if len(aligned_returns) >= 90:
+                metrics_json["btc_rolling_correlation_90d"] = _rolling_correlation(aligned_returns, aligned_benchmark, 90)
         except Exception as exc:  # noqa: BLE001
             # audit-2026-05-07 G11.E.2: this `try` historically wrapped the entire
             # benchmark-metrics fan-out (greeks/alpha/beta/correlation/info_ratio/

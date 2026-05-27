@@ -1792,3 +1792,52 @@ class TestAttributeDimensionMalformedBreakdown:
         }
         result = _attribute_dimension({"kind": "allocated"}, sb)
         assert result == ALL_DIMENSIONS
+
+    def test_three_way_tie_credits_all_tied_dimensions_deterministically(self):
+        """F_fb (red-team 2026-05-27): a top score tied across 3 dimensions
+        must credit ALL 3, not just the alphabetically-last one.
+
+        Pre-fix `max(sorted(candidates.keys()), key=...)` returned a single
+        dimension (the last tied key in sort order), so two of the three tied
+        dimensions got ZERO credit for the outcome. This biases their
+        success_rate by an alphabetical accident over many ties. The fix splits
+        credit across every tied-max dimension. The result must also be
+        order-independent: scrambling the dict insertion order yields the SAME
+        tuple (ALL_DIMENSIONS fixed order)."""
+        from services.feedback_engine import _attribute_dimension
+        # portfolio_fit / track_record / capacity_fit all tied at the max (0.5);
+        # preference_fit is strictly lower (0.1).
+        sb = {
+            "portfolio_fit": 0.5,
+            "preference_fit": 0.1,
+            "track_record": 0.5,
+            "capacity_fit": 0.5,
+        }
+        result = _attribute_dimension({"kind": "allocated"}, sb)
+        assert result == ("W_PORTFOLIO_FIT", "W_TRACK_RECORD", "W_CAPACITY_FIT"), (
+            "all three tied-max dimensions must be credited, in ALL_DIMENSIONS "
+            f"order — got {result}"
+        )
+        assert "W_PREFERENCE_FIT" not in result  # strictly-lower dim excluded
+
+        # Determinism: a different dict insertion order produces the SAME tuple.
+        sb_scrambled = {
+            "capacity_fit": 0.5,
+            "track_record": 0.5,
+            "preference_fit": 0.1,
+            "portfolio_fit": 0.5,
+        }
+        assert _attribute_dimension({"kind": "allocated"}, sb_scrambled) == result
+
+    def test_two_way_tie_credits_both_dimensions(self):
+        """F_fb: a 2-way tie at the max credits both tied dimensions (not the
+        alphabetically-last alone)."""
+        from services.feedback_engine import _attribute_dimension
+        sb = {
+            "portfolio_fit": 0.8,
+            "preference_fit": 0.2,
+            "track_record": 0.8,
+            "capacity_fit": 0.3,
+        }
+        result = _attribute_dimension({"kind": "allocated"}, sb)
+        assert result == ("W_PORTFOLIO_FIT", "W_TRACK_RECORD")

@@ -40,7 +40,7 @@ def client() -> TestClient:
 
 
 # ---------------------------------------------------------------------------
-# _kill_switch_enabled fail-open contract
+# _engine_is_enabled fail-open contract
 # ---------------------------------------------------------------------------
 
 
@@ -49,7 +49,7 @@ class TestKillSwitchEnabled:
     SECURITY-relevant change that should require an explicit test update."""
 
     def test_returns_false_when_row_disabled(self, monkeypatch):
-        from routers.match import _kill_switch_enabled
+        from routers.match import _engine_is_enabled
 
         sb = MagicMock()
         sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
@@ -57,10 +57,10 @@ class TestKillSwitchEnabled:
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
 
-        assert _kill_switch_enabled() is False
+        assert _engine_is_enabled() is False
 
     def test_returns_true_when_no_row(self, monkeypatch):
-        from routers.match import _kill_switch_enabled
+        from routers.match import _engine_is_enabled
 
         sb = MagicMock()
         sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
@@ -69,20 +69,20 @@ class TestKillSwitchEnabled:
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
 
         # Default: no row → engine runs.
-        assert _kill_switch_enabled() is True
+        assert _engine_is_enabled() is True
 
     def test_fail_open_on_supabase_exception(self, monkeypatch, caplog):
         """A Supabase exception logs at ERROR and the engine stays running.
         Flipping to fail-closed would silently disable the engine on any
         transient DB blip — a worse failure mode than the (loud) contract."""
-        from routers.match import _kill_switch_enabled
+        from routers.match import _engine_is_enabled
 
         sb = MagicMock()
         sb.table.return_value.select.side_effect = RuntimeError("db down")
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
 
         with caplog.at_level("ERROR", logger="quantalyze.analytics"):
-            result = _kill_switch_enabled()
+            result = _engine_is_enabled()
 
         assert result is True
         assert any(
@@ -97,13 +97,13 @@ class TestKillSwitchEnabled:
 
 
 class TestRecordsToSeries:
-    """M-0606 — ``_records_to_series`` converts [{date,value},...] JSONB into
-    a DatetimeIndex pd.Series. It is the only adapter feeding
-    ``_load_candidate_universe`` across the whole strategy universe, but had
-    zero direct tests. The `if not isinstance(raw, list) or not raw` guard
-    handles None/empty/non-list, but the per-row dict access (`r['date']`,
-    `r['value']`) is UNGUARDED — a single malformed JSONB row aborts the
-    entire cron for that allocator.
+    """M-0606 / M-0604 — ``_records_to_series`` converts [{date,value},...]
+    JSONB into a DatetimeIndex pd.Series. It is the only adapter feeding
+    ``_load_candidate_universe`` across the whole strategy universe. The
+    `if not isinstance(raw, list) or not raw` guard handles None/empty/
+    non-list; M-0604 added per-row defensiveness so a malformed JSONB row
+    (missing 'date'/'value' or non-dict) is SKIPPED + logged rather than
+    raising KeyError and aborting the entire cron for that allocator.
     """
 
     def test_none_returns_none(self):
@@ -139,21 +139,41 @@ class TestRecordsToSeries:
         assert series.name == "strat-1"
         assert list(series.values) == [0.01, -0.005]
 
-    def test_malformed_row_missing_date_raises_keyerror(self):
-        """LOCK current behaviour: a row missing the 'date' key raises
-        KeyError because the dict access is unguarded. This crashes
-        ``_load_candidate_universe`` and aborts the cron for that allocator.
-
-        PRODUCTION FOLLOW-UP (cannot fix in a test): consider a per-row
-        try/skip in routers.match._records_to_series so one malformed row
-        is dropped + logged rather than killing the whole allocator's
-        recompute. This test pins the current crash semantics so any change
-        to that contract is deliberate, not accidental.
+    def test_malformed_row_missing_date_is_skipped_not_raised(self, caplog):
+        """M-0604: a row missing the 'date' (or 'value') key must be SKIPPED
+        with a WARNING, NOT raise KeyError. The unguarded dict access used to
+        propagate KeyError up through _load_candidate_universe →
+        _score_one_allocator → recompute() and 500 the whole cron for every
+        allocator that touched the offending strategy. The valid rows must
+        still produce a Series; the malformed row is dropped + logged.
         """
+        import logging
+        import pandas as pd
         from routers.match import _records_to_series
 
-        with pytest.raises(KeyError):
-            _records_to_series([{"value": 0.01}])  # missing 'date'
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            series = _records_to_series(
+                [
+                    {"date": "2026-01-01", "value": 0.01},
+                    {"value": 0.02},  # missing 'date' — must be skipped
+                    {"date": "2026-01-03", "value": 0.03},
+                ],
+                name="strat-skip",
+            )
+        assert series is not None
+        assert isinstance(series.index, pd.DatetimeIndex)
+        assert list(series.values) == [0.01, 0.03], "only the valid rows survive"
+        assert any("dropped" in r.message for r in caplog.records), (
+            "a WARNING must be logged for the dropped malformed record"
+        )
+
+    def test_all_malformed_rows_returns_none(self):
+        """M-0604: when EVERY record is malformed, return None (treat as
+        missing-returns, which the engine handles) rather than raising or
+        building an empty Series."""
+        from routers.match import _records_to_series
+
+        assert _records_to_series([{"value": 0.01}, {"date": "2026-01-01"}]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +185,7 @@ class TestRecomputeEndpoint:
     def test_kill_switch_off_returns_disabled_status(self, client, monkeypatch):
         """Every branch carries a `status` discriminator; kill-switch off → 'disabled'."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: False)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: False)
 
         r = client.post(
             "/api/match/recompute",
@@ -179,7 +199,7 @@ class TestRecomputeEndpoint:
     def test_skip_path_returns_skipped_status(self, client, monkeypatch):
         """Skipped branch carries status='skipped' + reason."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
 
         async def _skip(allocator_id, force):
             return True
@@ -198,7 +218,7 @@ class TestRecomputeEndpoint:
     def test_empty_universe_returns_400(self, client, monkeypatch):
         """Empty candidate universe → 400."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
             return False
@@ -218,7 +238,7 @@ class TestRecomputeEndpoint:
     def test_score_exception_returns_500(self, client, monkeypatch):
         """_score_one_allocator raising → 500."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
             return False
@@ -262,7 +282,7 @@ class TestRecomputeEndpoint:
     def test_ok_path_carries_status_ok(self, client, monkeypatch):
         """Success branch carries status='ok' alongside the result fields."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
             return False
@@ -307,7 +327,7 @@ class TestRecomputeEndpoint:
         produces a partial-success state with no rollback. Log loudly and
         return the result."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
             return False
@@ -358,17 +378,18 @@ class TestRecomputeEndpoint:
 class TestEvalLookbackBoundaries:
     """1-365 must accept both endpoints; 0 and 366 must reject. A refactor to
     `<= 0` / `>= 365` would silently flip behaviour at the canonical
-    7/28/90/365 buttons on the eval dashboard."""
+    7/28/90/365 buttons on the eval dashboard.
+
+    M-0608: the range is now enforced via FastAPI `Query(ge=1, le=365)`, so an
+    out-of-range value is rejected with a 422 (structured validation error)
+    rather than the old hand-rolled 400."""
 
     def test_lookback_0_rejected(self, client, monkeypatch):
-        async def _noop(*args, **kwargs):
-            return {}
-
         monkeypatch.setattr(
             "routers.match.compute_hit_rate_metrics", lambda *a, **k: {}
         )
         r = client.get("/api/match/eval?lookback_days=0")
-        assert r.status_code == 400
+        assert r.status_code == 422
 
     def test_lookback_1_accepted(self, client, monkeypatch):
         monkeypatch.setattr(
@@ -386,7 +407,7 @@ class TestEvalLookbackBoundaries:
 
     def test_lookback_366_rejected(self, client):
         r = client.get("/api/match/eval?lookback_days=366")
-        assert r.status_code == 400
+        assert r.status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -394,69 +415,108 @@ class TestEvalLookbackBoundaries:
 # ---------------------------------------------------------------------------
 
 
+class _FakeRetentionDB:
+    """In-memory stand-in for the Supabase chain used by `_retention_sweep`.
+
+    Models match_batches as an ordered dict {id: computed_at} so the two query
+    shapes the sweep issues are answered against a real (mutating) row set:
+
+      * protected SELECT: .order('computed_at', desc=True).range(0, keep-1)
+      * drain SELECT:      .order('computed_at', desc=False).range(0, PAGE-1)
+      * DELETE:            .delete().in_('id', chunk)
+
+    DELETEs mutate the backing store so a multi-page drain converges, exactly
+    like the live table. Used by F2 regression + the retained invariant tests.
+    """
+
+    def __init__(self, rows: dict[str, int]):
+        # rows: id -> computed_at sort key (higher = newer)
+        self._rows = dict(rows)
+        self.select_ranges: list[tuple[bool, int, int]] = []  # (desc, start, end)
+        self.delete_chunks: list[list[str]] = []
+
+    def table(self, name):
+        assert name == "match_batches"
+        return self
+
+    # --- SELECT chain ---
+    def select(self, _cols):
+        self._mode = "select"
+        return self
+
+    def eq(self, _col, _val):
+        return self
+
+    def order(self, _col, desc=False):
+        self._desc = desc
+        return self
+
+    def range(self, start, end):
+        self.select_ranges.append((self._desc, start, end))
+        ordered = sorted(self._rows.items(), key=lambda kv: kv[1], reverse=self._desc)
+        page = ordered[start:end + 1]
+        self._pending = [{"id": rid} for rid, _ in page]
+        return self
+
+    # --- DELETE chain ---
+    def delete(self):
+        self._mode = "delete"
+        return self
+
+    def in_(self, _col, ids):
+        ids = list(ids)
+        self.delete_chunks.append(ids)
+        deleted = [{"id": i} for i in ids if i in self._rows]
+        for i in ids:
+            self._rows.pop(i, None)
+        self._pending = deleted
+        return self
+
+    def execute(self):
+        return MagicMock(data=self._pending)
+
+
 class TestRetentionSweep:
-    """A regression that flipped `rows[keep:]` to `rows[:keep]` or sorted ASC
-    would silently delete the NEWEST batches instead of the oldest —
-    invisible until an allocator's queue empties. Lock both invariants with
-    a deterministic batch ordering."""
+    """Invariants: never delete the newest `keep`, always delete the OLDEST
+    first, paginate the DELETE IN-list. A regression that flipped the keep/drop
+    sets would silently delete the newest batches; F2 additionally requires a
+    backlog larger than one page to fully drain in a single sweep."""
 
     def test_deletes_oldest_when_above_keep(self, monkeypatch):
         from routers import match as match_mod
 
-        # 10 batches, computed_at DESC — newest first (id-0) to oldest (id-9).
-        rows = [{"id": f"id-{i}"} for i in range(10)]
-        captured_delete_ids: list[list[str]] = []
-
-        sb = MagicMock()
-        # Select chain returns the 10 rows DESC.
-        select_chain = MagicMock()
-        select_chain.select.return_value.eq.return_value.order.return_value.execute.return_value = (
-            MagicMock(data=rows)
-        )
-
-        delete_chain = MagicMock()
-
-        def _capture_in(_col, ids):
-            captured_delete_ids.append(list(ids))
-            # Return the deleted rows as data (matching real Supabase DELETE
-            # behaviour) so the NEW-C08-04 actual-count logic gives the right
-            # total instead of 0.
-            return MagicMock(execute=MagicMock(return_value=MagicMock(
-                data=[{"id": i} for i in ids]
-            )))
-
-        delete_chain.delete.return_value.in_.side_effect = _capture_in
-
-        sb.table.side_effect = lambda name: (
-            select_chain if name == "match_batches" else MagicMock()
-        )
-        # Both paths reach .table('match_batches') — same chain handles select +
-        # delete because the delete branch uses .delete().in_ on the same mock.
-        select_chain.delete = delete_chain.delete
-
-        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        # 10 batches, computed_at 0 (oldest) .. 9 (newest); keep=7 → drop 0,1,2.
+        db = _FakeRetentionDB({f"id-{i}": i for i in range(10)})
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: db)
 
         deleted = match_mod._retention_sweep("alloc-1", keep=7)
 
-        assert deleted == 3, "must delete exactly len(rows) - keep = 3"
-        assert len(captured_delete_ids) == 1
-        assert captured_delete_ids[0] == ["id-7", "id-8", "id-9"], (
-            "must delete the 3 OLDEST (tail of DESC list), not the newest"
+        assert deleted == 3, "must delete exactly the rows past the newest keep"
+        # The 7 newest (id-3..id-9) survive; the 3 oldest are gone.
+        assert set(db._rows) == {f"id-{i}" for i in range(3, 10)}
+        # The protected SELECT pins the newest `keep` via a DESC range(0, keep-1).
+        assert (True, 0, 6) in db.select_ranges, (
+            "must pin the newest keep via DESC .range(0, keep-1)"
         )
+        # The drain reads the OLDEST first via an ASC range.
+        assert any(desc is False for desc, _s, _e in db.select_ranges), (
+            "must drain the oldest rows ascending"
+        )
+        # Only the oldest 3 ids were ever handed to DELETE.
+        all_deleted = [i for chunk in db.delete_chunks for i in chunk]
+        assert set(all_deleted) == {"id-0", "id-1", "id-2"}
 
     def test_returns_zero_when_below_keep(self, monkeypatch):
         from routers import match as match_mod
 
-        rows = [{"id": "id-0"}, {"id": "id-1"}]
-        sb = MagicMock()
-        sb.table.return_value.select.return_value.eq.return_value.order.return_value.execute.return_value = (
-            MagicMock(data=rows)
-        )
-        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        # Fewer than `keep` total rows → nothing older to sweep.
+        db = _FakeRetentionDB({f"id-{i}": i for i in range(5)})
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: db)
 
-        # 2 rows, keep=7 → nothing to delete
         deleted = match_mod._retention_sweep("alloc-1", keep=7)
         assert deleted == 0
+        assert db.delete_chunks == [], "no DELETE when total <= keep"
+        assert set(db._rows) == {f"id-{i}" for i in range(5)}
 
     def test_delete_paginates_large_in_list(self, monkeypatch):
         """An unbounded IN-list DELETE can exceed PostgREST URL limits.
@@ -464,33 +524,66 @@ class TestRetentionSweep:
         pages so the IN-list stays bounded."""
         from routers import match as match_mod
 
-        # 200 batches → after keeping 7, 193 IDs to delete → must be chunked.
-        rows = [{"id": f"id-{i}"} for i in range(200)]
-        captured_chunks: list[list[str]] = []
-
-        sb = MagicMock()
-        sb.table.return_value.select.return_value.eq.return_value.order.return_value.execute.return_value = (
-            MagicMock(data=rows)
-        )
-
-        def _capture_in(_col, ids):
-            captured_chunks.append(list(ids))
-            # Return the deleted rows as data (matching real Supabase DELETE
-            # behaviour) so the NEW-C08-04 actual-count logic gives the right
-            # total instead of 0.
-            return MagicMock(execute=MagicMock(return_value=MagicMock(
-                data=[{"id": i} for i in ids]
-            )))
-
-        sb.table.return_value.delete.return_value.in_.side_effect = _capture_in
-        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        # keep=7 + one full SELECT page of deletable rows.
+        total = 7 + match_mod._RETENTION_SELECT_PAGE_SIZE
+        db = _FakeRetentionDB({f"id-{i}": i for i in range(total)})
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: db)
 
         deleted = match_mod._retention_sweep("alloc-1", keep=7)
 
-        assert deleted == 193
-        assert len(captured_chunks) > 1, "DELETE must paginate, not send 193 IDs at once"
-        for chunk in captured_chunks:
+        assert deleted == match_mod._RETENTION_SELECT_PAGE_SIZE
+        assert len(db.delete_chunks) > 1, "DELETE must paginate, not send all IDs at once"
+        for chunk in db.delete_chunks:
             assert len(chunk) <= match_mod._RETENTION_DELETE_BATCH_SIZE
+
+    def test_backlog_larger_than_page_fully_drains_in_one_sweep(self, monkeypatch):
+        """F2 (red-team MED8): a backlog exceeding one SELECT page must be fully
+        drained to `keep` within a SINGLE _retention_sweep call.
+
+        Pre-fix the sweep deleted only one .range(keep, keep+PAGE-1) page per
+        run, so a backlog > PAGE (e.g. retention was disabled for a long window,
+        or concurrent front-inserts shifted the DESC offset) would leave tail
+        rows undeleted indefinitely. The drain loop must keep going until the
+        backlog is gone."""
+        from routers import match as match_mod
+
+        keep = 7
+        # 2.5 pages of deletable backlog on top of the protected `keep`.
+        backlog = match_mod._RETENTION_SELECT_PAGE_SIZE * 2 + 25
+        total = keep + backlog
+        db = _FakeRetentionDB({f"id-{i}": i for i in range(total)})
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: db)
+
+        deleted = match_mod._retention_sweep("alloc-1", keep=keep)
+
+        assert deleted == backlog, (
+            f"single sweep must drain the entire backlog of {backlog}, "
+            f"not just one page ({match_mod._RETENTION_SELECT_PAGE_SIZE})"
+        )
+        # Exactly the newest `keep` survive (the highest computed_at keys).
+        assert set(db._rows) == {f"id-{i}" for i in range(total - keep, total)}
+        assert len(db._rows) == keep
+
+    def test_never_deletes_newest_keep(self, monkeypatch):
+        """The newest `keep` ids must never appear in any DELETE chunk, even as
+        the drain pages through a multi-page backlog."""
+        from routers import match as match_mod
+
+        keep = 7
+        total = keep + match_mod._RETENTION_SELECT_PAGE_SIZE + 10
+        db = _FakeRetentionDB({f"id-{i}": i for i in range(total)})
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: db)
+
+        match_mod._retention_sweep("alloc-1", keep=keep)
+
+        protected = {f"id-{i}" for i in range(total - keep, total)}
+        all_deleted = {i for chunk in db.delete_chunks for i in chunk}
+        assert not (all_deleted & protected), (
+            "the newest keep ids must never be deleted"
+        )
+        # And no id was handed to DELETE twice.
+        flat = [i for chunk in db.delete_chunks for i in chunk]
+        assert len(flat) == len(set(flat)), "no row may be deleted twice"
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +602,7 @@ class TestCronPartialFailure:
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
             lambda: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
@@ -542,7 +635,13 @@ class TestCronPartialFailure:
         assert call_order == ["a1", "a2", "a3"]
 
     def test_kill_switch_flip_mid_run_breaks_loop(self, client, monkeypatch):
-        """Mid-run kill-switch detection must abort the loop early."""
+        """Mid-run kill-switch detection must abort the loop early.
+
+        M-0603: the mid-loop re-check now goes through a TTL cache to collapse
+        the per-allocator N+1 poll. Force TTL=0 here so every re-check re-polls
+        and the test exercises the abort-on-flip invariant deterministically
+        (the cache freshness logic is covered separately)."""
+        monkeypatch.setattr("routers.match.KILL_SWITCH_CACHE_TTL_S", 0.0)
         sb = MagicMock()
         sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
@@ -569,7 +668,7 @@ class TestCronPartialFailure:
             # n=3 mid-loop check before allocator a2 — OFF
             return kill_calls["n"] <= 2
 
-        monkeypatch.setattr("routers.match._kill_switch_enabled", _flip)
+        monkeypatch.setattr("routers.match._engine_is_enabled", _flip)
 
         call_order: list[str] = []
 
@@ -586,6 +685,65 @@ class TestCronPartialFailure:
         assert call_order == ["a1"]
         assert r.json()["processed"] == 1
 
+    def test_mid_run_kill_switch_recheck_is_uncached(self, client, monkeypatch):
+        """F1 (red-team MED8): a founder flipping the kill switch OFF mid-run
+        must be honored on the NEXT iteration, NOT delayed up to the TTL window.
+
+        The pre-loop gate may use the TTL cache, but the per-allocator safety
+        re-check must call the UNCACHED `_engine_is_enabled`. We prove this by
+        setting a LARGE TTL (so a cached value would still read ON for the whole
+        run) while flipping `_engine_is_enabled` to OFF after 2 allocators are
+        scored. If the re-check were cached, all 4 allocators would be scored;
+        with the uncached re-check, the loop aborts after the flip and only the
+        first 2 batches are persisted."""
+        # Large TTL: if the mid-run check used the cache, it would never re-poll
+        # within this run and would keep reading the seeded ON value.
+        monkeypatch.setattr("routers.match.KILL_SWITCH_CACHE_TTL_S", 3600.0)
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+            MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}, {"id": "a4"}])
+        )
+        monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
+        monkeypatch.setattr(
+            "routers.match._load_candidate_universe",
+            lambda: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr("routers.match._should_skip_allocator", _no_skip)
+
+        # _engine_is_enabled returns ON until 2 allocators have been scored, then
+        # flips OFF. The cached pre-loop gate seeds ON; the uncached mid-run
+        # re-check observes the flip on the iteration after the 2nd score.
+        scored: list[str] = []
+
+        def _engine_state():
+            return len(scored) < 2
+
+        monkeypatch.setattr("routers.match._engine_is_enabled", _engine_state)
+
+        persisted: list[str] = []
+
+        async def _score(allocator_id, universe):
+            scored.append(allocator_id)
+            persisted.append(allocator_id)
+            return {}
+
+        monkeypatch.setattr("routers.match._score_one_allocator", _score)
+        monkeypatch.setattr("routers.match._retention_sweep", lambda aid: 0)
+
+        r = client.post("/api/match/cron-recompute")
+        assert r.status_code == 200
+        # After a1 + a2 are scored, the uncached re-check before a3 sees OFF and
+        # the loop breaks — a3/a4 are never persisted.
+        assert persisted == ["a1", "a2"], (
+            "mid-run kill-switch re-check must be uncached: scoring must stop "
+            "immediately after the flip, not continue for up to the TTL window"
+        )
+        assert r.json()["processed"] == 2
+
     def test_retention_sweep_failure_for_one_allocator_does_not_abort_total(
         self, client, monkeypatch
     ):
@@ -596,7 +754,7 @@ class TestCronPartialFailure:
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
             lambda: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
@@ -646,7 +804,7 @@ class TestCronResponseShape:
     }
 
     def test_kill_switch_branch_has_full_shape(self, client, monkeypatch):
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: False)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: False)
 
         r = client.post("/api/match/cron-recompute")
         body = r.json()
@@ -655,7 +813,7 @@ class TestCronResponseShape:
         assert isinstance(body["duration_s"], (int, float))
 
     def test_no_allocators_branch_has_full_shape(self, client, monkeypatch):
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
         sb = MagicMock()
         sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
             MagicMock(data=[])
@@ -669,7 +827,7 @@ class TestCronResponseShape:
         assert isinstance(body["duration_s"], (int, float))
 
     def test_empty_universe_branch_has_full_shape(self, client, monkeypatch):
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
         sb = MagicMock()
         sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}])
@@ -702,7 +860,7 @@ class TestCronTotalFailureLogging:
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
             lambda: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
@@ -749,7 +907,7 @@ class TestCronTotalFailureLogging:
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: True)
         monkeypatch.setattr(
             "routers.match._load_candidate_universe",
             lambda: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
@@ -1076,7 +1234,7 @@ class TestRecomputeRoleValidation:
     def test_allocator_uuid_passes_role_check(self, client, monkeypatch):
         """A valid allocator profile UUID must proceed past the role check."""
         monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: False)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: False)
 
         r = client.post(
             "/api/match/recompute",
@@ -1105,7 +1263,7 @@ class TestForceRecomputeThrottle:
 
         alloc_id = str(uuid4())
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
             return False
@@ -1144,7 +1302,7 @@ class TestForceRecomputeThrottle:
 
         alloc_id = str(uuid4())
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
             return False
@@ -1200,7 +1358,7 @@ class TestRecomputeDemoOnlyWiring:
             return {"strategies_by_id": {}, "returns_by_id": {}}
 
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
             return False
@@ -1230,7 +1388,7 @@ class TestRecomputeDemoOnlyWiring:
             return {"strategies_by_id": {}, "returns_by_id": {}}
 
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
             return False
@@ -2034,16 +2192,20 @@ class TestRetentionSweepActualDeleteCount:
     ):
         from routers import match as match_mod
 
-        rows = [{"id": f"id-{i}"} for i in range(10)]
-        sb = MagicMock()
-        sb.table.return_value.select.return_value.eq.return_value.order.return_value.execute.return_value = (
-            MagicMock(data=rows)
-        )
-        # DELETE returns data=[] — simulating an RLS no-op.
-        sb.table.return_value.delete.return_value.in_.return_value.execute.return_value = (
-            MagicMock(data=[])
-        )
-        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        # keep=7 protected rows + 3 deletable rows. The DELETE is a no-op (RLS
+        # regression): it reports data=[] and does NOT remove rows. The drain's
+        # `page_deleted == 0` terminator stops after one page so the sweep can't
+        # spin on a permanently-failing DELETE.
+        class _NoOpDeleteDB(_FakeRetentionDB):
+            def in_(self, _col, ids):
+                ids = list(ids)
+                self.delete_chunks.append(ids)
+                # Simulate RLS no-op: report nothing deleted, mutate nothing.
+                self._pending = []
+                return self
+
+        db = _NoOpDeleteDB({f"id-{i}": i for i in range(10)})
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: db)
 
         with caplog.at_level("ERROR", logger="quantalyze.analytics"):
             deleted = match_mod._retention_sweep("alloc-rls", keep=7)
@@ -2054,6 +2216,7 @@ class TestRetentionSweepActualDeleteCount:
             "retention_sweep must count actual deleted rows, not chunk size; "
             "an RLS no-op DELETE must surface as deleted=0"
         )
+        assert db.delete_chunks, "the DELETE path must be reached (3 deletable rows)"
         assert any(
             "retention DELETE affected 0/" in rec.getMessage()
             for rec in caplog.records
@@ -2163,7 +2326,7 @@ class TestForceThrottleStampAfterSuccess:
 
         alloc_id = str(uuid4())
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
             return False
@@ -2205,7 +2368,7 @@ class TestForceThrottleStampAfterSuccess:
 
         alloc_id = str(uuid4())
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
             return False
@@ -2928,7 +3091,7 @@ class TestForceThrottleLockAtomicity:
             }
 
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
-        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
         monkeypatch.setattr(match_mod, "_should_skip_allocator", lambda *_: asyncio.coroutine(lambda: False)())
         monkeypatch.setattr(
             match_mod, "_load_candidate_universe",
@@ -2980,7 +3143,7 @@ class TestCronSkipsDemoAllocator:
             )
             return sb
 
-        monkeypatch.setattr(match_mod, "_kill_switch_enabled", lambda: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
         monkeypatch.setattr(match_mod, "get_supabase", lambda: _make_allocator_sb([demo_id, real_id]))
         monkeypatch.setattr(
             match_mod, "_load_candidate_universe",
@@ -3004,3 +3167,417 @@ class TestCronSkipsDemoAllocator:
             and rec.levelname == "ERROR"
             for rec in caplog.records
         ), "demo allocator in cron list must log at ERROR (M-3)"
+
+
+# ---------------------------------------------------------------------------
+# M-0603 — kill-switch poll is TTL-cached, retention sweep is scoped + parallel
+# ---------------------------------------------------------------------------
+
+
+class TestKillSwitchTTLCache:
+    """M-0603 (part 1): the mid-run kill-switch re-check must NOT fire one
+    Supabase round-trip per allocator. The cron loops through the TTL cache so
+    the underlying poll runs at most once per TTL window."""
+
+    def test_engine_is_enabled_cached_reuses_within_ttl(self, monkeypatch):
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        monkeypatch.setattr(match_mod, "KILL_SWITCH_CACHE_TTL_S", 30.0)
+        calls = {"n": 0}
+
+        def _poll():
+            calls["n"] += 1
+            return True
+
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _poll)
+
+        # 5 cached reads within the TTL must hit the underlying poll ONCE.
+        results = [match_mod._engine_is_enabled_cached() for _ in range(5)]
+        assert all(results)
+        assert calls["n"] == 1, (
+            "TTL cache must collapse repeated reads into a single poll "
+            "(pre-fix this was one DB round-trip per allocator)"
+        )
+
+    def test_engine_is_enabled_cached_repolls_after_ttl_zero(self, monkeypatch):
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        monkeypatch.setattr(match_mod, "KILL_SWITCH_CACHE_TTL_S", 0.0)
+        calls = {"n": 0}
+
+        def _poll():
+            calls["n"] += 1
+            return True
+
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", _poll)
+
+        # TTL=0 → every read re-polls (used by the flip-detection test).
+        for _ in range(3):
+            match_mod._engine_is_enabled_cached()
+        assert calls["n"] == 3
+
+
+class TestCronRetentionSweepScopedToScoredAllocators:
+    """M-0603 (part 2): the cron retention sweep must run ONLY for allocators
+    that actually produced a new batch this run, not for every allocator
+    (skipped/failed allocators have unchanged history and need no sweep)."""
+
+    @pytest.mark.asyncio
+    async def test_skipped_and_failed_allocators_are_not_swept(
+        self, monkeypatch
+    ):
+        from routers import match as match_mod
+
+        match_mod._reset_kill_switch_cache()
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+            MagicMock(data=[{"id": "a-ok"}, {"id": "a-skip"}, {"id": "a-fail"}])
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _skip(allocator_id, force):
+            return allocator_id == "a-skip"  # only a-skip is skipped
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _skip)
+
+        async def _score(allocator_id, universe):
+            if allocator_id == "a-fail":
+                raise RuntimeError("boom")
+            return {}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score)
+
+        swept: list[str] = []
+        monkeypatch.setattr(
+            match_mod, "_retention_sweep",
+            lambda aid, *a, **k: (swept.append(aid) or 0),
+        )
+
+        result = await match_mod.cron_recompute()
+
+        assert result["processed"] == 1
+        assert result["skipped"] == 1
+        assert result["failed"] == 1
+        # ONLY the successfully-scored allocator is swept.
+        assert swept == ["a-ok"], (
+            "retention sweep must target only allocators that got a new batch; "
+            "skipped/failed allocators must not be re-swept"
+        )
+
+
+# ---------------------------------------------------------------------------
+# M-0607 — bad computed_at in _should_skip_allocator logs + forces recompute
+# ---------------------------------------------------------------------------
+
+
+class TestShouldSkipBadComputedAtLogging:
+    """M-0607: an unparseable computed_at on the latest batch must log a
+    WARNING and force a recompute (return False) — pre-fix it returned False
+    silently with NO log, masking a corrupted column as 'fresh' data while
+    thrashing the cron every tick."""
+
+    @pytest.mark.asyncio
+    async def test_bad_computed_at_logs_warning_and_does_not_skip(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = (
+            MagicMock(data=[{"computed_at": "not-a-timestamp",
+                             "engine_version": match_mod.ENGINE_VERSION}])
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            skip = await match_mod._should_skip_allocator("alloc-bad-ts", force=False)
+
+        assert skip is False, "a bad computed_at must force a recompute, not skip"
+        assert any(
+            "bad computed_at" in rec.getMessage()
+            for rec in caplog.records
+        ), "a WARNING must surface the corrupted computed_at value"
+
+
+# ---------------------------------------------------------------------------
+# M-0602 — scoring with no allocator_preferences row logs an INFO signal
+# ---------------------------------------------------------------------------
+
+
+class TestScoreOneAllocatorNoPreferencesRowLogging:
+    """M-0602: when an allocator has no allocator_preferences row (preferences
+    is None), the engine must log a structured INFO event so ops can tell
+    'no mandate configured' apart from 'empty mandate' — pre-fix None was
+    silently coerced to {} with no signal."""
+
+    @pytest.mark.asyncio
+    async def test_none_preferences_emits_info_log(self, monkeypatch, caplog):
+        from routers import match as match_mod
+
+        # _load_allocator_context returns preferences=None (no row).
+        def _ctx(allocator_id):
+            return {
+                "preferences": None,
+                "portfolio_strategies": [],
+                "portfolio_returns": {},
+                "portfolio_weights": {},
+                "portfolio_aum": None,
+                "thumbs_down_ids": set(),
+                "_holdings_rows_eligible": [],
+            }
+
+        monkeypatch.setattr(match_mod, "_load_allocator_context", _ctx)
+        monkeypatch.setattr(
+            "services.feedback_engine.compute_adjusted_weights",
+            lambda allocator_id: None,
+        )
+
+        def _score_candidates(**kwargs):
+            # Assert the coerced-empty mandate is what reaches the engine.
+            assert kwargs["preferences"] == {"scoring_weight_overrides": None}
+            return {
+                "mode": "screening",
+                "filter_relaxed": False,
+                "candidates": [],
+                "excluded": [],
+                "excluded_total": 0,
+                "effective_preferences": {},
+                "effective_thresholds": {},
+                "source_strategy_count": 0,
+            }
+
+        monkeypatch.setattr(match_mod, "score_candidates", _score_candidates)
+
+        # Persist path: batch insert returns an id, candidate insert no-ops.
+        sb = MagicMock()
+        sb.table.return_value.insert.return_value.execute.return_value = (
+            MagicMock(data=[{"id": "batch-1"}])
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        universe = {"strategies_by_id": {"s1": {}}, "returns_by_id": {}}
+
+        with caplog.at_level("INFO", logger="quantalyze.analytics"):
+            await match_mod._score_one_allocator("alloc-no-prefs", universe)
+
+        assert any(
+            "DEFAULT mandate" in rec.getMessage()
+            and "alloc-no-prefs" in rec.getMessage()
+            for rec in caplog.records
+        ), "scoring with no preferences row must log an INFO signal (M-0602)"
+
+
+# ---------------------------------------------------------------------------
+# M-0605 — analytics SELECT omits dead fields
+# ---------------------------------------------------------------------------
+
+
+class TestLoadUniverseAnalyticsSelectOmitsDeadFields:
+    """M-0605: the strategy_analytics SELECT must pull ONLY the fields the
+    engine consumes (strategy_id, returns_series, sharpe, max_drawdown) and
+    NOT the dead cumulative_return / cagr / volatility columns."""
+
+    def test_select_string_excludes_unused_columns(self, monkeypatch):
+        from routers import match as match_mod
+
+        captured_selects: list[str] = []
+
+        sb = MagicMock()
+
+        strategies_chain = MagicMock()
+        strategies_chain.select.return_value.eq.return_value.execute.return_value = (
+            MagicMock(data=[{"id": "s1", "aum": None, "start_date": None}])
+        )
+
+        analytics_chain = MagicMock()
+
+        def _analytics_select(cols):
+            captured_selects.append(cols)
+            return MagicMock(
+                in_=MagicMock(return_value=MagicMock(
+                    execute=MagicMock(return_value=MagicMock(data=[]))
+                ))
+            )
+
+        analytics_chain.select.side_effect = _analytics_select
+
+        sb.table.side_effect = lambda name: (
+            strategies_chain if name == "strategies" else analytics_chain
+        )
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        match_mod._load_candidate_universe()
+
+        assert captured_selects, "analytics SELECT must have fired"
+        cols = captured_selects[0]
+        for dead in ("cumulative_return", "cagr", "volatility"):
+            assert dead not in cols, (
+                f"dead select field {dead!r} must be removed (M-0605); got: {cols}"
+            )
+        for live in ("strategy_id", "returns_series", "sharpe", "max_drawdown"):
+            assert live in cols, f"engine-consumed field {live!r} must remain in SELECT"
+
+
+# ---------------------------------------------------------------------------
+# MA1 (red-team LOW9) — force-throttle dicts are pruned, not unbounded
+# ---------------------------------------------------------------------------
+
+
+class TestForceThrottleStateEviction:
+    """MA1: ``_force_last_run`` / ``_force_lock`` previously grew one permanent
+    entry per distinct allocator_id that ever hit the force=True path, with no
+    eviction — bounded by the allocator population today, unbounded in principle.
+    ``_prune_stale_force_entries`` drops entries older than the throttle window
+    (stamps that can no longer throttle anything) and the matching idle locks,
+    while preserving throttle semantics: a recent stamp must still throttle.
+    """
+
+    def test_stale_entries_pruned_across_many_distinct_allocator_ids(self):
+        import time as _time
+
+        from routers import match as match_mod
+
+        match_mod._force_last_run.clear()
+        match_mod._force_lock.clear()
+
+        now = _time.monotonic()
+        # Simulate 500 distinct allocator_ids that each forced a recompute
+        # LONGER ago than the throttle window — every entry is now stale and
+        # can no longer throttle any future request.
+        stale_age = match_mod.FORCE_RECOMPUTE_MIN_INTERVAL_S + 1
+        for i in range(500):
+            aid = f"stale-alloc-{i}"
+            match_mod._force_last_run[aid] = now - stale_age
+            match_mod._force_lock[aid] = asyncio.Lock()  # idle, never held
+
+        assert len(match_mod._force_last_run) == 500
+        assert len(match_mod._force_lock) == 500
+
+        match_mod._prune_stale_force_entries(now=now)
+
+        # Pre-fix these dicts only ever grew; post-fix every stale entry
+        # (stamp + matching idle lock) is evicted.
+        assert match_mod._force_last_run == {}, (
+            "stale stamps (older than the throttle window) must be pruned"
+        )
+        assert match_mod._force_lock == {}, (
+            "idle locks for stale allocators must be pruned alongside the stamps"
+        )
+
+    def test_recent_stamp_is_retained_so_throttle_semantics_hold(self):
+        import time as _time
+
+        from routers import match as match_mod
+
+        match_mod._force_last_run.clear()
+        match_mod._force_lock.clear()
+
+        now = _time.monotonic()
+        recent_id = "recent-alloc"
+        stale_id = "stale-alloc"
+        # Recent: stamped just now — STILL inside the window, must keep
+        # throttling. Stale: older than the window — droppable.
+        match_mod._force_last_run[recent_id] = now
+        match_mod._force_lock[recent_id] = asyncio.Lock()
+        match_mod._force_last_run[stale_id] = now - (
+            match_mod.FORCE_RECOMPUTE_MIN_INTERVAL_S + 5
+        )
+        match_mod._force_lock[stale_id] = asyncio.Lock()
+
+        match_mod._prune_stale_force_entries(now=now)
+
+        # The recent stamp + its lock survive (throttle still active).
+        assert recent_id in match_mod._force_last_run, (
+            "a recent stamp must be retained so it keeps throttling — pruning "
+            "it would let a rapid duplicate force=True through"
+        )
+        assert recent_id in match_mod._force_lock
+        # The stale one is gone.
+        assert stale_id not in match_mod._force_last_run
+        assert stale_id not in match_mod._force_lock
+
+    def test_held_lock_is_not_pruned(self):
+        """A lock currently held by an in-flight request (no surviving stamp,
+        e.g. the optimistic stamp was cleared on a scoring failure) must NOT be
+        evicted — dropping it would let a concurrent waiter acquire a DIFFERENT
+        lock object, breaking the M-1 atomicity guarantee."""
+        import time as _time
+
+        from routers import match as match_mod
+
+        match_mod._force_last_run.clear()
+        match_mod._force_lock.clear()
+
+        held_id = "in-flight-alloc"
+        lock = asyncio.Lock()
+
+        async def _drive():
+            async with lock:  # lock is held while we prune
+                match_mod._force_lock[held_id] = lock
+                # No stamp for held_id (simulating a cleared optimistic stamp).
+                match_mod._prune_stale_force_entries(now=_time.monotonic())
+                return held_id in match_mod._force_lock
+
+        survived = asyncio.run(_drive())
+        assert survived, (
+            "a held lock must survive pruning even with no stamp — evicting it "
+            "would break the M-1 check-then-stamp atomicity for concurrent "
+            "force=True requests"
+        )
+
+    def test_prune_runs_on_force_path_via_recompute(self, client, monkeypatch):
+        """Integration: a force=True recompute prunes pre-existing stale entries
+        so the dicts stay bounded by recently-active allocators."""
+        import time as _time
+
+        from routers import match as match_mod
+
+        match_mod._force_last_run.clear()
+        match_mod._force_lock.clear()
+
+        # Seed 50 stale allocators that will never force again.
+        old = _time.monotonic() - (match_mod.FORCE_RECOMPUTE_MIN_INTERVAL_S + 10)
+        for i in range(50):
+            match_mod._force_last_run[f"ghost-{i}"] = old
+            match_mod._force_lock[f"ghost-{i}"] = asyncio.Lock()
+
+        alloc_id = str(uuid4())
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _score(allocator_id, universe):
+            return {"allocator_id": allocator_id, "batch_id": "b1",
+                    "candidate_count": 0, "excluded_count": 0,
+                    "mode": "screening", "filter_relaxed": False, "latency_ms": 1}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score)
+        monkeypatch.setattr(match_mod, "_retention_sweep", lambda *_: 0)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": True},
+        )
+        assert r.status_code == 200, r.text
+
+        # The 50 stale ghosts are gone; only the just-served allocator remains.
+        assert all(f"ghost-{i}" not in match_mod._force_last_run for i in range(50)), (
+            "force path must prune stale entries — pre-fix they accumulated "
+            "forever"
+        )
+        assert alloc_id in match_mod._force_last_run

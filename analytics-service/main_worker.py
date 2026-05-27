@@ -37,6 +37,7 @@ import os
 import signal
 import socket
 import time
+from typing import Any, TypedDict, cast
 
 from dotenv import load_dotenv
 
@@ -47,9 +48,50 @@ load_dotenv()
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
 from services.feature_flags import is_unified_backbone_active
-from services.job_worker import DispatchOutcome, dispatch
+from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
 
 logger = logging.getLogger("quantalyze.analytics.worker")
+
+
+# ---------------------------------------------------------------------------
+# Claimed compute_jobs row shape (audit-2026-05-07 H-0529)
+# ---------------------------------------------------------------------------
+# The claim RPCs (`claim_compute_jobs_with_priority` / legacy
+# `claim_compute_jobs`) both `RETURNS SETOF compute_jobs`, so each claimed row
+# is a full compute_jobs table row (migration
+# 20260411144407_compute_jobs_queue.sql + the claim_token column added by
+# 20260515114555_compute_jobs_claim_token_fencing.sql). `claim_result.data`
+# from PostgREST is otherwise typed `Any`, so the worker indexed rows as
+# `j["id"]` / `job["id"]` / `job.get("claim_token")` with no static guard: a
+# column rename in a future migration (e.g. `id` → `job_id` on the RETURNS
+# shape) would surface as a runtime KeyError on the hot dispatch path rather
+# than a type-check failure. `ClaimedJob` pins the row contract the worker
+# relies on so the claim path is typed symmetrically with the
+# `dispatch(job)` consumer in services.job_worker.
+#
+# `id` is the only field the worker dereferences unconditionally (`j["id"]`,
+# `job["id"]` in the mark closures); everything else is read defensively via
+# `.get()` or consumed inside `dispatch()`, so they are declared on a
+# `total=False` block. `kind` is `str` (the DB column is
+# `TEXT REFERENCES compute_job_kinds(name)` — there is no Python Literal mirror;
+# `dispatch()` already branches on `job.get("kind")` and falls through to a
+# FAILED outcome for an unknown kind).
+class _ClaimedJobOptional(TypedDict, total=False):
+    strategy_id: str | None
+    portfolio_id: str | None
+    kind: str
+    status: JobStatus
+    priority: Priority
+    claim_token: str | None
+    metadata: dict[str, Any] | None
+    exchange: str | None
+
+
+class ClaimedJob(_ClaimedJobOptional):
+    # `id` is required: the worker indexes `job["id"]` unconditionally when
+    # building the mark_done / mark_failed RPC closures. A claim row without it
+    # is a contract violation, not a tolerable partial row.
+    id: str
 
 # ---------------------------------------------------------------------------
 # Worker identity
@@ -165,26 +207,66 @@ def _is_serialization_failure(exc: BaseException) -> bool:
 # We catch 42883 specifically and fall back to the legacy
 # `claim_compute_jobs(p_batch_size, p_worker_id)` RPC (the pre-086 signature).
 # Once a fallback succeeds we latch the choice in `_FALLBACK_CLAIM_RPC` so
-# subsequent ticks skip the missing-RPC probe.
+# subsequent ticks skip the missing-RPC probe — but only for a bounded
+# window (see the TTL re-probe below), not for the process lifetime.
 _SQLSTATE_UNDEFINED_FUNCTION = "42883"
 _FALLBACK_CLAIM_RPC: bool = False
 
+# redteam-2026-05 W1 (MED8): the latch must NOT be permanent. A 42883
+# ("does not exist") is raised TRANSIENTLY by PostgreSQL while a migration is
+# mid-`CREATE OR REPLACE` (functions drop-recreate, and migrations auto-apply
+# on merge in this project). A single transient hit previously demoted the
+# worker to the legacy 2-arg claim for the entire process lifetime — silently
+# disabling priority-aware claiming + the backfill throttle until the next
+# restart, with only a one-time WARNING. Two changes fix this:
+#   1. The LATCH decision now requires the STRUCTURED SQLSTATE `code == 42883`
+#      (`_is_undefined_function_structured`). The loose message-substring path
+#      in `_is_undefined_function` is kept ONLY for the one-shot per-tick
+#      fallback (a best-effort attempt to still claim something this tick), but
+#      a message-only match no longer latches the worker into legacy mode.
+#   2. The latch self-heals: it carries a timestamp and is re-probed every
+#      `_FALLBACK_REPROBE_INTERVAL_S`. After the window elapses, the next tick
+#      re-attempts the priority RPC; if the function genuinely doesn't exist
+#      (migration not applied) it simply 42883s again and re-latches, so the
+#      log noise stays bounded. While latched we re-emit the WARNING so the
+#      degradation stays VISIBLE in logs rather than going silent after the
+#      first line.
+_FALLBACK_REPROBE_INTERVAL_S: float = 300.0  # re-probe the priority RPC every 5 min
+_FALLBACK_LATCHED_AT: float = 0.0
+
 
 def _is_undefined_function(exc: BaseException) -> bool:
-    """Return True iff `exc` is a PostgREST APIError signaling SQLSTATE 42883
-    (function does not exist). Match SQLSTATE on `.code` or the canonical
-    message substring 'does not exist' alongside the RPC name (some
-    postgrest versions surface the SQLSTATE only in the message string)."""
-    code = getattr(exc, "code", None)
-    if code == _SQLSTATE_UNDEFINED_FUNCTION:
-        return True
-    details = getattr(exc, "details", None)
-    if isinstance(details, dict) and details.get("code") == _SQLSTATE_UNDEFINED_FUNCTION:
+    """Return True iff `exc` looks like a PostgREST APIError signaling SQLSTATE
+    42883 (function does not exist). Matches the STRUCTURED SQLSTATE on `.code`
+    / `.details["code"]` OR — defensively, for postgrest versions that surface
+    the SQLSTATE only in the message string — the canonical phrase 'does not
+    exist' alongside the RPC name.
+
+    Used for the per-tick fallback DECISION (try the legacy RPC this tick). The
+    permanent LATCH uses the stricter `_is_undefined_function_structured` so a
+    transient message-only error can never demote the worker for the process
+    lifetime (redteam-2026-05 W1)."""
+    if _is_undefined_function_structured(exc):
         return True
     # Defensive: some PostgREST versions stash the SQLSTATE only inside the
     # message string. Match on the canonical PostgreSQL phrase.
     msg = str(exc) if exc is not None else ""
     if "claim_compute_jobs_with_priority" in msg and "does not exist" in msg:
+        return True
+    return False
+
+
+def _is_undefined_function_structured(exc: BaseException) -> bool:
+    """Return True iff `exc` carries the STRUCTURED SQLSTATE 42883 on `.code`
+    or `.details["code"]`. This is the predicate that gates the fallback LATCH
+    (redteam-2026-05 W1): a loose message-substring match must never latch the
+    worker permanently, because a mid-`CREATE OR REPLACE` migration raises a
+    transient 42883."""
+    code = getattr(exc, "code", None)
+    if code == _SQLSTATE_UNDEFINED_FUNCTION:
+        return True
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict) and details.get("code") == _SQLSTATE_UNDEFINED_FUNCTION:
         return True
     return False
 
@@ -327,29 +409,79 @@ async def dispatch_tick(worker_id: str) -> None:
     # audit-2026-05-07 C-0190: handle SQLSTATE 42883 (undefined_function)
     # from `claim_compute_jobs_with_priority` so a Supabase environment
     # without migration 086 falls back to the legacy claim RPC instead of
-    # silently stalling. Once a fallback succeeds we latch the choice in
-    # `_FALLBACK_CLAIM_RPC` — the missing-RPC condition is environmental
-    # (migration not applied), not transient, so probing the missing
-    # function every 30s would only pollute logs with identical errors.
-    global _FALLBACK_CLAIM_RPC
-    if _FALLBACK_CLAIM_RPC:
+    # silently stalling.
+    #
+    # redteam-2026-05 W1 (MED8): the latch is NOT permanent. It carries a
+    # timestamp (`_FALLBACK_LATCHED_AT`) and is re-probed every
+    # `_FALLBACK_REPROBE_INTERVAL_S`. A transient 42883 (raised while a
+    # migration is mid-`CREATE OR REPLACE`) therefore self-heals on the next
+    # re-probe instead of demoting the worker to the legacy 2-arg claim for
+    # the process lifetime. While latched we re-emit the WARNING so the
+    # degradation stays visible. Only a STRUCTURED 42883 latches (a loose
+    # message-substring match still triggers the one-shot per-tick fallback
+    # but never latches).
+    global _FALLBACK_CLAIM_RPC, _FALLBACK_LATCHED_AT
+    now = time.monotonic()
+    latched_and_fresh = (
+        _FALLBACK_CLAIM_RPC
+        and (now - _FALLBACK_LATCHED_AT) < _FALLBACK_REPROBE_INTERVAL_S
+    )
+    if latched_and_fresh:
+        # Re-emit the WARNING so a latched degradation stays VISIBLE in logs
+        # (not just the one-time line at latch time). The priority RPC will be
+        # re-probed once the interval elapses.
+        logger.warning(
+            "claim_compute_jobs_with_priority still latched to legacy "
+            "claim_compute_jobs RPC (SQLSTATE 42883 seen %.0fs ago); will "
+            "re-probe the priority RPC after %.0fs. Apply migration 086 to "
+            "restore priority-aware claiming.",
+            now - _FALLBACK_LATCHED_AT,
+            _FALLBACK_REPROBE_INTERVAL_S,
+            extra={"event_type": "claim_rpc_fallback_latched"},
+        )
         claim_result = await db_execute(_claim_legacy)
     else:
+        # Either never latched, or the re-probe window elapsed — clear any
+        # stale latch and re-attempt the priority RPC so a transient 42883
+        # self-heals.
+        if _FALLBACK_CLAIM_RPC:
+            logger.info(
+                "Re-probing claim_compute_jobs_with_priority after fallback "
+                "window (%.0fs) elapsed.",
+                _FALLBACK_REPROBE_INTERVAL_S,
+                extra={"event_type": "claim_rpc_reprobe"},
+            )
+            _FALLBACK_CLAIM_RPC = False
         try:
             claim_result = await db_execute(_claim_priority)
         except Exception as exc:  # noqa: BLE001
             if _is_undefined_function(exc):
+                # Only a STRUCTURED SQLSTATE 42883 latches; a message-only
+                # match falls back for THIS tick but leaves the latch off so
+                # the next tick re-attempts the priority RPC (redteam W1).
+                structured = _is_undefined_function_structured(exc)
+                if structured:
+                    _FALLBACK_CLAIM_RPC = True
+                    _FALLBACK_LATCHED_AT = now
                 logger.warning(
-                    "claim_compute_jobs_with_priority missing (SQLSTATE 42883); "
-                    "falling back to legacy claim_compute_jobs RPC. Apply "
-                    "migration 086 to restore priority-aware claiming.",
-                    extra={"event_type": "claim_rpc_fallback"},
+                    "claim_compute_jobs_with_priority missing (SQLSTATE 42883%s); "
+                    "falling back to legacy claim_compute_jobs RPC for this tick%s. "
+                    "Apply migration 086 to restore priority-aware claiming.",
+                    "" if structured else ", message-only match",
+                    " and latching (will re-probe)" if structured else " (not latching)",
+                    extra={
+                        "event_type": "claim_rpc_fallback",
+                        "latched": structured,
+                    },
                 )
-                _FALLBACK_CLAIM_RPC = True
                 claim_result = await db_execute(_claim_legacy)
             else:
                 raise
-    jobs = claim_result.data or []
+    # H-0529: type the claim path symmetrically with the dispatch() consumer.
+    # claim_result.data is PostgREST `Any`; each row is a `SETOF compute_jobs`
+    # record, so annotate as list[ClaimedJob] to pin the row contract the
+    # worker dereferences below (`j["id"]`, `job["id"]`, `job.get("claim_token")`).
+    jobs: list[ClaimedJob] = claim_result.data or []
 
     # Update healthz timestamp as soon as the claim RPC succeeds — an idle
     # queue means the worker is healthy, not stale. The previous early-return
@@ -374,7 +506,15 @@ async def dispatch_tick(worker_id: str) -> None:
         # not a failure. INVEST-P97 §Recommendation point 2.
         claim_token = job.get("claim_token")
         try:
-            result = await dispatch(job)
+            # `dispatch(job: dict)` in services.job_worker accepts a plain dict;
+            # a TypedDict is not assignable to `dict[Any, Any]` under mypy's
+            # invariance rules even though `ClaimedJob` IS a dict at runtime.
+            # Cast at this single boundary rather than loosening `ClaimedJob`
+            # back to `Any` — the precise type still guards every `job["id"]`
+            # / `job.get(...)` access in this module. Widening dispatch()'s
+            # parameter to a Mapping is the symmetric cross-module follow-up
+            # (services.job_worker is out of scope for H-0529).
+            result = await dispatch(cast("dict[str, Any]", job))
 
             if result.outcome == DispatchOutcome.DONE:
                 def _mark_done(jid=job["id"], tok=claim_token):
@@ -534,6 +674,66 @@ async def daily_enqueue_tick() -> None:
     logger.info("Daily enqueue: %d poll_positions jobs created", count)
 
 
+async def _daily_enqueue_already_ran_today() -> bool:
+    """Return True iff the daily enqueue has already run on the current UTC
+    calendar day (so a worker restart within the same day must NOT re-seed).
+
+    redteam-2026-05 W1 (LOW9): `daily_enqueue_loop` runs the full enqueue on
+    EVERY worker startup. Railway redeploys/crashes within one day therefore
+    triggered multiple full enqueue passes. The per-strategy partial-unique
+    dedup only absorbs duplicates while the prior day's poll_positions jobs are
+    still in-flight (status pending/running/done_pending_children — see
+    migration 20260411144407 index); once they complete, a same-day re-seed
+    inserts FRESH duplicate jobs → transient queue inflation.
+
+    Signal: the daily loop stamps `metadata.enqueued_by = 'daily_loop'` on each
+    job it creates (migration 20260412094449 STEP 4). We query the most-recent
+    such poll_positions job and compare its `created_at` UTC date to today's.
+
+    Fail-safe: any error (env not configured, DB down, missing column) returns
+    False so the startup enqueue still fires. A redundant enqueue is the
+    pre-existing behavior and is mostly absorbed by the RPC's own per-strategy
+    in-flight guard; SKIPPING a legitimately-needed daily seed would be the
+    worse failure, so we bias toward running."""
+    try:
+        supabase = get_supabase()
+
+        def _query():
+            return (
+                supabase.table("compute_jobs")
+                .select("created_at")
+                .eq("kind", "poll_positions")
+                .eq("metadata->>enqueued_by", "daily_loop")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+
+        result = await db_execute(_query)
+        rows = result.data or []
+        if not rows:
+            return False
+        created_at = rows[0].get("created_at")
+        if not created_at:
+            return False
+        # created_at is an ISO-8601 timestamptz string (PostgREST). Normalize
+        # the trailing 'Z' that fromisoformat rejected before Python 3.11.
+        from datetime import datetime, timezone
+
+        ts = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc).date() == datetime.now(timezone.utc).date()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "daily_enqueue startup-gate check failed (%s); proceeding with "
+            "startup enqueue (fail-safe).",
+            exc,
+            extra={"event_type": "daily_enqueue_gate_failed"},
+        )
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Infinite loop wrappers
 # ---------------------------------------------------------------------------
@@ -575,9 +775,21 @@ async def watchdog_loop(interval: float = 60.0) -> None:
 
 async def daily_enqueue_loop(interval: float = 86400.0) -> None:
     """Daily enqueue loop: once per day, seed poll_positions jobs."""
-    # Run immediately on startup, then every interval
+    # Run on startup ONLY if the daily enqueue hasn't already run today.
+    # redteam-2026-05 W1 (LOW9): without this gate, every Railway
+    # redeploy/crash within one day re-ran the full enqueue, inflating the
+    # poll_positions queue once the prior batch had completed (the per-strategy
+    # in-flight dedup no longer covers completed rows). The periodic tick below
+    # is unaffected — it fires on the genuine 24h boundary.
     try:
-        await daily_enqueue_tick()
+        if await _daily_enqueue_already_ran_today():
+            logger.info(
+                "daily_enqueue: skipping startup tick — already ran today "
+                "(restart within the same UTC day).",
+                extra={"event_type": "daily_enqueue_startup_skipped"},
+            )
+        else:
+            await daily_enqueue_tick()
     except Exception as exc:  # noqa: BLE001
         logger.error("daily_enqueue initial tick failed: %s", exc, exc_info=True)
 

@@ -49,8 +49,13 @@ API_KEY_ID_2 = "00000000-0000-0000-0000-000000000002"
 
 
 class _FakeUpsertResult:
-    def __init__(self, data: list[dict]):
+    def __init__(self, data: list[dict], count: int | None = None):
         self.data = data
+        # L-0067/L-0066: production now requests count='exact' +
+        # returning='minimal'. Mirror real PostgREST: when count was
+        # requested, .count carries the authoritative write/delete count
+        # and .data is empty (minimal). _result_row_count prefers .count.
+        self.count = count
 
 
 class _FakeSelectResult:
@@ -82,13 +87,26 @@ class _FakeTable:
         self._pending_on_conflict: str | None = None
         self._pending_ignore_duplicates: bool = False
         self._pending_update_payload: dict = {}
+        # L-0066/L-0067: write-path count='exact' / returning='minimal'.
+        self._pending_count_mode: str | None = None
+        self._pending_returning: str | None = None
 
     # --- write ops ---
-    def upsert(self, rows, on_conflict: str | None = None, ignore_duplicates: bool = False):
+    def upsert(
+        self,
+        rows,
+        on_conflict: str | None = None,
+        ignore_duplicates: bool = False,
+        count: str | None = None,
+        returning: str | None = None,
+    ):
         self._pending_op = "upsert"
         self._pending_rows = rows if isinstance(rows, list) else [rows]
         self._pending_on_conflict = on_conflict
         self._pending_ignore_duplicates = ignore_duplicates
+        # L-0067: production requests count='exact' + returning='minimal'.
+        self._pending_count_mode = count
+        self._pending_returning = returning
         return self
 
     def insert(self, rows):
@@ -101,8 +119,11 @@ class _FakeTable:
         self._pending_update_payload = payload
         return self
 
-    def delete(self):
+    def delete(self, count: str | None = None, returning: str | None = None):
         self._pending_op = "delete"
+        # L-0066: production requests count='exact' + returning='minimal'.
+        self._pending_count_mode = count
+        self._pending_returning = returning
         return self
 
     # --- select ops ---
@@ -164,6 +185,12 @@ class _FakeTable:
                 else:
                     self._store[key] = dict(row)
                     written.append(dict(row))
+            # Mirror real PostgREST: count='exact' populates .count with the
+            # affected-row count; returning='minimal' empties .data (the
+            # response no longer echoes the inserted representation).
+            if self._pending_count_mode == "exact":
+                data_out = [] if self._pending_returning == "minimal" else written
+                return _FakeUpsertResult(data_out, count=len(written))
             return _FakeUpsertResult(written)
 
         if self._pending_op == "insert":
@@ -205,6 +232,10 @@ class _FakeTable:
                     continue
                 deleted.append(dict(row))
                 del self._store[key]
+            # Mirror real PostgREST for the L-0066 count='exact' delete path.
+            if self._pending_count_mode == "exact":
+                data_out = [] if self._pending_returning == "minimal" else deleted
+                return _FakeUpsertResult(data_out, count=len(deleted))
             return _FakeUpdateResult(deleted)
 
         if self._pending_op == "select":
@@ -259,7 +290,52 @@ class FakeSupabaseClient:
         return self.table(name)
 
     def rpc(self, name: str, params: dict | None = None):
-        self.rpc_calls.append((name, params or {}))
+        params = params or {}
+        self.rpc_calls.append((name, params))
+        store = self.store
+
+        # E4 (HIGH8): emulate the atomic replace_allocator_equity_snapshots
+        # RPC against the in-memory store so the sole-key integration tests
+        # still verify end-to-end behaviour (stale rows gone, fresh rows
+        # written) now that the recovery path calls the RPC instead of
+        # separate purge + persist. Mirrors the SQL function: DELETE every
+        # row for p_allocator_id, then INSERT p_rows with the WR-05 per-row
+        # depth rule, in one (logically atomic) operation. Returns the
+        # inserted count under .data (scalar RETURNS integer).
+        if name == "replace_allocator_equity_snapshots":
+            alloc = params.get("p_allocator_id")
+            new_rows = params.get("p_rows") or []
+            depth = params.get("p_depth_months")
+            # Purge (scoped strictly to this allocator).
+            for key in list(store.keys()):
+                tbl, _pk = key
+                if tbl != "allocator_equity_snapshots":
+                    continue
+                if store[key].get("allocator_id") == alloc:
+                    del store[key]
+            # Insert; first-writer-wins on duplicate asof (ON CONFLICT DO NOTHING).
+            inserted = 0
+            for r in new_rows:
+                pk = (alloc, r.get("asof"))
+                key = ("allocator_equity_snapshots", pk)
+                if key in store:
+                    continue
+                src = r.get("source", "exchange_primary")
+                store[key] = {
+                    "allocator_id": alloc,
+                    "asof": r.get("asof"),
+                    "value_usd": r.get("value_usd"),
+                    "breakdown": r.get("breakdown"),
+                    "source": src,
+                    "history_depth_months": depth if src == "exchange_primary" else None,
+                }
+                inserted += 1
+
+            class _ReplaceShim:
+                def execute(inner_self):
+                    return _FakeSelectResult(data=inserted)
+
+            return _ReplaceShim()
 
         class _RPCShim:
             def execute(inner_self):
@@ -2118,22 +2194,39 @@ async def test_stale_snapshots_replaced_on_new_key_when_no_siblings(monkeypatch)
         f"got {stored!r}"
     )
 
-    # H-1184: the user-actionable observability signal is the
-    # `stale_snapshots_purged` audit field on reconstruct_complete. The
-    # sole-source purge fired and deleted all 10 stale rows, so the audit
-    # trail MUST report 10. A regression that wipes the table but emits
-    # purged=0 (or vice-versa) silently breaks the operator's only window
-    # into "we replaced N stale rows vs touched nothing".
+    # E4 (HIGH8): the sole-key path now replaces history via the atomic
+    # replace_allocator_equity_snapshots RPC (DELETE + INSERT in one
+    # transaction). The audit trail MUST flag the atomic replace and report a
+    # non-zero replaced/written count — the user-actionable observability
+    # signal is "we atomically replaced N rows vs touched nothing".
     complete_calls = [
         c for c in audit_mock.call_args_list
         if c.kwargs.get("action") == "allocator.equity.reconstruct_complete"
     ]
     assert complete_calls, audit_mock.call_args_list
     meta = complete_calls[-1].kwargs.get("metadata") or {}
-    assert meta.get("stale_snapshots_purged") == 10, (
-        "sole-source purge wiped 10 stale rows but the audit field "
-        f"reported {meta.get('stale_snapshots_purged')!r}; the user-actionable "
-        f"observability signal is broken. metadata={meta!r}"
+    assert meta.get("atomic_replace") is True, (
+        "sole-key reconstruct must use the atomic replace RPC; audit field "
+        f"atomic_replace={meta.get('atomic_replace')!r}. metadata={meta!r}"
+    )
+    # stale_snapshots_purged now mirrors the atomically-written count.
+    assert meta.get("stale_snapshots_purged") == meta.get("days_written"), (
+        "atomic replace: stale_snapshots_purged must mirror days_written; got "
+        f"purged={meta.get('stale_snapshots_purged')!r} "
+        f"days_written={meta.get('days_written')!r}. metadata={meta!r}"
+    )
+    assert (meta.get("days_written") or 0) > 0, (
+        "atomic replace wrote zero rows; the replacement is broken. "
+        f"metadata={meta!r}"
+    )
+    # The atomic replace RPC must have been called exactly once.
+    replace_rpc_calls = [
+        c for c in fake_supabase.rpc_calls
+        if c[0] == "replace_allocator_equity_snapshots"
+    ]
+    assert len(replace_rpc_calls) == 1, (
+        f"expected exactly one replace_allocator_equity_snapshots RPC call, "
+        f"got {fake_supabase.rpc_calls!r}"
     )
 
 
@@ -2346,20 +2439,33 @@ async def test_stale_snapshots_replaced_when_sibling_is_disconnected(monkeypatch
     # And the fresh reconstruct's rows must now be present.
     assert stored, "Fresh reconstruct wrote zero rows — upstream regression"
 
-    # H-1184: disconnected sibling is not a live contributor, so the
-    # sole-source purge fires and wipes all 10 stale rows. The audit field
-    # MUST report 10 — this is the operator-visible proof that the
-    # disconnected-sibling recovery path actually purged rather than no-op'd.
+    # E4 (HIGH8): disconnected sibling is not a live contributor, so the
+    # sole-source recovery path fires — now via the atomic replace RPC. The
+    # audit field MUST flag atomic_replace and report a non-zero written count
+    # — operator-visible proof the disconnected-sibling path replaced history
+    # rather than no-op'd.
     complete_calls = [
         c for c in audit_mock.call_args_list
         if c.kwargs.get("action") == "allocator.equity.reconstruct_complete"
     ]
     assert complete_calls, audit_mock.call_args_list
     meta = complete_calls[-1].kwargs.get("metadata") or {}
-    assert meta.get("stale_snapshots_purged") == 10, (
-        "disconnected sibling → purge fires on 10 stale rows → "
-        f"stale_snapshots_purged must be 10; got "
-        f"{meta.get('stale_snapshots_purged')!r}. metadata={meta!r}"
+    assert meta.get("atomic_replace") is True, (
+        "disconnected sibling → sole-key atomic replace must fire; "
+        f"atomic_replace={meta.get('atomic_replace')!r}. metadata={meta!r}"
+    )
+    assert (meta.get("days_written") or 0) > 0, (
+        "atomic replace wrote zero rows on the disconnected-sibling path. "
+        f"metadata={meta!r}"
+    )
+    # The atomic replace RPC must have been called exactly once.
+    replace_rpc_calls = [
+        c for c in fake_supabase.rpc_calls
+        if c[0] == "replace_allocator_equity_snapshots"
+    ]
+    assert len(replace_rpc_calls) == 1, (
+        f"expected exactly one replace_allocator_equity_snapshots RPC call, "
+        f"got {fake_supabase.rpc_calls!r}"
     )
 
 
@@ -2927,6 +3033,292 @@ async def test_v0_15_4_2_anchor_offsets_reconstructed_series_to_exchange_balance
     # STARTING_BALANCE key must appear in every row carrying the offset.
     for r in rows:
         assert "STARTING_BALANCE" in r["breakdown"], r
+
+
+# ---------------------------------------------------------------------------
+# E1 (HIGH7) / E2 (MED8): skip anchor when the replay's absolute level is
+# untrustworthy (unknown-ctVal perps or inverse perps).
+# ---------------------------------------------------------------------------
+#
+# When _compute_daily_equity records ANY unknown_perp_symbols or
+# inverse_perp_symbols, the replay's ABSOLUTE level cannot be trusted (unknown
+# perps priced via cost/price can leak contract counts; inverse perp fills are
+# skipped entirely while the live anchor still adds their uPnL). Spreading the
+# anchor offset across history then systematically inflates the whole curve.
+# The fix skips the anchor and stamps DQ telemetry. Pre-fix: the offset is
+# spread and the last row equals the (untrustworthy) exchange anchor.
+
+
+def _stub_compute_records(symbol_set_kwarg: str, symbol: str, rows: list[dict]):
+    """Build a _compute_daily_equity stub that populates the named caller set
+    (unknown_perp_symbols / inverse_perp_symbols) and returns ``rows``."""
+    def _fake(*_a, **kw):
+        target = kw.get(symbol_set_kwarg)
+        if target is not None:
+            target.add(symbol)
+        return [dict(r) for r in rows]
+    return _fake
+
+
+def _anchor_skip_fake_exchange(anchor_total: float):
+    class FakeExchange:
+        def __init__(self):
+            self.rateLimit = 0
+            self.markets = {}
+        async def load_markets(self):
+            return self.markets
+        async def fetch_my_trades(self, *a, **kw):
+            return []
+        async def fetch_deposits(self, *a, **kw):
+            return []
+        async def fetch_withdrawals(self, *a, **kw):
+            return []
+        async def fetch_ohlcv(self, *a, **kw):
+            return []
+        async def fetch_balance(self):
+            return {"total": {"USDT": anchor_total}}
+        async def fetch_positions(self):
+            return []
+        async def fetch_ticker(self, *a, **kw):
+            return {"last": 0.0}
+        async def close(self):
+            pass
+    return FakeExchange()
+
+
+class _AnchorStubSupabase:
+    def table(self, *a, **kw): return self
+    def select(self, *a, **kw): return self
+    def eq(self, *a, **kw): return self
+    def gte(self, *a, **kw): return self
+    def lte(self, *a, **kw): return self
+    def upsert(self, *a, **kw): return self
+    def execute(self):
+        class R: data = []
+        return R()
+
+
+@pytest.mark.asyncio
+async def test_e1_anchor_skipped_when_unknown_perp_symbols_present(monkeypatch):
+    """E1 (HIGH7): an unknown-ctVal perp in the replay makes the absolute
+    level untrustworthy. The anchor MUST be skipped (last row stays at the
+    replayed value, NOT lifted to the exchange anchor) and telemetry MUST
+    flag anchor_replay_unreliable with the offset it declined to spread.
+
+    Pre-fix: the anchor offset (anchor - last_value) is spread across every
+    row and the last row equals the inflated exchange anchor.
+    """
+    from services.equity_reconstruction import _fetch_and_price_window
+
+    replay_rows = [
+        {"asof": "2026-04-22", "value_usd": 1000.0, "breakdown": {"USDT": 1000.0}, "source": "exchange_primary"},
+        {"asof": "2026-04-23", "value_usd": 1200.0, "breakdown": {"USDT": 1200.0}, "source": "exchange_primary"},
+    ]
+    monkeypatch.setattr(
+        "services.equity_reconstruction._compute_daily_equity",
+        _stub_compute_records("unknown_perp_symbols", "DOGE/USDT:USDT", replay_rows),
+    )
+
+    # Exchange reports a 4x-inflated anchor (4800 vs replay last 1200) — well
+    # within the 5x implausibility gate, so ONLY the unreliable-replay skip
+    # can save the curve here.
+    rows, _terminus, telemetry = await _fetch_and_price_window(
+        _anchor_skip_fake_exchange(4800.0), "okx", _AnchorStubSupabase(),
+        date(2026, 4, 22), date(2026, 4, 23),
+    )
+
+    # Anchor skipped: last row stays at the replayed 1200, NOT lifted to 4800.
+    assert rows[-1]["value_usd"] == pytest.approx(1200.0), (
+        f"E1: anchor must be SKIPPED for unknown-perp replay; last row should "
+        f"stay at the replayed 1200, got {rows[-1]!r}"
+    )
+    # No STARTING_BALANCE offset key was added (anchor not applied).
+    assert "STARTING_BALANCE" not in (rows[-1].get("breakdown") or {})
+    # Telemetry flags the skip and surfaces the offset it declined to spread.
+    assert telemetry["anchor_replay_unreliable"] is True
+    assert telemetry["anchor_offset_skipped_usd"] == pytest.approx(3600.0), telemetry
+    assert "DOGE/USDT:USDT" in telemetry["unknown_perp_symbols"]
+
+
+@pytest.mark.asyncio
+async def test_e2_anchor_skipped_when_inverse_perp_symbols_present(monkeypatch):
+    """E2 (MED8): an inverse perp's fills are skipped in the replay, but the
+    live anchor (non-unified venue) adds the inverse position's current uPnL.
+    Anchoring would back-fill that uPnL across all past dates. The anchor MUST
+    be skipped when inverse_perp_symbols is non-empty.
+
+    Pre-fix: the current inverse uPnL is spread across history via the offset.
+    """
+    from services.equity_reconstruction import _fetch_and_price_window
+
+    replay_rows = [
+        {"asof": "2026-04-22", "value_usd": 500.0, "breakdown": {"USDT": 500.0}, "source": "exchange_primary"},
+        {"asof": "2026-04-23", "value_usd": 500.0, "breakdown": {"USDT": 500.0}, "source": "exchange_primary"},
+    ]
+    monkeypatch.setattr(
+        "services.equity_reconstruction._compute_daily_equity",
+        _stub_compute_records("inverse_perp_symbols", "BTC/USD:BTC", replay_rows),
+    )
+
+    # Non-unified venue (binance) so the live inverse uPnL WOULD be additive
+    # to the anchor; anchor reports 900 (= 500 + 400 phantom inverse uPnL).
+    rows, _terminus, telemetry = await _fetch_and_price_window(
+        _anchor_skip_fake_exchange(900.0), "binance", _AnchorStubSupabase(),
+        date(2026, 4, 22), date(2026, 4, 23),
+    )
+
+    # Anchor skipped: the inverse uPnL is NOT spread; rows stay at 500.
+    for r in rows:
+        assert r["value_usd"] == pytest.approx(500.0), (
+            f"E2: inverse-perp current uPnL must NOT be back-filled across "
+            f"history via the anchor offset; got {r!r}"
+        )
+        assert "STARTING_BALANCE" not in (r.get("breakdown") or {})
+    assert telemetry["anchor_replay_unreliable"] is True
+    assert "BTC/USD:BTC" in telemetry["inverse_perp_symbols"]
+
+
+@pytest.mark.asyncio
+async def test_e1_clean_account_still_anchors(monkeypatch):
+    """E1/E2 must NOT regress clean spot/known-perp accounts: with both
+    symbol-sets empty, the anchor is applied as before."""
+    from services.equity_reconstruction import _fetch_and_price_window
+
+    replay_rows = [
+        {"asof": "2026-04-22", "value_usd": 1000.0, "breakdown": {"USDT": 1000.0}, "source": "exchange_primary"},
+        {"asof": "2026-04-23", "value_usd": 1200.0, "breakdown": {"USDT": 1200.0}, "source": "exchange_primary"},
+    ]
+    # Stub that records NOTHING in either symbol set → clean account.
+    def _fake_clean(*_a, **_kw):
+        return [dict(r) for r in replay_rows]
+    monkeypatch.setattr(
+        "services.equity_reconstruction._compute_daily_equity", _fake_clean,
+    )
+
+    rows, _terminus, telemetry = await _fetch_and_price_window(
+        _anchor_skip_fake_exchange(1500.0), "okx", _AnchorStubSupabase(),
+        date(2026, 4, 22), date(2026, 4, 23),
+    )
+
+    # Anchor applied: last row lifted to 1500 (offset = 1500 - 1200 = 300).
+    assert rows[-1]["value_usd"] == pytest.approx(1500.0), (
+        f"clean account must still anchor; got {rows[-1]!r}"
+    )
+    assert "STARTING_BALANCE" in rows[-1]["breakdown"]
+    assert telemetry["anchor_replay_unreliable"] is False
+    assert telemetry["anchor_offset_skipped_usd"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# E3 (MED8): _cap_breakdown must ALWAYS preserve protected keys.
+# ---------------------------------------------------------------------------
+
+
+def test_e3_cap_breakdown_preserves_starting_balance_when_truncating():
+    """E3 (MED8): STARTING_BALANCE carries the anchor offset that makes the
+    breakdown reconcile to value_usd. It must survive _cap_breakdown's top-N
+    truncation even when it is NOT among the largest absolute contributions.
+
+    Pre-fix: STARTING_BALANCE competes in the top-N sort and gets evicted by
+    larger symbols, so the breakdown no longer sums to value_usd.
+    """
+    from services.equity_reconstruction import _cap_breakdown, _BREAKDOWN_TOP_N
+
+    # Build a breakdown with many large symbols + a small STARTING_BALANCE so
+    # the offset would lose the top-N race. Use long keys + a high cardinality
+    # so the JSON encoding blows the 4096-byte cap and the truncation branch
+    # actually fires.
+    breakdown = {
+        f"LONGSYMBOLNAME{i:04d}/USDT:USDT": float(100000 + i) for i in range(150)
+    }
+    breakdown["STARTING_BALANCE"] = 1.23  # small abs value — would be evicted
+
+    capped = _cap_breakdown(breakdown)
+
+    assert "__truncated__" in capped, "expected truncation to fire on >cap breakdown"
+    assert "STARTING_BALANCE" in capped, (
+        "E3: STARTING_BALANCE was evicted by the top-N selection — the "
+        f"breakdown no longer reconciles to value_usd. capped keys: "
+        f"{sorted(capped.keys())}"
+    )
+    assert capped["STARTING_BALANCE"] == pytest.approx(1.23)
+    # Top-N symbols (excluding the 2 protected keys) preserved.
+    symbol_keys = [k for k in capped if k not in ("STARTING_BALANCE", "__truncated__")]
+    assert len(symbol_keys) == _BREAKDOWN_TOP_N
+
+
+# ---------------------------------------------------------------------------
+# E4 (HIGH8): atomic replace_equity_snapshots RPC.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_e4_replace_equity_snapshots_calls_rpc_once_not_purge_persist(monkeypatch):
+    """E4 (HIGH8): the sole-key recovery helper must perform the
+    DELETE + INSERT in ONE atomic RPC call, not separate purge + persist
+    round-trips — so a crash can no longer leave zero rows.
+
+    This asserts replace_equity_snapshots issues exactly one
+    replace_allocator_equity_snapshots RPC and projects the WR-05 row shape.
+    """
+    from services.equity_reconstruction import replace_equity_snapshots
+
+    fake = FakeSupabaseClient()
+    rows = [
+        {"asof": "2026-04-22", "value_usd": 100.0, "breakdown": {"USDT": 100.0}, "source": "exchange_primary"},
+        {"asof": "2026-04-23", "value_usd": 200.0, "breakdown": {"USDT": 200.0}, "source": "coingecko_fallback"},
+    ]
+
+    inserted = await replace_equity_snapshots(fake, rows, ALLOCATOR_ID, 24)
+
+    # Exactly one RPC call to the atomic function — no separate delete/upsert.
+    replace_calls = [c for c in fake.rpc_calls if c[0] == "replace_allocator_equity_snapshots"]
+    assert len(replace_calls) == 1, fake.rpc_calls
+    _, params = replace_calls[0]
+    assert params["p_allocator_id"] == ALLOCATOR_ID
+    assert params["p_depth_months"] == 24
+    assert [r["asof"] for r in params["p_rows"]] == ["2026-04-22", "2026-04-23"]
+    assert inserted == 2
+
+    # WR-05 server-side depth rule: exchange_primary gets the depth, others NULL.
+    stored = {r["asof"]: r for r in fake.rows_for("allocator_equity_snapshots")}
+    assert stored["2026-04-22"]["history_depth_months"] == 24
+    assert stored["2026-04-23"]["history_depth_months"] is None
+
+
+@pytest.mark.asyncio
+async def test_e4_replace_equity_snapshots_failure_leaves_existing_rows(monkeypatch):
+    """E4 (HIGH8): if the atomic RPC raises, the existing history MUST remain
+    intact — there is no purge-committed-but-insert-failed window. The helper
+    propagates the error; the caller's outer try classifies it as
+    reconstruct_failed (covered by test_m1029)."""
+    from services.equity_reconstruction import replace_equity_snapshots
+
+    fake = FakeSupabaseClient()
+    # Seed existing history.
+    for d in range(3):
+        asof = f"2026-04-2{d}"
+        fake.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID, "asof": asof, "value_usd": 999.0,
+        }
+
+    def _raising_rpc(name, params=None):
+        class _Shim:
+            def execute(inner_self):
+                raise RuntimeError("atomic replace failed mid-transaction")
+        return _Shim()
+
+    monkeypatch.setattr(fake, "rpc", _raising_rpc)
+
+    with pytest.raises(RuntimeError):
+        await replace_equity_snapshots(
+            fake, [{"asof": "2026-05-01", "value_usd": 1.0, "source": "exchange_primary"}],
+            ALLOCATOR_ID, 24,
+        )
+
+    # All 3 existing rows survive — no zero-row half-state.
+    survivors = fake.rows_for("allocator_equity_snapshots")
+    assert len(survivors) == 3, survivors
 
 
 # ---------------------------------------------------------------------------
@@ -3509,6 +3901,100 @@ async def test_h1166_purge_count_reflects_actual_deletions(monkeypatch):
     assert purged_empty == 0
 
 
+# ---- L-0066 / L-0067 - count='exact' + returning='minimal' contract ------
+
+@pytest.mark.asyncio
+async def test_l0067_persist_requests_exact_count_minimal_returning(monkeypatch):
+    """L-0067/M-1026: persist_equity_snapshots must request count='exact'
+    and returning='minimal' so the audit count comes from the authoritative
+    res.count (Content-Range) and PostgREST does NOT echo the full inserted-
+    row JSONB representation back over the wire just to be len()'d.
+
+    Fails before the fix (the upsert omitted both kwargs and relied on
+    len(res.data) from return=representation)."""
+    from services.equity_reconstruction import persist_equity_snapshots
+
+    fake_supabase = FakeSupabaseClient()
+    captured: dict = {}
+    orig_table = fake_supabase.table
+
+    def _capturing_table(name: str):
+        tbl = orig_table(name)
+        real_upsert = tbl.upsert
+
+        def _wrapped(rows, **kwargs):
+            captured.update(kwargs)
+            return real_upsert(rows, **kwargs)
+
+        tbl.upsert = _wrapped
+        return tbl
+
+    monkeypatch.setattr(fake_supabase, "table", _capturing_table)
+
+    rows = [
+        {"asof": f"2026-04-{d:02d}", "value_usd": 100.0 + d,
+         "breakdown": {"BTC": 100.0}, "source": "exchange_primary"}
+        for d in range(1, 8)  # 7 fresh rows, no collisions
+    ]
+    count = await persist_equity_snapshots(
+        fake_supabase, rows, ALLOCATOR_ID, history_depth_months=24
+    )
+
+    assert captured.get("count") == "exact", (
+        f"upsert must request count='exact'; got {captured!r}"
+    )
+    assert captured.get("returning") == "minimal", (
+        f"upsert must request returning='minimal' (no representation "
+        f"over-fetch); got {captured!r}"
+    )
+    # Count must survive even though returning='minimal' empties res.data —
+    # proves _result_row_count read res.count, not len(res.data).
+    assert count == 7, count
+
+
+@pytest.mark.asyncio
+async def test_l0066_purge_requests_exact_count_minimal_returning(monkeypatch):
+    """L-0066: _purge_allocator_equity_snapshots must request count='exact'
+    + returning='minimal' so stale_snapshots_purged comes from res.count and
+    not len(res.data) (which silently reports 0 under return=minimal even
+    when rows were wiped). Fails before the fix (delete() took no kwargs)."""
+    from services.equity_reconstruction import _purge_allocator_equity_snapshots
+
+    fake_supabase = FakeSupabaseClient()
+    for d in range(3):
+        asof = f"2026-04-{d + 1:02d}"
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID, "asof": asof, "value_usd": 1.0,
+        }
+
+    captured: dict = {}
+    orig_table = fake_supabase.table
+
+    def _capturing_table(name: str):
+        tbl = orig_table(name)
+        real_delete = tbl.delete
+
+        def _wrapped(**kwargs):
+            captured.update(kwargs)
+            return real_delete(**kwargs)
+
+        tbl.delete = _wrapped
+        return tbl
+
+    monkeypatch.setattr(fake_supabase, "table", _capturing_table)
+
+    purged = await _purge_allocator_equity_snapshots(fake_supabase, ALLOCATOR_ID)
+
+    assert captured.get("count") == "exact", (
+        f"delete must request count='exact'; got {captured!r}"
+    )
+    assert captured.get("returning") == "minimal", (
+        f"delete must request returning='minimal'; got {captured!r}"
+    )
+    # Count survives minimal returning → proves it read res.count.
+    assert purged == 3, purged
+
+
 # ---- H-1168 - Distinct audit kinds for no-op vs no-data ------------------
 
 @pytest.mark.asyncio
@@ -3567,7 +4053,12 @@ async def test_h1168_reconstruct_no_data_emits_distinct_audit_kind(
 
 @pytest.mark.asyncio
 async def test_m1029_purge_failure_bubbles_to_outer_handler(monkeypatch):
-    """Purge crash must bubble and result in reconstruct_failed audit."""
+    """Replace-phase crash must bubble and result in reconstruct_failed audit.
+
+    E4 (HIGH8): the sole-key path now performs the purge inside the atomic
+    replace_allocator_equity_snapshots RPC. A crash in that RPC must still
+    bubble to the outer handler (M-1029 contract) instead of silently
+    completing — the test injects an RPC failure for that function only."""
     fake_supabase = FakeSupabaseClient()
     audit_mock = _install_fake_audit(monkeypatch)
 
@@ -3612,20 +4103,19 @@ async def test_m1029_purge_failure_bubbles_to_outer_handler(monkeypatch):
 
     monkeypatch.setattr(er, "datetime", _FakeDatetime)
 
-    original_table = fake_supabase.table
+    # Inject a failure in the atomic replace RPC only (the purge now lives
+    # inside that one transaction). Every other RPC stays functional.
+    original_rpc = fake_supabase.rpc
 
-    def _table(name):
-        t = original_table(name)
-        if name == "allocator_equity_snapshots":
-            orig_run = t.execute
-            def _wrapped_execute():
-                if t._pending_op == "delete":
-                    raise RuntimeError("simulated delete failure")
-                return orig_run()
-            t.execute = _wrapped_execute
-        return t
+    def _rpc(name, params=None):
+        if name == "replace_allocator_equity_snapshots":
+            class _FailShim:
+                def execute(inner_self):
+                    raise RuntimeError("simulated atomic replace failure")
+            return _FailShim()
+        return original_rpc(name, params)
 
-    monkeypatch.setattr(fake_supabase, "table", _table)
+    monkeypatch.setattr(fake_supabase, "rpc", _rpc)
     from services import db as db_module
     monkeypatch.setattr(db_module, "get_supabase", lambda: fake_supabase)
     monkeypatch.setattr(er, "get_supabase", lambda: fake_supabase, raising=False)
@@ -3641,6 +4131,17 @@ async def test_m1029_purge_failure_bubbles_to_outer_handler(monkeypatch):
 
     actions = [c.kwargs.get("action") for c in audit_mock.call_args_list]
     assert "allocator.equity.reconstruct_failed" in actions, actions
+
+    # E4 (HIGH8): the stale rows must STILL be present (the failed atomic
+    # replace rolled back — no half-state where the purge committed but the
+    # insert never ran). Pre-E4 the separate DELETE could commit before the
+    # UPSERT failed, wiping history; this asserts that window is closed.
+    stored = fake_supabase.rows_for("allocator_equity_snapshots")
+    survivors = [r for r in stored if r.get("value_usd") == 12345.0]
+    assert len(survivors) == 10, (
+        "E4 regression: atomic replace failure must leave all 10 stale rows "
+        f"intact (no zero-row half-state). Got {len(survivors)}: {stored!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3844,12 +4345,15 @@ async def test_pta1_unexpected_noop_audit_fires_when_rows_collide_sole_key(
 
     monkeypatch.setattr(er, "datetime", _FakeDatetime)
 
-    # Force persist_equity_snapshots to report count=0 with non-empty rows
-    # → simulates ON CONFLICT DO NOTHING collisions on a sole-key reconstruct.
-    async def _fake_persist(supabase, rows, allocator_id, depth_months):
+    # E4 (HIGH8): the sole-key path now calls the atomic
+    # replace_equity_snapshots RPC, not persist_equity_snapshots. Force IT to
+    # report count=0 with non-empty rows → simulates the (now-impossible-via-
+    # crash but still-detectable) zero-write outcome the unexpected_noop alarm
+    # was meant to catch.
+    async def _fake_replace(supabase, rows, allocator_id, depth_months):
         return 0
 
-    monkeypatch.setattr(er, "persist_equity_snapshots", _fake_persist)
+    monkeypatch.setattr(er, "replace_equity_snapshots", _fake_replace)
 
     job = {
         "id": "pta1-noop",
@@ -4247,3 +4751,51 @@ async def test_spec_sfh4_refresh_perp_upnl_missing_is_aggregated(monkeypatch):
     assert "symbols" in meta and "missing_count" in meta, meta
     assert sorted(meta["symbols"]) == ["BTCUSDT", "ETHUSDT", "SOLUSDT"], meta
     assert meta["missing_count"] == 3, meta
+
+
+# ---- L-0065 - _cap_breakdown cardinality short-circuit -------------------
+
+def test_l0065_cap_breakdown_skips_serialise_for_small_breakdown(monkeypatch):
+    """L-0065: a breakdown at/below _BREAKDOWN_TOP_N must NOT call json.dumps
+    — the truncation branch can never shrink it, so serialising is pure
+    hot-path waste (~730 rows/reconstruct × every connected key). Pre-fix
+    json.dumps ran unconditionally; we prove it is skipped by making it raise.
+    """
+    from services import equity_reconstruction as er
+
+    def _boom(*_a, **_kw):
+        raise AssertionError(
+            "json.dumps must NOT be called for a small (<=top-N) breakdown"
+        )
+
+    monkeypatch.setattr(er.json, "dumps", _boom)
+
+    breakdown = {"BTC": 1000.0, "ETH": 250.0, "USDT": 5.0}
+    capped = er._cap_breakdown(breakdown)
+
+    # Identity-preserving: same object/content returned, no truncation flag.
+    assert capped is breakdown
+    assert "__truncated__" not in capped
+
+
+def test_l0065_cap_breakdown_still_truncates_large_breakdown():
+    """L-0065 guard: the >top-N path is unchanged — a breakdown that exceeds
+    both the cardinality floor AND the byte cap is still truncated to top-N
+    by absolute value with the __truncated__ sentinel."""
+    from services.equity_reconstruction import (
+        _cap_breakdown,
+        _BREAKDOWN_TOP_N,
+        RAW_PAYLOAD_CAP_BYTES,
+    )
+    import json
+
+    # 150 long-named symbols → exceeds 4096-byte cap and the top-N floor.
+    breakdown = {f"TOKEN_{i:04d}_USDT_PERP": float(i + 1) for i in range(150)}
+    assert len(json.dumps(breakdown, default=str)) > RAW_PAYLOAD_CAP_BYTES
+
+    capped = _cap_breakdown(breakdown)
+    assert capped["__truncated__"] is True
+    # top-N symbols (excluding the sentinel key) retained.
+    assert len(capped) == _BREAKDOWN_TOP_N + 1
+    # Highest-value symbol (TOKEN_0149...) must survive the top-N cut.
+    assert "TOKEN_0149_USDT_PERP" in capped

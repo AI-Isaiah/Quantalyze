@@ -233,6 +233,111 @@ class TestComputeAllMetrics:
         with pytest.raises(ValueError, match="Insufficient"):
             compute_all_metrics(returns)
 
+    def test_non_datetime_index_raises_typeerror(self):
+        """M-0693: a non-DatetimeIndex must fail loud at the boundary, not deep
+        inside a helper. Pre-fix a RangeIndex AttributeError'd inside
+        `returns.index[-1].replace(day=1)` (mtd slice) or surfaced as a
+        misattributed Railway WARNING."""
+        returns = pd.Series([0.01, -0.02, 0.015])  # default RangeIndex
+        with pytest.raises(TypeError, match="DatetimeIndex"):
+            compute_all_metrics(returns)
+
+    def test_int_dtype_returns_raises_typeerror(self):
+        """M-0693: an int-dtype series must fail loud — int returns silently
+        truncate in np.log1p / cumprod instead of computing real metrics."""
+        dates = pd.bdate_range("2023-01-01", periods=5)
+        returns = pd.Series([0, 1, 0, 1, 0], index=dates)  # int64 dtype
+        assert pd.api.types.is_integer_dtype(returns)
+        with pytest.raises(TypeError, match="float-dtype"):
+            compute_all_metrics(returns)
+
+    def test_descending_index_raises_valueerror(self):
+        """F3 (red-team MED8): a descending DatetimeIndex passes the
+        DatetimeIndex + float-dtype checks but breaks mtd/ytd window
+        construction and tail(126)/tail(63), which assume the LAST rows are
+        the most recent. Must fail loud (Rule 12) rather than silently
+        computing windows from the wrong end."""
+        dates = pd.bdate_range("2023-01-01", periods=5)[::-1]  # newest-first
+        returns = pd.Series([0.01, -0.02, 0.015, 0.005, -0.01], index=dates)
+        assert isinstance(returns.index, pd.DatetimeIndex)
+        assert not returns.index.is_monotonic_increasing
+        with pytest.raises(ValueError, match="monotonic-increasing|ascending"):
+            compute_all_metrics(returns)
+
+    def test_shuffled_index_raises_valueerror(self):
+        """F3: a shuffled (non-monotonic) DatetimeIndex is equally unsafe."""
+        dates = pd.bdate_range("2023-01-01", periods=6)
+        shuffled = dates[[0, 3, 1, 5, 2, 4]]
+        returns = pd.Series(
+            [0.01, -0.02, 0.015, 0.005, -0.01, 0.02], index=shuffled
+        )
+        assert not returns.index.is_monotonic_increasing
+        with pytest.raises(ValueError, match="monotonic-increasing|ascending"):
+            compute_all_metrics(returns)
+
+    def test_ascending_index_still_passes(self):
+        """F3: the sorted/ascending case (the normal contract) must remain
+        accepted — the new precondition must not reject valid input."""
+        dates = pd.bdate_range("2023-01-01", periods=50)
+        np.random.seed(7)
+        returns = pd.Series(np.random.normal(0.001, 0.01, 50), index=dates)
+        assert returns.index.is_monotonic_increasing
+        result = compute_all_metrics(returns)  # must not raise
+        assert result["cumulative_return"] is not None
+
+    def test_catastrophic_loss_clamps_equity_and_drawdown(self):
+        """F7 (red-team HIGH7): a return <= -1 (>=100% loss day) must NOT
+        produce a negative, sign-oscillating equity curve or a drawdown below
+        -100%. The log-returns chart already clamps to _LOG_RETURN_FLOOR; the
+        linear equity (cumprod) and drawdown must clamp consistently.
+
+        Pre-fix `(1 + (-1.2)).cumprod() = -0.2` then sign-flips on every
+        subsequent multiply, and to_drawdown_series yields a drawdown of
+        roughly -1.23 (below -100%, impossible)."""
+        from services.metrics import _LOG_RETURN_FLOOR
+
+        dates = pd.bdate_range("2023-01-01", periods=8)
+        # A -1.2 (>100% loss) day in the middle of otherwise-normal returns.
+        vals = [0.01, 0.02, -1.2, 0.015, 0.01, -0.005, 0.02, 0.01]
+        returns = pd.Series(vals, index=dates, dtype="float64")
+        result = compute_all_metrics(returns)
+
+        # Equity (returns_series / cumulative) must stay non-negative and not
+        # oscillate sign. Pre-fix it went negative at the catastrophic day.
+        equity_vals = [pt["value"] for pt in result["returns_series"]]
+        assert equity_vals, "equity series must not be empty"
+        assert all(v >= 0 for v in equity_vals), (
+            f"equity curve must stay non-negative after a >=100% loss day; "
+            f"got {equity_vals}"
+        )
+
+        # Drawdown must be bounded at -1.0 (cannot lose more than 100%).
+        dd_vals = [pt["value"] for pt in result["drawdown_series"]]
+        assert dd_vals, "drawdown series must not be empty"
+        assert min(dd_vals) >= _LOG_RETURN_FLOOR - 1e-6, (
+            f"drawdown must be bounded at -1.0 (>=100% loss is total); "
+            f"got min={min(dd_vals)}"
+        )
+
+    def test_normal_returns_equity_unaffected_by_clamp(self):
+        """F7: the clamp is a no-op for normal data (every return > -1), so a
+        strategy with no catastrophic day must produce an equity curve identical
+        to the unclamped cumprod — golden/parity fixtures must not churn."""
+        dates = pd.bdate_range("2023-01-01", periods=60)
+        np.random.seed(13)
+        vals = np.random.normal(0.001, 0.015, 60)
+        # Guarantee no value <= -1.
+        assert (vals > -1.0).all()
+        returns = pd.Series(vals, index=dates, dtype="float64")
+        result = compute_all_metrics(returns)
+
+        expected = (1 + returns).cumprod()
+        equity_vals = [pt["value"] for pt in result["returns_series"]]
+        # Same length + last value matches the unclamped cumprod (within float
+        # rounding the serializer applies).
+        assert len(equity_vals) == len(expected)
+        assert equity_vals[-1] == pytest.approx(float(expected.iloc[-1]), rel=1e-6)
+
     def test_all_negative_returns(self):
         """Strategy that only loses money."""
         np.random.seed(99)
@@ -310,6 +415,56 @@ class TestComputeAllMetrics:
             assert "date" in entry and "value" in entry
             assert -1.0 <= entry["value"] <= 1.0
             assert not math.isnan(entry["value"])
+
+    def test_benchmark_metrics_share_single_aligned_sample_on_calendar_mismatch(self):
+        """M1 (red-team 2026-05-27): alpha/beta/correlation/info_ratio must ALL be
+        computed over the SAME inner-join aligned sample when the strategy and
+        benchmark calendars differ.
+
+        Before the fix, alpha/beta came from ``qs.stats.greeks(returns,
+        benchmark)`` — which internally reindexes the benchmark onto the
+        strategy's FULL date range (bfill) via quantstats `_prepare_benchmark` —
+        while correlation/info_ratio used the inner-join intersection only. On a
+        24/7-crypto-vs-gapped-benchmark mismatch the two disagree. This test pins
+        the post-fix contract: every benchmark-relative metric is over the
+        intersection, and (anti-vacuity) the produced alpha/beta differ from what
+        the OLD full-range path would have produced.
+        """
+        rng = np.random.default_rng(7)
+        # Strategy trades 24/7 (every calendar day).
+        s_dates = pd.date_range("2024-01-01", periods=120, freq="D")
+        strat = pd.Series(rng.normal(0.001, 0.02, 120), index=s_dates, name="returns")
+        # Benchmark only has business days → weekend/holiday gaps vs the strategy.
+        b_dates = pd.bdate_range("2024-01-01", periods=85)
+        bench = pd.Series(rng.normal(0.0005, 0.025, 85), index=b_dates, name="BTC")
+
+        # Sanity: the calendars genuinely differ (intersection < strategy length).
+        aligned = strat.align(bench, join="inner")
+        ar, ab = aligned[0], aligned[1]
+        assert 1 < len(ar) < len(strat), "fixture must have a real calendar gap"
+
+        result = compute_all_metrics(strat, bench)
+        mj = result["metrics_json"]
+
+        # Oracle: every benchmark-relative metric over the SAME inner-join sample.
+        exp = qs.stats.greeks(ar, ab)
+        exp_alpha = _safe_float(exp.get("alpha", 0))
+        exp_beta = _safe_float(exp.get("beta", 0))
+        exp_corr = _safe_float(ar.corr(ab))
+        excess = ar - ab
+        exp_te = float(excess.std() * np.sqrt(252))
+        exp_ir = _safe_float(excess.mean() * 252 / exp_te)
+
+        assert mj["alpha"] == pytest.approx(exp_alpha, abs=1e-12)
+        assert mj["beta"] == pytest.approx(exp_beta, abs=1e-12)
+        assert mj["correlation"] == pytest.approx(exp_corr, abs=1e-12)
+        assert mj["info_ratio"] == pytest.approx(exp_ir, abs=1e-12)
+
+        # Anti-vacuity: the OLD path (greeks over the full bfilled range) would
+        # have produced DIFFERENT alpha/beta. Prove the fix actually changed the
+        # alignment, not just that the assertions are self-consistent.
+        old = qs.stats.greeks(strat, bench)
+        assert mj["beta"] != pytest.approx(_safe_float(old.get("beta", 0)), abs=1e-9)
 
     def test_drawdown_episodes(self, golden_returns):
         """drawdown_episodes should list top-5 drawdowns sorted by depth desc."""
