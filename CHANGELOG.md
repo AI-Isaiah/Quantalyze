@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.9.29] - 2026-05-27
+### Fixed — CSV ingester ambiguous-date corruption + /process-key DoS caps (specialist-review batch)
+- **Date format (CRITICAL):** the v0.24.9.26 auto-detect resolved genuinely-ambiguous all-≤12 dates by a daily-cadence guess, which silently mis-parsed monthly/weekly day-first series into the wrong calendar (e.g. `05/01,05/02,05/03` → 5 May 1-3) — the exact silent-corruption class the feature was meant to kill. The ingester now auto-detects only the unambiguous cases (ISO, or any day>12 — every real ≥20-day daily series) and **rejects** genuinely-ambiguous input with an actionable `date_format_ambiguous` error instead of guessing.
+- **/process-key DoS (H1):** added a byte cap (`csv_adapter`, 10 MB, bounded before `base64.b64decode`) and a row cap (`validate_csv`, 5000) to the unified-backbone CSV path, which had no upstream size cap (unlike the TS edge / legacy `csv.py`).
+- **Validator hardening:** skip percent-form auto-normalize on a frame that already failed schema validation (M1); stop echoing raw failing cell values into the error envelope, which is persisted into `strategy_verifications` metadata (M2, PII); drop redundant per-row `pd.to_datetime` reconverts (M4).
+- **process_key:** the 23505 race re-select now uses `maybe_single()` + a None guard, re-raising the original 23505 on a 0-row TOCTOU instead of a cryptic `PGRST116`/None-deref 500 (M5/GAP-4); `X-Correlation-Id` is validated as a UUID (minted if absent/invalid) before it reaches structured logs and the UUID DB column.
+- Deferred follow-ups: H2 (offload ~10 blocking Supabase calls via `db_execute`), `info_flags` discriminated-union typing, wizard format-confirmation UX, comma-decimal locale.
+
+
 ## [0.24.9.28] - 2026-05-27
 ### Fixed — analytics-service numeric precision (float→Decimal money math) + correctness guards (audit-2026-05-07 batch 4)
 - **position_reconstruction** (`_match_positions_fifo`): money/quantity arithmetic is now `Decimal` end-to-end, so fills accumulate exactly and `realized_pnl` round-trips without float drift across thousands of fills (H-0735/H-0740/M-0717). Position close-detection uses exact `Decimal(0)` plus a proportional dust-snap, replacing the hardcoded `1e-12` float epsilon (which was too small to absorb memecoin-scale residue yet large enough to snap away a real sub-satoshi position) (M-0718). A `_round_float` output-boundary helper rounds the float rather than the Decimal, so a large-magnitude (>=1e20) corrupt value can no longer raise `decimal.InvalidOperation` and crash the whole per-symbol reconstruction — a regression the prior float code tolerated, caught by red-team. Present-but-unparseable monetary fields are surfaced via a `malformed_fill_field_dropped` counter instead of silent coercion to 0; `compute_turnover_series` flags missing-price / non-positive-NAV dates instead of silently emitting turnover=0 (M-0711).
