@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.24.10.6] - 2026-05-27
+### Fixed — repro-key-flow.sh leak gate: `pytest: command not found` under cassette-refresh
+- v0.24.10.5's Python 3.12 pin fixed the `pip install`, so the failure moved one step later to "Record cassettes + leak gate". Root cause: `scripts/repro-key-flow.sh` was internally inconsistent about its interpreter — the `--record` path hard-requires and uses `analytics-service/.venv/bin/python` (lines 63, 86), but the leak gate called **bare `pytest`** (line 116). CI installs deps ONLY into `.venv`, never onto the global PATH, so `pytest` was not found. Recording appeared to succeed only because happy/auth-fail cassettes already existed (skipped) and rate-limit/schema-drift are pure YAML synthesis — the leak gate's `pytest` was the first real dependency use.
+- Fixed by making the leak gate use the same venv interpreter (`.venv/bin/python -m pytest`) when `.venv/bin/python` exists, with a fall-back to a global `pytest` so local replay-only runs (which never required a venv) keep working.
+- Caught by the workflow_dispatch run immediately after the v0.24.10.5 merge. CI-only; no prod-side impact.
+
 ## [0.24.10.5] - 2026-05-27
 ### Fixed — cassette-refresh.yml: Python 3.12 (pyarrow + pydantic-core fail to wheel on 3.14)
 - v0.24.10.4's `pip install -r requirements.txt -r requirements-dev.txt` reached the package list but choked on wheel-builds for `pyarrow` and `pydantic-core` because Python 3.14 is newer than PyO3 v0.24's maximum supported version (3.13). Pinned `python-version: "3.12"` matching `ci.yml` (which uses the same `actions/setup-python@v6.2.0` SHA pin). Added `cache: pip` + `cache-dependency-path` for both requirements files so subsequent runs are faster.

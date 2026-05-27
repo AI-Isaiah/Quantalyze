@@ -112,8 +112,14 @@ for f in "${required_cassettes[@]}"; do
 done
 
 # 1. Run the replay suite (zero network).
+# Prefer the analytics-service venv: the --record path above hard-requires it
+# (line 63) and CI installs deps ONLY into .venv, never onto the global PATH —
+# so a bare `pytest` here is not found under cassette-refresh.yml. Fall back to
+# a global `pytest` for local replay-only runs that skip the venv.
+pytest_cmd=(pytest)
+[ -x .venv/bin/python ] && pytest_cmd=(.venv/bin/python -m pytest)
 log "running pytest tests/test_repro_key_flow.py (replay-only)..."
-if ! pytest tests/test_repro_key_flow.py -x -q; then
+if ! "${pytest_cmd[@]}" tests/test_repro_key_flow.py -x -q; then
   fail "pytest replay failed"
 fi
 log "replay PASS (12 cassettes)"
