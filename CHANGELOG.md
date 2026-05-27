@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.9.26] - 2026-05-27
+### Fixed — CSV ingester: auto-detect date format (day-first vs month-first)
+- `analytics-service` `validate_csv` previously coerced the `date` column straight through pandas `to_datetime` (month-first default), silently mis-parsing non-US uploads: European/German `D/M/YYYY` with every component ≤12 (e.g. `01/02/2023` = 1 Feb) parsed as 2 Jan with **no error** (wrong calendar → garbage CAGR/Sharpe), and any day >12 (`13/02/2023`) hit a cryptic `dtype('datetime64[ns]')` rejection.
+- The ingester now deduces the format **from the data**: it parses month-first and day-first, then picks the reading that yields a valid strictly-increasing series (the schema already requires monotonic dates), breaking the genuinely-ambiguous all-≤12 case by daily-cadence spacing. ISO (`YYYY-MM-DD`) and US dates are unchanged and emit no flag; day-first / ambiguity-resolved picks emit a `date_format_normalized` info-flag for transparency. The emitted `daily_returns_series` stays `YYYY-MM-DD`.
+- Scope: `daily_returns` + `daily_nav` ingestion. The `trades` path (`coerce_to_aware_utc`) strictly rejects non-ISO and is shared with broker adapters — left as a documented follow-up. 9 new regression tests + 52 CSV tests pass.
+
+
 ## [0.24.9.25] - 2026-05-27
 ### Changed — CI: opt the secret-scan gitleaks-action into Node 24
 - `secret-scan` job sets `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` so `gitleaks/gitleaks-action@v2.3.9` (a Node-20 JS action) runs on Node 24 ahead of GitHub's forced switch (2026-06-02) and Node-20 removal (2026-09-16). The action is a thin wrapper around the gitleaks Go binary, so it runs cleanly on Node 24, and CI's secret-scan job verifies it directly (the deprecation warning clears). The latest action release is still v2.3.9/node20 — no version bump fixes it. Fallback if a future Node bump ever breaks the action's JS bundle: replace it with the gitleaks binary (the cached + retried download + range scan pattern #308 used for lychee).
