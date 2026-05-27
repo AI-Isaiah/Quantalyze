@@ -33,10 +33,15 @@ SET lock_timeout = '3s';
 CREATE TABLE IF NOT EXISTS public.phase19_soak_daily (
   date_utc      DATE        PRIMARY KEY,
   day_index     SMALLINT    NOT NULL CHECK (day_index BETWEEN 1 AND 14),
-  error_rate    NUMERIC(7,5) NOT NULL CHECK (error_rate >= 0 AND error_rate <= 1),
+  -- NUMERIC(6,5) matches the route's Number(errorRate.toFixed(5)) precision
+  -- and the CHECK 0..1 domain exactly; no headroom for >1 rates.
+  error_rate    NUMERIC(6,5) NOT NULL CHECK (error_rate >= 0 AND error_rate <= 1),
   total_events  INTEGER     NOT NULL CHECK (total_events >= 0),
   error_events  INTEGER     NOT NULL CHECK (error_events >= 0 AND error_events <= total_events),
   recorded_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- WARNING: notes is anon-visible via phase19_soak_daily_anon_select. Writers
+  -- (cron + manual backfill) must NOT store PII, secrets, or user identifiers
+  -- here. Operational text only ("no /process-key traffic in window …").
   notes         TEXT
 );
 
@@ -71,12 +76,28 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_catalog
 AS $$
+DECLARE
+  v_is_service_role BOOLEAN := FALSE;
+  v_caller_role TEXT;
 BEGIN
-  -- Defense in depth: service_role / postgres only. SECDEF bypasses RLS,
-  -- so this gate is what prevents a future ACL relaxation from letting
-  -- a compromised authenticated session forge daily rollup rows.
-  IF current_user NOT IN ('postgres', 'service_role') THEN
-    RAISE EXCEPTION 'phase19_soak_record_day: only service_role may write rollup rows (current_user=%)', current_user
+  -- Defense in depth: service_role only. SECDEF bypasses RLS, so this gate
+  -- is what prevents a future ACL relaxation from letting a compromised
+  -- authenticated session forge daily rollup rows.
+  --
+  -- Use auth.role() (reads JWT claim) NOT current_user — current_user inside
+  -- a SECURITY DEFINER body equals the function owner (typically postgres),
+  -- not the caller. Wrap in BEGIN/EXCEPTION mirroring 20260515113910 so a
+  -- direct-psql call (no JWT context) raises a clean error instead of crashing.
+  BEGIN
+    v_caller_role := auth.role();
+    v_is_service_role := (v_caller_role = 'service_role');
+  EXCEPTION WHEN OTHERS THEN
+    v_is_service_role := FALSE;
+    v_caller_role := 'unknown';
+  END;
+
+  IF NOT v_is_service_role THEN
+    RAISE EXCEPTION 'phase19_soak_record_day: only service_role may write rollup rows (auth.role()=%)', v_caller_role
       USING ERRCODE = 'insufficient_privilege';
   END IF;
 
@@ -174,6 +195,11 @@ $$;
 COMMENT ON FUNCTION public.phase19_soak_status(timestamptz) IS
   'Phase 19 soak probe. SECURITY DEFINER; returns ONLY scalars. Extended 2026-05-27 to also report phase19_soak_daily rollup counts (daily_rows, max_error_rate, breach_count) so the phase-19-stability.yml workflow can verify both legacy-write absence AND daily-row presence in one round-trip. No row data / PII.';
 
+-- Mirror 20260525113000's REVOKE-then-GRANT idempotency. CREATE OR REPLACE
+-- preserves grants on in-place upgrade, but a fresh-schema rebuild (test
+-- project reset) would carry PUBLIC's implicit EXECUTE forward without the
+-- explicit REVOKE.
+REVOKE ALL ON FUNCTION public.phase19_soak_status(timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.phase19_soak_status(timestamptz) TO anon, authenticated, service_role;
 
 -- ----------------------------------------------------------------------------

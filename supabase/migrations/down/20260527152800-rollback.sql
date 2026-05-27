@@ -46,6 +46,7 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION public.phase19_soak_status(timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.phase19_soak_status(timestamptz) TO anon, authenticated, service_role;
 
 COMMIT;

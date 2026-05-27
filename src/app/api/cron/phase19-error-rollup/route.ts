@@ -32,35 +32,63 @@ export const maxDuration = 60;
 const SENTRY_BASE = "https://sentry.io/api/0/organizations";
 const KILL_SWITCH_KEY = "process_key_unified_backbone";
 
-/** Resilient parse for Sentry events API response. Same shape probe as
- *  flag-monitor route — Sentry has rotated this twice, so accept both
- *  `data[0]["count()"]` and `data[0].count`. */
-function parseSentryCount(payload: unknown): number {
-  const data =
-    payload && typeof payload === "object" && "data" in payload
-      ? (payload as { data: unknown }).data
-      : null;
-  if (!Array.isArray(data) || data.length === 0) return 0;
-  const row = data[0] as Record<string, unknown>;
-  const v = row?.["count()"] ?? row?.count ?? 0;
-  return typeof v === "number" ? v : 0;
+/** Resilient parse for Sentry events API response. Returns a discriminated
+ *  union so callers MUST handle shape failure — silent coercion to 0 would
+ *  let a malformed Sentry response (incident HTML, schema rotation #3, token
+ *  downgrade) silently report error_rate=0 and falsely satisfy the soak gate. */
+type SentryParseResult =
+  | { kind: "ok"; count: number }
+  | { kind: "missing_data" };
+
+function parseSentryCount(payload: unknown): SentryParseResult {
+  if (!payload || typeof payload !== "object" || !("data" in payload)) {
+    return { kind: "missing_data" };
+  }
+  const data = (payload as { data: unknown }).data;
+  if (!Array.isArray(data)) {
+    return { kind: "missing_data" };
+  }
+  // Empty array means "no events in window" — legitimate zero, not a parse error.
+  if (data.length === 0) return { kind: "ok", count: 0 };
+  const row = data[0] as Record<string, unknown> | null | undefined;
+  if (!row || typeof row !== "object") return { kind: "missing_data" };
+  // Sentry has rotated this twice — accept both `data[0]["count()"]` and
+  // `data[0].count`. Any non-finite / negative number is a shape problem.
+  const v = row["count()"] ?? row.count;
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+    return { kind: "missing_data" };
+  }
+  return { kind: "ok", count: v };
 }
 
-type SentryCountResult =
+/** Sentry events API window — either relative (statsPeriod=Nh, anchored to
+ *  now) or absolute (start/end ISO). Used by both the live and backfill paths. */
+type SentryWindow =
+  | { kind: "period"; hours: number }
+  | { kind: "range"; start: Date; end: Date };
+
+/** Result discriminator: callers must short-circuit on every non-ok variant
+ *  via mapSentryResultToResponse() so HTTP status + reason envelope are
+ *  consistent across live and backfill paths. */
+type SentryFetchResult =
   | { kind: "ok"; count: number }
-  | { kind: "terminal"; res: NextResponse };
+  | { kind: "rate_limited"; status: number; retryAfter: string | null }
+  | { kind: "unreachable"; reason: "fetch_failed" | "non_2xx"; status?: number }
+  | { kind: "unparseable"; status: number; sample: string };
 
 async function fetchSentryCount(args: {
   orgSlug: string;
   sentryToken: string;
   query: string;
-  statsPeriodHours: number;
-}): Promise<SentryCountResult> {
-  const params = new URLSearchParams({
-    statsPeriod: `${args.statsPeriodHours}h`,
-    query: args.query,
-    field: "count()",
-  });
+  window: SentryWindow;
+}): Promise<SentryFetchResult> {
+  const params = new URLSearchParams({ query: args.query, field: "count()" });
+  if (args.window.kind === "period") {
+    params.set("statsPeriod", `${args.window.hours}h`);
+  } else {
+    params.set("start", args.window.start.toISOString());
+    params.set("end", args.window.end.toISOString());
+  }
   const url = `${SENTRY_BASE}/${args.orgSlug}/events/?${params}`;
 
   let res: Response;
@@ -70,11 +98,8 @@ async function fetchSentryCount(args: {
       cache: "no-store",
     });
   } catch (err) {
-    console.warn("[cron/phase19-error-rollup] sentry fetch threw:", err);
-    return {
-      kind: "terminal",
-      res: NextResponse.json({ ok: false, reason: "sentry_unreachable" }),
-    };
+    console.error("[cron/phase19-error-rollup] sentry fetch threw:", err);
+    return { kind: "unreachable", reason: "fetch_failed" };
   }
 
   if (!res.ok) {
@@ -83,19 +108,77 @@ async function fetchSentryCount(args: {
       res.status === 429 ||
       retryAfter !== null ||
       res.headers.get("x-sentry-rate-limit-remaining") !== null;
-    return {
-      kind: "terminal",
-      res: NextResponse.json({
-        ok: false,
-        reason: isRateLimited ? "sentry_rate_limited" : "sentry_unreachable",
-        status: res.status,
-        ...(retryAfter ? { retry_after: retryAfter } : {}),
-      }),
-    };
+    if (isRateLimited) {
+      return { kind: "rate_limited", status: res.status, retryAfter };
+    }
+    return { kind: "unreachable", reason: "non_2xx", status: res.status };
   }
 
-  const payload = await res.json().catch(() => ({}));
-  return { kind: "ok", count: parseSentryCount(payload) };
+  let payload: unknown;
+  try {
+    payload = await res.json();
+  } catch (err) {
+    const sample = await res.clone().text().catch(() => "");
+    console.error(
+      "[cron/phase19-error-rollup] sentry response not JSON:",
+      err,
+      { status: res.status, contentType: res.headers.get("content-type") },
+    );
+    return { kind: "unparseable", status: res.status, sample: sample.slice(0, 200) };
+  }
+
+  const parsed = parseSentryCount(payload);
+  if (parsed.kind === "missing_data") {
+    console.error(
+      "[cron/phase19-error-rollup] sentry shape unexpected:",
+      JSON.stringify(payload).slice(0, 500),
+    );
+    return {
+      kind: "unparseable",
+      status: res.status,
+      sample: JSON.stringify(payload).slice(0, 200),
+    };
+  }
+  return { kind: "ok", count: parsed.count };
+}
+
+/** Map a non-ok SentryFetchResult to a NextResponse with the correct HTTP
+ *  status so Vercel Cron monitoring can alert on non-2xx. The previous
+ *  blanket-200 envelope hid Sentry outages until the post-168h gate ran. */
+function mapSentryResultToResponse(
+  result: Exclude<SentryFetchResult, { kind: "ok" }>,
+): NextResponse {
+  switch (result.kind) {
+    case "rate_limited":
+      return NextResponse.json(
+        {
+          ok: false,
+          reason: "sentry_rate_limited",
+          status: result.status,
+          ...(result.retryAfter ? { retry_after: result.retryAfter } : {}),
+        },
+        { status: 429 },
+      );
+    case "unreachable":
+      return NextResponse.json(
+        {
+          ok: false,
+          reason: "sentry_unreachable",
+          ...(result.status ? { status: result.status } : {}),
+        },
+        { status: 502 },
+      );
+    case "unparseable":
+      return NextResponse.json(
+        {
+          ok: false,
+          reason: "sentry_unparseable",
+          status: result.status,
+          sample: result.sample,
+        },
+        { status: 502 },
+      );
+  }
 }
 
 async function handle(req: NextRequest): Promise<NextResponse> {
@@ -108,10 +191,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const orgSlug = process.env.SENTRY_ORG_SLUG;
   const sentryToken = process.env.SENTRY_AUTH_TOKEN;
   if (!orgSlug || !sentryToken) {
-    console.warn(
-      "[cron/phase19-error-rollup] SENTRY_ORG_SLUG or SENTRY_AUTH_TOKEN missing — skipping",
+    // Production config drift — return 500 so Vercel Cron alerts fire on
+    // non-2xx. console.warn alone goes nowhere visible.
+    console.error(
+      "[cron/phase19-error-rollup] SENTRY_ORG_SLUG or SENTRY_AUTH_TOKEN missing — soak rollup will record nothing until restored",
     );
-    return NextResponse.json({ ok: false, reason: "sentry_not_configured" });
+    return NextResponse.json(
+      { ok: false, reason: "sentry_not_configured" },
+      { status: 500 },
+    );
   }
 
   const admin = createAdminClient();
@@ -134,6 +222,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     );
   }
   if (!flagRow || flagRow.value !== "on" || !flagRow.updated_at) {
+    // soak_not_started AND soak_rolled_back are both "skip" cases that the
+    // operator expects daily — keep them at 200 so they don't page. The bash
+    // gate's exit-7 branch catches the rolled-back case explicitly.
     return NextResponse.json({
       ok: false,
       reason: "soak_not_started",
@@ -174,81 +265,61 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     });
   }
 
-  // 4) day_index — ceil((windowStart - flipDate) / 24h) + 1, clamped to [1, 14].
-  //    Day 1 = first 24h after the flip.
+  // 4) day_index — floor((windowStart - flipDate) / 24h) + 1.
+  //    Day 1 = the calendar day on which the flip occurred (flipDate's UTC).
+  //    Fail loud on out-of-bounds — the previous silent Math.max/min clamp
+  //    masked window_pre_flip-by-half and post-soak backfills. Both deserve
+  //    explicit operator signal.
   const flipDate = new Date(flipTs);
   flipDate.setUTCHours(0, 0, 0, 0);
   const dayIndexRaw =
     Math.floor((windowStart.getTime() - flipDate.getTime()) / (24 * 60 * 60 * 1000)) + 1;
-  const dayIndex = Math.max(1, Math.min(14, dayIndexRaw));
+  if (dayIndexRaw < 1) {
+    return NextResponse.json({
+      ok: false,
+      reason: "window_pre_flip",
+      day_index_raw: dayIndexRaw,
+      flip_date: flipDate.toISOString().slice(0, 10),
+      window_start: windowStart.toISOString().slice(0, 10),
+    });
+  }
+  if (dayIndexRaw > 14) {
+    return NextResponse.json({
+      ok: false,
+      reason: "window_post_soak",
+      day_index_raw: dayIndexRaw,
+      flip_date: flipDate.toISOString().slice(0, 10),
+      window_start: windowStart.toISOString().slice(0, 10),
+    });
+  }
+  const dayIndex = dayIndexRaw;
 
-  // 5) Sentry numerator + denominator over the same 24h window. statsPeriod
-  //    is "X hours back from now" so we compute hours-from-now for the
-  //    window end (today UTC) and treat that as a 24h reference window.
-  //    For backfills, this counts the prior 24h from "now" — acceptable
-  //    since the cron runs daily at 00:30 UTC; a one-day-old backfill
-  //    queries a 48h-ago window which Sentry retains.
-  //
-  //    Note: Sentry's events API doesn't expose arbitrary start/end via the
-  //    same `statsPeriod` shape; for backfill use `start`/`end` ISO params.
-  //    Implemented below — both code paths converge on a `query` string +
-  //    a count from the JSON response.
+  // 5) Sentry numerator + denominator over the same 24h window. Live path
+  //    uses statsPeriod=24h (anchored to now, drift ≤cron-interval) while
+  //    backfill uses explicit start/end. Both flow through fetchSentryCount
+  //    so the error envelope (rate_limited / unreachable / unparseable) is
+  //    consistent across paths. If windowStart straddles the flip (backfill
+  //    for the flip-day itself), clamp the Sentry start to flipTs so the
+  //    measurement excludes pre-flip traffic.
   const queryNum = `level:error path:/api/process-key environment:production`;
   const queryDen = `path:/api/process-key environment:production`;
 
-  // For "yesterday" run (no date param), use statsPeriod=24h shorthand which
-  // anchors to "now" — yields the prior 24h. For backfills, use explicit
-  // start/end timestamps.
   const isBackfill = dateParam !== null;
-  let errorCount: number;
-  let totalCount: number;
+  const window: SentryWindow = isBackfill
+    ? {
+        kind: "range",
+        start: windowStart.getTime() < flipTs.getTime() ? flipTs : windowStart,
+        end: windowEnd,
+      }
+    : { kind: "period", hours: 24 };
 
-  if (!isBackfill) {
-    const num = await fetchSentryCount({
-      orgSlug,
-      sentryToken,
-      query: queryNum,
-      statsPeriodHours: 24,
-    });
-    if (num.kind === "terminal") return num.res;
-    errorCount = num.count;
+  const num = await fetchSentryCount({ orgSlug, sentryToken, query: queryNum, window });
+  if (num.kind !== "ok") return mapSentryResultToResponse(num);
+  const errorCount = num.count;
 
-    const den = await fetchSentryCount({
-      orgSlug,
-      sentryToken,
-      query: queryDen,
-      statsPeriodHours: 24,
-    });
-    if (den.kind === "terminal") return den.res;
-    totalCount = den.count;
-  } else {
-    // Backfill path — explicit start/end timestamps.
-    const params = (q: string) =>
-      new URLSearchParams({
-        start: windowStart.toISOString(),
-        end: windowEnd.toISOString(),
-        query: q,
-        field: "count()",
-      });
-    const num = await (async (): Promise<number> => {
-      const res = await fetch(`${SENTRY_BASE}/${orgSlug}/events/?${params(queryNum)}`, {
-        headers: { Authorization: `Bearer ${sentryToken}` },
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error(`sentry numerator ${res.status}`);
-      return parseSentryCount(await res.json());
-    })();
-    const den = await (async (): Promise<number> => {
-      const res = await fetch(`${SENTRY_BASE}/${orgSlug}/events/?${params(queryDen)}`, {
-        headers: { Authorization: `Bearer ${sentryToken}` },
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error(`sentry denominator ${res.status}`);
-      return parseSentryCount(await res.json());
-    })();
-    errorCount = num;
-    totalCount = den;
-  }
+  const den = await fetchSentryCount({ orgSlug, sentryToken, query: queryDen, window });
+  if (den.kind !== "ok") return mapSentryResultToResponse(den);
+  const totalCount = den.count;
 
   // 6) Compute error rate. Guard divide-by-zero — when total is 0 the rate
   //    is 0 and the day is recorded with a note so the gate reviewer can
@@ -260,7 +331,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       : null;
 
   // 7) Upsert via SECDEF RPC. Admin client = service_role JWT, so the
-  //    RPC's current_user check passes.
+  //    RPC's auth.role() check passes.
   const { data: rpcResult, error: rpcErr } = await admin.rpc(
     "phase19_soak_record_day",
     {

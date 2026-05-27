@@ -38,6 +38,9 @@ KEY="PROD_SUPABASE_ANON_KEY=anon-test-key"
 TODO_LOG=$(write_log "TODO (record from commit (b) timestamp; e.g. 2026-05-15T14:00:00Z)")
 GOOD_LOG=$(write_log "2026-05-25T14:00:00Z")
 BAD_LOG=$(write_log "2026-05-25T14:00:00Z (commit b)")
+# OLD_LOG: flip >168h ago — triggers the post-soak daily-rollup gate. Use a
+# date >7 days before the script will reasonably run.
+OLD_LOG=$(write_log "2026-05-01T00:00:00Z")
 
 echo "verify-no-legacy-writes.sh self-test:"
 
@@ -89,6 +92,42 @@ expect "rpc not deployed" 2 -- PHASE19_STABILITY_LOG="$GOOD_LOG" $URL $KEY \
 # Exit 3 — unparseable response
 expect "parse error" 3 -- PHASE19_STABILITY_LOG="$GOOD_LOG" $URL $KEY \
   PHASE19_FAKE_RPC_RESPONSE='not json at all'
+
+# ============================================================================
+# Daily-rollup gate (added 2026-05-27 for migration 20260527152800 extension).
+# Post-168h elapsed: PR-D ship requires >=7 daily rows + breach_count=0.
+# ============================================================================
+
+# Exit 8 — soak >=168h but daily_rows < 7 (cron not running, or backfill needed)
+expect "soak incomplete (3 of 7 rows)" 8 -- PHASE19_STABILITY_LOG="$OLD_LOG" $URL $KEY \
+  PHASE19_FAKE_RPC_RESPONSE='{"flag_value":"on","vr_is_view":false,"legacy_write_count":0,"daily_rows":3,"max_error_rate":0,"breach_count":0}'
+
+# Exit 9 — daily_rows >=7 but breach_count > 0 (error-rate breach)
+expect "error-rate breach (2 days)" 9 -- PHASE19_STABILITY_LOG="$OLD_LOG" $URL $KEY \
+  PHASE19_FAKE_RPC_RESPONSE='{"flag_value":"on","vr_is_view":false,"legacy_write_count":0,"daily_rows":7,"max_error_rate":0.012,"breach_count":2}'
+
+# Exit 0 — full post-168h green: 7 rows, max_error_rate just under 0.005, no breach
+expect "post-soak clean (7 rows, no breach)" 0 -- PHASE19_STABILITY_LOG="$OLD_LOG" $URL $KEY \
+  PHASE19_FAKE_RPC_RESPONSE='{"flag_value":"on","vr_is_view":false,"legacy_write_count":0,"daily_rows":7,"max_error_rate":0.00499,"breach_count":0}'
+
+# Exit 0 — boundary: exactly 7 rows passes (the threshold is >=7)
+expect "post-soak boundary (exactly 7 rows)" 0 -- PHASE19_STABILITY_LOG="$OLD_LOG" $URL $KEY \
+  PHASE19_FAKE_RPC_RESPONSE='{"flag_value":"on","vr_is_view":false,"legacy_write_count":0,"daily_rows":7,"max_error_rate":0.003,"breach_count":0}'
+
+# Exit 3 — post-168h with missing daily-rollup fields (RPC shape regressed)
+expect "post-soak MISSING daily fields" 3 -- PHASE19_STABILITY_LOG="$OLD_LOG" $URL $KEY \
+  PHASE19_FAKE_RPC_RESPONSE='{"flag_value":"on","vr_is_view":false,"legacy_write_count":0}'
+
+# Exit 0 — pre-168h with MISSING daily-rollup fields (tolerated; migration may
+# not be applied yet, soak is in-progress). Should be the in-progress message.
+expect "pre-soak MISSING (tolerated)" 0 -- PHASE19_STABILITY_LOG="$GOOD_LOG" $URL $KEY \
+  PHASE19_FAKE_RPC_RESPONSE='{"flag_value":"on","vr_is_view":false,"legacy_write_count":0}'
+
+# Exit 0 — pre-168h, soak in-progress with 3 daily rows present (cron has
+# started writing rows but window isn't elapsed yet — should pass the legacy
+# write check and report in-progress).
+expect "pre-soak in-progress (3 rows)" 0 -- PHASE19_STABILITY_LOG="$GOOD_LOG" $URL $KEY \
+  PHASE19_FAKE_RPC_RESPONSE='{"flag_value":"on","vr_is_view":false,"legacy_write_count":0,"daily_rows":3,"max_error_rate":0.002,"breach_count":0}'
 
 echo ""
 echo "RESULT: $PASS passed, $FAIL failed"

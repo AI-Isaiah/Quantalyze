@@ -10,16 +10,33 @@ import type { NextRequest } from "next/server";
  * via phase19_soak_record_day. If the gate workflow finds <7 daily rows
  * near ship time, PR-D is blocked.
  *
- * Test surface:
- *   (1) 401 when CRON_SECRET missing or auth header mismatch.
- *   (2) sentry_not_configured when SENTRY_ORG_SLUG / SENTRY_AUTH_TOKEN unset.
- *   (3) soak_not_started when feature_flags row is missing or value !== 'on'.
- *   (4) window_pre_flip when target date precedes the flip.
- *   (5) happy path: fetches Sentry numerator + denominator, computes rate,
- *       upserts via phase19_soak_record_day RPC.
- *   (6) rate-limit branch: 429 returns sentry_rate_limited.
- *   (7) zero-denominator (no traffic) records error_rate=0 with explanatory note.
- *   (8) backfill via ?date= uses explicit start/end timestamps.
+ * Test surface (post-review hardening 2026-05-27):
+ *   (1)  401 when CRON_SECRET missing or auth header mismatch.
+ *   (2)  500 sentry_not_configured when SENTRY_ORG_SLUG / SENTRY_AUTH_TOKEN
+ *        unset (was 200 — bumped so Vercel cron alerts fire on prod config drift).
+ *   (3)  soak_not_started when feature_flags row is missing or value !== 'on'
+ *        (200, expected daily skip while flag is off).
+ *   (4)  window_pre_flip when target date precedes the flip (200, expected
+ *        skip while backfilling).
+ *   (5)  happy path: fetches Sentry numerator + denominator, computes rate,
+ *        upserts via phase19_soak_record_day RPC.
+ *   (6)  429 sentry_rate_limited (was 200 — bumped so Vercel cron alerts).
+ *   (7)  zero-denominator (no traffic) records error_rate=0 with explanatory note.
+ *   (8)  backfill via ?date= uses explicit start/end timestamps.
+ *   (9)  500 feature_flags_unreachable when admin.from().maybeSingle() errors.
+ *   (10) 502 sentry_unreachable when fetch throws (DNS / TLS / network).
+ *   (11) 400 bad_date_param when ?date= is unparseable.
+ *   (12) 500 sentry_not_configured when SENTRY_AUTH_TOKEN missing (the other
+ *        arm of the OR — symmetry-coverage with test 2).
+ *   (13) window_post_soak when ?date= is >14 days past flip (was clamped to 14;
+ *        now bails so the operator sees the post-soak backfill explicitly).
+ *   (14) 502 sentry_unparseable when Sentry response has no data field
+ *        (was silent count=0 — pre-hardening this would let a malformed
+ *        response satisfy the soak gate).
+ *   (15) 502 sentry_unparseable when Sentry response has non-numeric count
+ *        (defensive against shape rotation #3).
+ *   (16) backfill 429 returns structured 429 sentry_rate_limited (was unstructured
+ *        500 — backfill path now goes through fetchSentryCount).
  */
 
 vi.mock("server-only", () => ({}));
@@ -114,12 +131,20 @@ describe("/api/cron/phase19-error-rollup", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns sentry_not_configured when SENTRY_ORG_SLUG missing", async () => {
+  it("returns 500 sentry_not_configured when SENTRY_ORG_SLUG missing", async () => {
     delete process.env.SENTRY_ORG_SLUG;
     const { GET } = await import("./route");
     const res = await GET(makeRequest({ auth: "Bearer test-secret" }));
-    const body = await res.json();
-    expect(body).toEqual({ ok: false, reason: "sentry_not_configured" });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ ok: false, reason: "sentry_not_configured" });
+  });
+
+  it("returns 500 sentry_not_configured when SENTRY_AUTH_TOKEN missing", async () => {
+    delete process.env.SENTRY_AUTH_TOKEN;
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest({ auth: "Bearer test-secret" }));
+    expect(res.status).toBe(500);
+    expect((await res.json()).reason).toBe("sentry_not_configured");
   });
 
   it("returns soak_not_started when flag value is 'off'", async () => {
@@ -140,6 +165,15 @@ describe("/api/cron/phase19-error-rollup", () => {
     expect(body.reason).toBe("soak_not_started");
   });
 
+  it("returns 500 feature_flags_unreachable when admin.from errors", async () => {
+    adminRecorders.flagErr = new Error("connection refused");
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest({ auth: "Bearer test-secret" }));
+    expect(res.status).toBe(500);
+    expect((await res.json()).reason).toBe("feature_flags_unreachable");
+    expect(adminRecorders.rpcArgs).toHaveLength(0);
+  });
+
   it("returns window_pre_flip when ?date= precedes the flip", async () => {
     const { GET } = await import("./route");
     const res = await GET(
@@ -148,6 +182,30 @@ describe("/api/cron/phase19-error-rollup", () => {
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.reason).toBe("window_pre_flip");
+  });
+
+  it("returns window_post_soak when ?date= is >14 days past flip", async () => {
+    const { GET } = await import("./route");
+    // flip 2026-05-25 → day 15 = 2026-06-08; pick a date well past the soak window.
+    const res = await GET(
+      makeRequest({ auth: "Bearer test-secret", search: "?date=2026-06-20" }),
+    );
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.ok).toBe(false);
+    expect(body.reason).toBe("window_post_soak");
+    expect(body.day_index_raw).toBeGreaterThan(14);
+    expect(adminRecorders.rpcArgs).toHaveLength(0);
+  });
+
+  it("returns 400 bad_date_param when ?date= is unparseable", async () => {
+    const { GET } = await import("./route");
+    const res = await GET(
+      makeRequest({ auth: "Bearer test-secret", search: "?date=notadate" }),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).reason).toBe("bad_date_param");
+    expect(adminRecorders.rpcArgs).toHaveLength(0);
   });
 
   it("happy path — records daily row with computed error_rate", async () => {
@@ -175,7 +233,7 @@ describe("/api/cron/phase19-error-rollup", () => {
     fetchSpy.mockRestore();
   });
 
-  it("rate-limit branch — 429 returns sentry_rate_limited", async () => {
+  it("returns 429 sentry_rate_limited on Sentry 429", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response("", {
         status: 429,
@@ -184,11 +242,46 @@ describe("/api/cron/phase19-error-rollup", () => {
     );
     const { GET } = await import("./route");
     const res = await GET(makeRequest({ auth: "Bearer test-secret" }));
+    expect(res.status).toBe(429);
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.reason).toBe("sentry_rate_limited");
     expect(body.retry_after).toBe("30");
     expect(adminRecorders.rpcArgs).toHaveLength(0);
+  });
+
+  it("returns 502 sentry_unreachable when fetch throws (DNS / TLS / network)", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("ENOTFOUND sentry.io"));
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest({ auth: "Bearer test-secret" }));
+    expect(res.status).toBe(502);
+    expect((await res.json()).reason).toBe("sentry_unreachable");
+    expect(adminRecorders.rpcArgs).toHaveLength(0);
+  });
+
+  it("returns 502 sentry_unparseable when Sentry response has no data field", async () => {
+    // The previous parseSentryCount would have silently returned 0 here,
+    // letting a malformed numerator + malformed denominator both = 0 record
+    // a false-clean error_rate=0 row.
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "internal" }), { status: 200 }),
+    );
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest({ auth: "Bearer test-secret" }));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.reason).toBe("sentry_unparseable");
+    expect(adminRecorders.rpcArgs).toHaveLength(0);
+  });
+
+  it("returns 502 sentry_unparseable when count is non-numeric (shape rotation defense)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ data: [{ "count()": "1234" }] }), { status: 200 }),
+    );
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest({ auth: "Bearer test-secret" }));
+    expect(res.status).toBe(502);
+    expect((await res.json()).reason).toBe("sentry_unparseable");
   });
 
   it("zero-denominator — records 0 rate with explanatory note", async () => {
@@ -221,7 +314,7 @@ describe("/api/cron/phase19-error-rollup", () => {
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ data: [{ "count()": 100 }] }), { status: 200 }),
       );
-    adminRecorders.rpcErr = new Error("simulated RPC failure") as never;
+    adminRecorders.rpcErr = new Error("simulated RPC failure");
     const { GET } = await import("./route");
     const res = await GET(makeRequest({ auth: "Bearer test-secret" }));
     const body = await res.json();
@@ -250,6 +343,44 @@ describe("/api/cron/phase19-error-rollup", () => {
     expect(firstCall).toContain("start=");
     expect(firstCall).toContain("end=");
     expect(firstCall).not.toContain("statsPeriod=");
+    fetchSpy.mockRestore();
+  });
+
+  it("backfill 429 returns structured 429 sentry_rate_limited (unified path)", async () => {
+    // Before hardening, backfill IIFE threw a bare Error → Next.js default 500
+    // with no reason. Now backfill goes through fetchSentryCount.
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("", { status: 429, headers: { "retry-after": "10" } }),
+    );
+    const { GET } = await import("./route");
+    const res = await GET(
+      makeRequest({ auth: "Bearer test-secret", search: "?date=2026-05-26" }),
+    );
+    expect(res.status).toBe(429);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.reason).toBe("sentry_rate_limited");
+    expect(adminRecorders.rpcArgs).toHaveLength(0);
+  });
+
+  it("backfill for flip-day clamps Sentry window start to flipTs (skips pre-flip)", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ "count()": 0 }] }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ "count()": 0 }] }), { status: 200 }),
+      );
+    const { GET } = await import("./route");
+    // flip = 2026-05-25T15:51:07Z. Backfill for 2026-05-25 should query Sentry
+    // with start = 15:51:07Z (not 00:00Z) so it excludes pre-flip traffic.
+    const res = await GET(
+      makeRequest({ auth: "Bearer test-secret", search: "?date=2026-05-25" }),
+    );
+    expect(res.status).toBe(200);
+    const firstCall = fetchSpy.mock.calls[0][0] as string;
+    expect(firstCall).toContain("start=2026-05-25T15%3A51%3A07.000Z");
     fetchSpy.mockRestore();
   });
 });
