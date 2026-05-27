@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.9.24] - 2026-05-27
+### Changed — CI speed (audit fixes, safe subset)
+- **shared node_modules cache (F1):** a `deps-cache` job populates a lockfile-keyed `node_modules` cache from one clean `npm ci`; the 6 frontend jobs + e2e restore it read-only (fall back to a retried `npm ci` on miss). Most runs (lockfile unchanged) skip the ~40-60s install in every job; no serial dependency, and a failed install can never poison the cache (save is an explicit post-`npm ci` step).
+- **e2e decouple (F2):** `e2e` no longer `needs: frontend-test` — its validity depends on the build + typecheck, not unit tests; shortens the critical-path tail. Merge is still gated by the `frontend` aggregator.
+- **shard 3→2 (F6):** vitest reduced from 3 to 2 shards now that F1 removes per-shard install overhead.
+- Deferred: F5 (pin h2 — ambiguous prod-transport decision, `h2` shows no Required-by), F3 (path filters — needs branch-protection required-check verification), F10 (ephemeral CI Postgres).
+
+
 ## [0.24.9.23] - 2026-05-27
 ### Fixed — audit-2026-05-07 cluster review: scenario commit + mandate autosave + outcomes KPI (batch b05)
 - mandate autosave: NaN retry-after guard, stale-throttle-error clear, idle-gate (no premature "idle" while a field is in-flight), timeout-no-retry, cross-field 429 shared rate-limit gate (NEW-C05)
