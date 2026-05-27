@@ -29,7 +29,15 @@ import { safeCompare } from "@/lib/timing-safe-compare";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const SENTRY_BASE = "https://sentry.io/api/0/organizations";
+// Sentry organizations are region-locked since the 2023 EU launch — an
+// EU-region org (`region_url: https://de.sentry.io` in the auth-token JWT)
+// silently returns `{ "data": [] }` (HTTP 200) from the global `sentry.io`
+// host. The empty-data response masquerades as "no events", causing the
+// soak gate to record 0/0 false-clean rows. Make the base host explicit
+// via env so EU orgs override; default to global for back-compat with
+// US-region orgs.
+const SENTRY_BASE =
+  process.env.SENTRY_API_BASE ?? "https://sentry.io/api/0/organizations";
 const KILL_SWITCH_KEY = "process_key_unified_backbone";
 
 /** Resilient parse for Sentry events API response. Returns a discriminated

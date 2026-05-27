@@ -43,7 +43,15 @@ import { Resend } from "resend";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const SENTRY_BASE = "https://sentry.io/api/0/organizations";
+// Sentry organizations are region-locked since the 2023 EU launch — an
+// EU-region org (`region_url: https://de.sentry.io` in the auth-token JWT)
+// silently returns `{ "data": [] }` (HTTP 200) from the global `sentry.io`
+// host. The empty-data response masquerades as "0 errors", causing the
+// auto-rollback path to never trip (`errorCount / audit_log_denominator = 0%`
+// always). Make the base host explicit via env so EU orgs override; default
+// to global for back-compat with US-region orgs.
+const SENTRY_BASE =
+  process.env.SENTRY_API_BASE ?? "https://sentry.io/api/0/organizations";
 
 const ALERT_THRESHOLD = 0.005; // 0.5% error envelope rate
 const WARN_THRESHOLD = 0.0025; // 0.25%

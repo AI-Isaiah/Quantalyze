@@ -10,11 +10,16 @@
 #
 # Required env:
 #   SENTRY_AUTH_TOKEN  org-scoped, scope `event:read`
-#   SENTRY_ORG_SLUG    e.g. "quantalyze"
+#   SENTRY_ORG_SLUG    e.g. "metaworld-fund-ltd"
+# Optional env:
+#   SENTRY_API_BASE    override the API host — REQUIRED for EU-region orgs.
+#                      Default: https://sentry.io/api/0/organizations (US).
+#                      EU:      https://de.sentry.io/api/0/organizations
 #
 # Usage:
 #   export SENTRY_AUTH_TOKEN=...
 #   export SENTRY_ORG_SLUG=...
+#   export SENTRY_API_BASE=https://de.sentry.io/api/0/organizations   # if EU
 #   bash scripts/probe-sentry-events-api.sh
 #
 # Exit codes:
@@ -38,7 +43,10 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
-URL="https://sentry.io/api/0/organizations/${SENTRY_ORG_SLUG}/events/"
+# EU-region orgs MUST set SENTRY_API_BASE=https://de.sentry.io/api/0/organizations
+# — the global host silently returns empty `data: []` for non-US orgs.
+SENTRY_API_BASE="${SENTRY_API_BASE:-https://sentry.io/api/0/organizations}"
+URL="${SENTRY_API_BASE}/${SENTRY_ORG_SLUG}/events/"
 # Probe an intentionally generic query (no path filter) so the probe still
 # returns a response shape even when /api/process-key has zero events.
 QUERY='statsPeriod=15m&query=level%3Aerror+environment%3Aproduction&field=count%28%29'
