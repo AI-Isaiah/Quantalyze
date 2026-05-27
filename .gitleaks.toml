@@ -93,4 +93,13 @@ paths = [
   # the response body. Not a real secret — gitleaks generic-api-key flags the
   # fixture on the push-to-main full scan (the PR-diff scan did not). Audit H-0305.
   '''(^|/)src/app/api/strategies/create-with-key/route\.audit\.test\.ts$''',
+  # H-0535 SecretStr redaction regression tests (audit-2026-05-07 batch 5).
+  # Both files define deliberately key-shaped fixtures (AWS-style `AKIDLIVE…`
+  # api_key / `SECRETLIVE…` api_secret) that the tests feed into
+  # _redact_credentials to assert exchange credentials are scrubbed from logs
+  # under SecretStr (the isinstance(str) re-leak trap). Not real secrets — the
+  # whole point of the test is that these values get [REDACTED]. The
+  # generic-api-key entropy detector flags the literals on the full scan.
+  '''(^|/)analytics-service/tests/test_verify_strategy_redaction\.py$''',
+  '''(^|/)analytics-service/tests/test_portfolio_router_audit_2026_05_07\.py$''',
 ]
