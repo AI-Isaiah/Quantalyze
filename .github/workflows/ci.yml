@@ -580,6 +580,19 @@ jobs:
     # lives in .gitleaks.toml (extends the default ruleset with a
     # narrow allowlist for known test fixtures).
     runs-on: ubuntu-latest
+    env:
+      # gitleaks-action@v2.3.9 is a Node-20 JS action; GitHub forces JS actions
+      # to Node 24 on 2026-06-02 and removes Node 20 on 2026-09-16. The action
+      # is a thin wrapper that downloads + runs the gitleaks Go binary, so it
+      # runs cleanly on Node 24 — opt in now so the secret-scan job verifies it
+      # ahead of the forced switch (and the deprecation warning clears). The
+      # latest gitleaks-action release is still v2.3.9/node20, so there is no
+      # version bump that fixes this. If a future Node bump ever breaks the
+      # action's JS bundle, replace it with the gitleaks binary (the pattern
+      # #308 used for lychee: a cached+retried release download + a
+      # `gitleaks git . --config .gitleaks.toml --log-opts=<base..head>` range
+      # scan — validated locally on this branch's investigation).
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     # C-0293(a) per-job uplift: gitleaks-action posts finding summaries
     # as PR comments when a leak is detected (so the author sees the
     # diagnostic without digging into the workflow log). That requires
