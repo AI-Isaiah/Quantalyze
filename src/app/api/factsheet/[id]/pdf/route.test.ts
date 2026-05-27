@@ -431,6 +431,55 @@ describe("GET /api/factsheet/[id]/pdf — analytics gating (Cluster L specialist
     expect(puppeteer.acquirePdfSlot).not.toHaveBeenCalled();
     expect(puppeteer.launchBrowser).not.toHaveBeenCalled();
   });
+
+  it("B3 (Phase 19.1): computation_status 'complete_with_warnings' is NOT rejected by the gate (proceeds to render)", async () => {
+    // A CSV strategy with an unavailable benchmark computes valid metrics and
+    // lands at `complete_with_warnings`. Pre-B3 the gate only admitted
+    // `complete`, so the HTML factsheet would render metrics while this PDF
+    // export 400'd — the same narrow-gate symptom B3 fixes on the page. This
+    // is the inverse of the test above: the route MUST pass the gate and reach
+    // the PDF queue slot. `computed_at` is supplied so the ETag stage (which
+    // runs before acquirePdfSlot) doesn't short-circuit.
+    const single = vi.fn().mockResolvedValue({
+      data: {
+        id: "00000000-0000-0000-0000-000000000001",
+        name: "CSV Strategy (benchmark unavailable)",
+        status: "published",
+        strategy_analytics: [
+          {
+            computation_status: "complete_with_warnings",
+            computed_at: "2026-05-17T00:00:00.000Z",
+          },
+        ],
+      },
+      error: null,
+    });
+    const eq2 = vi.fn().mockReturnValue({ single });
+    const eq1 = vi.fn().mockReturnValue({ eq: eq2 });
+    const select = vi.fn().mockReturnValue({ eq: eq1 });
+    const from = vi.fn().mockReturnValue({ select });
+    vi.mocked(createAdminClient).mockReturnValue({ from } as never);
+
+    const { GET } = await import("./route");
+    const req = new NextRequest(
+      "https://quantalyze.example.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      { method: "GET" },
+    );
+    try {
+      await GET(req, mkParams());
+    } catch (err) {
+      // The puppeteer chain is mocked incompletely in this describe, so the
+      // route throws AFTER the analytics gate. This test asserts only that the
+      // gate was passed — acquirePdfSlot is invoked immediately after it.
+      void err;
+    }
+    // The analytics gate (400 "Analytics not computed") returns BEFORE
+    // acquirePdfSlot. acquirePdfSlot being called therefore proves
+    // complete_with_warnings passed the gate — regresses loud if the gate is
+    // ever narrowed back to `complete` only.
+    const puppeteer = await import("@/lib/puppeteer");
+    expect(puppeteer.acquirePdfSlot).toHaveBeenCalled();
+  });
 });
 
 /**
