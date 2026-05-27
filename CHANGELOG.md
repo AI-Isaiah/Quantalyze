@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.24.9.27] - 2026-05-27
+### Fixed — Unified-backbone CSV pipeline 500 on every new upload (prod-down)
+- `analytics-service` `routers/process_key.py` idempotency pre-check did `if existing.data:` on the result of `.maybe_single().execute()`. PostgREST returns **None** (not a response with `data=None`) when zero rows match — the normal case for a brand-new `wizard_session_id` — so the pre-check raised `AttributeError: 'NoneType' object has no attribute 'data'` and returned **500 for every first-time CSV upload** once the unified-backbone flag was flipped on (Plan 08). Guard `existing is not None` so an absent row falls through to the normal insert path.
+- Found via Plan 09 prod E2E (`POST /process-key` 500). The existing test mock modeled the empty case as `MagicMock(data=None)` (kept `existing` truthy), so it never reproduced the real None; a new regression test overrides `maybe_single().execute()` to literal None (fails pre-fix, passes post-fix). 33 process_key tests pass.
+
+
 ## [0.24.9.26] - 2026-05-27
 ### Fixed — CSV ingester: auto-detect date format (day-first vs month-first)
 - `analytics-service` `validate_csv` previously coerced the `date` column straight through pandas `to_datetime` (month-first default), silently mis-parsing non-US uploads: European/German `D/M/YYYY` with every component ≤12 (e.g. `01/02/2023` = 1 Feb) parsed as 2 Jan with **no error** (wrong calendar → garbage CAGR/Sharpe), and any day >12 (`13/02/2023`) hit a cryptic `dtype('datetime64[ns]')` rejection.
