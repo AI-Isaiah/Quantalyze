@@ -52,7 +52,8 @@ export default async function CsvStatusPage() {
           strategies!inner (
             id,
             name,
-            user_id
+            user_id,
+            status
           )
         `,
       )
@@ -102,8 +103,8 @@ export default async function CsvStatusPage() {
                 // array depending on FK shape; normalize to a single
                 // row defensively.
                 const stratRaw = row.strategies as
-                  | { id: string; name: string; user_id: string }
-                  | { id: string; name: string; user_id: string }[]
+                  | { id: string; name: string; user_id: string; status: string }
+                  | { id: string; name: string; user_id: string; status: string }[]
                   | null;
                 const strat = Array.isArray(stratRaw) ? (stratRaw[0] ?? null) : stratRaw;
                 const email = strat?.user_id
@@ -140,15 +141,25 @@ export default async function CsvStatusPage() {
                       {submittedAt}
                     </td>
                     <td className="px-3 py-2">
-                      {strat?.id ? (
+                      {strat?.id && strat.status === "published" ? (
                         <Link
-                          href={`/strategies/${strat.id}`}
+                          href={`/strategy/${strat.id}`}
                           className="text-xs text-accent hover:underline"
                         >
                           View factsheet →
                         </Link>
                       ) : (
-                        <span className="text-xs text-text-muted">—</span>
+                        // The public factsheet (/strategy/[id]) is
+                        // status='published'-gated (getPublicStrategyDetail →
+                        // notFound otherwise) and there is no admin view for
+                        // another team's unpublished strategy, so a link on a
+                        // non-published row only 404s. Show a muted state
+                        // instead. (Pre-fix this linked `/strategies/${id}` —
+                        // PLURAL, a route that does not exist, only
+                        // /strategies/[id]/edit — so EVERY row 404'd.)
+                        <span className="text-xs text-text-muted">
+                          {strat?.id ? "Not published" : "—"}
+                        </span>
                       )}
                     </td>
                   </tr>

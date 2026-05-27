@@ -68,6 +68,14 @@ const STEP_INDEX: Record<WizardStepKey, 1 | 2 | 3 | 4> = {
   csv_submit: 4,
 };
 
+/**
+ * Phase 15 fix: debounce window for the CSV strategy-name autosave (below).
+ * Named to match the same-directory `*_MS` timing-constant convention
+ * (SyncPreviewStep.tsx: SLOW_HINT_MS, POLL_BACKOFF_MS, …). The autosave test
+ * waits 500 ms — comfortably past this window — so keep them consistent.
+ */
+const NAME_AUTOSAVE_DEBOUNCE_MS = 400;
+
 /** Phase 15 / CSV-01..CSV-02 — preview shape returned by /api/strategies/csv-validate. */
 type CsvFmt = "daily_returns" | "daily_nav" | "trades";
 interface CsvPreview {
@@ -312,6 +320,37 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
       window.removeEventListener("pageshow", handlePageShow);
     };
   }, [router]);
+
+  // Phase 15 fix (2026-05-27): autosave the CSV strategy name as the user
+  // types so a tab refresh/close BEFORE "Validate and continue" doesn't drop
+  // it. Pre-fix the name only reached localStorage inside the csv_upload
+  // onSuccess handler (after a successful validate), so a user who typed a
+  // name and refreshed lost it — Phase 15 VERIFICATION item #4 ("strategyName
+  // pre-populated on refresh"), confirmed failing by /qa. The restore path
+  // (deriveWizardResumeOverrides → setStrategyName → CsvUploadStep
+  // initialStrategyName backfill) already worked; the gap was purely that
+  // nothing was ever saved. Debounced (400ms) to coalesce keystrokes into one
+  // signed-envelope write; gated on `hydrated` so the post-mount restore paint
+  // doesn't fire a redundant echo write. Updates savedAt (the persistent
+  // "Draft saved · HH:MM" label) but intentionally does NOT tick the toast —
+  // a "Progress saved" popup on every typing pause would be noise.
+  useEffect(() => {
+    if (source !== "csv" || step !== "csv_upload" || !hydrated) return;
+    if (strategyName.trim().length === 0) return;
+    const timer = setTimeout(() => {
+      void saveWizardState({
+        // "" sentinel: the CSV branch has no server draft until submit —
+        // same value the other CSV saveWizardState calls below use.
+        strategyId: "",
+        wizardSessionId,
+        step: "csv_upload",
+        source: "csv",
+        strategyName,
+      });
+      setSavedAt(Date.now());
+    }, NAME_AUTOSAVE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [source, step, hydrated, strategyName, wizardSessionId]);
 
   const persistPointer = useCallback(
     (nextStep: WizardStepKey, id: string | null) => {
@@ -632,6 +671,12 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
               <CsvUploadStep
                 wizardSessionId={wizardSessionId}
                 initialStrategyName={strategyName}
+                // Phase 15 fix: keep WizardClient's strategyName in sync with
+                // every keystroke so the debounced autosave effect above can
+                // persist it. The CsvUploadStep clobber-guard (only backfill
+                // when its local value is "") prevents the resulting
+                // initialStrategyName echo from overwriting in-progress typing.
+                onNameChange={setStrategyName}
                 onSuccess={(payload) => {
                   setCsvFmt(payload.fmt);
                   setCsvPreview(payload.preview);
