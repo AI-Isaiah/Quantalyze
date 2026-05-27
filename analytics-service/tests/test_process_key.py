@@ -754,6 +754,52 @@ def test_process_key_onboard_queues(client):
     assert payload["p_metadata"]["verification_id"] == "ver-onboard"
 
 
+def test_process_key_resync_no_credentials_queues(client):
+    """Regression (2026-05-27 SYNC_FAILED): flow_type=resync is a long-fetch flow.
+
+    The wizard "Verify data" step (/api/keys/sync -> unifiedKeysSyncHandler) posts
+    `{flow_type:'resync', context:{strategy_id, user_id}}` with NO api_key/api_secret
+    and NO step -- by design, because the worker resolves credentials server-side
+    from the stored api_key_id. Pre-fix `_validate_per_flow_required_keys` lumped
+    resync with teaser/onboard and required api_key/api_secret, so this exact body
+    422'd before any compute_job was enqueued. Both OKX and Bybit key uploads
+    surfaced "Sync failed: analytics computation did not complete" with zero
+    compute_jobs and zero strategy_analytics rows (verified in prod Railway logs +
+    Supabase). This asserts the real caller's body now validates and queues.
+    """
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-resync")
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "resync",
+                "source": "bybit",
+                "context": {
+                    # Exactly what /api/keys/sync sends -- NO credentials, NO step.
+                    "strategy_id": "s1",
+                    "user_id": "u1",
+                },
+            },
+            headers=_auth_headers(),
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["queued"] is True
+
+    # The worker (not this request) resolves credentials from the stored
+    # api_key; resync must enqueue a process_key_long job.
+    rpc_calls = [c.args for c in fake.rpc.call_args_list]
+    enqueue_calls = [c for c in rpc_calls if c and c[0] == "enqueue_compute_job"]
+    assert enqueue_calls, "resync should enqueue process_key_long"
+    assert enqueue_calls[0][1]["p_kind"] == "process_key_long"
+
+
 def test_process_key_validate_failure_returns_envelope(client):
     """Adapter.validate(valid=False) → Phase 17 DESIGN-05 envelope shape."""
     fake = _build_supabase_mock(existing_row=None, insert_id="ver-bad")

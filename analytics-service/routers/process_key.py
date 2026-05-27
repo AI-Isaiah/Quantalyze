@@ -155,7 +155,16 @@ class _ProcessKeyBody(BaseModel):
         if step in {"validate", "finalize"}:
             return self
 
-        if self.flow_type in {"teaser", "onboard", "resync"}:
+        # resync is excluded: it re-syncs an EXISTING strategy whose api_key is
+        # already stored (api_key_id linkage), so the worker resolves
+        # credentials server-side from the stored key — the /api/keys/sync body
+        # carries no api_key/api_secret and no step. Pre-fix resync sat in this
+        # set, so that credential-less body 422'd before any compute_job was
+        # enqueued and the wizard "Verify data" step surfaced SYNC_FAILED with
+        # zero analytics written. teaser (synchronous, reads creds from context
+        # below) and onboard (may be a first-time connect; its callers pass
+        # step=validate/finalize which is skipped above) still require creds.
+        if self.flow_type in {"teaser", "onboard"}:
             missing = [k for k in ("api_key", "api_secret") if k not in ctx]
             if missing:
                 raise ValueError(

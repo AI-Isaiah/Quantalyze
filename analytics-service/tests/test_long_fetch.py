@@ -95,7 +95,7 @@ async def test_drain_unified_claim_runs_pipeline():
             "source": "csv",  # CSV path skips encrypt_credentials branch.
             "flow_type": "onboard",
             "correlation_id": "cid-2",
-            "context": {"strategy_id": "s-unified"},
+            "context": {"strategy_id": "s-unified", "api_key": "k", "api_secret": "s"},
         },
     }
     fake_trades: list = []
@@ -141,6 +141,176 @@ async def test_drain_unified_claim_runs_pipeline():
     assert rpc_names.count("transition_strategy_verification") >= 5
     fake_adapter.fetch_raw.assert_awaited_once()
     fake_adapter.reconstruct_positions.assert_awaited_once_with(fake_trades)
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_resolves_stored_credentials_when_absent() -> None:
+    """Bug #2 regression (2026-05-27): queued resync/onboard arrive with NO
+    credentials in context (the /process-key enqueue never forwards context), so
+    the handler must resolve the stored key server-side via
+    job_worker._load_strategy_and_key + services.encryption.decrypt_credentials
+    and inject the decrypted creds into the adapter request BEFORE validate.
+    Pre-fix the adapter pipeline hit `context["api_key"]` KeyError / validated
+    against empty creds. This asserts the decrypted stored creds reach validate."""
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-creds",
+        "kind": "process_key_long",
+        "strategy_id": "s-creds",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-creds",
+            "source": "okx",
+            "flow_type": "resync",
+            "correlation_id": "cid-creds",
+            "context": {"strategy_id": "s-creds"},  # NO api_key / api_secret
+        },
+    }
+
+    captured: dict[str, Any] = {}
+
+    async def _capture_validate(req):
+        captured["ctx"] = dict(req.context)
+        return ValidationResult(
+            valid=True, read_only=True, error_code=None,
+            human_message=None, debug_context={},
+        )
+
+    fake_metrics = MagicMock()
+    fake_metrics.__dict__ = {"sharpe": 1.0, "trade_count": 0}
+    fake_fp = MagicMock()
+    fake_fp.to_jsonb.return_value = {"version": 1}
+
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(side_effect=_capture_validate)
+    adapter.fetch_raw = AsyncMock(return_value=[])
+    adapter.compute_metrics = MagicMock(return_value=fake_metrics)
+    adapter.compute_fingerprint = MagicMock(return_value=fake_fp)
+    adapter.reconstruct_positions = AsyncMock(return_value=[])
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb), \
+         patch(
+             "services.job_worker._load_strategy_and_key",
+             new=AsyncMock(return_value=(
+                 {"id": "s-creds", "user_id": "u1", "api_key_id": "k1"},
+                 {"id": "k1", "user_id": "u1", "exchange": "okx"},
+                 None,
+             )),
+         ), \
+         patch(
+             "services.encryption.decrypt_credentials",
+             return_value=("RESOLVED_KEY", "RESOLVED_SECRET", "RESOLVED_PASS"),
+         ), \
+         patch("services.encryption.get_kek", return_value=b"0" * 32), \
+         patch("services.encryption.encrypt_credentials", return_value={"v": 1}):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.DONE
+    # The decrypted STORED credentials (not request-body creds) must reach validate.
+    assert captured["ctx"]["api_key"] == "RESOLVED_KEY"
+    assert captured["ctx"]["api_secret"] == "RESOLVED_SECRET"
+    assert captured["ctx"]["passphrase"] == "RESOLVED_PASS"
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_credential_resolution_failure_is_permanent() -> None:
+    """Bug #2 edge: when the strategy has no connected key, credential resolution
+    fails permanently (matches the legacy _exchange_preflight convention) rather
+    than crashing on KeyError or validating against empty creds."""
+    job = {
+        "id": "job-nokey",
+        "kind": "process_key_long",
+        "strategy_id": "s-nokey",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-nokey",
+            "source": "okx",
+            "flow_type": "resync",
+            "correlation_id": "cid-nokey",
+            "context": {"strategy_id": "s-nokey"},
+        },
+    }
+    sb = _build_supabase_mock(existing_status="draft")
+    with patch("services.ingestion.long_fetch.get_adapter") as mock_adapter, \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb), \
+         patch(
+             "services.job_worker._load_strategy_and_key",
+             new=AsyncMock(return_value=(None, None, "Strategy has no connected API key")),
+         ):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    # No broker adapter should be constructed when creds cannot be resolved.
+    mock_adapter.return_value.validate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_enqueues_sync_trades_on_success() -> None:
+    """Bug #3 regression (2026-05-27): the queued path advanced the verification
+    to 'published' but never wrote `strategy_analytics` -- which is what the
+    wizard's SyncPreviewStep polls (`computation_status='complete'`). On success
+    a non-csv flow must enqueue the proven sync_trades job, which persists trades
+    and auto-chains to compute_analytics -> strategy_analytics -> status bridge.
+    Pre-fix the wizard polled forever and timed out to SYNC_FAILED."""
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-st",
+        "kind": "process_key_long",
+        "strategy_id": "s-st",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-st",
+            "source": "okx",
+            "flow_type": "resync",
+            "correlation_id": "cid-st",
+            # creds present -> credential resolution is skipped (bug #2 path
+            # covered separately); this test focuses on the sync_trades enqueue.
+            "context": {"strategy_id": "s-st", "api_key": "k", "api_secret": "s"},
+        },
+    }
+
+    fake_metrics = MagicMock()
+    fake_metrics.__dict__ = {"sharpe": 1.0, "trade_count": 0}
+    fake_fp = MagicMock()
+    fake_fp.to_jsonb.return_value = {"version": 1}
+
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=True,
+            error_code=None,
+            human_message=None,
+            debug_context={},
+        )
+    )
+    adapter.fetch_raw = AsyncMock(return_value=[])
+    adapter.compute_metrics = MagicMock(return_value=fake_metrics)
+    adapter.compute_fingerprint = MagicMock(return_value=fake_fp)
+    adapter.reconstruct_positions = AsyncMock(return_value=[])
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb), \
+         patch("services.encryption.encrypt_credentials", return_value={"v": 1}), \
+         patch("services.encryption.get_kek", return_value=b"0" * 32):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.DONE
+    enqueue = [
+        c for c in sb.rpc.call_args_list
+        if c.args and c.args[0] == "enqueue_compute_job"
+    ]
+    assert enqueue, "success must enqueue a follow-on sync_trades job"
+    assert enqueue[0].args[1]["p_kind"] == "sync_trades"
+    assert enqueue[0].args[1]["p_strategy_id"] == "s-st"
 
 
 @pytest.mark.asyncio
@@ -280,7 +450,7 @@ async def test_short_circuit_skips_broker_on_non_draft_status(advanced_status):
             "source": "okx",
             "flow_type": "onboard",
             "correlation_id": "cid-retry",
-            "context": {"strategy_id": "s-retry"},
+            "context": {"strategy_id": "s-retry", "api_key": "k", "api_secret": "s"},
         },
     }
     sb = _build_supabase_mock(existing_status=advanced_status)
@@ -371,7 +541,7 @@ async def test_long_fetch_rejects_write_capable_key(
             "source": "binance",
             "flow_type": "onboard",
             "correlation_id": "cid-scope",
-            "context": {"strategy_id": "s-scope"},
+            "context": {"strategy_id": "s-scope", "api_key": "k", "api_secret": "s"},
         },
     }
 
@@ -442,7 +612,7 @@ async def test_long_fetch_scope_rejection_uses_validation_unexpected_fallback() 
             "source": "binance",
             "flow_type": "onboard",
             "correlation_id": "cid-fallback",
-            "context": {"strategy_id": "s-fallback"},
+            "context": {"strategy_id": "s-fallback", "api_key": "k", "api_secret": "s"},
         },
     }
 
@@ -510,7 +680,7 @@ async def test_long_fetch_scope_rejection_survives_rpc_failure() -> None:
             "source": "okx",
             "flow_type": "onboard",
             "correlation_id": "cid-rpc-fail",
-            "context": {"strategy_id": "s-rpc-fail"},
+            "context": {"strategy_id": "s-rpc-fail", "api_key": "k", "api_secret": "s"},
         },
     }
 
@@ -558,7 +728,7 @@ async def test_long_fetch_csv_read_only_none_not_rejected() -> None:
             "source": "csv",
             "flow_type": "onboard",
             "correlation_id": "cid-csv",
-            "context": {"strategy_id": "s-csv"},
+            "context": {"strategy_id": "s-csv", "api_key": "k", "api_secret": "s"},
         },
     }
 
@@ -627,7 +797,7 @@ async def test_long_fetch_probe_error_is_transient_not_permanent() -> None:
             "source": "okx",
             "flow_type": "onboard",
             "correlation_id": "cid-probe",
-            "context": {"strategy_id": "s-probe"},
+            "context": {"strategy_id": "s-probe", "api_key": "k", "api_secret": "s"},
         },
     }
 
@@ -699,7 +869,7 @@ async def test_long_fetch_validation_unexpected_from_adapter_is_transient() -> N
             "source": "binance",
             "flow_type": "onboard",
             "correlation_id": "cid-unexpected",
-            "context": {"strategy_id": "s-unexpected"},
+            "context": {"strategy_id": "s-unexpected", "api_key": "k", "api_secret": "s"},
         },
     }
 
@@ -750,7 +920,7 @@ async def test_long_fetch_validation_unexpected_fallback_is_permanent() -> None:
             "source": "bybit",
             "flow_type": "onboard",
             "correlation_id": "cid-fallback-perm",
-            "context": {"strategy_id": "s-fallback-perm"},
+            "context": {"strategy_id": "s-fallback-perm", "api_key": "k", "api_secret": "s"},
         },
     }
 
@@ -800,7 +970,7 @@ async def test_long_fetch_defense_in_depth_error_code_none_read_only_gate() -> N
             "source": "okx",
             "flow_type": "onboard",
             "correlation_id": "cid-dib",
-            "context": {"strategy_id": "s-dib"},
+            "context": {"strategy_id": "s-dib", "api_key": "k", "api_secret": "s"},
         },
     }
 
