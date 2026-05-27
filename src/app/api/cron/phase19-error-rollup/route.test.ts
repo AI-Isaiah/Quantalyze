@@ -116,6 +116,7 @@ describe("/api/cron/phase19-error-rollup", () => {
     process.env.CRON_SECRET = "test-secret";
     process.env.SENTRY_ORG_SLUG = "quantalyze";
     process.env.SENTRY_AUTH_TOKEN = "sentry-token";
+    delete process.env.SENTRY_API_BASE;
   });
 
   afterEach(() => {
@@ -123,6 +124,7 @@ describe("/api/cron/phase19-error-rollup", () => {
     delete process.env.CRON_SECRET;
     delete process.env.SENTRY_ORG_SLUG;
     delete process.env.SENTRY_AUTH_TOKEN;
+    delete process.env.SENTRY_API_BASE;
   });
 
   it("returns 401 when auth header is wrong", async () => {
@@ -361,6 +363,45 @@ describe("/api/cron/phase19-error-rollup", () => {
     expect(body.ok).toBe(false);
     expect(body.reason).toBe("sentry_rate_limited");
     expect(adminRecorders.rpcArgs).toHaveLength(0);
+  });
+
+  it("respects SENTRY_API_BASE for EU-region orgs (regression: 0/0 false-clean fix)", async () => {
+    // Pre-fix: SENTRY_BASE was hardcoded to https://sentry.io. EU-region orgs
+    // got HTTP 200 + empty data, recording 0/0 false-clean soak rows. Fix
+    // is env-configurable SENTRY_API_BASE.
+    process.env.SENTRY_API_BASE = "https://de.sentry.io/api/0/organizations";
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ "count()": 1 }] }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ "count()": 200 }] }), { status: 200 }),
+      );
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest({ auth: "Bearer test-secret" }));
+    expect(res.status).toBe(200);
+    const firstCall = fetchSpy.mock.calls[0][0] as string;
+    expect(firstCall).toMatch(/^https:\/\/de\.sentry\.io\/api\/0\/organizations\/quantalyze\/events\//);
+    fetchSpy.mockRestore();
+  });
+
+  it("defaults to https://sentry.io when SENTRY_API_BASE is unset (back-compat)", async () => {
+    // SENTRY_API_BASE deletion already happens in beforeEach; explicit here for clarity.
+    delete process.env.SENTRY_API_BASE;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ "count()": 0 }] }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ "count()": 100 }] }), { status: 200 }),
+      );
+    const { GET } = await import("./route");
+    await GET(makeRequest({ auth: "Bearer test-secret" }));
+    const firstCall = fetchSpy.mock.calls[0][0] as string;
+    expect(firstCall).toMatch(/^https:\/\/sentry\.io\/api\/0\/organizations\//);
+    fetchSpy.mockRestore();
   });
 
   it("backfill for flip-day clamps Sentry window start to flipTs (skips pre-flip)", async () => {

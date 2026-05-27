@@ -393,5 +393,41 @@ describe.each([["GET"], ["POST"]] as const)(
         "connection reset by peer",
       );
     });
+
+    // --- (3) SENTRY_API_BASE region override (regression: silent false-clean) -
+
+    it("(3a) respects SENTRY_API_BASE for EU-region orgs", async () => {
+      // Pre-fix: SENTRY_BASE was hardcoded to https://sentry.io and EU-region
+      // orgs (metaworld-fund-ltd on de.sentry.io) silently returned empty
+      // data. Auto-rollback path was effectively disabled for the entire
+      // post-deploy window. Fix is env-driven SENTRY_API_BASE.
+      process.env.SENTRY_API_BASE = "https://de.sentry.io/api/0/organizations";
+      rec.denominator = 1000;
+      const fetchFn = vi.fn(async () =>
+        sentryResponse({ ok: true, json: { data: [{ "count()": 1 }] } }),
+      );
+      vi.stubGlobal("fetch", fetchFn);
+      const handler = await getHandler();
+      await handler(authedReq());
+      const firstCall = (fetchFn.mock.calls[0] as unknown as [string])[0];
+      expect(firstCall).toMatch(
+        /^https:\/\/de\.sentry\.io\/api\/0\/organizations\/quantalyze\/events\//,
+      );
+    });
+
+    it("(3b) defaults to https://sentry.io when SENTRY_API_BASE is unset (back-compat)", async () => {
+      delete process.env.SENTRY_API_BASE;
+      rec.denominator = 1000;
+      const fetchFn = vi.fn(async () =>
+        sentryResponse({ ok: true, json: { data: [{ "count()": 0 }] } }),
+      );
+      vi.stubGlobal("fetch", fetchFn);
+      const handler = await getHandler();
+      await handler(authedReq());
+      const firstCall = (fetchFn.mock.calls[0] as unknown as [string])[0];
+      expect(firstCall).toMatch(
+        /^https:\/\/sentry\.io\/api\/0\/organizations\//,
+      );
+    });
   },
 );
