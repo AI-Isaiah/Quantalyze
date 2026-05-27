@@ -104,35 +104,60 @@ def test_us_month_first_with_day_over_12_unchanged_no_flag() -> None:
 
 
 # ---------------------------------------------------------------------------
-# THE critical regression: day-first, every component <= 12. Without the fix
-# this silently parsed as month-first (Jan 2 / Feb 2 / Mar 2) with NO error.
-# The fix must return three CONSECUTIVE days in February.
+# Genuinely ambiguous dates (every component <= 12, both readings valid AND
+# different) must be REJECTED, not guessed. The data cannot tell DD/MM from
+# MM/DD; guessing silently mis-parses the whole series into the wrong calendar.
+# A real >=20-day daily series always contains a day > 12 (unambiguous), so
+# only short/sparse series reach this path.
 # ---------------------------------------------------------------------------
 
-def test_european_day_first_all_le_12_is_not_silently_corrupted() -> None:
+def test_european_day_first_all_le_12_is_rejected_as_ambiguous() -> None:
+    # 01/02,02/02,03/02 could be 1-3 Feb (day-first) OR Jan2/Feb2/Mar2
+    # (month-first) — both monotonic. The pre-fix cadence tie-break silently
+    # picked one; now we reject rather than risk corrupting the calendar.
     env = validate_csv(
         _csv([("01/02/2023", "0.01"), ("02/02/2023", "0.02"), ("03/02/2023", "-0.01")]),
         "daily_returns",
     )
-    assert env["ok"] is True, env.get("errors")
-    # 1-3 February (day-first) — NOT 2 Jan / 2 Feb / 2 Mar (the old month-first
-    # mis-parse). This assertion fails on the pre-fix code.
-    assert _dates(env) == ["2023-02-01", "2023-02-02", "2023-02-03"], (
-        "Day-first dates with all components <= 12 must be read as consecutive "
-        "days (daily cadence), not spread across three months by the month-first "
-        f"default. Got {_dates(env)}"
+    assert env["ok"] is False
+    assert "date_format_ambiguous" in {e["rule"] for e in env["errors"]}, (
+        f"Ambiguous all-<=12 dates must be rejected, not guessed. errors={env['errors']}"
     )
-    flags = env.get("info_flags") or []
-    date_flags = [f for f in flags if f["rule"] == "date_format_normalized"]
-    assert date_flags, "An ambiguous day-first resolution must surface a transparency flag."
-    assert date_flags[0]["detected_format"] == "day_first"
-    assert date_flags[0]["ambiguous"] is True
+    assert env.get("daily_returns_series") is None
+
+
+def test_monthly_day_first_ambiguous_is_rejected_not_silently_misread() -> None:
+    """GAP-1 regression. A monthly day-first series (5th of Jan/Feb/Mar,
+    European) whose WRONG month-first reading collapses to three consecutive
+    days in May. The old daily-cadence tie-break picked the smaller-gap
+    (month-first) reading and silently relabeled it — the exact silent
+    corruption the feature was meant to prevent. Must now reject as ambiguous.
+    """
+    env = validate_csv(
+        _csv([("05/01/2023", "0.01"), ("05/02/2023", "0.02"), ("05/03/2023", "-0.01")]),
+        "daily_returns",
+    )
+    assert env["ok"] is False
+    assert "date_format_ambiguous" in {e["rule"] for e in env["errors"]}, (
+        f"A monthly day-first series must not be silently read as month-first "
+        f"daily. errors={env['errors']}"
+    )
+
+
+def test_single_row_ambiguous_is_rejected_without_phantom_flag() -> None:
+    """GAP-2. A 1-row all-<=12 file has no way to disambiguate and no cadence
+    to lean on; it must be rejected (ambiguous), not emit a phantom
+    date_format_normalized flag claiming a resolved guess."""
+    env = validate_csv(_csv([("01/02/2023", "0.01")]), "daily_returns")
+    assert env["ok"] is False
+    assert "date_format_ambiguous" in {e["rule"] for e in env["errors"]}
+    assert "date_format_normalized" not in _flag_rules(env)
 
 
 # ---------------------------------------------------------------------------
-# Day-first with a day > 12 — was a cryptic `dtype('datetime64[ns]')`
-# rejection; must now parse cleanly to 12-14 February with a (non-ambiguous)
-# day-first flag.
+# Day-first with a day > 12 — only day-first parses, so it is UNAMBIGUOUS:
+# was a cryptic `dtype('datetime64[ns]')` rejection, must now parse cleanly to
+# 12-14 February with a day-first flag.
 # ---------------------------------------------------------------------------
 
 def test_european_day_first_with_day_over_12_now_accepted() -> None:
@@ -146,18 +171,17 @@ def test_european_day_first_with_day_over_12_now_accepted() -> None:
     assert _dates(env) == ["2023-02-12", "2023-02-13", "2023-02-14"]
     date_flags = [f for f in (env.get("info_flags") or []) if f["rule"] == "date_format_normalized"]
     assert date_flags and date_flags[0]["detected_format"] == "day_first"
-    # A day > 12 makes month-first impossible, so this is unambiguous, not a
-    # cadence-resolved tie.
-    assert date_flags[0]["ambiguous"] is False
 
 
 def test_german_dotted_day_first_parses() -> None:
+    # 12.02 (Dec 2 month-first) then 13.02 breaks month-first monotonicity →
+    # day-first is the only valid reading → unambiguous dotted European date.
     env = validate_csv(
-        _csv([("01.02.2023", "0.01"), ("02.02.2023", "0.02"), ("03.02.2023", "-0.01")]),
+        _csv([("12.02.2023", "0.01"), ("13.02.2023", "0.02"), ("14.02.2023", "-0.01")]),
         "daily_returns",
     )
     assert env["ok"] is True, env.get("errors")
-    assert _dates(env) == ["2023-02-01", "2023-02-02", "2023-02-03"]
+    assert _dates(env) == ["2023-02-12", "2023-02-13", "2023-02-14"]
     assert "date_format_normalized" in _flag_rules(env)
 
 
@@ -207,6 +231,38 @@ def test_daily_nav_day_first_is_normalized() -> None:
 def test_unparseable_dates_still_rejected_without_flag() -> None:
     env = validate_csv(
         _csv([("not-a-date", "0.01"), ("also-bad", "0.02")]),
+        "daily_returns",
+    )
+    assert env["ok"] is False
+    assert env.get("daily_returns_series") is None
+    assert "date_format_normalized" not in _flag_rules(env)
+
+
+# ---------------------------------------------------------------------------
+# H1 — row cap (DoS): reject oversize row counts before the date double-parse.
+# GAP-3 — a partially-unparseable column is rejected, not speculatively mutated.
+# ---------------------------------------------------------------------------
+
+def test_too_many_rows_is_rejected() -> None:
+    import datetime as _dt
+
+    from services.csv_validator import MAX_INGEST_ROWS
+
+    base = _dt.date(2000, 1, 1)
+    rows = [
+        ((base + _dt.timedelta(days=i)).isoformat(), "0.001")
+        for i in range(MAX_INGEST_ROWS + 5)
+    ]
+    env = validate_csv(_csv(rows), "daily_returns")
+    assert env["ok"] is False
+    assert "too_many_rows" in {e["rule"] for e in env["errors"]}
+
+
+def test_partially_unparseable_dates_rejected_without_flag() -> None:
+    # GAP-3 — one bad row among good ones: rejected, no speculative mutation,
+    # no date flag (the existing pandera error path handles it).
+    env = validate_csv(
+        _csv([("01/02/2023", "0.01"), ("not-a-date", "0.02"), ("03/02/2023", "-0.01")]),
         "daily_returns",
     )
     assert env["ok"] is False

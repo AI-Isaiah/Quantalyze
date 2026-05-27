@@ -43,25 +43,56 @@ from services.ingestion.adapter import (
 )
 
 
+# 2026-05-27 (H1, security) — byte ceiling on the /process-key CSV path. The
+# unified-backbone endpoint has no upstream size cap (unlike the TS edge route
+# and the legacy FastAPI csv.py `_read_capped`), so a direct caller holding
+# INTERNAL_API_TOKEN could hand an arbitrarily large base64 blob and OOM / DoS
+# the worker via base64.b64decode + pd.read_csv. Reject oversize BEFORE
+# allocating the full decoded buffer. 10 MB matches the TS edge + legacy caps.
+MAX_CSV_BYTES = 10 * 1024 * 1024
+# base64 inflates by ~4/3; bound the b64 string so the decode can't allocate
+# past the cap. Slack covers padding/newlines.
+_MAX_CSV_B64_CHARS = (MAX_CSV_BYTES * 4) // 3 + 1024
+
+
+class CsvTooLargeError(ValueError):
+    """Raised when an uploaded CSV exceeds MAX_CSV_BYTES."""
+
+
 def _resolve_raw_bytes(context: dict[str, Any]) -> bytes:
     """CR-03 — resolve CSV bytes from the unified-backbone wire envelope.
 
     Canonical key: `raw_bytes_base64` (string). Falls back to legacy
     `raw_bytes` (raw bytes) for unit tests / internal callers. Raises
-    KeyError if neither is present so the route surfaces a clean error.
+    KeyError if neither is present, or CsvTooLargeError if the payload exceeds
+    MAX_CSV_BYTES, so the route surfaces a clean error.
     """
     b64 = context.get("raw_bytes_base64")
     if b64 is not None:
         if isinstance(b64, (bytes, bytearray)):
             b64 = bytes(b64).decode("ascii")
-        return base64.b64decode(b64)
+        if len(b64) > _MAX_CSV_B64_CHARS:
+            raise CsvTooLargeError(
+                f"CSV exceeds the {MAX_CSV_BYTES // (1024 * 1024)} MB limit."
+            )
+        decoded = base64.b64decode(b64)
+        if len(decoded) > MAX_CSV_BYTES:
+            raise CsvTooLargeError(
+                f"CSV exceeds the {MAX_CSV_BYTES // (1024 * 1024)} MB limit "
+                f"({len(decoded)} bytes)."
+            )
+        return decoded
     raw = context.get("raw_bytes")
     if raw is not None:
-        if isinstance(raw, str):
-            # Legacy callers occasionally hand a UTF-8 string; preserve
-            # backwards-compatibility but emit bytes.
-            return raw.encode("utf-8")
-        return bytes(raw)
+        # Legacy callers occasionally hand a UTF-8 string; preserve
+        # backwards-compatibility but emit bytes.
+        data = raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
+        if len(data) > MAX_CSV_BYTES:
+            raise CsvTooLargeError(
+                f"CSV exceeds the {MAX_CSV_BYTES // (1024 * 1024)} MB limit "
+                f"({len(data)} bytes)."
+            )
+        return data
     raise KeyError(
         "CSV context missing both `raw_bytes_base64` (canonical) and "
         "`raw_bytes` (legacy); the thin adapter must base64-encode file bytes."
@@ -81,7 +112,17 @@ class CsvAdapter:
         # strategy_id (optional pre-strategy), wizard_session_id, user_id.
         from services import csv_validator
 
-        raw_bytes = _resolve_raw_bytes(req.context)
+        try:
+            raw_bytes = _resolve_raw_bytes(req.context)
+        except CsvTooLargeError as exc:
+            # H1 — reject oversize uploads cleanly instead of OOM-ing the pod.
+            return ValidationResult(
+                valid=False,
+                read_only=None,
+                error_code="CSV_TOO_LARGE",
+                human_message=str(exc),
+                debug_context=None,
+            )
         fmt = req.context["fmt"]
 
         try:

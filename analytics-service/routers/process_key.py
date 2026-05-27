@@ -319,7 +319,17 @@ async def process_key(
     # `Exception: No "request" or "websocket" argument on function`.
     _verify_internal_token(request)
 
-    correlation_id = request.headers.get("X-Correlation-Id", "")
+    # 2026-05-27 — the client-supplied correlation id flows into structured
+    # logs AND the UUID column strategy_verifications.correlation_id. Accept it
+    # only if it is a well-formed UUID; otherwise mint one. This prevents
+    # log-shaping via an unbounded/newline header and the empty-string-into-
+    # UUID-column insert failure. The TS client always sends a UUID, so this is
+    # a no-op for the real caller.
+    _raw_cid = request.headers.get("X-Correlation-Id", "")
+    try:
+        correlation_id = str(uuid.UUID(str(_raw_cid)))
+    except (ValueError, AttributeError, TypeError):
+        correlation_id = str(uuid.uuid4())
     started_at = time.monotonic()
 
     structlog.contextvars.bind_contextvars(
@@ -647,25 +657,32 @@ async def process_key(
         # 23505 and return the row that actually won the race.
         msg = str(exc)
         if "23505" in msg or "duplicate key" in msg.lower():
-            existing = (
+            # Re-fetch the row that won the race. Use maybe_single (returns
+            # None on zero rows) rather than single (raises PGRST116): if a
+            # TOCTOU delete / RLS hide between the failed insert and this
+            # re-select leaves no row, we must surface the ORIGINAL 23505
+            # rather than mask it with a cryptic None-deref or PGRST116 500.
+            race_winner = (
                 supabase.table("strategy_verifications")
                 .select("*")
                 .eq("wizard_session_id", wizard_session_id)
-                .single()
+                .maybe_single()
                 .execute()
             )
+            if race_winner is None or not race_winner.data:
+                raise
             log.info(
                 "process_key.idempotent_race_resolved",
-                verification_id=existing.data["id"],
+                verification_id=race_winner.data["id"],
             )
             # API-7 — race-resolved idempotent hit emits WIZARD_DUPLICATE
             # for the same reason as the SELECT-pre-check path above.
             return {
                 "code": "WIZARD_DUPLICATE",
                 "idempotent": True,
-                "verification_id": existing.data["id"],
-                "status": existing.data["status"],
-                "trust_tier": existing.data.get("trust_tier"),
+                "verification_id": race_winner.data["id"],
+                "status": race_winner.data["status"],
+                "trust_tier": race_winner.data.get("trust_tier"),
                 "correlation_id": correlation_id,
                 "queued": False,
             }

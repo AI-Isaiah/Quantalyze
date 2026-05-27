@@ -73,6 +73,14 @@ DAILY_RETURN_DOLLAR_FORM_MEDIAN_ABS_THRESHOLD = 0.5
 PERCENT_FORM_AUTO_NORM_LOWER = 0.5
 PERCENT_FORM_AUTO_NORM_UPPER = 100.0
 
+# 2026-05-27 (H1, security) — hard row ceiling enforced BEFORE the date
+# double-parse. The /process-key path has no upstream row cap (unlike the TS
+# edge route), so an unbounded CSV would make pandas read_csv + the two
+# pd.to_datetime passes run on arbitrarily many rows. Matches the 5000-row
+# persistence limit (persist_csv_daily_returns); a larger file is rejected
+# with an actionable error rather than silently truncated or DoS-ing the pod.
+MAX_INGEST_ROWS = 5000
+
 # Phase 15 PII column-name pattern. Matches column NAMES (case-insensitive)
 # that historically carry user-identifying values in CSV exports. The
 # match is on the column name; values are masked to '***' regardless of
@@ -481,37 +489,38 @@ def _coerce_numeric_string(value: object) -> object:
 # Real customers will not reformat their broker/accounting exports to ISO
 # on request, so the ingester deduces the format FROM THE DATA: parse the
 # column both month-first and day-first, then use the schema's existing
-# strictly-increasing requirement (plus daily-cadence spacing for the
-# genuinely-ambiguous all-<=12 case) to pick the reading that yields a
-# valid ascending series. The chosen reading is written back as a single
-# datetime64 column BEFORE pandera runs, so downstream coercion is a no-op
-# and the emitted daily_returns_series is always YYYY-MM-DD.
+# strictly-increasing requirement to pick the reading that yields a valid
+# ascending series. When only ONE reading is valid (the common case — any
+# real >=20-day daily series contains a day > 12, which rules out the wrong
+# reading) the format is unambiguous; the chosen reading is written back as
+# a single datetime64 column BEFORE pandera runs, so downstream coercion is
+# a no-op and the emitted daily_returns_series is always YYYY-MM-DD.
 #
-# Minimal-intervention by construction: the column is rewritten ONLY when
-# month-first (what pandera would do today) is wrong or ambiguous. ISO,
-# US dates, and unparseable garbage are left untouched, so their existing
-# behaviour is byte-for-byte unchanged and no info-flag is emitted. Any
-# day-first or ambiguity-resolved pick DOES emit a `date_format_normalized`
-# info-flag so the wizard can surface a chip and the user can catch a wrong
-# guess.
+# When BOTH readings are valid but DIFFER (every component <= 12 — only
+# reachable for short / sparse series, which a real >=20-day daily track
+# record never is), the data genuinely cannot disambiguate DD/MM from MM/DD.
+# We do NOT guess: a wrong guess silently mis-parses the entire track record
+# into the wrong calendar with no error (e.g. a monthly day-first series
+# "05/01,05/02,05/03" read as three consecutive days in May). Instead
+# validate_csv rejects with an actionable `date_format_ambiguous` error
+# asking for ISO. (A richer wizard fallback — show the first rows and let the
+# user confirm the column/format — is tracked as a follow-up.)
+#
+# Minimal-intervention by construction: the column is rewritten ONLY when a
+# single, non-month-first reading is valid. ISO, US dates, and unparseable
+# garbage are left untouched (byte-for-byte unchanged, no info-flag); the
+# unambiguous day-first case emits a `date_format_normalized` info-flag.
 # ---------------------------------------------------------------------------
 
-def _date_series_quality(parsed: pd.Series) -> tuple[bool, float | None]:
-    """(usable, median_abs_gap_days) for one candidate date parse.
+def _date_parse_is_usable(parsed: pd.Series) -> bool:
+    """True when every value parsed (no NaT) AND the series is monotonic
+    non-decreasing.
 
-    `usable` = no NaT (every cell parsed) AND monotonic non-decreasing.
-    Uniqueness is intentionally NOT required here — format *selection*
-    only needs a consistent ordering; the per-format pandera
-    `_strictly_increasing` check still enforces uniqueness downstream. The
-    median gap is used only to break a day-first/month-first tie in favour
-    of the daily-cadence reading.
+    Uniqueness is intentionally NOT required here — format *selection* only
+    needs a consistent ordering; the per-format pandera `_strictly_increasing`
+    check still enforces uniqueness downstream.
     """
-    if parsed.isna().any() or not parsed.is_monotonic_increasing:
-        return (False, None)
-    gaps = parsed.diff().dropna()
-    if len(gaps) == 0:
-        return (True, None)
-    return (True, float(gaps.dt.total_seconds().abs().median() / 86400.0))
+    return bool(not parsed.isna().any() and parsed.is_monotonic_increasing)
 
 
 def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None:
@@ -556,51 +565,44 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
             df["date"] = parsed_mf
         return None
 
-    mf_ok, mf_gap = _date_series_quality(parsed_mf)
-    df_ok, df_gap = _date_series_quality(parsed_df)
+    mf_ok = _date_parse_is_usable(parsed_mf)
+    df_ok = _date_parse_is_usable(parsed_df)
 
     if mf_ok and not df_ok:
         return None  # month-first is the only valid reading — unchanged
 
-    detected: str
-    ambiguous = False
     if df_ok and not mf_ok:
+        # Day-first is the ONLY valid reading (e.g. a day > 12 rules out
+        # month-first). Unambiguous — normalize in place and flag it.
         df["date"] = parsed_df
-        detected = "day_first"
-    elif mf_ok and df_ok:
-        # Both readings are valid but differ → genuinely ambiguous (every
-        # component <= 12). Daily-return / NAV series are daily-cadence, so
-        # the smaller median gap is the intended reading: day-first
-        # "01/02,02/02,03/02" = 1-3 Feb (gap 1d) beats month-first
-        # Jan2/Feb2/Mar2 (gap ~29d).
-        ambiguous = True
-        if df_gap is not None and mf_gap is not None and df_gap < mf_gap:
-            df["date"] = parsed_df
-            detected = "day_first"
-        else:
-            df["date"] = parsed_mf
-            detected = "month_first"
-    else:
-        return None  # neither reading is a clean ascending series — let pandera raise
+        return {
+            "rule": "date_format_normalized",
+            "detected_format": "day_first",
+            "message": (
+                "Detected day-first (DD/MM/YYYY) dates and normalized them "
+                "to YYYY-MM-DD."
+            ),
+        }
 
-    human = (
-        "day-first (DD/MM/YYYY)"
-        if detected == "day_first"
-        else "month-first (MM/DD/YYYY)"
-    )
-    message = f"Detected {human} dates and normalized them to YYYY-MM-DD."
-    if ambiguous:
-        message += (
-            " Both day-first and month-first parsed cleanly; chose the"
-            " reading that matches a daily-spaced series. Upload ISO"
-            " (YYYY-MM-DD) if your dates are not daily-spaced."
-        )
-    return {
-        "rule": "date_format_normalized",
-        "detected_format": detected,
-        "ambiguous": ambiguous,
-        "message": message,
-    }
+    if mf_ok and df_ok:
+        # Both readings yield valid ascending series that DIFFER → the data
+        # genuinely cannot disambiguate DD/MM from MM/DD (every component is
+        # <= 12). Do NOT guess — a wrong guess silently mis-parses the whole
+        # track record into the wrong calendar with no error (e.g. a monthly
+        # day-first series read as consecutive days). A real >=20-day daily
+        # series always contains a day > 12 and takes the unambiguous branch
+        # above; only short/sparse series reach here. Signal an ambiguity
+        # error for validate_csv to surface and do NOT mutate df["date"].
+        return {
+            "rule": "date_format_ambiguous",
+            "message": (
+                "Could not determine the date format — these dates are "
+                "ambiguous (each could be DD/MM/YYYY or MM/DD/YYYY). Please "
+                "re-upload with ISO dates in YYYY-MM-DD format."
+            ),
+        }
+
+    return None  # neither reading is a clean ascending series — let pandera raise
 
 
 # ---------------------------------------------------------------------------
@@ -708,19 +710,57 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             "correlation_id": None,
         }
 
+    # 2026-05-27 (H1, security) — reject oversize row counts BEFORE the date
+    # double-parse / sentinels run, to bound worker CPU + memory on the
+    # /process-key path (which has no upstream row cap).
+    if len(df) > MAX_INGEST_ROWS:
+        return {
+            "ok": False,
+            "preview": None,
+            "errors": [{
+                "rule": "too_many_rows",
+                "row": 0,
+                "message": (
+                    f"CSV exceeds the {MAX_INGEST_ROWS}-row limit "
+                    f"(got {len(df)} rows)."
+                ),
+            }],
+            "correlation_id": None,
+        }
+
     # 2026-05-27 — deduce the date format from the data and normalize the
     # `date` column to a single datetime64 series BEFORE pandera coercion,
     # so non-US uploads (D/M/YYYY) are parsed correctly instead of silently
-    # mis-read as month-first. No-op (returns None) for ISO / US / garbage
-    # inputs. See _detect_and_normalize_date_column.
-    date_flag = _detect_and_normalize_date_column(df)
+    # mis-read as month-first. Returns None for ISO / US / garbage inputs, a
+    # `date_format_normalized` info-flag for an unambiguous day-first file, or
+    # a `date_format_ambiguous` error when the format genuinely can't be
+    # determined (validate_csv rejects rather than guess). See
+    # _detect_and_normalize_date_column.
+    date_result = _detect_and_normalize_date_column(df)
+    date_flag: dict[str, Any] | None = None
+    date_error: dict[str, Any] | None = None
+    if date_result is not None:
+        if date_result.get("rule") == "date_format_ambiguous":
+            date_error = {
+                "rule": "date_format_ambiguous",
+                "row": 0,
+                "message": date_result["message"],
+            }
+        else:
+            date_flag = date_result
 
     all_errors: list[dict[str, Any]] = []
+    if date_error is not None:
+        # Ambiguous date format — reject with an actionable message instead
+        # of silently mis-parsing (see _detect_and_normalize_date_column).
+        all_errors.append(date_error)
     schema = SCHEMAS[fmt]
 
+    schema_validation_ok = True
     try:
         df_validated = schema.validate(df, lazy=True)
     except SchemaErrors as exc:
+        schema_validation_ok = False
         for _, row in exc.failure_cases.iterrows():
             # Cross-AI revision 2026-04-30: NEVER log row.get('failure_case')
             # — that's the raw cell value. Log only the row index + rule.
@@ -731,12 +771,17 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
                 "[csv-validator] rule violation row=%d rule=%s",
                 row_idx, rule_name,
             )
+            # 2026-05-27 — do NOT echo the raw failing cell value
+            # (`row.get('failure_case')`) into the user-facing message: it is
+            # untrusted CSV content that can carry PII, and this envelope is
+            # persisted into strategy_verifications metadata. Mirror the
+            # no-row-data discipline (above) on the response channel too.
             all_errors.append({
                 "rule": rule_name,
                 "row": row_idx,
                 "message": (
-                    f"Column '{row.get('column')}' failed: "
-                    f"{row.get('failure_case')}"
+                    f"Column '{row.get('column')}' failed rule "
+                    f"'{rule_name}' at row {row_idx}."
                 ),
             })
         df_validated = df
@@ -751,7 +796,15 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     info_flags: list[dict[str, Any]] = []
     if date_flag is not None:
         info_flags.append(date_flag)
-    norm_flag = _maybe_auto_normalize_percent_form(df_validated, fmt)
+    # 2026-05-27 — only auto-normalize a frame that PASSED schema validation.
+    # On the SchemaErrors fallback `df_validated = df` (unvalidated), so the
+    # /100 mutation + its info-flag would otherwise run on an already-rejected
+    # file — pointless and misleading.
+    norm_flag = (
+        _maybe_auto_normalize_percent_form(df_validated, fmt)
+        if schema_validation_ok
+        else None
+    )
     if norm_flag is not None:
         info_flags.append(norm_flag)
 
@@ -763,7 +816,13 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
 
     date_min, date_max = "", ""
     if "date" in df.columns:
-        dates = pd.to_datetime(df["date"], errors="coerce").dropna()
+        # `_detect_and_normalize_date_column` already converted `date` to
+        # datetime64 for non-ISO files; only re-parse when it's still strings
+        # (ISO / month-first / rejected paths) rather than a redundant pass.
+        date_col = df["date"]
+        if not pd.api.types.is_datetime64_any_dtype(date_col):
+            date_col = pd.to_datetime(date_col, errors="coerce")
+        dates = date_col.dropna()
         if not dates.empty:
             date_min = str(dates.min().date())
             date_max = str(dates.max().date())
@@ -799,23 +858,22 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     daily_returns_series = None
     if ok and fmt == "daily_returns" and "daily_return" in df_validated.columns:
         valid = df_validated[["date", "daily_return"]].dropna()
+        # `date` is already datetime64 by here (normalized above and/or coerced
+        # by pandera), so this is one vectorized strftime, not a per-row
+        # pd.to_datetime reconvert.
+        iso_dates = pd.to_datetime(valid["date"]).dt.strftime("%Y-%m-%d")
         daily_returns_series = [
-            {
-                "date": str(pd.to_datetime(d).date()),
-                "daily_return": float(r),
-            }
-            for d, r in zip(valid["date"], valid["daily_return"])
+            {"date": str(d), "daily_return": float(r)}
+            for d, r in zip(iso_dates, valid["daily_return"])
         ]
     elif ok and fmt == "daily_nav" and "nav" in df_validated.columns:
         nav_series = df_validated[["date", "nav"]].dropna().copy()
         nav_series["return"] = nav_series["nav"].pct_change()
         valid = nav_series.dropna(subset=["return"])
+        iso_dates = pd.to_datetime(valid["date"]).dt.strftime("%Y-%m-%d")
         daily_returns_series = [
-            {
-                "date": str(pd.to_datetime(d).date()),
-                "daily_return": float(r),
-            }
-            for d, r in zip(valid["date"], valid["return"])
+            {"date": str(d), "daily_return": float(r)}
+            for d, r in zip(iso_dates, valid["return"])
         ]
 
     envelope: dict[str, Any] = {
