@@ -590,6 +590,86 @@ def test_process_key_csv_sync_path(client):
     assert body["errors"] == []
 
 
+def test_process_key_new_upload_maybe_single_none_does_not_500(client):
+    """Regression: a brand-new upload (no prior strategy_verifications row)
+    must NOT 500 on the idempotency pre-check.
+
+    PostgREST's `.maybe_single().execute()` returns **None** (not a response
+    object with data=None) when zero rows match — which is the normal case for
+    a first-time wizard_session_id. Pre-fix, `if existing.data:` raised
+    `AttributeError: 'NoneType' object has no attribute 'data'` and 500'd the
+    ENTIRE ingestion once the unified-backbone flag was flipped on in prod, so
+    every first-time CSV upload broke. The fix guards `existing is not None`.
+
+    `_build_supabase_mock(existing_row=None)` only models the empty case as
+    `MagicMock(data=None)` — which keeps `existing` truthy and never reproduces
+    the prod crash — so this test overrides `maybe_single().execute()` to the
+    literal None that real PostgREST returns. Pre-fix this raises (TestClient
+    re-raises server exceptions); post-fix the pre-check falls through and the
+    fresh upload publishes.
+    """
+    from services.ingestion.adapter import (
+        Fingerprint,
+        MetricsSnapshot,
+        ValidationResult,
+    )
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-fresh")
+    # Reproduce real PostgREST 0-row behavior: maybe_single().execute() is None.
+    fake.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = None
+
+    csv_adapter = MagicMock()
+    csv_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=None,
+            error_code=None,
+            human_message=None,
+            debug_context={},
+        )
+    )
+    csv_adapter.fetch_raw = AsyncMock(return_value=[])
+    csv_adapter.compute_metrics = MagicMock(
+        return_value=MetricsSnapshot(
+            sharpe=None,
+            twr=None,
+            ytd=None,
+            max_drawdown=None,
+            total_pnl=None,
+            trade_count=0,
+            win_rate=None,
+        )
+    )
+    csv_adapter.compute_fingerprint = MagicMock(return_value=Fingerprint())
+    csv_adapter.reconstruct_positions = AsyncMock(return_value=[])
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=csv_adapter,
+    ):
+        body = {
+            "flow_type": "csv",
+            "source": "csv",
+            "context": {
+                "strategy_id": "s1",
+                "wizard_session_id": "wiz-fresh-1",
+                "fmt": "trades",
+                "raw_bytes_base64": "Y29sCjE=",
+            },
+        }
+        r = client.post("/process-key", json=body, headers=_auth_headers())
+
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "published"
+    assert r.json()["verification_id"] == "ver-fresh"
+
+
 def test_process_key_onboard_queues(client):
     """flow_type=onboard, source=okx → enqueues process_key_long, returns 202-shape."""
     fake = _build_supabase_mock(existing_row=None, insert_id="ver-onboard")
