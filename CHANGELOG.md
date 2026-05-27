@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.24.10.3] - 2026-05-27
+### Added — Cassette refresh half: `--record` subcommand + daily auto-PR workflow (Phase 19 PR-B)
+- **Completes the cassette half of Phase 19 soak instrumentation** that was paused from PR #328. The Phase 19 plan called for a daily refresh of broker cassettes so the unified key-flow replay suite catches schema rotations (OKX/Bybit ccxt-canonical field renames) BEFORE the live `/process-key` route hits them in production. Without this workflow the cassettes only refresh when a developer remembers to run `python scripts/record_cassettes.py`, which means drift accumulates silently.
+- **`scripts/repro-key-flow.sh`**:
+  - **Dropped Binance from `required_cassettes`** — no production test keys are provisioned, so the script was red on main since the day the Binance cassettes were deleted. Binance vars remain in the Layer A leak-gate denylist (defensively, if creds reappear) but are not REQUIRED for the script to exit 0.
+  - **New `--record` subcommand**: invokes `analytics-service/scripts/record_cassettes.py` for each broker whose `DEBUG_KEY_FLOW_<BROKER>_*` env vars are set, skipping brokers without creds. Falls through to the existing pre-flight + replay + Layer A + Layer B leak-gate after recording, so the new cassettes are validated end-to-end. New exit code 3 covers `--record`-specific failures (missing creds, recorder script exited non-zero).
+  - **`--help`** prints the header-comment usage block.
+- **`.github/workflows/cassette-refresh.yml`** (NEW):
+  - Schedule: 04:00 UTC daily (well before the 00:30 UTC Phase 19 rollup cron, outside US/EU broker maintenance windows). Manual `workflow_dispatch` trigger with a `force_refresh` boolean input that deletes `happy.yaml` + `auth-fail.yaml` before recording (idempotent recorder otherwise re-uses them).
+  - Steps: checkout → setup-python@v5 → install analytics-service venv → optionally force-refresh → `scripts/repro-key-flow.sh --record` (with all 5 `DEBUG_KEY_FLOW_*` GH secrets bound) → `git diff --quiet` on `analytics-service/tests/cassettes/` → if cassettes diverged, open an auto-PR via `peter-evans/create-pull-request@v7` labeled `cassettes` + `automated`, assigned to `AI-Isaiah`. The PR body explains how to triage the diff (schema rename vs cosmetic) and links the workflow run.
+  - Permissions: `contents: write` + `pull-requests: write` at the job level; default `contents: read` at the workflow level (least-privilege).
+  - Injection safety: all `${{ }}` expressions in `run:` steps are routed through `env:` blocks (DIFF_CHANGED, FORCE_REFRESH); PR-action parameters take metadata directly since the action doesn't shell-eval them.
+  - Concurrency group `cassette-refresh` with `cancel-in-progress: false` so back-to-back manual dispatches queue rather than racing.
+- **Scope note**: the original plan called for a TS-side `msw` fixture suite for OKX + Bybit. Investigation found the TS codebase does NOT call broker APIs directly — all broker I/O happens in `analytics-service` via ccxt. The TS verify-strategy route proxies to Python. So TS-side cassettes have nothing to replay against. The dropped scope is documented; the architecture review revealed it was based on a misunderstanding of the layering.
+- **Operator action required before the first scheduled run**: Settings → Actions → General → Workflow permissions → enable "Allow GitHub Actions to create and approve pull requests". Without it, `peter-evans/create-pull-request` will fail with `Resource not accessible by integration` on the first cassette drift.
+- Gates: `bash -n scripts/repro-key-flow.sh` clean, `--help` + `--bogus` exit codes correct, YAML schema valid.
+
 ## [0.24.10.2] - 2026-05-27
 ### Fixed — Sentry region URL: EU org silently returned empty data, masking soak gate + auto-rollback
 - **Root cause**: both `/api/cron/flag-monitor` and `/api/cron/phase19-error-rollup` hardcoded `SENTRY_BASE = "https://sentry.io/api/0/organizations"` (the global/US host). The prod org is `metaworld-fund-ltd` on the EU region (`https://de.sentry.io` per the build-plugin auth-token JWT's `region_url` claim). Sentry's API returns HTTP 200 + empty `data: []` when an EU org is queried from the US host. The cron's resilient parser interpreted this as "no events" — silently. Discovered when both day-1 and day-2 `phase19_soak_daily` rows landed with `total_events=0` after the PR #328 deploy.

@@ -1,0 +1,164 @@
+name: Cassette refresh (OKX + Bybit)
+
+# Daily re-record of broker cassettes so the replay suite catches schema
+# rotations BEFORE the live route does. Runs `scripts/repro-key-flow.sh
+# --record` against real broker APIs using read-only credentials in GH
+# secrets, runs the two-layer leak gate (Layer A: known-env match; Layer B:
+# high-entropy literal in signing-key-named fields), and auto-PRs the diff
+# back to main if cassettes diverged.
+#
+# Binance is OUT OF SCOPE — no production test keys provisioned. OKX + Bybit
+# only.
+#
+# Injection-safety: all `${{ }}` expressions in run-steps are routed through
+# env: blocks to avoid the GitHub Actions command-injection class. The PR
+# action receives metadata as parameters (not shell), so direct interpolation
+# is safe there.
+#
+# Operator notes:
+#   - DEBUG_KEY_FLOW_* secrets must be set on the repo (Settings →
+#     Secrets and variables → Actions). 2026-05-27: OKX_KEY/SECRET/
+#     PASSPHRASE + BYBIT_KEY/SECRET all present.
+#   - The recorder is idempotent on happy/auth-fail (skips if present) but
+#     ALWAYS re-synthesizes rate-limit + schema-drift from happy. To force
+#     a full refresh, use the workflow_dispatch `force_refresh` input.
+#   - The auto-PR uses peter-evans/create-pull-request with the default
+#     GITHUB_TOKEN (contents: write + pull-requests: write at the job).
+
+on:
+  schedule:
+    # 04:00 UTC daily — well before the 00:30 UTC Phase 19 rollup cron and
+    # outside US/EU broker maintenance windows (~16:00 UTC). Catches schema
+    # drift before the next rollup tick.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: "Delete existing happy.yaml + auth-fail.yaml before recording (forces full refresh)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cassette-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install analytics-service deps
+        working-directory: analytics-service
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e .[dev]
+
+      - name: Force refresh (workflow_dispatch only)
+        env:
+          FORCE_REFRESH: ${{ inputs.force_refresh }}
+        if: ${{ inputs.force_refresh == true }}
+        run: |
+          echo "force_refresh=$FORCE_REFRESH — deleting existing happy.yaml + auth-fail.yaml"
+          rm -f analytics-service/tests/cassettes/okx/happy.yaml
+          rm -f analytics-service/tests/cassettes/okx/auth-fail.yaml
+          rm -f analytics-service/tests/cassettes/bybit/happy.yaml
+          rm -f analytics-service/tests/cassettes/bybit/auth-fail.yaml
+
+      - name: Record cassettes + leak gate
+        env:
+          DEBUG_KEY_FLOW_OKX_KEY: ${{ secrets.DEBUG_KEY_FLOW_OKX_KEY }}
+          DEBUG_KEY_FLOW_OKX_SECRET: ${{ secrets.DEBUG_KEY_FLOW_OKX_SECRET }}
+          DEBUG_KEY_FLOW_OKX_PASSPHRASE: ${{ secrets.DEBUG_KEY_FLOW_OKX_PASSPHRASE }}
+          DEBUG_KEY_FLOW_BYBIT_KEY: ${{ secrets.DEBUG_KEY_FLOW_BYBIT_KEY }}
+          DEBUG_KEY_FLOW_BYBIT_SECRET: ${{ secrets.DEBUG_KEY_FLOW_BYBIT_SECRET }}
+        run: bash scripts/repro-key-flow.sh --record
+
+      - name: Detect cassette diff
+        id: diff
+        run: |
+          if git diff --quiet -- analytics-service/tests/cassettes/; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No cassette diff vs main — broker schemas stable."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Cassette diff detected:"
+            git diff --stat -- analytics-service/tests/cassettes/
+          fi
+
+      - name: Create auto-PR on cassette diff
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/cassette-refresh-${{ github.run_number }}
+          delete-branch: true
+          commit-message: |
+            chore(cassettes): daily refresh — broker schema drift detected
+
+            Run #${{ github.run_number }} of cassette-refresh.yml caught a
+            divergence between recorded broker responses and what's on
+            main. Leak gate (Layer A + B) passed on the new cassettes.
+
+            Review the diff carefully — a schema field rename or drop
+            may break the unified key-flow replay tests.
+          title: "chore(cassettes): daily refresh — broker schema drift detected (run #${{ github.run_number }})"
+          body: |
+            ## Cassette drift detected
+
+            The daily `cassette-refresh.yml` workflow recorded fresh broker
+            responses for OKX + Bybit and found they differ from what's on
+            `main`. The two-layer leak gate (env-value match + high-entropy
+            literal scan) passed on the new cassettes — safe to commit.
+
+            ### What to verify before merging
+
+            1. Look at the diff for each broker (`okx/`, `bybit/`).
+            2. If a ccxt-canonical field was renamed/dropped, update
+               `analytics-service/scripts/record_cassettes.py`'s
+               `_synthesize_schema_drift` mapping AND the replay test.
+            3. If only `headers.date` / opaque tokens changed, the drift is
+               cosmetic — safe to merge.
+
+            ### Workflow context
+
+            - Triggered by: `${{ github.event_name }}`
+            - Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            🤖 Generated by `.github/workflows/cassette-refresh.yml`
+          labels: |
+            cassettes
+            automated
+          assignees: AI-Isaiah
+
+      - name: Summary
+        if: always()
+        env:
+          DIFF_CHANGED: ${{ steps.diff.outputs.changed }}
+        run: |
+          {
+            echo "## Cassette refresh summary"
+            echo ""
+            if [ "$DIFF_CHANGED" = "true" ]; then
+              echo "**Status:** Diff detected — auto-PR opened."
+            elif [ "$DIFF_CHANGED" = "false" ]; then
+              echo "**Status:** No diff — broker schemas stable."
+            else
+              echo "**Status:** Recording or leak gate failed before diff check."
+            fi
+            echo ""
+            echo "Brokers attempted: OKX + Bybit (Binance out of scope)."
+          } >> "$GITHUB_STEP_SUMMARY"
