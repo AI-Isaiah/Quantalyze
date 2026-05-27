@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.9.32] - 2026-05-27
+### Fixed — CSV upload step 4 (Submit) 42501 "finalize_csv_strategy called without an auth session" (prod-down, unified-backbone)
+- After v0.24.9.30 unblocked validate (step 1), Submit failed with `finalize_csv_strategy RPC failed: 'finalize_csv_strategy called without an auth session', code 42501`. The unified `/process-key` finalize path (gated on `process_key_unified_backbone`, flipped on 2026-05-25 15:51 UTC) called the SECURITY DEFINER RPC `finalize_csv_strategy` with the analytics service's **service-role** client. The RPC manually enforces `auth.uid() IS NOT NULL` and `auth.uid() = p_user_id` (migration 20260501055202) — service-role has no `auth.uid()`, so it raised 42501. No upload had reached step 4 since the flag flip (step 1 was broken), so the gap was latent. The legacy path called the RPC with the user's session, which is why it worked before the flip.
+- Root-cause fix (forward the user's identity end-to-end, preserving the RPC's `auth.uid() = p_user_id` guarantee): the Next.js `csv-finalize` route pulls the caller's Supabase access token from the session and hands it to `postProcessKey`, which forwards it as the `X-User-Access-Token` header (separate from the internal-token `Authorization`). The analytics router builds a **user-scoped** Supabase client (`get_user_scoped_supabase`: anon key as apikey + user JWT as the `postgrest.auth` bearer) and calls `finalize_csv_strategy` with it, so `auth.uid()` resolves to the user. Missing token → clean 401 (never an unauthenticated finalize). Validate-only / teaser / resync flows are unchanged (no token forwarded, no user-auth RPC).
+- Adds `SUPABASE_ANON_KEY` to the analytics service env (public publishable key; load-bearing as the PostgREST apikey — a raw user JWT in that slot is rejected by the gateway). 6 regression tests (finalize runs on the user-scoped client not service-role; missing-token→401; the db helper's anon-key-apikey + JWT-bearer wiring + env/token guards; postProcessKey header forwarding present/absent). Reviewed by code-reviewer + silent-failure-hunter + RLS/security audit + red team.
+
+
 ## [0.24.9.31] - 2026-05-27
 ### Fixed — analytics-service audit remediation batch 5 (multi-agent sweep + whole-file red team)
 Internal-only analytics-service hardening across 15 source files (no API/contract changes). Closed all verified CRITICAL/HIGH + MED≥8 + LOW≥9 findings in the batch's scope plus every issue surfaced by a whole-file adversarial red-team pass.

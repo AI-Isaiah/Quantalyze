@@ -41,7 +41,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from services.db import get_supabase
+from services.db import get_supabase, get_user_scoped_supabase
 from services.feature_flags import is_unified_backbone_active
 from services.ingestion import get_adapter
 from services.ingestion.adapter import KeySubmissionRequest
@@ -592,9 +592,31 @@ async def process_key(
             wsid = body.context.get("wizard_session_id")
             fmt = body.context.get("fmt")
             strategy_name = body.context.get("strategy_name")
+            # finalize_csv_strategy is SECURITY DEFINER and enforces
+            # auth.uid() = p_user_id (migration 20260501055202): a user may
+            # only finalize their OWN strategy. The module service-role client
+            # has no auth.uid(), so calling it with `supabase` raised 42501
+            # "called without an auth session" on every flag-on finalize. Call
+            # it with a user-scoped client built from the access token the
+            # Next.js csv-finalize route forwards in X-User-Access-Token; the
+            # RPC's auth.uid() = p_user_id check still runs (defense in depth).
+            # Everything else in this handler stays service-role.
+            user_token = request.headers.get("X-User-Access-Token", "")
+            if not user_token:
+                log.warning("process_key.csv_finalize_missing_user_token")
+                return JSONResponse(
+                    status_code=401,
+                    content=_envelope_error(
+                        "CSV_FINALIZE_FAILED",
+                        "finalize requires an authenticated user session.",
+                        correlation_id,
+                        None,
+                    ),
+                )
             try:
+                user_sb = get_user_scoped_supabase(user_token)
                 rpc_result = (
-                    supabase.rpc(
+                    user_sb.rpc(
                         "finalize_csv_strategy",
                         {
                             "p_user_id": user_id,

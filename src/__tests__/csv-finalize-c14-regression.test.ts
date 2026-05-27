@@ -46,6 +46,13 @@ const updateMock = vi.hoisted(() =>
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
+    // Phase 19.1: the unified finalize path reads the session to forward the
+    // user JWT to analytics. Provide one so the handler clears its 401 guard.
+    auth: {
+      getSession: async () => ({
+        data: { session: { access_token: "test-user-jwt" } },
+      }),
+    },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     rpc: (name: string, args: Record<string, unknown>) => (rpcMock as any)(name, args),
     from: (_table: string) => ({

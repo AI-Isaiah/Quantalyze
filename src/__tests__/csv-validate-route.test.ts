@@ -73,6 +73,10 @@ vi.mock("@/lib/supabase/server", () => ({
           user: { id: "00000000-0000-0000-0000-000000000abc" },
         },
       }),
+      // Phase 19.1: unified finalize forwards the user JWT from the session.
+      getSession: async () => ({
+        data: { session: { access_token: "test-user-jwt" } },
+      }),
     },
     rpc: (name: string, args: Record<string, unknown>) => rpcMock(name, args),
     from: (table: string) => ({

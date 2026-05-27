@@ -1244,6 +1244,34 @@ async function unifiedCsvFinalizeHandler(args: {
     );
   }
 
+  // Phase 19.1 (2026-05-27) — finalize_csv_strategy is SECURITY DEFINER and
+  // enforces auth.uid() = p_user_id, so the unified router must call it AS the
+  // user. Forward the caller's Supabase access token; the analytics service
+  // builds a user-scoped client from it. With no session we cannot finalize —
+  // fail with a clean 401 rather than letting the upstream RPC raise 42501
+  // ("finalize_csv_strategy called without an auth session").
+  const authClient = await createClient();
+  const {
+    data: { session },
+  } = await authClient.auth.getSession();
+  const userAccessToken = session?.access_token;
+  if (!userAccessToken) {
+    console.error(
+      `[strategies/csv-finalize unified] no user session to forward [correlation_id=${args.correlationId}]`,
+    );
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_FINALIZE_FAIL",
+        human_message:
+          "Your session has expired. Please sign in again and resubmit.",
+        debug_context: {},
+        correlation_id: args.correlationId,
+      },
+      { status: 401 },
+    );
+  }
+
   const result = await postProcessKey({
     flow_type: "csv",
     source: "csv",
@@ -1263,6 +1291,9 @@ async function unifiedCsvFinalizeHandler(args: {
     // getCorrelationId() lookup and the trail breaks at the route
     // boundary.
     correlationId: args.correlationId,
+    // Phase 19.1 — forward the user JWT so analytics calls
+    // finalize_csv_strategy as the user (auth.uid() = p_user_id).
+    userAccessToken,
   });
   if (!result.ok) return result.response;
   // QA ISSUE-010 + /ship specialist review: apply the same metadata
