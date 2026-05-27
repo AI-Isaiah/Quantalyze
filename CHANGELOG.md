@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.24.9.25] - 2026-05-27
+### Changed — CI: opt the secret-scan gitleaks-action into Node 24
+- `secret-scan` job sets `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` so `gitleaks/gitleaks-action@v2.3.9` (a Node-20 JS action) runs on Node 24 ahead of GitHub's forced switch (2026-06-02) and Node-20 removal (2026-09-16). The action is a thin wrapper around the gitleaks Go binary, so it runs cleanly on Node 24, and CI's secret-scan job verifies it directly (the deprecation warning clears). The latest action release is still v2.3.9/node20 — no version bump fixes it. Fallback if a future Node bump ever breaks the action's JS bundle: replace it with the gitleaks binary (the cached + retried download + range scan pattern #308 used for lychee).
+
+
 ## [0.24.9.24] - 2026-05-27
 ### Changed — CI speed (audit fixes, safe subset)
 - **shared node_modules cache (F1):** a `deps-cache` job populates a lockfile-keyed `node_modules` cache from one clean `npm ci`; the 6 frontend jobs + e2e restore it read-only (fall back to a retried `npm ci` on miss). Most runs (lockfile unchanged) skip the ~40-60s install in every job; no serial dependency, and a failed install can never poison the cache (save is an explicit post-`npm ci` step).
