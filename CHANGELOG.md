@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.24.10.7] - 2026-05-27
+### Fixed — repro-key-flow.sh okx rate-limit cassette: wrong OKX error code (50013 → 50011)
+- v0.24.10.6's venv fix let `pytest` actually run, surfacing a genuine failure: `test_rate_limit_raises_rate_limit_exceeded[okx]` raised `ccxt.ExchangeNotAvailable`, which is not in the asserted `(RateLimitExceeded, DDoSProtection, ExchangeError)` family (it extends `NetworkError`, not `ExchangeError`).
+- Root cause: `record_cassettes.py` synthesized the OKX rate-limit body with code `50013` ("System is busy") which ccxt maps to `ExchangeNotAvailable`. The real OKX rate-limit code is `50011` ("Request too frequent") → `ccxt.RateLimitExceeded`. The exact-code match precedes ccxt's HTTP-429 handler (also `ExchangeNotAvailable` on okx), so the body code drives the mapping. Bybit's `10006` was already correct (its test passed).
+- Fixed the synthesizer to emit `50011` and regenerated the committed `tests/cassettes/okx/rate-limit.yaml`. Local replay suite now: 8 passed, 4 skipped. This workflow (added in #330) had never had a green run; CI-only, no prod impact.
+
 ## [0.24.10.6] - 2026-05-27
 ### Fixed — repro-key-flow.sh leak gate: `pytest: command not found` under cassette-refresh
 - v0.24.10.5's Python 3.12 pin fixed the `pip install`, so the failure moved one step later to "Record cassettes + leak gate". Root cause: `scripts/repro-key-flow.sh` was internally inconsistent about its interpreter — the `--record` path hard-requires and uses `analytics-service/.venv/bin/python` (lines 63, 86), but the leak gate called **bare `pytest`** (line 116). CI installs deps ONLY into `.venv`, never onto the global PATH, so `pytest` was not found. Recording appeared to succeed only because happy/auth-fail cassettes already existed (skipped) and rate-limit/schema-drift are pure YAML synthesis — the leak gate's `pytest` was the first real dependency use.

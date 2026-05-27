@@ -118,11 +118,16 @@ def _synthesize_rate_limit(broker: str, happy_path: Path) -> Path:
     data = _load_yaml(happy_path)
     last = data["interactions"][-1]
     last["response"]["status"] = {"code": 429, "message": "Too Many Requests"}
+    # OKX code 50011 = "Request too frequent" -> ccxt RateLimitExceeded. NOT
+    # 50013 ("System is busy") which ccxt maps to ExchangeNotAvailable (and the
+    # exact-code match precedes the HTTP-429 handler, which is ALSO
+    # ExchangeNotAvailable on okx). The test asserts the RateLimitExceeded
+    # family, so the body code is what drives the mapping.
     body = (
         '{"retCode":10006,"retMsg":"Too many visits!",'
         '"result":{},"retExtInfo":{},"time":0}'
         if broker == "bybit"
-        else '{"code":"50013","msg":"Rate limit exceeded"}'
+        else '{"code":"50011","msg":"Request too frequent. Please throttle."}'
     )
     last["response"]["body"]["string"] = body
     _dump_yaml(data, target)

@@ -47411,7 +47411,7 @@ interactions:
     uri: https://www.okx.com/api/v5/account/balance
   response:
     body:
-      string: '{"code":"50011","msg":"Requests too frequent","data":[]}'
+      string: '{"code":"50011","msg":"Request too frequent. Please throttle."}'
     headers:
       CF-RAY:
       - 9f4ec104291ebc72-ZRH
