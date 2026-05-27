@@ -17,6 +17,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // --- Navigation ---
 const pushMock = vi.fn();
 const refreshMock = vi.fn();
+// Phase 15: mutable so a test can drive the ?source=csv branch. Default ""
+// = api branch (matches the original hardcoded value).
+let searchParamsString = "";
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
     push: pushMock,
@@ -26,7 +29,7 @@ vi.mock("next/navigation", () => ({
     replace: vi.fn(),
     prefetch: vi.fn(),
   }),
-  useSearchParams: () => new URLSearchParams(""),
+  useSearchParams: () => new URLSearchParams(searchParamsString),
 }));
 
 // --- Analytics ---
@@ -53,12 +56,15 @@ vi.mock("@/lib/supabase/client", () => ({
 // --- localStorage helpers: control resume overrides per-test. ---
 let resumeOverrides: Record<string, unknown> = {};
 const clearWizardStateMock = vi.fn();
+// Phase 15: capture saveWizardState so the CSV autosave test can assert the
+// debounced write of the typed strategy name.
+const saveWizardStateMock = vi.fn(async (..._args: unknown[]) => {});
 vi.mock("@/lib/wizard/localStorage", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
     ...actual,
     loadWizardState: vi.fn(async () => null),
-    saveWizardState: vi.fn(async () => {}),
+    saveWizardState: saveWizardStateMock,
     clearWizardState: () => clearWizardStateMock(),
     newWizardSessionId: () => "ssr-session-throwaway",
     deriveWizardResumeOverrides: () => resumeOverrides,
@@ -85,9 +91,11 @@ let WizardClient: typeof import("./WizardClient").WizardClient;
 beforeEach(async () => {
   authCallback = null;
   resumeOverrides = {};
+  searchParamsString = "";
   trackMock.mockClear();
   pushMock.mockClear();
   clearWizardStateMock.mockClear();
+  saveWizardStateMock.mockClear();
   ({ WizardClient } = await import("./WizardClient"));
 });
 
@@ -173,5 +181,84 @@ describe("[H-0182] WizardClient — wizard_start telemetry", () => {
     );
     expect(startCalls).toHaveLength(1);
     expect((startCalls[0]![1] as { resume: boolean }).resume).toBe(false);
+  });
+});
+
+describe("[Phase 15] WizardClient — CSV strategy-name autosave (BUG P1)", () => {
+  it("persists the typed CSV strategy name (debounced) so a tab refresh keeps it", async () => {
+    // Root cause: pre-fix the CSV strategy name only reached localStorage
+    // inside the csv_upload onSuccess handler (after a successful file
+    // validate). A user who typed a name and refreshed BEFORE validating
+    // lost it — Phase 15 VERIFICATION item #4. The fix reports name edits up
+    // (onNameChange) and debounce-autosaves them from WizardClient. This test
+    // drives the ?source=csv branch, types a name, and asserts the autosave
+    // write — it fails pre-fix because typing never triggered saveWizardState.
+    searchParamsString = "source=csv";
+    render(<WizardClient initialDraft={null} />);
+
+    const input = await screen.findByTestId("csv-strategy-name");
+    fireEvent.change(input, { target: { value: "BTC Vol Carry" } });
+
+    await waitFor(() => {
+      const autosave = saveWizardStateMock.mock.calls.find((c) => {
+        const arg = (c as unknown[])[0] as {
+          step?: string;
+          source?: string;
+          strategyName?: string;
+        };
+        return (
+          arg?.step === "csv_upload" &&
+          arg?.source === "csv" &&
+          arg?.strategyName === "BTC Vol Carry"
+        );
+      });
+      expect(autosave).toBeDefined();
+    });
+  });
+
+  it("does NOT autosave an empty/whitespace-only name", async () => {
+    // Guard: the debounce early-returns on a blank name so we never write an
+    // empty strategyName envelope (which would resume to a blank field anyway).
+    searchParamsString = "source=csv";
+    render(<WizardClient initialDraft={null} />);
+
+    const input = await screen.findByTestId("csv-strategy-name");
+    fireEvent.change(input, { target: { value: "   " } });
+
+    // Give the debounce window time to (not) fire.
+    await new Promise((r) => setTimeout(r, 500));
+    const blankWrite = saveWizardStateMock.mock.calls.find((c) => {
+      const arg = (c as unknown[])[0] as { step?: string; strategyName?: string };
+      return arg?.step === "csv_upload";
+    });
+    expect(blankWrite).toBeUndefined();
+  });
+
+  it("coalesces rapid edits — only the final typed name is persisted (debounce cleanup)", async () => {
+    // The 400ms debounce must clearTimeout the prior pending write on each
+    // keystroke, so a burst of edits produces ONE write with the final value,
+    // not one per character. Both changes land synchronously before the timer
+    // fires, so the intermediate "A" timer is cancelled before it can run.
+    searchParamsString = "source=csv";
+    render(<WizardClient initialDraft={null} />);
+
+    const input = await screen.findByTestId("csv-strategy-name");
+    fireEvent.change(input, { target: { value: "A" } });
+    fireEvent.change(input, { target: { value: "Aurora Capital" } });
+
+    await waitFor(() => {
+      const finalWrite = saveWizardStateMock.mock.calls.find((c) => {
+        const arg = (c as unknown[])[0] as { step?: string; strategyName?: string };
+        return arg?.step === "csv_upload" && arg?.strategyName === "Aurora Capital";
+      });
+      expect(finalWrite).toBeDefined();
+    });
+
+    // The intermediate "A" timer must have been cleared before firing.
+    const intermediateWrite = saveWizardStateMock.mock.calls.find((c) => {
+      const arg = (c as unknown[])[0] as { strategyName?: string };
+      return arg?.strategyName === "A";
+    });
+    expect(intermediateWrite).toBeUndefined();
   });
 });

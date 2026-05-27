@@ -103,6 +103,15 @@ export interface CsvUploadStepProps {
   wizardSessionId: string;
   /** Phase 15 — preserved across back-navigation by WizardClient. */
   initialStrategyName?: string;
+  /**
+   * Phase 15 fix (2026-05-27): report every name edit up to WizardClient so
+   * it can debounce-autosave the typed name to localStorage. Pre-fix the
+   * name only reached localStorage inside onSuccess (after a successful
+   * validate), so typing a name and refreshing before validation lost it
+   * (VERIFICATION item #4). Optional so the existing prop-sync tests, which
+   * don't pass it, stay green.
+   */
+  onNameChange?: (name: string) => void;
   /** Hoists user-typed name up to WizardClient so it survives back/forward. */
   onSuccess: (payload: {
     fmt: Fmt;
@@ -122,6 +131,7 @@ export interface CsvUploadStepProps {
 export function CsvUploadStep({
   wizardSessionId,
   initialStrategyName = "",
+  onNameChange,
   onSuccess,
 }: CsvUploadStepProps) {
   const [strategyName, setStrategyName] = useState<string>(initialStrategyName);
@@ -154,7 +164,9 @@ export function CsvUploadStep({
   const handleNameChange = useCallback((value: string) => {
     setStrategyName(value);
     if (nameError) setNameError(null);
-  }, [nameError]);
+    // Phase 15 fix: mirror the edit up so WizardClient can autosave it.
+    onNameChange?.(value);
+  }, [nameError, onNameChange]);
 
   const handleSelectFmt = useCallback((next: Fmt) => {
     setFmt(next);
