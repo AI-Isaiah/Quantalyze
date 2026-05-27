@@ -834,8 +834,8 @@ def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
     Returns:
       gross_volume_usd          — sum of |notional_usd| over every fill
       mean_trade_size_usd       — gross_volume / N
-      daily_turnover_usd        — mean of per-day notional totals (group by date prefix)
-      monthly_turnover_usd      — mean of per-month notional totals (group by YYYY-MM prefix)
+      mean_daily_turnover_usd        — mean of per-day notional totals (group by date prefix)
+      mean_monthly_turnover_usd      — mean of per-month notional totals (group by YYYY-MM prefix)
       turnover_timestamp_coverage — fraction of fills with usable timestamps (NEW-C02-08)
 
     Pure function: groups by `filled_at` (or `created_at` fallback) date prefix.
@@ -857,8 +857,8 @@ def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
         return {
             "gross_volume_usd": 0.0,
             "mean_trade_size_usd": 0.0,
-            "daily_turnover_usd": 0.0,
-            "monthly_turnover_usd": 0.0,
+            "mean_daily_turnover_usd": 0.0,
+            "mean_monthly_turnover_usd": 0.0,
         }
 
     # Single pass: parse notional once, accumulate gross + daily/monthly buckets.
@@ -924,8 +924,8 @@ def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
     result: dict[str, float] = {
         "gross_volume_usd": gross_volume,
         "mean_trade_size_usd": mean_size,
-        "daily_turnover_usd": daily_avg,
-        "monthly_turnover_usd": monthly_avg,
+        "mean_daily_turnover_usd": daily_avg,
+        "mean_monthly_turnover_usd": monthly_avg,
     }
     # Emit coverage fraction so callers can propagate it as a data-quality flag.
     ts_coverage = (n - ts_skipped) / n if n else 1.0

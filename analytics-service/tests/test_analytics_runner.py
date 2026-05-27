@@ -1004,15 +1004,15 @@ def sample_fills_with_maker_taker(sample_fills) -> list[dict]:
 
 def test_volume_aggregator_includes_required_keys(sample_fills):
     """METRICS-09: aggregator returns gross_volume_usd, mean_trade_size_usd,
-    daily_turnover_usd, monthly_turnover_usd."""
+    mean_daily_turnover_usd, mean_monthly_turnover_usd."""
     from services.analytics_runner import _compute_volume_aggregator
 
     result = _compute_volume_aggregator(sample_fills)
     for key in [
         "gross_volume_usd",
         "mean_trade_size_usd",
-        "daily_turnover_usd",
-        "monthly_turnover_usd",
+        "mean_daily_turnover_usd",
+        "mean_monthly_turnover_usd",
     ]:
         assert key in result
 
@@ -1024,8 +1024,8 @@ def test_volume_aggregator_empty_fills():
     result = _compute_volume_aggregator([])
     assert result["gross_volume_usd"] == 0.0
     assert result["mean_trade_size_usd"] == 0.0
-    assert result["daily_turnover_usd"] == 0.0
-    assert result["monthly_turnover_usd"] == 0.0
+    assert result["mean_daily_turnover_usd"] == 0.0
+    assert result["mean_monthly_turnover_usd"] == 0.0
 
 
 def test_volume_aggregator_computes_correct_values(sample_fills):
@@ -1039,9 +1039,9 @@ def test_volume_aggregator_computes_correct_values(sample_fills):
     # mean trade = 5000 / 6 ≈ 833.33
     assert abs(result["mean_trade_size_usd"] - 5000.0 / 6) < 1e-6
     # 3 distinct days: 2300 (1/15) + 1800 (1/16) + 900 (2/5) = 5000; mean = 5000/3
-    assert abs(result["daily_turnover_usd"] - 5000.0 / 3) < 1e-6
+    assert abs(result["mean_daily_turnover_usd"] - 5000.0 / 3) < 1e-6
     # 2 distinct months: 4100 (jan) + 900 (feb) = 5000; mean = 5000/2
-    assert abs(result["monthly_turnover_usd"] - 5000.0 / 2) < 1e-6
+    assert abs(result["mean_monthly_turnover_usd"] - 5000.0 / 2) < 1e-6
 
 
 def test_volume_aggregator_malformed_timestamp_kept_in_gross_excluded_from_turnover():
@@ -1073,8 +1073,8 @@ def test_volume_aggregator_malformed_timestamp_kept_in_gross_excluded_from_turno
     # `break`, the loop would have exited and daily would still be 1000;
     # but if gross also dropped the malformed fills, the assertions above
     # would catch that. The turnover figure pins the exclusion side.
-    assert result["daily_turnover_usd"] == pytest.approx(1000.0)
-    assert result["monthly_turnover_usd"] == pytest.approx(1000.0)
+    assert result["mean_daily_turnover_usd"] == pytest.approx(1000.0)
+    assert result["mean_monthly_turnover_usd"] == pytest.approx(1000.0)
 
 
 def test_volume_aggregator_uses_created_at_when_filled_at_missing():
@@ -1090,8 +1090,8 @@ def test_volume_aggregator_uses_created_at_when_filled_at_missing():
     result = _compute_volume_aggregator(fills)
     assert result["gross_volume_usd"] == pytest.approx(2000.0)
     # created_at fallback drove the daily bucket (single day → mean 2000).
-    assert result["daily_turnover_usd"] == pytest.approx(2000.0)
-    assert result["monthly_turnover_usd"] == pytest.approx(2000.0)
+    assert result["mean_daily_turnover_usd"] == pytest.approx(2000.0)
+    assert result["mean_monthly_turnover_usd"] == pytest.approx(2000.0)
 
 
 def test_derived_trade_metrics_sqn_degenerate_variance_returns_none():

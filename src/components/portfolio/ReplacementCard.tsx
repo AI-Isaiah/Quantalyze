@@ -69,12 +69,14 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
     }
   }, [candidate, replacementFor]);
 
-  // NEW-C21-02: use asImprovement to normalise sign so positive=improvement
-  // for all fields, eliminating the hand-kept invertedBetter table.
+  // NEW-C21-02 / H-1065: backend deltas are all oriented positive=improvement
+  // (sharpe_delta = new-old; corr_delta = current-new, i.e. correlation reduced;
+  // dd_delta = new-old on <=0 drawdowns, i.e. shallower). So every axis is
+  // "higher-better" — asImprovement keeps the sign and deltaColor greens positive.
   const deltas: { label: string; raw: number; improvement: Improvement }[] = [
     { label: "Sharpe", raw: candidate.sharpe_delta, improvement: asImprovement(candidate.sharpe_delta, "higher-better") },
-    { label: "MaxDD",  raw: candidate.dd_delta,     improvement: asImprovement(candidate.dd_delta, "lower-better") },
-    { label: "Corr",   raw: candidate.corr_delta,   improvement: asImprovement(candidate.corr_delta, "lower-better") },
+    { label: "MaxDD",  raw: candidate.dd_delta,     improvement: asImprovement(candidate.dd_delta, "higher-better") },
+    { label: "Corr",   raw: candidate.corr_delta,   improvement: asImprovement(candidate.corr_delta, "higher-better") },
   ];
 
   return (

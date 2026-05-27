@@ -85,8 +85,8 @@ const TM_FULL: TradeMetrics & Record<string, unknown> = {
   // Volume aggregator extras (Phase 12 Plan 12-05 SUMMARY)
   gross_volume_usd: 12_500_000,
   mean_trade_size_usd: 6_400,
-  daily_turnover_usd: 320_000,
-  monthly_turnover_usd: 9_700_000,
+  mean_daily_turnover_usd: 320_000,
+  mean_monthly_turnover_usd: 9_700_000,
   payoff_ratio: 1.55,
   profit_factor: 1.38,
   winners_count: 1251,

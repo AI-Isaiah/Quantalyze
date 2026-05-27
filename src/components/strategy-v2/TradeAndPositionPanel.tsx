@@ -138,8 +138,8 @@ function Body({
 }) {
   const grossVolume = tm.gross_volume_usd;
   const meanTradeSize = tm.mean_trade_size_usd;
-  const dailyTurnover = tm.daily_turnover_usd;
-  const monthlyTurnover = tm.monthly_turnover_usd;
+  const dailyTurnover = tm.mean_daily_turnover_usd;
+  const monthlyTurnover = tm.mean_monthly_turnover_usd;
   const payoffRatio = tm.payoff_ratio;
   const profitFactor = tm.profit_factor;
   const winners = tm.winners_count;

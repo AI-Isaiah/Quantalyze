@@ -16,6 +16,14 @@ from typing import Optional
 from services.metrics import _safe_float
 from services.portfolio_optimizer import _compute_sharpe, _avg_corr, _max_drawdown
 
+# H-1066: per-axis "excellent" reference magnitudes for a single-strategy swap.
+# Normalizing each delta by its scale (and clamping to [-1, 1]) puts the composite
+# in [-1, 1], so the _fit_label thresholds (0.7/0.4/0.2) are reachable for realistic
+# candidates instead of every candidate collapsing to "Weak fit".
+SHARPE_SCALE = 0.5   # Sharpe-ratio points
+CORR_SCALE = 0.15    # average-correlation reduction
+DD_SCALE = 0.10      # fractional drawdown improvement
+
 
 def find_replacement_candidates(
     portfolio_returns: dict[str, pd.Series],
@@ -93,9 +101,20 @@ def find_replacement_candidates(
 
         sharpe_delta = _delta(new_sharpe, current_sharpe)
         corr_delta = _delta(current_corr, new_corr)  # positive = corr reduced (good)
-        dd_delta = _delta(current_dd, new_dd)  # positive = less drawdown (good)
+        # H-1065: _max_drawdown returns <= 0, so a shallower (better) new drawdown
+        # means new_dd > current_dd. Use (new_dd - current_dd) so positive = improvement,
+        # consistent with sharpe_delta and corr_delta. The old (current_dd - new_dd)
+        # made improvement negative, which the positive-weighted composite penalized —
+        # inverting the REPLACE ranking on the drawdown axis.
+        dd_delta = _delta(new_dd, current_dd)  # positive = shallower drawdown (good)
 
-        composite = w1 * sharpe_delta + w2 * corr_delta + w3 * dd_delta
+        # H-1066: normalize each axis to [-1, 1] before weighting so the composite is
+        # scale-stable and the fit-label thresholds are reachable for realistic deltas.
+        composite = (
+            w1 * _normalize(sharpe_delta, SHARPE_SCALE)
+            + w2 * _normalize(corr_delta, CORR_SCALE)
+            + w3 * _normalize(dd_delta, DD_SCALE)
+        )
         fit_label = _fit_label(composite)
 
         results.append({
@@ -114,6 +133,19 @@ def _delta(new_val: Optional[float], old_val: Optional[float]) -> float:
     if new_val is None or old_val is None:
         return 0.0
     return new_val - old_val
+
+
+def _normalize(value: float, scale: float) -> float:
+    """Scale a raw delta by its per-axis reference magnitude, clamped to [-1, 1].
+
+    Clamping bounds the composite to [-1, 1] so the fit-label thresholds are
+    meaningful. Trade-off: a delta beyond ``scale`` (an already-extraordinary
+    single-swap improvement) saturates to +/-1, so two such candidates tie on
+    that axis and are ordered only by the remaining axes — the strict ranking is
+    preserved for realistic deltas (well within ``scale``), which is the case
+    that matters for allocator-facing fit labels.
+    """
+    return max(-1.0, min(1.0, value / scale))
 
 
 def _fit_label(score: float) -> str:

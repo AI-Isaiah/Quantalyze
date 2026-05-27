@@ -5575,14 +5575,14 @@
       "best_trade_roi": 0.15293388741715502,
       "buy_volume_pct": 0.0,
       "closed_positions": 50,
-      "daily_turnover_usd": 1450.0,
+      "mean_daily_turnover_usd": 1450.0,
       "expectancy": 21.091002960000008,
       "gross_volume_usd": 362500.0,
       "long_count": 25,
       "long_volume_pct": 0.0,
       "losers_count": 16,
       "mean_trade_size_usd": 1450.0,
-      "monthly_turnover_usd": 30208.333333333332,
+      "mean_monthly_turnover_usd": 30208.333333333332,
       "open_positions": 0,
       "profit_factor_long": 8.989462739582786,
       "profit_factor_short": 1.4510316193933552,
@@ -5813,10 +5813,10 @@
     },
     "volatility": 0.2123153159982408,
     "volume_metrics": {
-      "daily_turnover_usd": 1450.0,
+      "mean_daily_turnover_usd": 1450.0,
       "gross_volume_usd": 362500.0,
       "mean_trade_size_usd": 1450.0,
-      "monthly_turnover_usd": 30208.333333333332
+      "mean_monthly_turnover_usd": 30208.333333333332
     }
   },
   "sibling": {

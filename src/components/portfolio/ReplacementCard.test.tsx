@@ -9,10 +9,11 @@ import type { BridgeCandidate } from "@/lib/types";
  * Load-bearing behaviors:
  *   - fit_label badge picks the right color class (Strong/Good → positive,
  *     Moderate → warning, Weak → badge-other).
- *   - delta sign → color: Sharpe uses positive-is-better (positive delta =
- *     green); MaxDD and Corr use invertedBetter=true (NEGATIVE delta = green).
- *     A refactor flipping invertedBetter on Sharpe would paint a real
- *     improvement red, and vice-versa — so the colors are asserted directly.
+ *   - delta sign → color (H-1065): the backend orients ALL deltas so
+ *     positive = improvement, making every axis "higher-better". A positive
+ *     Sharpe, MaxDD (shallower drawdown), or Corr (reduced correlation) delta
+ *     paints green; negative paints red. Asserted directly so a future sign
+ *     regression on any axis is caught.
  *   - intro flow: POST /api/intro, 409 treated as success ("done"), non-409
  *     error surfaces "Retry Intro", button disabled while loading.
  */
@@ -22,8 +23,8 @@ function buildCandidate(partial: Partial<BridgeCandidate> = {}): BridgeCandidate
     strategy_id: "s-1",
     strategy_name: "Replacement Alpha",
     sharpe_delta: 0.25,
-    dd_delta: -0.04,
-    corr_delta: -0.1,
+    dd_delta: 0.04,
+    corr_delta: 0.1,
     composite_score: 0.82,
     fit_label: "Strong fit",
     ...partial,
@@ -93,30 +94,41 @@ describe("<ReplacementCard> — H-1077", () => {
     expect(chip.className).toContain("text-negative");
   });
 
-  it("colors a NEGATIVE MaxDD delta green because invertedBetter=true (shallower drawdown is good)", () => {
-    render(
-      <ReplacementCard
-        candidate={buildCandidate({ dd_delta: -0.04 })}
-        replacementFor="old-1"
-      />,
-    );
-    // -0.04 → "-4.0% MaxDD"
-    const chip = screen.getByText("-4.0% MaxDD");
-    expect(chip.className).toContain("text-positive");
-  });
-
-  it("colors a POSITIVE MaxDD delta red because invertedBetter=true (deeper drawdown is bad)", () => {
+  it("colors a POSITIVE MaxDD delta green (H-1065: positive = shallower drawdown = improvement)", () => {
     render(
       <ReplacementCard
         candidate={buildCandidate({ dd_delta: 0.04 })}
         replacementFor="old-1"
       />,
     );
+    // +0.04 → "+4.0% MaxDD"
     const chip = screen.getByText("+4.0% MaxDD");
+    expect(chip.className).toContain("text-positive");
+  });
+
+  it("colors a NEGATIVE MaxDD delta red (deeper drawdown is worse)", () => {
+    render(
+      <ReplacementCard
+        candidate={buildCandidate({ dd_delta: -0.04 })}
+        replacementFor="old-1"
+      />,
+    );
+    const chip = screen.getByText("-4.0% MaxDD");
     expect(chip.className).toContain("text-negative");
   });
 
-  it("colors a NEGATIVE Corr delta green because invertedBetter=true (lower correlation is good)", () => {
+  it("colors a POSITIVE Corr delta green (H-1065: positive = correlation reduced = improvement)", () => {
+    render(
+      <ReplacementCard
+        candidate={buildCandidate({ corr_delta: 0.1 })}
+        replacementFor="old-1"
+      />,
+    );
+    const chip = screen.getByText("+10.0% Corr");
+    expect(chip.className).toContain("text-positive");
+  });
+
+  it("colors a NEGATIVE Corr delta red (higher correlation is worse)", () => {
     render(
       <ReplacementCard
         candidate={buildCandidate({ corr_delta: -0.1 })}
@@ -124,7 +136,7 @@ describe("<ReplacementCard> — H-1077", () => {
       />,
     );
     const chip = screen.getByText("-10.0% Corr");
-    expect(chip.className).toContain("text-positive");
+    expect(chip.className).toContain("text-negative");
   });
 
   it("POSTs to /api/intro with the candidate id, source=bridge, and replacement_for", async () => {
