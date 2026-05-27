@@ -58,6 +58,36 @@ async def test_validate_returns_none_read_only() -> None:
     assert result.human_message is None
 
 
+async def test_validate_rejects_oversize_csv() -> None:
+    """H1 — a CSV larger than MAX_CSV_BYTES is rejected cleanly (CSV_TOO_LARGE)
+    rather than OOM-ing the worker via b64decode + read_csv. The /process-key
+    path has no upstream size cap, so the adapter enforces it."""
+    from services.ingestion.adapter import KeySubmissionRequest
+    from services.ingestion.csv_adapter import CsvAdapter, MAX_CSV_BYTES
+
+    adapter = CsvAdapter()
+    oversize = b"date,daily_return\n" + b"2023-01-01,0.01\n" * (MAX_CSV_BYTES // 16 + 1)
+    assert len(oversize) > MAX_CSV_BYTES
+    req = KeySubmissionRequest(
+        flow_type="csv",
+        source="csv",
+        context={
+            "raw_bytes": oversize,
+            "fmt": "daily_returns",
+            "strategy_id": "test-strategy",
+            "wizard_session_id": "test-session",
+            "user_id": "test-user",
+        },
+    )
+
+    result = await adapter.validate(req)
+
+    assert result.valid is False
+    assert result.error_code == "CSV_TOO_LARGE", (
+        f"oversize CSV must be rejected with CSV_TOO_LARGE, got {result}"
+    )
+
+
 async def test_validate_returns_error_on_invalid_format() -> None:
     from services.ingestion.adapter import KeySubmissionRequest
     from services.ingestion.csv_adapter import CsvAdapter

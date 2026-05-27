@@ -125,9 +125,15 @@ def client(app):
     return TestClient(app)
 
 
+# A valid UUID — the route now validates X-Correlation-Id as a UUID and mints
+# a fresh one if it isn't (2026-05-27), so tests must send a well-formed value
+# for it to round-trip into the response envelope.
+_TEST_CID = "11111111-1111-4111-8111-111111111111"
+
+
 def _auth_headers() -> dict[str, str]:
     """Bearer header that matches the fixture-set INTERNAL_API_TOKEN."""
-    return {"Authorization": f"Bearer {'a' * 64}", "X-Correlation-Id": "cid-test"}
+    return {"Authorization": f"Bearer {'a' * 64}", "X-Correlation-Id": _TEST_CID}
 
 
 def _build_supabase_mock(
@@ -148,18 +154,21 @@ def _build_supabase_mock(
     """
     fake = MagicMock()
 
-    # SELECT path returns a configurable existing row.
+    # SELECT path. `.maybe_single().execute()` is used by BOTH the idempotency
+    # pre-check AND the 23505 race re-select (2026-05-27 — the race switched
+    # from `.single()` to `.maybe_single()`). When a race winner is configured,
+    # the pre-check returns first, then the winner on the re-select.
     select_chain = MagicMock()
-    select_chain.execute.return_value = MagicMock(
-        data=existing_row,
-    )
+    if insert_raises_then_existing is not None:
+        select_chain.execute.side_effect = [
+            MagicMock(data=existing_row),
+            MagicMock(data=insert_raises_then_existing),
+        ]
+    else:
+        select_chain.execute.return_value = MagicMock(data=existing_row)
     eq_chain = MagicMock()
     eq_chain.maybe_single.return_value = select_chain
-    eq_chain.single.return_value = MagicMock(
-        execute=MagicMock(
-            return_value=MagicMock(data=insert_raises_then_existing)
-        )
-    )
+    eq_chain.single.return_value = select_chain  # legacy; race now uses maybe_single
     select_obj = MagicMock()
     select_obj.eq.return_value = eq_chain
     table = MagicMock()
@@ -519,6 +528,43 @@ def test_process_key_unique_violation_returns_existing(client):
     assert body_json["idempotent"] is True
 
 
+def test_process_key_race_catch_zero_rows_reraises_original(client):
+    """GAP-4. INSERT raises 23505 but the race re-select finds 0 rows (the
+    racing row was rolled back / RLS-hidden between insert and re-select). The
+    route uses .maybe_single() (returns None on 0 rows) + a guard, so it must
+    re-raise the ORIGINAL 23505 rather than None-deref or mask it with a
+    cryptic PGRST116. No `insert_raises_then_existing` → the re-select returns
+    data=None."""
+    fake = _build_supabase_mock(
+        existing_row=None,
+        insert_raises=Exception(
+            "duplicate key value violates unique constraint (SQLSTATE 23505)"
+        ),
+    )
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ):
+        body = {
+            "flow_type": "csv",
+            "source": "csv",
+            "context": {
+                "strategy_id": "s1",
+                "wizard_session_id": "wiz-race-gone",
+                "fmt": "trades",
+                "raw_bytes_base64": "Y29sCjE=",
+            },
+        }
+        with pytest.raises(Exception) as exc_info:
+            client.post("/process-key", json=body, headers=_auth_headers())
+    assert "23505" in str(exc_info.value), (
+        "the original 23505 must propagate, not a None-deref / PGRST116 mask"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sync vs queued dispatch
 # ---------------------------------------------------------------------------
@@ -752,7 +798,7 @@ def test_process_key_validate_failure_returns_envelope(client):
     body = r.json()
     assert body["ok"] is False
     assert body["code"] == "AUTH_FAILED"
-    assert body["correlation_id"] == "cid-test"
+    assert body["correlation_id"] == _TEST_CID
     assert body["debug_context"]["verification_id"] == "ver-bad"
 
 
