@@ -81,6 +81,16 @@ class ValidationResult:
     # treat `error_code` as authoritative.
     human_message: str | None
     debug_context: dict[str, Any] | None
+    # Phase 19.1 (2026-05-27) — CSV wizard preview passthrough. The CSV
+    # adapter populates these from csv_validator.validate_csv()'s success
+    # envelope so the unified /process-key validate-only flow returns the
+    # same {preview, daily_returns_series} the wizard's CsvUploadStep
+    # requires: it raises CSV_UPSTREAM_FAIL on a missing `preview` and
+    # forwards `daily_returns_series` to csv-finalize. None for the API-key
+    # adapter, which has no file preview. Shapes: PreviewShape in
+    # CsvUploadStep.tsx; the success envelope in csv_validator.py.
+    preview: dict[str, Any] | None = None
+    daily_returns_series: list[dict[str, Any]] | None = None
 
 
 # ---------------------------------------------------------------------------
