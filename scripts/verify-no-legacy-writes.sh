@@ -21,6 +21,12 @@
 #       but flag_flipped_at is still TODO. Record the flip timestamp.
 #   7 — INVALID SOAK: flag_flipped_at recorded but prod kill-switch is OFF
 #       (auto-rollback fired mid-window). The soak must restart.
+#   8 — SOAK INCOMPLETE: elapsed >=168h but phase19_soak_daily has <7 rows.
+#       The Vercel cron /api/cron/phase19-error-rollup is not running (or
+#       failing). Daily evidence is missing; PR-D BLOCKED until backfilled.
+#   9 — ERROR-RATE BREACH: a phase19_soak_daily row has error_rate >= 0.005
+#       (0.5%) or breach_count > 0. PR-D BLOCKED — error rate exceeds the
+#       go/no-go threshold on at least one day.
 #
 # Test seams (default to real behavior — zero prod impact when unset):
 #   PHASE19_STABILITY_LOG     override the stability-log path
@@ -111,7 +117,18 @@ if isinstance(d, list):
     d = d[0] if d else {}
 if not isinstance(d, dict) or "flag_value" not in d:
     print("PARSE_ERR"); sys.exit(0)
-print("%s\t%s\t%s" % (d.get("flag_value","ERR"), str(d.get("vr_is_view","ERR")).lower(), d.get("legacy_write_count","ERR")))
+# Extra fields are additive (migration 20260527152800). Missing fields
+# emit "MISSING" rather than 0 so the bash gate can distinguish a measured
+# zero from a regressed RPC shape. Pre-168h, MISSING is tolerated; post-168h,
+# bash treats MISSING as exit 3 ("RPC shape regressed; cannot verify").
+print("%s\t%s\t%s\t%s\t%s\t%s" % (
+    d.get("flag_value","ERR"),
+    str(d.get("vr_is_view","ERR")).lower(),
+    d.get("legacy_write_count","ERR"),
+    d.get("daily_rows", "MISSING"),
+    d.get("max_error_rate", "MISSING"),
+    d.get("breach_count", "MISSING"),
+))
 ')
 
 if [[ "$PARSED" == "PARSE_ERR" ]]; then
@@ -123,6 +140,9 @@ fi
 FLAG=$(printf '%s' "$PARSED" | cut -f1)
 IS_VIEW=$(printf '%s' "$PARSED" | cut -f2)
 COUNT=$(printf '%s' "$PARSED" | cut -f3)
+DAILY_ROWS=$(printf '%s' "$PARSED" | cut -f4)
+MAX_ERROR_RATE=$(printf '%s' "$PARSED" | cut -f5)
+BREACH_COUNT=$(printf '%s' "$PARSED" | cut -f6)
 
 # --- Decision logic ---------------------------------------------------------
 # View-shim applied. Retiring the gate is only legitimate if the soak actually
@@ -168,5 +188,64 @@ if (( COUNT > 0 )); then
   exit 4
 fi
 
-echo "OK: kill-switch ON since ${FLIP_TS}; 0 writes to legacy verification_requests — soak clean."
+# --- Daily-rollup gate (extension 2026-05-27) -------------------------------
+# Only enforced once the soak has run for >=168h. Pre-168h, missing daily
+# rows are expected (the cron hasn't had time to fill them); legacy-write
+# absence is the only criterion. Post-168h, PR-D ship requires (a) >=7
+# daily rows recorded and (b) every row's error_rate < 0.005 AND
+# breach_count = 0.
+# Date parse — both GNU and BSD form. Fail-loud on parse failure rather than
+# falling back to FLIP_EPOCH=0 (which would make ELAPSED_H look like ~500k
+# hours and silently trip the >=168h branch with garbage data).
+if FLIP_EPOCH=$(date -u -d "$FLIP_TS" +%s 2>/dev/null); then :; \
+elif FLIP_EPOCH=$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$FLIP_TS" +%s 2>/dev/null); then :; \
+else
+  echo "FAIL: could not parse flag_flipped_at='$FLIP_TS' as epoch seconds." >&2
+  echo "      Both GNU 'date -u -d' and BSD 'date -j -u -f' rejected the format." >&2
+  exit 3
+fi
+NOW_EPOCH=$(date -u +%s)
+ELAPSED_S=$(( NOW_EPOCH - FLIP_EPOCH ))
+ELAPSED_H=$(( ELAPSED_S / 3600 ))
+
+if (( ELAPSED_H >= 168 )); then
+  # Post-168h: any MISSING field means the RPC shape regressed (migration
+  # 20260527152800 rolled back, or future PR renamed a field). Fail loud with
+  # exit 3 rather than treating MISSING as a passing zero.
+  if [[ "$DAILY_ROWS" == "MISSING" || "$BREACH_COUNT" == "MISSING" || "$MAX_ERROR_RATE" == "MISSING" ]]; then
+    echo "FAIL: phase19_soak_status response missing daily-rollup fields (daily_rows='${DAILY_ROWS}', max_error_rate='${MAX_ERROR_RATE}', breach_count='${BREACH_COUNT}')." >&2
+    echo "      Migration 20260527152800 may not be applied to prod, or a future RPC change dropped fields. Cannot verify post-168h gate." >&2
+    exit 3
+  fi
+
+  if [[ ! "$DAILY_ROWS" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: phase19_soak_status returned non-numeric daily_rows='${DAILY_ROWS}'." >&2
+    exit 3
+  fi
+  if (( DAILY_ROWS < 7 )); then
+    echo "FAIL: soak elapsed ${ELAPSED_H}h (>=168h) but phase19_soak_daily has only ${DAILY_ROWS} row(s) — expected >=7." >&2
+    echo "      Backfill missing days via: curl -H \"Authorization: Bearer \$CRON_SECRET\" \"\$PROD_URL/api/cron/phase19-error-rollup?date=YYYY-MM-DD\"" >&2
+    exit 8
+  fi
+
+  if [[ ! "$BREACH_COUNT" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: phase19_soak_status returned non-numeric breach_count='${BREACH_COUNT}'." >&2
+    exit 3
+  fi
+  if (( BREACH_COUNT > 0 )); then
+    echo "FAIL: ${BREACH_COUNT} day(s) in phase19_soak_daily have error_rate >= 0.005 (0.5%); max_error_rate=${MAX_ERROR_RATE}." >&2
+    echo "      PR-D MUST NOT ship — error envelope rate breached the go/no-go threshold." >&2
+    exit 9
+  fi
+
+  echo "OK: soak ${ELAPSED_H}h elapsed; legacy writes=0; ${DAILY_ROWS}/7 daily rows recorded; max_error_rate=${MAX_ERROR_RATE} (<0.005). All gates green."
+  exit 0
+fi
+
+# Pre-168h: MISSING fields are tolerated (pre-migration prod or in-progress
+# soak). Reported as the in-progress message; the post-168h branch will catch
+# any regression once the soak window completes.
+DAILY_ROWS_DISPLAY="$DAILY_ROWS"
+[[ "$DAILY_ROWS_DISPLAY" == "MISSING" ]] && DAILY_ROWS_DISPLAY="0 (RPC field missing — migration not applied yet)"
+echo "OK: kill-switch ON since ${FLIP_TS} (${ELAPSED_H}h elapsed, <168h); 0 writes to legacy verification_requests; ${DAILY_ROWS_DISPLAY} daily row(s) so far — soak in-progress."
 exit 0

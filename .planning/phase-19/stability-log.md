@@ -23,25 +23,50 @@ flipped without recording here, or rolled back mid-window.
 
 - **flag_flipped_at:** 2026-05-25T15:51:07Z
 
-## Daily Sentry Error-Envelope Rate (15-min tumbling windows averaged daily)
+## Daily Sentry Error-Envelope Rate (Vercel cron-recorded; READ FROM Supabase)
 
-| Day | Date | Error rate (%) | /process-key calls | Errors | Notes |
-|-----|------|----------------|--------------------|--------|-------|
-| 1 | YYYY-MM-DD | 0.00 | N | M | first 24h post-flip |
-| 2 | YYYY-MM-DD | 0.00 | N | M | |
-| 3 | YYYY-MM-DD | 0.00 | N | M | |
-| 4 | YYYY-MM-DD | 0.00 | N | M | |
-| 5 | YYYY-MM-DD | 0.00 | N | M | |
-| 6 | YYYY-MM-DD | 0.00 | N | M | |
-| 7 | YYYY-MM-DD | 0.00 | N | M | ≥168h elapsed; commit (d) eligible if all rows below 0.5% |
+The 7 daily rows are now written to `public.phase19_soak_daily` by
+`/api/cron/phase19-error-rollup` (Vercel cron, daily at 00:30 UTC). The
+gate workflow `.github/workflows/phase-19-stability.yml` reads them via
+`phase19_soak_status()` (extended migration `20260527152800`) and fails
+loud if (a) <7 rows exist past ≥168h, (b) any row has `error_rate >= 0.005`,
+or (c) any row's `total_events` denominator is zero outside an explicitly-noted
+no-traffic day.
 
-## Daily vcrpy + repro-key-flow.sh Cassette Refresh (Theme 5)
+Reviewer query for the go/no-go review:
 
-| Day | OKX cassettes refreshed | Bybit cassettes refreshed | Result |
-|-----|-------------------------|---------------------------|--------|
-| 1 | 4/4 | 4/4 | ✓ |
-| 2 | 4/4 | 4/4 | ✓ |
-| ... | ... | ... | ... |
+```sql
+SELECT date_utc, day_index, error_rate, total_events, error_events, notes, recorded_at
+  FROM public.phase19_soak_daily
+ ORDER BY date_utc;
+```
+
+Backfill: `curl -H "Authorization: Bearer $CRON_SECRET" \
+  "$PROD_URL/api/cron/phase19-error-rollup?date=2026-05-26"` upserts a
+specific historical day's row. Idempotent on `date_utc`.
+
+Day-index convention: flip-date row = day 1; day 8+ = soak over-extension.
+`day_index BETWEEN 1 AND 14` is CHECK-enforced.
+
+## Daily Cassette Refresh (`scripts/repro-key-flow.sh --record`)
+
+Coverage: **OKX + Bybit only** (Binance dropped 2026-05-27 — no test keys
+provided). The TS-side `tests/cassettes/` and Python-side
+`analytics-service/tests/cassettes/{okx,bybit}/` are both refreshed daily
+by `.github/workflows/cassette-refresh.yml` from real broker APIs using
+read-only credentials in GH secrets (`DEBUG_KEY_FLOW_OKX_*`,
+`DEBUG_KEY_FLOW_BYBIT_*`). Workflow runs the leak-gate (Layers A + B) on
+every refresh and opens an auto-PR if the cassettes diverge from main.
+
+Reviewer evidence: cassette-refresh workflow run history under
+`gh run list --workflow=cassette-refresh.yml`. ≥6 of the 7 soak days
+must show `conclusion: success` for the go/no-go criterion to pass.
+
+## Customer-Feedback Gate (founder-only)
+
+Manual: founder records ≥1 verbatim entry in
+`.planning/phase-19/customer-feedback.md`. The gate cannot be automated
+because the content is qualitative. See template in that file.
 
 ## Exit Criteria
 
