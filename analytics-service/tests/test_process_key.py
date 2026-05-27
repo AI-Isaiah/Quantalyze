@@ -1247,19 +1247,15 @@ def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
     """
     fake = _build_supabase_mock(existing_row=None)
     new_sid = "11111111-1111-1111-1111-111111111111"
-    # Override rpc so finalize_csv_strategy returns the new strategy_id
+    # Phase 19.1 (2026-05-27): finalize_csv_strategy is SECURITY DEFINER and
+    # enforces auth.uid() = p_user_id, so it runs on a USER-scoped client built
+    # from the forwarded X-User-Access-Token — never the service-role client.
     finalize_call = MagicMock()
     finalize_call.execute.return_value = MagicMock(data=new_sid)
-
-    log_audit_call = MagicMock()
-    log_audit_call.execute.return_value = MagicMock(data={})
-
-    def _rpc_router(name, *_a, **_kw):
-        if name == "finalize_csv_strategy":
-            return finalize_call
-        return log_audit_call
-
-    fake.rpc.side_effect = _rpc_router
+    user_sb = MagicMock()
+    user_sb.rpc.return_value = finalize_call
+    # Benign default for any incidental service-role rpc (audit etc.).
+    fake.rpc.return_value = MagicMock(execute=MagicMock(return_value=MagicMock(data={})))
 
     with patch(
         "routers.process_key.is_unified_backbone_active",
@@ -1267,7 +1263,10 @@ def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
     ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
-    ):
+    ), patch(
+        "routers.process_key.get_user_scoped_supabase",
+        return_value=user_sb,
+    ) as mock_user_client:
         r = client.post(
             "/process-key",
             json={
@@ -1281,7 +1280,7 @@ def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
                     "step": "finalize",
                 },
             },
-            headers=_auth_headers(),
+            headers={**_auth_headers(), "X-User-Access-Token": "user-jwt-abc"},
         )
 
     assert r.status_code == 200, r.text
@@ -1291,18 +1290,63 @@ def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
     assert body["status"] == "pending_review"
     assert body["step"] == "finalize"
 
-    # finalize_csv_strategy RPC was called exactly once with the expected payload.
-    finalize_calls = [
-        c.args
-        for c in fake.rpc.call_args_list
+    # The user-scoped client was built from the forwarded token...
+    mock_user_client.assert_called_once_with("user-jwt-abc")
+    # ...and finalize_csv_strategy ran on THAT client (the auth.uid() path).
+    user_finalize = [
+        c for c in user_sb.rpc.call_args_list
         if c.args and c.args[0] == "finalize_csv_strategy"
     ]
-    assert len(finalize_calls) == 1, "finalize_csv_strategy must be called once"
-    payload = finalize_calls[0][1]
+    assert len(user_finalize) == 1, "finalize_csv_strategy must run on the user-scoped client"
+    payload = user_finalize[0].args[1]
     assert payload["p_user_id"] == "33333333-3333-3333-3333-333333333333"
     assert payload["p_wizard_session_id"] == "22222222-2222-2222-2222-222222222222"
     assert payload["p_fmt"] == "trades"
     assert payload["p_strategy_name"] == "Test Strategy"
+    # The service-role client must NOT be used for the user-auth finalize RPC.
+    svc_finalize = [
+        c for c in fake.rpc.call_args_list
+        if c.args and c.args[0] == "finalize_csv_strategy"
+    ]
+    assert svc_finalize == [], "finalize_csv_strategy must NOT use the service-role client"
+
+
+def test_process_key_csv_finalize_without_user_token_returns_401(client):
+    """Phase 19.1 (2026-05-27) guard: finalize_csv_strategy is user-auth
+    (auth.uid() = p_user_id). If the Next.js route forwards no
+    X-User-Access-Token, fail with a clean 401 rather than letting the upstream
+    RPC raise 42501 'called without an auth session'. We must not even attempt
+    to build a user client or run the RPC unauthenticated.
+    """
+    fake = _build_supabase_mock(existing_row=None)
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_user_scoped_supabase",
+    ) as mock_user_client:
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "wizard_session_id": "22222222-2222-2222-2222-222222222222",
+                    "user_id": "33333333-3333-3333-3333-333333333333",
+                    "fmt": "trades",
+                    "strategy_name": "Test Strategy",
+                    "step": "finalize",
+                },
+            },
+            headers=_auth_headers(),  # no X-User-Access-Token
+        )
+
+    assert r.status_code == 401, r.text
+    assert r.json().get("code") == "CSV_FINALIZE_FAILED"
+    mock_user_client.assert_not_called()
 
 
 def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):

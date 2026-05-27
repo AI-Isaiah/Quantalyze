@@ -17,10 +17,62 @@ coverage farming:
 """
 
 import asyncio
+from unittest.mock import MagicMock
 
 import pytest
 
-from services.db import db_execute, get_supabase
+from services.db import db_execute, get_supabase, get_user_scoped_supabase
+
+
+def test_get_user_scoped_supabase_uses_anon_key_and_sets_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 19.1 (2026-05-27): the user-scoped client must use the ANON key as
+    the PostgREST apikey and set the user JWT as the Authorization bearer via
+    postgrest.auth(). This is load-bearing: a raw user JWT in the apikey slot is
+    rejected by the API gateway, and without the bearer the SECURITY DEFINER RPC
+    finalize_csv_strategy sees no auth.uid() and raises 42501. Locks both halves.
+    """
+    monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-key-xyz")
+    captured: dict[str, str] = {}
+    fake_client = MagicMock()
+
+    def _fake_create_client(url: str, key: str) -> MagicMock:
+        captured["url"] = url
+        captured["key"] = key
+        return fake_client
+
+    monkeypatch.setattr("services.db.create_client", _fake_create_client)
+
+    client = get_user_scoped_supabase("user-jwt-123")
+
+    assert client is fake_client
+    assert captured["url"] == "https://proj.supabase.co"
+    # apikey is the ANON key, NOT the user JWT.
+    assert captured["key"] == "anon-key-xyz"
+    # user JWT is set as the bearer for all subsequent RPC/PostgREST calls.
+    fake_client.postgrest.auth.assert_called_once_with("user-jwt-123")
+
+
+def test_get_user_scoped_supabase_requires_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-key-xyz")
+    with pytest.raises(ValueError, match="user_access_token"):
+        get_user_scoped_supabase("")
+
+
+def test_get_user_scoped_supabase_requires_anon_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If SUPABASE_ANON_KEY is unset, fail loudly — never silently fall back to
+    the service-role key (which would defeat the auth.uid() guarantee)."""
+    monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
+    monkeypatch.delenv("SUPABASE_ANON_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="SUPABASE_ANON_KEY"):
+        get_user_scoped_supabase("user-jwt-123")
 
 
 def test_get_supabase_missing_env_raises(monkeypatch: pytest.MonkeyPatch) -> None:

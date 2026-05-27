@@ -39,6 +39,39 @@ def get_supabase() -> Client:
     return create_client(url, key)
 
 
+def get_user_scoped_supabase(user_access_token: str) -> Client:
+    """Build a per-request Supabase client that acts AS the end user.
+
+    SECURITY DEFINER RPCs that enforce ``auth.uid() = p_user_id`` (e.g.
+    ``finalize_csv_strategy``, migration 20260501055202) cannot be called with
+    the module service-role client: service_role has no ``auth.uid()``, so the
+    RPC raises 42501 "called without an auth session". This client carries the
+    user's Supabase access token (forwarded by the Next.js route in the
+    ``X-User-Access-Token`` header) so the RPC sees the real user.
+
+    Construction mirrors the frontend's user client: the anon key is the
+    PostgREST ``apikey`` (the API gateway requires a project key — a raw user
+    JWT in that slot is rejected), and the user JWT is set as the
+    ``Authorization: Bearer`` token via ``postgrest.auth()`` so PostgREST
+    resolves ``role=authenticated`` and ``auth.uid()=sub``.
+
+    NOT cached: the token is per-user and short-lived. Caller must pass a
+    non-empty token.
+    """
+    url = os.getenv("SUPABASE_URL", "")
+    anon = os.getenv("SUPABASE_ANON_KEY", "")
+    if not url or not anon:
+        raise RuntimeError(
+            "SUPABASE_URL and SUPABASE_ANON_KEY required for a user-scoped client"
+        )
+    if not user_access_token:
+        raise ValueError("user_access_token is required for a user-scoped client")
+    client = create_client(url, anon)
+    # Sets `Authorization: Bearer <user jwt>` on all PostgREST/RPC calls.
+    client.postgrest.auth(user_access_token)
+    return client
+
+
 async def db_execute(fn):
     """Run a synchronous Supabase call without blocking the async event loop.
 

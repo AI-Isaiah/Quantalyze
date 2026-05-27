@@ -57,6 +57,16 @@ export interface PostProcessKeyArgs {
    * window, isolated from any authenticated tenant.
    */
   userId: string;
+  /**
+   * Phase 19.1 (2026-05-27) — the END USER's Supabase access token (JWT),
+   * forwarded as the `X-User-Access-Token` header so the unified router can
+   * call SECURITY DEFINER RPCs that enforce `auth.uid() = p_user_id`
+   * (finalize_csv_strategy). The analytics service's service-role client has
+   * no `auth.uid()`; without this the RPC raises 42501 "called without an
+   * auth session". Only the CSV finalize step needs it — omit for
+   * validate-only / teaser / resync flows, which never hit a user-auth RPC.
+   */
+  userAccessToken?: string;
 }
 
 export type PostProcessKeyResult =
@@ -106,6 +116,12 @@ export async function postProcessKey(
         // CT-4 (army2) — forward tenant id for cross-tenant rate-limit
         // isolation. See PostProcessKeyArgs.userId for the contract.
         "X-User-Id": args.userId,
+        // Phase 19.1 — forward the end user's access token so the unified
+        // router can call user-auth SECURITY DEFINER RPCs (finalize_csv_strategy)
+        // as the user. Only present for the CSV finalize step.
+        ...(args.userAccessToken
+          ? { "X-User-Access-Token": args.userAccessToken }
+          : {}),
       },
       body: JSON.stringify({
         flow_type: args.flow_type,

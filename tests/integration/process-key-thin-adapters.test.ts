@@ -77,6 +77,14 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: {
       getUser: async () => ({ data: { user: TEST_USER }, error: null }),
+      // Phase 19.1: the unified csv-finalize path reads the session to forward
+      // the user JWT (X-User-Access-Token) so analytics can call
+      // finalize_csv_strategy as the user. Provide one so the handler clears
+      // its 401 guard.
+      getSession: async () => ({
+        data: { session: { access_token: "test-user-jwt" } },
+        error: null,
+      }),
     },
     from: () => ({
       select: () => ({
