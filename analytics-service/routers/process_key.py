@@ -529,7 +529,17 @@ async def process_key(
     )
 
     # 1) Idempotency check (BACKBONE-08): wizard_session_id UNIQUE INDEX.
-    wizard_session_id = body.context.get("wizard_session_id")
+    #
+    # strategy_verifications.wizard_session_id is NOT NULL. The wizard-driven
+    # flows (onboard/csv finalize) always supply one, but `resync` via
+    # /api/keys/sync carries no wizard_session_id (it re-syncs an existing
+    # strategy, not a wizard session) -- so the draft insert below 23502'd with
+    # a NULL wizard_session_id once resync got past the validator. Mint a fresh
+    # uuid4 when absent (same pattern teaser uses above). resync is then
+    # deliberately not idempotent-by-session (each refresh is its own
+    # verification), which matches teaser's contract; downstream sync_trades
+    # enqueues still dedupe on (strategy_id, kind).
+    wizard_session_id = body.context.get("wizard_session_id") or str(uuid.uuid4())
     if wizard_session_id:
         existing = (
             supabase.table("strategy_verifications")

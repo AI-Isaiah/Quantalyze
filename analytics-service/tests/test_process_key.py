@@ -799,6 +799,24 @@ def test_process_key_resync_no_credentials_queues(client):
     assert enqueue_calls, "resync should enqueue process_key_long"
     assert enqueue_calls[0][1]["p_kind"] == "process_key_long"
 
+    # Bug #4 regression (2026-05-27, found by prod E2E): the
+    # strategy_verifications.wizard_session_id column is NOT NULL. resync sends
+    # no wizard_session_id, so the route MUST mint one before the draft insert.
+    # Pre-fix the insert carried NULL and 23502'd in prod (500) — but this unit
+    # mock does not enforce NOT NULL, which is why the original test passed.
+    # Assert the insert payload explicitly so the contract is pinned.
+    insert_payloads = [
+        c.args[0]
+        for c in fake.table.return_value.insert.call_args_list
+        if c.args and isinstance(c.args[0], dict)
+    ]
+    sv_inserts = [p for p in insert_payloads if "wizard_session_id" in p]
+    assert sv_inserts, "expected a strategy_verifications insert with wizard_session_id"
+    assert sv_inserts[0]["wizard_session_id"], (
+        "wizard_session_id must be non-null on the strategy_verifications insert "
+        "(NOT NULL column); resync must mint one when the body carries none"
+    )
+
 
 def test_process_key_validate_failure_returns_envelope(client):
     """Adapter.validate(valid=False) → Phase 17 DESIGN-05 envelope shape."""

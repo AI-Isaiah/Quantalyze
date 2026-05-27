@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.24.10.9] - 2026-05-27
+### Fixed — process-key resync: NULL wizard_session_id 500'd the verification insert (found by prod E2E)
+- With v0.24.10.8's validator fix, a real prod `/process-key` resync (replaying the wizard "Verify data" request with the user's stored Bybit key) got past the 422 and then **500'd**: `null value in column "wizard_session_id" of relation "strategy_verifications" violates not-null constraint (23502)`. `resync` carries no `wizard_session_id` (it re-syncs an existing strategy, not a wizard session), but the column is NOT NULL and the draft insert passed it through as NULL.
+- Fix (`routers/process_key.py`): mint a fresh `uuid4` for `wizard_session_id` when the body carries none — the same pattern the teaser path already uses. resync is then deliberately not idempotent-by-session (each refresh is its own verification); downstream `sync_trades` enqueues still dedupe on `(strategy_id, kind)`.
+- Strengthened `test_process_key_resync_no_credentials_queues` to assert a non-null `wizard_session_id` reaches the insert (the original unit mock didn't enforce NOT NULL, which is why this slipped past v0.24.10.8 — only the real DB E2E caught it).
+
 ## [0.24.10.8] - 2026-05-27
 ### Fixed — API-key uploads (OKX + Bybit): unified queued resync path produced no factsheet
 The wizard "Verify data" step (`/api/keys/sync` → `flow_type=resync`) failed for both OKX and Bybit with "Sync failed: analytics computation did not complete" (`SYNC_FAILED`). The unified queued path (`process_key_long`) had been flag-gated ON since 2026-05-25 but never run in prod. Three defects, all on this path:
