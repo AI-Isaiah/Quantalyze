@@ -379,6 +379,83 @@ class TestMatchPositionsFIFO:
         assert len(positions) == 0
         assert dropped_flags.get("zero_entry_price_dropped") == 1
 
+    def test_malformed_monetary_field_is_surfaced_not_silently_dropped(self) -> None:
+        """Specialist follow-up (pr-test-analyzer / silent-failure-hunter):
+        the Decimal parse (M-0717) replaced `float(fill[...] or 0)` — which
+        RAISED on a present-but-non-numeric value (e.g. quantity="abc") — with
+        `_decimal_or_none(...) or Decimal(0)`, which coerces to 0. A corrupt
+        monetary field would then silently drop the fill from the FIFO
+        reconstruction with no signal, contradicting the batch's own fail-loud
+        thesis. The drop must be SURFACED via the `malformed_fill_field_dropped`
+        counter (the same drop-and-count channel as `zero_entry_price_dropped`),
+        not swallowed."""
+        good = _make_fill(side="buy", price=100.0, quantity=1.0,
+                          timestamp="2024-01-01T00:00:00+00:00")
+        # quantity present but non-numeric (connector/parse corruption). The
+        # old float("GARBAGE") path crashed here; the Decimal path must count
+        # it, not silently coerce qty->0 and vanish the fill.
+        corrupt_qty = _make_fill(side="buy", price=100.0, quantity=1.0,
+                                 timestamp="2024-01-02T00:00:00+00:00")
+        corrupt_qty["quantity"] = "GARBAGE"
+        # price stored as a non-finite sentinel string ('NaN').
+        corrupt_price = _make_fill(side="sell", price=100.0, quantity=1.0,
+                                   timestamp="2024-01-03T00:00:00+00:00")
+        corrupt_price["price"] = "NaN"
+        dropped_flags: dict[str, object] = {}
+        # Must not raise (the old float("GARBAGE") raised ValueError).
+        _match_positions_fifo(
+            "BTCUSDT", [good, corrupt_qty, corrupt_price], "strat-1",
+            dropped_flags=dropped_flags,
+        )
+        # Two present-but-unparseable monetary fields -> surfaced, not silent.
+        assert dropped_flags.get("malformed_fill_field_dropped") == 2, (
+            f"malformed monetary input must be surfaced via dropped_flags; "
+            f"got {dropped_flags!r}"
+        )
+
+    def test_absent_optional_field_not_counted_as_malformed(self) -> None:
+        """False-positive guard for the malformed-field counter: a legitimately
+        ABSENT field (e.g. no `fee` key — common for many connectors) is not
+        corruption and must NOT increment `malformed_fill_field_dropped`. Only
+        PRESENT-but-unparseable values count."""
+        f_buy = _make_fill(side="buy", price=100.0, quantity=1.0,
+                           timestamp="2024-01-01T00:00:00+00:00")
+        f_sell = _make_fill(side="sell", price=110.0, quantity=1.0,
+                            timestamp="2024-01-02T00:00:00+00:00")
+        f_buy.pop("fee", None)
+        f_sell.pop("fee", None)
+        dropped_flags: dict[str, object] = {}
+        positions = _match_positions_fifo(
+            "BTCUSDT", [f_buy, f_sell], "strat-1", dropped_flags=dropped_flags
+        )
+        assert len(positions) == 1  # well-formed trade survives
+        assert "malformed_fill_field_dropped" not in dropped_flags
+
+    def test_large_magnitude_field_does_not_crash_reconstruction(self) -> None:
+        """Red-team 2026-05-27: the float->Decimal conversion serialized output
+        via `float(round(Decimal, n))`. `round(Decimal, 8)` quantizes within the
+        28-digit decimal context and raises InvalidOperation once the value
+        needs more digits (>=1e20 rounded to 8dp). The matcher runs in a bare
+        per-symbol loop, so that uncaught crash would take down the WHOLE
+        strategy reconstruction on corrupt large-magnitude input — which the
+        prior float path tolerated. A huge (corrupt) size must be handled by the
+        boundary serializer, not raise."""
+        # quantity 1e22 -> size_base 1e22: finite (passes _decimal_or_none and
+        # the is_finite() guard), then hits the boundary round() that crashed.
+        fills = [
+            _make_fill(side="buy", price=1.0, quantity=1e22,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="sell", price=2.0, quantity=1e22,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+        ]
+        # Must not raise decimal.InvalidOperation.
+        positions = _match_positions_fifo("DOGE", fills, "strat-1")
+        assert len(positions) == 1
+        # Value preserved, serialized as a finite float (no crash).
+        assert positions[0]["size_base"] == 1e22
+        # realized_pnl = (2 - 1) * 1e22 - 0 fees, serialized without raising.
+        assert positions[0]["realized_pnl"] == 1e22
+
     def test_roi_net_of_fees_classifies_fee_only_loser_as_loser(self) -> None:
         """KPI-17 follow-up regression. The prior ROI formula was
         `(exit-entry)/entry` (gross price change), which classified a
@@ -1100,6 +1177,121 @@ class TestExitVWAPAcrossClosingFills:
         # And realized_pnl uses VWAP, not last-fill price (103).
         # entry=100, exit_vwap=101.2, qty=1 → realized_pnl=1.2
         assert abs(pos["realized_pnl"] - 1.2) < 1e-6
+
+
+class TestDecimalMoneyArithmetic:
+    """Audit-2026-05-07 M-0717 / M-0718 / H-0735 / H-0740.
+
+    WHY these matter: the FIFO matcher accumulates `total_entry_cost`,
+    `total_entry_qty`, fees and `net_qty` over potentially thousands of
+    fills. The trades table columns are NUMERIC; the prior code parsed them
+    as Python `float`, so `qty += 0.23` repeated thousands of times drifted
+    below the 8-decimal rounding boundary and persisted a `size_base` that
+    was *wrong* (e.g. 6899.99999999 instead of 6900.0). Funding, meanwhile,
+    was already computed in `Decimal` — so `realized_pnl` (float) and
+    `funding_pnl` (Decimal→float) lived in different numeric domains and
+    could not be summed without silent FP drift (H-0740). Running ALL money
+    math in `Decimal` and serializing to float only at the output boundary
+    makes the stored value exact and puts both halves in the same domain.
+
+    These tests assert EXACT equality (no tolerance): on the old float path
+    the accumulated value carried a sub-ULP error that survived the round to
+    8 places; with Decimal it is exactly the analytic value. A regression to
+    float `+=` re-introduces the drift and fails the `== exact` assertions.
+    """
+
+    def test_quantity_accumulation_is_exact_over_thousands_of_fills(self) -> None:
+        """M-0717: 30 000 buy fills of qty=0.23 accumulate to EXACTLY 6900.0.
+
+        Float `0.23` is not representable, so `sum(0.23 for _ in range(30000))`
+        == 6899.999999999... which `round(.,8)` pins to 6899.99999999 — a
+        wrong, drifted `size_base`. Decimal accumulation yields exactly 6900,
+        so the persisted `size_base` is 6900.0. Fails on the pre-fix float
+        matcher (would assert-fail at 6899.99999999 != 6900.0)."""
+        fills = [
+            _make_fill(side="buy", price=100.0, quantity=0.23,
+                       timestamp=f"2024-01-01T00:{(i // 60) % 60:02d}:{i % 60:02d}+00:00")
+            for i in range(30_000)
+        ]
+        # Close the entire 6900-base long in one sell so a single position
+        # carries the full accumulated size.
+        fills.append(_make_fill(side="sell", price=110.0, quantity=6900.0,
+                                 timestamp="2024-06-01T00:00:00+00:00"))
+        fills.sort(key=lambda f: f["timestamp"])
+        positions = _match_positions_fifo("PEPEUSDT", fills, "strat-1")
+        assert len(positions) == 1, f"expected one clean position, got {len(positions)}"
+        pos = positions[0]
+        # EXACT — not approx. Float drift would make this 6899.99999999.
+        assert pos["size_base"] == 6900.0, (
+            f"size_base must be exact 6900.0 (Decimal); float drift gives "
+            f"6899.99999999. Got {pos['size_base']!r}"
+        )
+        # entry VWAP is exactly the single fill price; realized_pnl exact too.
+        assert pos["entry_price_avg"] == 100.0
+        assert pos["realized_pnl"] == 69000.0  # (110-100) * 6900
+
+    def test_memecoin_scale_size_is_exact_not_float_drifted(self) -> None:
+        """M-0718: a memecoin-scale position stores its EXACT base size.
+
+        The finding cites `1000000.0 - 999999.9999999999` exceeding the old
+        `1e-12` epsilon. Here two large fractional buys (99999999.99 +
+        12345678.99) sum to EXACTLY 112345678.98 in Decimal, but in float
+        accumulate to 112345678.97999999 — which `round(.,8)` does NOT
+        repair (the drift is at the 2nd decimal of a 1e8-magnitude value).
+        With Decimal the stored `size_base` is exact. Fails on the pre-fix
+        float matcher at 112345678.97999999 != 112345678.98."""
+        fills = [
+            _make_fill(side="buy", price=0.0001, quantity=99999999.99,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="buy", price=0.0001, quantity=12345678.99,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+            _make_fill(side="sell", price=0.00012, quantity=112345678.98,
+                       timestamp="2024-02-01T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo("MEMEUSDT", fills, "strat-1")
+        # Exactly one closed position, no phantom flip leg from float residue.
+        assert len(positions) == 1, (
+            f"expected one clean close (no phantom flip), got {len(positions)}: "
+            f"{[(p['status'], p['size_base']) for p in positions]}"
+        )
+        pos = positions[0]
+        assert pos["status"] == "closed"
+        assert pos["size_base"] == 112345678.98, (
+            f"memecoin size must be exact 112345678.98 (Decimal); float drift "
+            f"gives 112345678.97999999. Got {pos['size_base']!r}"
+        )
+
+    def test_realized_pnl_exact_decimal_at_persisted_precision(self) -> None:
+        """H-0735 / H-0740: realized_pnl is Decimal-derived, exact at the
+        persisted 4-decimal precision — same numeric domain as funding_pnl.
+
+        WHY: realized_pnl and funding_pnl are the two halves of total P&L; a
+        downstream consumer summing them must not accumulate cross-domain FP
+        error (H-0740). Here a two-fill VWAP entry (135.62×4.8 + 20.3773×2.5)
+        closed at 23.99 yields realized_pnl that the FLOAT path rounds to
+        -526.7923, but the exact Decimal value rounds to -526.7922 — a
+        difference at the 4th decimal, i.e. the *persisted* precision, not
+        hidden noise. Funding is already Decimal; making realized_pnl Decimal
+        too removes the drift that flipped borderline SQN / profit-factor
+        signs. Fails on the pre-fix float matcher (-526.7923 != -526.7922)."""
+        fills = [
+            _make_fill(side="buy", price=135.62, quantity=4.8,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="buy", price=20.3773, quantity=2.5,
+                       timestamp="2024-01-01T00:00:01+00:00"),
+            _make_fill(side="sell", price=23.99, quantity=7.3,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo("ALTUSDT", fills, "strat-1")
+        assert len(positions) == 1
+        pos = positions[0]
+        assert pos["size_base"] == 7.3, f"got {pos['size_base']!r}"
+        # Exact at 4dp — the float path drifts to -526.7923 here.
+        assert pos["realized_pnl"] == -526.7922, (
+            f"realized_pnl must be the exact Decimal value -526.7922 at the "
+            f"persisted 4dp precision; float gives -526.7923. Got "
+            f"{pos['realized_pnl']!r}"
+        )
 
 
 class TestSymbolAndExchangeBucketing:
@@ -2028,6 +2220,79 @@ class TestTurnoverGapDetectionBoundary:
         )
         assert "2025-01-08" in (flags.get("turnover_gap_dates") or []), (
             f"smallest 2-day gap must flag the post-gap date; got {flags}"
+        )
+
+
+class TestTurnoverMissingPriceFlag:
+    """Audit-2026-05-07 M-0711: a symbol with a non-zero position delta but
+    NO price in `prices_by_date` was silently treated as $0 turnover —
+    under-stating the day, indistinguishable from a genuinely quiet day.
+
+    WHY it matters: thinly-traded instruments and upstream price-feed gaps
+    are normal. Without a flag, an allocator reading the turnover series
+    cannot tell a real low-turnover day from a price gap that truncated the
+    number. The fix records affected dates in
+    `flags['turnover_missing_price_dates']` (Rule 12: fail loud), mirroring
+    the existing nav-missing / gap / dropped flag-list convention."""
+
+    def test_missing_price_for_moved_symbol_is_flagged(self) -> None:
+        """ETH moves on 2025-01-02 but has no price that day. Its turnover
+        contribution is silently zeroed; the date MUST surface in
+        flags['turnover_missing_price_dates']. Fails pre-fix (flag absent)."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 0.0, "ETH": 0.0},
+            "2025-01-02": {"BTC": 1.0, "ETH": 5.0},  # both moved
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0, "ETH": 50.0},
+            "2025-01-02": {"BTC": 100.0},  # ETH price MISSING
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        missing = flags.get("turnover_missing_price_dates") or []
+        assert "2025-01-02" in missing, (
+            f"date with a moved-but-unpriced symbol must be flagged; got {flags}"
+        )
+        # The turnover row is still emitted (math runs on the priced symbols
+        # only): BTC Δ=1 × 100 = 100 / nav 10000 = 0.01. ETH silently $0.
+        days = {p["date"]: p["turnover"] for p in series}
+        assert days["2025-01-02"] == pytest.approx(0.01, abs=1e-9)
+
+    def test_missing_price_for_flat_symbol_not_flagged(self) -> None:
+        """A symbol whose delta is 0 needs no price — a missing price there
+        changes nothing, so it must NOT raise a false-positive flag (Rule 12
+        means fail loud on REAL gaps, not noise on benign ones)."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0, "ETH": 5.0},
+            "2025-01-02": {"BTC": 2.0, "ETH": 5.0},  # ETH unchanged (Δ=0)
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0, "ETH": 50.0},
+            "2025-01-02": {"BTC": 100.0},  # ETH price missing but ETH didn't move
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert "turnover_missing_price_dates" not in flags, (
+            f"a flat (Δ=0) symbol's missing price must not flag the date; "
+            f"got {flags}"
         )
 
 

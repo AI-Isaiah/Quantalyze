@@ -1074,6 +1074,24 @@ def _finalize_rolling(series: pd.Series) -> list[SeriesPoint]:
     has multiple finalize_rolling sites and threading a tuple through
     each would balloon the diff. The frontend warning gate is left as
     a follow-up: this fix surfaces the signal in server logs.
+
+    Audit 2026-05-07 H-0717: this helper conflates THREE semantically
+    distinct reasons a date is absent from the output — (1) window warmup
+    (the leading `window-1` rows are always NaN — expected), (2) a real
+    qs/pandas computation failure mid-series, and (3) a mathematically
+    undefined-but-good window (e.g. zero-downside Sortino → +∞, the bull
+    signal; see H-0722). The aggregate >10% WARNING above plus the
+    per-window WARNING that `_rolling_sortino_from_components` now emits give
+    operators a server-side signal, but the STORED output still cannot tell
+    these apart per-date. Emitting that provenance into the payload
+    (a `reason` key on each SeriesPoint, or a parallel sidecar series/kind)
+    is DEFERRED-CROSSRUNTIME: every sibling-kind payload flows verbatim
+    through `analytics_runner` → `upsert_strategy_analytics_series_batch`
+    (p_kinds) into `strategy_analytics_series` JSONB and is read back by the
+    TS chart consumers (RollingSortinoChart.tsx, RollingMetricsPanel.tsx,
+    HeadlineMetricsPanel.tsx), whose point type is pinned to `{date, value}`
+    (SeriesPoint mirrors it — H-0730). Adding a field is a coordinated
+    Python+RPC+TS change, out of scope for this single-file fix.
     """
     total = len(series)
     cleaned = _drop_nonfinite(series)
@@ -1129,9 +1147,32 @@ def _rolling_sortino_from_components(
     do the divide-by-zero check EXPLICITLY via `np.where(roll_dstd > 0, ...,
     np.nan)` so (a) no RuntimeWarning is emitted on healthy strategies and
     (b) the intent (undefined-but-good is treated as 'point absent') is visible
-    in the code. The provenance issue (UI cannot tell warmup from undefined
-    from error) is documented in H-0717 and is out of scope here as it requires
-    a downstream contract change.
+    in the code.
+
+    Audit 2026-05-07 H-0722: the explicit np.where above stops the
+    RuntimeWarning but the no-downside window is STILL mapped to NaN and then
+    dropped by `_finalize_rolling` — and, critically, that drop was SILENT and
+    indistinguishable from the leading window-warmup rows. A no-downside window
+    with POSITIVE mean return is not "missing data": it is a mathematically
+    defined edge (Sortino → +∞, the BULL signal) that simply cannot be plotted
+    on a finite ratio axis. We now separate it from the genuine 0/0 (flat/
+    all-zero) case and emit an attributable WARNING counting these "undefined-
+    but-good" windows, so a rolling-Sortino chart that is punctured exactly at
+    the strategy's best months is no longer a silent omission — an operator can
+    see in the logs that the gaps are upside-undefined, not data loss.
+
+    The undefined-but-good predicate excludes warmup rows explicitly:
+    `roll_dstd.notna()` is False for the first `window-1` rows (the rolling
+    sum is NaN there), so only fully-warmed windows are counted.
+
+    What is NOT fixed here (DEFERRED-CROSSRUNTIME): emitting the warmup /
+    undefined-good / error provenance into the STORED per-date output so the
+    chart can render "undefined — strategy too good" vs "no data yet". That
+    requires a JSON contract change — either a `reason` key inside each
+    SeriesPoint or a new sibling kind — both of which flow verbatim through
+    `analytics_runner.upsert_strategy_analytics_series_batch` (p_kinds) into
+    `strategy_analytics_series` JSONB and are read back by the TS chart
+    consumers (RollingSortinoChart.tsx et al.). See H-0717.
 
     Mirrors qs.stats.sortino math (downside RMS / N, NOT pandas std / N-1) per
     the contract documented in `_rolling_sortino`.
@@ -1146,6 +1187,25 @@ def _rolling_sortino_from_components(
     # can attach the original dates to the surviving points.
     ratio = np.where(roll_dstd > 0, roll_mean / roll_dstd, np.nan)
     ratio_series = pd.Series(ratio, index=returns.index)
+
+    # H-0722: count the "undefined-but-good" windows BEFORE they are dropped by
+    # _finalize_rolling so the omission is observable. A warmed window
+    # (roll_dstd.notna()) with zero downside (roll_dstd == 0) and positive mean
+    # is +∞ Sortino — the bull signal. Distinguished from the flat 0/0 case
+    # (roll_mean <= 0), which is genuinely undefined with no upside meaning.
+    warmed = roll_dstd.notna()
+    no_downside = warmed & (roll_dstd == 0)
+    undefined_but_good = int((no_downside & (roll_mean > 0)).sum())
+    if undefined_but_good > 0:
+        logger.warning(
+            "rolling_sortino window=%d: %d undefined-but-good window(s) "
+            "(zero downside + positive mean → +Inf Sortino) omitted from the "
+            "value series; chart gaps here are the BULL signal, not data loss "
+            "(H-0722; per-date provenance deferred — see H-0717)",
+            window,
+            undefined_but_good,
+        )
+
     return _finalize_rolling(ratio_series * np.sqrt(252))
 
 
