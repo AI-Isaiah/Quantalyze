@@ -56,6 +56,65 @@ function singlePublishedComplete() {
   vi.mocked(createAdminClient).mockReturnValue({ from } as never);
 }
 
+describe("GET /api/factsheet/[id]/tearsheet.pdf — B3 analytics gating (Phase 19.1)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.mocked(checkLimit).mockReset();
+    vi.mocked(checkLimit).mockResolvedValue({
+      success: true,
+      retryAfter: 0,
+    } as never);
+    vi.mocked(createAdminClient).mockReset();
+  });
+
+  afterEach(() => {
+    process.env = { ...ENV_BACKUP };
+  });
+
+  it("computation_status 'complete_with_warnings' is NOT rejected by the analytics gate", async () => {
+    // Parity with the sibling pdf route + the /strategy/[id] page gate: a CSV
+    // strategy with an unavailable benchmark computes valid metrics under
+    // `complete_with_warnings`. Pre-B3 the gate admitted only `complete`, so
+    // the tearsheet PDF 400'd while the HTML factsheet rendered. The route must
+    // pass the gate and reach the PDF queue slot (which sits after the gate).
+    const single = vi.fn().mockResolvedValue({
+      data: {
+        id: STRATEGY_ID,
+        name: "CSV Strategy (benchmark unavailable)",
+        status: "published",
+        strategy_analytics: [
+          { computation_status: "complete_with_warnings" },
+        ],
+      },
+      error: null,
+    });
+    const eq2 = vi.fn().mockReturnValue({ single });
+    const eq1 = vi.fn().mockReturnValue({ eq: eq2 });
+    const select = vi.fn().mockReturnValue({ eq: eq1 });
+    const from = vi.fn().mockReturnValue({ select });
+    vi.mocked(createAdminClient).mockReturnValue({ from } as never);
+
+    const { GET } = await import("./route");
+    const req = new NextRequest(
+      `https://quantalyze.example.com/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
+      { method: "GET" },
+    );
+    try {
+      await GET(req, mkParams());
+    } catch (err) {
+      // The puppeteer chain is mocked incompletely here, so the route throws
+      // AFTER the analytics gate. This test asserts only that the gate was
+      // passed — acquirePdfSlot is invoked immediately after it.
+      void err;
+    }
+    // The analytics gate (400 "Analytics not computed") returns BEFORE
+    // acquirePdfSlot. acquirePdfSlot being called proves complete_with_warnings
+    // passed the gate — regresses loud if the gate is narrowed back.
+    const puppeteer = await import("@/lib/puppeteer");
+    expect(puppeteer.acquirePdfSlot).toHaveBeenCalled();
+  });
+});
+
 describe("GET /api/factsheet/[id]/tearsheet.pdf — SSRF + UUID validation (C-0092)", () => {
   let goto: ReturnType<typeof vi.fn>;
 

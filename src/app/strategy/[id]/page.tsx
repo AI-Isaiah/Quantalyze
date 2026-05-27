@@ -7,7 +7,6 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Button } from "@/components/ui/Button";
 import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
-import { analyticsMissingMessage } from "./analyticsMissingMessage";
 // User-gated private note card on the factsheet, rendered between the
 // sparkline card and the CTA card.
 import { createClient } from "@/lib/supabase/server";
@@ -132,7 +131,9 @@ export default async function PublicStrategyPage({
         </div>
 
         {/* Summary metrics */}
-        {analytics && analytics.computation_status === "complete" ? (
+        {analytics &&
+        (analytics.computation_status === "complete" ||
+          analytics.computation_status === "complete_with_warnings") ? (
           <>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 mb-8">
               <MetricCard
@@ -183,7 +184,7 @@ export default async function PublicStrategyPage({
         ) : (
           <div className="rounded-lg border border-border bg-card p-8 text-center mb-8">
             <p className="text-text-muted">
-              {analyticsMissingMessage(strategy.trust_tier)}
+              Analytics are being computed. Check back soon.
             </p>
           </div>
         )}

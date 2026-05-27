@@ -215,7 +215,15 @@ export async function GET(
   }
 
   const analytics = extractAnalytics(strategy.strategy_analytics);
-  if (!analytics || analytics.computation_status !== "complete") {
+  // B3 (Phase 19.1): admit `complete_with_warnings` — CSV strategies with an
+  // unavailable benchmark still compute valid metrics under this terminal
+  // status. Parity with the /strategy/[id] factsheet render gate; without it a
+  // complete_with_warnings strategy renders metrics on the page but 400s here.
+  if (
+    !analytics ||
+    (analytics.computation_status !== "complete" &&
+      analytics.computation_status !== "complete_with_warnings")
+  ) {
     return NextResponse.json(
       { error: "Analytics not computed" },
       { status: 400 },
