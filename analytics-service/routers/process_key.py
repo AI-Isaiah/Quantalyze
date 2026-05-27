@@ -284,13 +284,24 @@ async def _run_validate_only(
             val.error_code, val.human_message, correlation_id, None
         )
     log.info("process_key.validate_only_ok", duration_ms=duration_ms)
-    return {
+    envelope: dict[str, Any] = {
         "ok": True,
         "valid": True,
         "read_only": val.read_only,
         "correlation_id": correlation_id,
         "step": "validate",
     }
+    # Phase 19.1 fix (2026-05-27) — surface the CSV preview + normalized
+    # daily-return series the wizard's CsvUploadStep requires. It raises
+    # CSV_UPSTREAM_FAIL when `preview` is absent and forwards
+    # `daily_returns_series` to csv-finalize. Only the CSV adapter populates
+    # these; the API-key validate-only flow leaves them None, so the keys are
+    # omitted and that envelope is unchanged.
+    if val.preview is not None:
+        envelope["preview"] = val.preview
+    if val.daily_returns_series is not None:
+        envelope["daily_returns_series"] = val.daily_returns_series
+    return envelope
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.9.30] - 2026-05-27
+### Fixed — CSV upload wizard broken since unified-backbone flag flip (prod-down)
+- Every CSV upload at `/strategies/new` failed at step 1 with "Validation service returned an unexpected response" (`CSV_UPSTREAM_FAIL`) after `process_key_unified_backbone` flipped on **2026-05-25 15:51 UTC**. The unified `/process-key` validate-only path (`_run_validate_only`) ran `CsvAdapter.validate()`, which on success returned a bare `ValidationResult(valid=True, …)` and **discarded the `preview` + `daily_returns_series`** that `csv_validator.validate_csv()` had already computed. The wizard's `CsvUploadStep` does `if (!data.preview) → CSV_UPSTREAM_FAIL`, so it broke on every upload. The legacy `/csv/validate` path returned the full envelope, which is why uploads worked before the flag flip (last success 2026-05-25 07:27, hours before the flip).
+- Fix threads the already-computed payload through the seam where it was dropped: `ValidationResult` gains optional `preview` + `daily_returns_series` fields; `CsvAdapter.validate()` populates them from the success envelope; `_run_validate_only` includes them when present. The API-key/onboard validate-only flow is unchanged — broker adapters leave both `None`, so the keys are omitted and that envelope is byte-identical.
+- Found via Plan 09 prod E2E: analytics logged `process_key.validate_only_ok` 200 in 281 ms while the wizard showed CSV_UPSTREAM_FAIL — the data was computed then dropped at the adapter→envelope boundary. 3 regression tests (adapter surfaces preview+series; router envelope includes them; empty `[]` series emitted not dropped — locks the `is not None` guard). 44 csv-adapter + process_key tests pass; `mypy --strict services/ingestion` clean. Reviewed by code-reviewer + silent-failure-hunter (no blocking findings; csv-finalize confirmed unaffected).
+
+
 ## [0.24.9.29] - 2026-05-27
 ### Fixed — CSV ingester ambiguous-date corruption + /process-key DoS caps (specialist-review batch)
 - **Date format (CRITICAL):** the v0.24.9.26 auto-detect resolved genuinely-ambiguous all-≤12 dates by a daily-cadence guess, which silently mis-parsed monthly/weekly day-first series into the wrong calendar (e.g. `05/01,05/02,05/03` → 5 May 1-3) — the exact silent-corruption class the feature was meant to kill. The ingester now auto-detects only the unambiguous cases (ISO, or any day>12 — every real ≥20-day daily series) and **rejects** genuinely-ambiguous input with an actionable `date_format_ambiguous` error instead of guessing.
