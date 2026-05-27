@@ -1,23 +1,36 @@
 #!/usr/bin/env bash
 # Phase 16 / OBSERV-08 — local repro of the unified key flow against vcrpy cassettes.
 #
-# Replays 12 pre-recorded cassettes (3 brokers × 4 scenarios) with NO network access
-# and asserts the unified flow passes deterministically. Includes a TWO-layer CI grep
-# gate that fails if any secret leaked into the committed cassettes:
+# Replays 8 pre-recorded cassettes (OKX + Bybit × 4 scenarios each) with NO
+# network access and asserts the unified flow passes deterministically. Binance
+# was dropped 2026-05-27 — no production test keys are provisioned for the
+# Binance test fixture, so the broker is out of scope until creds reappear.
+#
+# Includes a TWO-layer CI grep gate that fails if any secret leaked into the
+# committed cassettes:
 #   - Layer A: known DEBUG_KEY_FLOW_* env value match
 #   - Layer B: high-entropy literal scan inside lines that name signing-key fields
 #     (catches missed values from rotated test creds OR new secret formats not
 #     in the known-env list)
 #
-# Usage: bash scripts/repro-key-flow.sh
+# Usage:
+#   bash scripts/repro-key-flow.sh                     # replay + leak gate (default)
+#   bash scripts/repro-key-flow.sh --record            # record fresh cassettes
+#                                                       from live brokers, then
+#                                                       run the leak gate.
+#                                                       Requires DEBUG_KEY_FLOW_*
+#                                                       env vars set.
 #
 # Exit codes:
 #   0 — replay clean, no leaks
 #   1 — replay failed OR a known DEBUG_KEY_FLOW_* env value found in cassettes
 #       OR a high-entropy literal found in a signing-key-named field
 #   2 — pre-flight failure (missing test files, vcrpy not installed)
+#   3 — --record mode failed (missing creds OR broker call failed)
 #
-# Run daily during the Phase 19 stability window per Theme 5 mitigation.
+# Run daily during the Phase 19 stability window per Theme 5 mitigation. The
+# .github/workflows/cassette-refresh.yml workflow invokes --record mode + opens
+# an auto-PR if cassettes diverge from main.
 
 set -euo pipefail
 
@@ -27,18 +40,68 @@ PREFIX="[repro-key-flow]"
 log() { echo "$PREFIX $*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
 
+# --- --record subcommand --------------------------------------------------
+MODE="replay"
+for arg in "$@"; do
+  case "$arg" in
+    --record) MODE="record" ;;
+    --help|-h)
+      grep -E '^#( |$)' "$0" | sed 's/^# \?//' | head -40
+      exit 0
+      ;;
+    *) fail "unknown arg: $arg (use --record or --help)" ;;
+  esac
+done
+
 cd analytics-service
 
-# Pre-flight: cassettes + test file present
+if [ "$MODE" = "record" ]; then
+  # Pre-flight: which broker creds are available? Each broker is opt-in based on
+  # env presence, so a partial credential set (e.g. OKX only) still records what
+  # it can rather than aborting the whole run.
+  log "recording mode — live broker calls"
+  if [ ! -x .venv/bin/python ]; then
+    fail "missing analytics-service/.venv/bin/python — bootstrap the venv first"
+  fi
+  recorded=0
+  for broker in okx bybit; do
+    case "$broker" in
+      okx)
+        if [ -z "${DEBUG_KEY_FLOW_OKX_KEY:-}" ] \
+          || [ -z "${DEBUG_KEY_FLOW_OKX_SECRET:-}" ] \
+          || [ -z "${DEBUG_KEY_FLOW_OKX_PASSPHRASE:-}" ]; then
+          log "skip $broker — DEBUG_KEY_FLOW_OKX_KEY/SECRET/PASSPHRASE not all set"
+          continue
+        fi
+        ;;
+      bybit)
+        if [ -z "${DEBUG_KEY_FLOW_BYBIT_KEY:-}" ] \
+          || [ -z "${DEBUG_KEY_FLOW_BYBIT_SECRET:-}" ]; then
+          log "skip $broker — DEBUG_KEY_FLOW_BYBIT_KEY/SECRET not all set"
+          continue
+        fi
+        ;;
+    esac
+    log "recording $broker (idempotent — happy/auth-fail re-used if present)"
+    if ! .venv/bin/python scripts/record_cassettes.py "$broker"; then
+      log "FAIL: record_cassettes.py exited non-zero for $broker"
+      exit 3
+    fi
+    recorded=$((recorded + 1))
+  done
+  if [ "$recorded" = "0" ]; then
+    fail "no broker creds available — set DEBUG_KEY_FLOW_OKX_* and/or DEBUG_KEY_FLOW_BYBIT_*"
+  fi
+  log "recorded $recorded broker(s); running leak gate next"
+  # Fall through to leak-gate sections below.
+fi
+
+# Pre-flight: cassettes + test file present (only OKX + Bybit — Binance dropped).
 required_cassettes=(
   tests/cassettes/okx/happy.yaml
   tests/cassettes/okx/auth-fail.yaml
   tests/cassettes/okx/rate-limit.yaml
   tests/cassettes/okx/schema-drift.yaml
-  tests/cassettes/binance/happy.yaml
-  tests/cassettes/binance/auth-fail.yaml
-  tests/cassettes/binance/rate-limit.yaml
-  tests/cassettes/binance/schema-drift.yaml
   tests/cassettes/bybit/happy.yaml
   tests/cassettes/bybit/auth-fail.yaml
   tests/cassettes/bybit/rate-limit.yaml
@@ -56,6 +119,8 @@ fi
 log "replay PASS (12 cassettes)"
 
 # 2a. Layer A — CI gate: grep cassettes for ANY known DEBUG_KEY_FLOW_* env value.
+# Binance vars stay in the list defensively — if creds reappear and a Binance
+# cassette is later recorded, the leak gate must still catch them.
 DEBUG_VARS=(
   DEBUG_KEY_FLOW_OKX_KEY
   DEBUG_KEY_FLOW_OKX_SECRET
