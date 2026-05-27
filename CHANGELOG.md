@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.10.8] - 2026-05-27
+### Fixed — API-key uploads (OKX + Bybit): unified queued resync path produced no factsheet
+The wizard "Verify data" step (`/api/keys/sync` → `flow_type=resync`) failed for both OKX and Bybit with "Sync failed: analytics computation did not complete" (`SYNC_FAILED`). The unified queued path (`process_key_long`) had been flag-gated ON since 2026-05-25 but never run in prod. Three defects, all on this path:
+- **Validator 422 (`routers/process_key.py`):** `_validate_per_flow_required_keys` required `api_key`/`api_secret` for `resync`, but resync re-syncs an existing strategy whose key is already stored — the body carries no credentials. So every resync 422'd before any compute job was enqueued (verified in prod Railway logs: `POST /process-key 422`). Removed `resync` from the credential-required set.
+- **Worker never resolved stored credentials (`services/ingestion/long_fetch.py`):** the handler read `context["api_key"]` but the enqueue forwarded no credentials and there was no decrypt-from-stored-key code. Now resolves them server-side via the same audited path the legacy `sync_trades` handler uses (`_load_strategy_and_key` + `decrypt_credentials`, including the owner check), for any credential-less non-CSV flow.
+- **Worker never produced `strategy_analytics` (`services/ingestion/long_fetch.py`):** the handler advanced `strategy_verifications` to `published` but never wrote `strategy_analytics` — which is exactly what the wizard polls (`computation_status='complete'`). On success it now enqueues the proven `sync_trades` job, which persists trades and auto-chains to `compute_analytics` → writes `strategy_analytics` → the dispatch loop's status bridge flips `computation_status` to `complete`.
+- Regression tests: `test_process_key_resync_no_credentials_queues`, `test_long_fetch_enqueues_sync_trades_on_success`; existing scope-rejection tests updated for the new credential-resolution gate. Analytics suite green (mypy `--strict` clean).
+- **Known follow-up:** `sync_trades` re-fetches from the broker, duplicating this handler's existing fetch. The redundant in-handler fetch should be retired once the path is E2E-verified and the verification-state-machine consumers are mapped (kept additive here to avoid changing the `published`/fingerprint behavior other code reads). Tracked in `.planning/phase-19/QUEUED-PATH-COMPLETION-PLAN.md`. Full E2E confirmation requires the post-deploy `/qa` pass.
+
 ## [0.24.10.7] - 2026-05-27
 ### Fixed — repro-key-flow.sh okx rate-limit cassette: wrong OKX error code (50013 → 50011)
 - v0.24.10.6's venv fix let `pytest` actually run, surfacing a genuine failure: `test_rate_limit_raises_rate_limit_exceeded[okx]` raised `ccxt.ExchangeNotAvailable`, which is not in the asserted `(RateLimitExceeded, DDoSProtection, ExchangeError)` family (it extends `NetworkError`, not `ExchangeError`).

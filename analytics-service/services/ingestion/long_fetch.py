@@ -178,10 +178,57 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
     # Build the request from the job's strategy + stored credentials.
-    # NOTE: For onboard, credentials are in job.metadata.context.
-    # For resync, credentials decrypt from
-    # strategy_verifications.encrypted_credentials.
-    context = metadata.get("context") or {}
+    #
+    # The /process-key long-fetch enqueue (routers/process_key.py) puts only
+    # {correlation_id, verification_id, flow_type, source} in compute_jobs.metadata
+    # -- it does NOT forward `context`. So BOTH queued flows (onboard and resync)
+    # arrive here credential-less, and we resolve + decrypt the stored key
+    # server-side: the strategy already has an api_key_id linkage. Reuses the
+    # same load+decrypt the legacy sync_trades handler uses
+    # (job_worker._load_strategy_and_key + services.encryption.decrypt_credentials,
+    # including the key-belongs-to-strategy-owner check). Without it the adapter
+    # pipeline below hit `context["api_key"]` KeyError / validated against empty
+    # creds. This path never ran in prod before 2026-05-27 because resync 422'd
+    # at the /process-key validator first (onboard's callers use
+    # step=validate/finalize, which take the synchronous branches, not this one).
+    # csv carries no broker credentials, so it is excluded.
+    context = dict(metadata.get("context") or {})
+    if source != "csv" and ("api_key" not in context or "api_secret" not in context):
+        from services.encryption import decrypt_credentials, get_kek
+        from services.job_worker import _load_strategy_and_key
+
+        cred_strategy_id = context.get("strategy_id") or job.get("strategy_id")
+        if not cred_strategy_id:
+            log.error("process_key_long.no_strategy_id_for_creds", metadata=metadata)
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    "process_key_long: missing strategy_id -- cannot resolve "
+                    "stored credentials for a credential-less flow"
+                ),
+                error_kind="permanent",
+            )
+        _strategy_row, key_row, cred_err = await _load_strategy_and_key(
+            supabase, cred_strategy_id
+        )
+        if cred_err or not key_row:
+            log.error(
+                "process_key_long.credential_resolution_failed",
+                error=cred_err or "api key not found",
+                verification_id=verification_id,
+                correlation_id=correlation_id,
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=f"process_key_long: {cred_err or 'API key not found'}",
+                error_kind="permanent",
+            )
+        api_key, api_secret, passphrase = decrypt_credentials(key_row, get_kek())
+        context["api_key"] = api_key
+        context["api_secret"] = api_secret
+        if passphrase:
+            context["passphrase"] = passphrase
+
     request = KeySubmissionRequest(
         flow_type=cast(FlowType, flow_type),
         source=cast(Source, source),
@@ -386,6 +433,50 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
             "p_metadata": {},
         },
     ).execute()
+
+    # Produce the verified factsheet the wizard waits on. This handler advances
+    # the strategy_verifications state machine and captures a metrics_snapshot,
+    # but it does NOT write `strategy_analytics` -- which is exactly what the
+    # wizard's SyncPreviewStep polls (`computation_status='complete'`). Enqueue
+    # the proven sync_trades job: it persists trades and auto-chains to
+    # compute_analytics, which writes strategy_analytics; the dispatch loop's
+    # sync_strategy_analytics_status bridge then flips computation_status to
+    # 'complete'. CSV has no broker fills, so it is excluded (csv analytics run
+    # via compute_analytics_from_csv on the synchronous path).
+    #
+    # FOLLOW-UP (noted in QUEUED-PATH-COMPLETION-PLAN.md): sync_trades re-fetches
+    # from the broker, duplicating this handler's fetch_raw above. The redundant
+    # in-handler fetch should be retired once the delegate path is E2E-verified
+    # and the verification-state-machine consumers are mapped; kept additive
+    # here to avoid changing the published/fingerprint behavior other code reads.
+    analytics_strategy_id = context.get("strategy_id") or job.get("strategy_id")
+    if source != "csv" and analytics_strategy_id:
+        # Best-effort, mirroring run_sync_trades_job's follow-on compute_analytics
+        # enqueue (which is also wrapped). The verification is already 'published',
+        # so a worker retry short-circuits on that status (idempotency check above)
+        # and would NOT re-run this tail — therefore we must NOT let an enqueue
+        # blip crash the handler. Log loudly instead; strategy_analytics can be
+        # recomputed via a manual re-sync if this rare path is hit.
+        try:
+            supabase.rpc(
+                "enqueue_compute_job",
+                {
+                    "p_strategy_id": analytics_strategy_id,
+                    "p_kind": "sync_trades",
+                    "p_metadata": {"correlation_id": correlation_id},
+                },
+            ).execute()
+            log.info(
+                "process_key_long.enqueued_sync_trades",
+                strategy_id=analytics_strategy_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "process_key_long.enqueue_sync_trades_failed",
+                error=str(exc)[:200],
+                strategy_id=analytics_strategy_id,
+                verification_id=verification_id,
+            )
 
     log.info("process_key_long.complete")
     return DispatchResult(outcome=DispatchOutcome.DONE)
