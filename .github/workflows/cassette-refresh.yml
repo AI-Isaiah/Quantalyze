@@ -61,12 +61,21 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install analytics-service deps
+      - name: Install analytics-service deps (retry transient index failures)
         working-directory: analytics-service
         run: |
+          # analytics-service uses requirements.txt + requirements-dev.txt
+          # (no pyproject.toml). Mirrors ci.yml's retry pattern for
+          # transient pip-index/CDN flakiness.
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e .[dev]
+          n=0
+          until .venv/bin/pip install -r requirements.txt -r requirements-dev.txt; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "pip install failed after $n attempts"; exit 1; fi
+            echo "pip install attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
 
       - name: Force refresh (workflow_dispatch only)
         env:
