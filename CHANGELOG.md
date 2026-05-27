@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.24.10.4] - 2026-05-27
+### Fixed — cassette-refresh.yml: `pip install -e .[dev]` failed (analytics-service has no pyproject.toml)
+- Manual workflow_dispatch on v0.24.10.3 failed at "Install analytics-service deps" because `analytics-service/` uses `requirements.txt` + `requirements-dev.txt` (no `pyproject.toml`). Replaced `.venv/bin/pip install -e .[dev]` with `pip install -r requirements.txt -r requirements-dev.txt`, mirroring `ci.yml:712` including the 3-attempt retry loop for transient pip-index/CDN flakiness.
+- Caught by manual workflow_dispatch immediately after the v0.24.10.3 merge — before the first scheduled 04:00 UTC fire. No prod-side impact.
+
 ## [0.24.10.3] - 2026-05-27
 ### Added — Cassette refresh half: `--record` subcommand + daily auto-PR workflow (Phase 19 PR-B)
 - **Completes the cassette half of Phase 19 soak instrumentation** that was paused from PR #328. The Phase 19 plan called for a daily refresh of broker cassettes so the unified key-flow replay suite catches schema rotations (OKX/Bybit ccxt-canonical field renames) BEFORE the live `/process-key` route hits them in production. Without this workflow the cassettes only refresh when a developer remembers to run `python scripts/record_cassettes.py`, which means drift accumulates silently.
