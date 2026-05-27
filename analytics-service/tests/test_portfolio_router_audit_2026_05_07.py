@@ -177,6 +177,48 @@ class TestRedactCredentials:
         safe = _redact_credentials(msg, req)
         assert safe == msg
 
+    # --- Audit H-0535: SecretStr trap.
+    # The fields above are MagicMock plain strings (duck-typed). The REAL
+    # VerifyStrategyRequest now wraps api_key/api_secret/passphrase in
+    # pydantic.SecretStr — which is NOT a `str`. Pre-fix, _redact_credentials'
+    # `isinstance(needle, str)` guard would have SILENTLY skipped every
+    # SecretStr, re-leaking the raw secret into logs/Sentry. These tests pin
+    # that _redact_credentials unwraps SecretStr (.get_secret_value()) before
+    # the substring scrub, using a genuine request object.
+    def test_redacts_secretstr_api_key_from_real_request(self):
+        from models.schemas import VerifyStrategyRequest
+        raw_key = "AKIDLIVE0123456789abcdef"
+        req = VerifyStrategyRequest(
+            email="trader@example.com",
+            exchange="binance",
+            api_key=raw_key,
+            api_secret="s" * 24,
+        )
+        # Sanity: the SecretStr must NOT render the raw value in repr/str —
+        # this is the leak surface H-0535 closes.
+        assert raw_key not in repr(req)
+        assert raw_key not in str(req.api_key)
+        msg = f"Invalid signature for key {raw_key}: handshake rejected"
+        safe = _redact_credentials(msg, req)
+        assert raw_key not in safe, "SecretStr api_key leaked through redaction"
+        assert "[REDACTED]" in safe
+
+    def test_redacts_secretstr_api_secret_and_passphrase_from_real_request(self):
+        from models.schemas import VerifyStrategyRequest
+        raw_secret = "SECRETLIVE9876543210xyzAB"
+        raw_pass = "okx-passphrase-live-1234"
+        req = VerifyStrategyRequest(
+            email="trader@example.com",
+            exchange="okx",
+            api_key="k" * 24,
+            api_secret=raw_secret,
+            passphrase=raw_pass,
+        )
+        msg = f"BadSig: {raw_secret} / passphrase {raw_pass}"
+        safe = _redact_credentials(msg, req)
+        assert raw_secret not in safe, "SecretStr api_secret leaked"
+        assert raw_pass not in safe, "SecretStr passphrase leaked"
+
 
 # ---------------------------------------------------------------------------
 # _build_normalized_weights (M-0624)
@@ -570,6 +612,60 @@ class TestIdempotencyCache:
         finally:
             portfolio_mod._VERIFY_STRATEGY_IDEMPOTENCY_CACHE_MAX = original_cap
 
+    def test_store_uses_wall_clock_not_monotonic(self):
+        """F5(b) (red-team HIGH7): the idempotency cache must stamp entries with
+        wall clock (time.time()), consistent with the rate limiter. monotonic
+        restarts at 0 on a worker recycle, which would make a freshly-stored
+        entry read as wildly out-of-window on the new process. The stored
+        timestamp must be close to time.time(), NOT time.monotonic() (which on
+        any real host is a very different magnitude — uptime, not epoch)."""
+        import time
+
+        portfolio_mod._verify_strategy_idempotency_store(
+            "a@x.com", "binance", self._API_KEY, "key1", {"verification_id": "v-1"},
+        )
+        key = portfolio_mod._verify_strategy_idempotency_key(
+            "a@x.com", "binance", self._API_KEY, "key1",
+        )
+        stored_at, _resp = portfolio_mod._verify_strategy_idempotency[key]
+        wall = time.time()
+        mono = time.monotonic()
+        # Stored timestamp must track wall clock, not the monotonic clock.
+        assert abs(stored_at - wall) < 5.0, (
+            "idempotency entry must be stamped with time.time() (wall clock)"
+        )
+        # And it must be clearly NOT the monotonic clock (epoch ~1.7e9 vs uptime).
+        assert abs(stored_at - mono) > 1000.0, (
+            "idempotency entry must NOT use time.monotonic() — it restarts at 0 "
+            "on a worker recycle, inconsistent with the rate limiter's wall clock"
+        )
+
+    def test_ttl_expiry_measured_against_wall_clock(self):
+        """F5(b): an entry whose wall-clock timestamp is older than the TTL must
+        expire on lookup; a fresh one must still hit. This pins that the lookup
+        TTL compare uses the same clock the store writes."""
+        import time
+
+        key = portfolio_mod._verify_strategy_idempotency_key(
+            "a@x.com", "binance", self._API_KEY, "key1",
+        )
+        ttl = portfolio_mod._VERIFY_STRATEGY_IDEMPOTENCY_TTL_SEC
+        # Stale wall-clock timestamp (older than the TTL) → must expire.
+        portfolio_mod._verify_strategy_idempotency[key] = (
+            time.time() - ttl - 10, {"verification_id": "stale"},
+        )
+        assert portfolio_mod._verify_strategy_idempotency_lookup(
+            "a@x.com", "binance", self._API_KEY, "key1",
+        ) is None
+        # Fresh wall-clock timestamp → must hit.
+        portfolio_mod._verify_strategy_idempotency[key] = (
+            time.time(), {"verification_id": "fresh"},
+        )
+        hit = portfolio_mod._verify_strategy_idempotency_lookup(
+            "a@x.com", "binance", self._API_KEY, "key1",
+        )
+        assert hit == {"verification_id": "fresh"}
+
 
 class TestPerEmailRateLimit:
     def setup_method(self):
@@ -621,14 +717,15 @@ class TestPortfolioOptimizerRequestValidator:
     def test_none_weights_accepted(self):
         # user_id is Optional (C-001 red-team); omit to keep the test focused on
         # weights validation. Use a valid UUID when supplying one (M-001).
+        # Audit H-0533: portfolio_id is now UUID-validated, so use _VALID_UUID.
         from models.schemas import PortfolioOptimizerRequest
-        r = PortfolioOptimizerRequest(portfolio_id="p1", user_id=_VALID_UUID)
+        r = PortfolioOptimizerRequest(portfolio_id=_VALID_UUID, user_id=_VALID_UUID)
         assert r.weights is None
 
     def test_valid_weights_accepted(self):
         from models.schemas import PortfolioOptimizerRequest
         r = PortfolioOptimizerRequest(
-            portfolio_id="p1",
+            portfolio_id=_VALID_UUID,
             user_id=_VALID_UUID,
             weights={"s1": 0.6, "s2": 0.4},
         )
@@ -637,22 +734,22 @@ class TestPortfolioOptimizerRequestValidator:
     def test_nan_weight_rejected(self):
         from models.schemas import PortfolioOptimizerRequest
         with pytest.raises(Exception):
-            PortfolioOptimizerRequest(portfolio_id="p1", user_id=_VALID_UUID, weights={"s1": float("nan")})
+            PortfolioOptimizerRequest(portfolio_id=_VALID_UUID, user_id=_VALID_UUID, weights={"s1": float("nan")})
 
     def test_inf_weight_rejected(self):
         from models.schemas import PortfolioOptimizerRequest
         with pytest.raises(Exception):
-            PortfolioOptimizerRequest(portfolio_id="p1", user_id=_VALID_UUID, weights={"s1": float("inf")})
+            PortfolioOptimizerRequest(portfolio_id=_VALID_UUID, user_id=_VALID_UUID, weights={"s1": float("inf")})
 
     def test_negative_weight_rejected(self):
         from models.schemas import PortfolioOptimizerRequest
         with pytest.raises(Exception):
-            PortfolioOptimizerRequest(portfolio_id="p1", user_id=_VALID_UUID, weights={"s1": -0.5})
+            PortfolioOptimizerRequest(portfolio_id=_VALID_UUID, user_id=_VALID_UUID, weights={"s1": -0.5})
 
     def test_non_numeric_weight_rejected(self):
         from models.schemas import PortfolioOptimizerRequest
         with pytest.raises(Exception):
-            PortfolioOptimizerRequest(portfolio_id="p1", user_id=_VALID_UUID, weights={"s1": "not-a-number"})
+            PortfolioOptimizerRequest(portfolio_id=_VALID_UUID, user_id=_VALID_UUID, weights={"s1": "not-a-number"})
 
 
 # ---------------------------------------------------------------------------
@@ -759,6 +856,66 @@ class TestVerifyStrategyRequestValidation:
         over_limit = "a" * 250 + "@e.co"  # 255
         with pytest.raises(ValidationError):
             VerifyStrategyRequest(**{**self._BASE, "email": over_limit})
+
+    # --- Audit H-0535: api_key/api_secret/passphrase are pydantic.SecretStr.
+    # NOTE: we assert on BEHAVIOR (masked repr + .get_secret_value round-trip),
+    # not `isinstance(_, SecretStr)`. Sibling test modules in this suite install
+    # MagicMock stubs that can re-import `pydantic` under a distinct module
+    # identity, so a class-identity `isinstance` check flakes in the full-suite
+    # ordering even though the field genuinely IS a SecretStr (see the file
+    # header re: stub-import contamination). The security contract is the
+    # masked-repr + opaque-str behavior — that is what we pin.
+    def test_credentials_are_secretstr(self):
+        """H-0535: the three credential fields must be SecretStr so they never
+        render verbatim in repr/str/validation errors. The raw value is only
+        reachable via .get_secret_value()."""
+        from models.schemas import VerifyStrategyRequest
+        r = VerifyStrategyRequest(
+            **{**self._BASE, "passphrase": "okx-pass-123456"}
+        )
+        # Behavioral SecretStr contract: type name, masked str, opaque getter.
+        assert type(r.api_key).__name__ == "SecretStr"
+        assert type(r.api_secret).__name__ == "SecretStr"
+        assert type(r.passphrase).__name__ == "SecretStr"
+        assert "**********" in str(r.api_key)
+        # Round-trip: the raw value is preserved behind the wrapper.
+        assert r.api_key.get_secret_value() == self._BASE["api_key"]
+        assert r.api_secret.get_secret_value() == self._BASE["api_secret"]
+        assert r.passphrase.get_secret_value() == "okx-pass-123456"
+
+    def test_secretstr_not_leaked_in_repr(self):
+        """H-0535: the raw secret must NOT appear in repr(req) / str(field) —
+        the exact leak surface (logs, Sentry breadcrumbs, tracebacks)."""
+        from models.schemas import VerifyStrategyRequest
+        raw_key = "VISIBLE_KEY_VALUE_ABCDEF1234"
+        raw_secret = "VISIBLE_SECRET_VALUE_XYZ9876"
+        r = VerifyStrategyRequest(
+            **{**self._BASE, "api_key": raw_key, "api_secret": raw_secret}
+        )
+        text = repr(r)
+        assert raw_key not in text
+        assert raw_secret not in text
+        assert raw_key not in str(r.api_key)
+        assert raw_secret not in str(r.api_secret)
+
+    def test_passphrase_optional_defaults_none(self):
+        """H-0535: passphrase is Optional[SecretStr]; omitting it yields None
+        (not a SecretStr('')), so the handler's `is not None` unwrap guard is
+        exercised on the non-OKX path."""
+        from models.schemas import VerifyStrategyRequest
+        r = VerifyStrategyRequest(**self._BASE)
+        assert r.passphrase is None
+
+    def test_empty_credential_is_handled_not_crash(self):
+        """H-0535: a malformed/empty credential must not crash construction —
+        SecretStr('') is a valid (if useless) wrapper; the empty raw value
+        round-trips and downstream redaction's len>=6 floor simply skips it.
+        The exchange handshake then fails cleanly rather than blowing up at
+        the type boundary."""
+        from models.schemas import VerifyStrategyRequest
+        r = VerifyStrategyRequest(**{**self._BASE, "api_key": ""})
+        assert type(r.api_key).__name__ == "SecretStr"
+        assert r.api_key.get_secret_value() == ""
 
 
 # ---------------------------------------------------------------------------

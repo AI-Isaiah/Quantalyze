@@ -376,19 +376,25 @@ class TestRequestSchemaUserIdC19:
     # forward it receive a 200 rather than a 422.  The "requires user_id"
     # tests are updated: omitting user_id is now valid (None is accepted);
     # providing a bad value (non-UUID) must still raise ValidationError.
+    #
+    # Audit H-0532/H-0533: portfolio_id is now UUID-validated at the boundary,
+    # so the prior placeholder ``"p1"`` would 422 on portfolio_id BEFORE the
+    # user_id assertions could run. Use a real UUID for the field under test.
+    _PID = "00000000-0000-0000-0000-000000000001"
+
     def test_portfolio_analytics_request_omits_user_id_is_valid(self):
         """C-001: PortfolioAnalyticsRequest must accept a missing user_id
         (Optional) so the TS caller that doesn't yet forward it doesn't
         receive a 422."""
         from models.schemas import PortfolioAnalyticsRequest
-        r = PortfolioAnalyticsRequest(portfolio_id="p1")
+        r = PortfolioAnalyticsRequest(portfolio_id=self._PID)
         assert r.user_id is None
 
     def test_portfolio_analytics_request_accepts_valid_uuid(self):
         """M-001: a well-formed UUID must be accepted and stored verbatim."""
         from models.schemas import PortfolioAnalyticsRequest
         uid = "123e4567-e89b-12d3-a456-426614174000"
-        r = PortfolioAnalyticsRequest(portfolio_id="p1", user_id=uid)
+        r = PortfolioAnalyticsRequest(portfolio_id=self._PID, user_id=uid)
         assert r.user_id == uid
 
     def test_portfolio_analytics_request_rejects_non_uuid(self):
@@ -396,26 +402,42 @@ class TestRequestSchemaUserIdC19:
         from pydantic import ValidationError
         from models.schemas import PortfolioAnalyticsRequest
         with pytest.raises(ValidationError, match="valid UUID"):
-            PortfolioAnalyticsRequest(portfolio_id="p1", user_id="not-a-uuid")
+            PortfolioAnalyticsRequest(portfolio_id=self._PID, user_id="not-a-uuid")
 
     def test_portfolio_analytics_request_rejects_empty_string(self):
         """M-001: an empty user_id must raise ValidationError, not pass silently."""
         from pydantic import ValidationError
         from models.schemas import PortfolioAnalyticsRequest
         with pytest.raises(ValidationError, match="not be empty"):
-            PortfolioAnalyticsRequest(portfolio_id="p1", user_id="")
+            PortfolioAnalyticsRequest(portfolio_id=self._PID, user_id="")
+
+    # --- Audit H-0532: portfolio_id UUID validation (PortfolioAnalyticsRequest)
+    def test_portfolio_analytics_request_rejects_non_uuid_portfolio_id(self):
+        """H-0532: a non-UUID portfolio_id must 422 at the boundary instead of
+        flowing to Supabase and failing with a generic postgres error."""
+        from pydantic import ValidationError
+        from models.schemas import PortfolioAnalyticsRequest
+        with pytest.raises(ValidationError, match="portfolio_id must be a valid UUID"):
+            PortfolioAnalyticsRequest(portfolio_id="p1")
+
+    def test_portfolio_analytics_request_rejects_empty_portfolio_id(self):
+        """H-0532: an empty/whitespace portfolio_id must be rejected."""
+        from pydantic import ValidationError
+        from models.schemas import PortfolioAnalyticsRequest
+        with pytest.raises(ValidationError, match="portfolio_id must not be empty"):
+            PortfolioAnalyticsRequest(portfolio_id="   ")
 
     def test_portfolio_optimizer_request_omits_user_id_is_valid(self):
         """C-001: PortfolioOptimizerRequest must accept a missing user_id."""
         from models.schemas import PortfolioOptimizerRequest
-        r = PortfolioOptimizerRequest(portfolio_id="p1")
+        r = PortfolioOptimizerRequest(portfolio_id=self._PID)
         assert r.user_id is None
 
     def test_portfolio_optimizer_request_accepts_valid_uuid(self):
         """M-001: a well-formed UUID must be accepted."""
         from models.schemas import PortfolioOptimizerRequest
         uid = "123e4567-e89b-12d3-a456-426614174000"
-        r = PortfolioOptimizerRequest(portfolio_id="p1", user_id=uid)
+        r = PortfolioOptimizerRequest(portfolio_id=self._PID, user_id=uid)
         assert r.user_id == uid
 
     def test_portfolio_optimizer_request_rejects_non_uuid(self):
@@ -423,7 +445,15 @@ class TestRequestSchemaUserIdC19:
         from pydantic import ValidationError
         from models.schemas import PortfolioOptimizerRequest
         with pytest.raises(ValidationError, match="valid UUID"):
-            PortfolioOptimizerRequest(portfolio_id="p1", user_id="garbage")
+            PortfolioOptimizerRequest(portfolio_id=self._PID, user_id="garbage")
+
+    # --- Audit H-0533: portfolio_id UUID validation (PortfolioOptimizerRequest)
+    def test_portfolio_optimizer_request_rejects_non_uuid_portfolio_id(self):
+        """H-0533: a non-UUID portfolio_id must 422 at the boundary."""
+        from pydantic import ValidationError
+        from models.schemas import PortfolioOptimizerRequest
+        with pytest.raises(ValidationError, match="portfolio_id must be a valid UUID"):
+            PortfolioOptimizerRequest(portfolio_id="not-a-uuid")
 
     def test_bridge_request_rejects_empty_user_id(self):
         """M-001: BridgeRequest.user_id is still required; an empty string
@@ -446,6 +476,25 @@ class TestRequestSchemaUserIdC19:
                 portfolio_id="p1",
                 underperformer_strategy_id="s1",
                 user_id="not-a-uuid",
+            )
+
+    # --- MED8 (2026-05-27): portfolio_id UUID validation (BridgeRequest) ---
+    # BridgeRequest.portfolio_id was the one request schema with portfolio_id
+    # left as a bare `str` — its sibling schemas (PortfolioAnalyticsRequest,
+    # PortfolioOptimizerRequest) already validate it. A malformed id flowed
+    # all the way to Supabase's `.eq("id", req.portfolio_id)` UUID column
+    # before failing with a generic postgres error instead of a clean 422.
+    def test_bridge_request_rejects_non_uuid_portfolio_id(self):
+        """MED8: a non-UUID BridgeRequest.portfolio_id must 422 at the boundary
+        (mirrors the sibling-schema validators). user_id is a valid UUID here
+        so this test isolates the portfolio_id failure."""
+        from pydantic import ValidationError
+        from models.schemas import BridgeRequest
+        with pytest.raises(ValidationError, match="portfolio_id must be a valid UUID"):
+            BridgeRequest(
+                portfolio_id="not-a-uuid",
+                underperformer_strategy_id="s1",
+                user_id=self._PID,
             )
 
 

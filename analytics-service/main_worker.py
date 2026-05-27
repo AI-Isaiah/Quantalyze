@@ -37,6 +37,7 @@ import os
 import signal
 import socket
 import time
+from typing import Any, TypedDict, cast
 
 from dotenv import load_dotenv
 
@@ -47,9 +48,50 @@ load_dotenv()
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
 from services.feature_flags import is_unified_backbone_active
-from services.job_worker import DispatchOutcome, dispatch
+from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
 
 logger = logging.getLogger("quantalyze.analytics.worker")
+
+
+# ---------------------------------------------------------------------------
+# Claimed compute_jobs row shape (audit-2026-05-07 H-0529)
+# ---------------------------------------------------------------------------
+# The claim RPCs (`claim_compute_jobs_with_priority` / legacy
+# `claim_compute_jobs`) both `RETURNS SETOF compute_jobs`, so each claimed row
+# is a full compute_jobs table row (migration
+# 20260411144407_compute_jobs_queue.sql + the claim_token column added by
+# 20260515114555_compute_jobs_claim_token_fencing.sql). `claim_result.data`
+# from PostgREST is otherwise typed `Any`, so the worker indexed rows as
+# `j["id"]` / `job["id"]` / `job.get("claim_token")` with no static guard: a
+# column rename in a future migration (e.g. `id` → `job_id` on the RETURNS
+# shape) would surface as a runtime KeyError on the hot dispatch path rather
+# than a type-check failure. `ClaimedJob` pins the row contract the worker
+# relies on so the claim path is typed symmetrically with the
+# `dispatch(job)` consumer in services.job_worker.
+#
+# `id` is the only field the worker dereferences unconditionally (`j["id"]`,
+# `job["id"]` in the mark closures); everything else is read defensively via
+# `.get()` or consumed inside `dispatch()`, so they are declared on a
+# `total=False` block. `kind` is `str` (the DB column is
+# `TEXT REFERENCES compute_job_kinds(name)` — there is no Python Literal mirror;
+# `dispatch()` already branches on `job.get("kind")` and falls through to a
+# FAILED outcome for an unknown kind).
+class _ClaimedJobOptional(TypedDict, total=False):
+    strategy_id: str | None
+    portfolio_id: str | None
+    kind: str
+    status: JobStatus
+    priority: Priority
+    claim_token: str | None
+    metadata: dict[str, Any] | None
+    exchange: str | None
+
+
+class ClaimedJob(_ClaimedJobOptional):
+    # `id` is required: the worker indexes `job["id"]` unconditionally when
+    # building the mark_done / mark_failed RPC closures. A claim row without it
+    # is a contract violation, not a tolerable partial row.
+    id: str
 
 # ---------------------------------------------------------------------------
 # Worker identity
@@ -349,7 +391,11 @@ async def dispatch_tick(worker_id: str) -> None:
                 claim_result = await db_execute(_claim_legacy)
             else:
                 raise
-    jobs = claim_result.data or []
+    # H-0529: type the claim path symmetrically with the dispatch() consumer.
+    # claim_result.data is PostgREST `Any`; each row is a `SETOF compute_jobs`
+    # record, so annotate as list[ClaimedJob] to pin the row contract the
+    # worker dereferences below (`j["id"]`, `job["id"]`, `job.get("claim_token")`).
+    jobs: list[ClaimedJob] = claim_result.data or []
 
     # Update healthz timestamp as soon as the claim RPC succeeds — an idle
     # queue means the worker is healthy, not stale. The previous early-return
@@ -374,7 +420,15 @@ async def dispatch_tick(worker_id: str) -> None:
         # not a failure. INVEST-P97 §Recommendation point 2.
         claim_token = job.get("claim_token")
         try:
-            result = await dispatch(job)
+            # `dispatch(job: dict)` in services.job_worker accepts a plain dict;
+            # a TypedDict is not assignable to `dict[Any, Any]` under mypy's
+            # invariance rules even though `ClaimedJob` IS a dict at runtime.
+            # Cast at this single boundary rather than loosening `ClaimedJob`
+            # back to `Any` — the precise type still guards every `job["id"]`
+            # / `job.get(...)` access in this module. Widening dispatch()'s
+            # parameter to a Mapping is the symmetric cross-module follow-up
+            # (services.job_worker is out of scope for H-0529).
+            result = await dispatch(cast("dict[str, Any]", job))
 
             if result.outcome == DispatchOutcome.DONE:
                 def _mark_done(jid=job["id"], tok=claim_token):

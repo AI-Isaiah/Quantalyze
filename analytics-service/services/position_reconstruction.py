@@ -24,6 +24,48 @@ from uuid import UUID
 from services.db import db_execute
 
 
+# Audit-2026-05-27 H-0650: the canonical position-direction Literal. A
+# reconstructed position's direction is one of these three (`flat` is the
+# snapshot/exposure no-position marker; FIFO matching only ever assigns
+# `long`/`short`). Centralizing the type lets every direction-bearing local
+# share one contract — see `position_side` in `_match_positions_fifo`.
+#
+# Renamed from `Side` (2026-05-27 type-hygiene): the bare `Side` name
+# collided with `job_worker.Side = Literal["buy","sell"]` — a same-name,
+# different-meaning alias across two modules in the same package. The
+# position-direction subset is `PositionSide`; the buy/sell fill action
+# stays `job_worker.Side`. NOTE: this is the *direction* contract, NOT the
+# return type of `_normalize_side` (which returns an arbitrary lowercased
+# `str` — it case-folds raw `buy`/`sell`/etc. before any narrowing; see its
+# docstring).
+PositionSide = Literal["long", "short", "flat"]
+
+
+def _normalize_side(raw: Any) -> str:
+    """Normalize a raw `side` value to a lower-cased string.
+
+    Audit-2026-05-27 H-0650: `side` was parsed three different ways over the
+    same column — `(snap.get("side") or "").lower()` (snapshot path),
+    `(fill.get("side") or "").lower()` (volume_metrics), and raw equality
+    `side = f.get("side")` (trade_mix, NOT case-folded). The third regime
+    silently dropped an uppercase `side="LONG"` because it matched neither
+    `buy`/`sell` nor the lower-cased bucket keys. This helper is the single
+    normalization boundary so all three regimes agree.
+
+    Contract: lower-cases the string form, falling back to "" for falsy /
+    non-string input — IDENTICAL output to the prior `(x or "").lower()`
+    idiom for every current (lowercase or falsy) input. The only behavior
+    change is that the raw-equality trade_mix path now folds case too,
+    which is the documented bug fix. Returns a plain `str` (not
+    `PositionSide`): callers compare it against `buy`/`sell` aliases before
+    it is a valid `PositionSide`, so the direction narrowing happens at the
+    bucket / position-open assignment (`position_side`), not here.
+    """
+    if not raw:
+        return ""
+    return str(raw).lower()
+
+
 # Audit-2026-05-07 H-0733 / H-0743: wire schemas for the JSONB
 # payloads. Pre-fix both were typed as `list[dict[str, Any]]`, so a
 # producer typo (e.g. `side='LONG'`) silently fed the wrong bucket in
@@ -36,10 +78,51 @@ class RealizedPnLRecord(TypedDict):
     for the data-quality-failure path; `realized_pnl` is `None` when
     the position has no computable PnL — the producer must not coerce
     either to a default.
+
+    Audit-2026-05-27 H-0639: this IS the `RealizedTrade` contract the
+    audit asked for — the element type of
+    `PositionTradeMetrics.realized_pnl_per_trade`. The `side` field uses
+    the long/short subset of the `PositionSide` Literal (`flat` is never a
+    closed position's recorded direction) plus `None` for the DQ-failure path.
     """
 
     side: Literal["long", "short"] | None
     realized_pnl: float | None
+
+
+class PositionTradeMetrics(TypedDict, total=False):
+    """Wire shape of `reconstruct_positions`' return dict (the position-side
+    trade metrics persisted to `strategy_analytics.trade_metrics`).
+
+    Audit-2026-05-27 H-0638: pre-fix the producer returned an untyped
+    `dict[str, Any]` and `analytics_runner._compute_derived_trade_metrics`
+    consumed ~10 keys via `.get()`. A renamed/typo'd producer key silently
+    yielded `None` → corrupted the derived metrics (expectancy, R:R, SQN,
+    profit_factor) and the JSONB column. Enumerating every key the producer
+    emits pins the contract at type-check time.
+
+    `total=False` because the producer omits `data_quality_flags` when the
+    aggregated flags dict is empty (see `_reconstruct_positions_inner`), and
+    the whole dict is `{}` when a strategy has no fills.
+    """
+
+    total_positions: int
+    open_positions: int
+    closed_positions: int
+    win_rate: float
+    avg_roi: float
+    capital_weighted_roi: float
+    avg_duration_days: float
+    long_count: int
+    short_count: int
+    best_trade_roi: float
+    worst_trade_roi: float
+    avg_winning_trade: float
+    avg_losing_trade: float
+    winners_count: int
+    losers_count: int
+    realized_pnl_per_trade: list[RealizedPnLRecord]
+    data_quality_flags: dict[str, Any]
 
 
 class ExposurePoint(TypedDict):
@@ -49,6 +132,41 @@ class ExposurePoint(TypedDict):
     date: str  # 'YYYY-MM-DD' per docstring contract
     gross: float
     net: float
+
+
+class ExposureMetrics(TypedDict, total=False):
+    """Wire shape of `compute_exposure_metrics`' return dict.
+
+    Audit-2026-05-27 H-0658: pre-fix the producer returned an untyped
+    `dict[str, Any]`; the consumer (`analytics_runner`) splits the scalar
+    aggregate bag from the per-date series with
+    `exposure_metrics.pop("exposure_series", None)`. Typing the contract
+    surfaces a renamed key (e.g. `exposure_serie`) at type-check time
+    instead of as a silently-missing sibling-table row.
+
+    `total=False` because the producer emits THREE distinct shapes, all
+    subsets of these keys:
+      - shared-api-key skip → only `data_quality_flags`
+      - no-snapshots        → only `data_quality_flags`
+      - normal              → the six aggregates + `exposure_series`
+                              (+ optional `data_quality_flags`)
+
+    Audit-2026-05-27 H-0659: the producer always returns one of these
+    dicts — it NEVER returns None. The consumer's `... or {}` guard and the
+    `isinstance(exposure_metrics, dict)` check are therefore defensive
+    against a hypothetical future regression, not a current None path; the
+    honest return type is `ExposureMetrics` (non-optional). See the consumer
+    annotation note in analytics_runner.run_strategy_analytics.
+    """
+
+    mean_gross_exposure: float
+    std_gross_exposure: float
+    max_gross_exposure: float
+    mean_net_exposure: float
+    std_net_exposure: float
+    max_net_exposure: float
+    exposure_series: list[ExposurePoint]
+    data_quality_flags: dict[str, Any]
 
 logger = logging.getLogger("quantalyze.analytics.position_reconstruction")
 
@@ -190,7 +308,9 @@ def _lock_for(strategy_id: str) -> asyncio.Lock:
     return _RECONSTRUCT_LOCKS.setdefault(strategy_id, asyncio.Lock())
 
 
-async def reconstruct_positions(strategy_id: str | UUID, supabase) -> dict:
+async def reconstruct_positions(
+    strategy_id: str | UUID, supabase
+) -> PositionTradeMetrics:
     """Public entry point — serializes per-strategy via in-memory
     asyncio.Lock so concurrent same-worker callers do not both fire the
     atomic-rebuild RPC. Cluster-wide serialization remains the SQL-side
@@ -218,7 +338,9 @@ async def reconstruct_positions(strategy_id: str | UUID, supabase) -> dict:
         return await _reconstruct_positions_inner(strategy_id, supabase)
 
 
-async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
+async def _reconstruct_positions_inner(
+    strategy_id: str, supabase
+) -> PositionTradeMetrics:
     """Reconstruct position lifecycles from raw fills using FIFO matching.
 
     Returns trade_metrics dict for strategy_analytics JSONB. Each closed
@@ -509,7 +631,7 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
             + missing_pnl
         )
 
-    out: dict[str, Any] = {
+    out: PositionTradeMetrics = {
         "total_positions": total,
         "open_positions": open_count,
         "closed_positions": closed_count,
@@ -956,7 +1078,12 @@ def _match_positions_fifo(
     total_exit_cost = Decimal(0)
     total_exit_qty = Decimal(0)
     total_fees = Decimal(0)
-    position_side = None  # "long" or "short"
+    # Audit-2026-05-27 type-hygiene: the live `PositionSide` annotation. Only
+    # ever `None` (no open position) or `"long"`/`"short"` — the matcher never
+    # assigns `"flat"` to a reconstructed position, but the direction contract
+    # is shared with the snapshot/exposure path so `PositionSide` carries the
+    # full three-value domain.
+    position_side: PositionSide | None = None
     position_open_time = None
     # Audit-2026-05-07 G12.C.4: per-position transient quality flags
     # (e.g. posSide_side_mismatch). Stored on the in-memory dict and
@@ -964,7 +1091,10 @@ def _match_positions_fifo(
     position_quality_flags: dict[str, Any] = {}
 
     for fill in fills:
-        side = fill.get("side", "").lower()
+        # Audit-2026-05-27 H-0650: single normalization boundary (was
+        # `fill.get("side", "").lower()`). Behavior-identical for current
+        # lowercase/falsy input.
+        side = _normalize_side(fill.get("side"))
         # Audit-2026-05-07 M-0717: parse the NUMERIC columns as Decimal
         # (preserving the PostgREST string precision) instead of float. A
         # missing value coerces to Decimal(0) — preserving the prior
@@ -1037,7 +1167,7 @@ def _match_positions_fifo(
             # blindly trusted posSide, allowing posSide='short' on a
             # side='buy' fill to publish a fabricated short-side
             # position to allocators (G12.C.4).
-            side_derived = "short" if side == "sell" else "long"
+            side_derived: PositionSide = "short" if side == "sell" else "long"
             if pos_side in ("long", "short") and pos_side != side_derived:
                 position_quality_flags["posSide_side_mismatch"] = True
                 logger.warning(
@@ -1373,7 +1503,9 @@ def _match_positions_fifo(
     return positions
 
 
-async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
+async def compute_exposure_metrics(
+    strategy_id: str, supabase
+) -> ExposureMetrics:
     """Compute exposure metrics from position_snapshots.
 
     Returns dict with mean/std/max gross and net exposure (existing aggregates,
@@ -1500,7 +1632,10 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
         net = 0.0
         for snap in date_snaps:
             size_usd = float(snap.get("size_usd", 0) or 0)
-            side = snap.get("side", "")
+            # Audit-2026-05-27 H-0650: normalize via the shared boundary so the
+            # snapshot side regime agrees with FIFO + volume + trade_mix.
+            # Behavior-identical for current lowercase input.
+            side = _normalize_side(snap.get("side"))
             gross += abs(size_usd)
             if side == "short":
                 net -= abs(size_usd)
@@ -1525,7 +1660,7 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     std_net = statistics.stdev(net_exposures) if len(net_exposures) > 1 else 0.0
     max_net = max(net_exposures, key=abs)
 
-    out: dict[str, Any] = {
+    out: ExposureMetrics = {
         "mean_gross_exposure": round(mean_gross, 2),
         "std_gross_exposure": round(std_gross, 2),
         "max_gross_exposure": round(max_gross, 2),

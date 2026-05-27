@@ -412,7 +412,16 @@ def measure_p999_via_sql() -> tuple[float, int]:
         **pg_env,
     }
     try:
-        result = subprocess.run(
+        # M-0638: pin the result type. With text=True the stdout/stderr are
+        # `str` (not `str | bytes`), so the positional parse below
+        # (`result.stdout.strip().splitlines()`) and the `_redact_dsn(
+        # result.stderr.strip())` call are type-checked against the str API
+        # rather than CompletedProcess's default `str | bytes` union — a
+        # future edit that drops `text=True` would surface as a type error
+        # here instead of a runtime `.strip()` on bytes. Success/error state
+        # stays explicit: the `returncode != 0` guard below is the only path
+        # that consumes stderr; the happy path consumes stdout.
+        result: subprocess.CompletedProcess[str] = subprocess.run(
             ["psql", "-tAF,", "-c", sql],
             capture_output=True, text=True, check=False,
             timeout=timeout_s,

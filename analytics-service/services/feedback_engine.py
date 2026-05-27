@@ -35,12 +35,78 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Literal, Optional, TypedDict
 
 from services.audit import log_audit_event
 from services.db import get_supabase
 
 logger = logging.getLogger("quantalyze.feedback_engine")
+
+
+# ---------------------------------------------------------------------------
+# Row contract — TypedDict mirrors the bridge_outcomes columns this pipeline
+# reads (H-0680). TypedDict (not Pydantic) keeps zero runtime cost — the
+# Supabase fetch returns plain dicts and we keep consuming them as dicts —
+# while giving mypy/IDE static checks at every read site (`outcome["kind"]`,
+# `outcome.get("delta_180d")`, etc.) so a future column rename (e.g.
+# delta_180d → delta_180_days) or a kind/reason typo surfaces as a type error
+# instead of a silent None / raw KeyError at runtime. Mirrors the
+# FundingFeeRow (M-0929) / ScoredCandidate (H-0698) convention.
+#
+# Field shapes track information_schema for bridge_outcomes:
+#   kind             TEXT NOT NULL  → Literal['rejected','allocated']
+#   rejection_reason TEXT NULL
+#   strategy_id      UUID NULL      (holding-based outcomes carry NULL; dropped
+#                                    in _fetch_eligible_outcomes)
+#   delta_30/90/180d NUMERIC NULL   → PostgREST serializes numeric as a JSON
+#                                    number OR a string depending on magnitude,
+#                                    so the read sites coerce via float(); the
+#                                    annotation reflects both wire shapes.
+#   percent_allocated NUMERIC NULL
+# total=False because every fetch projects an explicit column subset and any
+# field may be absent/None on a given row.
+RejectionReason = Literal[
+    "mandate_conflict",
+    "underperforming_peers",
+    "timing_wrong",
+    "already_owned",
+    "other",
+]
+
+
+# LOW9 (2026-05-27): required/optional split mirroring the
+# `_ClaimedJobOptional` / `ClaimedJob` pattern in main_worker.py. Pre-fix
+# `BridgeOutcomeRow` was a single `total=False` TypedDict, yet `kind` and
+# `strategy_id` are dereferenced as REQUIRED (`outcome["kind"]` in
+# `_success_value`/`_attribute_dimension`; `o["strategy_id"]` /
+# `outcome["strategy_id"]` in `compute_adjusted_weights`). `_fetch_eligible_
+# outcomes` guarantees both: every fetch projects `strategy_id, kind, ...`
+# explicitly, and the producer drops rows with `strategy_id is None` before
+# returning, so the required fields are non-absent at every consumer.
+class _BridgeOutcomeOptional(TypedDict, total=False):
+    # MED8 (2026-05-27): typed as the `RejectionReason` Literal (was bare
+    # `Optional[str]`). The enumerated values mirror the bridge_outcomes
+    # producer's CHECK domain (the five D-06 reasons; NULL on allocated rows).
+    # `_attribute_dimension` already routes the unmapped tail (`other`, and the
+    # SQL-filtered `already_owned`) through the score-dominant fallback, so the
+    # closed Literal is the honest contract — a typo'd/renamed reason now
+    # surfaces as a type error at the read site instead of silently mapping to
+    # nothing.
+    rejection_reason: Optional[RejectionReason]
+    delta_30d: Optional[float | str]
+    delta_90d: Optional[float | str]
+    delta_180d: Optional[float | str]
+    percent_allocated: Optional[float | str]
+
+
+class BridgeOutcomeRow(_BridgeOutcomeOptional):
+    # Required keys: always projected by `_fetch_eligible_outcomes` and never
+    # absent at a consumer. `strategy_id` is non-None after the producer's
+    # `o.get("strategy_id") is not None` filter (holding-based outcomes carry
+    # NULL strategy_id and are dropped before this contract is read), so it is
+    # required AND non-Optional here.
+    strategy_id: str
+    kind: Literal["rejected", "allocated"]
 
 # D-06 direct-mapping subset. See module docstring for the two intentional
 # omissions (already_owned and other) — both covered by tests
@@ -97,7 +163,7 @@ def _has_any_bridge_outcomes(allocator_id: str) -> bool:
     return bool(resp.data)
 
 
-def _fetch_eligible_outcomes(allocator_id: str) -> list[dict[str, Any]]:
+def _fetch_eligible_outcomes(allocator_id: str) -> list[BridgeOutcomeRow]:
     """Query bridge_outcomes for this allocator, apply D-08 noise filters + D-03 pending drop.
 
     Two sequential queries (not one OR chain — Pitfall 5). D-08 drop order:
@@ -206,7 +272,7 @@ def _fetch_score_breakdowns(
     return out
 
 
-def _success_value(outcome: dict[str, Any]) -> int:
+def _success_value(outcome: BridgeOutcomeRow) -> int:
     """D-01 + D-02: success = 1 iff most-mature non-NULL delta > 0; else 0.
     Rejected outcomes count as FAILURE (D-04). Precondition: outcome passed D-03/D-08 filters.
     """
@@ -236,7 +302,7 @@ def _success_value(outcome: dict[str, Any]) -> int:
 
 
 def _attribute_dimension(
-    outcome: dict[str, Any],
+    outcome: BridgeOutcomeRow,
     score_breakdown: Optional[dict[str, Any]],
 ) -> tuple[str, ...]:
     """D-05 hybrid attribution. Returns a tuple of dimension names:

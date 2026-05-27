@@ -49,8 +49,13 @@ API_KEY_ID_2 = "00000000-0000-0000-0000-000000000002"
 
 
 class _FakeUpsertResult:
-    def __init__(self, data: list[dict]):
+    def __init__(self, data: list[dict], count: int | None = None):
         self.data = data
+        # L-0067/L-0066: production now requests count='exact' +
+        # returning='minimal'. Mirror real PostgREST: when count was
+        # requested, .count carries the authoritative write/delete count
+        # and .data is empty (minimal). _result_row_count prefers .count.
+        self.count = count
 
 
 class _FakeSelectResult:
@@ -82,13 +87,26 @@ class _FakeTable:
         self._pending_on_conflict: str | None = None
         self._pending_ignore_duplicates: bool = False
         self._pending_update_payload: dict = {}
+        # L-0066/L-0067: write-path count='exact' / returning='minimal'.
+        self._pending_count_mode: str | None = None
+        self._pending_returning: str | None = None
 
     # --- write ops ---
-    def upsert(self, rows, on_conflict: str | None = None, ignore_duplicates: bool = False):
+    def upsert(
+        self,
+        rows,
+        on_conflict: str | None = None,
+        ignore_duplicates: bool = False,
+        count: str | None = None,
+        returning: str | None = None,
+    ):
         self._pending_op = "upsert"
         self._pending_rows = rows if isinstance(rows, list) else [rows]
         self._pending_on_conflict = on_conflict
         self._pending_ignore_duplicates = ignore_duplicates
+        # L-0067: production requests count='exact' + returning='minimal'.
+        self._pending_count_mode = count
+        self._pending_returning = returning
         return self
 
     def insert(self, rows):
@@ -101,8 +119,11 @@ class _FakeTable:
         self._pending_update_payload = payload
         return self
 
-    def delete(self):
+    def delete(self, count: str | None = None, returning: str | None = None):
         self._pending_op = "delete"
+        # L-0066: production requests count='exact' + returning='minimal'.
+        self._pending_count_mode = count
+        self._pending_returning = returning
         return self
 
     # --- select ops ---
@@ -164,6 +185,12 @@ class _FakeTable:
                 else:
                     self._store[key] = dict(row)
                     written.append(dict(row))
+            # Mirror real PostgREST: count='exact' populates .count with the
+            # affected-row count; returning='minimal' empties .data (the
+            # response no longer echoes the inserted representation).
+            if self._pending_count_mode == "exact":
+                data_out = [] if self._pending_returning == "minimal" else written
+                return _FakeUpsertResult(data_out, count=len(written))
             return _FakeUpsertResult(written)
 
         if self._pending_op == "insert":
@@ -205,6 +232,10 @@ class _FakeTable:
                     continue
                 deleted.append(dict(row))
                 del self._store[key]
+            # Mirror real PostgREST for the L-0066 count='exact' delete path.
+            if self._pending_count_mode == "exact":
+                data_out = [] if self._pending_returning == "minimal" else deleted
+                return _FakeUpsertResult(data_out, count=len(deleted))
             return _FakeUpdateResult(deleted)
 
         if self._pending_op == "select":
@@ -3509,6 +3540,100 @@ async def test_h1166_purge_count_reflects_actual_deletions(monkeypatch):
     assert purged_empty == 0
 
 
+# ---- L-0066 / L-0067 - count='exact' + returning='minimal' contract ------
+
+@pytest.mark.asyncio
+async def test_l0067_persist_requests_exact_count_minimal_returning(monkeypatch):
+    """L-0067/M-1026: persist_equity_snapshots must request count='exact'
+    and returning='minimal' so the audit count comes from the authoritative
+    res.count (Content-Range) and PostgREST does NOT echo the full inserted-
+    row JSONB representation back over the wire just to be len()'d.
+
+    Fails before the fix (the upsert omitted both kwargs and relied on
+    len(res.data) from return=representation)."""
+    from services.equity_reconstruction import persist_equity_snapshots
+
+    fake_supabase = FakeSupabaseClient()
+    captured: dict = {}
+    orig_table = fake_supabase.table
+
+    def _capturing_table(name: str):
+        tbl = orig_table(name)
+        real_upsert = tbl.upsert
+
+        def _wrapped(rows, **kwargs):
+            captured.update(kwargs)
+            return real_upsert(rows, **kwargs)
+
+        tbl.upsert = _wrapped
+        return tbl
+
+    monkeypatch.setattr(fake_supabase, "table", _capturing_table)
+
+    rows = [
+        {"asof": f"2026-04-{d:02d}", "value_usd": 100.0 + d,
+         "breakdown": {"BTC": 100.0}, "source": "exchange_primary"}
+        for d in range(1, 8)  # 7 fresh rows, no collisions
+    ]
+    count = await persist_equity_snapshots(
+        fake_supabase, rows, ALLOCATOR_ID, history_depth_months=24
+    )
+
+    assert captured.get("count") == "exact", (
+        f"upsert must request count='exact'; got {captured!r}"
+    )
+    assert captured.get("returning") == "minimal", (
+        f"upsert must request returning='minimal' (no representation "
+        f"over-fetch); got {captured!r}"
+    )
+    # Count must survive even though returning='minimal' empties res.data —
+    # proves _result_row_count read res.count, not len(res.data).
+    assert count == 7, count
+
+
+@pytest.mark.asyncio
+async def test_l0066_purge_requests_exact_count_minimal_returning(monkeypatch):
+    """L-0066: _purge_allocator_equity_snapshots must request count='exact'
+    + returning='minimal' so stale_snapshots_purged comes from res.count and
+    not len(res.data) (which silently reports 0 under return=minimal even
+    when rows were wiped). Fails before the fix (delete() took no kwargs)."""
+    from services.equity_reconstruction import _purge_allocator_equity_snapshots
+
+    fake_supabase = FakeSupabaseClient()
+    for d in range(3):
+        asof = f"2026-04-{d + 1:02d}"
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID, "asof": asof, "value_usd": 1.0,
+        }
+
+    captured: dict = {}
+    orig_table = fake_supabase.table
+
+    def _capturing_table(name: str):
+        tbl = orig_table(name)
+        real_delete = tbl.delete
+
+        def _wrapped(**kwargs):
+            captured.update(kwargs)
+            return real_delete(**kwargs)
+
+        tbl.delete = _wrapped
+        return tbl
+
+    monkeypatch.setattr(fake_supabase, "table", _capturing_table)
+
+    purged = await _purge_allocator_equity_snapshots(fake_supabase, ALLOCATOR_ID)
+
+    assert captured.get("count") == "exact", (
+        f"delete must request count='exact'; got {captured!r}"
+    )
+    assert captured.get("returning") == "minimal", (
+        f"delete must request returning='minimal'; got {captured!r}"
+    )
+    # Count survives minimal returning → proves it read res.count.
+    assert purged == 3, purged
+
+
 # ---- H-1168 - Distinct audit kinds for no-op vs no-data ------------------
 
 @pytest.mark.asyncio
@@ -4247,3 +4372,51 @@ async def test_spec_sfh4_refresh_perp_upnl_missing_is_aggregated(monkeypatch):
     assert "symbols" in meta and "missing_count" in meta, meta
     assert sorted(meta["symbols"]) == ["BTCUSDT", "ETHUSDT", "SOLUSDT"], meta
     assert meta["missing_count"] == 3, meta
+
+
+# ---- L-0065 - _cap_breakdown cardinality short-circuit -------------------
+
+def test_l0065_cap_breakdown_skips_serialise_for_small_breakdown(monkeypatch):
+    """L-0065: a breakdown at/below _BREAKDOWN_TOP_N must NOT call json.dumps
+    — the truncation branch can never shrink it, so serialising is pure
+    hot-path waste (~730 rows/reconstruct × every connected key). Pre-fix
+    json.dumps ran unconditionally; we prove it is skipped by making it raise.
+    """
+    from services import equity_reconstruction as er
+
+    def _boom(*_a, **_kw):
+        raise AssertionError(
+            "json.dumps must NOT be called for a small (<=top-N) breakdown"
+        )
+
+    monkeypatch.setattr(er.json, "dumps", _boom)
+
+    breakdown = {"BTC": 1000.0, "ETH": 250.0, "USDT": 5.0}
+    capped = er._cap_breakdown(breakdown)
+
+    # Identity-preserving: same object/content returned, no truncation flag.
+    assert capped is breakdown
+    assert "__truncated__" not in capped
+
+
+def test_l0065_cap_breakdown_still_truncates_large_breakdown():
+    """L-0065 guard: the >top-N path is unchanged — a breakdown that exceeds
+    both the cardinality floor AND the byte cap is still truncated to top-N
+    by absolute value with the __truncated__ sentinel."""
+    from services.equity_reconstruction import (
+        _cap_breakdown,
+        _BREAKDOWN_TOP_N,
+        RAW_PAYLOAD_CAP_BYTES,
+    )
+    import json
+
+    # 150 long-named symbols → exceeds 4096-byte cap and the top-N floor.
+    breakdown = {f"TOKEN_{i:04d}_USDT_PERP": float(i + 1) for i in range(150)}
+    assert len(json.dumps(breakdown, default=str)) > RAW_PAYLOAD_CAP_BYTES
+
+    capped = _cap_breakdown(breakdown)
+    assert capped["__truncated__"] is True
+    # top-N symbols (excluding the sentinel key) retained.
+    assert len(capped) == _BREAKDOWN_TOP_N + 1
+    # Highest-value symbol (TOKEN_0149...) must survive the top-N cut.
+    assert "TOKEN_0149_USDT_PERP" in capped

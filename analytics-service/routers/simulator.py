@@ -25,11 +25,12 @@ collapsed into one shared bucket — first-mover starvation. Per-user
 keying mirrors routers/process_key.py:_process_key_rate_limit_key.
 """
 
+import asyncio
 import logging
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from slowapi.util import get_remote_address
 
 from services.audit import log_audit_event
@@ -78,9 +79,17 @@ def _simulator_rate_limit_key(request: Request) -> str:
 
 
 class SimulatorRequest(BaseModel):
-    portfolio_id: str
-    candidate_strategy_id: str
-    user_id: str
+    # G15-010 (audit-2026-05-07, M-0974): mirror the TS contract
+    # (src/lib/api/simulatorSchema.ts — `z.string().min(1)`). Bare `str`
+    # let an empty-string id parse and fall through to a Supabase no-rows
+    # query (a silent 404 instead of a clear 422). `min_length=1` rejects
+    # empty / NULL-byte-only payloads at the Pydantic boundary with a
+    # structured 422. UUID-format validation stays upstream (Next.js
+    # layer) per the documented trust boundary — the DB-layer 404 is the
+    # surface this router owns.
+    portfolio_id: str = Field(min_length=1)
+    candidate_strategy_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
 
 
 def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
@@ -96,11 +105,46 @@ def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
     dependent; an unsorted index produces a garbage equity curve, and a
     duplicate index entry inflates the compounded factor for that date.
     These guards exist for storage-drift safety, not for the happy-path.
+
+    G15-008/G15-009 (audit-2026-05-07, M-0975/M-0976): tolerate malformed
+    records. ``returns_series`` is JSONB written by the analytics worker;
+    a single row missing ``date`` or ``value`` (legacy schema, partial
+    backfill, manual SQL fixup) previously raised KeyError in the list
+    comprehension, propagating up through ``portfolio_simulator`` as an
+    unhandled 500 — taking down the simulator for any portfolio that
+    contained one corrupted strategy row. We now skip malformed entries,
+    warn once, and return None when nothing usable remains so the router
+    falls into its "No returns data available" 400 path with a clear
+    message instead of a 500. Mirrors the hardened
+    ``routers.portfolio._records_to_series``.
     """
     if not isinstance(raw, list) or not raw:
         return None
-    dates = [r["date"] for r in raw]
-    vals = [r["value"] for r in raw]
+
+    dates: list = []
+    vals: list = []
+    skipped = 0
+    for r in raw:
+        if not isinstance(r, dict):
+            skipped += 1
+            continue
+        d = r.get("date")
+        v = r.get("value")
+        if d is None or v is None:
+            skipped += 1
+            continue
+        dates.append(d)
+        vals.append(v)
+
+    if skipped:
+        logger.warning(
+            "_records_to_series: skipped %d malformed records for %s",
+            skipped, name or "<unnamed>",
+        )
+
+    if not dates:
+        return None
+
     series = pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
     # G15-006 — sort then dedupe (keep='last'). Order matters: dedupe BEFORE
     # sort would keep the last-by-input occurrence rather than the
@@ -123,31 +167,52 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
     """
     supabase = get_supabase()
 
+    # G15-012 (audit-2026-05-07, M-0973): the first three reads —
+    # (1) portfolio ownership, (2) candidate published-check, and
+    # (3) portfolio_strategies composition — have NO inter-dependencies
+    # (none consumes another's result), so they ran ~90-180ms of serial
+    # Supabase RTT on every call. Fan them out with asyncio.gather over
+    # asyncio.to_thread (the supabase-py client is SYNC — calling
+    # `.execute()` directly would block the event loop; to_thread offloads
+    # it, matching routers/match.py's pattern). The results are checked in
+    # the SAME order as before so the 404/400 error PRECEDENCE is
+    # unchanged (portfolio 404 wins over candidate 404 wins over empty-
+    # portfolio 400) — the parallelism is purely a latency win, not a
+    # contract change.
+    portfolio_result, candidate_row, ps_result = await asyncio.gather(
+        asyncio.to_thread(
+            lambda: supabase.table("portfolios")
+            .select("id")
+            .eq("id", req.portfolio_id)
+            .eq("user_id", req.user_id)
+            .single()
+            .execute()
+        ),
+        asyncio.to_thread(
+            lambda: supabase.table("strategies")
+            .select("id, name, status")
+            .eq("id", req.candidate_strategy_id)
+            .eq("status", "published")
+            .maybe_single()
+            .execute()
+        ),
+        asyncio.to_thread(
+            lambda: supabase.table("portfolio_strategies")
+            .select("strategy_id, current_weight")
+            .eq("portfolio_id", req.portfolio_id)
+            .execute()
+        ),
+    )
+
     # Defense-in-depth ownership check. The Next.js layer already validates
     # this, but the Python service uses a service-role client that bypasses
     # RLS — if the service were ever reachable from another path we still
     # want to enforce portfolio ownership here.
-    portfolio_result = (
-        supabase.table("portfolios")
-        .select("id")
-        .eq("id", req.portfolio_id)
-        .eq("user_id", req.user_id)
-        .single()
-        .execute()
-    )
     if not portfolio_result.data:
         raise HTTPException(status_code=404, detail="Portfolio not found")
 
     # Reject candidates that aren't published — same guardrail as the
     # portfolio-optimizer + bridge endpoints.
-    candidate_row = (
-        supabase.table("strategies")
-        .select("id, name, status")
-        .eq("id", req.candidate_strategy_id)
-        .eq("status", "published")
-        .maybe_single()
-        .execute()
-    )
     if not candidate_row.data:
         raise HTTPException(
             status_code=404,
@@ -156,12 +221,6 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
     candidate_name = candidate_row.data.get("name") or req.candidate_strategy_id
 
     # Current portfolio composition + weights
-    ps_result = (
-        supabase.table("portfolio_strategies")
-        .select("strategy_id, current_weight")
-        .eq("portfolio_id", req.portfolio_id)
-        .execute()
-    )
     portfolio_strategies = ps_result.data or []
     if not portfolio_strategies:
         raise HTTPException(
@@ -188,19 +247,44 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
     total_w = sum(raw_weights.values()) or 1.0
     weights = {sid: w / total_w for sid, w in raw_weights.items()}
 
-    # Fetch returns for portfolio strategies in one call
+    # G15-011 (audit-2026-05-07, M-0972): fetch returns for the portfolio
+    # strategies AND the candidate in ONE strategy_analytics query instead
+    # of two round-trips to the same table on the same connection. Split
+    # the result locally by strategy_id. Both target the same table — a
+    # single `.in_(portfolio_ids + [candidate_id])` saves one full RTT
+    # (~30-80ms) on every successful run.
     portfolio_ids = list(existing_ids)
-    sa_port_result = (
-        supabase.table("strategy_analytics")
+    sa_result = await asyncio.to_thread(
+        lambda: supabase.table("strategy_analytics")
         .select("strategy_id, returns_series")
-        .in_("strategy_id", portfolio_ids)
+        .in_("strategy_id", portfolio_ids + [req.candidate_strategy_id])
         .execute()
     )
+    # Index the rows by strategy_id so we can split portfolio vs candidate
+    # without a second query. `candidate_row_present` distinguishes the two
+    # candidate-failure messages preserved below: a wholly-MISSING analytics
+    # row ("No returns data available for the candidate") vs a row that
+    # EXISTS but has empty/None returns_series ("Candidate has no returns
+    # history"). Folding into the IN query would otherwise collapse those
+    # two branches — the existing tests assert both distinctly.
+    rows_by_id: dict[str, dict] = {}
+    candidate_row_present = False
+    for row in (sa_result.data or []):
+        sid = row.get("strategy_id")
+        if sid is None:
+            continue
+        rows_by_id[sid] = row
+        if sid == req.candidate_strategy_id:
+            candidate_row_present = True
+
     portfolio_returns: dict[str, pd.Series] = {}
-    for row in (sa_port_result.data or []):
-        s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+    for sid in existing_ids:
+        row = rows_by_id.get(sid)
+        if row is None:
+            continue
+        s = _records_to_series(row.get("returns_series"), name=sid)
         if s is not None:
-            portfolio_returns[row["strategy_id"]] = s
+            portfolio_returns[sid] = s
 
     if not portfolio_returns:
         raise HTTPException(
@@ -208,21 +292,14 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
             detail="No returns data available for portfolio strategies",
         )
 
-    # Fetch candidate returns
-    sa_cand_result = (
-        supabase.table("strategy_analytics")
-        .select("strategy_id, returns_series")
-        .eq("strategy_id", req.candidate_strategy_id)
-        .maybe_single()
-        .execute()
-    )
-    if not sa_cand_result.data:
+    # Candidate returns — split out of the same result set.
+    if not candidate_row_present:
         raise HTTPException(
             status_code=400,
             detail="No returns data available for the candidate",
         )
     candidate_series = _records_to_series(
-        sa_cand_result.data.get("returns_series"),
+        rows_by_id[req.candidate_strategy_id].get("returns_series"),
         name=req.candidate_strategy_id,
     )
     if candidate_series is None:

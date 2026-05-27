@@ -448,7 +448,26 @@ def history_depth_months_for_venue(venue: str) -> int | None:
 # Raw-payload cap (matches allocator_positions.py pattern)
 # ---------------------------------------------------------------------------
 
+# L-0065: top-N truncation keeps at most this many symbols; also the
+# cardinality short-circuit floor below. Named so the two stay in lockstep —
+# the json.dumps cap-check is only meaningful past this count.
+_BREAKDOWN_TOP_N: int = 20
+
+
 def _cap_breakdown(breakdown: dict) -> dict:
+    # Audit 2026-05-07 L-0065: short-circuit on cardinality BEFORE serialising.
+    # The truncation branch keeps only the top _BREAKDOWN_TOP_N symbols, so a
+    # breakdown already at/below that count can never be truncated to anything
+    # smaller — `json.dumps` would run, find the encoding under the cap (a few
+    # ticker keys + float values stay well under RAW_PAYLOAD_CAP_BYTES), and
+    # return `breakdown` unchanged anyway. This helper is called per output row
+    # (~730/reconstruct) plus per refresh-snapshot and per anchor-adjusted row,
+    # fanned out across every connected api_key on the migration-078 deploy, so
+    # skipping the serialise on the dominant 1-3-symbol case removes real hot-
+    # path cost. Output semantics are identical: the truncation path (and its
+    # `__truncated__` flag) only ever fired for >_BREAKDOWN_TOP_N symbols.
+    if len(breakdown) <= _BREAKDOWN_TOP_N:
+        return breakdown
     encoded = json.dumps(breakdown, default=str)
     if len(encoded) <= RAW_PAYLOAD_CAP_BYTES:
         return breakdown
@@ -456,7 +475,7 @@ def _cap_breakdown(breakdown: dict) -> dict:
     # the biggest contributions.
     top_symbols = sorted(
         breakdown.items(), key=lambda kv: abs(float(kv[1] or 0)), reverse=True
-    )[:20]
+    )[:_BREAKDOWN_TOP_N]
     truncated = dict(top_symbols)
     truncated["__truncated__"] = True
     return truncated
@@ -1339,6 +1358,8 @@ async def persist_equity_snapshots(
             stamped,
             on_conflict="allocator_id,asof",
             ignore_duplicates=True,
+            count="exact",
+            returning="minimal",
         ).execute()
 
     # /investigate 2026-04-22: return the count Postgres ACTUALLY wrote,
@@ -1349,12 +1370,18 @@ async def persist_equity_snapshots(
     # count and can surface "reconstruct_complete but no rows written"
     # as a user-actionable signal.
     #
-    # /investigate 2026-05-15 (H-1159 / M-1025): prefer `res.count` when
-    # PostgREST returns it (we'd ideally request count='exact' but
-    # supabase-py doesn't accept that on the upsert builder, so we
-    # opportunistically use `count` if present and fall back to
-    # `len(data)`). Either signal collapses to zero on a clean DO-NOTHING
-    # so the audit-log contract holds.
+    # Audit 2026-05-07 L-0067 / M-1026: request `count='exact'` +
+    # `returning='minimal'` explicitly. supabase-py >= 2.x exposes both
+    # kwargs on the upsert builder (the older comment claiming otherwise
+    # predates the client upgrade and was factually stale). `returning=
+    # 'minimal'` stops PostgREST from echoing the full inserted-row
+    # representation (each row carries the JSONB breakdown — ~150B × up to
+    # 730 days × every connected api_key on a migration-078 fan-out) back
+    # over the wire just to be discarded by a len(). `count='exact'` makes
+    # the audit-log count the authoritative Postgres write count via
+    # `res.count` instead of the fragile len(res.data) PostgREST-
+    # representation contract. `_result_row_count` already prefers
+    # `res.count`; the `len(data)` fallback stays only for legacy mocks.
     res = await db_execute(_upsert)
     return _result_row_count(res)
 
@@ -1475,11 +1502,19 @@ async def _purge_allocator_equity_snapshots(
     audit log doesn't silently report ``stale_snapshots_purged=0`` when
     a real purge ran (the exact gap PR #68 already closed for
     ``persist_equity_snapshots``).
+
+    Audit 2026-05-07 L-0066 / L-0067: request ``count='exact'`` +
+    ``returning='minimal'`` so the deletion count comes from the
+    authoritative ``res.count`` (Content-Range) header rather than
+    ``len(res.data)`` — which silently reports 0 if a future client
+    version or call site reduces to ``return=minimal`` while rows were
+    actually wiped, hiding the wipe in the audit trail. ``minimal`` also
+    avoids materialising every deleted JSONB row back to the worker.
     """
     def _del():
         return (
             supabase.table("allocator_equity_snapshots")
-            .delete()
+            .delete(count="exact", returning="minimal")
             .eq("allocator_id", allocator_id)
             .execute()
         )

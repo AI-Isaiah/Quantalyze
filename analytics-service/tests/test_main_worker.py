@@ -1169,3 +1169,88 @@ class TestClaimRpcFallback:
         import main_worker
 
         assert main_worker._FALLBACK_CLAIM_RPC is False
+
+
+# ---------------------------------------------------------------------------
+# Claimed-row contract (audit-2026-05-07 H-0529)
+# ---------------------------------------------------------------------------
+# The claim RPCs RETURN SETOF compute_jobs, so each claimed row is a full
+# compute_jobs record. dispatch_tick dereferences `job["id"]` unconditionally
+# when building the mark_done / mark_failed closures and reads
+# `job.get("claim_token")` for the P97 fence. Before H-0529 the claim path was
+# typed `Any`, so a column rename in a future migration (e.g. RETURNS shape
+# `id` -> `job_id`) would surface as a runtime KeyError on the hot path rather
+# than a type error. `ClaimedJob` pins that contract. These tests encode the
+# intent: the keys the worker dereferences unconditionally MUST be required,
+# and the optional/defensive ones MUST be declared so the row shape stays a
+# single source of truth alongside the consumer.
+# ---------------------------------------------------------------------------
+
+
+class TestClaimedJobContract:
+    def test_id_is_required(self) -> None:
+        """`id` is dereferenced unconditionally (`j["id"]`, `job["id"]` in the
+        mark closures), so it MUST be a required key on ClaimedJob. If a future
+        edit demotes it to optional (or renames it), the worker's
+        `job["id"]` KeyError risk returns silently — this assertion is the
+        type-contract guard the finding asks for."""
+        from main_worker import ClaimedJob
+
+        assert "id" in ClaimedJob.__required_keys__, (
+            "ClaimedJob.id must be required — dispatch_tick indexes job['id'] "
+            "unconditionally when building mark_* RPC closures"
+        )
+
+    def test_fence_and_dispatch_keys_are_declared(self) -> None:
+        """`claim_token` (P97 fence, read via .get()) and `kind` (forwarded to
+        dispatch()) must be part of the declared contract so the row shape
+        documents every field the worker / dispatch consumer touches."""
+        from main_worker import ClaimedJob
+
+        declared = ClaimedJob.__required_keys__ | ClaimedJob.__optional_keys__
+        for key in ("claim_token", "kind", "strategy_id", "portfolio_id"):
+            assert key in declared, (
+                f"ClaimedJob must declare {key!r}: the worker or dispatch() "
+                f"reads it. Declared keys: {sorted(declared)}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_claimed_row_drives_id_and_claim_token_through_marks(self) -> None:
+        """A row shaped per ClaimedJob flows through dispatch_tick: `id` lands
+        in the mark_done RPC and `claim_token` is threaded through as
+        p_claim_token (the P97 fence). This pins that the worker reads the
+        ClaimedJob fields by their contracted names."""
+        job = {
+            "id": "cj-contract-1",
+            "kind": "compute_analytics",
+            "strategy_id": "strat-contract",
+            "claim_token": "tok-contract-xyz",
+        }
+        mock_supabase = MagicMock()
+        claim_chain = MagicMock()
+        claim_chain.execute.return_value = MagicMock(data=[job])
+        mark_chain = MagicMock()
+        mark_chain.execute.return_value = MagicMock(data=None)
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return claim_chain
+            return mark_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-contract")
+
+        mark_done_calls = [
+            c for c in mock_supabase.rpc.call_args_list
+            if c.args[0] == "mark_compute_job_done"
+        ]
+        assert len(mark_done_calls) == 1
+        params = mark_done_calls[0].args[1]
+        assert params["p_job_id"] == "cj-contract-1"
+        assert params["p_claim_token"] == "tok-contract-xyz"

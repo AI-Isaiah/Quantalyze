@@ -10,7 +10,23 @@ M-02 (12-REVIEWS.md):
     backfill job drains to 'done' / 'failed_final', a second invocation of this
     enqueuer would land a duplicate. We pre-check pending compute_analytics rows
     and bail out with a notice when any are present, so callers cannot accidentally
-    pile up redundant backfills (or hit the partial-unique-index error mid-loop).
+    pile up redundant backfills.
+
+    The pre-check is best-effort, NOT a lock: two operators racing in parallel
+    can both observe pending_count=0. The durable guarantee comes from the SINGLE
+    atomic bulk INSERT below (H-0599 / H-0600 / S15e). PostgREST runs a list
+    .insert([...]) as one statement in one transaction, so if a racing invocation
+    (or a worker re-enqueue) has already landed an in-flight row for any
+    (strategy_id, kind) in our batch, the partial unique index aborts the WHOLE
+    statement atomically — there is no split-brain half-enqueued state and no
+    non-deterministic mid-loop crash. We catch that collision (errcode 23505) and
+    report it loudly instead of dumping a raw traceback.
+
+    NOTE on ON CONFLICT: the partial unique index cannot be used as a PostgREST
+    upsert arbiter — Postgres raises 42P10 ("no matching constraint") because a
+    partial index's predicate is not inferable from `on_conflict=(strategy_id,kind)`
+    (verified against the live schema). So we do a plain bulk INSERT guarded by the
+    pre-check + atomic-abort semantics rather than .upsert(..., ignore_duplicates).
 
 Usage:
     cd analytics-service
@@ -39,7 +55,19 @@ async def main() -> int:
         .eq("status", "pending")
         .execute()
     )
-    pending_count = existing.count or 0
+    # H-0600(c) / S15e type-design #17: `existing.count or 0` collapsed a
+    # missing count header (None — possible under RLS/PostgREST quirks) into 0,
+    # which would silently SKIP the duplicate guard and let us pile on a second
+    # backfill. A None count means the guard could not be evaluated — fail loud
+    # rather than guess (Rule 12), because the count="exact" request above
+    # explicitly asked PostgREST for a count.
+    if existing.count is None:
+        raise RuntimeError(
+            "phase12_backfill_enqueue: pending compute_analytics count came back "
+            "None (count header absent); refusing to run the duplicate guard "
+            "blind. Re-run or inspect PostgREST/RLS before backfilling."
+        )
+    pending_count = existing.count
     if pending_count > 0:
         print(
             f"[backfill] {pending_count} existing pending compute_analytics jobs found "
@@ -70,55 +98,86 @@ async def main() -> int:
         f"priority='low'"
     )
 
-    # P2025: track per-row outcomes. The old loop had no try/except — a partial-
-    # unique-index violation on row K would raise and leave the caller thinking
-    # K-1 rows were enqueued, while the final message lied about `total`.
-    #
     # Defensive id extraction: a row missing 'id' (schema rename, RLS-
-    # projection change, malformed response) must NOT raise KeyError
-    # mid-loop and skip the final summary. Match the kill_switch pattern.
+    # projection change, malformed response) must NOT raise KeyError and
+    # abort the batch. Filter to valid ids BEFORE building the bulk payload;
+    # any skipped row is recorded as a failure so the script exits non-zero
+    # (Rule 12 — fail loud) without losing the rows that ARE enqueueable.
     now_iso = datetime.now(timezone.utc).isoformat()
-    inserted = 0
-    failures: list[tuple[str, str]] = []
+    payload: list[dict] = []
+    skipped: list[str] = []
     for idx, r in enumerate(strategies):
         sid = r.get("id") if isinstance(r, dict) else None
         if not isinstance(sid, str) or not sid:
-            failures.append((f"<row-{idx}>", f"missing/invalid 'id' in {r!r}"))
+            skipped.append(f"<row-{idx}>")
             print(
                 f"phase12_backfill_enqueue: WARNING — strategy row {idx} "
-                f"missing/invalid 'id' field: {r!r} (continuing)"
+                f"missing/invalid 'id' field: {r!r} (skipping)"
             )
             continue
+        payload.append(
+            {
+                "strategy_id": sid,
+                "kind": "compute_analytics",
+                "status": "pending",
+                "priority": "low",
+                "next_attempt_at": now_iso,
+                "metadata": {"phase": "12-backfill"},
+            }
+        )
+
+    # H-0596: ONE bulk INSERT instead of N serial round-trips (PostgREST
+    # accepts a list payload). H-0599 / H-0600: this single statement runs in
+    # one transaction, so a duplicate-guard race (parallel operator, or a
+    # worker re-enqueue between the pre-check and here) aborts the ENTIRE
+    # insert atomically via the partial unique index — never a split-brain
+    # half-enqueued batch. We narrow-catch that collision (23505) and report
+    # it cleanly, mirroring services/job_worker.py reconcile_strategy.
+    inserted = 0
+    raced = False
+    if payload:
         try:
             await db_execute(
-                lambda strategy_id=sid: supabase.table("compute_jobs").insert(
-                    {
-                        "strategy_id": strategy_id,
-                        "kind": "compute_analytics",
-                        "status": "pending",
-                        "priority": "low",
-                        "next_attempt_at": now_iso,
-                        "metadata": {"phase": "12-backfill"},
-                    }
-                ).execute()
+                lambda: supabase.table("compute_jobs").insert(payload).execute()
             )
-            inserted += 1
-        except Exception as exc:
-            failures.append((sid, repr(exc)))
-            print(
-                f"phase12_backfill_enqueue: WARNING — insert failed for strategy "
-                f"{sid}: {exc!r} (continuing)"
-            )
+            inserted = len(payload)
+        except Exception as exc:  # noqa: BLE001
+            code = getattr(exc, "code", None)
+            msg = str(exc)
+            if code == "23505" or "23505" in msg or "duplicate key" in msg.lower():
+                # The best-effort pre-check lost a race: another invocation or
+                # a worker already has an in-flight (strategy_id, kind) for a
+                # row in this batch. The whole INSERT rolled back atomically —
+                # zero rows enqueued, no partial state.
+                raced = True
+                print(
+                    "phase12_backfill_enqueue: ERROR — bulk insert hit the "
+                    "(strategy_id, kind) partial unique index (errcode 23505): "
+                    f"{exc!r}. A concurrent backfill/worker beat us; the batch "
+                    "rolled back atomically (0 enqueued). Re-run after the queue "
+                    "drains."
+                )
+            else:
+                # Any other failure (network, auth, malformed payload) is not a
+                # benign race — surface it loudly rather than swallow.
+                print(
+                    "phase12_backfill_enqueue: ERROR — bulk insert failed "
+                    f"({code}): {exc!r}. 0 enqueued (atomic rollback)."
+                )
 
     print(
         f"phase12_backfill_enqueue: enqueued {inserted}/{total} jobs. Throttle "
         f"(claim_compute_jobs_with_priority RPC, ~5/min when sync_trades queued) will pace."
     )
-    if failures:
+    if skipped:
         print(
-            f"phase12_backfill_enqueue: {len(failures)} per-row failures — "
-            f"see WARNING lines above"
+            f"phase12_backfill_enqueue: {len(skipped)} strategy rows skipped "
+            f"(missing/invalid id) — see WARNING lines above"
         )
+    # Non-zero exit when ANY row could not be enqueued: malformed rows skipped,
+    # a duplicate-guard race, or a bulk-insert error. inserted < len(payload)
+    # only happens on an atomic abort (inserted stays 0), so the union check is:
+    if skipped or raced or inserted != len(payload):
         return 1
     return 0
 

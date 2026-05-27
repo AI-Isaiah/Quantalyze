@@ -340,6 +340,45 @@ def compute_all_metrics(
     if len(returns) < 2:
         raise ValueError("Insufficient trade history. At least 2 trading days required.")
 
+    # Audit 2026-05-07 M-0693: fail-loud input-shape precondition (Rule 12).
+    # The body below assumes a DatetimeIndex (returns.index[-1].replace(day=1),
+    # .year, d.strftime in _daily_returns_grid_from_series / _format_series_points)
+    # and a float dtype (np.log1p in _log_returns_series, the resample/quantile
+    # paths). A plain RangeIndex or an int-dtype series previously failed DEEP
+    # inside a helper (TypeError swallowed by a per-scalar try/except, or silent
+    # truncation in np.log1p) — producing wrong output or a misattributed
+    # Railway log instead of a clear contract violation at the boundary. Check
+    # both at the top so the caller sees exactly which precondition was broken.
+    if not isinstance(returns.index, pd.DatetimeIndex):
+        raise TypeError(
+            "compute_all_metrics requires a DatetimeIndex on `returns`; got "
+            f"{type(returns.index).__name__}. The metrics pipeline indexes by "
+            "calendar date (mtd/ytd slices, monthly resample, per-date series)."
+        )
+    if not pd.api.types.is_float_dtype(returns):
+        raise TypeError(
+            "compute_all_metrics requires a float-dtype `returns` series; got "
+            f"dtype={returns.dtype}. Integer/object dtypes silently truncate in "
+            "np.log1p and the cumprod equity path — convert with "
+            "`returns.astype('float64')` at the ingestion boundary."
+        )
+    # F3 (red-team MED8): the body assumes the index is ASCENDING by date.
+    # mtd/ytd window construction reads `returns.index[-1]` as "most recent",
+    # and `tail(126)`/`tail(63)` (six_month/three_month) assume the LAST rows
+    # are the most recent. A descending or shuffled DatetimeIndex would pass the
+    # DatetimeIndex + float-dtype checks above yet silently produce wrong
+    # windows (e.g. mtd computed from the OLDEST month, three_month from the
+    # FIRST 63 days). Fail loud (Rule 12) so the caller fixes ordering at the
+    # ingestion boundary rather than shipping a mislabeled factsheet.
+    if not returns.index.is_monotonic_increasing:
+        raise ValueError(
+            "compute_all_metrics requires an ascending (monotonic-increasing) "
+            "DatetimeIndex on `returns`; the index is not sorted oldest-to-newest. "
+            "mtd/ytd slices and tail(126)/tail(63) windows assume the last rows "
+            "are the most recent — sort with `returns.sort_index()` at the "
+            "ingestion boundary."
+        )
+
     # Red-team F3: NaN in `returns` propagates through `cumprod` so one upstream
     # gap day silently truncates the equity curve at the gap (post-NaN rows
     # drop out at serialization). For chart-feeding paths, treat NaN as a
@@ -363,7 +402,17 @@ def compute_all_metrics(
             "(returns_len=%d). Equity curve may show sign flips — check upstream CSV.",
             catastrophic_count, len(returns),
         )
-    returns_for_chart = returns.fillna(0)
+    # F7 (red-team HIGH7): clamp the chart series' lower bound to _LOG_RETURN_FLOOR
+    # (= -1 + 1e-9) BEFORE the cumprod equity and to_drawdown_series. The log-
+    # returns chart already clamps in `_log_returns_series`, but the linear equity
+    # `(1+returns_for_chart).cumprod()` and `to_drawdown_series` only WARN above —
+    # an r <= -1 day produced a non-positive multiplier, giving a negative,
+    # sign-oscillating equity curve and a drawdown below -100%. Clamping here makes
+    # all three series (equity, drawdown, log-returns) treat a >=100%-loss day
+    # consistently: equity stays non-negative and drawdown is bounded at -1.0.
+    # No-op for normal data (every value > -1), so golden/parity fixtures are
+    # unaffected.
+    returns_for_chart = returns.fillna(0).clip(lower=_LOG_RETURN_FLOOR)
 
     # Core metrics (safe_float handles NaN/Inf from quantstats)
     # NEW-C02-05: cumulative_return scalar uses raw returns (NaN-dropped, same

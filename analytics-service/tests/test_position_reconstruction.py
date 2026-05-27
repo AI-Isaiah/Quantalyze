@@ -688,6 +688,58 @@ class TestReconstructPositions:
 
         assert result1 == result2
 
+    @pytest.mark.asyncio
+    async def test_return_pins_position_trade_metrics_contract_h0638(self) -> None:
+        """H-0638 regression: the producer must emit every key the consumer
+        (`analytics_runner._compute_derived_trade_metrics`) reads via `.get()`.
+
+        Pre-fix the return was an untyped `dict[str, Any]`; a renamed/typo'd
+        producer key silently yielded None downstream and corrupted JSONB.
+        PositionTradeMetrics(TypedDict) is annotation-only, so this asserts the
+        RUNTIME shape so a dropped/renamed key (the failure mode the typing
+        guards) is caught even though TypedDict is erased at runtime.
+        """
+        fills = [
+            {
+                "symbol": "BTCUSDT", "side": "buy", "price": 100.0,
+                "quantity": 1.0, "fee": 0.1,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT", "side": "sell", "price": 110.0,
+                "quantity": 1.0, "fee": 0.1,
+                "timestamp": "2024-01-02T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+        with patch(
+            "services.position_reconstruction.db_execute", side_effect=_run_sync
+        ):
+            result = await reconstruct_positions("strat-1", mock_supabase)
+
+        # Every key the consumer reads must be present (data_quality_flags is
+        # total=False — only present when non-empty, so excluded here).
+        required = {
+            "total_positions", "open_positions", "closed_positions",
+            "win_rate", "avg_roi", "capital_weighted_roi", "avg_duration_days",
+            "long_count", "short_count", "best_trade_roi", "worst_trade_roi",
+            "avg_winning_trade", "avg_losing_trade", "winners_count",
+            "losers_count", "realized_pnl_per_trade",
+        }
+        assert required.issubset(result.keys()), (
+            f"producer dropped keys: {required - set(result.keys())}"
+        )
+        # H-0639: each realized_pnl_per_trade entry pins the RealizedTrade
+        # (RealizedPnLRecord) element shape: side (long/short/None) + realized_pnl.
+        for rec in result["realized_pnl_per_trade"]:
+            assert set(rec.keys()) == {"side", "realized_pnl"}
+            assert rec["side"] in ("long", "short", None)
+            assert rec["realized_pnl"] is None or isinstance(
+                rec["realized_pnl"], float
+            )
+
 
 # ---------------------------------------------------------------------------
 # Helpers

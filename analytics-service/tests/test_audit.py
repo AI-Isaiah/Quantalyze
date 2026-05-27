@@ -613,3 +613,92 @@ class TestLogAuditEventConcurrency:
             f"transient counter lost updates: expected {total}, got "
             f"{audit_module.audit_emit_transient_failures_total}"
         )
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 H-0656 / H-0657 / M-0660 — the Python `AuditAction` /
+# `AuditEntityType` `Literal` unions in services/audit.py MUST stay in lockstep
+# with the canonical TS source of truth (`src/lib/audit.ts`). There is no mypy
+# gate on audit.py in CI, so the annotations alone have no runtime teeth — this
+# sync test is what makes the cross-service taxonomy contract enforceable. It
+# fails loudly the moment one side is edited without the other (the exact drift
+# the findings flag: a typo'd / out-of-taxonomy action silently writing garbage
+# to an append-only audit_log).
+# ---------------------------------------------------------------------------
+
+
+def _parse_ts_union(ts_source: str, type_name: str) -> set[str]:
+    """Extract the string-literal members of a TS `export type X = ... ;` union.
+
+    Parses the canonical `src/lib/audit.ts` without a TS toolchain: isolates the
+    `export type <type_name> =` declaration up to its terminating `;`, strips
+    `//` line comments (the union is heavily annotated), then collects every
+    double-quoted literal. Returns the set of member strings.
+    """
+    import re
+
+    decl_re = re.compile(
+        r"export\s+type\s+" + re.escape(type_name) + r"\s*=(.*?);",
+        re.DOTALL,
+    )
+    m = decl_re.search(ts_source)
+    if m is None:
+        raise AssertionError(
+            f"could not locate `export type {type_name}` in src/lib/audit.ts"
+        )
+    body = m.group(1)
+    # Drop `//` line comments so commented-out example values never leak in.
+    body = re.sub(r"//[^\n]*", "", body)
+    return set(re.findall(r'"([^"]+)"', body))
+
+
+class TestAuditTaxonomySyncWithTypeScript:
+    """The Python Literal vocabulary must equal the TS source-of-truth union."""
+
+    def _ts_source(self) -> str:
+        from pathlib import Path
+
+        ts_path = (
+            Path(__file__).resolve().parents[2] / "src" / "lib" / "audit.ts"
+        )
+        assert ts_path.exists(), (
+            f"canonical TS taxonomy not found at {ts_path}; the sync test "
+            "cannot verify the Python Literal unions against the source of truth"
+        )
+        return ts_path.read_text(encoding="utf-8")
+
+    def test_action_literal_matches_ts_union(self):
+        from typing import get_args
+
+        ts_actions = _parse_ts_union(self._ts_source(), "AuditAction")
+        py_actions = set(get_args(audit_module.AuditAction))
+
+        assert py_actions == ts_actions, (
+            "Python AuditAction Literal drifted from TS AuditAction union.\n"
+            f"  in TS only (add to services/audit.py): {sorted(ts_actions - py_actions)}\n"
+            f"  in Python only (add to src/lib/audit.ts or remove here): "
+            f"{sorted(py_actions - ts_actions)}"
+        )
+
+    def test_entity_type_literal_matches_ts_union(self):
+        from typing import get_args
+
+        ts_entities = _parse_ts_union(self._ts_source(), "AuditEntityType")
+        py_entities = set(get_args(audit_module.AuditEntityType))
+
+        assert py_entities == ts_entities, (
+            "Python AuditEntityType Literal drifted from TS AuditEntityType union.\n"
+            f"  in TS only (add to services/audit.py): {sorted(ts_entities - py_entities)}\n"
+            f"  in Python only (add to src/lib/audit.ts or remove here): "
+            f"{sorted(py_entities - ts_entities)}"
+        )
+
+    def test_taxonomy_is_non_trivially_populated(self):
+        """Guard against the parser silently returning empty sets (which would
+        make the equality assertions vacuously pass on a broken parse)."""
+        from typing import get_args
+
+        # Lower bounds, not exact counts — exactness is covered above. These
+        # only catch a regex/parse regression that returns {} on both sides.
+        assert len(get_args(audit_module.AuditAction)) >= 40
+        assert len(get_args(audit_module.AuditEntityType)) >= 20
