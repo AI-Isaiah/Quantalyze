@@ -545,9 +545,12 @@ def test_rolling_sortino_all_positive_window_no_inf_no_warning():
     uses np.where to set those windows to NaN explicitly so:
       (a) no RuntimeWarning is emitted to noisy logs / poison parity gates
       (b) the result list contains no ±Inf rows
-    The 'best' windows are still dropped — fixing the provenance (warmup vs
-    undefined-but-good) is H-0717, which requires a downstream UI contract
-    change and is out of scope here.
+    The 'best' windows are still dropped from the plotted value series (an
+    +∞ Sortino cannot be plotted on a finite ratio axis). H-0722 makes that
+    drop ATTRIBUTABLE via a WARNING (see
+    test_rolling_sortino_undefined_but_good_window_is_not_silently_dropped);
+    surfacing per-date provenance into the STORED payload remains H-0717
+    (DEFERRED-CROSSRUNTIME — Python+RPC+TS contract change).
     """
     dates = pd.bdate_range("2024-01-01", periods=120)
     # All returns strictly > 0 — every window has zero downside.
@@ -559,6 +562,74 @@ def test_rolling_sortino_all_positive_window_no_inf_no_warning():
     # And the result must not contain any Inf entries.
     for point in result:
         assert not math.isinf(point["value"])
+
+
+def test_rolling_sortino_undefined_but_good_window_is_not_silently_dropped(caplog):
+    """Audit 2026-05-07 H-0722: a warmed window with ZERO downside and a
+    POSITIVE mean return is Sortino → +∞ — the strategy's BULL signal, NOT
+    missing data. It cannot be plotted on a finite ratio axis, so it is
+    legitimately absent from the {date, value} series; but pre-fix that
+    absence was SILENT and indistinguishable from the leading window-warmup
+    rows. A chart punctured exactly at the strategy's best months would read
+    as "data unavailable" with zero operator signal.
+
+    WHY this matters (not just behavior): the published rolling-Sortino chart
+    inverts the strategy's quality narrative — gaps at the peaks, solid line
+    during mediocrity. The fix must make the omission ATTRIBUTABLE so an
+    operator can tell "upside-undefined" from "data loss". We assert the
+    helper emits a WARNING naming the undefined-but-good window count. This
+    test FAILS on the old code (np.where → NaN → silent dropna, no log).
+
+    Per-date provenance in the STORED payload remains DEFERRED-CROSSRUNTIME
+    (H-0717) — it needs a coordinated Python+RPC+TS contract change.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    # Strictly positive returns: every warmed window has zero downside AND a
+    # positive mean → the undefined-but-good (+∞) case.
+    returns = pd.Series(np.full(120, 0.005), index=dates, name="returns")
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = _rolling_sortino(returns, 63)
+
+    # The +∞ windows are (correctly) absent from the plotted value series:
+    # none survive as Inf, and for an all-positive series every warmed window
+    # is undefined-but-good so the series is empty.
+    for point in result:
+        assert not math.isinf(point["value"])
+
+    bull_records = [
+        r for r in caplog.records
+        if "undefined-but-good" in r.getMessage()
+        and r.levelno == logging.WARNING
+    ]
+    assert bull_records, (
+        "a zero-downside positive-mean (undefined-but-good, +Inf Sortino) "
+        "window must emit an attributable WARNING — its omission from the "
+        "chart is the BULL signal, not silent data loss (H-0722)"
+    )
+    # The message must name the window so operators can locate which sibling
+    # kind (rolling_sortino_3m=63 / 6m=126 / 12m=252) is punctured.
+    assert any("window=63" in r.getMessage() for r in bull_records)
+
+
+def test_rolling_sortino_flat_window_is_not_flagged_as_undefined_but_good(caplog):
+    """Audit 2026-05-07 H-0722 (negative case): an all-zero / flat window has
+    zero downside too, but its mean is NOT positive — the ratio is a genuine
+    0/0, undefined with NO upside meaning. It must NOT be counted as an
+    'undefined-but-good' bull window. This pins the discriminator (roll_mean > 0)
+    so the H-0722 signal does not misfire on flat/dead strategies, which would
+    re-create log poison on the very strategies that have no signal at all.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    returns = pd.Series(np.zeros(120), index=dates, name="returns")
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        _rolling_sortino(returns, 63)
+    bull_records = [
+        r for r in caplog.records if "undefined-but-good" in r.getMessage()
+    ]
+    assert not bull_records, (
+        "a flat (all-zero, 0/0) window is genuinely undefined with no upside "
+        "meaning and must NOT be flagged as undefined-but-good (H-0722)"
+    )
 
 
 def test_rolling_sortino_all_zero_window_no_inf():

@@ -840,21 +840,79 @@ async def _attribute_funding(
 
         # Round to 8 decimals (funding amounts are typically ≤ 6 places
         # but we keep headroom to avoid premature truncation).
-        pos["funding_pnl"] = float(round(total, 8))
+        pos["funding_pnl"] = _round_float(total, 8)
 
 
 # Audit-2026-05-07 PATTERN-2 / P1100: net-qty snap-to-zero scale factor.
 # After every reducing fill in `_match_positions_fifo` we collapse any
-# `|net_qty|` below `max(total_entry_qty * FLIP_EPS_FACTOR, 1e-9)` to an
-# exact zero. 1e-9 = "one part per billion" of the original position
-# size; below this we treat the residue as IEEE-754 dust rather than a
-# real open exposure. Without the snap, sub-ULP residuals accumulated
-# across many micro-fills cause the close-and-flip branch to fire
-# spuriously, producing zero-duration phantom positions whose entry and
-# exit prices both equal a fill price (impossible under normal FIFO
-# semantics). Full root-cause analysis:
-# `.planning/audit-2026-05-07/INVEST-PATTERN-2-POSITIONS.md`.
-FLIP_EPS_FACTOR = 1e-9
+# `|net_qty|` below `max(total_entry_qty * FLIP_EPS_FACTOR, MIN_QTY_DUST)`
+# to an exact zero. 1e-9 = "one part per billion" of the original position
+# size; below this we treat the residue as dust rather than a real open
+# exposure. Without the snap, sub-quantum residuals accumulated across many
+# micro-fills cause the close-and-flip branch to fire spuriously, producing
+# zero-duration phantom positions whose entry and exit prices both equal a
+# fill price (impossible under normal FIFO semantics). Full root-cause
+# analysis: `.planning/audit-2026-05-07/INVEST-PATTERN-2-POSITIONS.md`.
+#
+# Audit-2026-05-07 M-0717 / M-0718: the FIFO matcher now runs ALL monetary
+# and quantity arithmetic in `Decimal` (parsed from the trades table's
+# NUMERIC columns via `Decimal(str(...))`), serializing back to float only
+# at the output boundary in `position_dict` / `open_dict`. Two consequences:
+#   - The snap factor and absolute dust floor are Decimal so the proportional
+#     `total_entry_qty * FLIP_EPS_FACTOR` snap stays in exact arithmetic and
+#     never re-introduces float drift it was meant to absorb.
+#   - The bare close-detection used a hardcoded float epsilon `1e-12`
+#     (M-0718): wrong for memecoin-scale sizes (1e6 - 999999.9999999999
+#     routinely exceeds 1e-12) and for sub-satoshi BTC closes. With exact
+#     Decimal arithmetic a genuine close lands on EXACTLY `Decimal(0)`, so
+#     close detection is `net_qty == 0` (exact). The only residue that can
+#     survive is the proportional dust the snap above already collapses;
+#     `MIN_QTY_DUST` (1e-9 base units) remains the absolute floor for the
+#     snap, documented as "below the smallest exchange lot precision (1e-8)".
+FLIP_EPS_FACTOR = Decimal("1e-9")
+
+# Absolute lower floor for the proportional snap-to-zero above. 1e-9 base
+# units sits one order of magnitude below the smallest exchange lot
+# precision in use (Binance/OKX minQty ~1e-8), so a residue below it cannot
+# be a real fill remainder — it is accumulation dust. Change only if a base
+# asset adopts a tick finer than 1e-9.
+MIN_QTY_DUST = Decimal("1e-9")
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    """Parse a trades-table numeric (str/int/float/Decimal) to a finite
+    Decimal, or None when the value is missing or non-numeric.
+
+    The trades table columns (quantity, price, fee) are NUMERIC; PostgREST
+    returns them as JSON strings to preserve precision. Parsing via
+    `Decimal(str(value))` keeps that precision end-to-end through the FIFO
+    matcher (M-0717). A non-finite result (NaN/Inf, reachable if a parser
+    upstream stored 'NaN'/'Infinity') is rejected as None so it cannot
+    poison `total_entry_cost` — mirrors the `is_finite()` guard the
+    closed/open record paths already apply to `entry_avg`.
+    """
+    if value is None:
+        return None
+    try:
+        out = Decimal(str(value))
+    except (ArithmeticError, ValueError, TypeError):
+        return None
+    if not out.is_finite():
+        return None
+    return out
+
+
+def _round_float(value: Decimal, places: int) -> float:
+    """Round a Decimal money/qty field and return it as float for the OUTPUT
+    boundary. `round(Decimal, n)` quantizes within the active 28-digit decimal
+    context and raises InvalidOperation once the result needs more digits
+    (e.g. a >=1e20 value rounded to 8dp). The matcher runs in a bare per-symbol
+    loop, so that uncaught crash would take down the WHOLE reconstruction on
+    corrupt large-magnitude input that the prior float code tolerated
+    (red-team 2026-05-27). The serialized output is float regardless, so round
+    the float: identical for representable values, and float round never raises.
+    """
+    return round(float(value), places)
 
 
 # Phase 19 / MC-2 decision: leave private (underscore prefix preserved).
@@ -881,17 +939,23 @@ def _match_positions_fifo(
     are excluded from the returned list so corrupt input cannot pollute
     win_rate / avg_roi / expectancy as a fabricated flat trade.
     """
+    # Audit-2026-05-07 M-0717/M-0718: all monetary + quantity state is
+    # Decimal. Float accumulation of `total_entry_cost += price * qty` over
+    # thousands of fills drifts (the trades table is NUMERIC); Decimal keeps
+    # the running sums exact and makes the close-detection `net_qty == 0`
+    # exact rather than dependent on a float epsilon. Serialized to float
+    # only when building the output position dict.
     positions: list[dict] = []
-    net_qty = 0.0
+    net_qty = Decimal(0)
     entry_fills: list[dict] = []  # fills that opened the current position
-    total_entry_cost = 0.0
-    total_entry_qty = 0.0
-    peak_qty = 0.0  # track peak position size for size_peak column
+    total_entry_cost = Decimal(0)
+    total_entry_qty = Decimal(0)
+    peak_qty = Decimal(0)  # track peak position size for size_peak column
     # Audit-2026-05-07 G12.C.5: track exit VWAP across multi-fill closes.
     # Previously `exit_avg = price` of the last closing fill only.
-    total_exit_cost = 0.0
-    total_exit_qty = 0.0
-    total_fees = 0.0
+    total_exit_cost = Decimal(0)
+    total_exit_qty = Decimal(0)
+    total_fees = Decimal(0)
     position_side = None  # "long" or "short"
     position_open_time = None
     # Audit-2026-05-07 G12.C.4: per-position transient quality flags
@@ -901,9 +965,42 @@ def _match_positions_fifo(
 
     for fill in fills:
         side = fill.get("side", "").lower()
-        qty = float(fill.get("quantity", 0) or 0)
-        price = float(fill.get("price", 0) or 0)
-        fee = float(fill.get("fee", 0) or 0)
+        # Audit-2026-05-07 M-0717: parse the NUMERIC columns as Decimal
+        # (preserving the PostgREST string precision) instead of float. A
+        # missing value coerces to Decimal(0) — preserving the prior
+        # `float(... or 0)` behavior where a 0/None qty fill is skipped by the
+        # `qty <= 0` guard below, and a None price/fee contributes 0.
+        raw_qty = fill.get("quantity")
+        raw_price = fill.get("price")
+        raw_fee = fill.get("fee")
+        parsed_qty = _decimal_or_none(raw_qty)
+        parsed_price = _decimal_or_none(raw_price)
+        parsed_fee = _decimal_or_none(raw_fee)
+        # Specialist follow-up (pr-test-analyzer / silent-failure-hunter): the
+        # old `float(fill[...] or 0)` RAISED on a present-but-non-numeric value
+        # (e.g. quantity="abc"); the Decimal parse instead returns None and
+        # coerces to 0, which would silently drop a corrupt fill from the
+        # reconstruction. Surface a field that was PRESENT but unparseable via
+        # the same drop-and-count channel as `zero_entry_price_dropped`, so
+        # corrupt monetary input is visible rather than swallowed. A
+        # legitimately ABSENT field (raw is None) is not corruption — skip it.
+        if dropped_flags is not None:
+            malformed = sum(
+                1
+                for raw, parsed in (
+                    (raw_qty, parsed_qty),
+                    (raw_price, parsed_price),
+                    (raw_fee, parsed_fee),
+                )
+                if raw is not None and parsed is None
+            )
+            if malformed:
+                dropped_flags["malformed_fill_field_dropped"] = (
+                    dropped_flags.get("malformed_fill_field_dropped", 0) + malformed
+                )
+        qty = parsed_qty or Decimal(0)
+        price = parsed_price or Decimal(0)
+        fee = parsed_fee or Decimal(0)
 
         # Audit-2026-05-07 G12.C.4: whitelist `posSide` from the
         # exchange-supplied raw_data. Anything outside the known set is
@@ -924,8 +1021,15 @@ def _match_positions_fifo(
 
         total_fees += fee
 
-        # Determine if this fill opens or closes position
-        if abs(net_qty) < 1e-12:
+        # Determine if this fill opens or closes position.
+        # Audit-2026-05-07 M-0718: exact Decimal zero-test. The prior float
+        # `abs(net_qty) < 1e-12` was simultaneously too SMALL to absorb
+        # memecoin-scale residue (1e6 - 999999.9999999999 is ~1.16e-10, well
+        # above 1e-12, so it was NOT snapped -> phantom flip) yet large enough
+        # to wrongly snap away a genuine sub-satoshi position; with Decimal
+        # arithmetic a flat book is EXACTLY Decimal(0) (the close/flip branch
+        # below snaps any proportional dust to 0 too).
+        if net_qty == 0:
             # Opening a new position. Direction is derived from `side`
             # (buy → long, sell → short). posSide is treated as a HINT
             # only: if it disagrees with side, we PREFER side and flag
@@ -947,8 +1051,8 @@ def _match_positions_fifo(
             total_entry_cost = price * qty
             total_entry_qty = qty
             peak_qty = qty
-            total_exit_cost = 0.0
-            total_exit_qty = 0.0
+            total_exit_cost = Decimal(0)
+            total_exit_qty = Decimal(0)
             entry_fills = [fill]
             position_open_time = fill.get("timestamp")
             continue
@@ -956,7 +1060,7 @@ def _match_positions_fifo(
         # Existing position. Determine whether this fill is closing (or
         # partial-closing/overshooting) the current side and how much of
         # the fill quantity is allocated to the close vs. the next leg.
-        closing_qty = 0.0
+        closing_qty = Decimal(0)
         if position_side == "long":
             if side == "buy":
                 # Adding to long
@@ -968,21 +1072,22 @@ def _match_positions_fifo(
             else:
                 # Reducing/closing long: portion of qty that closes the
                 # current long is min(qty, current net long size).
-                closing_qty = min(qty, net_qty) if net_qty > 0 else 0.0
+                closing_qty = min(qty, net_qty) if net_qty > 0 else Decimal(0)
                 net_qty -= qty
-                # Audit-2026-05-07 PATTERN-2 / P1100: snap sub-ULP residuals
-                # to zero. Without this, a residue of +/-1e-15..1e-9 in
-                # net_qty (from cumulative IEEE-754 error across many
-                # micro-fills) causes the close branch below to fire
-                # incorrectly — opening a phantom flip leg with size ~ ULP
-                # and entry_price drawn from the very fill that was
-                # supposed to close cleanly. The phantom then re-flips on
-                # the next fill, producing zero-duration positions whose
-                # opened_at == closed_at. See
+                # Audit-2026-05-07 PATTERN-2 / P1100: snap proportional dust
+                # to zero. Exact Decimal arithmetic removes the IEEE-754 ULP
+                # residue the float path accumulated, but a tiny PROPORTIONAL
+                # remainder (e.g. an exchange reporting a close fill rounded
+                # to fewer places than the opening fills) can still leave
+                # |net_qty| a few dust units shy of zero; without the snap
+                # the close branch below would open a phantom flip leg with
+                # size ~dust whose entry_price is drawn from the very fill
+                # that was supposed to close cleanly, producing zero-duration
+                # positions whose opened_at == closed_at. See
                 # .planning/audit-2026-05-07/INVEST-PATTERN-2-POSITIONS.md.
-                flip_eps = max(total_entry_qty * FLIP_EPS_FACTOR, 1e-9)
+                flip_eps = max(total_entry_qty * FLIP_EPS_FACTOR, MIN_QTY_DUST)
                 if abs(net_qty) < flip_eps:
-                    net_qty = 0.0
+                    net_qty = Decimal(0)
         elif position_side == "short":
             if side == "sell":
                 # Adding to short
@@ -993,14 +1098,14 @@ def _match_positions_fifo(
                 entry_fills.append(fill)
             else:
                 # Reducing/closing short
-                closing_qty = min(qty, -net_qty) if net_qty < 0 else 0.0
+                closing_qty = min(qty, -net_qty) if net_qty < 0 else Decimal(0)
                 net_qty += qty
                 # Audit-2026-05-07 PATTERN-2 / P1100: see snap-to-zero note
                 # above (the long-reducing branch). Same rationale applied
                 # symmetrically when buys close a short.
-                flip_eps = max(total_entry_qty * FLIP_EPS_FACTOR, 1e-9)
+                flip_eps = max(total_entry_qty * FLIP_EPS_FACTOR, MIN_QTY_DUST)
                 if abs(net_qty) < flip_eps:
-                    net_qty = 0.0
+                    net_qty = Decimal(0)
 
         # Audit-2026-05-07 G12.C.5: accumulate VWAP exit across all
         # closing fills (partial reductions PLUS the final closing fill).
@@ -1027,15 +1132,26 @@ def _match_positions_fifo(
             #   closing_qty = size that closed the prior side
             #   opening_qty = size that opens the new (flipped) side
             #   ratio = closing_qty / qty
+            # Audit-2026-05-07 M-0718: exact Decimal overshoot test. The dust
+            # snap above already collapsed any proportional remainder to
+            # Decimal(0), so a non-zero remainder here is a genuine flip leg.
             remainder = abs(net_qty)
-            opening_qty = remainder if remainder > 1e-12 else 0.0
-            opening_share = 0.0
+            opening_qty = remainder if remainder > 0 else Decimal(0)
+            opening_share = Decimal(0)
             if opening_qty > 0 and qty > 0 and fee > 0:
                 opening_share = (opening_qty / qty) * fee
                 # Subtract from the closed leg's fee total.
                 total_fees -= opening_share
 
-            entry_avg = total_entry_cost / total_entry_qty if total_entry_qty > 0 else 0
+            # Audit-2026-05-07 H-0735/H-0740/M-0717: entry/exit VWAP and the
+            # realized_pnl below are all Decimal — no float drift creeps in
+            # between the fills and the funding combination in
+            # `_attribute_funding`. Serialized to float at the output dict.
+            entry_avg = (
+                total_entry_cost / total_entry_qty
+                if total_entry_qty > 0
+                else Decimal(0)
+            )
             # Audit G12.C.5: VWAP across the position's closing fills.
             # Fall back to the last fill's price only if (defensively)
             # no closing volume was tracked — should not happen in
@@ -1054,7 +1170,7 @@ def _match_positions_fifo(
             # negative net). The new formula tracks realized_pnl / notional;
             # winners/losers stays aligned with positive/negative net P&L.
             notional = entry_avg * total_entry_qty
-            roi = realized_pnl / notional if notional > 0 else 0
+            roi = realized_pnl / notional if notional > 0 else Decimal(0)
 
             # Sub-day-aware duration. The DB column is NUMERIC (migration
             # 092) so fractional days express positions held for hours
@@ -1117,8 +1233,11 @@ def _match_positions_fifo(
             # `zero_entry_price_dropped` counter via `dropped_flags`, so the
             # corruption is not silent — the same drop-and-count pattern used
             # for `fills_dropped_no_symbol`. (review-5: the non-finite check
-            # mirrors the H-0769 math.isfinite guard — `Inf <= 0` is False.)
-            if not math.isfinite(entry_avg) or entry_avg <= 0:
+            # mirrors the H-0769 guard — `Inf <= 0` is False. entry_avg is
+            # Decimal here, so use Decimal.is_finite() — `Decimal('NaN') <= 0`
+            # RAISES InvalidOperation, unlike float NaN comparisons, so the
+            # finiteness check MUST short-circuit before the `<= 0`.)
+            if not entry_avg.is_finite() or entry_avg <= 0:
                 if dropped_flags is not None:
                     dropped_flags["zero_entry_price_dropped"] = (
                         dropped_flags.get("zero_entry_price_dropped", 0) + 1
@@ -1130,18 +1249,27 @@ def _match_positions_fifo(
                     total_entry_qty,
                 )
             else:
+                # Audit-2026-05-07 H-0735/H-0740/M-0717: serialize the Decimal
+                # money/quantity state to float at the OUTPUT boundary (same
+                # form the RPC payload + TS frontend + equity_reconstruction
+                # already consume — JSON cannot encode Decimal). The arithmetic
+                # above stayed in Decimal so the running cost/qty sums and the
+                # round-to-persisted-precision here are exact (no float drift
+                # across thousands of fills); the realized_pnl and funding_pnl
+                # halves are later combined in pandas float64 by the equity
+                # reconstructor, by which point both are already float.
                 position_dict: dict[str, Any] = {
                     "strategy_id": strategy_id,
                     "symbol": symbol,
                     "side": position_side,
                     "status": "closed",
-                    "entry_price_avg": round(entry_avg, 8),
-                    "exit_price_avg": round(exit_avg, 8),
-                    "size_base": round(total_entry_qty, 8),
-                    "size_peak": round(peak_qty, 8),
-                    "realized_pnl": round(realized_pnl, 4),
-                    "fee_total": round(total_fees, 4),
-                    "roi": round(roi, 6),
+                    "entry_price_avg": _round_float(entry_avg, 8),
+                    "exit_price_avg": _round_float(exit_avg, 8),
+                    "size_base": _round_float(total_entry_qty, 8),
+                    "size_peak": _round_float(peak_qty, 8),
+                    "realized_pnl": _round_float(realized_pnl, 4),
+                    "fee_total": _round_float(total_fees, 4),
+                    "roi": _round_float(roi, 6),
                     "duration_days": duration_days,
                     "duration_seconds": duration_seconds,
                     "opened_at": position_open_time,
@@ -1154,8 +1282,11 @@ def _match_positions_fifo(
                     position_dict["data_quality_flags"] = dict(position_quality_flags)
                 positions.append(position_dict)
 
-            # If overshot (net != 0), start a new position with remainder
-            if remainder > 1e-12:
+            # If overshot (net != 0), start a new position with remainder.
+            # Audit-2026-05-07 M-0718: exact Decimal — the dust snap above
+            # already zeroed any proportional residue, so `remainder > 0`
+            # cleanly distinguishes a real flip from a clean close.
+            if remainder > 0:
                 # Flip direction
                 if position_side == "long":
                     position_side = "short"
@@ -1171,32 +1302,37 @@ def _match_positions_fifo(
                 # opening share of the flip-fill's fee. The closed-leg
                 # fee_total already had this subtracted above.
                 total_fees = opening_share
-                total_exit_cost = 0.0
-                total_exit_qty = 0.0
+                total_exit_cost = Decimal(0)
+                total_exit_qty = Decimal(0)
                 position_open_time = fill.get("timestamp")
                 # Reset per-position quality flags for the new leg.
                 position_quality_flags = {}
             else:
-                net_qty = 0.0
-                total_entry_cost = 0.0
-                total_entry_qty = 0.0
-                peak_qty = 0.0
-                total_exit_cost = 0.0
-                total_exit_qty = 0.0
+                net_qty = Decimal(0)
+                total_entry_cost = Decimal(0)
+                total_entry_qty = Decimal(0)
+                peak_qty = Decimal(0)
+                total_exit_cost = Decimal(0)
+                total_exit_qty = Decimal(0)
                 entry_fills = []
-                total_fees = 0.0
+                total_fees = Decimal(0)
                 position_side = None
                 position_open_time = None
                 position_quality_flags = {}
 
-    # Record any open position
-    if abs(net_qty) > 1e-12 and position_side and total_entry_qty > 0:
+    # Record any open position.
+    # Audit-2026-05-07 M-0718: exact Decimal residual test (`> 0`) replaces
+    # the float epsilon — the dust snap inside the loop already zeroed any
+    # IEEE-754/proportional residue, so a surviving net_qty is a real open.
+    if abs(net_qty) > 0 and position_side and total_entry_qty > 0:
         entry_avg = total_entry_cost / total_entry_qty
         # review-5: same corrupt-input guard as the closed path above. A zero /
         # negative / non-finite entry on an OPEN position would persist
         # entry_price_avg=0 and feed a fabricated unrealized_pnl (mark*qty) to
         # the equity reconstructor. Drop + count it instead of recording it.
-        if not math.isfinite(entry_avg) or entry_avg <= 0:
+        # (entry_avg is Decimal — is_finite() must short-circuit before
+        # `<= 0`, which RAISES on Decimal('NaN').)
+        if not entry_avg.is_finite() or entry_avg <= 0:
             if dropped_flags is not None:
                 dropped_flags["zero_entry_price_dropped"] = (
                     dropped_flags.get("zero_entry_price_dropped", 0) + 1
@@ -1207,17 +1343,18 @@ def _match_positions_fifo(
                 strategy_id, symbol, position_side, total_entry_qty,
             )
         else:
+            # Audit-2026-05-07 M-0717: serialize Decimal → float at boundary.
             open_dict: dict[str, Any] = {
                 "strategy_id": strategy_id,
                 "symbol": symbol,
                 "side": position_side,
                 "status": "open",
-                "entry_price_avg": round(entry_avg, 8),
+                "entry_price_avg": _round_float(entry_avg, 8),
                 "exit_price_avg": None,
-                "size_base": round(total_entry_qty, 8),
-                "size_peak": round(peak_qty, 8),
+                "size_base": _round_float(total_entry_qty, 8),
+                "size_peak": _round_float(peak_qty, 8),
                 "realized_pnl": None,
-                "fee_total": round(total_fees, 4),
+                "fee_total": _round_float(total_fees, 4),
                 "roi": None,
                 "duration_days": None,
                 # Audit G12.C.9: also write duration_seconds (NULL while open).
@@ -1451,6 +1588,14 @@ def compute_turnover_series_with_flags(
                         nav_by_date (turnover emitted as None).
                       'turnover_nav_invalid_dates': dates whose NAV row
                         is present but <= 0 (turnover emitted as 0.0).
+                      'turnover_missing_price_dates': dates where a symbol
+                        with a non-zero position delta had no price in
+                        prices_by_date — its contribution was silently
+                        treated as $0, UNDER-stating that day's turnover
+                        (Audit-2026-05-07 M-0711). The math still runs (the
+                        row is emitted) but the flag makes the price-feed
+                        gap explicit instead of indistinguishable from a
+                        genuinely low-turnover day.
 
     Audit-2026-05-07 H-0744: previously a missing NAV row defaulted to
     0.0 and short-circuited to turnover=0.0, collapsing three distinct
@@ -1474,6 +1619,11 @@ def compute_turnover_series_with_flags(
     gap_dates: list[str] = []
     nav_missing_dates: list[str] = []
     nav_invalid_dates: list[str] = []
+    # Audit-2026-05-07 M-0711: dates where a symbol with a non-zero position
+    # delta had no price — its turnover contribution was silently zeroed,
+    # under-stating the day. Recorded once per date (deduped) so the flag
+    # counts affected DATES, consistent with the other turnover flag lists.
+    missing_price_dates: list[str] = []
     # Audit H-0741: rows the type-validation guard dropped (non-dict
     # positions / prices payload, or scalar values that can't coerce
     # to float). Pre-fix the entire date was silently dropped mid-loop
@@ -1584,10 +1734,25 @@ def compute_turnover_series_with_flags(
 
         total_change_usd = 0.0
         symbols = set(positions.keys()) | set(prev_positions.keys())
+        date_has_missing_price = False
         for sym in symbols:
             delta = positions.get(sym, 0.0) - prev_positions.get(sym, 0.0)
-            price = prices.get(sym, 0.0)
+            # Audit-2026-05-07 M-0711: a symbol absent from `prices` defaults
+            # to 0.0, contributing $0 to turnover. When that symbol ALSO moved
+            # (delta != 0) the day's turnover is silently UNDER-stated — a
+            # price-feed gap indistinguishable from a quiet day. Flag the date
+            # (the math still runs so consumers can decide to drop/smooth it).
+            # A delta of 0 needs no price, so a missing price there is benign
+            # and not flagged.
+            if sym not in prices:
+                if delta != 0.0:
+                    date_has_missing_price = True
+                price = 0.0
+            else:
+                price = prices[sym]
             total_change_usd += abs(delta * price)
+        if date_has_missing_price:
+            missing_price_dates.append(date)
         series.append({"date": date, "turnover": round(total_change_usd / nav, 6)})
         prev_positions = positions
         if current_date_parsed is not None:
@@ -1601,6 +1766,9 @@ def compute_turnover_series_with_flags(
     _emit_capped_flag_list(flags, "turnover_nav_invalid_dates", nav_invalid_dates)
     _emit_capped_flag_list(flags, "turnover_gap_dates", gap_dates)
     _emit_capped_flag_list(flags, "turnover_series_dropped_dates", dropped_dates)
+    # Audit-2026-05-07 M-0711: surface under-counted-turnover dates (missing
+    # price for a moved symbol). Same capped-list convention as the siblings.
+    _emit_capped_flag_list(flags, "turnover_missing_price_dates", missing_price_dates)
     return series, flags
 
 

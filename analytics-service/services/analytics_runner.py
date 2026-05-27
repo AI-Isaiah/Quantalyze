@@ -228,6 +228,20 @@ async def _load_position_time_series(
     positions_by_date: dict[str, dict[str, float]] = {}
     prices_by_date: dict[str, dict[str, float]] = {}
 
+    # Audit-2026-05-07 M-0654: a malformed `size_usd` was silently coerced to
+    # 0.0 and then dropped by the zero-tolerance skip below — corrupting the
+    # turnover/exposure grids by, e.g., 5% with NO operator signal if a
+    # migration left non-numeric values on a fraction of rows. Same for a
+    # non-numeric `mark_price` (silently skipped). Count both and emit a
+    # logger.warning, mirroring the counter+warning convention already used by
+    # the sibling fill helpers (`_compute_volume_metrics`,
+    # `_compute_volume_aggregator`, `_compute_trade_mix`,
+    # `_compute_position_side_volume_pcts`). NaN/Inf parse without raising, so
+    # guard `isfinite` too — a NaN size_usd would otherwise pass the tolerance
+    # check (abs(nan) < tol is False) and poison `signed` / max_gross_exposure.
+    size_usd_parse_failed = 0
+    mark_price_parse_failed = 0
+
     for snap in snapshots:
         d = snap.get("snapshot_date")
         sym = snap.get("symbol")
@@ -236,23 +250,58 @@ async def _load_position_time_series(
         mark_raw = snap.get("mark_price")
         if not d or not sym:
             continue
+        size_malformed = False
         try:
             size_usd = float(size_raw) if size_raw is not None else 0.0
+            if not math.isfinite(size_usd):
+                size_usd = 0.0
+                size_malformed = size_raw is not None
         except (TypeError, ValueError):
             size_usd = 0.0
+            size_malformed = True
+        if size_malformed:
+            size_usd_parse_failed += 1
         # Skip flat or near-zero-size rows (per migration 034 comment they're
         # usually not stored, but defensive). H-0644 / H-0654 motivates the
-        # tolerance — see POSITION_SIZE_ZERO_TOLERANCE_USD docstring.
+        # tolerance — see POSITION_SIZE_ZERO_TOLERANCE_USD docstring. A
+        # malformed size_usd lands here too (coerced to 0.0) — already counted
+        # above so the drop is observable, not silent (M-0654).
         if side == "flat" or abs(size_usd) < POSITION_SIZE_ZERO_TOLERANCE_USD:
             continue
         signed = size_usd if side == "long" else -size_usd
         positions_by_date.setdefault(d, {})[sym] = signed
         if mark_raw is not None:
             try:
-                prices_by_date.setdefault(d, {})[sym] = float(mark_raw)
+                mark_val = float(mark_raw)
+                if math.isfinite(mark_val):
+                    prices_by_date.setdefault(d, {})[sym] = mark_val
+                else:
+                    # Don't poison prices_by_date with NaN/Inf marks, but
+                    # count the drop (M-0654) so it isn't silent.
+                    mark_price_parse_failed += 1
             except (TypeError, ValueError):
-                # Don't poison prices_by_date with NaN/non-numeric marks.
-                pass
+                # Don't poison prices_by_date with non-numeric marks; count
+                # the drop (M-0654) instead of swallowing it silently.
+                mark_price_parse_failed += 1
+
+    # M-0654: surface malformed-row counts the same way the fill helpers do —
+    # a counter + a single warning per run. Silent 0.0 coercion of monetary
+    # snapshot fields previously degraded the turnover/exposure panels with no
+    # operator-visible signal.
+    if size_usd_parse_failed > 0:
+        logger.warning(
+            "_load_position_time_series: %d snapshot row(s) had non-numeric or "
+            "non-finite size_usd (coerced to 0 and dropped); turnover/exposure "
+            "grids may be understated for strategy %s.",
+            size_usd_parse_failed, strategy_id,
+        )
+    if mark_price_parse_failed > 0:
+        logger.warning(
+            "_load_position_time_series: %d snapshot row(s) had non-numeric or "
+            "non-finite mark_price (price omitted); turnover ratios for those "
+            "symbol-dates may be unavailable for strategy %s.",
+            mark_price_parse_failed, strategy_id,
+        )
 
     # Build nav_by_date. Audit-2026-05-07 C-0221 + H-0636: NEVER write
     # `float(account_balance)` here — that leaks the raw tenant USDT balance
@@ -669,6 +718,14 @@ def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
     monthly: dict[str, float] = defaultdict(float)
     ts_skipped = 0
 
+    # Audit-2026-05-07 M-0645: `mean_trade_size_usd` must average over fills
+    # that carry a REAL notional, not over every row. raw_fills includes
+    # zero-notional rows (orders placed but never filled, cancelled, or
+    # malformed-coerced-to-0) — dividing gross_volume by len(fills) silently
+    # shrinks the mean toward zero in proportion to how many dead rows exist.
+    # Count fills with notional > 0 and use that as the denominator instead.
+    nonzero_notional_count = 0
+
     notional_parse_failed = 0
     for f in fills:
         raw_notional = f.get("notional_usd", 0.0)
@@ -685,6 +742,8 @@ def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
             notional = 0.0
             notional_parse_failed += 1
         gross_volume += notional
+        if notional > 0:
+            nonzero_notional_count += 1
 
         ts = f.get("filled_at") or f.get("created_at") or ""
         if not ts or len(ts) < 10:
@@ -696,7 +755,10 @@ def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
         monthly[month] += notional
 
     n = len(fills)
-    mean_size = gross_volume / n if n else 0.0
+    # M-0645: divide by the count of fills with a real (> 0) notional so
+    # zero-notional rows don't dilute the mean. Guard divide-by-zero — an
+    # all-zero-notional fill set yields mean 0.0 (no real trades to average).
+    mean_size = gross_volume / nonzero_notional_count if nonzero_notional_count else 0.0
     daily_avg = sum(daily.values()) / len(daily) if daily else 0.0
     monthly_avg = sum(monthly.values()) / len(monthly) if monthly else 0.0
 

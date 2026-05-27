@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.9.28] - 2026-05-27
+### Fixed — analytics-service numeric precision (float→Decimal money math) + correctness guards (audit-2026-05-07 batch 4)
+- **position_reconstruction** (`_match_positions_fifo`): money/quantity arithmetic is now `Decimal` end-to-end, so fills accumulate exactly and `realized_pnl` round-trips without float drift across thousands of fills (H-0735/H-0740/M-0717). Position close-detection uses exact `Decimal(0)` plus a proportional dust-snap, replacing the hardcoded `1e-12` float epsilon (which was too small to absorb memecoin-scale residue yet large enough to snap away a real sub-satoshi position) (M-0718). A `_round_float` output-boundary helper rounds the float rather than the Decimal, so a large-magnitude (>=1e20) corrupt value can no longer raise `decimal.InvalidOperation` and crash the whole per-symbol reconstruction — a regression the prior float code tolerated, caught by red-team. Present-but-unparseable monetary fields are surfaced via a `malformed_fill_field_dropped` counter instead of silent coercion to 0; `compute_turnover_series` flags missing-price / non-positive-NAV dates instead of silently emitting turnover=0 (M-0711).
+- **analytics_runner**: `mean_trade_size_usd` divides by the nonzero-notional fill count so cancelled/zero-notional rows no longer dilute the mean (M-0645); malformed `size_usd`/`mark_price` are counted + warned rather than silently coerced to 0.0 (M-0654).
+- **metrics**: a warmed rolling-Sortino window with zero downside and positive mean now emits an attributable warning instead of being silently dropped by `_finalize_rolling` (H-0722).
+- Reviewed by 6 specialists + Claude red team + comment/simplify de-slop; 12 regression tests added (exact-decimal precision, data-quality flag set/not-set, large-magnitude no-crash, malformed-field surfaced). Full analytics suite: 2203 passed. Six findings re-verified STALE (already fixed by landed batches); 3 deferred as cross-runtime/migration (H-0640/H-0717/H-0669 — Decimal would break the httpx-JSON persist seam or the pinned TS {date,value} chart contract).
+
+
 ## [0.24.9.27] - 2026-05-27
 ### Fixed — Unified-backbone CSV pipeline 500 on every new upload (prod-down)
 - `analytics-service` `routers/process_key.py` idempotency pre-check did `if existing.data:` on the result of `.maybe_single().execute()`. PostgREST returns **None** (not a response with `data=None`) when zero rows match — the normal case for a brand-new `wizard_session_id` — so the pre-check raised `AttributeError: 'NoneType' object has no attribute 'data'` and returned **500 for every first-time CSV upload** once the unified-backbone flag was flipped on (Plan 08). Guard `existing is not None` so an absent row falls through to the normal insert path.

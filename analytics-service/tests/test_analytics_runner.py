@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import math
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -4018,6 +4019,202 @@ class TestLoadPositionTimeSeriesNavSafety:
         assert positions["2024-01-15"]["BTCUSDT"] == 10000.0
         assert "BTCUSDT" not in prices.get("2024-01-15", {})
 
+    @pytest.mark.asyncio
+    async def test_malformed_size_usd_is_surfaced_not_silently_dropped(
+        self, caplog,
+    ) -> None:
+        """Audit-2026-05-07 M-0654: a non-numeric `size_usd` was silently
+        coerced to 0.0 and then dropped by the zero-tolerance skip — corrupting
+        the turnover/exposure grids with NO operator signal.
+
+        WHY this matters: a migration / connector bug that leaves, say, 5% of
+        snapshot rows with non-numeric size_usd would silently shrink the
+        position grid by 5% and degrade every panel built on it (turnover,
+        exposure) with nothing in the logs to point an operator at the cause.
+        The fix must (a) still drop the corrupt row from the grid (it has no
+        usable size) but (b) emit a counted warning so the drop is observable —
+        mirroring the counter+warning convention the sibling fill helpers use.
+
+        Pin BOTH halves: the good row survives, the corrupt row is absent, AND
+        a warning naming the count fires. The OLD behavior emitted no log.
+        """
+        from services.analytics_runner import _load_position_time_series
+
+        snapshot_rows = [
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "size_usd": "10000",
+                "mark_price": "65000",
+            },
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "ETHUSDT",
+                "side": "long",
+                "size_usd": "NOT_A_NUMBER",  # corrupt — was silently → 0.0 → dropped
+                "mark_price": "3500",
+            },
+        ]
+        mock_supabase = MagicMock()
+        t = MagicMock()
+        sel = MagicMock()
+        eq = MagicMock()
+        order = MagicMock()
+        order.execute.return_value = MagicMock(data=snapshot_rows)
+        order.range = _make_paged_range(snapshot_rows)
+        order.order.return_value = order
+        eq.order = MagicMock(return_value=order)
+        sel.eq.return_value = eq
+        t.select.return_value = sel
+        mock_supabase.table.return_value = t
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with caplog.at_level(
+            logging.WARNING, logger="quantalyze.analytics.runner"
+        ), patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ):
+            positions, prices, _ = await _load_position_time_series(
+                "strat-test", mock_supabase
+            )
+
+        # Good row survives; corrupt row is dropped from BOTH grids (it has no
+        # usable signed size — keeping it would poison the turnover delta).
+        assert positions["2024-01-15"]["BTCUSDT"] == 10000.0
+        assert "ETHUSDT" not in positions.get("2024-01-15", {})
+        assert "ETHUSDT" not in prices.get("2024-01-15", {})
+        # The drop is SURFACED, not silent — a warning naming size_usd fires.
+        # This is the assertion that fails on the OLD silent-coerce behavior.
+        size_warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "size_usd" in r.getMessage()
+        ]
+        assert size_warnings, (
+            "a non-numeric size_usd must emit a counted warning (M-0654), "
+            f"not be silently coerced to 0.0; caplog={[r.getMessage() for r in caplog.records]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_malformed_mark_price_is_surfaced_not_silently_dropped(
+        self, caplog,
+    ) -> None:
+        """Audit-2026-05-07 M-0654 (mark_price half): a non-numeric mark_price
+        was silently `pass`-ed, omitting the price with no signal. The position
+        survives (size is fine) but the turnover ratio for that symbol-date is
+        unavailable — and an operator had no way to know why. Assert the omission
+        is now counted + warned, while the position grid is unaffected."""
+        from services.analytics_runner import _load_position_time_series
+
+        snapshot_rows = [
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "size_usd": "10000",
+                "mark_price": "garbage",  # non-numeric → price omitted
+            },
+        ]
+        mock_supabase = MagicMock()
+        t = MagicMock()
+        sel = MagicMock()
+        eq = MagicMock()
+        order = MagicMock()
+        order.execute.return_value = MagicMock(data=snapshot_rows)
+        order.range = _make_paged_range(snapshot_rows)
+        order.order.return_value = order
+        eq.order = MagicMock(return_value=order)
+        sel.eq.return_value = eq
+        t.select.return_value = sel
+        mock_supabase.table.return_value = t
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with caplog.at_level(
+            logging.WARNING, logger="quantalyze.analytics.runner"
+        ), patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ):
+            positions, prices, _ = await _load_position_time_series(
+                "strat-test", mock_supabase
+            )
+
+        # Position kept (size is valid), price omitted — unchanged behavior.
+        assert positions["2024-01-15"]["BTCUSDT"] == 10000.0
+        assert "BTCUSDT" not in prices.get("2024-01-15", {})
+        # But the omission is now SURFACED via a counted warning (M-0654).
+        mark_warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "mark_price" in r.getMessage()
+        ]
+        assert mark_warnings, (
+            "a non-numeric mark_price must emit a counted warning (M-0654), "
+            f"not silently pass; caplog={[r.getMessage() for r in caplog.records]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_clean_snapshots_emit_no_data_quality_warnings(
+        self, caplog,
+    ) -> None:
+        """M-0654 false-positive guard: a clean snapshot set must NOT emit the
+        malformed-size_usd / malformed-mark_price warnings. Otherwise every
+        normal run would log noise and operators couldn't distinguish a real
+        data-quality issue from background spam (the same reasoning the sibling
+        helpers' counter+warning gate on `> 0`)."""
+        from services.analytics_runner import _load_position_time_series
+
+        snapshot_rows = [
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "size_usd": "10000",
+                "mark_price": "65000",
+            },
+            {
+                "snapshot_date": "2024-01-16",
+                "symbol": "ETHUSDT",
+                "side": "short",
+                "size_usd": "5000",
+                "mark_price": "3500",
+            },
+        ]
+        mock_supabase = MagicMock()
+        t = MagicMock()
+        sel = MagicMock()
+        eq = MagicMock()
+        order = MagicMock()
+        order.execute.return_value = MagicMock(data=snapshot_rows)
+        order.range = _make_paged_range(snapshot_rows)
+        order.order.return_value = order
+        eq.order = MagicMock(return_value=order)
+        sel.eq.return_value = eq
+        t.select.return_value = sel
+        mock_supabase.table.return_value = t
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with caplog.at_level(
+            logging.WARNING, logger="quantalyze.analytics.runner"
+        ), patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ):
+            await _load_position_time_series("strat-test", mock_supabase)
+
+        dq_warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and ("size_usd" in r.getMessage() or "mark_price" in r.getMessage())
+        ]
+        assert not dq_warnings, (
+            "clean snapshots must not emit malformed-field warnings (M-0654 "
+            f"gates on count > 0); got {[r.getMessage() for r in dq_warnings]}"
+        )
+
     # Phase B pr-test-analyzer F7: `_load_position_time_series` declares
     # `except PaginatedSelectTruncated: raise` to fail loud. The runner has
     # a broad `except Exception` immediately after; a reorder regression
@@ -4286,6 +4483,77 @@ def test_volume_aggregator_single_pass_gross_matches_turnover_subset(sample_fill
     assert result["gross_volume_usd"] == pytest.approx(expected_gross), (
         "gross_volume_usd must equal sum of all notionals after single-pass "
         "refactor (NEW-C02-10)"
+    )
+
+
+def test_volume_aggregator_mean_excludes_zero_notional_fills():
+    """Audit-2026-05-07 M-0645: `mean_trade_size_usd` must average over fills
+    that carry a real (> 0) notional, NOT over every row.
+
+    WHY this matters: raw_fills includes zero-notional rows (orders placed but
+    never filled, cancelled, partial-fill edge cases, or malformed-coerced-to-0).
+    The old code divided gross_volume by len(fills), so those dead rows silently
+    dragged the published mean toward zero in proportion to how many existed —
+    an allocator reading `mean_trade_size_usd` would see a number diluted by
+    activity that never moved size. The denominator must be the count of fills
+    with notional > 0.
+
+    Construct a set where exactly half the fills have zero notional. The mean
+    over the real fills is 1000.0; the OLD (broken) per-row mean would be 500.0.
+    Pinning 1000.0 fails loudly on a regression to `gross / len(fills)`.
+    """
+    from services.analytics_runner import _compute_volume_aggregator
+
+    fills = [
+        {"notional_usd": 1000.0, "filled_at": "2024-01-15T10:00:00+00:00"},
+        {"notional_usd": 0.0, "filled_at": "2024-01-15T11:00:00+00:00"},   # never filled
+        {"notional_usd": 1000.0, "filled_at": "2024-01-16T10:00:00+00:00"},
+        {"notional_usd": 0.0, "filled_at": "2024-01-16T11:00:00+00:00"},   # cancelled
+    ]
+    result = _compute_volume_aggregator(fills)
+    # gross is unchanged — zero-notional rows add nothing to the sum.
+    assert result["gross_volume_usd"] == pytest.approx(2000.0)
+    # mean averages over the 2 fills with a real notional (2000/2), NOT 2000/4.
+    assert result["mean_trade_size_usd"] == pytest.approx(1000.0), (
+        "mean_trade_size_usd must divide gross_volume by the count of fills "
+        "with notional > 0 (M-0645); dividing by len(fills) would yield 500.0 "
+        f"and dilute the mean. got {result['mean_trade_size_usd']}"
+    )
+
+
+def test_volume_aggregator_mean_zero_when_all_notional_zero():
+    """M-0645 divide-by-zero guard: a fill set where every notional is 0 (all
+    cancelled / never filled) must yield mean_trade_size_usd == 0.0, not raise
+    ZeroDivisionError. There are no real trades to average."""
+    from services.analytics_runner import _compute_volume_aggregator
+
+    fills = [
+        {"notional_usd": 0.0, "filled_at": "2024-01-15T10:00:00+00:00"},
+        {"notional_usd": 0.0, "filled_at": "2024-01-16T10:00:00+00:00"},
+    ]
+    result = _compute_volume_aggregator(fills)
+    assert result["gross_volume_usd"] == pytest.approx(0.0)
+    assert result["mean_trade_size_usd"] == pytest.approx(0.0), (
+        "all-zero-notional fills must give mean 0.0 (guarded), not divide by zero"
+    )
+
+
+def test_volume_aggregator_malformed_notional_excluded_from_mean_denominator():
+    """M-0645 + M-0654 interaction: a malformed notional is coerced to 0 (and
+    counted as a parse failure). Because it is now 0, it must ALSO be excluded
+    from the mean denominator — otherwise the malformed row both contributes 0
+    to the numerator and inflates the denominator, double-diluting the mean."""
+    from services.analytics_runner import _compute_volume_aggregator
+
+    fills = [
+        {"notional_usd": 1000.0, "filled_at": "2024-01-15T10:00:00+00:00"},
+        {"notional_usd": "GARBAGE", "filled_at": "2024-01-16T10:00:00+00:00"},
+    ]
+    result = _compute_volume_aggregator(fills)
+    assert result["gross_volume_usd"] == pytest.approx(1000.0)
+    # Only the one real fill counts in the denominator → mean == 1000, not 500.
+    assert result["mean_trade_size_usd"] == pytest.approx(1000.0), (
+        "a malformed (→0) notional must not inflate the mean denominator (M-0645)"
     )
 
 
