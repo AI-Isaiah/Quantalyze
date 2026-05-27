@@ -138,12 +138,22 @@ class CsvAdapter:
             )
 
         if envelope.get("ok"):
+            # Phase 19.1 fix (2026-05-27) — thread the preview + normalized
+            # daily-return series from validate_csv's success envelope through
+            # to the wizard. Before this, the unified /process-key validate-only
+            # path dropped both, so CsvUploadStep saw no `preview` and raised
+            # CSV_UPSTREAM_FAIL on every upload once process_key_unified_backbone
+            # flipped on (2026-05-25 15:51 UTC). The legacy /csv/validate path
+            # returned the full envelope, which is why CSV upload worked before
+            # the flag flip.
             return ValidationResult(
                 valid=True,
                 read_only=None,
                 error_code=None,
                 human_message=None,
                 debug_context=None,
+                preview=envelope.get("preview"),
+                daily_returns_series=envelope.get("daily_returns_series"),
             )
 
         errors = envelope.get("errors") or []

@@ -872,6 +872,152 @@ def test_process_key_validate_only_csv_succeeds_without_strategy_id(client):
     )
 
 
+def test_process_key_validate_only_csv_returns_preview_and_series(client):
+    """Phase 19.1 regression (2026-05-27): _run_validate_only must surface the
+    adapter's preview + daily_returns_series in the response body.
+
+    The wizard's CsvUploadStep raises CSV_UPSTREAM_FAIL when `preview` is
+    absent and forwards `daily_returns_series` to csv-finalize. Pre-fix the
+    validate-only envelope dropped both fields even though the CSV adapter
+    produced them, so every upload failed at step 1 once the unified-backbone
+    flag went on (2026-05-25). This pins the envelope contract the wizard
+    consumes verbatim.
+    """
+    fake = _build_supabase_mock(existing_row=None)
+    from services.ingestion.adapter import ValidationResult
+
+    preview = {
+        "row_count": 4,
+        "date_range": ["2025-01-02", "2025-01-05"],
+        "columns_detected": ["date", "daily_return"],
+        "first_rows": [{"date": "2025-01-02", "daily_return": 0.0103}],
+        "last_rows": [{"date": "2025-01-05", "daily_return": -0.0007}],
+    }
+    series = [
+        {"date": "2025-01-02", "daily_return": 0.0103},
+        {"date": "2025-01-05", "daily_return": -0.0007},
+    ]
+    csv_adapter = MagicMock()
+    csv_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=None,
+            error_code=None,
+            human_message=None,
+            debug_context=None,
+            preview=preview,
+            daily_returns_series=series,
+        )
+    )
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=csv_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "wizard_session_id": "wiz-csv-preview",
+                    "user_id": "u1",
+                    "fmt": "daily_returns",
+                    # Adapter is mocked, so the bytes are not parsed here.
+                    "raw_bytes_base64": "ZGF0ZSxkYWlseV9yZXR1cm4K",
+                    "step": "validate",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("ok") is True
+    assert body.get("step") == "validate"
+    assert body.get("preview") == preview, (
+        "validate-only envelope must include the adapter's preview; the wizard "
+        "raises CSV_UPSTREAM_FAIL without it."
+    )
+    assert body.get("daily_returns_series") == series
+
+
+def test_process_key_validate_only_emits_empty_series_not_omitted(client):
+    """Phase 19.1 guard lock (2026-05-27): an empty daily_returns_series ([])
+    must be EMITTED as [], never dropped.
+
+    validate_csv returns ok=True with daily_returns_series=[] for a single-row
+    daily_nav (pct_change drops the only row); csv-finalize then rejects it with
+    a clean "received 0 rows". If _run_validate_only's `is not None` guard were
+    ever simplified to a truthy check, [] would vanish from the envelope and the
+    unified shape would silently diverge from the legacy /csv/validate shape.
+    This pins that load-bearing guard.
+    """
+    fake = _build_supabase_mock(existing_row=None)
+    from services.ingestion.adapter import ValidationResult
+
+    preview = {
+        "row_count": 1,
+        "date_range": ["2025-01-02", "2025-01-02"],
+        "columns_detected": ["date", "nav"],
+        "first_rows": [{"date": "2025-01-02", "nav": 1000.0}],
+        "last_rows": [{"date": "2025-01-02", "nav": 1000.0}],
+    }
+    csv_adapter = MagicMock()
+    csv_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=None,
+            error_code=None,
+            human_message=None,
+            debug_context=None,
+            preview=preview,
+            daily_returns_series=[],
+        )
+    )
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=csv_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "wizard_session_id": "wiz-csv-empty",
+                    "user_id": "u1",
+                    "fmt": "daily_nav",
+                    "raw_bytes_base64": "ZGF0ZSxuYXYK",  # adapter mocked; not parsed
+                    "step": "validate",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "daily_returns_series" in body, (
+        "empty series must be present as [], not omitted — omitting it diverges "
+        "from the legacy envelope shape the wizard/csv-finalize were built on."
+    )
+    assert body["daily_returns_series"] == []
+    assert body.get("preview") == preview
+
+
 def test_process_key_validate_only_onboard_succeeds_without_strategy_id(client):
     """CR-02 regression: keys/validate-and-encrypt fires step='validate'
     without strategy_id (onboard wizard step 2). No KeyError, no 500."""

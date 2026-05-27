@@ -58,6 +58,49 @@ async def test_validate_returns_none_read_only() -> None:
     assert result.human_message is None
 
 
+async def test_validate_surfaces_preview_and_series_for_daily_returns() -> None:
+    """Phase 19.1 regression (2026-05-27).
+
+    The unified /process-key validate-only flow must carry the preview +
+    normalized daily-return series that csv_validator.validate_csv() computes.
+    The adapter previously discarded both on success, so the wizard's
+    CsvUploadStep saw no `preview` and raised CSV_UPSTREAM_FAIL on every upload
+    once process_key_unified_backbone flipped on (2026-05-25 15:51 UTC). This
+    fails if the adapter ever drops validate_csv()'s success payload again.
+    """
+    from services.ingestion.adapter import KeySubmissionRequest
+    from services.ingestion.csv_adapter import CsvAdapter
+
+    adapter = CsvAdapter()
+    req = KeySubmissionRequest(
+        flow_type="csv",
+        source="csv",
+        context={
+            "raw_bytes": VALID_DAILY_RETURNS_CSV,
+            "fmt": "daily_returns",
+            "wizard_session_id": "test-session",
+            "user_id": "test-user",
+        },
+    )
+
+    result = await adapter.validate(req)
+
+    assert result.valid is True, f"expected valid=True, got {result}"
+    # CsvUploadStep raises CSV_UPSTREAM_FAIL when `preview` is missing.
+    assert result.preview is not None, (
+        "validate() must surface validate_csv()'s preview — the wizard upload "
+        "step fails with CSV_UPSTREAM_FAIL without it."
+    )
+    assert result.preview["row_count"] == 4
+    assert len(result.preview["date_range"]) == 2
+    # csv-finalize REQUIRES this series for fmt=daily_returns / daily_nav.
+    assert result.daily_returns_series is not None
+    assert len(result.daily_returns_series) == 4
+    first = result.daily_returns_series[0]
+    assert first["date"] == "2025-01-02"
+    assert abs(first["daily_return"] - 0.0103) < 1e-9
+
+
 async def test_validate_rejects_oversize_csv() -> None:
     """H1 — a CSV larger than MAX_CSV_BYTES is rejected cleanly (CSV_TOO_LARGE)
     rather than OOM-ing the worker via b64decode + read_csv. The /process-key
