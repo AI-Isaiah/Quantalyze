@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.24.10.5] - 2026-05-27
+### Fixed — cassette-refresh.yml: Python 3.12 (pyarrow + pydantic-core fail to wheel on 3.14)
+- v0.24.10.4's `pip install -r requirements.txt -r requirements-dev.txt` reached the package list but choked on wheel-builds for `pyarrow` and `pydantic-core` because Python 3.14 is newer than PyO3 v0.24's maximum supported version (3.13). Pinned `python-version: "3.12"` matching `ci.yml` (which uses the same `actions/setup-python@v6.2.0` SHA pin). Added `cache: pip` + `cache-dependency-path` for both requirements files so subsequent runs are faster.
+- Caught by the second manual workflow_dispatch immediately after the v0.24.10.4 merge. No prod-side impact.
+
 ## [0.24.10.4] - 2026-05-27
 ### Fixed — cassette-refresh.yml: `pip install -e .[dev]` failed (analytics-service has no pyproject.toml)
 - Manual workflow_dispatch on v0.24.10.3 failed at "Install analytics-service deps" because `analytics-service/` uses `requirements.txt` + `requirements-dev.txt` (no `pyproject.toml`). Replaced `.venv/bin/pip install -e .[dev]` with `pip install -r requirements.txt -r requirements-dev.txt`, mirroring `ci.yml:712` including the 3-attempt retry loop for transient pip-index/CDN flakiness.
