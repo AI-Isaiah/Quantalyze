@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.9.25] - 2026-05-27
+### Changed — CI reliability: F10 ephemeral local Supabase for the SQL self-tests
+- **`sql-tests` job decoupled from the shared remote test DB.** `supabase/tests/test_*.sql` now run against an EPHEMERAL local Supabase (bootstrap stack + committed schema snapshot) instead of `psql` against the shared remote test project (`qmnijlgmdhviwzwfyzlc`). Eliminates cross-run contention; the job is now fork-safe and runs unconditionally (no `TEST_SUPABASE_DB_URL` secret / fork gate).
+- **`supabase/ci-snapshot/`** — committed schema-only snapshot (`02-schema.sql`), a default-privilege neutralizer (`01-pre-load.sql`), a cron-job supplement (`03-cron-jobs.sql`), and a `MIGRATIONS.sha256` staleness sentinel. The migration train can't be replayed locally (`CREATE INDEX CONCURRENTLY` vs `ROLLBACK TO SAVEPOINT` in `DO` blocks are mutually exclusive); `pg_dump` final-state DDL sidesteps both. Two fidelity fixes: neutralize Supabase default privileges so the dump's explicit ACLs are authoritative (else anon/authenticated EXECUTE is silently resurrected); replay `cron.job` registrations the dump excludes.
+- **`scripts/ci-load-snapshot.sh`** — staleness-guards, bootstraps the base stack (migrations + seed relocated), loads the snapshot, reloads PostgREST. Shared by CI and local dev.
+- **`.github/workflows/ci-db-snapshot.yml`** — manual, secret-gated workflow to regenerate the snapshot from the test project after a schema migration lands (uploads an artifact to review + commit; never auto-pushes to main).
+- Verified locally: all 10 SQL self-tests pass against the snapshot-loaded stack. (The `python` and `e2e` jobs still use the remote test DB — a later F10 phase.)
+
+
 ## [0.24.9.24] - 2026-05-27
 ### Changed — CI speed (audit fixes, safe subset)
 - **shared node_modules cache (F1):** a `deps-cache` job populates a lockfile-keyed `node_modules` cache from one clean `npm ci`; the 6 frontend jobs + e2e restore it read-only (fall back to a retried `npm ci` on miss). Most runs (lockfile unchanged) skip the ~40-60s install in every job; no serial dependency, and a failed install can never poison the cache (save is an explicit post-`npm ci` step).
