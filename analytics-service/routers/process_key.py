@@ -508,7 +508,15 @@ async def process_key(
             .maybe_single()
             .execute()
         )
-        if existing.data:
+        # `.maybe_single().execute()` returns None (NOT a response object with
+        # data=None) when zero rows match — which is the normal case for a
+        # brand-new upload (no prior strategy_verifications row for this
+        # wizard_session_id). The pre-fix `if existing.data:` therefore raised
+        # `AttributeError: 'NoneType' object has no attribute 'data'` and 500'd
+        # the ENTIRE ingestion for every first-time upload once the
+        # unified-backbone flag was flipped on. Guard the None: absent row →
+        # not idempotent → fall through to the normal insert path below.
+        if existing is not None and existing.data:
             log.info(
                 "process_key.idempotent_hit",
                 verification_id=existing.data["id"],

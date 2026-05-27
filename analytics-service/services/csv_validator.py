@@ -24,6 +24,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+import warnings
 from typing import Any
 
 import pandas as pd
@@ -465,6 +466,144 @@ def _coerce_numeric_string(value: object) -> object:
 
 
 # ---------------------------------------------------------------------------
+# 2026-05-27 — date-format auto-detection.
+#
+# The `date` column was previously coerced straight through pandas'
+# `pd.to_datetime` (via pandera `coerce=True`), which defaults to
+# MONTH-FIRST (US). That silently mis-parsed non-US uploads:
+#   - European / German D/M/YYYY where every day <= 12 (e.g. "01/02/2023"
+#     meaning 1 Feb) parsed as 2 Jan — and because the wrong dates were
+#     still monotonic, NO error fired and the whole track record computed
+#     against the wrong calendar (garbage CAGR / time-weighting).
+#   - D/M/YYYY with any day > 12 (e.g. "13/02/2023") raised a cryptic
+#     `dtype('datetime64[ns]')` pandera error with no actionable message.
+#
+# Real customers will not reformat their broker/accounting exports to ISO
+# on request, so the ingester deduces the format FROM THE DATA: parse the
+# column both month-first and day-first, then use the schema's existing
+# strictly-increasing requirement (plus daily-cadence spacing for the
+# genuinely-ambiguous all-<=12 case) to pick the reading that yields a
+# valid ascending series. The chosen reading is written back as a single
+# datetime64 column BEFORE pandera runs, so downstream coercion is a no-op
+# and the emitted daily_returns_series is always YYYY-MM-DD.
+#
+# Minimal-intervention by construction: the column is rewritten ONLY when
+# month-first (what pandera would do today) is wrong or ambiguous. ISO,
+# US dates, and unparseable garbage are left untouched, so their existing
+# behaviour is byte-for-byte unchanged and no info-flag is emitted. Any
+# day-first or ambiguity-resolved pick DOES emit a `date_format_normalized`
+# info-flag so the wizard can surface a chip and the user can catch a wrong
+# guess.
+# ---------------------------------------------------------------------------
+
+def _date_series_quality(parsed: pd.Series) -> tuple[bool, float | None]:
+    """(usable, median_abs_gap_days) for one candidate date parse.
+
+    `usable` = no NaT (every cell parsed) AND monotonic non-decreasing.
+    Uniqueness is intentionally NOT required here — format *selection*
+    only needs a consistent ordering; the per-format pandera
+    `_strictly_increasing` check still enforces uniqueness downstream. The
+    median gap is used only to break a day-first/month-first tie in favour
+    of the daily-cadence reading.
+    """
+    if parsed.isna().any() or not parsed.is_monotonic_increasing:
+        return (False, None)
+    gaps = parsed.diff().dropna()
+    if len(gaps) == 0:
+        return (True, None)
+    return (True, float(gaps.dt.total_seconds().abs().median() / 86400.0))
+
+
+def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None:
+    """Deduce day-first vs month-first FROM THE DATA and normalize
+    df["date"] to datetime64 in-place. Returns a `date_format_normalized`
+    info-flag when a non-default format was applied (or an ambiguous case
+    resolved), else None.
+
+    See the module comment above for why this exists. Only rewrites the
+    column when pandas' month-first default would be wrong or ambiguous;
+    ISO / US / unparseable inputs are left for the unchanged path.
+    """
+    if "date" not in df.columns or pd.api.types.is_datetime64_any_dtype(df["date"]):
+        return None
+
+    s = df["date"].astype(str).str.strip()
+
+    # ISO-family (year-first: YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD) is
+    # unambiguous and pandas parses it correctly on the default path. We
+    # must short-circuit it BEFORE the day-first probe below, because
+    # `pd.to_datetime("2023-02-01", dayfirst=True)` FALSELY flips it to
+    # YYYY-DD-MM (2023-01-02) — a wrong-but-monotonic parse that would
+    # manufacture a phantom day-first/month-first ambiguity for every ISO
+    # upload. Year-first inputs have no day/month ambiguity to resolve.
+    iso_like = s.str.match(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}")
+    if iso_like.fillna(False).all():
+        return None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # silence pandas' per-row inference warnings
+        parsed_mf = pd.to_datetime(s, dayfirst=False, errors="coerce")
+        parsed_df = pd.to_datetime(s, dayfirst=True, errors="coerce")
+
+    # Identical under both flags → no day/month ambiguity to resolve (e.g.
+    # every first component > 12, so pandas can only read it day-first). ISO
+    # already returned above. Normalize to the shared parse so neither
+    # pandera's coerce nor the date-range computation below re-parses the raw
+    # strings (which would re-emit pandas' dayfirst warning), but stay silent
+    # — there was nothing to disambiguate.
+    if parsed_mf.equals(parsed_df):
+        if not parsed_mf.isna().all():
+            df["date"] = parsed_mf
+        return None
+
+    mf_ok, mf_gap = _date_series_quality(parsed_mf)
+    df_ok, df_gap = _date_series_quality(parsed_df)
+
+    if mf_ok and not df_ok:
+        return None  # month-first is the only valid reading — unchanged
+
+    detected: str
+    ambiguous = False
+    if df_ok and not mf_ok:
+        df["date"] = parsed_df
+        detected = "day_first"
+    elif mf_ok and df_ok:
+        # Both readings are valid but differ → genuinely ambiguous (every
+        # component <= 12). Daily-return / NAV series are daily-cadence, so
+        # the smaller median gap is the intended reading: day-first
+        # "01/02,02/02,03/02" = 1-3 Feb (gap 1d) beats month-first
+        # Jan2/Feb2/Mar2 (gap ~29d).
+        ambiguous = True
+        if df_gap is not None and mf_gap is not None and df_gap < mf_gap:
+            df["date"] = parsed_df
+            detected = "day_first"
+        else:
+            df["date"] = parsed_mf
+            detected = "month_first"
+    else:
+        return None  # neither reading is a clean ascending series — let pandera raise
+
+    human = (
+        "day-first (DD/MM/YYYY)"
+        if detected == "day_first"
+        else "month-first (MM/DD/YYYY)"
+    )
+    message = f"Detected {human} dates and normalized them to YYYY-MM-DD."
+    if ambiguous:
+        message += (
+            " Both day-first and month-first parsed cleanly; chose the"
+            " reading that matches a daily-spaced series. Upload ISO"
+            " (YYYY-MM-DD) if your dates are not daily-spaced."
+        )
+    return {
+        "rule": "date_format_normalized",
+        "detected_format": detected,
+        "ambiguous": ambiguous,
+        "message": message,
+    }
+
+
+# ---------------------------------------------------------------------------
 # validate_csv — public API used by the FastAPI router AND (Phase 19) by
 # the worker. Pure logic; no I/O beyond pd.read_csv on the in-memory bytes.
 # ---------------------------------------------------------------------------
@@ -569,6 +708,13 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             "correlation_id": None,
         }
 
+    # 2026-05-27 — deduce the date format from the data and normalize the
+    # `date` column to a single datetime64 series BEFORE pandera coercion,
+    # so non-US uploads (D/M/YYYY) are parsed correctly instead of silently
+    # mis-read as month-first. No-op (returns None) for ISO / US / garbage
+    # inputs. See _detect_and_normalize_date_column.
+    date_flag = _detect_and_normalize_date_column(df)
+
     all_errors: list[dict[str, Any]] = []
     schema = SCHEMAS[fmt]
 
@@ -603,6 +749,8 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # series. Skipped on dollar-PnL uploads (max |x| > 100) so the
     # post-norm sentinel still rejects those.
     info_flags: list[dict[str, Any]] = []
+    if date_flag is not None:
+        info_flags.append(date_flag)
     norm_flag = _maybe_auto_normalize_percent_form(df_validated, fmt)
     if norm_flag is not None:
         info_flags.append(norm_flag)
