@@ -326,8 +326,20 @@ def _attribute_dimension(
     }
     if not candidates:
         return ALL_DIMENSIONS
-    max_dim = max(sorted(candidates.keys()), key=lambda w: candidates[w])
-    return (max_dim,)
+    # F_fb (red-team 2026-05-27): on a tie for the max score, credit the
+    # outcome to ALL tied-max dimensions, not just one. The prior
+    # `max(sorted(candidates.keys()), key=...)` returned the alphabetically-
+    # FIRST tied dimension (`max` returns the first maximal element of the
+    # ascending-sorted keys), so a 3-way tie attributed the entire
+    # success/failure to one arbitrarily-chosen dimension while the other
+    # tied dims got zero credit — over many ties this biases a dimension's
+    # success_rate by an alphabetical accident. Splitting credit across every
+    # tied-max dimension is order-independent and deterministic (ALL_DIMENSIONS
+    # is a fixed-order tuple, so the returned subset preserves that order).
+    # compute_adjusted_weights already iterates the returned tuple and appends
+    # the outcome to each dimension, so a multi-element return Just Works.
+    max_score = max(candidates.values())
+    return tuple(dim for dim in ALL_DIMENSIONS if candidates.get(dim) == max_score)
 
 
 def _apply_shape(dim_outcomes: dict[str, list[int]]) -> dict[str, float]:

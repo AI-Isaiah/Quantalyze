@@ -406,6 +406,15 @@ async def _reconstruct_positions_inner(
         positions = _match_positions_fifo(
             symbol, symbol_fills, strategy_id, dropped_flags=fifo_dropped_flags
         )
+        # Audit-2026-05-27 P1 (MED8): stamp the bucket's exchange onto each
+        # position so `_attribute_funding` can key funding lookup by
+        # (symbol, exchange) — matching the FIFO bucketing. `_match_positions_fifo`
+        # only knows `symbol` (it is also imported by equity_reconstruction with
+        # that narrower contract), so the exchange is attached here at the one
+        # site that holds the (symbol, exchange) bucket key. `exchange` is a
+        # transient key stripped before the atomic-rebuild RPC (see _NON_DB_KEYS).
+        for pos in positions:
+            pos["exchange"] = _exchange
         # Audit G12.C.4: collect transient data_quality_flags from
         # in-memory position dicts BEFORE we strip them for DB persistence.
         for pos in positions:
@@ -665,7 +674,7 @@ async def _reconstruct_positions_inner(
 # before sending the payload to reconstruct_positions_atomic, otherwise
 # the JSONB-to-column projection in migration 113 will silently ignore
 # them (or, depending on Postgres version, raise on unknown casts).
-_NON_DB_KEYS = frozenset({"data_quality_flags"})
+_NON_DB_KEYS = frozenset({"data_quality_flags", "exchange"})
 
 
 def _strip_non_db_keys(pos: dict) -> dict:
@@ -825,7 +834,11 @@ async def _attribute_funding(
                     # summing — previously only symbol/amount/timestamp were
                     # selected, so a 0.0001 BTC row was silently added as $0.0001
                     # into a USD funding_pnl column (magnitude ~5 orders wrong).
-                    .select("symbol, amount, timestamp, currency")
+                    # Audit-2026-05-27 P1 (MED8): include exchange so funding is
+                    # keyed by (symbol, exchange), matching the FIFO bucketing —
+                    # otherwise two same-symbol positions on different exchanges
+                    # would both claim each other's funding rows.
+                    .select("symbol, amount, timestamp, currency, exchange")
                     .eq("strategy_id", strategy_id)
                     .gte("timestamp", min_opened_at)
                     .lte("timestamp", max_closed_at)
@@ -871,7 +884,11 @@ async def _attribute_funding(
     # but is added as $0.0001). Only sum rows whose currency is a USD-quote
     # stablecoin; skip others and emit a DQ flag so the drop is observable.
     _USD_QUOTE_CURRENCIES = frozenset({"USDT", "USDC", "BUSD", "USD", "TUSD", "FDUSD"})
-    by_symbol: dict[str, list[tuple[datetime, Decimal]]] = defaultdict(list)
+    # Audit-2026-05-27 P1 (MED8): key funding rows by (symbol, exchange) so a
+    # row is only ever a candidate for positions on the SAME exchange — the FIFO
+    # bucketing key (G12.C.6). Positions are stamped with their bucket exchange
+    # (see `_reconstruct_positions_inner`); the funding fetch now selects it too.
+    by_key: dict[tuple[str, str], list[tuple[datetime, Decimal]]] = defaultdict(list)
     funding_rows_unparseable = 0
     funding_currency_unsupported_count = 0
     for row in funding_rows:
@@ -881,6 +898,9 @@ async def _attribute_funding(
         if not sym or ts_raw is None or amt_raw is None:
             funding_rows_unparseable += 1
             continue
+        # Match the FIFO bucket's exchange fallback ("unknown") so a
+        # NULL-exchange funding row aligns with a NULL-exchange position bucket.
+        row_exchange = row.get("exchange") or "unknown"
         # NEW-C30-02: skip base-coin-denominated rows (inverse perps).
         currency = (row.get("currency") or "").upper()
         if currency and currency not in _USD_QUOTE_CURRENCIES:
@@ -903,7 +923,7 @@ async def _attribute_funding(
         except Exception:  # noqa: BLE001 — keep fail-soft; the row is counted
             funding_rows_unparseable += 1
             continue
-        by_symbol[sym].append((ts, amt))
+        by_key[(sym, row_exchange)].append((ts, amt))
 
     if funding_rows_unparseable and flags is not None:
         flags["funding_rows_unparseable"] = (
@@ -918,17 +938,37 @@ async def _attribute_funding(
             + funding_currency_unsupported_count
         )
 
-    # Sort each symbol's timeline once — supports linear scan per position.
-    for sym in by_symbol:
-        by_symbol[sym].sort(key=lambda x: x[0])
+    # Sort each (symbol, exchange) timeline once — supports linear scan
+    # per position and a stable single-assignment ownership pass below.
+    for key in by_key:
+        by_key[key].sort(key=lambda x: x[0])
 
-    # Reuse the single `now` sampled before the fetch (above) as the
-    # open/corrupt-close upper bound — sampling a second `now` here would let a
-    # funding row in the micro-gap between the two be inside a per-position
-    # window yet outside the (earlier) fetch bound, silently dropping it. One
-    # `now` keeps the fetch bound and the per-position scan identical.
+    # Audit-2026-05-27 P1 (MED8): attribute each funding row to EXACTLY ONE
+    # position, with half-open `[opened_at, closed_at)` windows. The prior loop
+    # summed every row in `[opened, closed]` (BOTH bounds inclusive) into EVERY
+    # position whose window contained it — two double-count bugs:
+    #   (a) a flip at instant T stamps the closing long with window [open, T]
+    #       and the new short with [T, close]; a funding row at exactly T landed
+    #       in BOTH (inclusive bounds). Half-open windows put it solely in the
+    #       new short ([T, close)) — counted once.
+    #   (b) two same-symbol positions with overlapping windows both summed a row
+    #       in the overlap. Single-assignment (consume each row once) fixes it;
+    #       (symbol, exchange) keying additionally prevents cross-exchange bleed.
+    #
+    # Algorithm: parse + collect each position's window, sort positions by
+    # opened_at (then closed_at) so earlier-opened positions claim contested
+    # rows first, and walk each position's (symbol, exchange) timeline skipping
+    # rows a prior position already consumed. Rows are sorted by ts; a per-key
+    # `consumed` set of indices marks ownership so no row is summed twice.
+    #
+    # `now` (sampled before the fetch) is the open/corrupt-close upper bound —
+    # sampling a second `now` here would let a row in the micro-gap between the
+    # two be inside a window yet outside the (earlier) fetch bound, dropping it.
+    parsed_positions: list[tuple[datetime, datetime, dict]] = []
     for pos in positions:
-        symbol = pos.get("symbol", "")
+        # Default funding_pnl=0 for every position; only positions whose window
+        # parses and claims rows below get a non-zero value.
+        pos["funding_pnl"] = 0
         opened_at_raw = pos.get("opened_at")
         closed_at_raw = pos.get("closed_at")
         if not opened_at_raw:
@@ -955,10 +995,28 @@ async def _attribute_funding(
         else:
             closed_dt = now
 
+        parsed_positions.append((opened_dt, closed_dt, pos))
+
+    # Earlier-opened (then earlier-closed) positions claim contested rows first.
+    parsed_positions.sort(key=lambda x: (x[0], x[1]))
+
+    # Per-(symbol, exchange) set of funding-row indices already owned by a
+    # position, so a row is summed into at most one position.
+    consumed: dict[tuple[str, str], set[int]] = defaultdict(set)
+    for opened_dt, closed_dt, pos in parsed_positions:
+        key = (pos.get("symbol", ""), pos.get("exchange") or "unknown")
+        rows = by_key.get(key, [])
+        owned = consumed[key]
         total = Decimal(0)
-        for ts, amt in by_symbol.get(symbol, []):
-            if opened_dt <= ts <= closed_dt:
+        for idx, (ts, amt) in enumerate(rows):
+            if idx in owned:
+                continue
+            # Half-open window: [opened, closed). A row at exactly closed_dt
+            # belongs to the NEXT leg (or to no position if it is the final
+            # close), never to this one — kills the flip-instant double count.
+            if opened_dt <= ts < closed_dt:
                 total += amt
+                owned.add(idx)
 
         # Round to 8 decimals (funding amounts are typically ≤ 6 places
         # but we keep headroom to avoid premature truncation).
@@ -1070,6 +1128,14 @@ def _match_positions_fifo(
     positions: list[dict] = []
     net_qty = Decimal(0)
     entry_fills: list[dict] = []  # fills that opened the current position
+    # Audit-2026-05-27 P2 (LOW9): count EVERY fill that touches the current
+    # position (open + adds + partial reductions + final close), not just the
+    # opening/adding fills. `entry_fills` only ever held opening/adding fills,
+    # so `fill_count = len(entry_fills) + 1` undercounted any position with
+    # intermediate partial reductions (e.g. 1 open + 3 partial reductions + 1
+    # close reported 2 instead of 5). This counter is incremented at each
+    # branch that allocates a fill's quantity to the position.
+    fill_touch_count = 0
     total_entry_cost = Decimal(0)
     total_entry_qty = Decimal(0)
     peak_qty = Decimal(0)  # track peak position size for size_peak column
@@ -1184,12 +1250,23 @@ def _match_positions_fifo(
             total_exit_cost = Decimal(0)
             total_exit_qty = Decimal(0)
             entry_fills = [fill]
+            # P2 (LOW9): this opening fill is the first touch of the new position.
+            fill_touch_count = 1
             position_open_time = fill.get("timestamp")
             continue
 
         # Existing position. Determine whether this fill is closing (or
         # partial-closing/overshooting) the current side and how much of
         # the fill quantity is allocated to the close vs. the next leg.
+        #
+        # P2 (LOW9): every fill that reaches here touches the current position
+        # (add, partial reduction, or final/overshoot close) — count it. Adds
+        # also append to `entry_fills`; reductions previously appended NOWHERE,
+        # which is exactly why `len(entry_fills) + 1` undercounted. On an
+        # overshoot/flip this fill ALSO seeds the new leg's count (handled in
+        # the flip branch below) since it both closes the old leg and opens the
+        # new one.
+        fill_touch_count += 1
         closing_qty = Decimal(0)
         if position_side == "long":
             if side == "buy":
@@ -1404,7 +1481,12 @@ def _match_positions_fifo(
                     "duration_seconds": duration_seconds,
                     "opened_at": position_open_time,
                     "closed_at": close_time,
-                    "fill_count": len(entry_fills) + 1,  # +1 for closing fill
+                    # P2 (LOW9): every touching fill (open + adds + partial
+                    # reductions + this closing fill) is in fill_touch_count.
+                    # The closing fill already incremented it at the top of the
+                    # "existing position" block, so no `+ 1` is needed (the old
+                    # `len(entry_fills) + 1` missed every partial reduction).
+                    "fill_count": fill_touch_count,
                     # Default 0; _attribute_funding sums in-window funding_fees rows before insert.
                     "funding_pnl": 0,
                 }
@@ -1428,6 +1510,11 @@ def _match_positions_fifo(
                 total_entry_qty = remainder
                 peak_qty = remainder
                 entry_fills = [fill]
+                # P2 (LOW9): the flip fill that just closed the prior leg ALSO
+                # opens this new leg — it is the new leg's first (and so far
+                # only) touching fill. Seed to 1 (not +=, the prior leg's count
+                # was already consumed by its closed position_dict above).
+                fill_touch_count = 1
                 # Audit G12.C.3: seed the new leg with the prorated
                 # opening share of the flip-fill's fee. The closed-leg
                 # fee_total already had this subtracted above.
@@ -1445,6 +1532,8 @@ def _match_positions_fifo(
                 total_exit_cost = Decimal(0)
                 total_exit_qty = Decimal(0)
                 entry_fills = []
+                # P2 (LOW9): clean close — no open position remains; reset.
+                fill_touch_count = 0
                 total_fees = Decimal(0)
                 position_side = None
                 position_open_time = None
@@ -1491,7 +1580,10 @@ def _match_positions_fifo(
                 "duration_seconds": None,
                 "opened_at": position_open_time,
                 "closed_at": None,
-                "fill_count": len(entry_fills),
+                # P2 (LOW9): open position never had a closing fill, but its
+                # partial reductions still touched it — count them all, not just
+                # the opening/adding fills `entry_fills` held.
+                "fill_count": fill_touch_count,
                 # Default 0; _attribute_funding sums funding_fees rows up to now
                 # for open positions (closed_at=None → window-end = now).
                 "funding_pnl": 0,

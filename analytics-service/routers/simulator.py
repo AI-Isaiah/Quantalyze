@@ -27,6 +27,7 @@ keying mirrors routers/process_key.py:_process_key_rate_limit_key.
 
 import asyncio
 import logging
+import time
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
@@ -74,8 +75,77 @@ def _simulator_rate_limit_key(request: Request) -> str:
     INTERNAL_API_TOKEN) so the header is non-spoofable; that's a
     follow-up. Mirrors the same fix in
     routers/process_key.py:_process_key_rate_limit_key.
+
+    S1 (red-team MED8) follow-up: this IP-keyed decorator is now only the
+    process-wide CEILING backstop. The EFFECTIVE per-tenant quota is enforced
+    in-handler against ``req.user_id`` (see ``_check_simulator_user_rate`` and
+    its call in ``portfolio_simulator``) — slowapi's key_func cannot see the
+    parsed request body, so per-user keying must live in the handler. ``user_id``
+    is set server-side by Next.js from the authenticated session and only the
+    Next.js front door reaches this route (X-Service-Key trust boundary), so it
+    is non-spoofable here — unlike the rejected ``X-User-Id`` header above.
     """
     return f"simulator:ip:{get_remote_address(request)}"
+
+
+# S1 (red-team MED8): per-USER sliding-window rate limit for /api/simulator.
+#
+# The @limiter.limit("20/hour") decorator below keys on remote IP, but behind
+# Vercel's egress NAT every tenant collapses into ONE shared bucket — the first
+# few users each hour exhaust the 20/hour ceiling and everyone else 429s
+# (effective platform-wide 20/hour). slowapi's key_func only sees the Request,
+# not the parsed body, so the per-user quota cannot be expressed in the
+# decorator. We enforce it IN-HANDLER against ``req.user_id`` instead, mirroring
+# routers/portfolio.py's ``_check_sliding_window_rate`` pattern. The decorator
+# stays as a coarse per-IP ceiling backstop; the per-user check is the
+# authoritative per-tenant quota.
+#
+# In-process only (not distributed-safe across workers); the Next.js front-door
+# Upstash limiter remains the cross-worker authority. Bound on distinct users
+# tracked so the dict can't grow unbounded; LRU-ish eviction via insertion-order
+# re-insertion (same as the portfolio limiter).
+_SIMULATOR_USER_RATE_LIMIT = 20          # match the 20/hour front-door ceiling
+_SIMULATOR_USER_RATE_WINDOW_SEC = 3600   # 1 hour
+_SIMULATOR_USER_CACHE_MAX = 10_000
+_simulator_user_attempts: dict[str, list[float]] = {}
+
+
+def _check_simulator_user_rate(user_id: str | None) -> bool:
+    """Return True if ``user_id`` is under the per-user simulator budget.
+
+    Sliding-window check with LRU-bounded cache, keyed on the request-body
+    ``user_id`` (server-set by Next.js, non-spoofable behind the X-Service-Key
+    boundary). Returning False means the caller must reject with HTTP 429 even
+    though the IP-based slowapi ceiling let the request through. Uses wall clock
+    (``time.time()``) so timestamps stay comparable; the cache itself is
+    in-process and resets on worker recycle (see the in-process-only note above).
+    Prunes expired timestamps + records the current attempt on the under-budget branch.
+
+    A missing user_id passes through as True; SimulatorRequest already enforces
+    ``user_id`` min_length=1 so this is defensive only.
+    """
+    if not user_id:
+        return True
+    now = time.time()
+    cutoff = now - _SIMULATOR_USER_RATE_WINDOW_SEC
+    bucket = [t for t in _simulator_user_attempts.get(user_id, []) if t >= cutoff]
+    if len(bucket) >= _SIMULATOR_USER_RATE_LIMIT:
+        # Refresh LRU position even on reject so a rate-limited user can't be
+        # evicted by a wave of fresh callers and silently regain quota (same
+        # red-team hardening as routers/portfolio._check_sliding_window_rate).
+        _simulator_user_attempts.pop(user_id, None)
+        _simulator_user_attempts[user_id] = bucket
+        while len(_simulator_user_attempts) > _SIMULATOR_USER_CACHE_MAX:
+            oldest = next(iter(_simulator_user_attempts))
+            _simulator_user_attempts.pop(oldest, None)
+        return False
+    bucket.append(now)
+    _simulator_user_attempts.pop(user_id, None)
+    _simulator_user_attempts[user_id] = bucket
+    while len(_simulator_user_attempts) > _SIMULATOR_USER_CACHE_MAX:
+        oldest = next(iter(_simulator_user_attempts))
+        _simulator_user_attempts.pop(oldest, None)
+    return True
 
 
 class SimulatorRequest(BaseModel):
@@ -165,6 +235,20 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
     before/after equity-curve overlay series. The response is
     allocator-safe: no profile data, no admin internals.
     """
+    # S1 (red-team MED8): per-USER quota. The @limiter.limit decorator keys on
+    # remote IP, which collapses every tenant behind Vercel's NAT into one
+    # shared 20/hour bucket. Enforce the real per-tenant limit here against the
+    # server-set ``req.user_id`` (the key_func cannot see the parsed body). One
+    # user exhausting their quota must NOT 429 another user on the same IP.
+    if not _check_simulator_user_rate(req.user_id):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Simulator rate limit exceeded "
+                f"({_SIMULATOR_USER_RATE_LIMIT}/hour per user) — please retry later"
+            ),
+        )
+
     supabase = get_supabase()
 
     # G15-012 (audit-2026-05-07, M-0973): the first three reads —

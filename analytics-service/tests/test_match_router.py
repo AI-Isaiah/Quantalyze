@@ -3423,3 +3423,161 @@ class TestLoadUniverseAnalyticsSelectOmitsDeadFields:
             )
         for live in ("strategy_id", "returns_series", "sharpe", "max_drawdown"):
             assert live in cols, f"engine-consumed field {live!r} must remain in SELECT"
+
+
+# ---------------------------------------------------------------------------
+# MA1 (red-team LOW9) — force-throttle dicts are pruned, not unbounded
+# ---------------------------------------------------------------------------
+
+
+class TestForceThrottleStateEviction:
+    """MA1: ``_force_last_run`` / ``_force_lock`` previously grew one permanent
+    entry per distinct allocator_id that ever hit the force=True path, with no
+    eviction — bounded by the allocator population today, unbounded in principle.
+    ``_prune_stale_force_entries`` drops entries older than the throttle window
+    (stamps that can no longer throttle anything) and the matching idle locks,
+    while preserving throttle semantics: a recent stamp must still throttle.
+    """
+
+    def test_stale_entries_pruned_across_many_distinct_allocator_ids(self):
+        import time as _time
+
+        from routers import match as match_mod
+
+        match_mod._force_last_run.clear()
+        match_mod._force_lock.clear()
+
+        now = _time.monotonic()
+        # Simulate 500 distinct allocator_ids that each forced a recompute
+        # LONGER ago than the throttle window — every entry is now stale and
+        # can no longer throttle any future request.
+        stale_age = match_mod.FORCE_RECOMPUTE_MIN_INTERVAL_S + 1
+        for i in range(500):
+            aid = f"stale-alloc-{i}"
+            match_mod._force_last_run[aid] = now - stale_age
+            match_mod._force_lock[aid] = asyncio.Lock()  # idle, never held
+
+        assert len(match_mod._force_last_run) == 500
+        assert len(match_mod._force_lock) == 500
+
+        match_mod._prune_stale_force_entries(now=now)
+
+        # Pre-fix these dicts only ever grew; post-fix every stale entry
+        # (stamp + matching idle lock) is evicted.
+        assert match_mod._force_last_run == {}, (
+            "stale stamps (older than the throttle window) must be pruned"
+        )
+        assert match_mod._force_lock == {}, (
+            "idle locks for stale allocators must be pruned alongside the stamps"
+        )
+
+    def test_recent_stamp_is_retained_so_throttle_semantics_hold(self):
+        import time as _time
+
+        from routers import match as match_mod
+
+        match_mod._force_last_run.clear()
+        match_mod._force_lock.clear()
+
+        now = _time.monotonic()
+        recent_id = "recent-alloc"
+        stale_id = "stale-alloc"
+        # Recent: stamped just now — STILL inside the window, must keep
+        # throttling. Stale: older than the window — droppable.
+        match_mod._force_last_run[recent_id] = now
+        match_mod._force_lock[recent_id] = asyncio.Lock()
+        match_mod._force_last_run[stale_id] = now - (
+            match_mod.FORCE_RECOMPUTE_MIN_INTERVAL_S + 5
+        )
+        match_mod._force_lock[stale_id] = asyncio.Lock()
+
+        match_mod._prune_stale_force_entries(now=now)
+
+        # The recent stamp + its lock survive (throttle still active).
+        assert recent_id in match_mod._force_last_run, (
+            "a recent stamp must be retained so it keeps throttling — pruning "
+            "it would let a rapid duplicate force=True through"
+        )
+        assert recent_id in match_mod._force_lock
+        # The stale one is gone.
+        assert stale_id not in match_mod._force_last_run
+        assert stale_id not in match_mod._force_lock
+
+    def test_held_lock_is_not_pruned(self):
+        """A lock currently held by an in-flight request (no surviving stamp,
+        e.g. the optimistic stamp was cleared on a scoring failure) must NOT be
+        evicted — dropping it would let a concurrent waiter acquire a DIFFERENT
+        lock object, breaking the M-1 atomicity guarantee."""
+        import time as _time
+
+        from routers import match as match_mod
+
+        match_mod._force_last_run.clear()
+        match_mod._force_lock.clear()
+
+        held_id = "in-flight-alloc"
+        lock = asyncio.Lock()
+
+        async def _drive():
+            async with lock:  # lock is held while we prune
+                match_mod._force_lock[held_id] = lock
+                # No stamp for held_id (simulating a cleared optimistic stamp).
+                match_mod._prune_stale_force_entries(now=_time.monotonic())
+                return held_id in match_mod._force_lock
+
+        survived = asyncio.run(_drive())
+        assert survived, (
+            "a held lock must survive pruning even with no stamp — evicting it "
+            "would break the M-1 check-then-stamp atomicity for concurrent "
+            "force=True requests"
+        )
+
+    def test_prune_runs_on_force_path_via_recompute(self, client, monkeypatch):
+        """Integration: a force=True recompute prunes pre-existing stale entries
+        so the dicts stay bounded by recently-active allocators."""
+        import time as _time
+
+        from routers import match as match_mod
+
+        match_mod._force_last_run.clear()
+        match_mod._force_lock.clear()
+
+        # Seed 50 stale allocators that will never force again.
+        old = _time.monotonic() - (match_mod.FORCE_RECOMPUTE_MIN_INTERVAL_S + 10)
+        for i in range(50):
+            match_mod._force_last_run[f"ghost-{i}"] = old
+            match_mod._force_lock[f"ghost-{i}"] = asyncio.Lock()
+
+        alloc_id = str(uuid4())
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+
+        async def _no_skip(allocator_id, force):
+            return False
+
+        monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+        monkeypatch.setattr(
+            match_mod, "_load_candidate_universe",
+            lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+        )
+
+        async def _score(allocator_id, universe):
+            return {"allocator_id": allocator_id, "batch_id": "b1",
+                    "candidate_count": 0, "excluded_count": 0,
+                    "mode": "screening", "filter_relaxed": False, "latency_ms": 1}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score)
+        monkeypatch.setattr(match_mod, "_retention_sweep", lambda *_: 0)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": True},
+        )
+        assert r.status_code == 200, r.text
+
+        # The 50 stale ghosts are gone; only the just-served allocator remains.
+        assert all(f"ghost-{i}" not in match_mod._force_last_run for i in range(50)), (
+            "force path must prune stale entries — pre-fix they accumulated "
+            "forever"
+        )
+        assert alloc_id in match_mod._force_last_run

@@ -416,6 +416,56 @@ class TestComputeAllMetrics:
             assert -1.0 <= entry["value"] <= 1.0
             assert not math.isnan(entry["value"])
 
+    def test_benchmark_metrics_share_single_aligned_sample_on_calendar_mismatch(self):
+        """M1 (red-team 2026-05-27): alpha/beta/correlation/info_ratio must ALL be
+        computed over the SAME inner-join aligned sample when the strategy and
+        benchmark calendars differ.
+
+        Before the fix, alpha/beta came from ``qs.stats.greeks(returns,
+        benchmark)`` — which internally reindexes the benchmark onto the
+        strategy's FULL date range (bfill) via quantstats `_prepare_benchmark` —
+        while correlation/info_ratio used the inner-join intersection only. On a
+        24/7-crypto-vs-gapped-benchmark mismatch the two disagree. This test pins
+        the post-fix contract: every benchmark-relative metric is over the
+        intersection, and (anti-vacuity) the produced alpha/beta differ from what
+        the OLD full-range path would have produced.
+        """
+        rng = np.random.default_rng(7)
+        # Strategy trades 24/7 (every calendar day).
+        s_dates = pd.date_range("2024-01-01", periods=120, freq="D")
+        strat = pd.Series(rng.normal(0.001, 0.02, 120), index=s_dates, name="returns")
+        # Benchmark only has business days → weekend/holiday gaps vs the strategy.
+        b_dates = pd.bdate_range("2024-01-01", periods=85)
+        bench = pd.Series(rng.normal(0.0005, 0.025, 85), index=b_dates, name="BTC")
+
+        # Sanity: the calendars genuinely differ (intersection < strategy length).
+        aligned = strat.align(bench, join="inner")
+        ar, ab = aligned[0], aligned[1]
+        assert 1 < len(ar) < len(strat), "fixture must have a real calendar gap"
+
+        result = compute_all_metrics(strat, bench)
+        mj = result["metrics_json"]
+
+        # Oracle: every benchmark-relative metric over the SAME inner-join sample.
+        exp = qs.stats.greeks(ar, ab)
+        exp_alpha = _safe_float(exp.get("alpha", 0))
+        exp_beta = _safe_float(exp.get("beta", 0))
+        exp_corr = _safe_float(ar.corr(ab))
+        excess = ar - ab
+        exp_te = float(excess.std() * np.sqrt(252))
+        exp_ir = _safe_float(excess.mean() * 252 / exp_te)
+
+        assert mj["alpha"] == pytest.approx(exp_alpha, abs=1e-12)
+        assert mj["beta"] == pytest.approx(exp_beta, abs=1e-12)
+        assert mj["correlation"] == pytest.approx(exp_corr, abs=1e-12)
+        assert mj["info_ratio"] == pytest.approx(exp_ir, abs=1e-12)
+
+        # Anti-vacuity: the OLD path (greeks over the full bfilled range) would
+        # have produced DIFFERENT alpha/beta. Prove the fix actually changed the
+        # alignment, not just that the assertions are self-consistent.
+        old = qs.stats.greeks(strat, bench)
+        assert mj["beta"] != pytest.approx(_safe_float(old.get("beta", 0)), abs=1e-9)
+
     def test_drawdown_episodes(self, golden_returns):
         """drawdown_episodes should list top-5 drawdowns sorted by depth desc."""
         result = compute_all_metrics(golden_returns)

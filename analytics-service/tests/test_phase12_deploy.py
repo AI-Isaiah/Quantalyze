@@ -357,12 +357,9 @@ class TestValidatePostgresUrl:
 
 
 class TestTradeMixFlagLiteral:
-    """M-0636: the flag constant and reader return the closed two-value
-    enum, not an arbitrary string. Pin the runtime value of the named
-    constant so a future edit that changes it (e.g. "FALSE"/"0") is caught."""
-
-    def test_flag_false_constant_value(self) -> None:
-        assert dep.FLAG_FALSE == "false"
+    """M-0636: the reader returns the closed two-value enum, not an arbitrary
+    string. Pin the reader's returned value so a future edit that admits
+    "FALSE"/"0"/"yes" is caught."""
 
     @pytest.mark.parametrize("value", ["true", "false"])
     def test_reader_returns_literal_value(self, monkeypatch, tmp_path, value: str) -> None:

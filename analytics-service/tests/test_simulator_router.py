@@ -94,6 +94,13 @@ def client(monkeypatch, supabase_mock):
     if callable(_reset):
         _reset()
 
+    # S1: the per-USER in-handler sliding-window limiter
+    # (_simulator_user_attempts) also persists across tests in the session —
+    # every test posts with user_id="u-1", so without a reset the 21st request
+    # in the session 429s before reaching its branch. Clear it per test, the
+    # same way the slowapi limiter is reset above.
+    simulator_router._simulator_user_attempts.clear()
+
     monkeypatch.setattr(
         "routers.simulator.get_supabase", lambda: supabase_mock
     )
@@ -1540,3 +1547,152 @@ class TestM0973_IndependentFetchesParallelised:
             "Initial reads did not overlap — asyncio.gather fan-out "
             f"regressed to serial awaits (max in-flight={in_flight['max']})."
         )
+
+
+# ---------------------------------------------------------------------------
+# S1 (red-team MED8) — per-USER rate limit (not per-IP / NAT-shared)
+# ---------------------------------------------------------------------------
+
+
+class TestS1_PerUserRateLimit:
+    """S1 — the simulator's effective quota must be PER USER, keyed on the
+    server-set ``req.user_id``, not per remote IP.
+
+    Behind Vercel's egress NAT every tenant collapses into one shared IP
+    bucket, so the per-IP @limiter.limit("20/hour") starves all tenants once
+    the first few users each hour exhaust it. The in-handler
+    ``_check_simulator_user_rate`` gives each user_id an independent 20/hour
+    window. ``user_id`` is server-set by Next.js behind the X-Service-Key
+    boundary, so (unlike the rejected spoofable ``X-User-Id`` header) it is a
+    safe key here.
+    """
+
+    def _reset(self):
+        from routers import simulator as simulator_router
+        simulator_router._simulator_user_attempts.clear()
+
+    def test_single_user_exceeding_limit_gets_blocked(self):
+        from routers import simulator as simulator_router
+
+        self._reset()
+        limit = simulator_router._SIMULATOR_USER_RATE_LIMIT
+        # Exactly `limit` calls are admitted...
+        for i in range(limit):
+            assert simulator_router._check_simulator_user_rate("user-solo") is True, (
+                f"call {i + 1}/{limit} must be admitted (under budget)"
+            )
+        # ...the next one is rejected (caller maps False → HTTP 429).
+        assert simulator_router._check_simulator_user_rate("user-solo") is False, (
+            "the (limit+1)-th call within the window must be rejected"
+        )
+
+    def test_two_users_have_independent_quotas(self):
+        from routers import simulator as simulator_router
+
+        self._reset()
+        limit = simulator_router._SIMULATOR_USER_RATE_LIMIT
+        # Alice exhausts her entire window.
+        for _ in range(limit):
+            assert simulator_router._check_simulator_user_rate("alice") is True
+        assert simulator_router._check_simulator_user_rate("alice") is False, (
+            "alice is now over budget"
+        )
+        # Bob — a DIFFERENT user on the same shared NAT IP — is completely
+        # unaffected. This is the whole point of S1: one tenant exhausting the
+        # quota must NOT 429 another tenant. Pre-fix (per-IP keying) bob would
+        # already be 429'd because he shares alice's IP bucket.
+        assert simulator_router._check_simulator_user_rate("bob") is True, (
+            "bob must have his OWN quota — alice exhausting hers must not "
+            "starve him (the per-IP / NAT-shared-bucket bug S1 fixes)"
+        )
+
+    def test_missing_user_id_passes_through(self):
+        """SimulatorRequest enforces user_id min_length=1, so an empty user_id
+        never reaches here in practice; the defensive pass-through must not
+        crash."""
+        from routers import simulator as simulator_router
+
+        self._reset()
+        assert simulator_router._check_simulator_user_rate("") is True
+        assert simulator_router._check_simulator_user_rate(None) is True
+
+    def test_check_uses_wall_clock_not_monotonic(self):
+        """The window comparison must use wall clock (time.time) so a worker
+        recycle / cold start does not invalidate every stored timestamp (same
+        contract as routers/portfolio._check_sliding_window_rate)."""
+        import inspect
+
+        from routers import simulator as simulator_router
+
+        src = inspect.getsource(simulator_router._check_simulator_user_rate)
+        assert "time.time()" in src
+        assert "monotonic" not in src, (
+            "per-user simulator limiter must use wall clock; monotonic restarts "
+            "at 0 on a worker recycle and would free-refill every quota"
+        )
+
+    def test_cache_evicts_oldest_at_cap(self, monkeypatch):
+        """The per-user bucket dict is LRU-bounded so an attacker rotating
+        user_ids cannot grow it without bound (mirrors the portfolio limiter
+        cap)."""
+        from routers import simulator as simulator_router
+
+        self._reset()
+        # Shrink the cap so the test is fast.
+        monkeypatch.setattr(simulator_router, "_SIMULATOR_USER_CACHE_MAX", 5)
+        for i in range(20):
+            simulator_router._check_simulator_user_rate(f"user-{i}")
+        assert len(simulator_router._simulator_user_attempts) <= 5, (
+            "per-user bucket cache must be LRU-bounded so rotating user_ids "
+            "cannot leak unbounded memory"
+        )
+
+
+@_BODY_PARSER_SKIP
+class TestS1_PerUserRateLimitIntegration:
+    """S1 integration: the handler returns 429 for a user over budget, while a
+    different user on the same TestClient (same remote IP) sails through."""
+
+    def _stage(self, supabase_mock):
+        _table_router(
+            supabase_mock,
+            portfolio_data={"id": "p-1"},
+            candidate_data={
+                "id": "c-1", "name": "Candidate Alpha", "status": "published",
+            },
+            portfolio_strategies_data=[
+                {"strategy_id": "s-1", "current_weight": 0.6},
+                {"strategy_id": "s-2", "current_weight": 0.4},
+            ],
+            sa_portfolio_data=[
+                {"strategy_id": "s-1", "returns_series": _build_returns_records(60)},
+                {"strategy_id": "s-2", "returns_series": _build_returns_records(60)},
+            ],
+            sa_candidate_data={
+                "strategy_id": "c-1", "returns_series": _build_returns_records(60),
+            },
+        )
+
+    def test_over_budget_user_429s_other_user_unaffected(
+        self, client, supabase_mock
+    ):
+        from routers import simulator as simulator_router
+
+        self._stage(supabase_mock)
+        limit = simulator_router._SIMULATOR_USER_RATE_LIMIT
+
+        # Pre-fill alice's window to the cap so her NEXT real request 429s.
+        for _ in range(limit):
+            simulator_router._check_simulator_user_rate("alice")
+
+        # Alice is over budget → 429 (per-user enforcement, NOT the per-IP
+        # decorator, which is reset fresh by the fixture).
+        r_alice = _post(client, user_id="alice")
+        assert r_alice.status_code == 429, r_alice.text
+        assert "rate limit" in r_alice.json()["detail"].lower()
+
+        # Bob shares the SAME TestClient remote IP but has his own quota →
+        # 200. Pre-fix (per-IP keying) bob would also be 429'd. This is the
+        # NAT-shared-bucket starvation S1 eliminates.
+        r_bob = _post(client, user_id="bob")
+        assert r_bob.status_code == 200, r_bob.text

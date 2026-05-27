@@ -150,6 +150,10 @@ class DataQualityFlags(TypedDict, total=False):
     fills_missing_is_maker_pct: float
     # --- account balance / capital ---
     account_balance_unavailable: bool
+    # Audit-2026-05-27 A1 (MED8): the stored account_balance_usdt was PRESENT
+    # but non-numeric (corrupt). Distinct from account_balance_unavailable
+    # ("no balance configured") and no_linked_api_key ("demo / no key").
+    account_balance_corrupt: bool
     no_linked_api_key: bool
     used_heuristic_capital: bool
     balance_error: bool
@@ -1180,6 +1184,13 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # without falsely implying analytics ran with a degraded NAV.
         account_balance = None
         account_balance_unavailable = False
+        # Audit-2026-05-27 A1 (MED8): a non-numeric / corrupt
+        # api_keys.account_balance_usdt is DISTINCT from "no balance
+        # configured". Pre-fix `float(balance_raw)` raised inside the broad
+        # `except Exception` below and routed to account_balance_unavailable,
+        # conflating "stored value is garbage" (a data-integrity bug worth
+        # surfacing) with the documented no-balance/demo meaning of that flag.
+        account_balance_corrupt = False
         no_linked_api_key = False
         # Hoisted out of the try so the except handler can route based on
         # whether api_key_id was set BEFORE the throw — otherwise a fetch
@@ -1212,7 +1223,23 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                     else None
                 )
                 if balance_raw is not None:
-                    account_balance = float(balance_raw)
+                    # Audit-2026-05-27 A1 (MED8): narrow the cast so a corrupt
+                    # stored value (e.g. "", "N/A", "12.3USDT") raises HERE and
+                    # is routed to a DISTINCT account_balance_corrupt flag —
+                    # NOT swallowed by the broad except below and mislabeled as
+                    # account_balance_unavailable. account_balance stays None
+                    # (NAV proxy semantics unchanged, per _load_position_time_
+                    # series), but the corruption is surfaced for the owner UI.
+                    try:
+                        account_balance = float(balance_raw)
+                    except (TypeError, ValueError):
+                        account_balance_corrupt = True
+                        logger.warning(
+                            "Corrupt account_balance_usdt=%r for strategy %s "
+                            "(api_key %s) — not numeric; treating as unavailable "
+                            "for NAV but flagging distinctly",
+                            balance_raw, strategy_id, api_key_id,
+                        )
                 else:
                     # api_key exists but no balance configured. Post-C-0221
                     # NAV semantics are unchanged (always `max_gross_exposure`,
@@ -1618,6 +1645,11 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         if account_balance_unavailable:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["account_balance_unavailable"] = True
+        # Audit-2026-05-27 A1 (MED8): corrupt stored balance gets its OWN flag,
+        # not account_balance_unavailable — preserves the data-integrity signal.
+        if account_balance_corrupt:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["account_balance_corrupt"] = True
         if no_linked_api_key:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["no_linked_api_key"] = True
@@ -1628,13 +1660,15 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # The factsheet UI uses these keys to render an "approximate"
         # chip on CAGR/Sharpe rather than presenting them as canonical.
         #
-        # Suppress used_heuristic_capital when account_balance_unavailable
-        # OR no_linked_api_key already fires — the heuristic is the
-        # downstream consequence of those upstream states, not a distinct
-        # condition. Surfacing both would render two redundant
+        # Suppress used_heuristic_capital when account_balance_unavailable,
+        # account_balance_corrupt, OR no_linked_api_key already fires — the
+        # heuristic is the downstream consequence of those upstream states, not
+        # a distinct condition. Surfacing both would render two redundant
         # "approximate" chips on the factsheet for one underlying state.
         if returns_meta["used_heuristic_capital"] and not (
-            account_balance_unavailable or no_linked_api_key
+            account_balance_unavailable
+            or account_balance_corrupt
+            or no_linked_api_key
         ):
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["used_heuristic_capital"] = True

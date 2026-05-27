@@ -25,7 +25,6 @@ from models.schemas import (
 from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import get_supabase
-from services.encryption import decrypt_credentials, encrypt_credentials, get_kek
 from services.exchange import create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions
 from services.metrics import _safe_float, sanitize_metrics
 from services.portfolio_metrics import compute_twr, compute_mwr, compute_period_returns

@@ -140,6 +140,7 @@ async def test_funding_pnl_summed_over_position_window() -> None:
     fills = [
         {
             "symbol": "BTCUSDT",
+            "exchange": "binance",
             "side": "buy",
             "price": 100.0,
             "quantity": 1.0,
@@ -150,6 +151,7 @@ async def test_funding_pnl_summed_over_position_window() -> None:
         },
         {
             "symbol": "BTCUSDT",
+            "exchange": "binance",
             "side": "sell",
             "price": 110.0,
             "quantity": 1.0,
@@ -276,6 +278,7 @@ async def test_realized_pnl_unchanged_by_funding_addition() -> None:
     fills = [
         {
             "symbol": "BTCUSDT",
+            "exchange": "binance",
             "side": "buy",
             "price": 100.0,
             "quantity": 1.0,
@@ -286,6 +289,7 @@ async def test_realized_pnl_unchanged_by_funding_addition() -> None:
         },
         {
             "symbol": "BTCUSDT",
+            "exchange": "binance",
             "side": "sell",
             "price": 110.0,
             "quantity": 1.0,
@@ -984,6 +988,7 @@ async def test_open_position_funding_attributed_through_now() -> None:
     fills = [
         {
             "symbol": "BTCUSDT",
+            "exchange": "binance",
             "side": "buy",
             "price": 100.0,
             "quantity": 1.0,
@@ -1322,3 +1327,186 @@ async def test_corrupt_funding_rows_counted_and_excluded_from_sum() -> None:
     assert dq.get("funding_rows_unparseable") == 2, (
         f"expected 2 unparseable funding rows surfaced; got data_quality_flags={dq!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_funding_at_flip_instant_counted_once() -> None:
+    """Audit-2026-05-27 P1 (MED8): a funding row stamped at the EXACT flip
+    instant must be attributed to exactly ONE leg, not both.
+
+    Timeline (single symbol+exchange):
+      buy 2 @ T0=Jan-1  → opens long 2
+      sell 4 @ T_flip=Jan-3 → closes long [Jan-1, Jan-3], opens short 2 [Jan-3, …]
+      buy 2 @ T2=Jan-5  → closes short [Jan-3, Jan-5]
+    A funding row at EXACTLY Jan-3 sits on the boundary the closing long
+    ([open, T_flip]) and the new short ([T_flip, close]) both claimed under the
+    prior inclusive-bounds + per-position summation. With half-open windows it
+    belongs solely to the short ([Jan-3, Jan-5)), counted once.
+
+    Fails without the fix: the Jan-3 row is summed into BOTH legs → the
+    strategy's total funding is double-counted (2.0 instead of 1.0).
+    """
+    fills = [
+        {
+            "symbol": "BTCUSDT",
+            "exchange": "binance",
+            "side": "buy",
+            "price": 100.0,
+            "quantity": 2.0,
+            "fee": 0.0,
+            "timestamp": "2024-01-01T00:00:00+00:00",
+            "raw_data": {},
+            "is_fill": True,
+        },
+        {
+            "symbol": "BTCUSDT",
+            "exchange": "binance",
+            "side": "sell",
+            "price": 110.0,
+            "quantity": 4.0,  # closes the 2-long AND opens a 2-short (flip)
+            "fee": 0.0,
+            "timestamp": "2024-01-03T00:00:00+00:00",
+            "raw_data": {},
+            "is_fill": True,
+        },
+        {
+            "symbol": "BTCUSDT",
+            "exchange": "binance",
+            "side": "buy",
+            "price": 105.0,
+            "quantity": 2.0,  # closes the short
+            "fee": 0.0,
+            "timestamp": "2024-01-05T00:00:00+00:00",
+            "raw_data": {},
+            "is_fill": True,
+        },
+    ]
+    funding_rows = [
+        {
+            "strategy_id": "strat-flip",
+            "exchange": "binance",
+            "symbol": "BTCUSDT",
+            "amount": "1.0",
+            "currency": "USDT",
+            "timestamp": "2024-01-03T00:00:00+00:00",  # EXACTLY the flip instant
+        },
+    ]
+
+    mock_supabase = _make_mock_supabase_with_funding(fills, funding_rows)
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ):
+        await reconstruct_positions("strat-flip", mock_supabase)
+
+    inserted_rows = [
+        row for batch in mock_supabase._captured_inserts for row in batch
+    ]
+    assert len(inserted_rows) == 2, f"expected 2 closed legs, got {inserted_rows!r}"
+
+    # The Jan-3 row is counted exactly once across BOTH legs (total == 1.0),
+    # and lands on the leg whose half-open window [Jan-3, Jan-5) contains it
+    # (the short opened by the flip), not the closing long ([Jan-1, Jan-3)).
+    total_funding = sum(p["funding_pnl"] for p in inserted_rows)
+    assert total_funding == pytest.approx(1.0, abs=1e-9), (
+        f"flip-instant funding double-counted: total={total_funding} "
+        f"across legs={[(p['opened_at'], p['closed_at'], p['funding_pnl']) for p in inserted_rows]}"
+    )
+
+    long_leg = next(p for p in inserted_rows if p["side"] == "long")
+    short_leg = next(p for p in inserted_rows if p["side"] == "short")
+    assert long_leg["funding_pnl"] == pytest.approx(0.0, abs=1e-9), (
+        "the row at the flip instant must NOT land in the closing long's "
+        "half-open window [open, flip)"
+    )
+    assert short_leg["funding_pnl"] == pytest.approx(1.0, abs=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_funding_not_double_counted_across_overlapping_same_symbol_positions() -> None:
+    """Audit-2026-05-27 P1 (MED8): two SAME-symbol positions on DIFFERENT
+    exchanges with OVERLAPPING time windows must not both claim a funding row
+    that falls in the overlap.
+
+    Pre-fix the funding lookup keyed by symbol alone (exchange dropped) and
+    summed every in-window row into EVERY position, so a row in the overlap was
+    attributed to both the binance and the okx position. Keying by
+    (symbol, exchange) + single-assignment attributes each row to exactly the
+    position on its own exchange.
+
+    Timeline (both BTCUSDT, overlapping Jan-2 → Jan-3):
+      binance: buy Jan-1 → sell Jan-4   window [Jan-1, Jan-4)
+      okx:     buy Jan-2 → sell Jan-5   window [Jan-2, Jan-5)
+    A binance funding row at Jan-2T12 (inside BOTH windows) belongs ONLY to the
+    binance position.
+
+    Fails without the fix: the Jan-2T12 row (and the okx one) are summed into
+    both positions → each shows the other's funding too.
+    """
+    fills = [
+        # binance position
+        {
+            "symbol": "BTCUSDT", "exchange": "binance", "side": "buy",
+            "price": 100.0, "quantity": 1.0, "fee": 0.0,
+            "timestamp": "2024-01-01T00:00:00+00:00", "raw_data": {}, "is_fill": True,
+        },
+        {
+            "symbol": "BTCUSDT", "exchange": "binance", "side": "sell",
+            "price": 110.0, "quantity": 1.0, "fee": 0.0,
+            "timestamp": "2024-01-04T00:00:00+00:00", "raw_data": {}, "is_fill": True,
+        },
+        # okx position — same symbol, overlapping window, different exchange
+        {
+            "symbol": "BTCUSDT", "exchange": "okx", "side": "buy",
+            "price": 100.0, "quantity": 1.0, "fee": 0.0,
+            "timestamp": "2024-01-02T00:00:00+00:00", "raw_data": {}, "is_fill": True,
+        },
+        {
+            "symbol": "BTCUSDT", "exchange": "okx", "side": "sell",
+            "price": 120.0, "quantity": 1.0, "fee": 0.0,
+            "timestamp": "2024-01-05T00:00:00+00:00", "raw_data": {}, "is_fill": True,
+        },
+    ]
+    funding_rows = [
+        # In the overlap [Jan-2, Jan-4): only the binance position owns it.
+        {
+            "strategy_id": "strat-overlap", "exchange": "binance", "symbol": "BTCUSDT",
+            "amount": "3.0", "currency": "USDT",
+            "timestamp": "2024-01-02T12:00:00+00:00",
+        },
+        # In the overlap too: only the okx position owns it.
+        {
+            "strategy_id": "strat-overlap", "exchange": "okx", "symbol": "BTCUSDT",
+            "amount": "7.0", "currency": "USDT",
+            "timestamp": "2024-01-03T12:00:00+00:00",
+        },
+    ]
+
+    mock_supabase = _make_mock_supabase_with_funding(fills, funding_rows)
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ):
+        await reconstruct_positions("strat-overlap", mock_supabase)
+
+    inserted_rows = [
+        row for batch in mock_supabase._captured_inserts for row in batch
+    ]
+    assert len(inserted_rows) == 2, f"expected 2 positions, got {inserted_rows!r}"
+
+    # Map by entry price to disambiguate (binance entry 100/exit 110, okx entry
+    # 100/exit 120) — exchange is a transient key stripped before persist, so
+    # use exit price which differs between the two legs.
+    binance_pos = next(p for p in inserted_rows if p["exit_price_avg"] == pytest.approx(110.0))
+    okx_pos = next(p for p in inserted_rows if p["exit_price_avg"] == pytest.approx(120.0))
+
+    assert binance_pos["funding_pnl"] == pytest.approx(3.0, abs=1e-9), (
+        f"binance position must own ONLY its own funding (3.0), "
+        f"got {binance_pos['funding_pnl']}"
+    )
+    assert okx_pos["funding_pnl"] == pytest.approx(7.0, abs=1e-9), (
+        f"okx position must own ONLY its own funding (7.0), "
+        f"got {okx_pos['funding_pnl']}"
+    )
+    # Total across both = 3 + 7 = 10 (no row summed twice).
+    assert sum(p["funding_pnl"] for p in inserted_rows) == pytest.approx(10.0, abs=1e-9)

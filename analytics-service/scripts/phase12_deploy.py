@@ -54,11 +54,11 @@ SQL_PROBE_PATH = Path(__file__).resolve().parent / "analyze_metrics_size.sql"
 # regex below only ever captures "true"/"false", but typing the return as a
 # bare `str` would let a future edit return "TRUE"/"1"/"yes" and silently
 # bypass analytics_runner's `.lower() == "true"` parse on the consuming side.
-# Pinning the Literal makes any such drift a type-check failure. The default
-# falsy branch is a named constant so the literal value lives in exactly one
-# place.
+# Pinning the Literal makes any such drift a type-check failure. Note the
+# reader has NO default branch: a missing/absent flag raises rather than
+# silently defaulting to "false" (a false default would let a misconfigured
+# deploy run parity tests against the wrong bucket path).
 TradeMixFlag = Literal["true", "false"]
-FLAG_FALSE: TradeMixFlag = "false"
 
 
 def _read_trade_mix_flag_from_todos() -> TradeMixFlag:

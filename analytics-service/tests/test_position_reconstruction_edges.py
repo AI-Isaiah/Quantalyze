@@ -346,6 +346,56 @@ class TestFifoEdges:
         flags = closed[0].get("data_quality_flags") or {}
         assert flags.get("posSide_side_mismatch") is True
 
+    def test_fill_count_includes_partial_reductions_on_close(self) -> None:
+        """Audit-2026-05-27 P2 (LOW9): fill_count must count EVERY fill that
+        touched the position — open + partial reductions + final close — not
+        just opening/adding fills.
+
+        Position: buy 4 (open) → sell 1 → sell 1 → sell 1 (three partial
+        reductions) → sell 1 (final close). 5 fills total. The prior
+        `len(entry_fills) + 1` counted only the 1 opening fill + 1 closing fill
+        = 2, silently dropping the three partial reductions.
+
+        Fails without the fix: fill_count == 2 instead of 5.
+        """
+        fills = [
+            _make_fill("buy", 4.0, 100.0, "2024-01-01T00:00:00+00:00"),
+            _make_fill("sell", 1.0, 101.0, "2024-01-02T00:00:00+00:00"),
+            _make_fill("sell", 1.0, 102.0, "2024-01-03T00:00:00+00:00"),
+            _make_fill("sell", 1.0, 103.0, "2024-01-04T00:00:00+00:00"),
+            _make_fill("sell", 1.0, 104.0, "2024-01-05T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "s-1")
+        closed = [p for p in positions if p["status"] == "closed"]
+        assert len(closed) == 1, f"expected 1 closed position, got {positions!r}"
+        assert closed[0]["fill_count"] == 5, (
+            "fill_count must include the 3 partial reductions "
+            f"(1 open + 3 reductions + 1 close = 5); got {closed[0]['fill_count']}"
+        )
+
+    def test_fill_count_includes_partial_reductions_on_open_position(self) -> None:
+        """P2 (LOW9): an OPEN position with intermediate partial reductions
+        must also report every touching fill.
+
+        Position stays open: buy 4 (open) → sell 1 → sell 1 (two partial
+        reductions, net still long 2). 3 touching fills. The prior
+        `len(entry_fills)` counted only the opening fill = 1.
+
+        Fails without the fix: fill_count == 1 instead of 3.
+        """
+        fills = [
+            _make_fill("buy", 4.0, 100.0, "2024-01-01T00:00:00+00:00"),
+            _make_fill("sell", 1.0, 101.0, "2024-01-02T00:00:00+00:00"),
+            _make_fill("sell", 1.0, 102.0, "2024-01-03T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "s-1")
+        opens = [p for p in positions if p["status"] == "open"]
+        assert len(opens) == 1, f"expected 1 open position, got {positions!r}"
+        assert opens[0]["fill_count"] == 3, (
+            "open-position fill_count must include the 2 partial reductions "
+            f"(1 open + 2 reductions = 3); got {opens[0]['fill_count']}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # _attribute_funding edge cases via reconstruct_positions

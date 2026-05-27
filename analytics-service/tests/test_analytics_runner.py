@@ -1635,7 +1635,10 @@ def _build_balance_flag_mock_supabase(
     daily_pnl_rows: list[dict],
     sa_upsert_calls: list[dict],
     strategy_api_key_id: str | None,
-    api_key_balance: float | int | None = 10000.0,
+    # Accepts a non-numeric value too (A1 corrupt-balance test) — the runner
+    # must route a corrupt stored value to a distinct flag, so the mock must be
+    # able to seed one.
+    api_key_balance: float | int | str | None = 10000.0,
     api_keys_raises: bool = False,
     strategies_data_raises_on_get: bool = False,
 ):
@@ -1955,6 +1958,37 @@ async def test_balance_flag_routing_exception_with_no_api_key_emits_no_linked():
     flags = await _run_and_get_data_quality_flags(mock_supabase, sa_upsert_calls)
     assert flags.get("no_linked_api_key") is True
     assert "account_balance_unavailable" not in flags
+
+
+@pytest.mark.asyncio
+async def test_balance_flag_routing_corrupt_balance_emits_distinct_flag():
+    """Audit-2026-05-27 A1 (MED8): a PRESENT but non-numeric
+    account_balance_usdt (e.g. 'N/A', '', '12.3USDT') must surface a DISTINCT
+    `account_balance_corrupt` flag — NOT be conflated with
+    `account_balance_unavailable` (the documented "no balance configured"
+    state) by the broad except.
+
+    Pre-fix `float(balance_raw)` raised inside the broad `except Exception`,
+    which — because api_key_id was resolved — set account_balance_unavailable,
+    losing the data-integrity signal.
+
+    Fails without the fix: account_balance_corrupt is absent and
+    account_balance_unavailable=True instead.
+    """
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance="N/A",  # corrupt stored value
+    )
+    flags = await _run_and_get_data_quality_flags(mock_supabase, sa_upsert_calls)
+    assert flags.get("account_balance_corrupt") is True, (
+        f"corrupt balance must set account_balance_corrupt; got {flags!r}"
+    )
+    # Corruption must NOT be mislabeled as the no-balance / demo states.
+    assert "account_balance_unavailable" not in flags
+    assert "no_linked_api_key" not in flags
 
 
 # ---------------------------------------------------------------------------

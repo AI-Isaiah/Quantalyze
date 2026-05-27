@@ -93,6 +93,49 @@ _force_last_run: dict[str, float] = {}  # allocator_id → monotonic timestamp
 # against. The lock is created on first use (defaultdict pattern).
 _force_lock: dict[str, asyncio.Lock] = {}
 
+
+def _prune_stale_force_entries(now: float | None = None) -> None:
+    """MA1 (red-team LOW9): evict stale per-allocator force-throttle state.
+
+    ``_force_last_run`` and ``_force_lock`` grow one permanent entry per
+    distinct allocator_id that ever hits the force=True path. Bounded by the
+    allocator population today, but unbounded in principle (e.g. a SERVICE_KEY
+    holder rotating allocator_ids). Called on the force path before the
+    check-then-stamp so the dicts stay proportional to *recently-active*
+    allocators, not all-time.
+
+    Eviction rule preserves throttle semantics exactly:
+      * A stamp is droppable only once it is OLDER than
+        FORCE_RECOMPUTE_MIN_INTERVAL_S — at that age it can no longer throttle
+        any future request (the gate compares ``now - stamp`` against the same
+        window), so removing it changes no decision. A *recent* stamp (still
+        inside the window) is retained so it keeps throttling.
+      * A lock is dropped only when it is (a) NOT currently held — an in-flight
+        request is inside ``async with _force_lock[id]`` — and (b) its allocator
+        has no surviving (recent) stamp. Dropping a held lock would let a
+        concurrent waiter acquire a *different* lock object, breaking the
+        atomicity M-1 added; dropping an unheld lock is safe because the next
+        force request lazily recreates one.
+    """
+    if now is None:
+        now = time.monotonic()
+    cutoff = FORCE_RECOMPUTE_MIN_INTERVAL_S
+    # Prune stamps that can no longer throttle (older than the window).
+    stale_ids = [
+        aid for aid, stamp in _force_last_run.items()
+        if now - stamp >= cutoff
+    ]
+    for aid in stale_ids:
+        del _force_last_run[aid]
+    # Prune idle locks whose allocator no longer has a live (recent) stamp.
+    # Iterate a snapshot of keys since we mutate the dict in the loop.
+    for aid in list(_force_lock.keys()):
+        if aid in _force_last_run:
+            continue  # still has a recent stamp → keep the matching lock
+        lock = _force_lock.get(aid)
+        if lock is not None and not lock.locked():
+            del _force_lock[aid]
+
 # C-01 (code-review): page size for analytics SELECT .in_() fetches
 # (NEW-C08-02 / NEW-C08-03). Previously defined at line 1007 (below its call
 # sites at lines 190 and 466) — CPython resolves module globals at call time
@@ -1465,8 +1508,15 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
     # startup all read 0.0, pass the gate simultaneously, and queue on the
     # scoring semaphore — exactly the churn the throttle was designed to prevent.
     # Lock is created on first use (lazy initialisation keeps the module-level
-    # dict lean; locks are cheap and never removed).
+    # dict lean). Idle locks for stale allocators are pruned by
+    # _prune_stale_force_entries below — but never a *held* lock.
     if req.force:
+        # MA1: prune stale throttle state BEFORE touching this allocator's
+        # entries so the dicts stay bounded by recently-active allocators.
+        # Runs before creating/acquiring THIS allocator's lock; the prune
+        # never drops a held lock or a still-throttling (recent) stamp, so
+        # it cannot race with this request's own check-then-stamp below.
+        _prune_stale_force_entries()
         if allocator_id not in _force_lock:
             _force_lock[allocator_id] = asyncio.Lock()
         async with _force_lock[allocator_id]:

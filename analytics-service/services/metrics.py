@@ -766,21 +766,42 @@ def compute_all_metrics(
     # Benchmark metrics (single greeks() call for alpha + beta)
     if benchmark_returns is not None and len(benchmark_returns) > 0:
         try:
-            greeks = qs.stats.greeks(returns, benchmark_returns)
-            metrics_json["alpha"] = _safe_float(greeks.get("alpha", 0))
-            metrics_json["beta"] = _safe_float(greeks.get("beta", 0))
+            # M1 (red-team 2026-05-27): align ONCE on the inner-join
+            # intersection and feed the SAME (returns, benchmark) pair into
+            # EVERY benchmark-relative metric (alpha/beta via greeks,
+            # correlation, info_ratio, treynor) so they are mutually
+            # consistent — all computed over the exact same dates.
+            #
+            # Previously alpha/beta came from `qs.stats.greeks(returns,
+            # benchmark_returns)`, which internally calls quantstats'
+            # `_prepare_benchmark(benchmark, returns.index)` — reindexing the
+            # benchmark onto the strategy's FULL date range with bfill. The
+            # other metrics used `returns.align(benchmark, join="inner")` (the
+            # intersection only). On a calendar mismatch (24/7 crypto strategy
+            # vs a benchmark with weekend/holiday gaps) alpha/beta were over
+            # the gap-filled full range while correlation/info_ratio were over
+            # the shorter intersection — internally inconsistent, and IR's
+            # tracking error was on a silently-truncated sample. Feeding the
+            # single inner-join pair to greeks() too removes that skew. When
+            # the calendars already match (e.g. the golden fixture) the
+            # intersection equals the full range, so the stored values are
+            # unchanged.
             aligned = returns.align(benchmark_returns, join="inner")
-            if len(aligned[0]) > 1:
-                metrics_json["correlation"] = _safe_float(aligned[0].corr(aligned[1]))
-                excess = aligned[0] - aligned[1]
+            aligned_returns, aligned_benchmark = aligned[0], aligned[1]
+            if len(aligned_returns) > 1:
+                greeks = qs.stats.greeks(aligned_returns, aligned_benchmark)
+                metrics_json["alpha"] = _safe_float(greeks.get("alpha", 0))
+                metrics_json["beta"] = _safe_float(greeks.get("beta", 0))
+                metrics_json["correlation"] = _safe_float(aligned_returns.corr(aligned_benchmark))
+                excess = aligned_returns - aligned_benchmark
                 te = float(excess.std() * np.sqrt(252))
                 if te > 0:
                     metrics_json["info_ratio"] = _safe_float(excess.mean() * 252 / te)
                 beta = metrics_json.get("beta", 0)
                 if beta and beta != 0 and cagr is not None:
                     metrics_json["treynor"] = _safe_float(cagr / beta)
-            if len(aligned[0]) >= 90:
-                metrics_json["btc_rolling_correlation_90d"] = _rolling_correlation(aligned[0], aligned[1], 90)
+            if len(aligned_returns) >= 90:
+                metrics_json["btc_rolling_correlation_90d"] = _rolling_correlation(aligned_returns, aligned_benchmark, 90)
         except Exception as exc:  # noqa: BLE001
             # audit-2026-05-07 G11.E.2: this `try` historically wrapped the entire
             # benchmark-metrics fan-out (greeks/alpha/beta/correlation/info_ratio/
