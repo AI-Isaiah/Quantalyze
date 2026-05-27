@@ -88,8 +88,8 @@ export const FROZEN_TRADE_METRICS_KEYS: ReadonlyArray<string> = [
   // Plan 12-06 merges _compute_volume_aggregator keys
   "gross_volume_usd",
   "mean_trade_size_usd",
-  "daily_turnover_usd",
-  "monthly_turnover_usd",
+  "mean_daily_turnover_usd",
+  "mean_monthly_turnover_usd",
 ];
 
 /**

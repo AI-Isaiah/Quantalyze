@@ -442,8 +442,8 @@ export interface TradeMetrics {
   // consumer that reads `gross_volume_usd` should null-check.
   gross_volume_usd?: number | null;
   mean_trade_size_usd?: number | null;
-  daily_turnover_usd?: number | null;
-  monthly_turnover_usd?: number | null;
+  mean_daily_turnover_usd?: number | null;
+  mean_monthly_turnover_usd?: number | null;
   payoff_ratio?: number | null;
   profit_factor?: number | null;
   winners_count?: number;
@@ -1312,21 +1312,22 @@ export type { BridgeFitLabel };
 
 // NEW-C21-02 — Improvement brand for BridgeCandidate deltas
 //
-// `sharpe_delta`, `dd_delta`, `corr_delta` are bare numbers with an implicit
-// per-field sign convention: for Sharpe, positive = improvement; for MaxDD and
-// Corr, NEGATIVE = improvement (lower drawdown / lower correlation is better).
-// ReplacementCard.tsx kept a hand-maintained `invertedBetter` boolean table
-// to apply this convention at render time — a source of silent bugs when new
-// delta fields are added without updating the table.
+// H-1065: the backend now orients ALL bridge deltas so positive = improvement:
+//   - sharpe_delta = new_sharpe - current_sharpe       (higher Sharpe is better)
+//   - corr_delta   = current_corr - new_corr           (correlation reduced is better)
+//   - dd_delta     = new_dd - current_dd  (drawdowns <= 0; shallower new dd is better)
+// So all three are "higher-better" at render time. (Before H-1065, dd_delta was
+// inverted, which both penalized drawdown improvements in the composite ranking and
+// forced a per-field sign table.)
 //
 // The `Improvement` brand encodes whether "positive means better" has already
 // been applied. `asImprovement(raw, direction)` is the single constructor:
-//   - direction: "higher-better" (Sharpe) → returns raw unchanged
-//   - direction: "lower-better" (MaxDD, Corr) → negates so positive=improvement
+//   - direction: "higher-better" → returns raw unchanged (all bridge deltas today)
+//   - direction: "lower-better"  → negates so positive=improvement (kept for any
+//     future field whose raw convention is lower-is-better)
 //
 // Consumers that receive `Improvement` values can render green for positive
-// and red for negative unconditionally, without a separate `invertedBetter`
-// flag. The hand-kept table in ReplacementCard.tsx is eliminated.
+// and red for negative unconditionally, without a per-field sign table.
 
 /** A number that has been normalised to "positive = improvement" semantics. */
 export type Improvement = number & { readonly __improvementBrand: true };
@@ -1347,9 +1348,10 @@ export interface BridgeCandidate {
   strategy_id: string;
   strategy_name: string;
   /**
-   * Raw deltas — UNSIGNED sign convention (positive = improvement for Sharpe,
-   * negative = improvement for dd/corr). Use `asImprovement(raw, direction)`
-   * to produce a normalised value before rendering.
+   * Raw deltas, all oriented positive = improvement (H-1065): sharpe_delta,
+   * corr_delta (correlation reduced), and dd_delta (shallower drawdown) are
+   * each >= 0 when the candidate improves that axis. Use
+   * `asImprovement(raw, "higher-better")` before rendering.
    */
   sharpe_delta: number;
   dd_delta: number;
