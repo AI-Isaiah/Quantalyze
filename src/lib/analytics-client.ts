@@ -175,15 +175,41 @@ export async function encryptKey(exchange: string, apiKey: string, apiSecret: st
   return parseResponse(EncryptKeyResponseSchema, data, "/api/encrypt-key");
 }
 
-export async function computePortfolioAnalytics(portfolioId: string) {
-  const data = await analyticsRequest("/api/portfolio-analytics", { portfolio_id: portfolioId });
+/**
+ * C-PR5-01 remainder (audit-2026-05-07, follow-up to PR #347).
+ *
+ * `actorId` (the authenticated user's id) is now REQUIRED on both analytics
+ * compute calls. It maps to the Python service's `req.user_id` parameter
+ * which the handler uses as the second ownership gate
+ * (`portfolios.user_id = req.user_id`) — the only defense against an
+ * X-Service-Key holder forging a request for another tenant's portfolio.
+ * The relaxed Optional[str] back-compat path in
+ * `analytics-service/models/schemas.py` was the C-PR5-01 attack surface
+ * identified by the PR-5 security review; tightening this signature on
+ * the TS side ensures the route can't drift back to the broken state.
+ *
+ * Symmetric to `recomputeMatch(allocatorId, force, actorId)` which closed
+ * the same shape on the match endpoint via PR #347.
+ */
+export async function computePortfolioAnalytics(
+  portfolioId: string,
+  actorId: string,
+) {
+  const data = await analyticsRequest("/api/portfolio-analytics", {
+    portfolio_id: portfolioId,
+    user_id: actorId,
+  });
   return parseResponse(PortfolioAnalyticsResponseSchema, data, "/api/portfolio-analytics");
 }
 
-export async function runPortfolioOptimizer(portfolioId: string, timeoutMs?: number) {
+export async function runPortfolioOptimizer(
+  portfolioId: string,
+  actorId: string,
+  timeoutMs?: number,
+) {
   const data = await analyticsRequest(
     "/api/portfolio-optimizer",
-    { portfolio_id: portfolioId },
+    { portfolio_id: portfolioId, user_id: actorId },
     timeoutMs ? { timeoutMs } : undefined,
   );
   return parseResponse(PortfolioOptimizerResponseSchema, data, "/api/portfolio-optimizer");

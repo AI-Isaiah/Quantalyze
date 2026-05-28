@@ -94,8 +94,14 @@ export async function POST(req: NextRequest) {
   try {
     // M-0332: `data` is now z.infer<typeof PortfolioOptimizerResponseSchema>
     // — `suggestions` is explicitly modelled, no cast needed.
+    // C-PR5-01 remainder (audit-2026-05-07): forward the authenticated
+    // `user.id` to the analytics service so the Python handler can apply
+    // the second ownership gate `portfolios.user_id = req.user_id` (the
+    // first gate is `assertPortfolioOwnership` above, which is the TS-side
+    // RLS-bypassing check). Both gates close C-PR5-01 in defence-in-depth.
     const data = await runPortfolioOptimizer(
       portfolioId,
+      user.id,
       OPTIMIZER_TIMEOUT_MS,
     );
 

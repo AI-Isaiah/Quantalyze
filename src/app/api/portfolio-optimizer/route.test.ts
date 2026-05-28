@@ -40,10 +40,19 @@ const STATE = vi.hoisted(() => ({
     | { success: false; retryAfter: number },
   ownershipResult: true,
   ownershipCalls: [] as Array<{ portfolioId: string; userId: string }>,
-  optimizerImpl: (async (_id: string, _ms?: number) => ({
+  optimizerImpl: (async (_id: string, _actorId: string, _ms?: number) => ({
     status: "complete",
     suggestions: [{ symbol: "BTC", weight: 0.3 }],
-  })) as (id: string, ms?: number) => Promise<unknown>,
+  })) as (id: string, actorId: string, ms?: number) => Promise<unknown>,
+  // C-PR5-01 follow-up (audit-2026-05-07): pin every actor_id forwarded
+  // through to the analytics service so a future regression dropping
+  // the user.id arg (re-opening the cross-tenant compute path) breaks a
+  // test rather than silently shipping. Symmetric to ownershipCalls.
+  optimizerCalls: [] as Array<{
+    id: string;
+    actorId: string;
+    ms?: number;
+  }>,
   // Audit-2026-05-07 red-team R-0002: track refund calls so the
   // symmetric-refund tests can assert the 504/503 paths refund the token.
   refundCalls: [] as string[],
@@ -78,8 +87,10 @@ vi.mock("@/lib/queries", () => ({
 }));
 
 vi.mock("@/lib/analytics-client", () => ({
-  runPortfolioOptimizer: (id: string, ms?: number) =>
-    STATE.optimizerImpl(id, ms),
+  runPortfolioOptimizer: (id: string, actorId: string, ms?: number) => {
+    STATE.optimizerCalls.push({ id, actorId, ms });
+    return STATE.optimizerImpl(id, actorId, ms);
+  },
   AnalyticsTimeoutError: FakeAnalyticsTimeoutError,
 }));
 
@@ -106,6 +117,7 @@ beforeEach(() => {
     status: "complete",
     suggestions: [{ symbol: "BTC", weight: 0.3 }],
   });
+  STATE.optimizerCalls = [];
   STATE.refundCalls = [];
 });
 
@@ -183,6 +195,33 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     const body = await res.json();
     expect(body.status).toBe("complete");
     expect(body.suggestions).toEqual([{ symbol: "BTC", weight: 0.3 }]);
+  });
+
+  // C-PR5-01 follow-up (audit-2026-05-07, PR-5 security review):
+  // the analytics-service `/api/portfolio-optimizer` Python handler
+  // gates ownership on `req.user_id`. The TS route MUST forward
+  // `user.id` (NOT a body-supplied value) so a forged request can't
+  // pass an arbitrary `user_id` and bypass the ownership filter.
+  // PR #347 closed the same shape on /api/match/recompute via actor
+  // binding; this pins the corresponding forward here.
+  it("C-PR5-01: forwards authenticated user.id as actorId, not body-supplied", async () => {
+    STATE.authUser = { id: "11111111-1111-4111-8111-111111111111" };
+    const res = await POST(
+      buildRequest({
+        portfolio_id: "00000000-0000-0000-0000-000000000123",
+        // Spoofed user_id in body — MUST be ignored.
+        user_id: "99999999-9999-9999-9999-999999999999",
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(STATE.optimizerCalls).toHaveLength(1);
+    expect(STATE.optimizerCalls[0].actorId).toBe(
+      "11111111-1111-4111-8111-111111111111",
+    );
+    // Negative: the body-supplied value never reached the analytics layer.
+    expect(STATE.optimizerCalls[0].actorId).not.toBe(
+      "99999999-9999-9999-9999-999999999999",
+    );
   });
 
   it("M-0332: missing suggestions in upstream response coerces to []", async () => {

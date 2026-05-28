@@ -1482,28 +1482,19 @@ async def portfolio_analytics(request: Request, req: PortfolioAnalyticsRequest):
     """Compute full portfolio analytics for a given portfolio."""
     supabase = get_supabase()
 
-    # NEW-C19-01: verify portfolio exists AND belongs to the requesting user.
-    # The service-role client bypasses RLS; without this ownership filter any
-    # X-Service-Key holder could compute analytics on another tenant's portfolio.
-    # Same pattern as the bridge endpoint's L-0047 ownership SELECT.
+    # NEW-C19-01 + C-PR5-01 (audit-2026-05-07): verify portfolio exists AND
+    # belongs to the requesting user. The service-role client bypasses RLS;
+    # without this ownership filter any X-Service-Key holder could compute
+    # analytics on another tenant's portfolio. Same pattern as the bridge
+    # endpoint's L-0047 ownership SELECT.
     #
-    # C-001 (red-team): user_id is now Optional. When present, apply the
-    # ownership .eq("user_id") filter (full defence-in-depth). When absent,
-    # fall back to an existence-only check and emit a warning so the ops team
-    # can track which callers still need to be upgraded to forward user_id.
-    if req.user_id is not None:
-        portfolio_result = supabase.table("portfolios").select("id").eq(
-            "id", req.portfolio_id
-        ).eq("user_id", req.user_id).single().execute()
-    else:
-        logger.warning(
-            "portfolio_analytics called without user_id for portfolio %s — "
-            "ownership check skipped; update caller to forward user_id",
-            req.portfolio_id,
-        )
-        portfolio_result = supabase.table("portfolios").select("id").eq(
-            "id", req.portfolio_id
-        ).single().execute()
+    # PR-5 follow-up: the prior C-001 (red-team) relaxation made user_id
+    # Optional and skipped the .eq("user_id") filter when absent. That was
+    # the C-PR5-01 attack surface — closed at the Pydantic layer (schema
+    # now requires str) and re-asserted here for defence-in-depth.
+    portfolio_result = supabase.table("portfolios").select("id").eq(
+        "id", req.portfolio_id
+    ).eq("user_id", req.user_id).single().execute()
 
     if not portfolio_result.data:
         raise HTTPException(status_code=404, detail="Portfolio not found")
@@ -1567,32 +1558,22 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     """
     supabase = get_supabase()
 
-    # NEW-C19-01: verify portfolio exists AND belongs to the requesting user.
-    # Without the .eq("user_id", req.user_id) filter this endpoint used to do
-    # a pure existence check — any X-Service-Key holder could pass an arbitrary
-    # portfolio_id and also issue an in-place UPDATE of another tenant's
-    # optimizer_suggestions (attribution forgery + cross-tenant write).
-    # The fix mirrors the bridge endpoint's L-0047 pattern.
-    # NOTE: portfolio_owner_id is captured from the row so the audit below
-    # can attribute under the portfolio's real owner; req.user_id is the value
-    # verified by the ownership SELECT.
+    # NEW-C19-01 + C-PR5-01 (audit-2026-05-07): verify portfolio exists AND
+    # belongs to the requesting user. Without the .eq("user_id", req.user_id)
+    # filter this endpoint used to do a pure existence check — any
+    # X-Service-Key holder could pass an arbitrary portfolio_id and also
+    # issue an in-place UPDATE of another tenant's optimizer_suggestions
+    # (attribution forgery + cross-tenant write). The fix mirrors the
+    # bridge endpoint's L-0047 pattern.
     #
-    # C-001 (red-team): user_id is now Optional. When present, apply the
-    # ownership .eq("user_id") filter (full defence-in-depth). When absent,
-    # fall back to an existence-only check and emit a warning.
-    if req.user_id is not None:
-        portfolio_result = supabase.table("portfolios").select("id, user_id").eq(
-            "id", req.portfolio_id
-        ).eq("user_id", req.user_id).single().execute()
-    else:
-        logger.warning(
-            "portfolio_optimizer called without user_id for portfolio %s — "
-            "ownership check skipped; update caller to forward user_id",
-            req.portfolio_id,
-        )
-        portfolio_result = supabase.table("portfolios").select("id, user_id").eq(
-            "id", req.portfolio_id
-        ).single().execute()
+    # PR-5 follow-up: prior C-001 (red-team) Optional relaxation was the
+    # C-PR5-01 attack surface — closed at the schema layer (now str) and
+    # re-asserted here for defence-in-depth. portfolio_owner_id is still
+    # captured from the row so the audit below can attribute under the
+    # portfolio's real owner.
+    portfolio_result = supabase.table("portfolios").select("id, user_id").eq(
+        "id", req.portfolio_id
+    ).eq("user_id", req.user_id).single().execute()
 
     if not portfolio_result.data:
         raise HTTPException(status_code=404, detail="Portfolio not found")

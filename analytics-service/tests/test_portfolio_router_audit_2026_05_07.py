@@ -715,9 +715,11 @@ _VALID_UUID = "123e4567-e89b-12d3-a456-426614174000"
 
 class TestPortfolioOptimizerRequestValidator:
     def test_none_weights_accepted(self):
-        # user_id is Optional (C-001 red-team); omit to keep the test focused on
-        # weights validation. Use a valid UUID when supplying one (M-001).
-        # Audit H-0533: portfolio_id is now UUID-validated, so use _VALID_UUID.
+        # user_id is now REQUIRED (C-PR5-01 follow-up to PR #347); the prior
+        # C-001 Optional[str]=None relaxation was the C-PR5-01 attack surface
+        # and is closed at the Pydantic layer. _VALID_UUID is passed verbatim
+        # here so this weights-focused test still constructs a valid model.
+        # Audit H-0533: portfolio_id is also UUID-validated, so use _VALID_UUID.
         from models.schemas import PortfolioOptimizerRequest
         r = PortfolioOptimizerRequest(portfolio_id=_VALID_UUID, user_id=_VALID_UUID)
         assert r.weights is None

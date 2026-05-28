@@ -372,23 +372,29 @@ class TestGenerateNarrativePartialDataC19:
 # ---------------------------------------------------------------------------
 
 class TestRequestSchemaUserIdC19:
-    # C-001 (red-team): user_id is now Optional so callers that don't yet
-    # forward it receive a 200 rather than a 422.  The "requires user_id"
-    # tests are updated: omitting user_id is now valid (None is accepted);
-    # providing a bad value (non-UUID) must still raise ValidationError.
+    # C-PR5-01 (audit-2026-05-07, follow-up to PR #347): the C-001
+    # relaxation that made user_id Optional was the C-PR5-01 attack
+    # surface — any X-Service-Key holder could omit user_id and the
+    # handler skipped the ownership filter. user_id is now REQUIRED
+    # again; omitting it raises ValidationError exactly like
+    # BridgeRequest.user_id has always done. TS-side
+    # `computePortfolioAnalytics(portfolioId, actorId)` /
+    # `runPortfolioOptimizer(portfolioId, actorId, ...)` now require
+    # the actorId argument so the wire never drifts back.
     #
     # Audit H-0532/H-0533: portfolio_id is now UUID-validated at the boundary,
     # so the prior placeholder ``"p1"`` would 422 on portfolio_id BEFORE the
     # user_id assertions could run. Use a real UUID for the field under test.
     _PID = "00000000-0000-0000-0000-000000000001"
 
-    def test_portfolio_analytics_request_omits_user_id_is_valid(self):
-        """C-001: PortfolioAnalyticsRequest must accept a missing user_id
-        (Optional) so the TS caller that doesn't yet forward it doesn't
-        receive a 422."""
+    def test_portfolio_analytics_request_omits_user_id_raises(self):
+        """C-PR5-01: PortfolioAnalyticsRequest must REJECT a missing user_id
+        (required) so any X-Service-Key holder that omits it gets a 422
+        instead of an unauthenticated portfolio compute."""
+        from pydantic import ValidationError
         from models.schemas import PortfolioAnalyticsRequest
-        r = PortfolioAnalyticsRequest(portfolio_id=self._PID)
-        assert r.user_id is None
+        with pytest.raises(ValidationError, match="user_id"):
+            PortfolioAnalyticsRequest(portfolio_id=self._PID)
 
     def test_portfolio_analytics_request_accepts_valid_uuid(self):
         """M-001: a well-formed UUID must be accepted and stored verbatim."""
@@ -427,11 +433,13 @@ class TestRequestSchemaUserIdC19:
         with pytest.raises(ValidationError, match="portfolio_id must not be empty"):
             PortfolioAnalyticsRequest(portfolio_id="   ")
 
-    def test_portfolio_optimizer_request_omits_user_id_is_valid(self):
-        """C-001: PortfolioOptimizerRequest must accept a missing user_id."""
+    def test_portfolio_optimizer_request_omits_user_id_raises(self):
+        """C-PR5-01: PortfolioOptimizerRequest must REJECT a missing
+        user_id (required). Mirrors the analytics-request test above."""
+        from pydantic import ValidationError
         from models.schemas import PortfolioOptimizerRequest
-        r = PortfolioOptimizerRequest(portfolio_id=self._PID)
-        assert r.user_id is None
+        with pytest.raises(ValidationError, match="user_id"):
+            PortfolioOptimizerRequest(portfolio_id=self._PID)
 
     def test_portfolio_optimizer_request_accepts_valid_uuid(self):
         """M-001: a well-formed UUID must be accepted."""

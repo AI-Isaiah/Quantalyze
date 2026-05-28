@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.24.15.0] - 2026-05-28
+### Hardened — Freshness UI + Boundary Parity + Strict Claim-Token + Portfolio Actor Binding (B14 + B9 + B5 + C-PR5-01 remainder + H-PR5-05 of cross-cutting refactor program)
+
+**B14 — Freshness / Liveness Signaling on Allocator Dashboard**
+- **NEW-C09-04.** `AllocationDashboardV2` now consumes `allKeysStale + lastSyncAt` from the payload and renders a non-blocking `StalenessBanner` above the InsightStrip when every active API key's `last_sync_at` is >24h old AND no sync is in flight (`!hasSyncing`, to avoid double-messaging with the SyncProgress pill). The banner copy includes the relative age ("3d ago") and points to the in-page API keys panel for reconnection. Defaults are conservative (`allKeysStale = false`) so a server payload regression silently under-warns rather than over-warns. Pinned by `AllocationDashboardV2.staleness.test.tsx` (4 specs).
+- **NEW-C09-06.** `AllocationDonut` now tracks excluded strategies by reason: "missing amount" (null `allocated_amount` AND null `current_weight × AUM`) versus "amount is zero" (explicit 0 from a paused / fully-redeemed strategy). Footnote rewords accordingly: `"3 of 5 investments excluded — amount unavailable"` vs `"1 of 3 investments excluded — amount is zero"` vs combined `"2 of 4 investments excluded — 1 amount unavailable, 1 at zero"`. The all-excluded case routes to dedicated copy (`"All N investments excluded — ..."`) instead of conflating with the no-data empty state. Pinned by 5 new specs in `allocation.test.tsx`.
+- **CLOSED-by-refactor.** NEW-C09-07 (`MyAllocationClient` header swap) — surface removed by the V2 dashboard refactor. NEW-C09-10 (TimeframeSelector silent collapse) — selector is now dead code (no JSX consumers); factsheet uses its own timeframe control. NEW-C37-01 (SyncProgress poller cutoff) — already in production (`POLL_MAX_ATTEMPTS = 40 + MISSING_ROW_GRACE_POLLS = 10`). NEW-C09-12 (formatCurrency `.toFixed(0)`) — already on `.toFixed(1)`.
+
+**B9 — Route ↔ DB CHECK Parity on `percent_allocated`**
+- **NEW-C18-02 / NEW-C18-03.** Migration `20260528183000_validate_scenario_diff_percent_range_fix.sql` updates the stale `_validate_scenario_diff` helper from the [0, 1] guard to the canonical [0, 100] range, matching the `bridge_outcomes_percent_allocated_range_check` column constraint (mig 20260514045553) and the route-side Zod (`scenario/commit/route.ts`). The function is still dead code on the hot path (`commit_scenario_batch` does NOT call it; only post-mig smoke DO blocks do), so this is pure latent-bug closure: the moment a future PR wires the validator into the per-diff loop, every legitimate `percent_allocated = 50` request would have raised 22023 against the old [0, 1] gate.
+- New vitest parity test (`percent-allocated-parity.test.ts`) pins the Zod ranges on `VoluntaryAddDiff / VoluntaryModifyDiff / BridgeRecommendedDiff` so any drift between TS, the column CHECK, and the validator surfaces in CI instead of as a 23514 in prod.
+
+**B5 — Strict Claim-Token on Terminal Mark RPCs (C-PR5-02 defense-in-depth)**
+- Migration `20260528183100_mark_compute_job_strict_claim_token.sql` replaces `mark_compute_job_done(p_job_id, p_claim_token)` and `mark_compute_job_failed(p_job_id, p_error, p_error_kind, p_claim_token)` so that NULL `p_claim_token` raises `22023 invalid_parameter_value` at the function entry, BEFORE touching `compute_jobs`. The `p_claim_token IS NULL OR ...` disjunct is removed from BOTH the running-row UPDATE WHERE clause AND the already-done idempotent-retry branch.
+- Signature unchanged (`DEFAULT NULL` preserved) so PostgREST routing is stable; legacy callers that omit the kwarg get a clean structured error instead of silently bypassing the P97 fence. The C-PR5-02 regression test (`tests/test_main_worker.py::test_c_pr5_02_no_null_claim_token_*`, shipped in PR #347) already pins the worker → mark contract, so the only production caller (`main_worker.py:522/543/595`) threads the token uniformly. Defense-in-depth closure of the back-compat path the PR-5 security review flagged as latent.
+- Verification DO block: NULL → 22023 on both RPCs (happy-path probe deferred to the live-DB pytest suite at `tests/test_compute_jobs_fencing.py` — in-migration seeding would FK-violate `strategies.user_id → profiles.id`).
+- 4 live-DB tests updated to thread `p_claim_token` (test_compute_jobs_fencing.py: `test_mark_done_without_token_raises_strict` renamed/inverted, plus the 3 status-guard tests use a known UUID).
+
+**C-PR5-01 — Portfolio Endpoints Remainder (follow-up to PR #347)**
+- `PortfolioAnalyticsRequest.user_id` and `PortfolioOptimizerRequest.user_id` flipped from `Optional[str] = None` (the prior C-001 red-team relaxation) back to required `str`. The PR-5 security review identified that Optional path as the C-PR5-01 attack surface for the portfolio endpoints — symmetric to the actor-binding gap on `/api/match/recompute` that PR #347 closed.
+- Python handlers (`portfolio_analytics`, `portfolio_optimizer`) drop the Optional branch and unconditionally apply `.eq("user_id", req.user_id)` on the ownership SELECT.
+- TS-side `computePortfolioAnalytics(portfolioId, actorId)` and `runPortfolioOptimizer(portfolioId, actorId, ...)` now require `actorId`. The `/api/portfolio-optimizer` route forwards `user.id` (NOT body-supplied) from the authenticated session. New TS spec (`route.test.ts::C-PR5-01`) pins the forwarding contract: a spoofed `user_id` in the request body MUST NOT reach the analytics service.
+
+**H-PR5-05 — Retention Sweep Tenant Binding (defense-in-depth)**
+- `match.py:_score_one_allocator` rollback DELETE on orphan `match_batches` now chains `.eq("allocator_id", allocator_id)` after `.eq("id", _batch_id)`. Service-role bypasses RLS, so the `.eq("id")` is normally load-bearing; the additional allocator binding makes a "delete-everything" regression impossible even when a poorly-typed batch_id (`None`, future supabase-py shape change) reaches the DELETE. Pinned by extended mock chains in `test_match_router.py` (4 mocks updated; 2 of them add explicit assertions that BOTH filters fired).
+
+**Refactor accounting**
+- B14 batch (Freshness/Liveness Signaling Contract) — CLOSED. 4 of 6 findings closed by prior refactors; 2 remained open and were fixed surgically here. The full `Freshness<T>` primitive + ESLint rule scaffold is deferred — site-level fixes deliver the user-observable improvement without the meta-refactor risk.
+- B9 batch (Boundary Validation Parity) — NEW-C18-02 / -03 closed; the broader `.passthrough()` ban + cross-schema parity sweep remains deferred.
+- B5 batch — defense-in-depth NULL-skip removal closes the C-PR5-02 latent surface. The wider concurrency refactor (fence threading through epilogue writes, advisory locks, atomic batch RPCs) is the next dedicated PR.
+- B4 batch (central `admin_role_mutate` RPC) — deferred to its own branch. Per-finding NEW-C17-* already shipped via PR #345; the structural refactor needs 1-week staging soak per the cross-cutting plan's risk note.
+
 ## [0.24.14.0] - 2026-05-28
 ### Hardened — Money-Unit Brand + Window-Coincident Metrics + Recompute Actor Binding (B1 + B3 + C-PR5-01 + C-PR5-02 of cross-cutting refactor program)
 

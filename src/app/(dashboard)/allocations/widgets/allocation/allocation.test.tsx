@@ -138,6 +138,142 @@ describe("AllocationDonut", () => {
       expect(within(gammaBtn()).queryByText("---")).toBeNull();
     });
   });
+
+  // NEW-C09-06 (B14, audit-2026-05-07) — strategies whose allocated_amount
+  // is null AND whose current_weight×AUM resolves to 0 get filtered out of
+  // the pie. Before the fix the user had no signal that "3 of 7 investments
+  // excluded" was the truth behind a clean-looking circle: the slices that
+  // rendered totalled 100% of *included* amount, hiding the included/total
+  // ratio. The footnote surfaces that ratio.
+  //
+  // MED-1 / MED-2 (silent-failure-hunter follow-up): the footnote
+  // distinguishes "amount unavailable" (data-pipeline gap) from "amount is
+  // zero" (paused / redeemed strategy) because the operator action differs.
+  describe("NEW-C09-06 — null-amount footnote", () => {
+    it("renders 'amount unavailable' when null-amount strategies drop", () => {
+      const mixed = {
+        ...mockData,
+        strategies: [
+          { ...mockStrategy("s1", "Alpha", 0.4) },
+          { ...mockStrategy("s2", "Beta", 0.35) },
+          { ...mockStrategy("s3", "Gamma", 0.25) },
+          // s4, s5: null amount AND null weight → "missing" classification.
+          {
+            ...mockStrategy("s4", "Delta", 0),
+            allocated_amount: null,
+            current_weight: null,
+          },
+          {
+            ...mockStrategy("s5", "Epsilon", 0),
+            allocated_amount: null,
+            current_weight: null,
+          },
+        ],
+      };
+      render(<AllocationDonut {...widgetProps} data={mixed} />);
+      expect(
+        screen.getByTestId("allocation-donut-footnote").textContent,
+      ).toBe("2 of 5 investments excluded — amount unavailable");
+    });
+
+    it("does NOT render footnote when every strategy has positive amount", () => {
+      render(<AllocationDonut {...widgetProps} />);
+      expect(
+        screen.queryByTestId("allocation-donut-footnote"),
+      ).toBeNull();
+    });
+
+    // MED-2: explicit 0 (paused/redeemed) gets distinct copy from "missing".
+    it("renders 'amount is zero' when strategies report explicit allocated_amount=0", () => {
+      const paused = {
+        ...mockData,
+        strategies: [
+          { ...mockStrategy("s1", "Alpha", 0.5) },
+          { ...mockStrategy("s2", "Beta", 0.5) },
+          // s3: explicit 0 — strategy paused, not missing.
+          {
+            ...mockStrategy("s3", "Gamma", 0),
+            allocated_amount: 0,
+            current_weight: 0,
+          },
+        ],
+      };
+      render(<AllocationDonut {...widgetProps} data={paused} />);
+      expect(
+        screen.getByTestId("allocation-donut-footnote").textContent,
+      ).toBe("1 of 3 investments excluded — amount is zero");
+    });
+
+    // MED-2: mixed missing + zero → both reasons surfaced in one line.
+    it("renders combined copy when both missing AND zero strategies exist", () => {
+      const mixed = {
+        ...mockData,
+        strategies: [
+          { ...mockStrategy("s1", "Alpha", 0.5) },
+          { ...mockStrategy("s2", "Beta", 0.5) },
+          {
+            ...mockStrategy("s3", "Gamma", 0),
+            allocated_amount: 0,
+            current_weight: 0,
+          },
+          {
+            ...mockStrategy("s4", "Delta", 0),
+            allocated_amount: null,
+            current_weight: null,
+          },
+        ],
+      };
+      render(<AllocationDonut {...widgetProps} data={mixed} />);
+      expect(
+        screen.getByTestId("allocation-donut-footnote").textContent,
+      ).toBe("2 of 4 investments excluded — 1 amount unavailable, 1 at zero");
+    });
+
+    // MED-1: all-excluded → dedicated "All N investments excluded" copy,
+    // NOT the generic empty-state.
+    it("renders dedicated all-excluded message when every strategy is filtered out", () => {
+      const allMissing = {
+        ...mockData,
+        strategies: [
+          {
+            ...mockStrategy("s1", "Alpha", 0),
+            allocated_amount: null,
+            current_weight: null,
+          },
+          {
+            ...mockStrategy("s2", "Beta", 0),
+            allocated_amount: null,
+            current_weight: null,
+          },
+        ],
+      };
+      render(<AllocationDonut {...widgetProps} data={allMissing} />);
+      const banner = screen.getByTestId("allocation-donut-all-excluded");
+      expect(banner.textContent).toBe(
+        "All 2 investments excluded — amount unavailable",
+      );
+      // The generic-empty surface MUST NOT render in this case.
+      expect(
+        screen.queryByTestId("allocation-donut-empty"),
+      ).toBeNull();
+    });
+
+    // MED-1: still routes to the generic empty surface when strategies is
+    // empty (true no-data case, e.g. allocator hasn't connected any keys).
+    it("renders generic empty message when no strategies are present", () => {
+      render(
+        <AllocationDonut
+          {...widgetProps}
+          data={{ ...mockData, strategies: [] }}
+        />,
+      );
+      const empty = screen.getByTestId("allocation-donut-empty");
+      expect(empty.textContent).toBe("Allocation data unavailable.");
+      expect(
+        screen.queryByTestId("allocation-donut-all-excluded"),
+      ).toBeNull();
+    });
+  });
 });
 
 describe("AllocationByStyleWidget", () => {

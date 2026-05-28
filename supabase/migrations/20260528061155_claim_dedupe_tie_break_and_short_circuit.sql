@@ -347,7 +347,20 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION claim_compute_jobs_with_priority IS
+-- audit-2026-05-07 + supabase-migrate prod recovery (2026-05-28): the
+-- prior `COMMENT ON FUNCTION claim_compute_jobs_with_priority IS ...`
+-- (no arg list) raised SQLSTATE 42725 "function name is not unique" on
+-- production because prod carries multiple overloads of this function
+-- name (one or more legacy signatures pre-dating mig 117). The supabase
+-- CLI runs each migration in a single transaction so the whole
+-- migration rolled back, leaving the H-1235 / H-1238 / M-1133 body
+-- changes unapplied. Adding the explicit (INTEGER, TEXT, BOOLEAN) arg
+-- list disambiguates the COMMENT target and lets the migration land.
+-- Test project qmnijlgmdhviwzwfyzlc already records this migration in
+-- schema_migrations (applied via MCP, transaction-bypassed) so the
+-- in-place edit cannot re-trigger application there. See
+-- .github/workflows/supabase-migrate.yml run 26560585968.
+COMMENT ON FUNCTION claim_compute_jobs_with_priority(INTEGER, TEXT, BOOLEAN) IS
   'Migration 117: P97 / G12.A.2 fence — claim_token = gen_random_uuid() on every claim. '
   'Mark RPCs verify token; late marks from watchdog-preempted workers raise '
   'serialization_failure. Preserves Phase 19 / mig 104 D-1 unified_backbone_at_claim '
