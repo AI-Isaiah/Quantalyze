@@ -47,7 +47,7 @@ describe("EquityChartWidget — UI-BLOCK-01 WidgetState v2 wiring", () => {
       <EquityChartWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{ equityDailyPoints: [] } as any}
-        timeframe="6M"
+        timeframe="1YTD"
         width={4}
         height={4}
       />,
@@ -67,7 +67,7 @@ describe("EquityChartWidget — UI-BLOCK-01 WidgetState v2 wiring", () => {
       <EquityChartWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{ equityDailyPoints: [] } as any}
-        timeframe="6M"
+        timeframe="1YTD"
         width={4}
         height={4}
       />,

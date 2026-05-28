@@ -99,7 +99,7 @@ function renderAndReadMap(): Record<string, string> {
     <HoldingsTableWidget
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       data={makeData() as any}
-      timeframe="YTD"
+      timeframe="1YTD"
       width={0}
       height={0}
     />,

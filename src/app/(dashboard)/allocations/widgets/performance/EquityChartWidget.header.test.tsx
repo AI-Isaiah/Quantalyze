@@ -116,7 +116,7 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
         <EquityChartWidget
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           data={{ equityDailyPoints: makeSeries(60) } as any}
-          timeframe="6M"
+          timeframe="1YTD"
           width={6}
           height={4}
         />
@@ -142,7 +142,7 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } as any
           }
-          timeframe="6M"
+          timeframe="1YTD"
           width={6}
           height={4}
         />
@@ -164,7 +164,7 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } as any
           }
-          timeframe="6M"
+          timeframe="1YTD"
           width={6}
           height={4}
         />
@@ -185,7 +185,7 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
         <EquityChartWidget
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           data={{ equityDailyPoints: makeSeries(60) } as any}
-          timeframe="6M"
+          timeframe="1YTD"
           width={6}
           height={4}
         />
@@ -211,7 +211,7 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } as any
           }
-          timeframe="6M"
+          timeframe="1YTD"
           width={6}
           height={4}
         />
@@ -234,7 +234,7 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } as any
           }
-          timeframe="6M"
+          timeframe="1YTD"
           width={6}
           height={4}
         />
@@ -251,7 +251,7 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
         <EquityChartWidget
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           data={{ equityDailyPoints: makeSeries(60) } as any}
-          timeframe="6M"
+          timeframe="1YTD"
           width={6}
           height={4}
         />
@@ -273,7 +273,7 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } as any
           }
-          timeframe="6M"
+          timeframe="1YTD"
           width={6}
           height={4}
         />

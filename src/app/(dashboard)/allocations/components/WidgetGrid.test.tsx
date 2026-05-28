@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent } from "@testing-library/react";
 import type { TileConfig } from "../lib/types";
+import { asRegistryWidgetId } from "../lib/widget-registry";
 import { WidgetGrid } from "./WidgetGrid";
 
 /**
@@ -28,9 +29,9 @@ import { WidgetGrid } from "./WidgetGrid";
  */
 
 const TILES: TileConfig[] = [
-  { k: "kpi-strip", w: 4 },
-  { k: "equity-curve", w: 2 },
-  { k: "allocation-donut", w: 1 },
+  { k: asRegistryWidgetId("kpi-strip"), w: 4 },
+  { k: asRegistryWidgetId("equity-curve"), w: 2 },
+  { k: asRegistryWidgetId("allocation-donut"), w: 1 },
 ];
 
 function makeProps() {

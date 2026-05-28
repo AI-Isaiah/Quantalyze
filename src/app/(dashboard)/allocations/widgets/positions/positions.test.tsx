@@ -54,7 +54,7 @@ const MOCK_DATA = {
 
 const WIDGET_PROPS = {
   data: MOCK_DATA,
-  timeframe: "YTD",
+  timeframe: "1YTD" as const,
   width: 800,
   height: 400,
 };
@@ -73,7 +73,7 @@ describe("PositionsTable", () => {
   });
 
   it("shows empty state when no strategies", () => {
-    render(<PositionsTable data={{ strategies: [] }} timeframe="YTD" width={800} height={400} />);
+    render(<PositionsTable data={{ strategies: [] }} timeframe="1YTD" width={800} height={400} />);
     expect(screen.getByText("No positions data available")).toBeInTheDocument();
   });
 
@@ -116,7 +116,7 @@ describe("PositionsTable", () => {
   });
 
   it("shows fewer columns at narrow widths", () => {
-    render(<PositionsTable data={MOCK_DATA} timeframe="YTD" width={280} height={400} />);
+    render(<PositionsTable data={MOCK_DATA} timeframe="1YTD" width={280} height={400} />);
     // At width < 300: only Strategy + Weight
     expect(screen.getByText("Strategy")).toBeInTheDocument();
     expect(screen.getByText("Weight")).toBeInTheDocument();
@@ -143,7 +143,7 @@ describe("PositionsTable", () => {
         ],
       };
       render(
-        <PositionsTable data={single} timeframe="YTD" width={800} height={400} />,
+        <PositionsTable data={single} timeframe="1YTD" width={800} height={400} />,
       );
       expect(screen.getByText("Solo Strat")).toBeInTheDocument();
       // Exactly one body data row (the <thead> row is excluded by tbody scope).
@@ -177,7 +177,7 @@ describe("PositionsTable", () => {
       render(
         <PositionsTable
           data={nullAnalytics}
-          timeframe="YTD"
+          timeframe="1YTD"
           width={800}
           height={400}
         />,
@@ -205,7 +205,7 @@ describe("PositionsTable", () => {
         ),
       };
       render(
-        <PositionsTable data={many} timeframe="YTD" width={800} height={400} />,
+        <PositionsTable data={many} timeframe="1YTD" width={800} height={400} />,
       );
       const tbody = document.querySelector("tbody")!;
       // No virtualization in this component — all 50 rows are present in the
@@ -252,7 +252,7 @@ describe("PositionsTable", () => {
 
     it("at width 280 the visible columns are EXACTLY ['Strategy', 'Weight'] (not just 'CAGR absent')", () => {
       render(
-        <PositionsTable data={MOCK_DATA} timeframe="YTD" width={280} height={400} />,
+        <PositionsTable data={MOCK_DATA} timeframe="1YTD" width={280} height={400} />,
       );
       expect(visibleColumnNames()).toEqual(["Strategy", "Weight"]);
     });
@@ -265,7 +265,7 @@ describe("PositionsTable", () => {
 
 describe("TradingActivityLog", () => {
   it("renders loading then empty state when no portfolio", () => {
-    render(<TradingActivityLog data={{}} timeframe="YTD" width={800} height={400} />);
+    render(<TradingActivityLog data={{}} timeframe="1YTD" width={800} height={400} />);
     // With no portfolio, it should show empty or loading
     expect(document.querySelector("div")).toBeTruthy();
   });
@@ -273,21 +273,21 @@ describe("TradingActivityLog", () => {
 
 describe("TradeVolume", () => {
   it("renders loading then empty state when no portfolio", () => {
-    render(<TradeVolume data={{}} timeframe="YTD" width={800} height={400} />);
+    render(<TradeVolume data={{}} timeframe="1YTD" width={800} height={400} />);
     expect(document.querySelector("div")).toBeTruthy();
   });
 });
 
 describe("ExposureByAsset", () => {
   it("shows empty state when no position snapshots", () => {
-    render(<ExposureByAsset data={{}} timeframe="YTD" width={800} height={400} />);
+    render(<ExposureByAsset data={{}} timeframe="1YTD" width={800} height={400} />);
     expect(screen.getByText("No position data available.")).toBeInTheDocument();
   });
 });
 
 describe("NetExposure", () => {
   it("shows empty state when no position snapshots", () => {
-    render(<NetExposure data={{}} timeframe="YTD" width={800} height={400} />);
+    render(<NetExposure data={{}} timeframe="1YTD" width={800} height={400} />);
     expect(screen.getByText("No position history available.")).toBeInTheDocument();
   });
 });

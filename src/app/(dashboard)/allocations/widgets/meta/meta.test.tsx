@@ -4,7 +4,7 @@ import { CustomKpiStrip } from "./CustomKpiStrip";
 import { NotesWidget } from "./NotesWidget";
 import { QuickActions } from "./QuickActions";
 
-const baseProps = { timeframe: "YTD", width: 6, height: 3 };
+const baseProps = { timeframe: "1YTD" as const, width: 6, height: 3 };
 
 // ---------------------------------------------------------------------------
 // CustomKpiStrip

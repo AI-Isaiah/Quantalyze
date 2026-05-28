@@ -46,7 +46,7 @@ describe("KpiStripWidget — UI-BLOCK-01 WidgetState v2 wiring", () => {
       <KpiStripWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{} as any}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={4}
         height={2}
       />,
@@ -66,7 +66,7 @@ describe("KpiStripWidget — UI-BLOCK-01 WidgetState v2 wiring", () => {
       <KpiStripWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{} as any}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={4}
         height={2}
       />,

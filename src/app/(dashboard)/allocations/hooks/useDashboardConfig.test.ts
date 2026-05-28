@@ -85,7 +85,7 @@ const LEGACY_LAYOUT_VERSION = 3;
  * Seed the mock localStorage with a current-V2-shape blob. Tests across
  * this file call `store.set(STORAGE_KEY, JSON.stringify({ tiles,
  * timeframe, layoutVersion }))` with the same defaults
- * (`timeframe: "YTD"`, `layoutVersion: LAYOUT_VERSION`) ~15 times; this
+ * (`timeframe: "1YTD"`, `layoutVersion: LAYOUT_VERSION`) ~15 times; this
  * helper centralises the boilerplate so version bumps and shape tweaks
  * land in one place.
  */
@@ -97,7 +97,7 @@ function seedV2Blob(
     STORAGE_KEY,
     JSON.stringify({
       tiles,
-      timeframe: opts.timeframe ?? "YTD",
+      timeframe: opts.timeframe ?? "1YTD",
       layoutVersion: opts.layoutVersion ?? LAYOUT_VERSION,
     }),
   );
@@ -144,11 +144,11 @@ describe("useDashboardConfig (legacy)", () => {
     expect(result.current.config.tiles[0]).toHaveProperty("x");
     expect(result.current.config.tiles[0]).toHaveProperty("y");
     expect(result.current.config.tiles[0]).toHaveProperty("h");
-    expect(result.current.config.timeframe).toBe("YTD");
+    expect(result.current.config.timeframe).toBe("1YTD");
     expect(result.current.config.layoutVersion).toBe(LEGACY_LAYOUT_VERSION);
   });
 
-  it("addTile appends a tile with the registry's defaultW/defaultH", () => {
+  it("addTile appends a tile with the registry's defaultW and the hardcoded h=3", () => {
     const { result } = renderHook(() => useDashboardConfig());
     const before = result.current.config.tiles.length;
 
@@ -159,6 +159,11 @@ describe("useDashboardConfig (legacy)", () => {
     const added = result.current.config.tiles.find((t) => t.widgetId === "rolling-sharpe");
     expect(added).toBeDefined();
     expect(added!.i).toBe("rolling-sharpe-1");
+    // rolling-sharpe defaultW=6 → legacy 12-col tile spans 6 cols.
+    expect(added!.w).toBe(6);
+    // h is hardcoded post-M-0155 (defaultH dropped from WidgetMeta); pin the
+    // contract so a future change to the hardcode ships red, not green.
+    expect(added!.h).toBe(3);
     expect(result.current.config.tiles.length).toBe(before + 1);
   });
 
@@ -177,7 +182,7 @@ describe("useDashboardConfig (legacy)", () => {
       STORAGE_KEY,
       JSON.stringify({
         layoutVersion: LEGACY_LAYOUT_VERSION,
-        timeframe: "YTD",
+        timeframe: "1YTD",
         tiles: [
           // Different widgetId, but their `i` occupies the -1 / -2 slots that
           // the count heuristic for a brand-new rolling-sharpe would target.
@@ -290,7 +295,7 @@ describe("useDashboardConfigV2", () => {
     // every k is a WIDGET_REGISTRY id — never a designer short key.
     expect(result.current.config.tiles).toEqual(expectedDefaultLayout);
     expect(result.current.config.layoutVersion).toBe(LAYOUT_VERSION);
-    expect(result.current.config.timeframe).toBe("YTD");
+    expect(result.current.config.timeframe).toBe("1YTD");
   });
 
   it("preserve + normalize: persisted current-version blob with short-key tiles → V2 loads them with registry-id k", () => {
@@ -302,7 +307,7 @@ describe("useDashboardConfigV2", () => {
         { k: "bridge", w: 4 },
         { k: "kpi", w: 2 },
       ] as const,
-      timeframe: "1M",
+      timeframe: "1MTD",
       // Track LAYOUT_VERSION rather than hard-coding the literal: this
       // test asserts a matching-version blob is preserved verbatim, so
       // any future bump keeps the assertion truthful.
@@ -317,7 +322,7 @@ describe("useDashboardConfigV2", () => {
     expect(result.current.config.tiles[0].w).toBe(4);
     expect(result.current.config.tiles[1].k).toBe(keyOf("kpi"));
     expect(result.current.config.tiles[1].w).toBe(2);
-    expect(result.current.config.timeframe).toBe("1M");
+    expect(result.current.config.timeframe).toBe("1MTD");
   });
 
   it("addWidget is idempotent — calling addWidget(<bridge short key>) when the resolved registry id is already present is a no-op", () => {
@@ -515,15 +520,15 @@ describe("useDashboardConfigV2", () => {
       const { result, unmount } = renderHook(() => useDashboardConfigV2());
 
       act(() => {
-        result.current.setTimeframe("3M");
+        result.current.setTimeframe("1QTD");
       });
       act(() => {
         vi.runAllTimers();
       });
 
-      expect(result.current.config.timeframe).toBe("3M");
+      expect(result.current.config.timeframe).toBe("1QTD");
       const stored = JSON.parse(store.get(STORAGE_KEY)!);
-      expect(stored.timeframe).toBe("3M");
+      expect(stored.timeframe).toBe("1QTD");
       unmount();
     } finally {
       vi.useRealTimers();
@@ -545,7 +550,7 @@ describe("useDashboardConfigV2", () => {
 
     expect(result.current.config.tiles).toEqual(expectedDefaultLayout);
     expect(result.current.config.layoutVersion).toBe(LAYOUT_VERSION);
-    expect(result.current.config.timeframe).toBe("YTD");
+    expect(result.current.config.timeframe).toBe("1YTD");
   });
 
   it("D-19 write-time normalization: addWidget with a designer short key lands the registry id in tiles", () => {
@@ -600,7 +605,7 @@ describe("dual-hook ping-pong (Phase A3 regression)", () => {
   it("V2 hook mounting against an existing v3 blob does NOT overwrite localStorage on mount", () => {
     const v3Blob = JSON.stringify({
       tiles: [{ i: "equity-curve-1", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 }],
-      timeframe: "YTD",
+      timeframe: "1YTD",
       layoutVersion: 3,
     });
     store.set(STORAGE_KEY, v3Blob);
@@ -621,7 +626,7 @@ describe("dual-hook ping-pong (Phase A3 regression)", () => {
         { k: keyOf("bridge"), w: 4 },
         { k: keyOf("kpi"), w: 2 },
       ],
-      timeframe: "1M",
+      timeframe: "1MTD",
       layoutVersion: LAYOUT_VERSION,
     });
     store.set(STORAGE_KEY, v4Blob);
@@ -760,7 +765,7 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
 
       // (b) A user mutation must NOT write to localStorage.
       act(() => {
-        result.current.setTimeframe("1M");
+        result.current.setTimeframe("1MTD");
       });
       act(() => {
         vi.runAllTimers();
@@ -772,6 +777,55 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
 
       // Unmount-flush also must not write (the beforeunload/pagehide path).
       expect(store.get(STORAGE_KEY)).toBe(blobBefore);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // F1 (Claude red-team HIGH c8) — cross-build timeframe forward-compat must
+  // not silently overwrite a future timeframe key. Build N+1 adds e.g. "5YTD";
+  // build N must (a) UI-fall-back to DEFAULT_TIMEFRAME, (b) leave the persisted
+  // "5YTD" untouched (readOnly), and (c) set the unknown_timeframe recovery
+  // flag for the banner. Pre-fix: coerceTimeframe → DEFAULT_TIMEFRAME → next
+  // mutation persisted DEFAULT_TIMEFRAME → user's "5YTD" silently destroyed.
+  it("F1: unknown future timeframe loads read-only — persisted blob is preserved across mutations", () => {
+    vi.useFakeTimers();
+    try {
+      const futureTile = { k: "kpi-strip", w: 4 };
+      // Layout schema and timeframe vocabulary are independent: matching
+      // layoutVersion, unknown timeframe key.
+      store.set(
+        STORAGE_KEY,
+        JSON.stringify({
+          tiles: [futureTile],
+          timeframe: "5YTD",
+          layoutVersion: LAYOUT_VERSION,
+        }),
+      );
+      const blobBefore = store.get(STORAGE_KEY);
+
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
+
+      // (a) UI falls back to DEFAULT_TIMEFRAME for the session.
+      expect(result.current.config.timeframe).toBe("1YTD");
+
+      // Mutation must NOT persist — readOnly is held.
+      act(() => {
+        result.current.setTimeframe("1MTD");
+      });
+      act(() => {
+        vi.runAllTimers();
+      });
+
+      // (b) Persisted blob still carries "5YTD" — NOT overwritten.
+      const after = store.get(STORAGE_KEY);
+      expect(after).toBe(blobBefore);
+      const parsed = JSON.parse(after!);
+      expect(parsed.timeframe).toBe("5YTD");
+
+      // (c) Recovery flag was set; drain it.
+      expect(consumeDashboardRecoveryFlag()).toBe("unknown_timeframe");
+      unmount();
     } finally {
       vi.useRealTimers();
     }
@@ -843,7 +897,7 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
       STORAGE_KEY,
       JSON.stringify({
         tiles: "not an array",
-        timeframe: "YTD",
+        timeframe: "1YTD",
         layoutVersion: LAYOUT_VERSION,
       }),
     );
@@ -888,7 +942,7 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
 
       const { result, unmount } = renderHook(() => useDashboardConfigV2());
       act(() => {
-        result.current.setTimeframe("1M");
+        result.current.setTimeframe("1MTD");
       });
       // audit-2026-05-07 M-0126/M-0134 — drain the debounce timer to fire
       // the (failing) persist call so warnSpy can capture the quota message.
@@ -917,7 +971,7 @@ describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + consol
 
       const { result, unmount } = renderHook(() => useDashboardConfigV2());
       act(() => {
-        result.current.setTimeframe("1M");
+        result.current.setTimeframe("1MTD");
       });
       act(() => {
         vi.runAllTimers();
@@ -1061,7 +1115,13 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
     for (const t of result.current.config.tiles) {
       expect([1, 2, 3, 4]).toContain(t.w);
     }
-    const byKey = new Map(result.current.config.tiles.map((t) => [t.k, t.w]));
+    // audit-2026-05-07 H-0142 — TileConfig.k is now RegistryWidgetId (a
+    // branded string). Widening to plain string for the Map keys lets the
+    // test assert against plain-string literal lookups without re-branding
+    // each one.
+    const byKey = new Map<string, number>(
+      result.current.config.tiles.map((t) => [t.k as string, t.w]),
+    );
     expect(byKey.get("correlation-matrix")).toBe(4);
     expect(byKey.get("kpi-strip")).toBe(1);
     // 'wide' / NaN both fall through to clampWidth's default branch (2).
@@ -1255,9 +1315,9 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
     ).toBe(true);
   });
 
-  it("coerces a non-string `timeframe` to the 'YTD' default at load time (M-0127)", () => {
+  it("coerces a non-string `timeframe` to the '1YTD' default at load time (M-0127)", () => {
     // timeframe: null is intentional — non-string was silently passed through pre-fix.
-    // seedV2Blob's default would force timeframe="YTD" so we open-code this case.
+    // seedV2Blob's default would force timeframe="1YTD" so we open-code this case.
     store.set(
       STORAGE_KEY,
       JSON.stringify({
@@ -1269,7 +1329,38 @@ describe("audit-2026-05-07 — per-tile validation on load", () => {
 
     const { result } = renderHook(() => useDashboardConfigV2());
 
-    expect(result.current.config.timeframe).toBe("YTD");
+    expect(result.current.config.timeframe).toBe("1YTD");
+  });
+
+  // H-0147 + M-1093 — legacy "YTD" label written by pre-narrowing builds must
+  // be migrated to the canonical key "1YTD" on read, AND the canonical value
+  // must be written back to localStorage so the legacy label disappears on
+  // the next persist. Mirrors useTimeframe.test.ts:66-70 but on the V2 hook.
+  it("migrates the legacy 'YTD' label to '1YTD' on load AND persists the canonical key back", () => {
+    vi.useFakeTimers();
+    try {
+      seedV2Blob([{ k: "kpi-strip", w: 4 }], { timeframe: "YTD" });
+
+      const { result, unmount } = renderHook(() => useDashboardConfigV2());
+
+      // (a) The in-memory config carries the canonical key.
+      expect(result.current.config.timeframe).toBe("1YTD");
+
+      // (b) Trigger a mutation + drain the debounce so the migrated value is
+      // written back to localStorage in canonical form.
+      act(() => {
+        result.current.resizeWidget("kpi-strip", 2);
+      });
+      act(() => {
+        vi.runAllTimers();
+      });
+
+      const stored = JSON.parse(store.get(STORAGE_KEY)!);
+      expect(stored.timeframe).toBe("1YTD");
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1351,7 +1442,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
     const rawJson =
       '{"tiles":[' +
       '{"k":"kpi-strip","w":4,"config":{"__proto__":{"polluted":true},"constructor":"bad","prototype":"bad","valid":"ok"}}' +
-      '],"timeframe":"YTD","layoutVersion":' +
+      '],"timeframe":"1YTD","layoutVersion":' +
       LAYOUT_VERSION +
       "}";
     store.set(STORAGE_KEY, rawJson);
@@ -1414,7 +1505,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
     // Seed Tab B with a known v4 blob.
     const initialBlob = JSON.stringify({
       tiles: [{ k: "kpi-strip", w: 2 }],
-      timeframe: "YTD",
+      timeframe: "1YTD",
       layoutVersion: LAYOUT_VERSION,
     });
     store.set(STORAGE_KEY, initialBlob);
@@ -1431,7 +1522,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
         { k: "kpi-strip", w: 4 },
         { k: "correlation-matrix", w: 4 },
       ],
-      timeframe: "1M",
+      timeframe: "1MTD",
       layoutVersion: LAYOUT_VERSION,
     });
     store.set(STORAGE_KEY, updatedBlob);
@@ -1448,7 +1539,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
 
     // Tab B's hook now reflects Tab A's write.
     expect(result.current.config.tiles.length).toBe(2);
-    expect(result.current.config.timeframe).toBe("1M");
+    expect(result.current.config.timeframe).toBe("1MTD");
     expect(
       result.current.config.tiles.some((t) => t.k === "correlation-matrix"),
     ).toBe(true);
@@ -1457,7 +1548,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
   it("ignores storage events for unrelated keys", () => {
     const initialBlob = JSON.stringify({
       tiles: [{ k: "kpi-strip", w: 2 }],
-      timeframe: "YTD",
+      timeframe: "1YTD",
       layoutVersion: LAYOUT_VERSION,
     });
     store.set(STORAGE_KEY, initialBlob);
@@ -1538,7 +1629,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
       // debounce fires.
       const tabBBlob = JSON.stringify({
         tiles: [{ k: "net-exposure", w: 2 }],
-        timeframe: "YTD",
+        timeframe: "1YTD",
         layoutVersion: LAYOUT_VERSION,
       });
       store.set(STORAGE_KEY, tabBBlob);
@@ -1617,7 +1708,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
     // Tab A resizes kpi-strip from w:2 to w:4 and writes it to storage.
     const resizedBlob = JSON.stringify({
       tiles: [{ k: "kpi-strip", w: 4 }, { k: "equity-chart", w: 4 }],
-      timeframe: "YTD",
+      timeframe: "1YTD",
       layoutVersion: LAYOUT_VERSION,
     });
     store.set(STORAGE_KEY, resizedBlob);
@@ -1644,7 +1735,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
     // Tab A reorders: equity-chart first, kpi-strip second.
     const reorderedBlob = JSON.stringify({
       tiles: [{ k: "equity-chart", w: 4 }, { k: "kpi-strip", w: 2 }],
-      timeframe: "YTD",
+      timeframe: "1YTD",
       layoutVersion: LAYOUT_VERSION,
     });
     store.set(STORAGE_KEY, reorderedBlob);
@@ -1685,7 +1776,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
       // Tab A resizes kpi-strip before Tab B's timer fires.
       const tabABlob = JSON.stringify({
         tiles: [{ k: "kpi-strip", w: 4 }],
-        timeframe: "YTD",
+        timeframe: "1YTD",
         layoutVersion: LAYOUT_VERSION,
       });
       store.set(STORAGE_KEY, tabABlob);
@@ -1729,7 +1820,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
       STORAGE_KEY,
       JSON.stringify({
         tiles: [{ k: "kpi-strip", w: 3 }],
-        timeframe: "YTD",
+        timeframe: "1YTD",
         layoutVersion: futureLayoutVersion,
       }),
     );
@@ -1743,7 +1834,7 @@ describe("audit-2026-05-07 — red-team Phase-4 (prototype pollution / mobile li
     // Now another tab writes a current-version blob (Tab A, same-version as this tab's LAYOUT_VERSION).
     const tabABlob = JSON.stringify({
       tiles: [{ k: "equity-chart", w: 4 }, { k: "net-exposure", w: 2 }],
-      timeframe: "1M",
+      timeframe: "1MTD",
       layoutVersion: LAYOUT_VERSION,
     });
     store.set(STORAGE_KEY, tabABlob);

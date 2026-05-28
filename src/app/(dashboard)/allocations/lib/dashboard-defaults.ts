@@ -1,4 +1,5 @@
 import type { TileConfig } from "./types";
+import { asRegistryWidgetId } from "./widget-registry";
 
 /**
  * Bumping LAYOUT_VERSION resets every persisted user layout to
@@ -13,12 +14,19 @@ export const LAYOUT_VERSION = 9;
  * the dedicated Holdings tab, where the full-width detail table belongs.
  * Every short key must resolve to a real `WIDGET_COMPONENTS` entry; the
  * dashboard-defaults regression test guards against drift.
+ *
+ * audit-2026-05-07 H-0142 — the literal short keys are routed through
+ * `asRegistryWidgetId` at module-init so each `k` is a real RegistryWidgetId
+ * before any consumer reads from this array. `asRegistryWidgetId` normalizes
+ * the short key via `resolveWidgetId` AND asserts the resolved id is a real
+ * WIDGET_REGISTRY own-key, so a typo here crashes at module load rather than
+ * rendering the "Unknown widget" placeholder.
  */
 export const DEFAULT_LAYOUT: TileConfig[] = [
-  { k: "kpi", w: 4 },
-  { k: "bridge", w: 4 },
-  { k: "equity", w: 4 },
-  { k: "allocation", w: 2 },
-  { k: "mandate", w: 2 },
-  { k: "outcomes", w: 4 },
+  { k: asRegistryWidgetId("kpi"), w: 4 },
+  { k: asRegistryWidgetId("bridge"), w: 4 },
+  { k: asRegistryWidgetId("equity"), w: 4 },
+  { k: asRegistryWidgetId("allocation"), w: 2 },
+  { k: asRegistryWidgetId("mandate"), w: 2 },
+  { k: asRegistryWidgetId("outcomes"), w: 4 },
 ];

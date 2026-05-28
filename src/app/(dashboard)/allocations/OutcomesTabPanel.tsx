@@ -18,7 +18,7 @@ export function OutcomesTabPanel(props: MyAllocationDashboardPayload) {
       <OutcomesWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={props as any}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={0}
         height={0}
       />

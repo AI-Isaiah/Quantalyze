@@ -5,7 +5,7 @@ import { ExchangeStatus } from "./ExchangeStatus";
 import { StrategyHealth } from "./StrategyHealth";
 import { DataFreshness } from "./DataFreshness";
 
-const baseProps = { timeframe: "YTD", width: 6, height: 3 };
+const baseProps = { timeframe: "1YTD" as const, width: 6, height: 3 };
 
 // ---------------------------------------------------------------------------
 // PortfolioAlerts

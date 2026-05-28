@@ -4,7 +4,7 @@ import { MorningBriefing } from "./MorningBriefing";
 import { RegimeDetector } from "./RegimeDetector";
 import { ConcentrationRisk } from "./ConcentrationRisk";
 
-const baseProps = { timeframe: "YTD", width: 6, height: 3 };
+const baseProps = { timeframe: "1YTD" as const, width: 6, height: 3 };
 
 // Build a daily-return series of `len` points starting 2024-01-01, where
 // `valueAt(i)` supplies each day's return. Shared by the deterministic

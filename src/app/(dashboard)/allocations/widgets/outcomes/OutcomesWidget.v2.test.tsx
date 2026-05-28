@@ -63,7 +63,7 @@ import OutcomesWidget from "./OutcomesWidget";
 const originalLocation = window.location;
 
 const WIDGET_PROPS_BASE = {
-  timeframe: "YTD" as const,
+  timeframe: "1YTD" as const,
   width: 1200,
   height: 300,
 };
