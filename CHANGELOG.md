@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.15.1] - 2026-05-28
+### Fixed — supabase-migrate prod recovery (follow-up to PR #348)
+
+PR #348's drift fix to `20260528061155_claim_dedupe_tie_break_and_short_circuit.sql` corrected the `COMMENT ON FUNCTION` arg-list bug but the migration's own STEP 3 self-verification block still failed on prod with `M-1133 migration verification failed: claim_compute_jobs_with_priority still uses SELECT count(*) in throttle probe`. Root cause: the verification regex `'select\s+count\s*\('` matched a documentation comment INSIDE the function body that referenced the legacy `SELECT count(*)` shape. The regex doesn't know it's a comment. supabase-migrate run 26593010829 rolled back the whole transaction, leaving prod still drifted.
+
+Fix: rewrite the in-body comment to describe the legacy form without spelling out the literal regex pattern. Function semantics unchanged. The STEP 3 verification block is preserved verbatim so the M-1133 regression guard stays load-bearing.
+
 ## [0.24.15.0] - 2026-05-28
 ### Hardened — Freshness UI + Boundary Parity + Strict Claim-Token + Portfolio Actor Binding (B14 + B9 + B5 + C-PR5-01 remainder + H-PR5-05 of cross-cutting refactor program)
 
