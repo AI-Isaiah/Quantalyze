@@ -1,5 +1,34 @@
 # Vercel Cron Upgrade — Path Back to a Single Scheduler
 
+> **STATUS: ARCHIVED (verified stale 2026-05-28). DO NOT FOLLOW.**
+>
+> The Hobby-era premise is no longer true. `vercel.json` ships **9 crons
+> on Pro** as of 2026-05-28 (warm-analytics, alert-digest, cleanup-wizard-drafts,
+> sync-funding, reconcile-strategies, cleanup-ack-tokens, founder-lp-report,
+> flag-monitor, phase19-error-rollup). The migration steps below (delete
+> `analytics-service/services/scheduled_tasks.py`, strip
+> `_scheduled_daily_loop` / `enqueue_sync_funding_tick` from
+> `main_worker.py`, delete `vercel-cron-limits.test.ts`) are
+> **actively destructive**:
+>
+> 1. The "delete `scheduled_tasks.py`" step targets a file that does not
+>    exist in the current tree.
+> 2. The "strip the scheduled loops from `main_worker.py`" step targets
+>    functions that do not exist.
+> 3. The "delete `vercel-cron-limits.test.ts`" step would remove the only
+>    guard that protects against breaching Vercel Pro's 10-cron ceiling.
+>
+> Current limit is **10 crons on Pro**, not 2 on Hobby. The cron sentinel
+> at `src/__tests__/vercel-cron-limits.test.ts` enforces 10, not 2 —
+> **keep it**.
+>
+> This file is preserved for historical context (the 2026-04 incident
+> narrative is accurate). For current cron state, read `vercel.json`
+> directly + `src/__tests__/vercel-cron-limits.test.ts`. PR-3+4 cross-file
+> review F-V-01 (audit-2026-05-07).
+
+---
+
 ## Why this runbook exists
 
 Quantalyze is currently on the Vercel Hobby plan. Hobby caps cron jobs at

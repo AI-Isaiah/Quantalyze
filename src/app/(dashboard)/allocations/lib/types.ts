@@ -34,6 +34,12 @@
 // Re-export the brand + derived category from widget-registry so consumers
 // of TileConfig/WidgetMeta pull the related types from the same module.
 import type { RegistryWidgetId, WidgetCategory } from "./widget-registry";
+// PR-3+4 NEW-C06-08 (audit-2026-05-07): LayoutVersion (= `typeof
+// LAYOUT_VERSION`) is the type-level discriminant for
+// DashboardConfig.layoutVersion (see JSDoc at the field). Type-only
+// import avoids a value-cycle with dashboard-defaults (which already
+// type-imports TileConfig from this module).
+import type { LayoutVersion } from "./dashboard-defaults";
 // Re-export TimeframeKey so dashboard slice imports the timeframe vocabulary
 // from `lib/types.ts` alongside its peers, not from a UI component module.
 import { TIMEFRAMES, type TimeframeKey } from "@/components/ui/TimeframeSelector";
@@ -86,9 +92,17 @@ export interface DashboardConfig {
    * defaults. Required (was optional) so a writer that omits it fails to
    * compile rather than silently producing an omitted version that the hook
    * treats as `undefined !== LAYOUT_VERSION` → reset on every load.
-   * (NEW-C06-08)
+   *
+   * PR-3+4 NEW-C06-08 (audit-2026-05-07): narrowed from `number` to
+   * `typeof LAYOUT_VERSION`. Writers that hardcode a stale literal (e.g.
+   * `layoutVersion: 8` after a bump to 9) now fail to compile rather than
+   * shipping a blob the hook silently resets at load. Parsed JSON blobs
+   * cast through this type at the boundary, but the runtime drift check
+   * (`parsed.layoutVersion !== LAYOUT_VERSION`) still catches inbound
+   * stale data — so this narrow is a producer-side guard, not a parser
+   * guard.
    */
-  layoutVersion: number;
+  layoutVersion: LayoutVersion;
 }
 
 /**
@@ -111,7 +125,14 @@ export interface LegacyDashboardConfig {
   tiles: LegacyTileConfig[];
   /** See DashboardConfig.timeframe (audit-2026-05-07 H-0147 + M-1093). */
   timeframe: TimeframeKey;
-  /** Required — see DashboardConfig.layoutVersion JSDoc (NEW-C06-08). */
+  /**
+   * Required — see DashboardConfig.layoutVersion JSDoc (NEW-C06-08).
+   * Kept as `number` here because the legacy LAYOUT_VERSION_LEGACY
+   * constant (= 3) is internal to useDashboardConfig.ts and the legacy
+   * tree is dormant + slated for deletion (M-1094). Narrowing to a
+   * literal here would require leaking the legacy constant into the
+   * public types surface for a code path being removed.
+   */
   layoutVersion: number;
 }
 

@@ -24,9 +24,15 @@ export const SimulatorStatusSchema = z.enum([
 ]);
 
 /** POST body contract for /api/simulator. */
+// PR-3+4 H-1143 (audit-2026-05-07): both fields are FK targets that must be
+// UUIDs in the producing tables. Pre-fix `.min(1)` permitted any non-empty
+// string ("-", "undefined", crafted SQL fragments). Parameterized queries
+// make injection inert, but a non-UUID id silently misses on the FK and
+// returns a generic insufficient_data shape rather than surfacing the
+// bad-input failure as 422 at the boundary.
 export const SimulatorRequestSchema = z.object({
-  portfolio_id: z.string().min(1),
-  candidate_strategy_id: z.string().min(1),
+  portfolio_id: z.string().uuid(),
+  candidate_strategy_id: z.string().uuid(),
 });
 
 export type SimulatorRequest = z.infer<typeof SimulatorRequestSchema>;
@@ -50,9 +56,36 @@ export const SimulatorDeltasSchema = z.object({
   concentration_delta: z.number().nullable(),
 });
 
+// PR-3+4 H-1141 + H-RT-03 (audit-2026-05-07 + red-team 2026-05-28):
+// pre-fix `z.string()` accepted any string (`""`, `"NaN"`,
+// `"2026-13-99"`); downstream parseISO returned NaN and the chart
+// dropped or rendered the bad point off-screen. `z.number()` permitted
+// Infinity/NaN, which survived to Number.isFinite guards added in
+// EquityChart.tsx — those guards are warm-up fallbacks, not boundary
+// rejection. The shape regex alone admits `2026-13-99` which Date.UTC
+// silently rolls to April; the `.refine` adds a calendar-validity gate
+// so a malformed wire-shape never reaches the binary-search invariant
+// in EquityChart.tsx's handleMove (which assumes monotonic epochs).
 const EquityCurvePointSchema = z.object({
-  date: z.string(),
-  value: z.number(),
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "ISO YYYY-MM-DD required")
+    .refine(
+      (s) => {
+        const [y, m, d] = s.split("-").map(Number);
+        if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+        // Round-trip via UTC Date: a rolled-over date (2026-02-30 →
+        // 2026-03-02) produces mismatched components, so reject.
+        const dt = new Date(Date.UTC(y, m - 1, d));
+        return (
+          dt.getUTCFullYear() === y &&
+          dt.getUTCMonth() === m - 1 &&
+          dt.getUTCDate() === d
+        );
+      },
+      { message: "calendar-invalid ISO date" },
+    ),
+  value: z.number().finite(),
 });
 
 // audit-2026-05-07 M-0912: partial_history is derivable from
@@ -68,6 +101,14 @@ const SimulatorCommonShape = {
   portfolio_id: z.string(),
   overlap_days: z.number().int().nonnegative(),
   partial_history: z.boolean(),
+  // PR-3+4 C-RT-01 (red-team 2026-05-28): Python emits this on every
+  // branch (`simulator_scoring.py:188` ok, `:145` insufficient_data,
+  // `:_empty_result` non-ok). Pre-fix the field was undeclared; the
+  // ok branch's `.strict()` would have 500'd every prod simulator call
+  // — none of the 5 specialist agents caught this because the test
+  // fixture was hand-built from the schema, never round-tripped from
+  // real Python. Declaring it preserves fail-loud strict-mode.
+  current_metrics_reliable: z.boolean(),
   current: SimulatorMetricsSchema,
 } as const;
 
@@ -76,6 +117,11 @@ const SimulatorCommonShape = {
 // metrics. overlap_days < 30 on an ok row is incoherent (insufficient_data
 // should have fired). At least one proposed metric must be non-null — an ok
 // result with all nulls would render ±0 chips as a confident projection.
+//
+// PR-3+4 H-1142 / S-PR34-01 (audit-2026-05-07): `.strict()` on the ok
+// branch only. See the non-ok scope note below for the asymmetric
+// rationale (Python `_empty_result` emits the full ok shape on every
+// non-ok status, so non-ok stays `.passthrough()` for wire-compatibility).
 const SimulatorOkBranch = z
   .object({
     status: z.literal("ok"),
@@ -85,7 +131,7 @@ const SimulatorOkBranch = z
     equity_curve_current: z.array(EquityCurvePointSchema),
     equity_curve_proposed: z.array(EquityCurvePointSchema),
   })
-  .passthrough()
+  .strict()
   .refine((d) => d.overlap_days >= 30, {
     message: "ok status requires overlap_days >= 30 (insufficient_data should have fired)",
     path: ["overlap_days"],
@@ -102,6 +148,16 @@ const SimulatorOkBranch = z
     },
   );
 
+// PR-3+4 H-1142 scope note: the non-ok branches stay `.passthrough()`
+// because the Python service (`_empty_result` in
+// analytics-service/services/simulator_scoring.py) emits the FULL ok
+// shape — proposed/deltas/equity_curve_current/equity_curve_proposed,
+// all null-or-empty — on every non-ok branch for wire-shape uniformity.
+// Tightening these branches would 5xx every non-ok response in prod.
+// The discriminated-union ALREADY routes non-ok rows to a code path that
+// reads none of those fields — the strict() guard is high-value on the
+// `ok` branch where producer drift could ship a renamed metric to the
+// browser as a silent unknown.
 const SimulatorInsufficientDataBranch = z
   .object({
     status: z.literal("insufficient_data"),

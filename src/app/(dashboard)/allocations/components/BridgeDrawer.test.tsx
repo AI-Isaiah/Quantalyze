@@ -239,6 +239,51 @@ describe("BridgeDrawer — Phase 09.1 Plan 09 / D-15 / D-16", () => {
     expect(screen.getByText("No candidates available.")).toBeInTheDocument();
   });
 
+  // PR-3+4 NEW-C24-01 regression (audit-2026-05-07): a flagged holding
+  // with no `top_candidate_strategy_id` is the precondition for the
+  // pre-fix CRITICAL — `selected` was derived from the UNFILTERED
+  // `flaggedHoldings.find`, so a stale `state.ref` pointing at a
+  // non-candidate holding rendered the confirm panel with
+  // selected.top_candidate_strategy_id === "" and the Send-intro POST
+  // forwarded an empty candidate id. Post-fix `selected` derives from
+  // the filtered `candidates` list — a non-candidate ref yields a
+  // null selection, the confirm panel does not render, and no row
+  // appears in the mandate-list candidate buttons.
+  it("NEW-C24-01: flagged holding without top_candidate_strategy_id is not rendered as a candidate", () => {
+    const FLAGGED_C: FlaggedHolding = {
+      venue: "binance",
+      symbol: "SOL/USDT",
+      holding_type: "spot",
+      value_usd: 12_000,
+      top_candidate_strategy_id: "",
+      top_candidate_name: "",
+      top_candidate_composite: 0,
+      breach_reasons: ["max_weight"],
+    };
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={vi.fn()}
+        flaggedHoldings={[FLAGGED_A, FLAGGED_C]}
+        matchDecisionsByHoldingRef={{}}
+      />,
+    );
+    // Mandate list shows BOTH (failed gate is the precondition for being
+    // in flaggedHoldings). Use `getAllByText` — BTC/USDT appears twice
+    // (mandate-list bullet + candidate-button label) while SOL/USDT
+    // appears only in the mandate-list bullet because it has no
+    // candidate row to render.
+    expect(screen.getAllByText(/BTC\/USDT/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/SOL\/USDT/).length).toBe(1);
+    // Candidate button only renders for the holding with a real candidate.
+    expect(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("bridge-candidate-holding:binance:SOL/USDT:spot"),
+    ).not.toBeInTheDocument();
+  });
+
   // -------------------------------------------------------------------------
   // H-0081 — state-machine error paths missing: thrown helper, network-error
   // rejection, and concurrent click double-fire.

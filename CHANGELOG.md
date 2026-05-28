@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.24.13.0] - 2026-05-28
+### Fixed — TS frontend + e2e + runbook hardening (PR-3+4 of cross-cutting refactor program)
+
+**BridgeDrawer (NEW-C24-01 CRITICAL + red-team C-RT-02)**
+- **NEW-C24-01.** `selected` now derives from the FILTERED `candidates` list instead of the unfiltered `flaggedHoldings.find`. Pre-fix a stale `state.ref` pointing at a holding without `top_candidate_strategy_id` would render the confirm panel with `selected.top_candidate_strategy_id === ""` and the Send-intro POST forwarded an empty candidate id. Defense-in-depth empty-id guards on both `handleSendIntro` and `handleAddToScenario`.
+- **silent-failure H5 + C-RT-02 — drawer recovery paths.** Back-to-candidates button is `disabled` while `state.submitting` is true. When `selected` resolves to null mid-confirm (parent re-fetched flaggedHoldings between click and render), a fallback panel renders with an explicit Back action so the user is never stuck on a "Confirm intro" header with no recovery.
+
+**simulatorSchema (H-1141 + H-1142 + H-1143 + red-team C-RT-01 + H-RT-03)**
+- **H-1143.** `SimulatorRequestSchema.portfolio_id` / `candidate_strategy_id` tightened from `z.string().min(1)` to `z.string().uuid()`. Non-UUID payloads now surface 422 at the route boundary instead of missing on the FK and returning a generic `insufficient_data`.
+- **H-1141 + H-RT-03.** `EquityCurvePointSchema.date` requires the shape regex AND a calendar-validity `.refine` (rejects `2026-13-99`, `2026-02-31`). `value` tightened to `z.number().finite()`. Refine closes H-RT-05 — without it a date that rolled over could break the monotonic-epoch invariant the new binary-search hot path assumes.
+- **H-1142.** `.strict()` on the ok branch — producer drift fails parse at the boundary. Non-ok branches stay `.passthrough()` because the Python `_empty_result` emits the full ok shape with nulls for wire-shape uniformity.
+- **C-RT-01 SHIP-BLOCKER (red-team).** `current_metrics_reliable: z.boolean()` added to `SimulatorCommonShape`. Python emits this on every branch; the field was undeclared, so `.strict()` would have 500'd every prod simulator call. None of the 5 specialist agents caught this — the test fixture was hand-built from the schema, never round-tripped from real Python. Specifically called out in the inline JSDoc.
+
+**Layout schema (NEW-C06-08)**
+- `DashboardConfig.layoutVersion: number` narrowed to a `LayoutVersion` literal (`typeof LAYOUT_VERSION`). Writers that hardcode a stale literal fail to compile rather than shipping a blob the hook silently resets at load. `LAYOUT_VERSION` exported `as const` from `dashboard-defaults.ts`.
+
+**EquityChart silent-failure + performance (silent-failure H1/H2/H4 + perf H1)**
+- **Sentry signal at 5 corruption sites** via new `captureChartIssue` helper with module-scoped dedup Set. Wired at: non-monotonic equityDailyPoints (the only signal of a buggy data pipeline that still renders), degenerate base, y-tick walker MIN_TICKS unmet, y-tick walker >50-tick overflow, CUSTOM-range malformed bounds. Pre-fix every site degraded via `console.warn` only — invisible in production.
+- **NEW-C04-01 overlay-row residual.** Tooltip overlay row now gates on `Number.isFinite(ov)` matching the portfolio/benchmark path.
+- **performance H1 — visibleEpochs precompute + binary search.** Cache `visible[].date → epoch` in one pass. Pre-fix every `x(i)` call, x-tick loop iteration, and the entire `handleMove` scan invoked `parseISO` independently. Both hot paths drop from O(n) to O(log n) via a shared `nearestIndex` helper. Hover-drag is no longer linear in window length.
+
+**Documentation (cross-file F-V-01 + F-O-01)**
+- `docs/runbooks/vercel-cron-upgrade.md` marked ARCHIVED. Repo runs 9 crons on Pro, not 2 on Hobby; the migration steps would delete files that no longer exist and remove the cron-ceiling sentinel test.
+- `docs/runbooks/bridge-outcome-cron.md` marked partial-stale. Cron + migration + delta-math sections are accurate; Vercel-Hobby framing is wrong (project is on Pro with 10-cron ceiling).
+
+**E2E cleanup (silent-failure H6 + red-team H-RT-07)**
+- `cleanupTestStrategy` harmonized with `cleanupTestAllocator`'s RT-J06 throw-in-CI pattern. On `deleteUser` failure in CI, a strategyId-based fallback delete runs BEFORE the throw so an orphan strategy doesn't poison the next run.
+
+**Tests (+32 net)**
+- 6 new schema regression tests covering NEW-C11-05 ok-branch refines + H-1141 date/value boundary + H-RT-03 calendar-invalid date.
+- DELTA_UNITS contract pin (NEW-C11-06).
+- NEW-C24-01 BridgeDrawer regression.
+- C-RT-01 `current_metrics_reliable` now a hard contract in every fixture.
+
+**Build**: 5689 TS tests pass / 253 skipped (+32 from v0.24.12.0). tsc + lint clean.
+
+**Review pipeline ran**: 6 PR-3+4 specialists → 1 CRITICAL + 24 HIGH; 1 fresh-context cross-file Claude → F-V-01 + F-O-01; comment-analyzer → contradiction fix + magnitude trimming; code-simplifier (read-only) → `nearestIndex` helper; Claude red-team → C-RT-01 ship-blocker + C-RT-02 + H-RT-03 + H-RT-07.
+
+PR-5 specialist reports persisted to `.planning/audit-2026-05-07/pr5-findings/` for the next iteration (2 CRITICAL: cross-tenant write via no actor binding, mig 117 fence inert in prod).
+
 ## [0.24.12.0] - 2026-05-28
 ### Changed — security + rate-limit + RBAC + GDPR hardening (PR-2 of cross-cutting refactor program)
 

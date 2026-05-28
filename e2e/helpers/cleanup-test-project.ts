@@ -79,13 +79,35 @@ export async function cleanupTestStrategy(
 ): Promise<void> {
   const admin = getAdmin();
 
+  // PR-3+4 silent-failure H6 (audit-2026-05-07): harmonize with the
+  // `cleanupTestAllocator` RT-J06 pattern — in CI a silent leak
+  // compounds across runs (test strategies accumulate in TEST_SUPABASE
+  // with no signal), so the warn becomes a thrown error to surface the
+  // leak in the failing spec. Local runs stay best-effort (re-runs
+  // sweep). Without this, the bridge-strategy cleanup path was the only
+  // remaining silent failure surface in the e2e helper module.
   if (typeof arg === "object" && arg.ownerUserId) {
     // Preferred path: delete the owner; the strategy cascades.
     const { error } = await admin.auth.admin.deleteUser(arg.ownerUserId);
     if (error) {
-      console.warn(
-        `[cleanup-test-project] deleteUser(${arg.ownerUserId}) for bridge owner failed: ${error.message}`,
-      );
+      // PR-3+4 H-RT-07 (red-team 2026-05-28): the deleteUser-then-throw
+      // pattern left an orphan strategy when the user-side delete failed.
+      // Subsequent runs hit an orphaned `strategies` row that poisoned
+      // unique-name checks. Attempt the strategyId-based fallback BEFORE
+      // surfacing the error, so the strategy row itself is removed even
+      // if the cascade path failed. The throw still fires in CI so the
+      // underlying auth-side failure surfaces.
+      const fallbackError = await admin
+        .from("strategies")
+        .delete()
+        .eq("id", arg.strategyId);
+      const message = `[cleanup-test-project] deleteUser(${arg.ownerUserId}) for bridge owner failed: ${error.message}${
+        fallbackError.error ? ` (strategy fallback also failed: ${fallbackError.error.message})` : " (strategy fallback deleted directly)"
+      }`;
+      if (process.env.CI) {
+        throw new Error(message);
+      }
+      console.warn(message);
     }
     return;
   }
@@ -97,8 +119,10 @@ export async function cleanupTestStrategy(
     .delete()
     .eq("id", strategyId);
   if (error) {
-    console.warn(
-      `[cleanup-test-project] strategy delete(${strategyId}) failed: ${error.message}`,
-    );
+    const message = `[cleanup-test-project] strategy delete(${strategyId}) failed: ${error.message}`;
+    if (process.env.CI) {
+      throw new Error(message);
+    }
+    console.warn(message);
   }
 }
