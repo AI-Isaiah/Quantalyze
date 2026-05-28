@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from "vitest";
 import {
   checkLimit,
   getClientIp,
@@ -242,12 +242,37 @@ describe("isRateLimitMisconfigured", () => {
 });
 
 describe("getClientIp", () => {
-  it("prefers x-real-ip because Vercel writes that header from the verified TCP peer", () => {
+  // PR-2 (2026-05-28) code-reviewer C1: x-real-ip is now ONLY trusted when
+  // process.env.VERCEL === "1" (set by Vercel build env). Outside Vercel the
+  // header is freely client-set, so a malicious client rotating it per
+  // request would defeat bucket isolation.
+  const ORIGINAL_VERCEL = process.env.VERCEL;
+  beforeEach(() => {
+    delete process.env.VERCEL;
+  });
+  afterAll(() => {
+    if (ORIGINAL_VERCEL === undefined) delete process.env.VERCEL;
+    else process.env.VERCEL = ORIGINAL_VERCEL;
+  });
+
+  it("prefers x-real-ip ONLY when running on Vercel (VERCEL=1 set)", () => {
+    process.env.VERCEL = "1";
     const headers = new Headers({
       "x-real-ip": "9.10.11.12",
       "x-forwarded-for": "1.2.3.4, 5.6.7.8",
     });
     expect(getClientIp(headers)).toBe("9.10.11.12");
+  });
+
+  it("IGNORES x-real-ip when VERCEL is unset (self-hosted / dev / CI)", () => {
+    // The whole point of this gate: when not on Vercel, x-real-ip is freely
+    // client-set, so a bot rotating it per request would otherwise defeat
+    // bucket isolation. Falls through to rightmost x-forwarded-for.
+    const headers = new Headers({
+      "x-real-ip": "9.10.11.12",
+      "x-forwarded-for": "1.2.3.4, 5.6.7.8",
+    });
+    expect(getClientIp(headers)).toBe("5.6.7.8");
   });
 
   it("returns the rightmost x-forwarded-for entry when x-real-ip is missing", () => {
@@ -265,7 +290,14 @@ describe("getClientIp", () => {
     expect(getClientIp(headers)).toBe("5.6.7.8");
   });
 
-  it("returns 'unknown' when no IP headers are present", () => {
+  it("returns 'unknown' when no IP headers are present (route-side defends with UA salt + aggregate cap)", () => {
+    // PR-2 code-reviewer C1 was initially fixed with a UUID nonce, but
+    // that broke for-quants-lead's documented `unknown:_aggregate` cap
+    // (the aggregate key has to be a stable literal so all unknown-IP
+    // requests can be globally capped). Reverted to "unknown"; routes
+    // that want per-UA fairness compose their own salt (e.g.
+    // `${base}:${ip}:${uaHash}`). See for-quants-lead/route.gaps.test.ts
+    // for the canonical defense shape.
     const headers = new Headers();
     expect(getClientIp(headers)).toBe("unknown");
   });

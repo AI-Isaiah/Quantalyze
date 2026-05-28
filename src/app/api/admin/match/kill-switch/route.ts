@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
+import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { logAuditEventAsUser } from "@/lib/audit";
 
 // GET — returns { enabled: boolean }
@@ -28,17 +29,39 @@ export async function GET(): Promise<NextResponse> {
   // Surface infrastructure errors instead of silently defaulting to enabled=true.
   // If system_flags doesn't exist (migration 011 not applied) the founder needs to
   // know that the engine isn't actually deployed — not see a misleading green pill.
+  //
+  // PR-2 code-reviewer I3 (2026-05-28): generic 503 message + Retry-After.
+  // Internal migration-name hint stays in server logs only — no infra detail
+  // surfaces to the admin client.
   if (error) {
-    console.error("[api/admin/match/kill-switch] read error:", error);
+    console.error(
+      "[api/admin/match/kill-switch] read error (system_flags likely missing — apply migration 011):",
+      error,
+    );
     return NextResponse.json(
-      { error: "Match engine schema not found. Apply migration 011 to your Supabase project." },
-      { status: 503 },
+      { error: "Match engine unavailable" },
+      { status: 503, headers: { "Retry-After": "60" } },
+    );
+  }
+
+  // PR-2 silent-failure-hunter F1 (2026-05-28): pre-fix, a missing row
+  // (data === null, error === null) fell through to `enabled ?? true` and
+  // surfaced a misleading green pill — operators would assume the engine
+  // was actively running when the canonical row had been deleted/never-
+  // seeded. Surface that as 503 too, distinct from a Postgres error.
+  if (!data) {
+    console.error(
+      "[api/admin/match/kill-switch] system_flags row missing for key=match_engine_enabled — seed required",
+    );
+    return NextResponse.json(
+      { error: "Match engine unavailable" },
+      { status: 503, headers: { "Retry-After": "60" } },
     );
   }
 
   return NextResponse.json({
-    enabled: data?.enabled ?? true,
-    updated_at: data?.updated_at,
+    enabled: data.enabled,
+    updated_at: data.updated_at,
   });
 }
 
@@ -55,6 +78,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!(await isAdminUser(supabase, user))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  // audit-2026-05-07 (PR-2 2026-05-28): kill-switch is the most-sensitive
+  // admin mutator (flips the global match engine on/off). A buggy admin
+  // client flipping in a loop would write N audit rows AND fan out N
+  // downstream re-recommend triggers; per-admin rate-limit caps that
+  // blast radius at the source.
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin-killswitch:${user.id}`,
+  );
+  if (!rl.success) return rateLimitDenyJson(rl);
 
   let body: { enabled?: boolean };
   try {

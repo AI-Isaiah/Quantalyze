@@ -7,7 +7,8 @@ import {
   PDF_QUEUE_TIMEOUT_MESSAGE,
 } from "@/lib/puppeteer";
 import { extractAnalytics } from "@/lib/queries";
-import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import { publicIpLimiter, checkLimit, getClientIp, isRateLimitMisconfigured } from "@/lib/ratelimit";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
 import { isUuid } from "@/lib/utils";
 
@@ -133,8 +134,16 @@ export async function GET(
   // Cache hits served from Vercel's CDN bypass this entirely, which is the
   // correct behavior for a public IP-based limiter.
   const ip = getClientIp(req.headers);
-  const rl = await checkLimit(publicIpLimiter, `pdf:${ip}`);
+  // audit-2026-05-07 H-0253 follow-up (PR-2 2026-05-28): per-surface key
+  // prefix. Was `pdf:${ip}`, shared with portfolio-pdf + factsheet/pdf.
+  const rl = await checkLimit(publicIpLimiter, `tearsheet-pdf:${ip}`);
   if (!rl.success) {
+    if (isRateLimitMisconfigured(rl)) {
+      return new NextResponse("Service temporarily unavailable", {
+        status: 503,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      });
+    }
     return new NextResponse("Rate limit exceeded", {
       status: 429,
       headers: { "Retry-After": String(rl.retryAfter) },
@@ -264,7 +273,13 @@ export async function GET(
         headers: { "Retry-After": "10" },
       });
     }
+    // PR-2 silent-failure-hunter F6 (2026-05-28): promote PDF render
+    // failures to Sentry. Pre-fix invisible.
     console.error("[tearsheet-pdf] Generation failed:", err);
+    captureToSentry(err, {
+      tags: { area: "tearsheet-pdf", step: "pdf_generation" },
+      level: "error",
+    });
     return NextResponse.json(
       { error: "PDF generation failed" },
       { status: 500 },
@@ -272,7 +287,17 @@ export async function GET(
   } finally {
     if (browser) {
       await browser.close().catch((closeErr) => {
+        // Red-team H3 (2026-05-28): wrap captureToSentry so a Sentry-SDK
+        // regression cannot escape the finally.
         console.error("[tearsheet-pdf] Browser close failed:", closeErr);
+        try {
+          captureToSentry(closeErr, {
+            tags: { area: "tearsheet-pdf", step: "browser_close" },
+            level: "warning",
+          });
+        } catch {
+          /* swallow — Sentry must never escape finally */
+        }
       });
     }
     if (release) release();

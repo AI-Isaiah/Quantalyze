@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { assertProfileApproved } from "@/lib/api/approval-gate";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { logAuditEvent } from "@/lib/audit";
 
 /**
@@ -49,8 +50,17 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
   if (authResult instanceof NextResponse) return authResult;
   const userId = authResult.userId;
 
-  const rl = await checkLimit(userActionLimiter, `strategies-draft-get:${userId}`);
+  // audit-2026-05-07 H-0253 follow-up (PR-2 2026-05-28): per-surface key.
+  // Was `strategies-draft-get:${userId}`, shared with the list GET in the
+  // sibling /strategies/draft/route.ts. Split to :by-id.
+  const rl = await checkLimit(userActionLimiter, `strategies-draft-get-by-id:${userId}`);
   if (!rl.success) {
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Rate limiter unavailable" },
+        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+      );
+    }
     return NextResponse.json(
       { error: "Too many requests" },
       { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
@@ -72,7 +82,25 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
     .eq("user_id", userId)
     .maybeSingle();
 
-  if (error || !data) {
+  // PR-2 silent-failure-hunter F8 (2026-05-28): pre-fix collapsed a
+  // transient Postgres error (network blip, RLS regression, connection
+  // pool exhaustion) into the same 404 "Draft not found" returned for
+  // genuinely-missing rows. A user who owned the draft would see 404,
+  // retry, get 404 again, abandon. Split the two cases + Sentry capture
+  // so the failure mode is observable.
+  if (error) {
+    console.error("[strategies/draft:GET by id] query error:", error.message);
+    captureToSentry(error, {
+      tags: { area: "strategies-draft-get-by-id", code: error.code },
+      extra: { user_id: userId, draft_id: id },
+      level: "error",
+    });
+    return NextResponse.json(
+      { error: "draft_lookup_failed" },
+      { status: 500 },
+    );
+  }
+  if (!data) {
     return NextResponse.json({ error: "Draft not found" }, { status: 404 });
   }
 
@@ -93,6 +121,12 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
     `strategies-draft-delete:${userId}`,
   );
   if (!rl.success) {
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Rate limiter unavailable" },
+        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+      );
+    }
     return NextResponse.json(
       { error: "Too many requests" },
       { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },

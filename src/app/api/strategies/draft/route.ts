@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
+import { captureToSentry } from "@/lib/sentry-capture";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -25,8 +26,17 @@ import type { User } from "@supabase/supabase-js";
  * runaway wizard mount loop cannot starve the write path.
  */
 export const GET = withAuth(async (_req: NextRequest, user: User) => {
-  const rl = await checkLimit(userActionLimiter, `strategies-draft-get:${user.id}`);
+  // audit-2026-05-07 H-0253 follow-up (PR-2 2026-05-28): per-surface key.
+  // Was `strategies-draft-get:${user.id}`, shared with the by-id GET — a
+  // wizard mount that polls list + by-id burns one bucket. Split to :list.
+  const rl = await checkLimit(userActionLimiter, `strategies-draft-get-list:${user.id}`);
   if (!rl.success) {
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { draft: null, error: "Rate limiter unavailable" },
+        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+      );
+    }
     return NextResponse.json(
       { draft: null, error: "Too many requests" },
       { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
@@ -47,8 +57,22 @@ export const GET = withAuth(async (_req: NextRequest, user: User) => {
     .maybeSingle();
 
   if (error) {
+    // PR-2 silent-failure-hunter F7 (2026-05-28): pre-fix returned the
+    // same `{draft: null}` shape on both 200 (no draft) and 500 (DB
+    // error). Client-side mount logic that only checks `body.draft`
+    // treated DB errors as "no draft exists" — user starts fresh,
+    // silently losing their resume banner. Distinct error envelope +
+    // Sentry capture so the failure is observable on both surfaces.
     console.error("[strategies/draft:GET] query error:", error.message);
-    return NextResponse.json({ draft: null }, { status: 500 });
+    captureToSentry(error, {
+      tags: { area: "strategies-draft-get-list", code: error.code },
+      extra: { user_id: user.id },
+      level: "error",
+    });
+    return NextResponse.json(
+      { draft: null, error: "draft_lookup_failed" },
+      { status: 500 },
+    );
   }
 
   return NextResponse.json({ draft: data ?? null });

@@ -103,9 +103,47 @@ vi.mock("@/lib/api/withAllocatorAuth", () => ({
 // ---------------------------------------------------------------------------
 
 const mockRpc = vi.fn();
+// PR-2 NEW-C18-04 (2026-05-28): scenario-commit now SELECTs allocator_holdings
+// to recompute the audit-trail size_at_decision_usd from authoritative server
+// data (the holdings.value_usd column) instead of trusting the client's
+// number. The from() mock must therefore return a thenable chain shaped like
+// `.from("allocator_holdings").select(...).eq(...)` resolving to
+// `{ data: [], error: null }`. Other from() callers (logAuditEvent's internal
+// supabase calls etc.) just need an object that exposes `.select()` returning
+// the same shape — keep the surface narrow so a test that needs to inspect a
+// different from() chain can override locally.
+// Per-test injection of allocator_holdings rows for NEW-C18-04 server-side
+// audit recompute coverage. Default empty (lookup_failed branch); a test can
+// set holdingsFixture / holdingsErrorFixture in beforeEach to exercise the
+// server_holding / server_aum / lookup_failed branches independently.
+type HoldingRowFixture = {
+  venue: string;
+  symbol: string;
+  holding_type: string;
+  value_usd: number;
+  asof: string;
+};
+let holdingsFixture: HoldingRowFixture[] = [];
+let holdingsErrorFixture: { message: string } | null = null;
+const buildHoldingsChain = () => {
+  const chain: { data: HoldingRowFixture[]; error: { message: string } | null } & {
+    select: () => typeof chain;
+    eq: () => typeof chain;
+    in: () => typeof chain;
+    order: () => typeof chain;
+  } = {
+    data: holdingsFixture,
+    error: holdingsErrorFixture,
+    select: () => chain,
+    eq: () => chain,
+    in: () => chain,
+    order: () => chain,
+  };
+  return chain;
+};
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
-    from: vi.fn(() => ({})),
+    from: vi.fn(() => buildHoldingsChain()),
     rpc: mockRpc,
   }),
 }));
@@ -121,6 +159,13 @@ vi.mock("@/lib/ratelimit", () => ({
     rateLimitAllow
       ? { success: true }
       : { success: false, retryAfter: 42 },
+  ),
+  // PR-2 (2026-05-28): routes now narrow on this type-guard before
+  // mapping the misconfig denial to 503. The default-allow test path
+  // never reaches it; the deny path returns no `reason` so it's false.
+  isRateLimitMisconfigured: vi.fn(
+    (rl: { success: boolean; reason?: string }) =>
+      rl.success === false && rl.reason === "ratelimit_misconfigured",
   ),
 }));
 
@@ -177,6 +222,8 @@ beforeEach(() => {
   withAuthShouldFail = false;
   allocatorGateShouldFail = false;
   rateLimitAllow = true;
+  holdingsFixture = [];
+  holdingsErrorFixture = null;
   mockRpc.mockReset();
 });
 
@@ -1077,62 +1124,33 @@ describe("T_R20 — Idempotency-Key dedup (P1945, migration 131 SQL-side)", () =
     );
   });
 
-  it("key boundary: 129 chars → RPC called with p_idempotency_key=null", async () => {
+  it("key boundary: 129 chars → 400 (PR-2 reviewer #2 hardening)", async () => {
     const overKey = "k".repeat(129);
-    mockRpc.mockResolvedValueOnce({
-      data: {
-        ok: true,
-        recorded: [
-          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
-        ],
-      },
-      error: null,
-    });
-    await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, overKey));
-    expect(mockRpc).toHaveBeenCalledWith(
-      "commit_scenario_batch",
-      expect.objectContaining({
-        p_idempotency_key: null,
-        p_request_hash: null,
-      }),
-    );
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, overKey));
+    expect(res.status).toBe(400);
+    expect(mockRpc).not.toHaveBeenCalled();
   });
 
-  it("Idempotency-Key with non-RFC-charset (space) → RPC called with p_idempotency_key=null", async () => {
+  it("Idempotency-Key with non-RFC-charset (space) → 400 (PR-2 reviewer #2 hardening)", async () => {
     const spacedKey = "abcdefghijklmnop qrstuvwx";
-    mockRpc.mockResolvedValueOnce({
-      data: {
-        ok: true,
-        recorded: [
-          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
-        ],
-      },
-      error: null,
-    });
     const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, spacedKey));
-    expect(res.status).toBe(200);
-    expect(mockRpc).toHaveBeenCalledWith(
-      "commit_scenario_batch",
-      expect.objectContaining({ p_idempotency_key: null }),
-    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("Idempotency-Key format invalid");
+    expect(mockRpc).not.toHaveBeenCalled();
   });
 
-  it("Idempotency-Key too short (8 chars) → RPC called with p_idempotency_key=null", async () => {
-    mockRpc.mockResolvedValueOnce({
-      data: {
-        ok: true,
-        recorded: [
-          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
-        ],
-      },
-      error: null,
-    });
+  it("Idempotency-Key too short (8 chars) → 400 (PR-2 reviewer #2 hardening)", async () => {
+    // Pre-PR-2 the route silently dropped a malformed key and treated the
+    // commit as non-idempotent. That turned a client's retry storm under
+    // a stuck Idempotency-Key into a duplicate-commit vector. Per RFC
+    // draft-ietf-httpapi-idempotency-key §2.5, a present-but-invalid key
+    // must be rejected, not ignored.
     const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, "shortkey"));
-    expect(res.status).toBe(200);
-    expect(mockRpc).toHaveBeenCalledWith(
-      "commit_scenario_batch",
-      expect.objectContaining({ p_idempotency_key: null }),
-    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("Idempotency-Key format invalid");
+    expect(mockRpc).not.toHaveBeenCalled();
   });
 
   it("request without Idempotency-Key header → RPC called with p_idempotency_key=null", async () => {
@@ -1312,5 +1330,154 @@ describe("T_R23 — audit metadata.commit_batch_id", () => {
 
     expect(batchId1).toMatch(/^[0-9a-f-]{36}$/);
     expect(batchId2).toBe(batchId1);
+  });
+});
+
+// ===========================================================================
+// NEW-C18-04 (PR-2 2026-05-28) — audit-trust server-side size recompute
+//
+// Specialist code-reviewer flagged C1: a naive SUM(value_usd) would inflate
+// AUM by the per-day snapshot count (UNIQUE allocator_id+venue+symbol+asof
+// in migration 20260420073003). Fix uses .order("asof", desc) + first-seen-
+// wins dedup per (venue, symbol, holding_type) to mirror the RPC's MAX(asof).
+// These tests pin the contract so a regression cannot silently reintroduce
+// the SUM-all-history bug.
+// ===========================================================================
+
+describe("NEW-C18-04 — server-side audit recompute of size_at_decision_usd", () => {
+  function getAuditMetadata(call: number): Record<string, unknown> {
+    const calls = (logAuditEvent as unknown as { mock: { calls: unknown[][] } })
+      .mock.calls as Array<[unknown, { metadata: Record<string, unknown> }]>;
+    return calls[call][1].metadata;
+  }
+
+  it("voluntary_add: server_size = percent_allocated × total_aum / 100, source = server_aum", async () => {
+    // Two holdings, latest asof: 80k + 120k = 200k AUM
+    holdingsFixture = [
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd: 80_000, asof: "2026-05-28" },
+      { venue: "binance", symbol: "ETH", holding_type: "spot", value_usd: 120_000, asof: "2026-05-28" },
+    ];
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_add" },
+        ],
+      },
+      error: null,
+    });
+
+    // Client claims size=999_999 — bogus. percent_allocated=5 → server says 5% × 200k = 10_000.
+    const liarDiff = { ...VALID_VA, size_at_decision_usd: 999_999, percent_allocated: 5 };
+    const res = await POST(mkReq({ diffs: [liarDiff] }));
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("server_aum");
+    expect(meta.size_at_decision_usd).toBe(10_000);
+    expect(meta.size_at_decision_usd_client).toBe(999_999);
+  });
+
+  it("voluntary_remove: server_size = holding.value_usd, source = server_holding", async () => {
+    holdingsFixture = [
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd: 42_000, asof: "2026-05-28" },
+    ];
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+
+    // Client claims size=1_000 (way under real 42_000). Server recomputes.
+    const liarDiff = { ...VALID_VR, size_at_decision_usd: 1_000 };
+    const res = await POST(mkReq({ diffs: [liarDiff] }));
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("server_holding");
+    expect(meta.size_at_decision_usd).toBe(42_000);
+    expect(meta.size_at_decision_usd_client).toBe(1_000);
+  });
+
+  it("lookup_failed: holdings SELECT errors → _size_source = lookup_failed, server_size = null", async () => {
+    holdingsErrorFixture = { message: "connection refused (test)" };
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_add" },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReq({ diffs: [VALID_VA] }));
+    // Audit recompute failure must NOT fail the commit — the data layer
+    // already landed via the RPC.
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("lookup_failed");
+    expect(meta.size_at_decision_usd).toBeNull();
+    // Client number preserved for forensic diff.
+    expect(meta.size_at_decision_usd_client).toBe(VALID_VA.size_at_decision_usd);
+  });
+
+  it("C1 REGRESSION: multi-asof per holding → latest-only wins, AUM is NOT summed across history", async () => {
+    // 3 snapshots of the same BTC holding across 3 days. If the bug returned
+    // the AUM would be 100k+50k+10k = 160k (and server_size = 5% × 160k = 8_000).
+    // With latest-asof-only, AUM is just the newest snapshot (100k → 5_000).
+    holdingsFixture = [
+      // Order DESC — newest first (mirrors .order("asof", { ascending: false }))
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd: 100_000, asof: "2026-05-28" },
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd:  50_000, asof: "2026-05-27" },
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd:  10_000, asof: "2026-05-26" },
+    ];
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_add" },
+        ],
+      },
+      error: null,
+    });
+
+    const diff = { ...VALID_VA, percent_allocated: 5 };
+    const res = await POST(mkReq({ diffs: [diff] }));
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("server_aum");
+    // Latest BTC snapshot is 100k. 5% × 100k = 5_000. Sum-all-history would be 8_000.
+    expect(meta.size_at_decision_usd).toBe(5_000);
+  });
+
+  it("C1 REGRESSION: voluntary_remove picks the LATEST asof value, not a stale snapshot", async () => {
+    holdingsFixture = [
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd: 75_000, asof: "2026-05-28" }, // latest
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd:  1_000, asof: "2024-01-01" }, // ancient
+    ];
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReq({ diffs: [VALID_VR] }));
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    // Must be 75_000 (latest), NOT 1_000 (ancient) and NOT 76_000 (sum).
+    expect(meta.size_at_decision_usd).toBe(75_000);
+    expect(meta._size_source).toBe("server_holding");
   });
 });

@@ -10,6 +10,10 @@ import { isUuid } from "@/lib/utils";
 import { logAuditEvent } from "@/lib/audit";
 
 // POST — toggle a lead's processed state. Body: { id, unprocess?: boolean }
+//
+// audit-2026-05-07 (PR-2 2026-05-28): per-admin rate limit on the toggle
+// surface. The opt-in is plumbed through the withAdminAuth wrapper so the
+// auth + audit-on-deny + body parse stay centralised.
 export const POST = withAdminAuth(async (body) => {
   const { id, unprocess } = body;
   if (!isUuid(id as string)) {
@@ -46,4 +50,4 @@ export const POST = withAdminAuth(async (body) => {
   });
 
   return NextResponse.json({ ok: true, unprocessed: unprocess === true });
-});
+}, { rateLimitKey: (user) => `admin-fql-process:${user.id}` });

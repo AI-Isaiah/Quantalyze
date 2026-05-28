@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
+import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { logAuditEventAsUser } from "@/lib/audit";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -11,6 +12,24 @@ type AdminHandler = (
   body: Record<string, unknown>,
   admin: SupabaseClient
 ) => Promise<NextResponse>;
+
+export interface WithAdminAuthOptions {
+  /**
+   * audit-2026-05-07 (PR-2 2026-05-28) — opt-in per-surface rate limit.
+   *
+   * When supplied, the wrapper calls `checkLimit(adminActionLimiter, key)`
+   * after the admin authz block and before body parse. The key MUST already
+   * include the surface name (e.g. `admin-fql-process:`) — only the trailing
+   * user id is appended here. Returning `null` from this callback opts the
+   * call out of rate limiting for one specific request (currently unused;
+   * kept for forward-compat with conditional opt-outs).
+   *
+   * The per-route inline limiters (preferences, kill-switch, decisions)
+   * deliberately do NOT use this hook — they need bespoke per-target-user
+   * key shapes that depend on URL params unavailable here.
+   */
+  rateLimitKey?: (user: { id: string }) => string | null;
+}
 
 /**
  * Admin route wrapper. Combines CSRF check, auth/role gate, and JSON
@@ -47,7 +66,10 @@ type AdminHandler = (
  *      400 instead of crashing the handler with `const { id } = body`
  *      against a primitive.
  */
-export function withAdminAuth(handler: AdminHandler) {
+export function withAdminAuth(
+  handler: AdminHandler,
+  options: WithAdminAuthOptions = {},
+) {
   return async (request: Request): Promise<NextResponse> => {
     // CSRF defense-in-depth: admin routes are always mutating (POST).
     const csrfError = assertSameOrigin(request as NextRequest);
@@ -79,6 +101,32 @@ export function withAdminAuth(handler: AdminHandler) {
         },
       });
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    // audit-2026-05-07 (PR-2 2026-05-28): opt-in rate limit on admin
+    // mutators routed through this wrapper. The key shape is per-route;
+    // the wrapper just consumes whatever the caller provides.
+    //
+    // Red-team C1 (2026-05-28): tighten the truthy check so an empty
+    // string (e.g. a buggy caller `(u) => process.env.X ?? ""`) does
+    // NOT silently bypass the limiter. Only the documented `null` opt-out
+    // is honored; everything else must be a non-empty string.
+    if (options.rateLimitKey) {
+      const surfaceKey = options.rateLimitKey({ id: user.id });
+      if (surfaceKey !== null && surfaceKey !== undefined) {
+        if (typeof surfaceKey !== "string" || surfaceKey.length < 1) {
+          console.error(
+            "[withAdminAuth] rateLimitKey returned non-string or empty value — failing closed",
+            { surfaceKey: typeof surfaceKey },
+          );
+          return NextResponse.json(
+            { error: "Rate limiter misconfigured" },
+            { status: 503 },
+          );
+        }
+        const rl = await checkLimit(adminActionLimiter, surfaceKey);
+        if (!rl.success) return rateLimitDenyJson(rl);
+      }
     }
 
     let body: Record<string, unknown>;

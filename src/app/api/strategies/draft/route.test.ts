@@ -89,6 +89,8 @@ vi.mock("@/lib/supabase/server", () => ({
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: null,
   checkLimit: async () => rateLimitResult,
+  isRateLimitMisconfigured: (rl: { success: boolean; reason?: string }) =>
+    rl.success === false && rl.reason === "ratelimit_misconfigured",
 }));
 
 function makeReq(): NextRequest {

@@ -8,6 +8,7 @@ import {
   isRateLimitMisconfigured,
 } from "@/lib/ratelimit";
 import { loadDeletionRequestForAction } from "../_shared";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * POST /api/admin/deletion-requests/[id]/approve
@@ -262,6 +263,11 @@ export const POST = withRole<{ id: string }>("admin")(
     // to retry, and the second sanitize_user is idempotent but the CAS
     // would still flip — adding noise without changing the safety
     // contract.
+    // PR-2 silent-failure-hunter F4 (2026-05-28): promote signOut
+    // failures to Sentry. The sanitize-loop defense documented above
+    // explicitly admits "the route-layer sentinel is the fail-safe" —
+    // making the degradation visible on the alert path is critical so
+    // operators know when defense-in-depth has dropped to single-layer.
     try {
       const { error: signOutErr } = await admin.auth.admin.signOut(
         reqRow.user_id,
@@ -272,12 +278,37 @@ export const POST = withRole<{ id: string }>("admin")(
           "[admin/deletion-requests/approve] admin.auth.admin.signOut failed — sanitize-loop defense degrades to route-layer sentinel only:",
           signOutErr.message,
         );
+        captureToSentry(
+          new Error(`admin.signOut failed: ${signOutErr.message}`),
+          {
+            tags: {
+              area: "admin/deletion-requests/approve",
+              gate: "sanitize_loop_signout",
+            },
+            extra: {
+              request_id: requestId,
+              target_user_id: reqRow.user_id,
+            },
+            level: "warning",
+          },
+        );
       }
     } catch (signOutErr) {
       console.error(
         "[admin/deletion-requests/approve] admin.auth.admin.signOut threw — sanitize-loop defense degrades to route-layer sentinel only:",
         signOutErr instanceof Error ? signOutErr.message : signOutErr,
       );
+      captureToSentry(signOutErr, {
+        tags: {
+          area: "admin/deletion-requests/approve",
+          gate: "sanitize_loop_signout",
+        },
+        extra: {
+          request_id: requestId,
+          target_user_id: reqRow.user_id,
+        },
+        level: "warning",
+      });
     }
 
     // Cluster-K C-0033 / H-0217 + red-team-CRITICAL

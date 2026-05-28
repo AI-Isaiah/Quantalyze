@@ -3,9 +3,10 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
-import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { notifyAllocatorIntroStatus } from "@/lib/email";
 import { logAuditEvent } from "@/lib/audit";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 const VALID_STATUSES = ["pending", "intro_made", "completed", "declined"] as const;
 
@@ -51,15 +52,10 @@ export async function POST(req: NextRequest) {
     adminActionLimiter,
     `admin:${user.id}:intro-request`,
   );
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      {
-        status: 429,
-        headers: { "Retry-After": String(rl.retryAfter) },
-      },
-    );
-  }
+  // PR-2 full-file reviewer #6 (2026-05-28): 503 on rate-limit misconfig
+  // so an Upstash outage surfaces on SRE health dashboards instead of
+  // masquerading as throttled organic admin traffic. (See rateLimitDenyJson.)
+  if (!rl.success) return rateLimitDenyJson(rl);
 
   let body: Record<string, unknown>;
   try {
@@ -111,6 +107,14 @@ export async function POST(req: NextRequest) {
     .select("id");
 
   if (error) {
+    // PR-1 background-reviewer H3 (2026-05-28): log code + message so a
+    // future supabase-driver schema-drift bug isn't a bare 500. Matches
+    // the SRE-forensics shape used in scenario-commit's rpcErr block.
+    console.error("[admin/intro-request] update failed:", {
+      user_id: user.id,
+      code: error.code,
+      message: error.message,
+    });
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
   if (!updated || updated.length === 0) {
@@ -180,10 +184,23 @@ export async function POST(req: NextRequest) {
           await notifyAllocatorIntroStatus(allocator.email, strategy.name, status as string);
         }
       } catch (err) {
+        // PR-2 silent-failure-hunter F3 (2026-05-28): promoted to
+        // captureToSentry so a regression in the allocator-notify side-
+        // effect (DB blip on profiles/strategies lookup, email-provider
+        // 5xx) is observable on the alert path. The admin has already
+        // received a 200 by the time after() runs.
         console.error(
           "[admin/intro-request] allocator-status notify failed:",
           err instanceof Error ? err.message : err,
         );
+        captureToSentry(err, {
+          tags: {
+            area: "admin/intro-request",
+            side_effect: "allocator_notify",
+          },
+          extra: { request_id: String(id), new_status: String(status) },
+          level: "warning",
+        });
       }
     });
   }

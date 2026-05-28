@@ -50,7 +50,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
 
@@ -208,8 +208,15 @@ function pickAuditDiffFields(
         percent_allocated: d.percent_allocated,
       };
     default: {
+      // Red-team H1 (2026-05-28): pre-fix the never-typed return value
+      // was the live `d` at runtime — schema drift (new `kind` added in
+      // SQL not yet redeployed to TS) would silently spread every field
+      // of `d` into the audit row, including fields the redaction layer
+      // wasn't designed for. Fail loud per Rule 12.
       const _exhaustive: never = d;
-      return _exhaustive;
+      throw new Error(
+        `pickAuditDiffFields: unhandled diff kind — RPC schema drift? got=${JSON.stringify(_exhaustive)}`,
+      );
     }
   }
 }
@@ -297,6 +304,15 @@ interface SuccessBody {
 export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUser): Promise<NextResponse> => {
   const rl = await checkLimit(userActionLimiter, `scenario_commit:${user.id}`);
   if (!rl.success) {
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Rate limiter unavailable" },
+        {
+          status: 503,
+          headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+        },
+      );
+    }
     return NextResponse.json(
       { error: "Too many requests" },
       {
@@ -379,6 +395,23 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   // eliminates that window entirely.
   // ---------------------------------------------------------------------------
   const idempotencyKey = req.headers.get("Idempotency-Key");
+  // PR-2 full-file reviewer #2 (2026-05-28): when the header is PRESENT
+  // but fails the format regex, fail loud with 400. Pre-fix the malformed
+  // key was silently dropped (passed null to the RPC) which turned the
+  // commit into a non-idempotent operation while the client kept retrying
+  // with the same malformed key — duplicate match_decisions + duplicate
+  // audit rows. Per RFC draft-ietf-httpapi-idempotency-key §2.5, an
+  // invalid key must be rejected, not ignored.
+  if (idempotencyKey !== null && !IDEMPOTENCY_KEY_RE.test(idempotencyKey)) {
+    return NextResponse.json(
+      {
+        error: "Idempotency-Key format invalid",
+        detail:
+          "Header must match /^[A-Za-z0-9._~-]{16,128}$/. Generate a fresh key and retry.",
+      },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
   const idempotencyKeyValid =
     !!idempotencyKey && IDEMPOTENCY_KEY_RE.test(idempotencyKey);
 
@@ -582,6 +615,92 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   const commitBatchId = randomUUID();
   const isCachedReplay = rpcResult.cached === true;
 
+  // NEW-C18-04 (PR-2 2026-05-28, audit-trust scope): pre-fix, the audit row
+  // stored `size_at_decision_usd` verbatim from the client payload. A
+  // malicious allocator could write any number and have it land in audit
+  // forever. The data-integrity scope is already safe — the RPC ignores
+  // this field entirely; `percent_allocated` is the authoritative
+  // dimensioning column — but the AUDIT TRAIL still trusted client truth.
+  //
+  // Fix: one SELECT against allocator_holdings to assemble the authoritative
+  // total_aum and per-holding value_usd map. The audit emit loop then
+  // derives size from server data:
+  //   - voluntary_remove: server_size = the removed holding's value_usd
+  //   - voluntary_modify / voluntary_add / bridge_recommended:
+  //       server_size = percent_allocated * total_aum / 100
+  //   - lookup failure: fall back to client number with a `_size_source`
+  //     sentinel of "client_unverified" so forensic readers can filter.
+  //
+  // CRITICAL — asof handling (code-reviewer C1 catch, PR-2 2026-05-28):
+  // allocator_holdings has UNIQUE (allocator_id, venue, symbol, asof) — one
+  // row PER DAY per holding (migration 20260420073003 line 147). A long-
+  // lived allocator can have 730+ snapshots per holding. A naive `SUM(value_usd)`
+  // would inflate AUM by the snapshot count (100×–730×) and the per-holding
+  // map would pick a non-deterministic asof. We mirror the RPC's MAX(asof)
+  // pattern (migration 20260515210400 lines 286/359/411) by ordering DESC and
+  // KEEPING ONLY THE FIRST-SEEN entry per (venue, symbol, holding_type) — the
+  // newest snapshot. Then sum across the deduped map for AUM.
+  //
+  // Skipped on cached replays (the original commit already emitted the
+  // server-side number; replays produce no new audit rows).
+  let serverAumUsd = 0;
+  const holdingValueByRef = new Map<string, number>();
+  // Hoisted so the per-row audit loop below can distinguish
+  // lookup_failed (Supabase error) from no_holdings_snapshot (legitimate
+  // empty-but-ok) from "the lookup never ran" (cached replay; today the
+  // audit loop is skipped on cached replays, but if a future refactor
+  // ever audits on cached path the explicit "not_run" state prevents
+  // the sentinel from falsely reading "no_holdings_snapshot" when the
+  // SELECT never executed). Red-team C2 (2026-05-28).
+  let holdingsLookupErr: { message?: string } | null = null;
+  let holdingsLookupRan = false;
+  if (!isCachedReplay) {
+    // I3 (PR-2 specialist code-reviewer): pre-filter to the two
+    // holding_type values the audit recompute knows about. A legacy /
+    // drifted row with holding_type="margin" (or any other value) would
+    // otherwise bloat serverAumUsd without ever matching a client diff's
+    // holding_ref, producing inflated AUM denominators silently.
+    // Reviewer #1 (2026-05-28): add holding_type tiebreaker so the
+    // first-seen-wins dedup is deterministic when two rows for the same
+    // (venue, symbol, asof) but different holding_type exist. Postgres
+    // would otherwise return them in an unspecified order.
+    const { data: holdingRows, error: holdingErr } = await supabase
+      .from("allocator_holdings")
+      .select("venue, symbol, holding_type, value_usd, asof")
+      .eq("allocator_id", user.id)
+      .in("holding_type", ["spot", "derivative"])
+      .order("asof", { ascending: false })
+      .order("holding_type", { ascending: true });
+    holdingsLookupErr = holdingErr;
+    holdingsLookupRan = true;
+    if (holdingErr) {
+      // Don't fail the commit — the data layer already landed. Log + mark
+      // every per-row audit with `_size_source: "lookup_failed"` so the
+      // sparse path is observable in forensic queries.
+      console.warn(
+        "[scenario-commit] allocator_holdings lookup for audit recompute failed:",
+        holdingErr.message,
+      );
+      captureToSentry(new Error("scenario_commit: holdings lookup for audit recompute failed"), {
+        tags: { area: "scenario-commit", gate: "audit_size_recompute" },
+        extra: { user_id: user.id, supabase_err: holdingErr.message },
+        level: "warning",
+      });
+    } else {
+      for (const row of holdingRows ?? []) {
+        const ref = `holding:${row.venue}:${row.symbol}:${row.holding_type}`;
+        // Order is asof DESC; the FIRST row seen for a given ref is the
+        // newest snapshot. Skip subsequent (older) rows.
+        if (holdingValueByRef.has(ref)) continue;
+        const v = typeof row.value_usd === "number" && Number.isFinite(row.value_usd)
+          ? row.value_usd
+          : 0;
+        holdingValueByRef.set(ref, v);
+        serverAumUsd += v;
+      }
+    }
+  }
+
   if (!isCachedReplay) {
     for (const row of recorded) {
       // audit-2026-05-07 H-0254: pre-fix the metadata captured only
@@ -612,6 +731,61 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
         );
       }
       const diffFields = inputDiff ? pickAuditDiffFields(inputDiff) : {};
+
+      // NEW-C18-04 audit-trust recompute: derive size from server data
+      // when possible; fall back to client number with sentinel otherwise.
+      //
+      // Reviewer #4 (2026-05-28): added "ref_not_found" sentinel so a
+      // voluntary_remove against a stale/missing holding_ref is
+      // distinguishable from a Supabase-side error (lookup_failed) and
+      // from a true client-only fallback (client_unverified).
+      let serverSizeUsd: number | null = null;
+      let sizeSource:
+        | "server_holding"
+        | "server_aum"
+        | "client_unverified"
+        | "lookup_failed"
+        | "ref_not_found"
+        | "no_holdings_snapshot" =
+        "client_unverified";
+      // Distinguish "Supabase errored" (lookup_failed) from "allocator
+      // legitimately has no holdings yet" (no_holdings_snapshot). The
+      // holdingsLookupOk flag captures the first; the empty-but-ok case
+      // captures the second.
+      // Red-team C2: holdingsLookupOk is true ONLY when the SELECT
+      // actually ran AND returned without error. holdingsLookupRan guards
+      // against the future cached-replay-audit refactor described above.
+      const holdingsLookupOk = holdingsLookupRan && holdingsLookupErr === null;
+      const holdingsEmptyOk = holdingsLookupOk && holdingValueByRef.size === 0;
+      if (inputDiff) {
+        if (inputDiff.kind === "voluntary_remove") {
+          const v = holdingValueByRef.get(inputDiff.holding_ref);
+          if (v !== undefined) {
+            serverSizeUsd = v;
+            sizeSource = "server_holding";
+          } else if (!holdingsLookupOk) {
+            sizeSource = "lookup_failed";
+          } else if (holdingsEmptyOk) {
+            sizeSource = "no_holdings_snapshot";
+          } else {
+            sizeSource = "ref_not_found";
+          }
+        } else if (
+          inputDiff.kind === "voluntary_modify" ||
+          inputDiff.kind === "voluntary_add" ||
+          inputDiff.kind === "bridge_recommended"
+        ) {
+          if (serverAumUsd > 0) {
+            serverSizeUsd = (inputDiff.percent_allocated * serverAumUsd) / 100;
+            sizeSource = "server_aum";
+          } else if (!holdingsLookupOk) {
+            sizeSource = "lookup_failed";
+          } else if (holdingsEmptyOk) {
+            sizeSource = "no_holdings_snapshot";
+          }
+        }
+      }
+
       logAuditEvent(supabase, {
         action: "match.decision_record",
         entity_type: "match_decision",
@@ -626,7 +800,20 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
           _diff_present: Boolean(inputDiff),
           ...diffFields,
           ...(inputDiff && {
-            size_at_decision_usd: inputDiff.size_at_decision_usd,
+            // NEW-C18-04: server-recomputed authoritative figure.
+            // Pre-fix this was the unverified client number; a malicious
+            // allocator could inflate or deflate it without bound. Now
+            // the `_size_source` sentinel below distinguishes six states:
+            //   server_holding        — voluntary_remove uses holdings.value_usd
+            //   server_aum            — other arms recompute pct × total_aum
+            //   ref_not_found         — voluntary_remove's holding_ref absent
+            //                           from a non-empty holdings map
+            //   no_holdings_snapshot  — lookup ran, returned zero rows
+            //   lookup_failed         — allocator_holdings SELECT errored
+            //   client_unverified     — no inputDiff (shouldn't happen)
+            size_at_decision_usd: serverSizeUsd,
+            size_at_decision_usd_client: inputDiff.size_at_decision_usd,
+            _size_source: sizeSource,
             effective_date: inputDiff.effective_date,
             note_present:
               typeof inputDiff.note === "string" && inputDiff.note.length > 0,

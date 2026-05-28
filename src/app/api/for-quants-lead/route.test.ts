@@ -222,6 +222,11 @@ const VALID_PAYLOAD = {
 
 describe("POST /api/for-quants-lead", () => {
   beforeEach(() => {
+    // PR-2 (2026-05-28): getClientIp now requires VERCEL=1 for x-real-ip
+    // to be trusted (defends against header spoofing on self-hosted
+    // deploys). The test suite simulates a Vercel-edge request so x-real-ip
+    // behavior matches prod.
+    process.env.VERCEL = "1";
     dbState.inserted = [];
     dbState.insertShouldFail = false;
     dbState.adminClientShouldThrow = false;
