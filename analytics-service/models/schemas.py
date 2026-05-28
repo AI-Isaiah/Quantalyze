@@ -88,29 +88,41 @@ class PortfolioAnalyticsRequest(BaseModel):
     @classmethod
     def _validate_portfolio_id_field(cls, v: str) -> str:
         return _validate_portfolio_id(v)
-    # NEW-C19-01: user_id supplied by the Next.js caller so this service can
-    # verify the portfolio belongs to the requesting user.  The X-Service-Key
-    # middleware authenticates the CALLER (Next.js), not the end user; this
-    # ownership check is the only defense against a service-key holder passing
-    # an arbitrary portfolio_id.  See trust-boundary comment in BridgeRequest.
+    # NEW-C19-01 + C-PR5-01 (audit-2026-05-07, follow-up to PR #347):
+    # user_id supplied by the Next.js caller so this service can verify
+    # the portfolio belongs to the requesting user. The X-Service-Key
+    # middleware authenticates the CALLER (Next.js), not the end user;
+    # this ownership check is the only defense against a service-key
+    # holder passing an arbitrary portfolio_id. See trust-boundary
+    # comment in BridgeRequest (which has always required user_id).
     #
-    # C-001 (red-team): changed from required ``str`` to ``Optional[str] = None``
-    # so that callers that do not yet forward user_id receive a 200 rather than a
-    # 422.  The handler skips the ownership SELECT when user_id is None and logs a
-    # warning.  See ``_validate_user_id`` for format enforcement.
-    user_id: Optional[str] = None
+    # Prior C-001 (red-team) relaxed this to ``Optional[str] = None`` for
+    # legacy callers that hadn't been updated yet. The PR-5 security
+    # review identified that relaxation as the C-PR5-01 attack surface
+    # (any X-Service-Key holder could pass portfolio_id with no user_id
+    # and the handler would drop the ownership filter). PR #347 closed
+    # the same shape on /api/match/recompute via actor binding; this
+    # change closes it here. TS-side `computePortfolioAnalytics` now
+    # requires `actorId` so the route signature can't drift back.
+    user_id: str
 
     @field_validator("user_id")
     @classmethod
-    def _validate_user_id_field(cls, v: Optional[str]) -> Optional[str]:
-        return _validate_user_id(v)
+    def _validate_user_id_field(cls, v: str) -> str:
+        result = _validate_user_id(v)
+        if result is None:
+            raise ValueError("user_id is required for PortfolioAnalyticsRequest")
+        return result
 
 
 class PortfolioOptimizerRequest(BaseModel):
     portfolio_id: str
-    # NEW-C19-01: same trust-boundary as PortfolioAnalyticsRequest.user_id.
-    # C-001 (red-team): Optional — see PortfolioAnalyticsRequest.user_id comment.
-    user_id: Optional[str] = None
+    # NEW-C19-01 + C-PR5-01: see PortfolioAnalyticsRequest.user_id above.
+    # The TS caller (src/lib/analytics-client.ts::runPortfolioOptimizer)
+    # now requires `actorId` and forwards it as `user_id` from the
+    # session-authenticated route. The Python handler's Optional branch
+    # is the C-PR5-01 attack surface; tightening here forecloses it.
+    user_id: str
 
     @field_validator("portfolio_id")
     @classmethod
@@ -119,8 +131,11 @@ class PortfolioOptimizerRequest(BaseModel):
 
     @field_validator("user_id")
     @classmethod
-    def _validate_user_id_field(cls, v: Optional[str]) -> Optional[str]:
-        return _validate_user_id(v)
+    def _validate_user_id_field(cls, v: str) -> str:
+        result = _validate_user_id(v)
+        if result is None:
+            raise ValueError("user_id is required for PortfolioOptimizerRequest")
+        return result
 
     # Custom optimizer weights, keyed by strategy_id. Validated by the
     # field_validator below + the handler's per-portfolio key-scoping.

@@ -1620,10 +1620,20 @@ class TestScoreOneAllocatorOrphanRollback:
                 t.insert.return_value.execute.return_value = MagicMock(
                     data=[{"id": "batch-xyz"}]
                 )
-                # Capture the rollback delete
+                # Capture the rollback delete. H-PR5-05 (audit-2026-05-07):
+                # the rollback DELETE now chains a second .eq("allocator_id",
+                # allocator_id) for tenant-binding defense-in-depth. Capture
+                # BOTH eq invocations so the test pins both filters AND a
+                # future regression that drops the .eq("allocator_id") fails
+                # the assertion below.
                 def _eq_capture(col, val):
                     captured_deletes.append((col, val))
-                    return MagicMock(execute=MagicMock(return_value=MagicMock(data=[{"id": val}])))
+                    sub = MagicMock()
+                    def _eq2_capture(col2, val2):
+                        captured_deletes.append((col2, val2))
+                        return MagicMock(execute=MagicMock(return_value=MagicMock(data=[{"id": val}])))
+                    sub.eq.side_effect = _eq2_capture
+                    return sub
                 t.delete.return_value.eq.side_effect = _eq_capture
             elif name == "match_candidates":
                 # Insert "succeeds" at the network level but returns empty
@@ -1693,6 +1703,12 @@ class TestScoreOneAllocatorOrphanRollback:
         assert ("id", "batch-xyz") in captured_deletes, (
             "orphan batch row must be deleted on candidate-insert failure"
         )
+        # H-PR5-05: the rollback DELETE must ALSO carry the allocator_id
+        # tenant binding so a poorly-typed batch id can't escape the tenant.
+        assert ("allocator_id", "11111111-1111-1111-1111-111111111111") in captured_deletes, (
+            "rollback DELETE must chain .eq('allocator_id', allocator_id) "
+            "for tenant-binding defense-in-depth (H-PR5-05)"
+        )
         assert any(
             "rolling back" in rec.getMessage() for rec in caplog.records
         )
@@ -1716,13 +1732,20 @@ class TestScoreOneAllocatorOrphanRollback:
                     data=[{"id": "batch-raise"}]
                 )
 
+                # H-PR5-05: rollback DELETE now chains a second
+                # .eq("allocator_id", allocator_id) — capture both.
                 def _eq_capture(col, val):
                     captured_deletes.append((col, val))
-                    return MagicMock(
-                        execute=MagicMock(
-                            return_value=MagicMock(data=[{"id": val}])
+                    sub = MagicMock()
+                    def _eq2_capture(col2, val2):
+                        captured_deletes.append((col2, val2))
+                        return MagicMock(
+                            execute=MagicMock(
+                                return_value=MagicMock(data=[{"id": val}])
+                            )
                         )
-                    )
+                    sub.eq.side_effect = _eq2_capture
+                    return sub
 
                 t.delete.return_value.eq.side_effect = _eq_capture
             elif name == "match_candidates":
@@ -1791,6 +1814,11 @@ class TestScoreOneAllocatorOrphanRollback:
         assert ("id", "batch-raise") in captured_deletes, (
             "orphan batch row must be deleted on candidate-insert raise too"
         )
+        # H-PR5-05: same tenant-binding assertion as the data=[] test.
+        assert ("allocator_id", "22222222-2222-2222-2222-222222222222") in captured_deletes, (
+            "rollback DELETE must chain .eq('allocator_id', allocator_id) "
+            "for tenant-binding defense-in-depth (H-PR5-05)"
+        )
         # The original FK error must be chained via __cause__ so the operator
         # can see the root cause.
         assert excinfo.value.__cause__ is not None
@@ -1814,7 +1842,10 @@ class TestScoreOneAllocatorOrphanRollback:
                     data=[{"id": "batch-cleanup-fail"}]
                 )
                 # Delete raises — the inner except must catch and log.
-                t.delete.return_value.eq.return_value.execute.side_effect = (
+                # H-PR5-05 (audit-2026-05-07): rollback DELETE now chains a
+                # second .eq("allocator_id", allocator_id) for defense-in-
+                # depth — extend the mock chain one more .eq link.
+                t.delete.return_value.eq.return_value.eq.return_value.execute.side_effect = (
                     RuntimeError("delete forbidden by RLS")
                 )
             elif name == "match_candidates":
@@ -1945,7 +1976,7 @@ class TestScoreOneAllocatorDemoFilter:
                 t.insert.return_value.execute.return_value = MagicMock(
                     data=[{"id": "batch-1"}]
                 )
-                t.delete.return_value.eq.return_value.execute.return_value = (
+                t.delete.return_value.eq.return_value.eq.return_value.execute.return_value = (
                     MagicMock(data=[])
                 )
             return t
@@ -2020,7 +2051,7 @@ class TestScoreOneAllocatorDemoFilter:
                 t.insert.return_value.execute.return_value = MagicMock(
                     data=[{"id": "batch-1"}]
                 )
-                t.delete.return_value.eq.return_value.execute.return_value = (
+                t.delete.return_value.eq.return_value.eq.return_value.execute.return_value = (
                     MagicMock(data=[])
                 )
             return t
@@ -2831,7 +2862,9 @@ class TestOrphanRollbackDeleteNoOpLogged:
                     data=[{"id": "batch-noop-del"}]
                 )
                 # DELETE succeeds (200) but returns data=[] — simulating RLS no-op
-                t.delete.return_value.eq.return_value.execute.return_value = (
+                # H-PR5-05: rollback DELETE now chains a second
+                # .eq("allocator_id", allocator_id) — extend the mock chain.
+                t.delete.return_value.eq.return_value.eq.return_value.execute.return_value = (
                     MagicMock(data=[])
                 )
             elif name == "match_candidates":

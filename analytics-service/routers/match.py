@@ -1134,10 +1134,21 @@ async def _score_one_allocator(
                         # successful cleanup. Pre-fix the result was discarded —
                         # the orphan row could survive and the audit trail would
                         # only show "rolling back" without confirming success.
+                        #
+                        # H-PR5-05 (audit-2026-05-07): pin the rollback DELETE
+                        # to the same allocator_id under which the batch was
+                        # being persisted. Service-role bypasses RLS, so a
+                        # poorly-typed _batch_id (None, future supabase-py
+                        # shape change) could in principle widen the DELETE.
+                        # The extra .eq("allocator_id", allocator_id) makes a
+                        # "delete-everything" regression impossible to escape
+                        # the tenant — defense-in-depth even when the .eq("id")
+                        # filter is the load-bearing one in practice today.
                         _del_result = await asyncio.to_thread(
                             lambda: supabase.table("match_batches")
                             .delete()
                             .eq("id", _batch_id)
+                            .eq("allocator_id", allocator_id)
                             .execute()
                         )
                         if not (_del_result.data):
