@@ -1,5 +1,16 @@
 # Bridge Outcome Cron Runbook
 
+> **STATUS: Partially stale (verified 2026-05-28).** The cron + migration
+> + delta math sections are accurate. The Vercel-Hobby cap rationale at
+> "Schedule → pg_cron only" is **wrong**: the repo runs on **Vercel Pro
+> with a 10-cron ceiling**, not Hobby with 2. The sister runbook
+> `docs/runbooks/vercel-cron-upgrade.md` is fully archived as stale; the
+> cron-sentinel at `src/__tests__/vercel-cron-limits.test.ts` enforces 10
+> (not 2). The pg_cron design choice for this job is still correct (it
+> is DB-side state-machine work, not a Next.js fetch), so the operational
+> guide below is valid — just disregard the Vercel-Hobby framing.
+> PR-3+4 cross-file review F-O-01 (audit-2026-05-07).
+
 Operational guide for the `compute_bridge_outcome_deltas` daily cron job. See the
 implementation plan at `.planning/phases/01-outcome-tracker/01-04-PLAN.md` and the
 migration at `supabase/migrations/20260418074935_bridge_outcome_cron.sql`.

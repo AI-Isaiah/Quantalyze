@@ -13,6 +13,7 @@ function buildResponse(
     status: "ok",
     overlap_days: 200,
     partial_history: false,
+    current_metrics_reliable: true,
     deltas: {
       sharpe_delta: 0.15,
       dd_delta: 0.02,
@@ -264,13 +265,11 @@ describe("<PortfolioImpactPanel>", () => {
             status: "insufficient_data",
             overlap_days: 10,
             partial_history: true,
-            proposed: {
-              sharpe: null,
-              max_drawdown: null,
-              avg_correlation: null,
-              concentration: null,
-            },
-            equity_curve_proposed: [],
+            // PR-3+4 H-1142: the typed discriminated union narrows
+            // proposed/deltas/curves OFF non-ok branches — override-emitting
+            // them here is a TS type error against the narrowed Partial.
+            // The actual wire shape keeps Python's _empty_result nulls; the
+            // schema's non-ok branches stay .passthrough() to accept them.
           }),
         ),
         {
@@ -367,17 +366,15 @@ describe("<PortfolioImpactPanel>", () => {
 
   function nonOkResponse(status: "already_in_portfolio" | "empty_portfolio") {
     // The non-ok branches expose no deltas / proposed metrics / proposed curve.
+    // PR-3+4 H-1142: the typed union narrows those keys OFF the non-ok branch
+    // — explicitly overriding them is a TS type error against the narrowed
+    // Partial. The schema keeps .passthrough() on non-ok so Python's
+    // _empty_result still parses; this fixture stays clean to mirror the
+    // contract the TS reader sees.
     return buildResponse({
       status,
       overlap_days: 0,
       partial_history: false,
-      proposed: {
-        sharpe: null,
-        max_drawdown: null,
-        avg_correlation: null,
-        concentration: null,
-      },
-      equity_curve_proposed: [],
     });
   }
 

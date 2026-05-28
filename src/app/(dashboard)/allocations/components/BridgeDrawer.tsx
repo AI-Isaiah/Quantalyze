@@ -130,13 +130,31 @@ export function BridgeDrawer({
 
   if (!isOpen) return null;
 
+  const candidates = flaggedHoldings.filter(
+    (h) => h.top_candidate_strategy_id,
+  );
+
+  // PR-3+4 NEW-C24-01 (audit-2026-05-07 CRITICAL): derive `selected` from the
+  // FILTERED candidates list, not the unfiltered flaggedHoldings. If
+  // `state.ref` ever points at a holding without a top_candidate_strategy_id
+  // (props changed between open + confirm, or a future caller passes a
+  // non-candidate ref programmatically), `selected` is null and the
+  // confirm panel falls back to a safe no-render via the
+  // `state.stage === "confirm" && selected` guard below. Pre-fix
+  // flaggedHoldings.find would have surfaced an empty strategy id into
+  // handleSendIntro / handleAddToScenario.
   const selected =
     state.stage === "confirm"
-      ? flaggedHoldings.find((h) => buildHoldingRef(h) === state.ref)
+      ? candidates.find((h) => buildHoldingRef(h) === state.ref)
       : null;
 
   async function handleSendIntro() {
     if (state.stage !== "confirm" || !selected) return;
+    // PR-3+4 defense-in-depth: even with the filtered-candidates fix
+    // above, surface a hard guard on the empty-id contract so a future
+    // refactor of `candidates` can't silently regress into POSTing a
+    // blank candidate id.
+    if (!selected.top_candidate_strategy_id) return;
     setState({ ...state, submitting: true, error: null });
     try {
       const result = await sendBridgeIntro({
@@ -176,6 +194,8 @@ export function BridgeDrawer({
    */
   function handleAddToScenario() {
     if (state.stage !== "confirm" || !selected || !onAddToScenario) return;
+    // PR-3+4 defense-in-depth: see handleSendIntro guard above.
+    if (!selected.top_candidate_strategy_id) return;
     // Audit H-0085 / Rule 12 (Fail loud): if the host mutator throws
     // SYNCHRONOUSLY, surface the message into the confirm stage's existing
     // role="alert" and KEEP the drawer open (a bare try/finally that always
@@ -203,10 +223,6 @@ export function BridgeDrawer({
     }
     onClose();
   }
-
-  const candidates = flaggedHoldings.filter(
-    (h) => h.top_candidate_strategy_id,
-  );
 
   return (
     <>
@@ -337,6 +353,30 @@ export function BridgeDrawer({
           </div>
         )}
 
+        {/* PR-3+4 C-RT-02 (red-team 2026-05-28): when `selected` resolves
+            to null mid-confirm (parent re-fetched flaggedHoldings between
+            click and render — e.g. allocator-context refresh removed the
+            candidate), the confirm panel hides INCLUDING the Back button,
+            leaving the user stuck on a "Confirm intro" header with no
+            recovery. Render a fallback panel with an explicit Back action
+            so the user can return to the candidate list. */}
+        {state.stage === "confirm" && !selected && (
+          <div className="mt-4 grid gap-3">
+            <div role="alert" className="text-sm text-text-secondary">
+              The candidate you selected is no longer available — the
+              flagged-holdings list refreshed while you were navigating.
+              Return to candidates to pick again.
+            </div>
+            <button
+              type="button"
+              onClick={() => setState({ stage: "browse" })}
+              className="self-start rounded-md border border-border px-3 py-1.5 text-sm text-text-primary hover:border-accent"
+            >
+              ← Back to candidates
+            </button>
+          </div>
+        )}
+
         {state.stage === "confirm" && selected && (
           <div className="mt-4 grid gap-4">
             {/* From → To row — designer screenshot 13.51.40 */}
@@ -400,14 +440,23 @@ export function BridgeDrawer({
             )}
             <button
               type="button"
+              disabled={state.submitting}
               onClick={() => {
                 // Returning to browse drops the confirm variant entirely, so
                 // any prior Send-intro / Add-to-scenario error is discarded —
                 // a stale alert never re-appears when the allocator re-enters
                 // the confirm stage.
+                //
+                // PR-3+4 silent-failure H5 (audit-2026-05-07): disabled while
+                // submitting so the allocator can't navigate away from an
+                // in-flight Send intro. Without this gate, the eventual
+                // response resolves into a "browse" state and any error
+                // (network failure, server 4xx) vanishes — both from the UI
+                // and from Sentry, since the resolved state never re-enters
+                // confirm to render the alert.
                 setState({ stage: "browse" });
               }}
-              className="self-start text-xs text-text-muted hover:text-text-primary"
+              className="self-start text-xs text-text-muted hover:text-text-primary disabled:opacity-50"
             >
               ← Back to candidates
             </button>

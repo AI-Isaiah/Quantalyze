@@ -78,7 +78,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         error:
-          "portfolio_id and candidate_strategy_id are required non-empty strings",
+          "portfolio_id and candidate_strategy_id are required and must be valid UUIDs",
       },
       { status: 400 },
     );

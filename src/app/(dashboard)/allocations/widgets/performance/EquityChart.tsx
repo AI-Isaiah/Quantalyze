@@ -8,6 +8,51 @@ import { useTweakValue } from "../../context/TweaksContext";
 import { WidgetState } from "../../components/WidgetState";
 import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 import { formatRelativeTime } from "@/lib/utils";
+import { captureToSentry } from "@/lib/sentry-capture";
+
+// PR-3+4 silent-failure H1 (audit-2026-05-07): the chart's defensive
+// guards previously degraded via `console.warn` only — invisible in
+// production. Sites that signal upstream data corruption (non-monotonic
+// producer, degenerate base, y-tick walker exhaustion, >50-tick flood,
+// CUSTOM-range malformed bounds) must reach Sentry so the team learns
+// about a broken data pipeline that still renders a chart. Module-scoped
+// dedup Set collapses repeat events from the same site to one per session;
+// without the cap a long hover/Tweaks session would saturate the Sentry
+// tier.
+const sentryEmittedSites = new Set<string>();
+
+// PR-3+4 performance H1 helper: shared by the x-tick month-midEpoch
+// resolver and handleMove. Both pre-fix had character-identical binary-
+// search loops; collapse into one — JIT inlines, no perf hit. The
+// epochs array is assumed sorted ascending (invariant maintained by
+// sortedEquityPoints + sliceByPeriod's filter-only semantics).
+function nearestIndex(epochs: number[], target: number): number {
+  let lo = 0;
+  let hi = epochs.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (epochs[mid] < target) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo > 0 && Math.abs(epochs[lo - 1] - target) < Math.abs(epochs[lo] - target)) {
+    return lo - 1;
+  }
+  return lo;
+}
+
+function captureChartIssue(
+  site: string,
+  message: string,
+  extra?: Record<string, unknown>,
+): void {
+  if (sentryEmittedSites.has(site)) return;
+  sentryEmittedSites.add(site);
+  captureToSentry(new Error(`[EquityChart] ${site}: ${message}`), {
+    tags: { widget: "EquityChart", site },
+    extra,
+    level: "warning",
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / D-10 — SVG EquityChart
@@ -315,12 +360,25 @@ function sliceByPeriod(
       // here we just fall back to ALL-period semantics to keep the
       // chart visible.
       if (!Number.isFinite(startEpoch) || !Number.isFinite(endEpoch)) {
+        // PR-3+4 silent-failure H4 (audit-2026-05-07): the allocator sees
+        // a CUSTOM pill highlighted while the chart shows ALL-period data
+        // — actively misleading about what range is displayed. Reach
+        // Sentry so the team sees the case. A full setPeriod("ALL") fix
+        // requires lifting the period state to the parent (currently this
+        // component is uncontrolled when period is omitted), so the
+        // captureChartIssue is the surgical fix; behavior remains the
+        // existing fall-back-to-ALL but is now observable.
         if (typeof console !== "undefined") {
           console.warn(
             "[EquityChart] sliceByPeriod — malformed custom range bounds; falling back to ALL period",
             { start: customRange.start, end: customRange.end },
           );
         }
+        captureChartIssue(
+          "custom_range_malformed",
+          "CUSTOM range bounds did not parse",
+          { start: customRange.start, end: customRange.end },
+        );
         return points;
       }
       break;
@@ -498,6 +556,11 @@ export function EquityChart({
       }
     }
     if (monotonic) return equityDailyPoints;
+    // PR-3+4 silent-failure H1 (audit-2026-05-07): this is the ONLY
+    // signal of a buggy data pipeline that still renders successfully.
+    // The defensive sort hides the producer bug from the user (good),
+    // but the team learns nothing in prod. Add Sentry alongside the
+    // warn so the data-quality team sees the upstream drift.
     if (typeof console !== "undefined") {
       console.warn(
         "[EquityChart] equityDailyPoints is not monotonically ascending — sorting defensively. " +
@@ -505,6 +568,11 @@ export function EquityChart({
         { firstDate: equityDailyPoints[0].date, lastDate: equityDailyPoints[equityDailyPoints.length - 1].date },
       );
     }
+    captureChartIssue("non_monotonic_producer", "equityDailyPoints not sorted", {
+      firstDate: equityDailyPoints[0].date,
+      lastDate: equityDailyPoints[equityDailyPoints.length - 1].date,
+      length: equityDailyPoints.length,
+    });
     return [...equityDailyPoints].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   }, [equityDailyPoints]);
 
@@ -643,6 +711,18 @@ export function EquityChart({
     // data; the happy path is unchanged.
     const rawBasePort = visible[0]?.value ?? 1;
     if (!Number.isFinite(rawBasePort) || rawBasePort <= 0) {
+      // PR-3+4 silent-failure H1+H2 (audit-2026-05-07): the degenerate
+      // base path renders the same "Equity data warming up" copy as the
+      // legitimately-empty case (equityDailyPoints.length === 0). Reach
+      // Sentry so the upstream producer bug — a zero-equity row that
+      // slipped past the f7 anchor — surfaces in prod. The H2 distinct-
+      // copy fix is keyed on equityDailyPoints.length > 0 + null
+      // projection in the render branch below.
+      captureChartIssue(
+        "degenerate_base",
+        "first visible point not finite or non-positive",
+        { firstPoint: visible[0], period },
+      );
       return null;
     }
     const basePort = rawBasePort;
@@ -781,12 +861,22 @@ export function EquityChart({
         } else break;
       }
       if (!satisfied) {
+        // PR-3+4 silent-failure H1 (audit-2026-05-07): the walker
+        // exhausting candidates without clearing MIN_TICKS is a
+        // schema/data-drift signal — a normal portfolio yields several
+        // candidates that satisfy the floor. Reach Sentry so the team
+        // sees the case in prod.
         if (typeof console !== "undefined") {
           console.warn(
             "[EquityChart] y-tick walker found no candidate meeting MIN_TICKS — falling back to 3-tick render",
             { yMin, yMax, MIN_TICKS },
           );
         }
+        captureChartIssue(
+          "ytick_min_ticks_unmet",
+          "y-tick walker fell back to 3-tick render",
+          { yMin, yMax, MIN_TICKS },
+        );
         // Fixed 3-tick render: yMin / 1.0 / yMax keeps the baseline tick
         // and bounds visible without flooding the DOM. Dedup via Set in
         // case yMin / yMax round-trip to exactly 1.0 (truly-flat series
@@ -823,6 +913,14 @@ export function EquityChart({
             { tickCount: ticks.size, yMin, yMax, stepPct },
           );
         }
+        // PR-3+4 silent-failure H1 (audit-2026-05-07): >50 ticks for a
+        // narrow range indicates a truly-flat series — usually upstream
+        // data corruption (zero variance, repeated rows). Reach Sentry.
+        captureChartIssue(
+          "ytick_overflow",
+          "y-tick walker emitted >50 ticks for narrow range",
+          { tickCount: ticks.size, yMin, yMax, stepPct },
+        );
         return Array.from(
           new Set([yMin, 1, yMax].filter((v) => Number.isFinite(v))),
         ).sort((a, b) => a - b);
@@ -844,12 +942,25 @@ export function EquityChart({
     // the same output as the index scale. When there are gaps it renders
     // correct proportional spacing. Falls back to centre when n ≤ 1 or
     // totalMs === 0 (single-point degenerate window).
-    const firstEpochX = n > 0 ? parseISO(visible[0].date) : 0;
-    const totalMs = n > 0 ? parseISO(visible[n - 1].date) - firstEpochX : 0;
+    //
+    // PR-3+4 performance H1 (audit-2026-05-07): cache visible[].date →
+    // epoch in ONE pass at the top of the memo. Pre-fix every x() call,
+    // x-tick loop iteration, and the entire handleMove scan invoked
+    // parseISO independently. For an ALL window with n daily points,
+    // handleMove was O(n) parseISO per mousemove pixel and the month-
+    // tick builder was O(n × ~36) parseISO per render. Now: one O(n)
+    // precompute, O(1) lookup in x(), and binary search in handleMove
+    // — drops both hot paths from O(n) to O(log n). visibleEpochs is
+    // also exposed in the projection return for handleMove below.
+    const visibleEpochs: number[] = new Array(n);
+    for (let i = 0; i < n; i++) {
+      visibleEpochs[i] = parseISO(visible[i].date);
+    }
+    const firstEpochX = n > 0 ? visibleEpochs[0] : 0;
+    const totalMs = n > 0 ? visibleEpochs[n - 1] - firstEpochX : 0;
     const x = (i: number): number => {
       if (n <= 1 || totalMs === 0) return pad.l + chartW / 2;
-      const e = parseISO(visible[i].date);
-      return pad.l + ((e - firstEpochX) / totalMs) * chartW;
+      return pad.l + ((visibleEpochs[i] - firstEpochX) / totalMs) * chartW;
     };
     const y = (v: number) => pad.t + (1 - (v - yMin) / yRange) * chartH;
 
@@ -884,8 +995,13 @@ export function EquityChart({
     type Tick = { i: number; label: string };
     const ticks: Tick[] = [];
     if (n > 90) {
-      const firstEpoch = parseISO(visible[0].date);
-      const lastEpoch = parseISO(visible[n - 1].date);
+      // PR-3+4 performance H1: reuse the precomputed visibleEpochs cache
+      // and binary-search via nearestIndex per month-tick midEpoch.
+      // Pre-fix this loop did n parseISO calls per month tick (up to 60
+      // ticks, guarded). Now: nearestIndex is O(log n) on a single shared
+      // epoch array.
+      const firstEpoch = visibleEpochs[0];
+      const lastEpoch = visibleEpochs[n - 1];
       const cursor = new Date(firstEpoch);
       cursor.setUTCDate(1);
       let guard = 0;
@@ -905,20 +1021,8 @@ export function EquityChart({
         const visDays = (visEnd - visStart) / DAY_MS;
         if (visDays >= 7) {
           const midEpoch = (visStart + visEnd) / 2;
-          // Map epoch → index by linear search (n is small in practice; this
-          // is O(n*ticks) per render which is < 5k ops at ALL).
-          let bestIdx = 0;
-          let bestDelta = Infinity;
-          for (let i = 0; i < n; i++) {
-            const e = parseISO(visible[i].date);
-            const dlt = Math.abs(e - midEpoch);
-            if (dlt < bestDelta) {
-              bestDelta = dlt;
-              bestIdx = i;
-            }
-          }
           ticks.push({
-            i: bestIdx,
+            i: nearestIndex(visibleEpochs, midEpoch),
             label: new Date(monthStart).toLocaleDateString("en-US", {
               month: "short",
               timeZone: "UTC",
@@ -931,7 +1035,7 @@ export function EquityChart({
       const target = 7;
       const step = Math.max(1, Math.round(n / target));
       for (let i = n - 1; i >= 0; i -= step) {
-        const d = new Date(parseISO(visible[i].date));
+        const d = new Date(visibleEpochs[i]);
         ticks.push({
           i,
           label: d.toLocaleDateString("en-US", {
@@ -948,6 +1052,9 @@ export function EquityChart({
       pad,
       height,
       chartW,
+      // PR-3+4 performance H1: exposed so handleMove can binary-search
+      // without redoing the O(n) parseISO scan.
+      visibleEpochs,
       chartH,
       n,
       visibleNormalized,
@@ -1018,6 +1125,7 @@ export function EquityChart({
     firstEpochX,
     totalMs,
     benchmarkBaselineDiffers,
+    visibleEpochs,
   } = projection;
 
   // ── Hover ─────────────────────────────────────────────────────────
@@ -1034,15 +1142,14 @@ export function EquityChart({
     const clampedPx = Math.max(pad.l, Math.min(pad.l + chartW, px));
     // Map pixel → target epoch
     const targetEpoch = firstEpochX + ((clampedPx - pad.l) / chartW) * totalMs;
-    // Find the nearest index by absolute epoch distance
-    let bestIdx = 0;
-    let bestDelta = Infinity;
-    for (let j = 0; j < n; j++) {
-      const e2 = parseISO(visible[j].date);
-      const d = Math.abs(e2 - targetEpoch);
-      if (d < bestDelta) { bestDelta = d; bestIdx = j; }
-    }
-    setHoverIdx(bestIdx);
+    // PR-3+4 performance H1 (audit-2026-05-07): binary-search the
+    // precomputed visibleEpochs array (sorted ascending by construction
+    // — composite is f7-anchored on a monotonic equityDailyPoints, and
+    // sliceByPeriod only filters). Pre-fix this loop did n parseISO
+    // calls per mousemove pixel; now O(log n) via nearestIndex against
+    // a cached epoch array. Hover-drag is no longer linear in window
+    // length.
+    setHoverIdx(nearestIndex(visibleEpochs, targetEpoch));
   }
 
   // ── Period toggle + range picker handlers ────────────────────────
@@ -1592,7 +1699,14 @@ export function EquityChart({
               )}
               {overlaySeries.map((o) => {
                 const ov = o.series[i];
-                if (ov == null) return null;
+                // PR-3+4 NEW-C04-01 overlay-row residual (audit-2026-05-07):
+                // pre-fix only `ov == null` was guarded — a non-finite ov
+                // (NaN/Inf surviving the overlay normalization round-trip
+                // when baseValue was near zero) rendered as
+                // `(NaN - 1) * 100 = NaN%` in the tooltip. Match the
+                // portfolio/benchmark path's `Number.isFinite` gate so
+                // the tooltip stays honest under producer drift.
+                if (ov == null || !Number.isFinite(ov)) return null;
                 const ovPct = (ov - 1) * 100;
                 return (
                   <TooltipRow
