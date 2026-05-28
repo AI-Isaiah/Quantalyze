@@ -37,6 +37,12 @@ from services.portfolio_risk import (
     compute_rolling_correlation,
 )
 from services.transforms import trades_to_daily_returns
+# NEW-C19-07: OWN-membership cap lives in a shared module so every OWN-portfolio
+# O(N^2) path imports the same guard (no router-to-router import / cycle).
+from services.portfolio_limits import (
+    MAX_PORTFOLIO_STRATEGIES as _MAX_PORTFOLIO_STRATEGIES,
+    assert_portfolio_within_cap as _assert_portfolio_within_cap,
+)
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -662,6 +668,18 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         if not portfolio_strategies:
             _fail("No strategies found in portfolio.")
             raise HTTPException(status_code=400, detail="No strategies found in portfolio")
+
+        # NEW-C19-07: reject oversized portfolios BEFORE the O(N^2) cov/
+        # correlation work + N×N JSONB persist below. _fail records the
+        # refusal on the analytics row (mirrors the empty-check above) so the
+        # status is observable, then 413 short-circuits the compute.
+        if len(portfolio_strategies) > _MAX_PORTFOLIO_STRATEGIES:
+            _msg = (
+                f"Portfolio has {len(portfolio_strategies)} strategies; the "
+                f"maximum supported for analytics is {_MAX_PORTFOLIO_STRATEGIES}."
+            )
+            _fail(_msg)
+            raise HTTPException(status_code=413, detail=_msg)
 
         strategy_ids = [row["strategy_id"] for row in portfolio_strategies]
 
@@ -1588,6 +1606,10 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     if not portfolio_strategies:
         raise HTTPException(status_code=400, detail="No strategies found in portfolio")
 
+    # NEW-C19-07: cap OWN membership before the optimizer builds an O(N) returns
+    # map + cov work (the published candidate pool is bounded, OWN N was not).
+    _assert_portfolio_within_cap(portfolio_strategies)
+
     strategy_ids = [row["strategy_id"] for row in portfolio_strategies]
 
     weights = _build_normalized_weights(portfolio_strategies)
@@ -1865,6 +1887,8 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     ).eq("portfolio_id", req.portfolio_id).execute()
 
     portfolio_strategies = ps_result.data or []
+    # NEW-C19-07: cap OWN membership before the bridge builds its returns map.
+    _assert_portfolio_within_cap(portfolio_strategies)
     strategy_ids = [row["strategy_id"] for row in portfolio_strategies]
 
     if req.underperformer_strategy_id not in strategy_ids:
