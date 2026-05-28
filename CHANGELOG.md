@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.24.15.7] - 2026-05-29
+### Fixed — cap OWN-portfolio strategy count to prevent O(N²) compute DoS (audit-2026-05-26 NEW-C19-07)
+
+Portfolio analytics builds an N×N covariance/correlation matrix from the allocator's own portfolio membership, persists it to JSONB, and runs the matmul inside a 3-permit compute semaphore. The candidate pool (30) and published pool (200) were bounded, but the allocator's OWN membership count was not — and strategies are added with no count guard, so a portfolio stuffed with thousands of rows could pin the analytics worker's memory/CPU (a denial-of-service surface). A new shared guard rejects an oversized portfolio with HTTP 413 at the boundary, before any matrix work or compute permit, across every own-membership path: analytics, optimizer, bridge, and the impact simulator. The cap (100) is ~16× the largest real portfolio, so no existing portfolio is affected.
+
 ## [0.24.15.6] - 2026-05-29
 ### Fixed — portfolio-impact projection truthfulness (audit-2026-05-26 NEW-C11-02, NEW-C11-04, NEW-C24-02)
 
