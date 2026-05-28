@@ -88,8 +88,11 @@ def test_grants_execute_to_service_role() -> None:
 
 def test_function_declared_security_definer() -> None:
     src = _read_source()
+    # Capture the full preamble through AS $$ — non-greedy match terminating
+    # at LANGUAGE would stop BEFORE SECURITY DEFINER (declared on the next
+    # line).
     block = re.search(
-        r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+upsert_strategy_analytics_series_batch[\s\S]*?LANGUAGE",
+        r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+upsert_strategy_analytics_series_batch[\s\S]*?AS\s+\$\$",
         src,
         re.IGNORECASE,
     )
@@ -142,8 +145,9 @@ def test_anon_client_cannot_call_upsert_strategy_analytics_series_batch() -> Non
             "upsert_strategy_analytics_series_batch",
             {
                 "p_strategy_id": fake_strategy_id,
-                "p_kinds": ["test"],
-                "p_series_by_kind": {},
+                # Actual signature is (uuid, jsonb) where p_kinds is a JSONB
+                # object {kind: payload, ...}.
+                "p_kinds": {"test": {}},
             },
         ).execute()
     except Exception as exc:

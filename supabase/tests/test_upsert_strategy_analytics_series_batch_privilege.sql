@@ -30,7 +30,7 @@ SELECT set_config(
 -- Test 1: SECURITY DEFINER posture
 --
 -- PR-2 reviewer #2 (2026-05-28): overload-drift defense — assert EXACTLY ONE
--- function matches the canonical (uuid, text[], jsonb) signature. A future
+-- function matches the canonical (uuid, jsonb) signature. A future
 -- migration that adds a sibling overload would silently land a second pg_proc
 -- row; without the count guard, Tests 2/3 would target the original signature
 -- while production code might hit the new overload bypassing the privilege
@@ -48,15 +48,15 @@ BEGIN
     JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public'
      AND p.proname = 'upsert_strategy_analytics_series_batch'
-     AND pg_get_function_identity_arguments(p.oid) = 'uuid, text[], jsonb';
+     AND pg_get_function_identity_arguments(p.oid) = 'uuid, jsonb';
 
   IF match_count = 0 THEN
     RAISE EXCEPTION
-      'H-0762 Test 1: upsert_strategy_analytics_series_batch(uuid, text[], jsonb) does not exist (overload drift?)';
+      'H-0762 Test 1: upsert_strategy_analytics_series_batch(uuid, jsonb) does not exist (overload drift?)';
   END IF;
   IF match_count > 1 THEN
     RAISE EXCEPTION
-      'H-0762 Test 1: upsert_strategy_analytics_series_batch(uuid, text[], jsonb) matched % rows — schema corruption',
+      'H-0762 Test 1: upsert_strategy_analytics_series_batch(uuid, jsonb) matched % rows — schema corruption',
       match_count;
   END IF;
   IF is_secdef IS NOT TRUE THEN
@@ -75,7 +75,7 @@ DECLARE
 BEGIN
   SELECT has_function_privilege(
     'service_role',
-    'public.upsert_strategy_analytics_series_batch(uuid, text[], jsonb)',
+    'public.upsert_strategy_analytics_series_batch(uuid, jsonb)',
     'EXECUTE'
   ) INTO service_can_execute;
 
@@ -104,12 +104,12 @@ DECLARE
 BEGIN
   SELECT has_function_privilege(
     'anon',
-    'public.upsert_strategy_analytics_series_batch(uuid, text[], jsonb)',
+    'public.upsert_strategy_analytics_series_batch(uuid, jsonb)',
     'EXECUTE'
   ) INTO anon_can_execute;
   SELECT has_function_privilege(
     'authenticated',
-    'public.upsert_strategy_analytics_series_batch(uuid, text[], jsonb)',
+    'public.upsert_strategy_analytics_series_batch(uuid, jsonb)',
     'EXECUTE'
   ) INTO auth_can_execute;
   -- Scan proacl for a PUBLIC GRANT. PUBLIC is rendered as `=X/<owner>` (empty
@@ -122,7 +122,7 @@ BEGIN
            unnest(p.proacl) AS acl_entry
      WHERE n.nspname = 'public'
        AND p.proname = 'upsert_strategy_analytics_series_batch'
-       AND pg_get_function_identity_arguments(p.oid) = 'uuid, text[], jsonb'
+       AND pg_get_function_identity_arguments(p.oid) = 'uuid, jsonb'
        AND acl_entry::text LIKE '=X/%'
   ) INTO proacl_has_public;
 
@@ -160,7 +160,7 @@ BEGIN
     JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public'
      AND p.proname = 'upsert_strategy_analytics_series_batch'
-     AND pg_get_function_identity_arguments(p.oid) = 'uuid, text[], jsonb';
+     AND pg_get_function_identity_arguments(p.oid) = 'uuid, jsonb';
 
   IF fn_config IS NULL THEN
     RAISE EXCEPTION
