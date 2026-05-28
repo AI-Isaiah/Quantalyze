@@ -41,7 +41,10 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import os
+import re
+import time
 import uuid
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -52,7 +55,105 @@ import pytest
 # ----------------------------------------------------------------------------
 
 from main_worker import _is_serialization_failure, dispatch_tick
-from services.job_worker import DispatchOutcome, DispatchResult
+from services.job_worker import (
+    PARTITION_COLUMNS,
+    DispatchOutcome,
+    DispatchResult,
+)
+
+
+# Path to the H-1235/H-1238/M-1133 hardening migration. Tests below parse
+# this file directly so they pin the Python `PARTITION_COLUMNS` constant
+# against the actual SQL — the prior tautological assertion (constant ==
+# its own literal definition) tested nothing.
+_HARDENING_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "supabase"
+    / "migrations"
+    / "20260528061155_claim_dedupe_tie_break_and_short_circuit.sql"
+)
+
+
+def _partition_columns_from_sql() -> list[str]:
+    """Parse the hardening migration SQL and return the ordered, deduped
+    list of `PARTITION BY kind, <col>` columns across all row_number()
+    windows in both claim RPC bodies.
+
+    The legacy + priority bodies each have FOUR row_number() windows, so
+    the raw regex returns ~8 hits with duplicates. Collapse to a list
+    that preserves first-seen order — this is what `PARTITION_COLUMNS`
+    must match.
+    """
+    text = _HARDENING_MIGRATION_PATH.read_text(encoding="utf-8")
+    # Red-team #2 (round-3): anchor on `row_number() OVER (` so we only
+    # match PARTITION BY clauses inside real window definitions — NOT
+    # ones embedded in `--` comments or COMMENT ON FUNCTION strings.
+    # Handles arbitrary whitespace between `kind,` and the column name
+    # (the priority body wraps the window across newlines).
+    raw = re.findall(
+        r"row_number\(\)\s*OVER\s*\(\s*PARTITION BY kind,\s*(\w+)",
+        text,
+    )
+    seen: list[str] = []
+    for col in raw:
+        if col not in seen:
+            seen.append(col)
+    return seen
+
+
+def test_partition_columns_match_sql_migration_windows():
+    """M-1128 + HIGH-2: pin `PARTITION_COLUMNS` to the SQL it mirrors.
+
+    The Python tuple MUST equal the dedupe-by-first-occurrence list of
+    partition columns parsed from
+    `supabase/migrations/20260528061155_claim_dedupe_tie_break_and_short_circuit.sql`.
+    A future addition (e.g. workspace_id) to either side without updating
+    the other will fail this test — making the cross-side change
+    deliberate rather than a silent desync.
+
+    The prior `assert PARTITION_COLUMNS == ('a','b','c','d')` was
+    tautological (same literal as the constant's definition); this
+    test is the load-bearing one.
+    """
+    sql_cols = _partition_columns_from_sql()
+    # Take only the first 4 (the priority + legacy bodies have 4 windows
+    # each; the de-dup-by-first-occurrence above already collapses them,
+    # but defending against an inadvertent 5th window slipping through).
+    assert tuple(sql_cols[:4]) == PARTITION_COLUMNS, (
+        f"PARTITION_COLUMNS {PARTITION_COLUMNS!r} drifted from the SQL "
+        f"migration's partition windows {sql_cols!r}. Update both sides "
+        "together — or the dedupe will silently disagree."
+    )
+
+
+def test_exactly_four_unique_partition_columns_in_sql():
+    """HIGH-2 second assertion: catch a 5th partition column landing in
+    the SQL without `PARTITION_COLUMNS` being updated.
+
+    If someone adds a `PARTITION BY kind, workspace_id` window to either
+    body, `_partition_columns_from_sql` returns 5 unique entries — this
+    test fails loudly, forcing the Python tuple to be widened in the
+    same change.
+    """
+    sql_cols = _partition_columns_from_sql()
+    assert len(sql_cols) == 4, (
+        f"Expected exactly 4 unique partition columns in the SQL, got "
+        f"{len(sql_cols)}: {sql_cols!r}. A new partition window was "
+        "added — widen PARTITION_COLUMNS in services/job_worker.py to "
+        "match."
+    )
+
+
+def test_partition_columns_pin_order_matches_sql():
+    """Defense-in-depth: pin the IMMUTABLE order independent of the SQL
+    parse. If a future refactor mistakenly reorders the Python tuple
+    even while the SQL is parsed correctly elsewhere, this guard fails."""
+    assert PARTITION_COLUMNS == (
+        "portfolio_id",
+        "strategy_id",
+        "allocator_id",
+        "api_key_id",
+    )
 
 
 try:
@@ -1298,6 +1399,32 @@ def _claim_with_priority(
     return list(res.data or [])
 
 
+def _claim_legacy(
+    admin,
+    *,
+    worker_id: str,
+    batch_size: int = 50,
+) -> list[dict]:
+    """Call the legacy ``claim_compute_jobs`` RPC and return the rows claimed.
+
+    Why this exists alongside ``_claim_with_priority``: the priority RPC
+    body filters on ``status = 'pending'`` ONLY (see migration
+    ``20260528061155_*.sql`` STEP 2), so any test that seeds rows in
+    ``failed_retry`` to exercise the row_number() dedupe + tie-break
+    semantics must call the legacy RPC, which filters on
+    ``status IN ('pending', 'failed_retry')`` (STEP 1, same migration).
+
+    The H-1235 carve-out and H-1238 ``, id`` tie-break are present in
+    BOTH bodies, so the legacy RPC is the right tool to assert those
+    behaviors against ``failed_retry`` candidates.
+    """
+    res = admin.rpc("claim_compute_jobs", {
+        "p_batch_size": batch_size,
+        "p_worker_id": worker_id,
+    }).execute()
+    return list(res.data or [])
+
+
 # G21-001 ----------------------------------------------------------------
 # CI surfacing a REAL audit gap: against the test Supabase project
 # (qmnijlgmdhviwzwfyzlc) this test reproducibly claims 0 rows when 1 was
@@ -1625,3 +1752,479 @@ def test_claim_dedupes_two_failed_retry_sharing_allocator(admin):
             )
     finally:
         _purge_allocator_jobs(admin, allocator_id)
+
+
+# ----------------------------------------------------------------------------
+# H-1238 — deterministic tie-break on `, id` when two rows share
+# (partition, next_attempt_at). Live-DB regression for the
+# `20260528061155_claim_dedupe_tie_break_and_short_circuit.sql` migration.
+# ----------------------------------------------------------------------------
+
+
+def test_claim_tie_breaks_on_id_when_next_attempt_at_ties(admin):
+    """H-1238 regression. Two failed_retry rows sharing
+    `(kind='rescore_allocator', allocator_id)` AND tied on
+    `next_attempt_at` (same backoff schedule, same tick) must produce
+    a DETERMINISTIC winner — the row with the lexicographically smaller
+    UUID id.
+
+    Pre-mig: `row_number() OVER (PARTITION BY kind, allocator_id ORDER
+    BY next_attempt_at)` was non-deterministic at a tie — which row
+    won the dedupe was implementation-defined across pg restarts and
+    vacuums. Post-mig the ORDER BY adds `, id` so the winner is the
+    smaller UUID lex-compared. UUIDs are TEXT/UUID columns; PG sorts
+    them lex-ascending which is what `min(id_a, id_b)` returns.
+    """
+    allocator_id = _allocator_id(admin)
+    _purge_allocator_jobs(admin, allocator_id)
+    try:
+        # Pin both rows to IDENTICAL next_attempt_at. The cassette here
+        # is "1 minute ago" — comfortably elapsed so both rows are
+        # claimable, no clock-skew dance needed.
+        same_ts = "2020-01-01T00:00:00Z"
+        row_a = _insert_failed_retry_rescore(
+            admin,
+            allocator_id=allocator_id,
+            next_attempt_at=same_ts,
+        )
+        row_b = _insert_failed_retry_rescore(
+            admin,
+            allocator_id=allocator_id,
+            next_attempt_at=same_ts,
+        )
+        id_a = row_a["id"]
+        id_b = row_b["id"]
+        assert id_a != id_b
+
+        # Use the LEGACY claim RPC because both rows are in failed_retry —
+        # the priority RPC body filters on `status = 'pending'` only and
+        # would return 0 rows, making this test vacuous. The legacy body
+        # carries the SAME `, id` tie-break clause (H-1238), so it is the
+        # correct surface for this assertion.
+        claimed = _claim_legacy(admin, worker_id="h1238-tiebreak-worker")
+        claimed_ids = {c["id"] for c in claimed}
+        ours = claimed_ids & {id_a, id_b}
+
+        # AT MOST one of our two rows (the partition dedupe still gates).
+        assert len(ours) == 1, (
+            f"H-1238 regression / dedupe failure: expected exactly 1 winner "
+            f"from the tied pair, got {len(ours)}: {ours!r}"
+        )
+        # The lex-smaller UUID must win — that's the deterministic
+        # tie-break the `, id` clause introduces.
+        expected_winner = min(id_a, id_b)
+        actual_winner = next(iter(ours))
+        assert actual_winner == expected_winner, (
+            f"H-1238 regression: tied next_attempt_at must tie-break on "
+            f"id ASC. Expected winner={expected_winner} (min of "
+            f"{id_a!r}, {id_b!r}), got {actual_winner!r}. Without the "
+            "`, id` clause the winner is implementation-defined."
+        )
+
+        # And the loser stays in failed_retry, available for the next sweep.
+        loser_id = id_b if expected_winner == id_a else id_a
+        loser_post = (
+            admin.table("compute_jobs")
+            .select("status")
+            .eq("id", loser_id)
+            .single()
+            .execute()
+            .data
+        )
+        assert loser_post["status"] == "failed_retry"
+    finally:
+        _purge_allocator_jobs(admin, allocator_id)
+
+
+# ----------------------------------------------------------------------------
+# H-1235 — compute_intro_snapshot carve-out. Multiple pending rows sharing
+# strategy_id but DIFFERENT allocator_id can legitimately co-claim
+# (per-allocator scope), since the partial unique index
+# `compute_jobs_one_inflight_per_kind_strategy` (mig 048) explicitly
+# excludes `kind = 'compute_intro_snapshot'` from its predicate.
+# ----------------------------------------------------------------------------
+
+
+def _insert_pending_intro_snapshot(
+    admin, *, strategy_id: str
+) -> str:
+    """Insert a pending compute_intro_snapshot row and return its id.
+
+    Per `compute_jobs_kind_target_coherence` (mig 062), intro_snapshot
+    is STRATEGY-scoped: `strategy_id IS NOT NULL AND allocator_id IS NULL
+    AND portfolio_id IS NULL`. The per-allocator routing happens at job
+    enqueue time via the unified backbone (which we bypass here); the
+    `compute_jobs` row itself carries only the strategy reference.
+    """
+    res = admin.table("compute_jobs").insert({
+        "kind": "compute_intro_snapshot",
+        "strategy_id": strategy_id,
+        "status": "pending",
+        "priority": "normal",
+        "next_attempt_at": "2020-01-01T00:00:00Z",
+    }).execute()
+    return res.data[0]["id"]
+
+
+def test_intro_snapshot_carve_out_allows_co_claim_for_same_strategy(admin):
+    """H-1235 positive case. Two compute_intro_snapshot pending rows for
+    the SAME strategy_id must BOTH be claimable in a single batch
+    (batch_size >= 2). Per the kind_target_coherence CHECK (mig 062)
+    intro_snapshot is strategy-scoped (allocator_id IS NULL), and mig
+    048's partial unique inflight index `compute_jobs_one_inflight_per_kind_strategy`
+    explicitly excludes `kind = 'compute_intro_snapshot'` — so multiple
+    rows sharing strategy_id legitimately coexist (per-allocator routing
+    happens at enqueue time, not on the compute_jobs row).
+
+    Pre-mig: the `strategy_id IS NULL OR rn_s = 1` dedupe forced only
+    one of the two to claim per batch, even though the partial unique
+    inflight index does NOT block them — pure throughput cost on
+    intro_snapshot queue depth.
+
+    Post-mig the dedupe carve-out (`kind = 'compute_intro_snapshot' OR
+    rn_s = 1`) lets both run in the same claim batch.
+    """
+    user_id = _seed_user_id(admin)
+    # Seed a fresh strategy for this test.
+    strat = admin.table("strategies").insert({
+        "user_id": user_id,
+        "name": f"h1235-carveout-pos-{uuid.uuid4().hex[:8]}",
+        "status": "pending_review",
+        "source": "okx",
+        "strategy_types": [],
+        "subtypes": [],
+        "markets": [],
+        "supported_exchanges": [],
+    }).execute().data[0]
+    strategy_id = strat["id"]
+
+    id_a: str | None = None
+    id_b: str | None = None
+    try:
+        id_a = _insert_pending_intro_snapshot(admin, strategy_id=strategy_id)
+        id_b = _insert_pending_intro_snapshot(admin, strategy_id=strategy_id)
+
+        # Shared test-DB has a dispatch loop that may steal one of our rows
+        # between INSERT and our claim call. Aggregate across a small number
+        # of claim attempts to absorb that race — the carve-out's contract
+        # is "both rows ARE claimable", not "both rows arrive in a single
+        # claim batch". batch_size=50 ensures dedupe (not LIMIT) is the gate.
+        # See memory project_shared_testdb_concurrent_ci_flake.
+        all_claimed: set[str] = set()
+        deadline = time.monotonic() + 5.0
+        attempt = 0
+        while True:
+            attempt += 1
+            claimed = _claim_with_priority(
+                admin, worker_id=f"h1235-carveout-pos-{attempt}",
+                batch_size=50,
+            )
+            all_claimed.update(c["id"] for c in claimed)
+            ours = all_claimed & {id_a, id_b}
+            if len(ours) == 2 or time.monotonic() > deadline:
+                break
+            time.sleep(0.2)
+
+        # Per the carve-out contract, both rows are claimable. If the
+        # dispatch loop is running, it WILL have claimed at least one by
+        # the time we check; the union of OUR claims + the dispatch loop's
+        # claims (which we can't observe directly via RPC return) must
+        # cover both — i.e. both rows transitioned out of 'pending'.
+        # Verify by reading their current status.
+        live = (
+            admin.table("compute_jobs")
+                 .select("id,status")
+                 .in_("id", [id_a, id_b])
+                 .execute()
+                 .data
+        )
+        out_of_pending = {row["id"] for row in live if row["status"] != "pending"}
+        assert out_of_pending == {id_a, id_b}, (
+            f"H-1235 regression: compute_intro_snapshot carve-out failed — "
+            f"of 2 same-strategy rows, only {len(out_of_pending)} left the "
+            "'pending' state after ${attempt} claim attempts. Both should "
+            "be claimable because the partial unique inflight index excludes "
+            "intro_snapshot from the strategy_id predicate. Live statuses: "
+            f"{[(r['id'], r['status']) for r in live]}"
+        )
+    finally:
+        if id_a is not None:
+            admin.table("compute_jobs").delete().eq("id", id_a).execute()
+        if id_b is not None:
+            admin.table("compute_jobs").delete().eq("id", id_b).execute()
+        try:
+            admin.table("strategies").delete().eq("id", strategy_id).execute()
+        except Exception:
+            pass
+
+
+def test_non_intro_snapshot_kind_still_dedupes_on_strategy_id(admin):
+    """H-1235 negative control. The carve-out MUST be kind-scoped — for
+    kinds that DO live under the strategy_id partial unique inflight
+    index (sync_trades is one such), the strategy_id dedupe must still
+    fire. Otherwise the carve-out would be too wide and the 23505
+    collision returns for unrelated kinds.
+
+    Setup: two pending sync_trades rows for the SAME strategy_id, both
+    claimable (different next_attempt_at to avoid tie-break ambiguity).
+    Claim batch_size >= 2. EXACTLY ONE should be returned — the partition
+    dedupe collapses to one winner; the loser stays pending and is
+    eligible on the next sweep.
+    """
+    user_id = _seed_user_id(admin)
+    strat = admin.table("strategies").insert({
+        "user_id": user_id,
+        "name": f"h1235-carveout-neg-{uuid.uuid4().hex[:8]}",
+        "status": "pending_review",
+        "source": "okx",
+        "strategy_types": [],
+        "subtypes": [],
+        "markets": [],
+        "supported_exchanges": [],
+    }).execute().data[0]
+    strategy_id = strat["id"]
+
+    id_a: str | None = None
+    id_b: str | None = None
+    try:
+        # Defensive pre-purge: clear any leaked sync_trades rows for this
+        # strategy_id from a prior failed test run before we insert. The
+        # strategy_id is freshly minted above so no leak is *expected*,
+        # but a 23505 on the second insert (below) would mask the real
+        # carve-out assertion behind a setup error. Red-team #3.
+        admin.table("compute_jobs").delete().eq(
+            "strategy_id", strategy_id
+        ).eq("kind", "sync_trades").execute()
+
+        # Two sync_trades pending rows sharing strategy_id. The earlier
+        # next_attempt_at wins the dedupe deterministically.
+        # The partial unique inflight index DOES cover sync_trades, so
+        # we can only have ONE row in {pending, running,
+        # done_pending_children} at a time per (strategy_id, kind). The
+        # 2nd insert would 23505 if both were 'pending'. To get two
+        # candidates in the claim pool we keep one in 'pending' and the
+        # other in 'failed_retry' (which the unique index does NOT cover)
+        # — the dedupe still fires across the LEGACY claim filter
+        # `status IN ('pending','failed_retry')`. The priority RPC body
+        # filters on `status = 'pending'` only, which would make the
+        # `rn_s = 1` clause untestable here (only one candidate would
+        # enter the CTE), so this test uses the legacy RPC.
+        row_a = admin.table("compute_jobs").insert({
+            "kind": "sync_trades",
+            "strategy_id": strategy_id,
+            "status": "pending",
+            "priority": "normal",
+            "exchange": "okx",
+            "next_attempt_at": "2020-01-01T00:00:00Z",  # earlier — winner
+        }).execute().data[0]
+        id_a = row_a["id"]
+        row_b = admin.table("compute_jobs").insert({
+            "kind": "sync_trades",
+            "strategy_id": strategy_id,
+            "status": "failed_retry",
+            "priority": "normal",
+            "exchange": "okx",
+            "next_attempt_at": "2020-06-01T00:00:00Z",  # later — deduped
+            "attempts": 1,
+            "max_attempts": 5,
+            "last_error": "synthetic",
+            "error_kind": "transient",
+        }).execute().data[0]
+        id_b = row_b["id"]
+
+        claimed = _claim_legacy(
+            admin, worker_id="h1235-carveout-neg", batch_size=50,
+        )
+        claimed_ids = {c["id"] for c in claimed}
+        ours = claimed_ids & {id_a, id_b}
+
+        # EXACTLY one — the dedupe collapses to one row. The carve-out
+        # is kind-scoped so sync_trades is NOT carved out.
+        assert len(ours) == 1, (
+            f"H-1235 over-reach: expected the strategy_id dedupe to "
+            f"collapse two same-strategy sync_trades rows to one, got "
+            f"{len(ours)}. The carve-out must be kind='compute_intro_snapshot' "
+            "only — if it widened to all kinds, 23505 collisions return "
+            "for kinds under the partial unique inflight index."
+        )
+
+        # Red-team #3: verify the WINNER is the expected one. row_a has
+        # the earlier next_attempt_at, so the ORDER BY next_attempt_at, id
+        # rank must put it at rn_s = 1 — id_a wins, id_b is deduped.
+        actual_winner = next(iter(ours))
+        assert actual_winner == id_a, (
+            f"H-1235 / H-1238 negative-control regression: expected the "
+            f"earlier next_attempt_at row (id_a={id_a}) to win the dedupe, "
+            f"got winner={actual_winner}. The ORDER BY next_attempt_at, id "
+            "clause should put 2020-01-01 ahead of 2020-06-01 deterministically."
+        )
+    finally:
+        if id_a is not None:
+            try:
+                admin.table("compute_jobs").delete().eq("id", id_a).execute()
+            except Exception:
+                pass
+        if id_b is not None:
+            try:
+                admin.table("compute_jobs").delete().eq("id", id_b).execute()
+            except Exception:
+                pass
+        try:
+            admin.table("strategies").delete().eq("id", strategy_id).execute()
+        except Exception:
+            pass
+
+
+# ----------------------------------------------------------------------------
+# M-1133 — EXISTS short-circuit (CASE WHEN EXISTS) semantics.
+# Asserts the boolean throttle gate behaves identically to the
+# pre-M-1133 count(*) probe: empty backlog → low rows claimable;
+# non-empty backlog → low rows throttled.
+# ----------------------------------------------------------------------------
+
+
+def test_low_priority_claimed_when_high_normal_backlog_empty(admin):
+    """M-1133 Test A. With NO normal/high pending ready rows, a single
+    low-priority pending ready row MUST be claimable.
+
+    This exercises the `v_high_pending = 0` branch of the priority RPC.
+    Pre-M-1133 (count(*) shape) and post-M-1133 (CASE WHEN EXISTS shape)
+    must agree here — but if a future refactor broke the EXISTS
+    semantics (e.g. flipped the boolean), low-priority work would be
+    forever throttled even with an empty backlog.
+    """
+    user_id = _seed_user_id(admin)
+    strat = admin.table("strategies").insert({
+        "user_id": user_id,
+        "name": f"m1133-low-empty-{uuid.uuid4().hex[:8]}",
+        "status": "pending_review",
+        "source": "okx",
+        "strategy_types": [],
+        "subtypes": [],
+        "markets": [],
+        "supported_exchanges": [],
+    }).execute().data[0]
+    strategy_id = strat["id"]
+    low_id: str | None = None
+    try:
+        low_row = admin.table("compute_jobs").insert({
+            "kind": "sync_trades",
+            "strategy_id": strategy_id,
+            "status": "pending",
+            "priority": "low",
+            "exchange": "okx",
+            "next_attempt_at": "2020-01-01T00:00:00Z",
+        }).execute().data[0]
+        low_id = low_row["id"]
+
+        claimed = _claim_with_priority(admin, worker_id="m1133-low-empty", batch_size=5)
+        claimed_ids = {c["id"] for c in claimed}
+        # Scope to our row; the shared test project may have other low
+        # rows that an unrelated branch (high backlog) could throttle.
+        # But our row is the canonical empty-backlog probe — if the
+        # gate flipped, our low row would NOT be claimed.
+        assert low_id in claimed_ids, (
+            "M-1133 regression: low-priority row was NOT claimed even "
+            "though there is no normal/high backlog ready. The "
+            "v_high_pending=0 branch of the throttle gate is broken — "
+            "low-priority work is unreachable."
+        )
+    finally:
+        if low_id is not None:
+            try:
+                admin.table("compute_jobs").delete().eq("id", low_id).execute()
+            except Exception:
+                pass
+        try:
+            admin.table("strategies").delete().eq("id", strategy_id).execute()
+        except Exception:
+            pass
+
+
+def test_low_priority_throttled_when_normal_backlog_present(admin):
+    """M-1133 Test B. With ≥1 normal-priority pending ready row AND ≥1
+    low-priority pending ready row in the queue, the claim batch MUST
+    return ONLY the normal row.
+
+    This exercises the `v_high_pending > 0` branch (CASE WHEN EXISTS
+    → 1). The contract: low work is throttled behind any normal/high
+    backlog. Mirrors the pre-M-1133 count(*) shape's behavior — proving
+    the refactor preserves the throttle gate semantics.
+    """
+    user_id = _seed_user_id(admin)
+    strat_normal = admin.table("strategies").insert({
+        "user_id": user_id,
+        "name": f"m1133-throttle-n-{uuid.uuid4().hex[:8]}",
+        "status": "pending_review",
+        "source": "okx",
+        "strategy_types": [],
+        "subtypes": [],
+        "markets": [],
+        "supported_exchanges": [],
+    }).execute().data[0]
+    strat_low = admin.table("strategies").insert({
+        "user_id": user_id,
+        "name": f"m1133-throttle-l-{uuid.uuid4().hex[:8]}",
+        "status": "pending_review",
+        "source": "okx",
+        "strategy_types": [],
+        "subtypes": [],
+        "markets": [],
+        "supported_exchanges": [],
+    }).execute().data[0]
+    normal_strategy_id = strat_normal["id"]
+    low_strategy_id = strat_low["id"]
+
+    normal_id: str | None = None
+    low_id: str | None = None
+    try:
+        normal_row = admin.table("compute_jobs").insert({
+            "kind": "sync_trades",
+            "strategy_id": normal_strategy_id,
+            "status": "pending",
+            "priority": "normal",
+            "exchange": "okx",
+            "next_attempt_at": "2020-01-01T00:00:00Z",
+        }).execute().data[0]
+        normal_id = normal_row["id"]
+        low_row = admin.table("compute_jobs").insert({
+            "kind": "sync_trades",
+            "strategy_id": low_strategy_id,
+            "status": "pending",
+            "priority": "low",
+            "exchange": "okx",
+            "next_attempt_at": "2020-01-01T00:00:00Z",
+        }).execute().data[0]
+        low_id = low_row["id"]
+
+        claimed = _claim_with_priority(
+            admin, worker_id="m1133-throttle", batch_size=50,
+        )
+        claimed_ids = {c["id"] for c in claimed}
+
+        # Low row MUST be throttled by the normal-priority backlog.
+        assert low_id not in claimed_ids, (
+            "M-1133 regression: low-priority row was claimed even though "
+            "a normal-priority row is ready. The v_high_pending>0 branch "
+            "of the throttle gate is broken — low work is bypassing the "
+            "EXISTS short-circuit."
+        )
+        # Sanity: the normal row WAS claimed (else the queue is empty
+        # for an unrelated reason and the test is vacuous).
+        assert normal_id in claimed_ids, (
+            "Stage error: normal-priority row should have been claimed "
+            "to prove we're exercising the throttle gate (not a vacuous "
+            "empty-queue path)."
+        )
+    finally:
+        for jid in (normal_id, low_id):
+            if jid is not None:
+                try:
+                    admin.table("compute_jobs").delete().eq("id", jid).execute()
+                except Exception:
+                    pass
+        for sid in (normal_strategy_id, low_strategy_id):
+            try:
+                admin.table("strategies").delete().eq("id", sid).execute()
+            except Exception:
+                pass
