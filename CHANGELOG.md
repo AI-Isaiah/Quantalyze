@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.15.4] - 2026-05-28
+### Fixed — GDPR Art.15 export no longer ships silently-incomplete when a parent row has a NULL key (audit-2026-05-07 NEW-C16-08)
+
+A data-subject export could be delivered as complete (200 + signed URL) while silently omitting rows. When an indirect table's parent-id probe encountered a parent row with a NULL primary key, that row was dropped and its child rows were excluded from the bundle — but unlike the 2000-row cap path (which sets `parent_id_truncated`) and the type-mismatch path (which sets `fetch_error`), the NULL-drop set no incompleteness signal at all, so the bundle's completeness gate never saw it. A subject's Article 15 export could therefore arrive missing data while presented as the complete record.
+
+The fetch layer now carries a dedicated `parent_id_null_dropped` flag end-to-end into a new `parent_id_null_dropped_tables` bundle field, and the export route refuses to mint a signed URL when it is non-empty — the same refusal-plus-token-refund path the row-cap uses, with a distinct, accurate reason (so the subject is told a NULL-keyed parent dropped child rows, not the misleading "2000-row cap"). The refusal is deliberately soft: it does NOT hard-fail the whole export (a single legacy NULL row must never lock a subject out of their Art.15 right), and the refusal is recorded in the durable audit trail as an aggregate count (never table names). A retry refunds the daily token.
+
 ## [0.24.15.3] - 2026-05-28
 ### Fixed — scenario-commit allocation range + audit-trail integrity (audit-2026-05-07 NEW-C18-02, NEW-C18-11)
 

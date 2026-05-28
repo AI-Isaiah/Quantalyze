@@ -424,6 +424,14 @@ async function handleExportRequest(
       `parent_id_cap_reached:${bundle.parent_id_truncated_tables.join(",")} — only the first 2000 parent rows are included; child rows of dropped parents are missing.`,
     );
   }
+  // NEW-C16-08: a NULL-PK parent row was dropped from the indirect probe, so
+  // child rows of that parent are absent. Distinct reason from the 2000-row
+  // cap above — refuse rather than ship a falsely-complete Art. 15 bundle.
+  if (bundle.parent_id_null_dropped_tables.length > 0) {
+    incompleteReasons.push(
+      `parent_id_null_dropped:${bundle.parent_id_null_dropped_tables.join(",")} — one or more parent rows had a NULL primary key and were dropped; child rows of those parents are missing.`,
+    );
+  }
 
   if (bundle.partial || incompleteReasons.length > 0) {
     const requestId = crypto.randomUUID();
@@ -435,6 +443,7 @@ async function handleExportRequest(
       truncated_at_size_cap: bundle.truncated_at_size_cap,
       row_capped_tables: rowCappedTables,
       parent_id_truncated_tables: bundle.parent_id_truncated_tables,
+      parent_id_null_dropped_tables: bundle.parent_id_null_dropped_tables,
       incomplete_reasons: incompleteReasons,
     });
     // Audit 2026-05-07 red-team #2 (HIGH conf-8): refund the 1/day
@@ -481,6 +490,10 @@ async function handleExportRequest(
         row_capped_table_count: rowCappedTables.length,
         parent_id_truncated_table_count:
           bundle.parent_id_truncated_tables.length,
+        // NEW-C16-08: surface the null-PK-parent drop in the durable trail
+        // (count only, never table names — same red-team #1 redaction).
+        parent_id_null_dropped_table_count:
+          bundle.parent_id_null_dropped_tables.length,
         failed_table_count: bundle.failed_tables.length,
         // Audit-2026-05-07 H-0200 (code-reviewer c9): IP + UA on every
         // emit path — a stolen-token export must be reconstructable
