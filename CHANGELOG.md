@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.24.14.0] - 2026-05-28
+### Hardened — Money-Unit Brand + Window-Coincident Metrics + Recompute Actor Binding (B1 + B3 + C-PR5-01 + C-PR5-02 of cross-cutting refactor program)
+
+**B1 — Money-Unit Brand (TypeScript `src/lib/units.ts`)**
+- New canonical entry-point that re-exports `Usd / Ratio / Fraction / Improvement` from `./types` (single source of truth — no parallel brand definitions) and adds a new `DecimalReturn` brand for cumulative-decimal-form returns (0.18 = +18%).
+- Validating constructors `safeUsd / safeDecimalReturn / safeRatio / safeFraction` reject NaN, Infinity, and implausibly-out-of-range inputs at the producer boundary. Each emits a single boundary warn so producer-side drift surfaces in logs. Distinct from the raw `asUsd / asRatio / asFraction` in `types.ts`, which stay as vocabulary-only casts for already-trusted values.
+- `WeightFraction` boundary clamp at `queries.ts` DEFERRED (see file comment + describe.skip block). The audit's NEW-C09-08 fix would silently swap a visible 5000% chip for a silent 0% slot across 8 dashboard aggregators that read `current_weight ?? 0`. The constructor ships in `@/lib/units`; landing it at the payload boundary needs a co-PR that audits each aggregator and either branches on null or excludes the row.
+
+**B1 — Factsheet brand-aware formatters (`src/app/factsheet/[id]/v2/format.ts`)**
+- New `formatUsd / formatDecimalReturn / formatRatio` accept only the matching brand. A USD value branded as `Usd` cannot be passed to `formatDecimalReturn` (which multiplies by 100) — closing the public-facing surface-mix risk that NEW-C20-10 flagged.
+- Legacy unbranded `pct / pctSigned / ratio / usdCompact` marked `@deprecated` with a JSDoc pointing to the brand-aware aliases. Existing call sites compile; new code paths organically migrate via IDE strikethrough.
+- Production-side adoption is TBD (single PR scope cap). The infrastructure ships; per-panel boundary wiring is a follow-up that audits each FactsheetPayload field and constructs the appropriate brand.
+
+**B1 — ScenarioComposer + ScenarioCommitDrawer (NEW-C18-06, NEW-C18-09)**
+- **NEW-C18-09.** `liveBaselineToComputedMetrics` returns `equity_curve: []` instead of `baseline.equity` (which is wealth-form). The producer convention for `ComputedMetrics.equity_curve` is cumulative-RETURN form; stuffing wealth-form data there silently mis-scaled any future chart that read the field directly. JSDoc on `ComputedMetrics.equity_curve` codifies the convention.
+- **NEW-C18-06.** `ScenarioCommitDrawer` accepts a new `scenarioAum?: number` prop (default 0). In `buildSubmitDiffs`, when the user edits `percent_allocated > 0` AND `scenarioAum > 0`, `size_at_decision_usd` is recomputed from `percent × scenarioAum / 100` so the two fields cannot ship inconsistent values. Server-side authoritative recompute (NEW-C18-04, route.ts) is still the integrity gate; this keeps the client-side audit sidecar (`size_at_decision_usd_client`) coherent with the percent the user just typed.
+- Code-reviewer follow-up: percent ≤ 0 keeps the composer-time size to avoid emitting `size_at_decision_usd: 0` and tripping the server's daily-delta divide-by-zero gate.
+
+**B1 — Bybit ctVal invariant (NEW-C13-01, analytics-service)**
+- New `_BYBIT_FILL_CATEGORIES = frozenset({"linear"})` constant + `_fetch_raw_trades_bybit(category="linear")` guard. Any non-allowlisted category raises `ValueError` and stamps `bybit_unsupported_category` DQ flag. Bybit V5 linear-perp execQty is already in base units (no rescale needed); inverse perps would require contractSize normalization the codebase doesn't carry today. The invariant codifies the assumption so a future contributor adding inverse must update the allowlist AND wire the rescale at the same time.
+
+**B3 — Window-Coincident Metrics Engine (`analytics-service/services/window_alignment.py`)**
+- New shared helper `align_current_and_proposed(port_df, candidate_returns, candidate_id, min_overlap_days)` returns `AlignmentMetadata { overlap_days, sufficient, port_aligned, candidate_aligned, aligned_concat }`. Two consumers (`match_engine._compute_portfolio_fit_components` and `simulator_scoring.simulate_add_candidate`) refactored to use it. Prevents future drift between the two paths that previously inlined near-identical `pd.concat(...).dropna()` joins. Closes the structural class of "current scored on the long window, proposed on the short window" ranking bias (NEW-C08-01 / NEW-C11-03) at one point of edit.
+- New runbook `docs/runbooks/metrics-nan-policy.md` codifies six rules: headline-scalar same NaN policy (NEW-C02-05), resample empty-bucket rejection (NEW-C02-04), symmetric strict-mask streaks (NEW-C02-03), business-day annualization (NEW-C01-15), window-coincident metric pairs (NEW-C08-01/-C11-03), and the truthy-vs-`is not None` discipline (NEW-C19-04/-05/-06).
+- **B3.4 truthy sweep.** `analytics-service/services/match_engine.py:_compute_capacity_fit` and two adjacent sites (`add_weight` derivation, `ticket_concentration` sidecar) converted from `or 0` to `is None` so an explicit `target_ticket_size_usd: 0` (user-set "no ticket configured") and `manager_aum: 0` (data-quality blip) flow through the same code path as a missing key. The dangerous variant (NEW-C19-05/-06) was already closed in `routers/portfolio.py`.
+
+**C-PR5-01 — Recompute actor binding (security CRITICAL)**
+- `analytics-service/routers/match.py` recompute() accepts a new optional `actor_id` field. When present, asserts `actor_id == allocator_id` OR `actor_id` has admin role (`_is_admin_profile` helper introduced). Cross-tenant write attempts (actor A passing allocator B without admin role) return 403; admin lookup DB blips return 503.
+- TS-side `recomputeMatch(allocatorId, force, actorId)` makes `actorId` REQUIRED at the signature so every TS caller compiles only with the binding threaded. The Next.js admin route (`/api/admin/match/recompute`) forwards `user.id` from `supabase.auth.getUser()`.
+- Python side keeps `actor_id` optional for backward compat with non-Next.js callers (cron handlers, debug scripts); a deprecation warning fires when omitted so the rollout is observable. Follow-up PR will promote the Python field to required once the TS rollout is complete.
+
+**C-PR5-02 — claim_token threading regression guard (prod CRITICAL)**
+- Production worker (`main_worker.dispatch_tick` line 507) already reads `job["claim_token"]` and threads it to every mark RPC — the closure is already live. New regression test pins the contract so a future refactor that drops `claim_token=claim_token` from the closures fails the build instead of silently bypassing the migration-117 P97 fence on the next watchdog reclaim.
+
+**Test coverage**
+- `src/lib/units.test.ts` — 18 specs covering safeUsd / safeDecimalReturn / safeRatio / safeFraction boundary semantics + re-export resolution
+- `src/app/factsheet/[id]/v2/format.test.ts` — 16 specs covering brand-aware aliases vs legacy formatters
+- `src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.test.tsx` — 3 specs covering NEW-C18-06 scenarioAum recompute
+- `src/app/api/admin/match/recompute/route.test.ts` (new) — 5 specs covering C-PR5-01 actor_id forwarding contract
+- `analytics-service/tests/test_window_alignment.py` (new) — 6 specs pinning the shared alignment contract
+- `analytics-service/tests/test_exchange.py::TestClusterIC1301BybitCategoryGuard` — 3 specs pinning the Bybit category invariant
+- `analytics-service/tests/test_match_router.py::TestRecomputeActorBinding` — 5 specs covering self-path / admin / 403 / 503 / deprecation warning
+- `analytics-service/tests/test_main_worker.py::test_c_pr5_02_no_null_claim_token_on_mark_done_for_fenced_jobs` — regression guard against future claim_token drop
+
+**Out-of-scope (tracked follow-ups)**
+- NEW-C09-08 boundary clamp + 8-aggregator sweep
+- Brand-aware factsheet payload wiring (`safeUsd / safeDecimalReturn / safeRatio` at producer edge)
+- B4 central `admin_role_mutate` SECDEF RPC (per-route fixes ship today)
+- B5 NULL-skip removal in migration 117 mark RPCs (worker rollout complete; defensive depth follow-up)
+- B8 closed-set discipline + B14 freshness primitive (structural refactors with substantial blast radius)
+
 ## [0.24.13.0] - 2026-05-28
 ### Fixed — TS frontend + e2e + runbook hardening (PR-3+4 of cross-cutting refactor program)
 

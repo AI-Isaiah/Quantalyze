@@ -78,6 +78,19 @@ export interface ComputedMetrics {
   max_dd_days: number | null;
   correlation_matrix: Record<string, Record<string, number>> | null;
   avg_pairwise_correlation: number | null;
+  /**
+   * NEW-C18-09 (B1, audit-2026-05-07): cumulative **RETURN** form
+   * (0.18 = +18%). `computeScenario` is the only producer that may
+   * fill this field with engine output. Consumers that need cumulative
+   * **wealth** form (1.18 = +18% from a $1 base) must convert via
+   * `toWealth()` (re-exported from `@/lib/units`).
+   *
+   * The adapter that lifts a server-side wealth-form baseline into a
+   * `ComputedMetrics`-shaped object (see
+   * `liveBaselineToComputedMetrics` in `ScenarioComposer.tsx`) leaves
+   * this field empty — a wealth-form array stored here would conflict
+   * with the convention above and silently render mis-scaled charts.
+   */
   equity_curve: Array<{ date: string; value: number }>;
   effective_start: string | null;
   effective_end: string | null;

@@ -293,6 +293,25 @@ def _okx_contract_size_for_inst_id(
 _OKX_FILL_INST_TYPES: tuple[str, ...] = ("SWAP", "FUTURES", "SPOT", "MARGIN")
 
 
+# NEW-C13-01 (Bybit half): the analogue of OKX's ctVal normalization.
+#
+# Bybit V5 reports `execQty` in **base asset** for `category="linear"`
+# (e.g. `execQty=0.1` on BTCUSDT-PERP means 0.1 BTC). No ctVal-style
+# rescale is required — the value is already in base units.
+#
+# `category="inverse"` is a DIFFERENT story: `execQty` there is in
+# **USD (contracts)** and would require a contractSize rescale to base
+# units before persisting. We currently fetch only `category="linear"`
+# (see _fetch_raw_trades_bybit + the cap-status / mark-price helpers),
+# so the inverse path is dead code today. This constant is the single
+# source of truth that codifies the invariant — a future contributor
+# adding inverse must update the allowed set deliberately and add the
+# contractSize rescale at the same time. Without the allowlist the
+# Bybit branch would silently start emitting USD-denominated quantities
+# as if they were base units (the OKX class of bug NEW-C13-01 closed).
+_BYBIT_FILL_CATEGORIES: frozenset[str] = frozenset({"linear"})
+
+
 def _finite_float(value: Any, *, label: str) -> float | None:
     """Audit-2026-05-07 H-0661 (partial) — exchange-ingestion variant of
     ``_safe_float``: reject bool (which Python's ``float()`` would
@@ -1835,15 +1854,36 @@ async def _fetch_raw_trades_okx(
 async def _fetch_raw_trades_bybit(
     exchange: ccxt.Exchange,
     since_ms: int | None,
+    *,
+    category: str = "linear",
 ) -> list[dict[str, Any]]:
-    """Bybit: private_get_v5_execution_list with cursor-based pagination."""
+    """Bybit: private_get_v5_execution_list with cursor-based pagination.
+
+    NEW-C13-01: ``category`` is asserted against ``_BYBIT_FILL_CATEGORIES``
+    so a future caller (or a refactor) cannot quietly request inverse
+    contracts — that branch needs contractSize rescale before persisting
+    ``execQty`` as ``quantity``, which is not implemented here. The invariant
+    is the Bybit analogue of OKX's ctVal normalization at ingest.
+    """
+    if category not in _BYBIT_FILL_CATEGORIES:
+        # Loud-fail rather than emit DQ-flagged data. An inverse fill stored
+        # with raw execQty would corrupt FIFO matching the same way an
+        # un-normalized OKX SWAP fill would (NEW-C13-01 root). Bail before
+        # writing rather than after — the caller can adapt by adding inverse
+        # support to ``_BYBIT_FILL_CATEGORIES`` and the contractSize rescale.
+        _record_dq_flag("bybit_unsupported_category", True)
+        raise ValueError(
+            f"_fetch_raw_trades_bybit: category={category!r} not in "
+            f"_BYBIT_FILL_CATEGORIES — add explicit support before fetching"
+        )
+
     fills: list[dict[str, Any]] = []
     cursor = ""
     natural_break = False
 
     PAGE_CAP = 100
     for page in range(PAGE_CAP):
-        params: dict[str, str] = {"category": "linear", "limit": "100"}
+        params: dict[str, str] = {"category": category, "limit": "100"}
         if cursor:
             params["cursor"] = cursor
         if since_ms and not cursor:

@@ -1383,6 +1383,55 @@ class TestClaimedJobContract:
         assert params["p_job_id"] == "cj-contract-1"
         assert params["p_claim_token"] == "tok-contract-xyz"
 
+    @pytest.mark.asyncio
+    async def test_c_pr5_02_no_null_claim_token_on_mark_done_for_fenced_jobs(
+        self,
+    ) -> None:
+        """C-PR5-02 (audit-2026-05-07): for any claimed job that came with a
+        non-NULL claim_token (i.e. every production claim through migration
+        117), the mark_compute_job_done RPC MUST be called with
+        ``p_claim_token != None``. A regression that passed NULL would
+        silently bypass the P97 fence — exactly the production-critical
+        gap the audit flagged. Pins the contract so a future refactor
+        that drops ``claim_token=claim_token`` from the closure fails this
+        test immediately rather than at the next watchdog reclaim.
+        """
+        job = {
+            "id": "cj-c-pr5-02",
+            "kind": "compute_analytics",
+            "strategy_id": "strat-c-pr5-02",
+            "claim_token": "tok-must-thread",
+        }
+        mock_supabase = MagicMock()
+        claim_chain = MagicMock()
+        claim_chain.execute.return_value = MagicMock(data=[job])
+        mark_chain = MagicMock()
+        mark_chain.execute.return_value = MagicMock(data=None)
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return claim_chain
+            return mark_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-c-pr5-02")
+
+        # The contract: EVERY mark RPC call (done or failed) carries a
+        # non-NULL p_claim_token. If a future refactor drops the
+        # threading, this assertion fails before the change ships.
+        for c in mock_supabase.rpc.call_args_list:
+            if c.args[0] in ("mark_compute_job_done", "mark_compute_job_failed"):
+                assert c.args[1].get("p_claim_token") is not None, (
+                    f"{c.args[0]} called with NULL p_claim_token — would silently "
+                    "bypass the P97 fence (C-PR5-02)"
+                )
+
 
 # ---------------------------------------------------------------------------
 # redteam-2026-05 W1 (LOW9) — daily-enqueue startup gate

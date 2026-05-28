@@ -5214,3 +5214,80 @@ class TestClusterIC1302OkxInstTypeFanOut:
             f"Expected 100 pages (SWAP only hit cap), got "
             f"{flags.get('sync_truncated_okx_pages')}"
         )
+
+
+class TestClusterIC1301BybitCategoryGuard:
+    """NEW-C13-01 (Bybit half) — the Bybit ingest path supports ONLY
+    ``category="linear"`` because that's the only branch where
+    ``execQty`` arrives in base units. ``category="inverse"`` reports
+    ``execQty`` in USD (contracts) and would require a contractSize
+    rescale before persisting — the OKX-style position-size inflation
+    bug NEW-C13-01 closed for OKX. A future caller adding inverse must
+    update ``_BYBIT_FILL_CATEGORIES`` AND wire the rescale; the guard
+    fails loud so that combination cannot land by accident.
+    """
+
+    @pytest.mark.asyncio
+    async def test_default_category_linear_passes(self) -> None:
+        # Sanity: the production caller (which omits the category kwarg
+        # and gets the linear default) must still work.
+        from services.exchange import (
+            _fetch_raw_trades_bybit,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_execution_list = AsyncMock(
+            return_value={"result": {"list": [], "nextPageCursor": ""}}
+        )
+        result = await _fetch_raw_trades_bybit(mock_exchange, None)
+        assert result == []
+        flags = get_and_clear_last_dq_flags()
+        # No category guard should have fired for the linear default.
+        assert flags.get("bybit_unsupported_category") is None
+
+    @pytest.mark.asyncio
+    async def test_inverse_category_rejected_with_dq_flag(self) -> None:
+        from services.exchange import (
+            _fetch_raw_trades_bybit,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        # Should never be called — the guard rejects before the round trip.
+        mock_exchange.private_get_v5_execution_list = AsyncMock(
+            return_value={"result": {"list": [], "nextPageCursor": ""}}
+        )
+        with pytest.raises(ValueError) as exc_info:
+            await _fetch_raw_trades_bybit(mock_exchange, None, category="inverse")
+        assert "category='inverse'" in str(exc_info.value)
+        # Round trip never happened — guard fired first.
+        mock_exchange.private_get_v5_execution_list.assert_not_called()
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("bybit_unsupported_category") is True
+
+    @pytest.mark.asyncio
+    async def test_spot_category_rejected_with_dq_flag(self) -> None:
+        # Bybit spot fills currently route through the CCXT generic
+        # `_normalize_fill` path, not this function. A future caller
+        # passing category="spot" here would silently double-ingest spot
+        # via two paths with different normalization — reject explicitly.
+        from services.exchange import (
+            _fetch_raw_trades_bybit,
+            get_and_clear_last_dq_flags,
+        )
+        get_and_clear_last_dq_flags()
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_execution_list = AsyncMock(
+            return_value={"result": {"list": [], "nextPageCursor": ""}}
+        )
+        with pytest.raises(ValueError):
+            await _fetch_raw_trades_bybit(mock_exchange, None, category="spot")
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("bybit_unsupported_category") is True

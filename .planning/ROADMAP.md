@@ -72,11 +72,12 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
 
 #### Phase Summary
 
-- [ ] **Phase 15: CSV Unblock** — Promote PR #22's CSV path to first-class so all 10 onboarding teams have a working ingestion route within 48h; ships `csv_uploaded` trust-tier placeholder + per-team `strategy_verifications` status visibility.
+- [x] **Phase 15: CSV Unblock** — Promote PR #22's CSV path to first-class so all 10 onboarding teams have a working ingestion route within 48h; ships `csv_uploaded` trust-tier placeholder + per-team `strategy_verifications` status visibility. (built 2026-05-01; closed 2026-05-28 after fixing the two /qa bugs — P1 CSV-wizard `strategyName` lost on refresh + P2 /admin/csv-status "View factsheet" 404 — in v0.24.9.35, PR #327)
 - [x] **Phase 16: Diagnostic Spike + Observability** — Wire correlation_id end-to-end (Next.js → FastAPI → Supabase → Resend), add Sentry on both halves of the stack, ship `/api/debug-key-flow` SSE endpoint + VCR-replay harness, audit migration triggers + PostHog mobile starts; closes with the Day-2 decision gate. (completed 2026-05-01)
 - [x] **Phase 17: Design Contract** — Lock DESIGN.md additions (trust-tier badges, error envelope wireframe, broker selector grid, CSV escape-hatch card, mobile fallback, a11y minimums, 9-state matrix) BEFORE backend rewrite; trust-tier tokens land as typed code constants regex-asserted against DESIGN.md. (completed 2026-05-01)
-- [ ] **Phase 18: Root-Cause Fix + Founder LP Skeleton** — Fix whatever Phase 16 surfaced with a regression test that fails without the fix; ship Python `redact.py` mirror of existing `pii-scrub.ts`; cron-emit a monthly LP report PDF reusing the existing factsheet endpoint; close the dogfood loop in writing.
+- [x] **Phase 18: Root-Cause Fix + Founder LP Skeleton** — Fix whatever Phase 16 surfaced with a regression test that fails without the fix; ship Python `redact.py` mirror of existing `pii-scrub.ts`; cron-emit a monthly LP report PDF reusing the existing factsheet endpoint; close the dogfood loop in writing. (completed 2026-05-06; verified 7/7 — FIX-02/FIX-03/LP-03 are /ship-time founder gates)
 - [ ] **Phase 19: Unified Backbone** *(conditional on Day-2 gate = COMMIT)* — Replace 5 divergent entry routes with one `POST /process-key` FastAPI RPC + adapter Protocol (OKX / Binance / Bybit / CSV — no MT5 / IBKR per UC-B); ship `strategy_verifications` state machine, 4-PR VIEW-shim migration sequence, feature flag + cron-based rollback monitor, perp correctness, JSONB fingerprint, idempotency.
+- [x] **Phase 19.1: CSV → analytics → factsheet pipeline** *(inserted urgent phase, operationally independent of Phase 19)* — Replace the v0.24.6.0 `analyticsMissingMessage` stop-gap with the real CSV → analytics → factsheet pipeline (csv_daily_returns table + persist_csv_daily_returns RPC + compute_analytics_from_csv job kind + Python run_csv_strategy_analytics + TypeScript computation_status polling + after() enqueue + B3 render-gate widening). (completed 2026-05-27 via v0.24.9.34, PR #326, merge 4ec36ad2; prod e2e verified VERDICT PASS on Orara-Statarb-L/S5)
 
 #### Wave Structure (sequential — real dependencies enforce ordering)
 
@@ -90,7 +91,7 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
 
 #### Phase Details
 
-### Phase 15: CSV Unblock
+### Phase 15: CSV Unblock ✅ COMPLETE
 **Goal**: Extend PR #22's CSV path so all 10 onboarding teams have a working ingestion route within 48h, decoupling customer urgency from the architectural diagnosis that Phase 16 will run.
 **Depends on**: Nothing (entry phase).
 **Entry gate**: Theme 4 founder-interview pass — founder emails all 10 teams BEFORE execution starts; ≥3 written replies confirming "yes, CSV bridge works" OR "no, I need API only" unlocks Phase 15. < 3 replies still ships (CSV is unblock primitive) but logs gap to `.planning/phase-15/customer-signal-gap.md`.
@@ -101,16 +102,17 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
   3. Strategies onboarded via CSV display `csv_uploaded` trust-tier placeholder text on factsheet + marketplace tile (badge component polish lives in Phase 17; CSV-03 ships only the data-model wiring)
   4. Per-team onboarding status surfaces via the new `/admin/csv-status` admin page (locked 2026-04-30 cross-AI revision; ships in plan 15-07) — admin-gated, 6-column table joined to auth.users.email + strategies.name. Replaces prior "queryable rows only" scope.
 **Plans**: 7 plans (cross-AI revision 2026-04-30 added 15-07 admin status page)
-- [ ] 15-01-PLAN.md — Migration 093 (strategy_verifications table + RLS + finalize_csv_strategy RPC + apply to test Supabase)
-- [ ] 15-02-PLAN.md — Python csv_validator (3 pandera schemas + 6 CSV-02 rules; trading_window dropped) + FastAPI csv router (validate-only; finalize endpoint removed) + requirements pin + inline _redact_preview helper
-- [ ] 15-03-PLAN.md — TrustTierLabel component + Strategy.trust_tier projection + StrategyHeader/StrategyGrid wiring
-- [ ] 15-04-PLAN.md — CSV wizard step components (CsvValidationEnvelope, CsvUploadStep, CsvPreviewStep, CsvSubmitStep)
-- [ ] 15-05-PLAN.md — WizardStepKey union + WizardLocalState (source + strategyName) + analytics-client multipart helper (throws on missing ANALYTICS_SERVICE_URL) + Next.js proxy routes (csv-validate + csv-finalize accepts user-typed strategy_name; STRATEGY_NAMES NOT imported) + WizardClient ?source=csv branching with strategyName state
-- [ ] 15-06-PLAN.md — Integration tests (RPC + route + RLS + 3 SQLSTATE 22023 guards distinguished by message content) + Playwright E2E happy path (auth.users SELECT-by-email user-id resolution + cleanup) with TrustTierLabel + user-typed name assertions
-- [ ] 15-07-PLAN.md — Admin /admin/csv-status server-component page (founder per-team status surface; admin-gated; DESIGN.md compliant single-table render)
+- [x] 15-01-PLAN.md — Migration 093 (strategy_verifications table + RLS + finalize_csv_strategy RPC + apply to test Supabase)
+- [x] 15-02-PLAN.md — Python csv_validator (3 pandera schemas + 6 CSV-02 rules; trading_window dropped) + FastAPI csv router (validate-only; finalize endpoint removed) + requirements pin + inline _redact_preview helper
+- [x] 15-03-PLAN.md — TrustTierLabel component + Strategy.trust_tier projection + StrategyHeader/StrategyGrid wiring
+- [x] 15-04-PLAN.md — CSV wizard step components (CsvValidationEnvelope, CsvUploadStep, CsvPreviewStep, CsvSubmitStep)
+- [x] 15-05-PLAN.md — WizardStepKey union + WizardLocalState (source + strategyName) + analytics-client multipart helper (throws on missing ANALYTICS_SERVICE_URL) + Next.js proxy routes (csv-validate + csv-finalize accepts user-typed strategy_name; STRATEGY_NAMES NOT imported) + WizardClient ?source=csv branching with strategyName state
+- [x] 15-06-PLAN.md — Integration tests (RPC + route + RLS + 3 SQLSTATE 22023 guards distinguished by message content) + Playwright E2E happy path (auth.users SELECT-by-email user-id resolution + cleanup) with TrustTierLabel + user-typed name assertions
+- [x] 15-07-PLAN.md — Admin /admin/csv-status server-component page (founder per-team status surface; admin-gated; DESIGN.md compliant single-table render)
 **Complexity**: LOW (operational unblock; PR #22 path already exists; 1 new Python dep `python-multipart==0.0.27`).
 **UI hint**: yes
 **Exit gate**: 10/10 teams reach `strategy_verifications.status='validated'` via CSV path (≥3-of-10 reply threshold from entry gate is informational; ship anyway). Per-team status logged in TODOS.md.
+**Close-out** (2026-05-28): PR #327 (v0.24.9.35, prod-deployed 2026-05-27) shipped the two bug fixes the 5 human-needed surfaces flagged — CSV wizard `strategyName` debounced-autosave + admin/csv-status published-gated factsheet link. VERIFICATION.md re-verified against current main, status promoted human_needed → passed.
 
 ### Phase 16: Diagnostic Spike + Observability
 **Goal**: Make observability load-bearing across Next.js → FastAPI → Supabase → Resend before any code is fixed; ship the deterministic local-repro harness that closes Theme 5 ("recurrence is tooling failure"); produce the Day-2 decision document that determines whether Phase 19 runs.
@@ -171,10 +173,10 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
   4. Founder LP report cron emits monthly PDF via existing `/api/factsheet/[id]/pdf` endpoint reused as-is (no branded design dependency); Sentry capture with cron-failure tag + correlation_id surfaces alert on failure; silent failure prohibited
   5. Phase 18 exit interview captures founder verbal-in-writing commitment to send the unedited cron PDF to a real LP within 14 days of milestone close (text logged in `.planning/phase-18/dogfood-commitment.md`)
 **Plans**: 4 plans (Wave 1: 18-01 — traceability + smoke template + 10-team tracker, no code; Wave 2: 18-02 + 18-03 parallel — redact.py + LP cron, independent code paths; Wave 3: 18-04 — doc updates depending on Wave 2 outcomes)
-- [ ] 18-01-PLAN.md — Phase 18 traceability (PR #116 + Bug #1 + Bybit quirks record-only) + founder OKX smoke evidence template + 10-team onboarding tracker (FIX-01 + FIX-02 + FIX-03)
-- [ ] 18-02-PLAN.md — `analytics-service/services/redact.py` Python mirror of `pii-scrub.ts` + 3 wire-up boundaries (Sentry before_send, structlog processor, audit-log writer) + shared 20-bad / 5-good fixture corpus + Vitest TS↔Python denylist parity test (FIX-04)
-- [ ] 18-03-PLAN.md — Founder LP cron at `/api/cron/founder-lp-report` (`0 9 1 * *`) reusing existing factsheet PDF endpoint + Resend send with PDF attachment + dual-alert (Sentry + Resend) failure path per Pitfall 7 + vercel.json registration + .env.example documentation (LP-01 + LP-02)
-- [ ] 18-04-PLAN.md — Dogfood-commitment.md stub (LP-03; founder fills at /ship time) + REQUIREMENTS/ROADMAP/STATE doc-sync pushing BACKBONE-06/-07 from Phase 18 to Phase 19 + Day-2 doc Section 5 REVISED header (LP-03 + cross-cutting docs)
+- [x] 18-01-PLAN.md — Phase 18 traceability (PR #116 + Bug #1 + Bybit quirks record-only) + founder OKX smoke evidence template + 10-team onboarding tracker (FIX-01 + FIX-02 + FIX-03) — completed 2026-05-06
+- [x] 18-02-PLAN.md — `analytics-service/services/redact.py` Python mirror of `pii-scrub.ts` + 3 wire-up boundaries (Sentry before_send, structlog processor, audit-log writer) + shared 20-bad / 5-good fixture corpus + Vitest TS↔Python denylist parity test (FIX-04) — completed 2026-05-06
+- [x] 18-03-PLAN.md — Founder LP cron at `/api/cron/founder-lp-report` (`0 9 1 * *`) reusing existing factsheet PDF endpoint + Resend send with PDF attachment + dual-alert (Sentry + Resend) failure path per Pitfall 7 + vercel.json registration + .env.example documentation (LP-01 + LP-02) — completed 2026-05-06
+- [x] 18-04-PLAN.md — Dogfood-commitment.md stub (LP-03; founder fills at /ship time) + REQUIREMENTS/ROADMAP/STATE doc-sync pushing BACKBONE-06/-07 from Phase 18 to Phase 19 + Day-2 doc Section 5 REVISED header (LP-03 + cross-cutting docs) — completed 2026-05-06
 **Complexity**: MEDIUM (root-cause fix already shipped in-flight via PR #116 + commits a48a92e/1960f54; scope is now traceability + redact.py mirror + LP cron + doc-sync; BACKBONE-06/-07 push to Phase 19 per CONTEXT.md L22-23).
 **Exit gate**: All 10 teams reach `published` (API teams) or `validated` (CSV teams). Founder LP commitment text in writing. PII grep over Supabase log table returns zero credential-shaped strings.
 
@@ -266,12 +268,12 @@ Phases execute in numeric order: 15 → 16 → [Day-2 gate] → 17 → 18 → 19
 | 13. Discovery v2 Polish | v0.17.0.0 | 4/4 | Complete | 2026-04-29 |
 | 14a. Single-Strategy v2 — Eager Panels + Identity | v0.17.0.0 | 6/6 | Complete | 2026-04-29 |
 | 14b. Single-Strategy v2 — Lazy Panels + Trade & Exposure | v0.17.0.0 | 8/8 | Complete | 2026-04-29 |
-| 15. CSV Unblock | v1.0.0 | 0/6 | Not started | - |
+| 15. CSV Unblock | v1.0.0 | 7/7 | Complete | 2026-05-28 |
 | 16. Diagnostic Spike + Observability | v1.0.0 | 9/10 | Complete    | 2026-05-01 |
 | 17. Design Contract | v1.0.0 | 6/6 | Complete    | 2026-05-01 |
 | 18. Root-Cause Fix + Founder LP Skeleton | v1.0.0 | 0/4 | Not started | - |
 | 19. Unified Backbone (conditional) | v1.0.0 | 0/TBD | Not started | - |
-| 19.1. CSV → analytics → factsheet pipeline | v1.0.0 | 0/10 | Not started | - |
+| 19.1. CSV → analytics → factsheet pipeline | v1.0.0 | 10/10 | Complete | 2026-05-27 |
 
 ### Phase 19.1: CSV → analytics → factsheet pipeline (prior work on feat/csv-analytics-pipeline-2026-05-21 may be discarded) (INSERTED)
 
@@ -281,13 +283,13 @@ Phases execute in numeric order: 15 → 16 → [Day-2 gate] → 17 → 18 → 19
 **Plans:** 10 plans
 
 Plans:
-- [ ] 19.1-01-PLAN.md — DB foundation: csv_daily_returns table + persist_csv_daily_returns RPC + compute_analytics_from_csv kind (Wave 1)
-- [ ] 19.1-02-PLAN.md — Python analytics: csv_validator daily_returns_series + run_csv_strategy_analytics + job_worker dispatch + watchdog override (Wave 1)
-- [ ] 19.1-03-PLAN.md — TypeScript surface: computation_status union + parseDailyReturnsSeries + persist call + unified-backbone mirror + after() enqueue (Wave 1)
-- [ ] 19.1-04-PLAN.md — [BLOCKING] Apply migrations to TEST Supabase qmnijlgmdhviwzwfyzlc (Wave 2; depends 01)
-- [ ] 19.1-05-PLAN.md — Live-DB tests for persist_csv_daily_returns (Wave 2; depends 04)
-- [ ] 19.1-06-PLAN.md — [BLOCKING] Apply migrations to PRODUCTION Supabase (Wave 3; depends 04, 05)
-- [ ] 19.1-07-PLAN.md — Railway analytics-service deploy verification (Wave 3; depends 02, 06)
-- [ ] 19.1-08-PLAN.md — Vercel USE_COMPUTE_JOBS_QUEUE flip + redeploy (Wave 3; depends 07)
-- [ ] 19.1-09-PLAN.md — End-to-end verification via production wizard (Wave 4; depends 08)
-- [ ] 19.1-10-PLAN.md — Stop-gap removal + delete feat/csv-analytics-pipeline-* branches (Wave 5; depends 09)
+- [x] 19.1-01-PLAN.md — DB foundation: csv_daily_returns table + persist_csv_daily_returns RPC + compute_analytics_from_csv kind (Wave 1)
+- [x] 19.1-02-PLAN.md — Python analytics: csv_validator daily_returns_series + run_csv_strategy_analytics + job_worker dispatch + watchdog override (Wave 1)
+- [x] 19.1-03-PLAN.md — TypeScript surface: computation_status union + parseDailyReturnsSeries + persist call + unified-backbone mirror + after() enqueue (Wave 1)
+- [x] 19.1-04-PLAN.md — [BLOCKING] Apply migrations to TEST Supabase qmnijlgmdhviwzwfyzlc (Wave 2; depends 01)
+- [x] 19.1-05-PLAN.md — Live-DB tests for persist_csv_daily_returns (Wave 2; depends 04)
+- [x] 19.1-06-PLAN.md — [BLOCKING] Apply migrations to PRODUCTION Supabase (Wave 3; depends 04, 05)
+- [x] 19.1-07-PLAN.md — Railway analytics-service deploy verification (Wave 3; depends 02, 06)
+- [x] 19.1-08-PLAN.md — Vercel USE_COMPUTE_JOBS_QUEUE flip + redeploy (Wave 3; depends 07)
+- [x] 19.1-09-PLAN.md — End-to-end verification via production wizard (Wave 4; depends 08)
+- [x] 19.1-10-PLAN.md — Stop-gap removal + delete feat/csv-analytics-pipeline-* branches (Wave 5; depends 09)

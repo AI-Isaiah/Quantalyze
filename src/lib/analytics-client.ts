@@ -246,10 +246,30 @@ export async function verifyStrategy(data: {
   return parseResponse(VerifyStrategyResponseSchema, result, "/api/verify-strategy");
 }
 
-export async function recomputeMatch(allocatorId: string, force = false) {
+export async function recomputeMatch(
+  allocatorId: string,
+  force: boolean,
+  actorId: string,
+) {
+  // C-PR5-01 (audit-2026-05-07): `actorId` is the authenticated user's
+  // id (`supabase.auth.getUser().user.id`). Forwarding it lets
+  // analytics-service assert the actor is allowed to recompute this
+  // allocator (either actor == allocator or actor is an admin profile)
+  // — defense-in-depth against any future Next.js route that drops the
+  // admin gate before calling this client. Required at the TS-side
+  // signature so every call site MUST compile with the binding
+  // threaded through; a refactor that drops it fails the build before
+  // it can ship.
+  //
+  // The Python schema accepts `actor_id` as optional for backward
+  // compat with non-Next.js callers (cron handlers, debug scripts)
+  // during the production rollout. Once every call site is TS-side
+  // (post-this-PR rollout), the Python field can be promoted to
+  // required in a follow-up PR.
   const data = await analyticsRequest("/api/match/recompute", {
     allocator_id: allocatorId,
     force,
+    actor_id: actorId,
   });
   return parseResponse(RecomputeMatchResponseSchema, data, "/api/match/recompute");
 }

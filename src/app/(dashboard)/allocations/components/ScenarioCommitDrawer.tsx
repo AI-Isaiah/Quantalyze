@@ -57,6 +57,22 @@ export interface ScenarioCommitDrawerProps {
   diffs: ScenarioCommitDiff[];
   /** Called after a FULL-SUCCESS batch (drawer auto-closes). */
   onSubmitSuccess: () => void;
+  /**
+   * NEW-C18-06 (B1, audit-2026-05-07): the composer's scenarioAum (the
+   * USD value of enabled live holdings). Used to recompute
+   * `size_at_decision_usd` from a user-edited `percent_allocated` so
+   * the two fields cannot disagree on the wire shape. Server-side
+   * audit-trust recompute (NEW-C18-04, route.ts) is the authoritative
+   * data-integrity gate; this prop keeps the client-side audit sidecar
+   * (`size_at_decision_usd_client`) coherent with the percent the user
+   * just typed.
+   *
+   * Optional + defaults to 0 so legacy tests / parent surfaces that
+   * don't pass it fall back to the diff's composer-time value (no
+   * regression from pre-fix behavior). Production composer always
+   * supplies a finite number — see ScenarioComposer.tsx render.
+   */
+  scenarioAum?: number;
 }
 
 interface SubmitResponse {
@@ -105,6 +121,7 @@ export function ScenarioCommitDrawer({
   onClose,
   diffs,
   onSubmitSuccess,
+  scenarioAum = 0,
 }: ScenarioCommitDrawerProps) {
   const [state, setState] = useState<SubmitState>({ kind: "idle" });
   const [perRow, setPerRow] = useState<Record<number, PerRowState>>({});
@@ -323,16 +340,54 @@ export function ScenarioCommitDrawer({
             ...(note !== undefined ? { note } : {}),
           };
         case "voluntary_add":
-        case "bridge_recommended":
+        case "bridge_recommended": {
+          // NEW-C18-06 (B1, audit-2026-05-07): when the user edits
+          // `percent_allocated` in the drawer, recompute
+          // `size_at_decision_usd` from `percent × scenarioAum / 100` so
+          // the two fields can't disagree on the wire shape. Server-side
+          // audit-trust (NEW-C18-04) is the authoritative gate; this
+          // keeps the audit sidecar (`size_at_decision_usd_client`)
+          // coherent with the percent that just shipped. When the user
+          // didn't touch the percent, keep the composer-time size; when
+          // `scenarioAum` is not finite or non-positive, fall back to
+          // the composer-time size rather than emit 0 (which would
+          // trigger the server's daily-delta divide-by-zero gate).
+          //
+          // Code-reviewer follow-up (2026-05-28): also bail on
+          // `percent_allocated <= 0`. allFilled() accepts percent >= 0,
+          // so a user clearing the input and Submitting would emit
+          // `size_at_decision_usd: 0` even though the composer's
+          // size>0 gate would have caught the same case before the
+          // drawer opened. Fall back to the composer-time size in that
+          // edge so the wire row keeps a non-zero size — the server's
+          // daily-delta divide-by-zero gate stays satisfied while the
+          // user-supplied percent is still forwarded.
+          const overrideSize =
+            r.percent_allocated !== undefined &&
+            r.percent_allocated > 0 &&
+            Number.isFinite(scenarioAum) &&
+            scenarioAum > 0
+              ? { size_at_decision_usd: (r.percent_allocated / 100) * scenarioAum }
+              : {};
           return {
             ...d,
             ...(r.percent_allocated !== undefined
               ? { percent_allocated: r.percent_allocated }
               : {}),
+            ...overrideSize,
             ...(note !== undefined ? { note } : {}),
           };
+        }
         case "voluntary_modify":
           // voluntary_modify — only `note` is a per-row drawer input.
+          //
+          // NEW-C18-06 caveat: voluntary_modify carries both
+          // `percent_allocated` and `size_at_decision_usd` from the
+          // composer at construction time (ScenarioComposer.tsx ~line
+          // 682-684). The drawer does not surface a percent editor for
+          // this kind today, so the two fields stay consistent without
+          // a recompute here. If a future drawer adds the editor, mirror
+          // the voluntary_add branch above.
           return note !== undefined ? { ...d, note } : { ...d };
         default: {
           const _exhaustive: never = d;
