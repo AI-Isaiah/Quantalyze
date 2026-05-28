@@ -1203,21 +1203,16 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
 // =============================================================================
 // NEW-C09-08 (B1, audit-2026-05-07) — current_weight boundary clamp
 //
-// DEFERRED. See the comment block at src/lib/queries.ts (~line 2910) for
-// the rationale. The `safeFraction` constructor ships in `@/lib/units`
-// today; landing it at the payload boundary requires a co-PR that
-// sweeps the eight downstream aggregators that read
-// `current_weight ?? 0` and either branches on null or excludes the
-// rejected row. Until that lands, gating here would swap a visible
-// 5000% chip for a silent 0% slot in HHI / tracking error / alpha-beta.
-//
-// The spec block below is left in `describe.skip` form so the next
-// PR that does the consumer sweep can flip it back on by deleting
-// `.skip` — no test code to rewrite, just the boundary constructor to
-// re-introduce in queries.ts and the consumer sweep to land alongside.
+// CLOSED. `getMyAllocationDashboard` now gates `current_weight` through
+// `safeFraction` (see src/lib/queries.ts ~line 2910). The blocking
+// aggregator sweep is complete: every downstream `current_weight ?? 0`
+// consumer either normalizes (null→0 ⟺ exclusion), explicitly excludes
+// zero-weight rows, or falls back to an equal-weight target — so clamping
+// a garbage weight to null is a strict improvement over propagating it,
+// with no silent-0 degradation.
 // =============================================================================
 
-describe.skip("NEW-C09-08 — current_weight clamped through safeFraction", () => {
+describe("NEW-C09-08 — current_weight clamped through safeFraction", () => {
   beforeEach(() => {
     resetState();
     state.portfolios = [PORTFOLIO_FIXTURE];
