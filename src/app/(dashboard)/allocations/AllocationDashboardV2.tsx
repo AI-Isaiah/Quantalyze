@@ -46,6 +46,17 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     snapshotCount,
     apiKeys = [],
     allocator_id: allocatorId,
+    // NEW-C09-04 (B14, audit-2026-05-07): the payload already carries the
+    // sync-freshness signal — `allKeysStale` is true when every active
+    // api_key's `last_sync_at` is older than 24h, and `lastSyncAt` is the
+    // newest of them. The legacy `components/KpiStrip.tsx` consumes it via
+    // an `allKeysStale` prop, but the V2 Overview routes through
+    // FactsheetBody, which has no equivalent dim-the-cells path. Surface
+    // the signal as a non-blocking banner above the InsightStrip so the
+    // allocator gets the freshness cue (and a path to retry) instead of
+    // looking at full-confidence numbers computed on stale data.
+    allKeysStale = false,
+    lastSyncAt = null,
   } = props;
 
   // NEW-C06-02: drain the one-shot recovery flag set by useDashboardConfigV2
@@ -203,6 +214,15 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         </div>
       )}
       {portfolio != null && <AlertBanner portfolioId={portfolio.id} />}
+      {/* NEW-C09-04 (B14): freshness banner. Renders only when every active
+          API key's last_sync_at is >24h old AND the dashboard is not actively
+          syncing right now (hasSyncing suppresses to avoid double-messaging
+          with the in-flight SyncProgress pill). Non-blocking: the dashboard
+          renders the last-known-good numbers behind it; the banner just
+          signals the staleness + offers the Connect Exchange path. */}
+      {allKeysStale && !hasSyncing && (
+        <StalenessBanner lastSyncAt={lastSyncAt} />
+      )}
       <InsightStrip
         analytics={analytics}
         portfolioId={portfolio?.id ?? null}
@@ -251,4 +271,57 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       )}
     </div>
   );
+}
+
+/**
+ * NEW-C09-04 (B14, audit-2026-05-07): non-blocking freshness banner.
+ *
+ * Renders above the InsightStrip when every active API key's `last_sync_at`
+ * is older than 24h. The dashboard still renders the last-known-good
+ * analytics behind it; this banner just makes the staleness observable so
+ * the allocator doesn't read full-confidence numbers as fresh truth.
+ *
+ * Uses the warning design tokens already in DESIGN.md (`--color-warning-bg`,
+ * `--color-warning-border`) — same shape as the dashboard-recovery banner
+ * above so the surface stays visually coherent. Dismissal is intentionally
+ * NOT supported: the staleness condition is data-driven (resolves only when
+ * a key actually syncs successfully) so a one-shot dismiss would let the
+ * user re-acquire the wrong mental model on the next page load.
+ */
+function StalenessBanner({ lastSyncAt }: { lastSyncAt: string | null }) {
+  const ageCopy = formatRelativeAge(lastSyncAt);
+  return (
+    <div
+      role="status"
+      data-testid="dashboard-staleness-banner"
+      className="mb-3 rounded-md border px-4 py-2 text-sm"
+      style={{
+        background: "var(--color-warning-bg)",
+        borderColor: "var(--color-warning-border)",
+        color: "var(--color-text-secondary)",
+      }}
+    >
+      <span className="font-medium">Analytics may be stale.</span>{" "}
+      <span>
+        {ageCopy
+          ? `Last successful sync was ${ageCopy}.`
+          : "No successful sync recorded yet."}
+        {" "}Use the API keys panel below to reconnect a key, or wait for
+        the next scheduled sync.
+      </span>
+    </div>
+  );
+}
+
+function formatRelativeAge(iso: string | null): string | null {
+  if (!iso) return null;
+  const ts = new Date(iso).getTime();
+  if (!Number.isFinite(ts)) return null;
+  const diffMs = Date.now() - ts;
+  if (diffMs < 0) return "just now";
+  const hours = Math.floor(diffMs / (60 * 60 * 1000));
+  if (hours < 1) return "less than 1h ago";
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
