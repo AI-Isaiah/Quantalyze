@@ -103,8 +103,14 @@ describe("sendBridgeIntro", () => {
     };
     const fetchMock = vi.fn().mockResolvedValue(badBody);
     installFetch(fetchMock);
+    // H-0435: helper emits a diagnostic console.error here; silence it so
+    // this test's intent (the fallback copy) is the only signal in the output.
+    vi.spyOn(console, "error").mockImplementation(() => {});
 
     const result = await sendBridgeIntro(ARGS);
+    // Red-team F1: HTTP status is NEVER in the user-facing copy. The
+    // diagnostic status is on console.error (asserted in the H-0435 logs test
+    // further below).
     expect(result).toEqual({
       ok: false,
       error: "This comparison isn't available.",
@@ -119,12 +125,42 @@ describe("sendBridgeIntro", () => {
       }),
     );
     installFetch(fetchMock);
+    // Red-team F1: helper now logs an HTTP error diagnostic for non-string
+    // error bodies; silence the noise.
+    vi.spyOn(console, "error").mockImplementation(() => {});
 
     const result = await sendBridgeIntro(ARGS);
     expect(result).toEqual({
       ok: false,
       error: "This comparison isn't available.",
     });
+  });
+
+  // Red-team F1: pin the contract that the HTTP status NEVER leaks into the
+  // user-facing toast, but DOES land on console.error for ops. A regression
+  // that puts `(HTTP ${res.status})` back in the toast copy must fail here.
+  it("logs HTTP status on console.error and keeps the toast clean (F1)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: 123 }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    installFetch(fetchMock);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await sendBridgeIntro(ARGS);
+
+    // User-facing copy: NO digits, NO "HTTP", NO parens.
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBe("This comparison isn't available.");
+    expect(result.error).not.toMatch(/HTTP|\d/);
+    // Diagnostic payload: status IS on console.error.
+    expect(errSpy).toHaveBeenCalledWith(
+      "[sendBridgeIntro] HTTP error:",
+      expect.objectContaining({ status: 503 }),
+    );
   });
 
   it("returns 'Malformed response' when a 2xx omits match_decision_id", async () => {
@@ -164,8 +200,110 @@ describe("sendBridgeIntro", () => {
   it("returns the network-error copy when fetch itself throws", async () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
     installFetch(fetchMock);
+    // H-0435: silence the diagnostic console.error — the dedicated test below
+    // asserts on the log payload; this one just pins the return shape.
+    vi.spyOn(console, "error").mockImplementation(() => {});
 
     const result = await sendBridgeIntro(ARGS);
     expect(result).toEqual({ ok: false, error: "Network error. Please retry." });
+  });
+
+  // H-0435: pin the diagnostic-signal contract so a regression that drops the
+  // console.error (or reverts to a bare `catch {}`) is caught here. A real
+  // connectivity regression in production must produce a log line — without
+  // it the helper is the diagnostic dead-end the original audit flagged.
+  it("logs the underlying error when fetch throws (H-0435 diagnostic signal)", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    installFetch(fetchMock);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await sendBridgeIntro(ARGS);
+
+    expect(errSpy).toHaveBeenCalledWith(
+      "[sendBridgeIntro] failed:",
+      expect.objectContaining({ message: "ECONNREFUSED" }),
+    );
+  });
+
+  it("logs HTTP status when a non-2xx body fails to parse (H-0435)", async () => {
+    const badBody = {
+      ok: false,
+      status: 502,
+      json: () => Promise.reject(new Error("invalid json")),
+    };
+    const fetchMock = vi.fn().mockResolvedValue(badBody);
+    installFetch(fetchMock);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await sendBridgeIntro(ARGS);
+
+    // Red-team F1: user-facing copy is clean; HTTP status is diagnostic-only.
+    expect(result).toEqual({
+      ok: false,
+      error: "This comparison isn't available.",
+    });
+    expect(errSpy).toHaveBeenCalledWith(
+      "[sendBridgeIntro] non-OK body parse failed (HTTP 502):",
+      expect.objectContaining({ message: "invalid json" }),
+    );
+    // F1: the HTTP-error diagnostic also fires (with the parsed empty body).
+    expect(errSpy).toHaveBeenCalledWith(
+      "[sendBridgeIntro] HTTP error:",
+      expect.objectContaining({ status: 502 }),
+    );
+  });
+
+  // H-0435 G3 (pr-test-analyzer): TypeError("Failed to fetch") path — the
+  // canonical browser fingerprint for CORS / offline / DNS failures. Must
+  // produce the network-error copy AND log the underlying TypeError so an
+  // ops dashboard can distinguish a connectivity regression from a backend
+  // 5xx. A bare `catch {}` regression would silently lose this signal.
+  it("returns network-error copy and logs when fetch throws TypeError (CORS/offline) — G3", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(new TypeError("Failed to fetch"));
+    installFetch(fetchMock);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await sendBridgeIntro(ARGS);
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Network error. Please retry.",
+    });
+    expect(errSpy).toHaveBeenCalledWith(
+      "[sendBridgeIntro] failed:",
+      expect.objectContaining({
+        name: "TypeError",
+        message: "Failed to fetch",
+      }),
+    );
+  });
+
+  // H-0435 G3 (pr-test-analyzer): malformed 2xx body — `res.ok === true` but
+  // `res.json()` rejects (HTML masquerading as JSON from a CDN, truncated
+  // stream). Previously this propagated as an unhandled rejection to the
+  // submit handler. The helper must catch it, log, and return the network
+  // copy so the UI sees a structured failure instead of a crash.
+  it("returns network-error copy and logs when a 2xx body fails to parse — G3", async () => {
+    const goodBody = {
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new Error("Unexpected token < in JSON")),
+    };
+    const fetchMock = vi.fn().mockResolvedValue(goodBody);
+    installFetch(fetchMock);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await sendBridgeIntro(ARGS);
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Network error. Please retry.",
+    });
+    expect(errSpy).toHaveBeenCalledWith(
+      "[sendBridgeIntro] 2xx body parse failed:",
+      expect.objectContaining({ message: "Unexpected token < in JSON" }),
+    );
   });
 });

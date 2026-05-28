@@ -184,7 +184,41 @@ export interface PortfolioAnalyticsHolding {
   profile: StrategyProfile;
 }
 
-export interface PortfolioAnalyticsJSONB {
+// H-1021: the `portfolio_analytics` table is a 4-state machine per its
+// CHECK constraint (`computation_status IN ('pending','computing','complete',
+// 'failed')` — supabase/migrations/20260407075303_portfolio_intelligence.sql)
+// and the writer in analytics-service/routers/portfolio.py
+// (`ComputationStatus.{COMPUTING,COMPLETE,FAILED}`, plus the column DEFAULT
+// 'pending'). The previous `PortfolioAnalyticsJSONB` interface modelled only
+// the "complete" branch as a literal type, which misled any consumer that
+// imported it and pulled a non-complete row. The fix is twofold:
+//   (a) rename the interface to `CompletePortfolioAnalyticsJSONB` so its
+//       narrowness is named — this is what the seed generator emits, NOT
+//       a generic DB row;
+//   (b) export a discriminated `PortfolioAnalyticsJSONB` union covering
+//       every legal status arm so any future consumer reading rows directly
+//       from `portfolio_analytics` gets a contract that matches reality
+//       (pending/computing rows have no metrics; failed rows carry an
+//       error message; only `complete` rows carry metrics).
+export type PortfolioAnalyticsJSONB =
+  | CompletePortfolioAnalyticsJSONB
+  | {
+      portfolio_id: string;
+      computation_status: "pending";
+      computation_error: null;
+    }
+  | {
+      portfolio_id: string;
+      computation_status: "computing";
+      computation_error: null;
+    }
+  | {
+      portfolio_id: string;
+      computation_status: "failed";
+      computation_error: string;
+    };
+
+export interface CompletePortfolioAnalyticsJSONB {
   portfolio_id: string;
   computation_status: "complete";
   computation_error: null;
@@ -259,11 +293,29 @@ export function approximateMwr(totalReturnTwr: number): number {
   return totalReturnTwr;
 }
 
+/**
+ * M-0845: the generator's math (`portfolioReturns[i] += h.weight * s[i]`)
+ * assumes Σ weights == 1. Weights summing to 0.7 or 1.3 would silently
+ * scale the entire analytics row, and seed-integrity.test.ts's round-trip
+ * adapter check would not catch it. Tolerate a tiny float drift so seeds
+ * computed via 0.40 + 0.35 + 0.25 still pass. NaN/Infinity weights short-
+ * circuit because `Math.abs(NaN - 1) > 1e-6` is false (NaN comparisons
+ * are all false) — guard with Number.isFinite first.
+ */
+function assertWeightsSumToOne(holdings: PortfolioAnalyticsHolding[]): void {
+  const sum = holdings.reduce((acc, h) => acc + h.weight, 0);
+  if (!Number.isFinite(sum) || Math.abs(sum - 1) > 1e-6) {
+    throw new Error(
+      `generatePortfolioAnalyticsJSONB: holdings.weight must sum to 1.0 (got ${sum})`,
+    );
+  }
+}
+
 export function generatePortfolioAnalyticsJSONB(
   portfolioId: string,
   holdings: PortfolioAnalyticsHolding[],
   seed: number,
-): PortfolioAnalyticsJSONB {
+): CompletePortfolioAnalyticsJSONB {
   if (holdings.length < 2) {
     // Correlation, regime detection, and attribution comparisons all require
     // at least two strategies to be meaningful. Refusing single-holding
@@ -275,6 +327,7 @@ export function generatePortfolioAnalyticsJSONB(
       "generatePortfolioAnalyticsJSONB: holdings must have at least 2 entries",
     );
   }
+  assertWeightsSumToOne(holdings);
 
   const rng = mulberry32(seed);
   const days = 365;
@@ -450,7 +503,8 @@ export function generatePortfolioAnalyticsJSONB(
   // Optimizer suggestions: not required by the /demo hero but shape matches
   // the Python writer so adaptPortfolioAnalytics round-trips cleanly. We leave
   // the array empty — the page treats empty arrays as null, which is fine.
-  const optimizerSuggestions: PortfolioAnalyticsJSONB["optimizer_suggestions"] = [];
+  const optimizerSuggestions: CompletePortfolioAnalyticsJSONB["optimizer_suggestions"] =
+    [];
 
   // Rolling correlation — a single representative pair for the first two
   // holdings, bucketed into 12 monthly points. Keyed by "<sidA>:<sidB>".
@@ -554,6 +608,19 @@ export function generatePortfolioAnalyticsJSONB(
     rolling_correlation: rolling,
   };
 }
+
+// ---------- StrategyIdx (exported for type-level pin in tests) ----------
+//
+// H-1022 (G2 / pr-test-analyzer): `StrategyIdx` is the legal-index union over
+// STRATEGY_UUIDS — `0 | 1 | ... | 7` for the current 8-entry tuple. Exported so
+// `src/__tests__/seed-demo-data-types.test.ts` can `@ts-expect-error` an
+// out-of-bounds index at compile time. The previous inline definition inside
+// `main()` was unreachable from the test boundary. Adding a 9th UUID auto-
+// widens the type via the `as const` tuple — no manual edit needed here.
+export type StrategyIdx = Exclude<
+  Partial<typeof STRATEGY_UUIDS>["length"],
+  typeof STRATEGY_UUIDS["length"]
+>;
 
 // ---------- Main ----------
 
@@ -851,13 +918,25 @@ async function main() {
   //
   // All three use the same idempotent upsert-then-bulk-membership pattern.
 
+  // H-1022: narrow strategy_idx to the literal indices that exist in
+  // STRATEGY_UUIDS. Definition lives at module scope above (`export type
+  // StrategyIdx`) so tests can pin it via `@ts-expect-error`. A typo of 8
+  // would compile (number is unbounded), then `STRATEGY_UUIDS[8]` returns
+  // undefined → opaque PostgREST error, and `STRATEGY_PROFILES[8]` crashes
+  // deep inside gaussian() with "Cannot read properties of undefined".
+  // M-0847: pin portfolio_id to the literal persona UUIDs so the analyticsSeeds
+  // exhaustiveness check below can index by `p.portfolio_id` without a cast.
+  type PersonaPortfolioId =
+    | typeof ACTIVE_PORTFOLIO_ID
+    | typeof COLD_PORTFOLIO_ID
+    | typeof STALLED_PORTFOLIO_ID;
   interface PersonaPortfolio {
-    portfolio_id: string;
+    portfolio_id: PersonaPortfolioId;
     user_id: string;
     name: string;
     description: string;
     memberships: Array<{
-      strategy_idx: number;
+      strategy_idx: StrategyIdx;
       current_weight: number;
       allocated_amount: number;
     }>;
@@ -906,28 +985,48 @@ async function main() {
     },
   ];
 
+  // Red-team F4: each persona's portfolio + memberships block is wrapped in
+  // try/catch. The previous code let any per-persona failure (a bad weight
+  // sum, a transient PostgREST 409 on portfolio_strategies, an FK violation
+  // from a stale strategy id) abort the loop mid-flight — leaving the test
+  // DB in a half-seeded state (some persona portfolios upserted, others
+  // missing). E2E suites then ran against that partial DB and produced
+  // confusing red diagnostics that were not the real bug. Per-persona
+  // isolation guarantees a single bad persona is logged + skipped without
+  // poisoning the rest of the seed run.
   for (const p of personaPortfolios) {
-    const { error: portErr } = await supabase.from("portfolios").upsert(
-      {
-        id: p.portfolio_id,
-        user_id: p.user_id,
-        name: p.name,
-        description: p.description,
-      },
-      { onConflict: "id" },
-    );
-    if (portErr) throw portErr;
+    try {
+      const { error: portErr } = await supabase.from("portfolios").upsert(
+        {
+          id: p.portfolio_id,
+          user_id: p.user_id,
+          name: p.name,
+          description: p.description,
+        },
+        { onConflict: "id" },
+      );
+      if (portErr) throw portErr;
 
-    const { error: psErr } = await supabase.from("portfolio_strategies").upsert(
-      p.memberships.map((m) => ({
-        portfolio_id: p.portfolio_id,
-        strategy_id: STRATEGY_UUIDS[m.strategy_idx],
-        current_weight: m.current_weight,
-        allocated_amount: m.allocated_amount,
-      })),
-      { onConflict: "portfolio_id,strategy_id" },
-    );
-    if (psErr) throw psErr;
+      const { error: psErr } = await supabase
+        .from("portfolio_strategies")
+        .upsert(
+          p.memberships.map((m) => ({
+            portfolio_id: p.portfolio_id,
+            strategy_id: STRATEGY_UUIDS[m.strategy_idx],
+            current_weight: m.current_weight,
+            allocated_amount: m.allocated_amount,
+          })),
+          { onConflict: "portfolio_id,strategy_id" },
+        );
+      if (psErr) throw psErr;
+    } catch (err) {
+      console.error(
+        `[seed] Persona ${p.name} (${p.portfolio_id}) FAILED, skipping. ` +
+          `Other personas will continue. Cause:`,
+        err,
+      );
+      continue;
+    }
   }
 
   console.log("[seed] Inserting deterministic portfolio_analytics rows ...");
@@ -936,33 +1035,52 @@ async function main() {
   // analytics rows are already gone — we just need a single INSERT per
   // portfolio here. Distinct seeds keep each persona's curve unique but
   // byte-identical across runs.
-  const analyticsSeeds: Record<string, number> = {
+  // M-0847: key the seeds map by the literal persona-portfolio UUIDs so a
+  // future contributor who adds a 4th persona but forgets to extend this
+  // map gets a TS error rather than silent `mulberry32(undefined)` →
+  // NaN-saturated analytics rows. `satisfies` enforces exhaustiveness
+  // without widening the inferred value type.
+  const analyticsSeeds = {
     [ACTIVE_PORTFOLIO_ID]: 9001,
     [COLD_PORTFOLIO_ID]: 9002,
     [STALLED_PORTFOLIO_ID]: 9003,
-  };
+  } satisfies Record<PersonaPortfolioId, number>;
 
+  // Red-team F4: same try/catch isolation applies to the analytics phase.
+  // assertWeightsSumToOne throws synchronously inside
+  // generatePortfolioAnalyticsJSONB; a single bad persona's weights would
+  // otherwise abort the whole analytics insert phase. Skip + log so the
+  // healthy personas still get their analytics rows.
   for (const p of personaPortfolios) {
-    const holdings: PortfolioAnalyticsHolding[] = p.memberships.map((m) => {
-      const profile = STRATEGY_PROFILES[m.strategy_idx];
-      return {
-        strategy_id: profile.id,
-        strategy_name: profile.name,
-        weight: m.current_weight,
-        profile,
-      };
-    });
+    try {
+      const holdings: PortfolioAnalyticsHolding[] = p.memberships.map((m) => {
+        const profile = STRATEGY_PROFILES[m.strategy_idx];
+        return {
+          strategy_id: profile.id,
+          strategy_name: profile.name,
+          weight: m.current_weight,
+          profile,
+        };
+      });
 
-    const payload = generatePortfolioAnalyticsJSONB(
-      p.portfolio_id,
-      holdings,
-      analyticsSeeds[p.portfolio_id],
-    );
+      const payload = generatePortfolioAnalyticsJSONB(
+        p.portfolio_id,
+        holdings,
+        analyticsSeeds[p.portfolio_id],
+      );
 
-    const { error: paErr } = await supabase
-      .from("portfolio_analytics")
-      .insert(payload);
-    if (paErr) throw paErr;
+      const { error: paErr } = await supabase
+        .from("portfolio_analytics")
+        .insert(payload);
+      if (paErr) throw paErr;
+    } catch (err) {
+      console.error(
+        `[seed] Persona analytics ${p.name} (${p.portfolio_id}) FAILED, skipping. ` +
+          `Other persona analytics will continue. Cause:`,
+        err,
+      );
+      continue;
+    }
   }
 
   console.log("[seed] Inserting 1 historical match_decision + contact_request ...");
@@ -1046,7 +1164,14 @@ async function main() {
 // opt-out `SEED_SKIP_MAIN` keeps the script importable even when the argv
 // heuristic fails (e.g., tsx resolving through a temp `.js` cache). The
 // argv check stays as a positive signal for the common tsx run.
-function isScriptEntryPoint(): boolean {
+// H-1023: exported so the regression test can assert on the predicate
+// directly. The denylist shape (VITEST + SEED_SKIP_MAIN) is the only thing
+// standing between a stray `npx tsx --test` and a destructive wipe of the
+// shared test-Supabase project; an undetected refactor that flips the
+// VITEST branch to `return true` would slip past the import-time
+// `createClient`-was-never-called check (because env-validation throws
+// earlier). Direct coverage on the predicate is the missing safety net.
+export function isScriptEntryPoint(): boolean {
   if (process.env.VITEST || process.env.VITEST_WORKER_ID) return false;
   if (process.env.SEED_SKIP_MAIN) return false;
   const entryPath = process.argv[1] ?? "";
