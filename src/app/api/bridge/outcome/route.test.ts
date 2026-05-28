@@ -196,6 +196,37 @@ describe("POST /api/bridge/outcome", () => {
     });
   });
 
+  it("NEW-C18-02 — accepts 60% and 100% allocations (canonical [.,100]), rejects >100", async () => {
+    // WHY: bridge_outcomes.percent_allocated is canonically [0,100] (the
+    // stale [0.1,50] inline column CHECK was dropped by mig 20260528223200).
+    // Pre-fix this route capped at 50 and 422-rejected legitimate 60%/75%/100%
+    // allocations — the same range-drift class as the scenario-commit bug.
+    const { POST } = await import("./route");
+    for (const pct of [60, 100]) {
+      const res = await POST(
+        makeRequest({
+          strategy_id: STRAT_ID,
+          kind: "allocated",
+          percent_allocated: pct,
+          allocated_at: ALLOCATED_AT,
+          note: null,
+        }),
+      );
+      expect(res.status).toBe(200);
+    }
+    // > 100 is still rejected by Zod (canonical upper bound).
+    const tooHigh = await POST(
+      makeRequest({
+        strategy_id: STRAT_ID,
+        kind: "allocated",
+        percent_allocated: 100.01,
+        allocated_at: ALLOCATED_AT,
+        note: null,
+      }),
+    );
+    expect(tooHigh.status).toBe(400);
+  });
+
   it("TC2 — happy rejected: 200 + rejection_reason persisted + bridge_outcome.record audit", async () => {
     STATE.insertedRow = {
       id: OUTCOME_ID,

@@ -20,7 +20,14 @@ const BODY_SCHEMA = z
   .object({
     strategy_id: z.string().uuid(),
     kind: z.enum(["allocated", "rejected"]),
-    percent_allocated: z.number().min(0.1).max(50).optional(),
+    // NEW-C18-02 (CL1 review, 2026-05-28): max is the canonical [.,100] that
+    // bridge_outcomes.percent_allocated now enforces (the stale [0.1,50] inline
+    // column CHECK was dropped by mig 20260528223200). Pre-fix this writer
+    // capped at 50, silently 422-rejecting legitimate 60%/75%/100% allocations
+    // — the same range-drift class as the scenario-commit path. min stays 0.1:
+    // an "allocated" outcome must be strictly positive (use kind='rejected' for
+    // a non-allocation), which is a per-endpoint rule, not column drift.
+    percent_allocated: z.number().min(0.1).max(100).optional(),
     allocated_at: z.string().date().optional(),
     rejection_reason: z.enum(REJECTION_REASONS).optional(),
     note: z.string().max(2000).nullish(),

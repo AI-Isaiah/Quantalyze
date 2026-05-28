@@ -51,7 +51,7 @@ import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAu
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
-import { logAuditEvent } from "@/lib/audit";
+import { emit, type AuditEvent } from "@/lib/audit";
 import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
 
 export const runtime = "nodejs";
@@ -300,6 +300,22 @@ interface SuccessBody {
 // ---------------------------------------------------------------------------
 // POST handler
 // ---------------------------------------------------------------------------
+
+/**
+ * Run a task after the response flushes. Uses Next's after() in a request
+ * scope; falls back to a microtask when after() throws outside one
+ * (vitest/cron/prerender). Single home for the fallback contract that the
+ * audit-flush and onboarding-stamp paths both rely on (mirrors src/lib/audit.ts).
+ */
+function scheduleBackground(task: () => Promise<void>): void {
+  try {
+    after(task);
+  } catch {
+    queueMicrotask(() => {
+      void task();
+    });
+  }
+}
 
 export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUser): Promise<NextResponse> => {
   const rl = await checkLimit(userActionLimiter, `scenario_commit:${user.id}`);
@@ -702,6 +718,15 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   }
 
   if (!isCachedReplay) {
+    // NEW-C18-11 (audit-2026-05-07): collect the per-row audit events and
+    // flush them as ONE batch below so a HARD audit failure becomes a
+    // distinct, commit-scoped alert instead of N swallowed fire-and-forget
+    // emits. (Pre-fix this loop called logAuditEvent per row, whose
+    // `.catch(() => {})` hid the re-throw — emit() reported each failure to
+    // Sentry but with no scenario-commit tag / commit_batch_id, so an
+    // operator could not tell that THIS financial commit lost its trail,
+    // and a cached replay returned 200 trusting the original had emitted.)
+    const auditEvents: AuditEvent[] = [];
     for (const row of recorded) {
       // audit-2026-05-07 H-0254: pre-fix the metadata captured only
       // `kind / source / bridge_outcome_id`. A scenario commit is a
@@ -786,7 +811,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
         }
       }
 
-      logAuditEvent(supabase, {
+      auditEvents.push({
         action: "match.decision_record",
         entity_type: "match_decision",
         entity_id: row.match_decision_id,
@@ -824,6 +849,61 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
         },
       });
     }
+
+    // NEW-C18-11: flush the whole financial-commit audit trail in ONE
+    // after() callback. Stays non-blocking (response latency unchanged),
+    // but a HARD audit failure (permission_denied / unknown — the classes
+    // emit() re-throws after Sentry-reporting) now raises a single
+    // commit-scoped `scenario_commit_audit_incomplete` alert carrying the
+    // commit_batch_id, so ops can find and backfill the exact commit whose
+    // Art.-grade financial trail dropped. transient/unauthenticated emits
+    // resolve (emit swallows them) and stay infra-level noise, as before.
+    // Kick the emits off synchronously (so the RPCs start during the
+    // request, matching the prior per-row behaviour) and await them only in
+    // after() for the completeness alert — the response itself never waits.
+    //
+    // CRITICAL (CL1 review, silent-failure H8 / red-team M8): attach the
+    // settle handler in the SAME synchronous turn each emit is launched —
+    // mirroring logAuditEvent's per-promise `.catch(() => {})` (audit.ts:662).
+    // emit() re-throws on permission_denied/unknown, and on Vercel after()
+    // runs flushAuditTrail in a LATER macrotask (post-response). If we only
+    // attached the handler via Promise.allSettled inside that callback, a
+    // rejection settling first would be momentarily handler-less → Node fires
+    // unhandledRejection → the Sentry SDK auto-captures an UN-scoped duplicate
+    // event (exactly the noise this fix removes) and risks process abort under
+    // --unhandled-rejections=throw. `.then(ok, fail)` here is the per-promise
+    // guard; flushAuditTrail then just counts the booleans.
+    const auditEmissions = auditEvents.map((event) =>
+      emit(supabase, event).then(
+        () => true,
+        () => false,
+      ),
+    );
+    const flushAuditTrail = async () => {
+      const results = await Promise.all(auditEmissions);
+      const failed = results.filter((ok) => !ok).length;
+      if (failed > 0) {
+        captureToSentry(
+          new Error(
+            "scenario_commit: audit trail incomplete — hard audit emit failure",
+          ),
+          {
+            tags: {
+              area: "scenario-commit",
+              scenario_commit_audit_incomplete: "true",
+            },
+            extra: {
+              commit_batch_id: commitBatchId,
+              allocator_id: user.id,
+              failed,
+              total: auditEvents.length,
+            },
+            level: "error",
+          },
+        );
+      }
+    };
+    scheduleBackground(flushAuditTrail);
   }
 
   const successBody: SuccessBody = {
@@ -842,11 +922,10 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   // to Sentry so a regression inside stampOutcomeMarker (TypeError /
   // ReferenceError) doesn't silently break the onboarding funnel.
   //
-  // The try/queueMicrotask fallback mirrors src/lib/audit.ts:374 — outside
-  // a request scope (vitest, cron, prerender) `after()` throws, so we
-  // fall back to a microtask scheduler best-effort. The admin client is
-  // created lazily inside the callback so non-success paths don't pay
-  // the construction cost.
+  // Scheduled via scheduleBackground() (see helper above) — after() throws
+  // outside a request scope (vitest, cron, prerender), so it falls back to a
+  // microtask, mirroring src/lib/audit.ts. The admin client is created lazily
+  // inside the callback so non-success paths don't pay the construction cost.
   const stampMarker = async () => {
     const admin = createAdminClient();
     try {
@@ -863,13 +942,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
       });
     }
   };
-  try {
-    after(stampMarker);
-  } catch {
-    queueMicrotask(() => {
-      void stampMarker();
-    });
-  }
+  scheduleBackground(stampMarker);
 
   return NextResponse.json(successBody, {
     status: 200,
