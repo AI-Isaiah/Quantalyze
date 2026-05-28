@@ -1194,6 +1194,7 @@ describe("encodeExportBundle — direct unit tests (red-team #4)", () => {
       ],
       truncated_at_size_cap: false,
       parent_id_truncated_tables: [],
+      parent_id_null_dropped_tables: [],
       partial: false,
       failed_tables: [],
     };
@@ -1508,9 +1509,14 @@ describe("redactAuditLogForUser — top-level user_id scrubbed on entity/meta-ta
  * should still build with only the affected child rows missing.
  */
 describe("collectUserExportBundle — indirect null parent IDs are tolerated (red-team #3)", () => {
-  it("a parent row with id=null does NOT trigger fetch_error on its child tables", async () => {
+  it("NEW-C16-08: a null parent id does NOT fetch_error, but DOES mark the child table parent_id_null_dropped (incomplete, not silently complete)", async () => {
     // Strategies parent returns one row with id=null among real rows.
-    // Pre-fix this triggered fail-loud and refused the export.
+    // Pre-fix (red-team #3) this triggered fail-loud and refused the export;
+    // then the over-correction shipped the bundle as COMPLETE (partial:false,
+    // no signal) even though child rows of the null-keyed parent are absent.
+    // NEW-C16-08: keep the no-lockout property (no fetch_error / partial), but
+    // surface parent_id_null_dropped_tables so the route refuses to ship it as
+    // a complete Art. 15 export.
     const parentRowsWithNull = [
       { id: "s-1" },
       { id: null },
@@ -1561,13 +1567,18 @@ describe("collectUserExportBundle — indirect null parent IDs are tolerated (re
     const bundle = await collectUserExportBundle(mock as any, "12121212-1212-1212-1212-121212121212");
     consoleWarnSpy.mockRestore();
 
-    // The bundle is NOT marked partial; trades row was fetched OK.
+    // No hard failure (red-team #3 contract preserved): not partial, no
+    // fetch_error, the trades row that DID resolve is present.
     expect(bundle.partial).toBe(false);
     expect(bundle.failed_tables).toEqual([]);
     const tradesEntry = bundle.tables.find((t) => t.table === "trades");
     expect(tradesEntry).toBeDefined();
     expect(tradesEntry!.fetch_error).toBeNull();
     expect(tradesEntry!.row_count).toBe(1);
+    // NEW-C16-08: but the dropped null parent IS surfaced so the bundle is
+    // honestly incomplete (the route refuses to mint a signed URL on this).
+    // Fails without the fix: pre-fix parent_id_null_dropped_tables was always [].
+    expect(bundle.parent_id_null_dropped_tables).toContain("trades");
   });
 
   it("a non-null, non-string parent id STILL triggers fetch_error (bigint/composite case)", async () => {
@@ -1915,6 +1926,7 @@ describe("rowsForTable + projectedRowsForTable — wired into production (red-te
       tables: [],
       truncated_at_size_cap: false,
       parent_id_truncated_tables: [],
+      parent_id_null_dropped_tables: [],
       partial: false,
       failed_tables: [],
     };
@@ -1960,6 +1972,7 @@ describe("rowsForTable + projectedRowsForTable — wired into production (red-te
       tables: [],
       truncated_at_size_cap: false,
       parent_id_truncated_tables: [],
+      parent_id_null_dropped_tables: [],
       partial: false,
       failed_tables: [],
     };

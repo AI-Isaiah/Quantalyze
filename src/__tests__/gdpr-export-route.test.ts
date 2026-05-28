@@ -223,6 +223,7 @@ describe("POST /api/account/export — orphan cleanup on sign failure (I2)", () 
       ],
       truncated_at_size_cap: false,
       parent_id_truncated_tables: [],
+      parent_id_null_dropped_tables: [],
       partial: false,
       failed_tables: [],
     });
@@ -346,6 +347,7 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
       ],
       truncated_at_size_cap: false,
       parent_id_truncated_tables: [],
+      parent_id_null_dropped_tables: [],
       partial: false,
       failed_tables: [],
     });
@@ -439,6 +441,7 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
       ],
       truncated_at_size_cap: true,
       parent_id_truncated_tables: ["strategy_analytics"],
+      parent_id_null_dropped_tables: [],
       partial: false,
       failed_tables: [],
     });
@@ -537,6 +540,66 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     consoleErrorSpy.mockRestore();
   });
 
+  it("NEW-C16-08: refuses to mint URL (+ refunds token) when a NULL-PK parent dropped child rows", async () => {
+    // A bundle that is otherwise complete (not partial, no fetch_error, no
+    // cap hit) but dropped a NULL-keyed parent row → child rows missing.
+    // Pre-fix this shipped as a 200 + signed URL (falsely complete). The
+    // route must now refuse with the SAME shape as the cap path, and the
+    // server-log reason must be the accurate parent_id_null_dropped (NOT the
+    // misleading 2000-row cap message).
+    collectBundleMock.mockResolvedValueOnce({
+      schema_version: 1,
+      user_id: "user-nulldrop",
+      generated_at: "2026-05-28T00:00:00Z",
+      total_row_count: 1,
+      tables: [
+        {
+          table: "trades",
+          rows: [],
+          row_count: 1,
+          truncated_at_cap: false,
+          parent_id_truncated: false,
+          fetch_error: null,
+        },
+      ],
+      truncated_at_size_cap: false,
+      parent_id_truncated_tables: [],
+      parent_id_null_dropped_tables: ["trades"],
+      partial: false,
+      failed_tables: [],
+    });
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest());
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe("export_truncated");
+
+    // Gate runs before storage — no URL minted, no upload cost.
+    expect(uploadMock).not.toHaveBeenCalled();
+    expect(createSignedUrlMock).not.toHaveBeenCalled();
+
+    // Server log carries the ACCURATE reason (not parent_id_cap_reached).
+    const logCall = consoleErrorSpy.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].includes("[api/account/export]"),
+    );
+    expect(logCall).toBeDefined();
+    const ctx = logCall![1] as Record<string, unknown>;
+    expect(ctx.parent_id_null_dropped_tables).toEqual(["trades"]);
+    const reasons = ctx.incomplete_reasons as string[];
+    expect(
+      reasons.some(
+        (r) => r.startsWith("parent_id_null_dropped") && r.includes("trades"),
+      ),
+    ).toBe(true);
+
+    // Refusal refunds the 1/day token so the subject is not locked out.
+    expect(resetUsedTokensMock).toHaveBeenCalledTimes(1);
+    consoleErrorSpy.mockRestore();
+  });
+
   it("emits account.export audit event with object_key_sha256 + expires_at + table_count + total_row_count", async () => {
     const { POST } = await loadRoute();
     const res = await POST(makeRequest());
@@ -603,6 +666,7 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
       ],
       truncated_at_size_cap: false,
       parent_id_truncated_tables: [],
+      parent_id_null_dropped_tables: [],
       partial: false,
       failed_tables: [],
     });
@@ -656,6 +720,7 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       ],
       truncated_at_size_cap: false,
       parent_id_truncated_tables: [],
+      parent_id_null_dropped_tables: [],
       partial: false,
       failed_tables: [],
     });
@@ -793,6 +858,7 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       ],
       truncated_at_size_cap: false,
       parent_id_truncated_tables: [],
+      parent_id_null_dropped_tables: [],
       partial: true,
       failed_tables: ["api_keys"],
     });
@@ -915,6 +981,7 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       ],
       truncated_at_size_cap: false,
       parent_id_truncated_tables: [],
+      parent_id_null_dropped_tables: [],
       partial: false,
       failed_tables: [],
     });

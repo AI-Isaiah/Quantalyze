@@ -1160,6 +1160,12 @@ export interface ExportBundleV1 {
   tables: ExportTablePayload[];
   truncated_at_size_cap: boolean;
   parent_id_truncated_tables: string[];
+  /**
+   * NEW-C16-08: indirect tables whose parent-id probe dropped a row with a
+   * NULL primary key, so child rows of that parent are absent. Marks the
+   * bundle incomplete with a reason distinct from the 2000-row cap.
+   */
+  parent_id_null_dropped_tables: string[];
   partial: boolean;
   failed_tables: string[];
 }
@@ -1289,6 +1295,7 @@ export function encodeExportBundle(bundle: ExportBundle): Uint8Array {
   const closer =
     `],"truncated_at_size_cap":${safeStringify(bundle.truncated_at_size_cap)},` +
     `"parent_id_truncated_tables":${safeStringify(bundle.parent_id_truncated_tables)},` +
+    `"parent_id_null_dropped_tables":${safeStringify(bundle.parent_id_null_dropped_tables)},` +
     `"partial":${safeStringify(bundle.partial)},` +
     `"failed_tables":${safeStringify(bundle.failed_tables)}}`;
   chunks.push(SHARED_ENCODER.encode(closer));
@@ -1384,6 +1391,8 @@ export async function collectUserExportBundle(
     rows: unknown[];
     error: string | null;
     parent_id_truncated: boolean;
+    /** NEW-C16-08: indirect parent probe dropped NULL-PK rows (child rows missing). */
+    parent_id_null_dropped: boolean;
     /**
      * Audit 2026-05-07 (specialist apply, code-reviewer HIGH conf-9):
      * true when the source SELECT returned > EXPORT_PER_TABLE_ROW_CAP
@@ -1416,6 +1425,7 @@ export async function collectUserExportBundle(
             rows: [],
             error: result.error,
             parent_id_truncated: result.parent_id_truncated,
+            parent_id_null_dropped: result.parent_id_null_dropped,
             source_truncated: result.source_truncated,
           };
         } else {
@@ -1424,6 +1434,7 @@ export async function collectUserExportBundle(
             rows: result.rows,
             error: null,
             parent_id_truncated: result.parent_id_truncated,
+            parent_id_null_dropped: result.parent_id_null_dropped,
             source_truncated: result.source_truncated,
           };
         }
@@ -1440,6 +1451,7 @@ export async function collectUserExportBundle(
           rows: [],
           error: reason,
           parent_id_truncated: false,
+          parent_id_null_dropped: false,
           source_truncated: false,
         };
       }
@@ -1462,6 +1474,10 @@ export async function collectUserExportBundle(
   const tables: ExportTablePayload[] = [];
   const failedTables: string[] = [];
   const parentTruncatedTables: string[] = [];
+  // NEW-C16-08: indirect tables whose probe dropped a NULL-PK parent row.
+  // Tracked separately from the 2000-row cap so the route's refusal reason
+  // is accurate (the data subject is told WHY child rows are missing).
+  const parentNullDroppedTables: string[] = [];
   let totalRowCount = 0;
   const encoder = new TextEncoder();
 
@@ -1482,6 +1498,7 @@ export async function collectUserExportBundle(
     tables: [],
     truncated_at_size_cap: false,
     parent_id_truncated_tables: [],
+    parent_id_null_dropped_tables: [],
     partial: false,
     failed_tables: [],
   };
@@ -1500,13 +1517,18 @@ export async function collectUserExportBundle(
   // `encodeExportBundle` can stitch them directly into a Uint8Array.
   for (const entry of fetched) {
     if (!entry) continue;
-    const { spec, rows, error: fetchError, parent_id_truncated, source_truncated } = entry;
+    const { spec, rows, error: fetchError, parent_id_truncated, parent_id_null_dropped, source_truncated } = entry;
 
     if (fetchError) {
       failedTables.push(spec.table);
     }
     if (parent_id_truncated) {
       parentTruncatedTables.push(spec.table);
+    }
+    // NEW-C16-08: a NULL-PK parent drop makes the bundle incomplete (child
+    // rows missing) — surface it so the route refuses to ship it as complete.
+    if (parent_id_null_dropped) {
+      parentNullDroppedTables.push(spec.table);
     }
 
     // Reserve the per-table wrapper bytes BEFORE counting rows so the
@@ -1627,6 +1649,7 @@ export async function collectUserExportBundle(
     tables,
     truncated_at_size_cap: truncatedAtSizeCap,
     parent_id_truncated_tables: parentTruncatedTables,
+    parent_id_null_dropped_tables: parentNullDroppedTables,
     partial: failedTables.length > 0,
     failed_tables: failedTables,
   };
@@ -1661,6 +1684,20 @@ interface FetchRowsResult {
    * See audit 2026-05-07 H-0453.
    */
   parent_id_truncated: boolean;
+  /**
+   * NEW-C16-08 (audit 2026-05-26, silent-failure): true when the
+   * indirect parent-id probe dropped one or more rows with a NULL
+   * primary key, so child rows of those parents are absent from the
+   * bundle. Distinct from `parent_id_truncated` (the 2000-row cap):
+   * the user-facing incompleteness REASON differs, so it carries its
+   * own flag + bundle list rather than overloading the cap signal.
+   * Like the cap path it marks the bundle incomplete (the route refuses
+   * with a 500 `export_truncated` + a rate-limit token refund), NOT a hard
+   * fetch failure (that would re-break the
+   * red-team #3 contract that one legacy null row must not lock a data
+   * subject out of their Art. 15 export).
+   */
+  parent_id_null_dropped: boolean;
   /**
    * Audit 2026-05-07 (specialist apply, code-reviewer HIGH conf-9):
    * true when the SOURCE-side SELECT hit `EXPORT_PER_TABLE_ROW_CAP`
@@ -1792,6 +1829,7 @@ async function fetchRowsForSpec(
         rows: [],
         error: msg,
         parent_id_truncated: false,
+        parent_id_null_dropped: false,
         source_truncated: false,
       };
     }
@@ -1800,6 +1838,7 @@ async function fetchRowsForSpec(
       rows: arr,
       error: null,
       parent_id_truncated: false,
+      parent_id_null_dropped: false,
       // No projection drops rows for direct specs, so the post-fetch
       // length matches the SQL cap exactly. The Phase 2 fallback
       // (rows.length >= cap) still applies symmetrically, but setting
@@ -1858,6 +1897,7 @@ async function fetchRowsForSpec(
         rows: [],
         error: msg,
         parent_id_truncated: false,
+        parent_id_null_dropped: false,
         source_truncated: false,
       };
     }
@@ -1874,6 +1914,7 @@ async function fetchRowsForSpec(
       ),
       error: null,
       parent_id_truncated: false,
+      parent_id_null_dropped: false,
       source_truncated: sourceTruncated,
     };
   }
@@ -1895,6 +1936,7 @@ async function fetchRowsForSpec(
       rows: [],
       error: msg,
       parent_id_truncated: false,
+      parent_id_null_dropped: false,
       source_truncated: false,
     };
   }
@@ -1940,6 +1982,10 @@ async function fetchRowsForSpec(
   const parentIds = nonNullParentIds.filter(
     (v): v is string => typeof v === "string",
   );
+  // NEW-C16-08: did the probe drop any NULL-PK parent rows? Hoisted so
+  // every return path below can report it. Child rows of NULL-keyed
+  // parents are silently absent without this signal.
+  const parentIdNullDropped = nonNullParentIds.length < parentIdsRaw.length;
   if (parentIds.length < nonNullParentIds.length) {
     // Genuine type mismatch: non-null, non-string. This is the bigint
     // / composite PK case the original fail-loud targeted. Bundle gate
@@ -1951,10 +1997,11 @@ async function fetchRowsForSpec(
       rows: [],
       error: msg,
       parent_id_truncated: false,
+      parent_id_null_dropped: parentIdNullDropped,
       source_truncated: false,
     };
   }
-  if (nonNullParentIds.length < parentIdsRaw.length) {
+  if (parentIdNullDropped) {
     // Null parent ids: legitimate dropped rows. Log so schema drift is
     // observable but DO NOT fail the bundle — the user's other rows
     // are still exportable.
@@ -1989,6 +2036,7 @@ async function fetchRowsForSpec(
       rows: [],
       error: null,
       parent_id_truncated: parentIdTruncated,
+      parent_id_null_dropped: parentIdNullDropped,
       source_truncated: false,
     };
   }
@@ -2093,6 +2141,7 @@ async function fetchRowsForSpec(
       rows: [],
       error: aggregatedError,
       parent_id_truncated: false,
+      parent_id_null_dropped: parentIdNullDropped,
       source_truncated: false,
     };
   }
@@ -2100,6 +2149,7 @@ async function fetchRowsForSpec(
     rows: aggregated,
     error: null,
     parent_id_truncated: parentIdTruncated,
+    parent_id_null_dropped: parentIdNullDropped,
     source_truncated:
       aggregatedTruncated || aggregated.length >= EXPORT_PER_TABLE_ROW_CAP,
   };

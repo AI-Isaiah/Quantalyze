@@ -56,6 +56,7 @@ const STATE = vi.hoisted(() => ({
         failed_tables: string[];
         truncated_at_size_cap: boolean;
         parent_id_truncated_tables: string[];
+        parent_id_null_dropped_tables: string[];
         total_row_count: number;
       },
   bundleSubjectId: null as string | null,
@@ -82,6 +83,7 @@ function defaultBundle() {
     failed_tables: [],
     truncated_at_size_cap: false,
     parent_id_truncated_tables: [],
+    parent_id_null_dropped_tables: [],
     total_row_count: 1,
   };
 }
