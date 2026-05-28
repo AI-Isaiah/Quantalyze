@@ -40,6 +40,7 @@ from sentry_sdk.integrations.starlette import StarletteIntegration
 # that have NOT yet been promoted to the canonical denylist.
 from services.redact import (
     scrub_pii as _redact_scrub_pii,
+    scrub_freeform_string as _redact_scrub_freeform_string,
     DENYLIST_EXACT as _CANONICAL_DENYLIST,
 )
 
@@ -240,6 +241,17 @@ def _redact_before_send(event: dict[str, Any], hint: dict[str, Any] | None) -> d
                 for exc in values:
                     if not isinstance(exc, dict):
                         continue
+                    # NEW-C13-10 / Security H conf=8 (2026-05-28 specialist):
+                    # LoggingIntegration sets exception.values[i].value to
+                    # str(exc) verbatim — pre-fix the walker only scrubbed
+                    # stacktrace frame vars, leaking HMAC-bearing ccxt
+                    # messages. Scrub the `value` string before egress.
+                    val = exc.get("value")
+                    if isinstance(val, str):
+                        try:
+                            exc["value"] = _redact_scrub_freeform_string(val)
+                        except Exception:  # pragma: no cover — defensive
+                            pass
                     stacktrace = exc.get("stacktrace")
                     if not isinstance(stacktrace, dict):
                         continue

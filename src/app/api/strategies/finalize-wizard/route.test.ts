@@ -773,7 +773,11 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     consoleErr.mockRestore();
   });
 
-  it("maps 22023 (invalid_parameter_value) to 403 + sanitized 'This draft cannot be finalized'", async () => {
+  it("audit-2026-05-07 H-0321: maps 22023 (invalid_parameter_value) to 409 with code='draft_state_invalid'", async () => {
+    // PRE-FIX: 22023 lumped with 42501 → 403 "This draft cannot be finalized".
+    // POST-FIX: 22023 is a state mismatch (already-published, missing-fields,
+    // stale-snapshot), distinct from a true permission denial. 409 lets the
+    // client show a refresh nudge rather than a sign-out / no-access prompt.
     const fetchSpy = mockProbeReadOnly();
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     STATE.rpcResult = {
@@ -787,9 +791,10 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(409);
     const body = await res.json();
-    expect(body.error).toBe("This draft cannot be finalized");
+    expect(body.error).toContain("not in a finalizable state");
+    expect(body.code).toBe("draft_state_invalid");
     // The raw status/source details must not leak (P445-style hardening).
     expect(JSON.stringify(body)).not.toContain("source=legacy");
 

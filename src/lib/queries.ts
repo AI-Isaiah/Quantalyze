@@ -2718,27 +2718,26 @@ export const getMyAllocationDashboard = cache(
       };
     }
 
-    // Step 2: parallel fetch everything. The admin client is used for
-    // portfolio_analytics and portfolio_strategies because these tables are
-    // owned by service_role with RLS policies that only grant SELECT to the
-    // owning user; the admin client bypasses RLS and an explicit
-    // .eq("portfolio_id", portfolio.id) ownership gate enforces tenancy.
-    // NOTE (NEW-C03-12): the prior comment claimed daily_returns was
-    // "column-level REVOKE'd from authenticated per migration 010" — no such
-    // REVOKE exists in any migration; that claim was stale. The admin-client
-    // usage here is justified solely by the RLS + ownership-gate pattern
-    // above, NOT by a column-level privilege restriction.
-    // The match_decisions read also uses the admin client because that table
-    // does not have an allocator-self-SELECT RLS policy, so a user-scoped
-    // client returns 0 rows even for the allocator's own intros. The
-    // bridge_outcomes and bridge_outcome_dismissals fan-outs run through the
-    // user-scoped client because migration 059 gave each table an owner-select
-    // policy; RLS then enforces the allocator_id gate as defence-in-depth.
-    // NOTE: `apiKeys` is already fetched above in the Phase 07 parallel
-    // round; we reuse that result here instead of firing a second
-    // getUserApiKeys query. Destructure naming is preserved by
-    // declaring a non-conflicting alias and letting the existing
-    // call sites keep reading `apiKeys`.
+    // Step 2: parallel fetch everything. Client selection rules:
+    //   - `portfolio_analytics`: admin + `.eq("portfolio_id", ...)` ownership
+    //     gate. Table carries `portfolio_analytics_owner_read` (migration
+    //     20260407075303) so user client would also work; admin is retained
+    //     as defence-in-depth — the inline predicate is the load-bearing
+    //     filter (RLS regression would return 0 rows silently).
+    //   - `portfolio_strategies` + nested `strategies` + `strategy_analytics`:
+    //     admin + `.eq("portfolio_id", ...)` ownership gate. NEW-C03-12
+    //     (2026-05-28): prior comment claimed daily_returns was "column-level
+    //     REVOKE'd from authenticated per migration 010" — no such REVOKE
+    //     exists. `portfolio_strategies_owner` (migration 20260405061912)
+    //     grants SELECT to the owning user; admin retained as defence-in-depth
+    //     (NOT justified by a column-level REVOKE that never existed).
+    //   - `match_decisions`: admin — table has no allocator-self SELECT RLS
+    //     policy. Explicit `.eq("allocator_id", userId)` is the ownership gate.
+    //   - `bridge_outcomes` + `bridge_outcome_dismissals`: user client.
+    //     Migration 059 grants each an owner-select policy; RLS enforces the
+    //     allocator_id gate as defence-in-depth.
+    // NOTE: `apiKeys` was already fetched in the Phase 07 parallel round
+    // above; we reuse that result rather than firing a second query.
     const nowIso = new Date().toISOString();
     // audit-2026-05-07 G8.A.1 (P34) — Step 2 raw-Supabase results were
     // also unwrapped via `?? []` / `?? null`. Hoist to a single
@@ -2759,6 +2758,9 @@ export const getMyAllocationDashboard = cache(
         .order("computed_at", { ascending: false })
         .limit(1)
         .maybeSingle(),
+      // NEW-C03-12: admin retained per comment block above. The
+      // `.eq("portfolio_id", ...)` ownership gate is the load-bearing
+      // tenant filter; RLS is defence-in-depth.
       admin
         .from("portfolio_strategies")
         .select(

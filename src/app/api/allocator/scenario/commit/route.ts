@@ -170,6 +170,50 @@ type NormalisedCommitDiff =
   | NormalisedVoluntaryModifyDiff
   | z.infer<typeof BridgeRecommendedDiff>;
 
+/**
+ * H-0254 audit-metadata projection — extracts the per-arm forensic fields
+ * from a NormalisedCommitDiff for inclusion in the audit_log row.
+ *
+ * Exhaustive `switch (kind)` + a `never`-typed assignment in the default
+ * branch so a future union arm fails the build at this site rather than
+ * silently producing a sparse audit row downstream.
+ */
+function pickAuditDiffFields(
+  d: NormalisedCommitDiff,
+): Record<string, string | number | undefined> {
+  switch (d.kind) {
+    case "voluntary_remove":
+      // Security M conf=9 (2026-05-28 specialist): rejection_reason is a
+      // closed-set z.enum (mandate_conflict / already_owned / etc.), safe
+      // to pass through. Free-text rationale lives in `note`, reduced to
+      // note_present:boolean below by design.
+      return {
+        holding_ref: d.holding_ref,
+        rejection_reason: d.rejection_reason,
+      };
+    case "voluntary_add":
+      return {
+        strategy_id: d.strategy_id,
+        percent_allocated: d.percent_allocated,
+      };
+    case "voluntary_modify":
+      return {
+        holding_ref: d.holding_ref,
+        percent_allocated: d.percent_allocated,
+      };
+    case "bridge_recommended":
+      return {
+        holding_ref: d.holding_ref,
+        strategy_id: d.strategy_id,
+        percent_allocated: d.percent_allocated,
+      };
+    default: {
+      const _exhaustive: never = d;
+      return _exhaustive;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Recorded-row envelope returned by the RPC
 //
@@ -540,6 +584,34 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
 
   if (!isCachedReplay) {
     for (const row of recorded) {
+      // audit-2026-05-07 H-0254: pre-fix the metadata captured only
+      // `kind / source / bridge_outcome_id`. A scenario commit is a
+      // FINANCIAL decision; the audit needs the full decision shape
+      // (which strategy, how much, when), not just the join keys.
+      const inputDiff = normalisedDiffs[row.index];
+      // Type-design M conf=8 + silent-failure M conf=9 (2026-05-28
+      // specialist): a missing inputDiff implies RPC index drift / schema
+      // regression. Pre-fix `inputDiff && ...` spread dropped forensic
+      // fields silently. Per Rule 12 (Fail loud): capture to Sentry and
+      // emit a sparse-but-flagged audit row so forensic readers can tell
+      // "RPC index drift" apart from "diff fields legitimately absent".
+      if (!inputDiff) {
+        captureToSentry(
+          new Error(
+            "scenario_commit: RPC echoed out-of-range index — audit metadata sparse",
+          ),
+          {
+            tags: { area: "scenario-commit", gate: "rpc_index_drift" },
+            extra: {
+              row_index: row.index,
+              batch_size: normalisedDiffs.length,
+              match_decision_id: row.match_decision_id,
+            },
+            level: "error",
+          },
+        );
+      }
+      const diffFields = inputDiff ? pickAuditDiffFields(inputDiff) : {};
       logAuditEvent(supabase, {
         action: "match.decision_record",
         entity_type: "match_decision",
@@ -549,6 +621,19 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
           source: "scenario_commit",
           bridge_outcome_id: row.bridge_outcome_id,
           commit_batch_id: commitBatchId,
+          allocator_id: user.id,
+          // Sentinel — distinguishes "diff present" from "RPC index drift".
+          _diff_present: Boolean(inputDiff),
+          ...diffFields,
+          ...(inputDiff && {
+            size_at_decision_usd: inputDiff.size_at_decision_usd,
+            effective_date: inputDiff.effective_date,
+            note_present:
+              typeof inputDiff.note === "string" && inputDiff.note.length > 0,
+          }),
+          // Idempotency key enables joining audit retries across the
+          // dedup window introduced in migration 131.
+          idempotency_key: idempotencyKeyValid ? idempotencyKey : null,
         },
       });
     }

@@ -328,6 +328,13 @@ export const POST = withRole<{ id: string }>("admin")(
     // emitted (idempotent re-run, was_first_run:false), which is the
     // honest signal; we deliberately do NOT also claim they "approved"
     // the request since the winning admin already owns that row.
+    //
+    // audit-2026-05-07 H-0254-pattern (audit-metadata enrichment): pre-fix
+    // captured only `target_user_id / approved_by`. Add `was_first_run`
+    // (anchors this row to the account.sanitize call that performed the
+    // destructive write) and `requested_at` (read off data_deletion_requests
+    // inline since that row is itself a sanitize target — captures the
+    // timing story in one audit row, no post-sanitize join needed).
     if (rowsAffected > 0) {
       logAuditEvent(supabase, {
         action: "deletion.request.approve",
@@ -336,6 +343,8 @@ export const POST = withRole<{ id: string }>("admin")(
         metadata: {
           target_user_id: reqRow.user_id,
           approved_by: user.id,
+          was_first_run: wasFirstRun === true,
+          requested_at: reqRow.requested_at ?? null,
         },
       });
     }
