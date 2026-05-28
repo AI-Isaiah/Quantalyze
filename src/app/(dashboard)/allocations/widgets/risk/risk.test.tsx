@@ -103,7 +103,7 @@ const MOCK_DATA = {
 
 const WIDGET_PROPS = {
   data: MOCK_DATA,
-  timeframe: "YTD",
+  timeframe: "1YTD" as const,
   width: 4,
   height: 3,
 };
@@ -149,7 +149,7 @@ describe("Risk Widgets — render without crash", () => {
     render(
       <CorrelationOverTime
         data={{ strategies: shortStrategies, analytics: null }}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={4}
         height={3}
       />,
@@ -190,7 +190,7 @@ describe("Risk Widgets — render without crash", () => {
       <TailRisk
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{ strategies: [], analytics: null, compositeReturns } as any}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={4}
         height={3}
       />,
@@ -213,7 +213,7 @@ describe("Risk Widgets — render without crash", () => {
       <TailRisk
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{ strategies: [], analytics: null, compositeReturns } as any}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={4}
         height={3}
       />,
@@ -237,7 +237,7 @@ describe("Risk Widgets — render without crash", () => {
 describe("Risk Widgets — empty data handling", () => {
   const emptyProps = {
     data: { strategies: [], analytics: null },
-    timeframe: "YTD",
+    timeframe: "1YTD" as const,
     width: 4,
     height: 3,
   };
@@ -299,7 +299,7 @@ describe("CorrelationMatrix — 3x3 cell count", () => {
     render(
       <CorrelationMatrix
         data={dataWithMatrix}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={4}
         height={3}
       />,

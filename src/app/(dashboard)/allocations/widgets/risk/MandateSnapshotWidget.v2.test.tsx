@@ -46,7 +46,7 @@ describe("MandateSnapshotWidget — UI-BLOCK-01 WidgetState v2 wiring", () => {
       <MandateSnapshotWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{ mandate: null } as any}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={2}
         height={3}
       />,
@@ -69,7 +69,7 @@ describe("MandateSnapshotWidget — UI-BLOCK-01 WidgetState v2 wiring", () => {
       <MandateSnapshotWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{ mandate: null } as any}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={2}
         height={3}
       />,

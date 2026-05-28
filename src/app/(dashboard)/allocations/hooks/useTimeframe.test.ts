@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
-import { useTimeframe, VALID_TIMEFRAMES } from "./useTimeframe";
+import { useTimeframe } from "./useTimeframe";
 
 // ---------------------------------------------------------------------------
 // Mock localStorage
@@ -33,13 +33,13 @@ describe("useTimeframe", () => {
 
   it("falls back to default when localStorage has an invalid value", () => {
     store.set(STORAGE_KEY, "INVALID_TIMEFRAME");
-    const { result } = renderHook(() => useTimeframe("YTD"));
-    expect(result.current[0]).toBe("YTD");
+    const { result } = renderHook(() => useTimeframe("1YTD"));
+    expect(result.current[0]).toBe("1YTD");
   });
 
   it("uses a valid localStorage value", () => {
     store.set(STORAGE_KEY, "1MTD");
-    const { result } = renderHook(() => useTimeframe("YTD"));
+    const { result } = renderHook(() => useTimeframe("1YTD"));
     expect(result.current[0]).toBe("1MTD");
   });
 
@@ -49,7 +49,7 @@ describe("useTimeframe", () => {
   });
 
   it("persists to localStorage on change", () => {
-    const { result } = renderHook(() => useTimeframe("YTD"));
+    const { result } = renderHook(() => useTimeframe("1YTD"));
 
     act(() => {
       result.current[1]("3YTD");
@@ -59,10 +59,13 @@ describe("useTimeframe", () => {
     expect(store.get(STORAGE_KEY)).toBe("3YTD");
   });
 
-  it("VALID_TIMEFRAMES contains all TimeframeSelector keys", () => {
-    const expected = ["1DTD", "1WTD", "1MTD", "1QTD", "1YTD", "3YTD", "ALL"];
-    for (const key of expected) {
-      expect(VALID_TIMEFRAMES.has(key)).toBe(true);
-    }
+  // audit-2026-05-07 H-0147 + M-1093 — pre-narrowing the hook returned
+  // `string`, so older builds persisted the LABEL "YTD" rather than the
+  // canonical key "1YTD". On read the hook now normalises legacy values to
+  // their canonical key so the returned union stays sound.
+  it("normalises the legacy 'YTD' label in localStorage to '1YTD'", () => {
+    store.set(STORAGE_KEY, "YTD");
+    const { result } = renderHook(() => useTimeframe("ALL"));
+    expect(result.current[0]).toBe("1YTD");
   });
 });

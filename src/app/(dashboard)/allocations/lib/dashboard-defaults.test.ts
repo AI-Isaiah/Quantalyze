@@ -25,14 +25,19 @@ describe("dashboard-defaults default-layout invariants", () => {
     }
   });
 
-  it("the 6 keys are kpi/bridge/equity/allocation/mandate/outcomes in that order", () => {
+  it("the 6 keys are kpi/bridge/equity/allocation/mandate/outcomes in that order (resolved to registry ids — audit-2026-05-07 H-0142)", () => {
+    // Post-H-0142 DEFAULT_LAYOUT pre-normalizes designer short keys to
+    // their canonical WIDGET_REGISTRY ids at module-init (so TileConfig.k
+    // is a RegistryWidgetId at every call site). The order + identity
+    // contract is preserved — only the surface representation changed
+    // (short key → resolved id).
     expect(DEFAULT_LAYOUT.map((t) => t.k)).toEqual([
-      "kpi",
-      "bridge",
-      "equity",
-      "allocation",
-      "mandate",
-      "outcomes",
+      resolveWidgetId("kpi"),
+      resolveWidgetId("bridge"),
+      resolveWidgetId("equity"),
+      resolveWidgetId("allocation"),
+      resolveWidgetId("mandate"),
+      resolveWidgetId("outcomes"),
     ]);
   });
 

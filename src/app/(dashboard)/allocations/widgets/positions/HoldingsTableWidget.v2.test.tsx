@@ -58,7 +58,7 @@ describe("HoldingsTableWidget — UI-BLOCK-01 WidgetState v2 wiring", () => {
       <HoldingsTableWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{} as any}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={3}
         height={4}
       />,
@@ -78,7 +78,7 @@ describe("HoldingsTableWidget — UI-BLOCK-01 WidgetState v2 wiring", () => {
       <HoldingsTableWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{} as any}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={3}
         height={4}
       />,

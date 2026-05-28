@@ -49,7 +49,7 @@ describe("BridgeHeroWidget — UI-BLOCK-01 WidgetState v2 wiring", () => {
       <BridgeHeroWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{ __error: true } as any}
-        timeframe="6M"
+        timeframe="1YTD"
         width={4}
         height={3}
       />,
@@ -69,7 +69,7 @@ describe("BridgeHeroWidget — UI-BLOCK-01 WidgetState v2 wiring", () => {
       <BridgeHeroWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{ __error: true } as any}
-        timeframe="6M"
+        timeframe="1YTD"
         width={4}
         height={3}
       />,
@@ -170,7 +170,7 @@ describe("BridgeHeroWidget — H-1207 happy-path adapter forwarding", () => {
         <BridgeHeroWidget
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           data={{ flaggedHoldings: [makeFlaggedHolding("SOL")] } as any}
-          timeframe="6M"
+          timeframe="1YTD"
           width={4}
           height={3}
         />
@@ -203,7 +203,7 @@ describe("BridgeHeroWidget — H-1207 happy-path adapter forwarding", () => {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } as any
           }
-          timeframe="6M"
+          timeframe="1YTD"
           width={4}
           height={3}
         />
@@ -232,7 +232,7 @@ describe("BridgeHeroWidget — H-1207 happy-path adapter forwarding", () => {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } as any
           }
-          timeframe="6M"
+          timeframe="1YTD"
           width={4}
           height={3}
         />

@@ -69,7 +69,7 @@ const EMPTY_DATA: WidgetProps["data"] = {
 };
 
 const baseProps: Omit<WidgetProps, "data"> = {
-  timeframe: "all",
+  timeframe: "ALL" as const,
   width: 6,
   height: 4,
 };

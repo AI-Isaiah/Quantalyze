@@ -1,4 +1,19 @@
 import type { WidgetMeta } from "./types";
+import { captureToSentry } from "@/lib/sentry-capture";
+
+// ---------------------------------------------------------------------------
+// RegistryWidgetId — branded id for post-normalization widget keys (H-0142)
+// ---------------------------------------------------------------------------
+//
+// audit-2026-05-07 H-0142 — `TileConfig.k` was `string`, but the invariant
+// across the dashboard is: every persisted/rendered tile's `k` resolves to
+// a valid WIDGET_REGISTRY id (after `resolveWidgetId`). The brand makes
+// that invariant a compile-time fact: only `resolveWidgetId` (the canonical
+// minter) or `asRegistryWidgetId` (the explicit-cast helper for literal
+// registry ids) can produce a `RegistryWidgetId`. The render path can then
+// assume `WIDGET_COMPONENTS[t.k]` is always either a real component or the
+// documented "unknown widget" fallback for ids that escaped validation.
+export type RegistryWidgetId = string & { readonly __brand: "registry-id" };
 
 // ---------------------------------------------------------------------------
 // Widget Registry — widgets available for the My Allocation dashboard
@@ -29,7 +44,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "performance",
     icon: "▲",
     defaultW: 12,
-    defaultH: 4,
     description: "Cumulative portfolio growth over time with composite + per-strategy lines.",
     status: "ready",
   },
@@ -45,7 +59,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "performance",
     icon: "▲",
     defaultW: 4,
-    defaultH: 4,
     description: "SVG equity chart with period toggle, crosshair, and holding overlays.",
     status: "ready",
   },
@@ -55,7 +68,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "performance",
     icon: "▲",
     defaultW: 12,
-    defaultH: 4,
     description: "Underwater chart showing peak-to-trough drawdowns over time.",
     status: "ready",
   },
@@ -65,7 +77,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "performance",
     icon: "▲",
     defaultW: 4,
-    defaultH: 3,
     description: "Calendar heatmap of monthly returns with color-coded cells.",
     status: "ready",
   },
@@ -75,7 +86,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "performance",
     icon: "▲",
     defaultW: 4,
-    defaultH: 3,
     description: "Bar chart of annual returns by year.",
     status: "ready",
   },
@@ -85,7 +95,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "performance",
     icon: "▲",
     defaultW: 6,
-    defaultH: 4,
     description: "Portfolio cumulative return overlaid with benchmark (BTC, ETH, S&P).",
     status: "ready",
   },
@@ -95,7 +104,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "performance",
     icon: "▲",
     defaultW: 6,
-    defaultH: 3,
     description: "Rolling 30/60/90-day Sharpe ratio over time.",
     status: "ready",
   },
@@ -105,7 +113,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "performance",
     icon: "▲",
     defaultW: 6,
-    defaultH: 3,
     description: "Rolling annualized volatility window chart.",
     status: "ready",
   },
@@ -115,7 +122,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "performance",
     icon: "▲",
     defaultW: 4,
-    defaultH: 3,
     description: "Histogram of daily returns with normal distribution overlay.",
     status: "ready",
   },
@@ -125,7 +131,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "performance",
     icon: "▲",
     defaultW: 4,
-    defaultH: 3,
     description: "Top 5 best and worst daily/weekly/monthly returns.",
     status: "ready",
   },
@@ -135,7 +140,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "performance",
     icon: "▲",
     defaultW: 4,
-    defaultH: 3,
     description: "Win/loss ratio and profit factor per strategy.",
     status: "ready",
   },
@@ -147,7 +151,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "risk",
     icon: "◆",
     defaultW: 4,
-    defaultH: 3,
     description: "Pairwise correlation heatmap between strategies.",
     status: "ready",
   },
@@ -157,7 +160,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "risk",
     icon: "◆",
     defaultW: 6,
-    defaultH: 3,
     description: "Rolling pairwise correlation trends to spot regime changes.",
     status: "ready",
   },
@@ -167,7 +169,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "risk",
     icon: "◆",
     defaultW: 4,
-    defaultH: 3,
     description: "Value at Risk (95%/99%) and Conditional VaR (Expected Shortfall).",
     status: "ready",
   },
@@ -177,7 +178,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "risk",
     icon: "◆",
     defaultW: 6,
-    defaultH: 3,
     description: "Contribution of each strategy to total portfolio risk.",
     status: "ready",
   },
@@ -187,7 +187,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "risk",
     icon: "◆",
     defaultW: 4,
-    defaultH: 3,
     description: "Skewness, kurtosis, and tail ratio metrics.",
     status: "ready",
   },
@@ -197,7 +196,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "risk",
     icon: "◆",
     defaultW: 4,
-    defaultH: 3,
     description: "Standard deviation of active returns vs benchmark.",
     status: "ready",
   },
@@ -213,7 +211,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "risk",
     icon: "◆",
     defaultW: 2,
-    defaultH: 3,
     description: "Live pass/fail of mandate gates against current portfolio.",
     status: "ready",
   },
@@ -230,7 +227,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "allocation",
     icon: "◉",
     defaultW: 2,
-    defaultH: 3,
     description:
       "Exposure by style tag — stacked bar + per-style weight legend.",
     status: "ready",
@@ -241,7 +237,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "allocation",
     icon: "◉",
     defaultW: 4,
-    defaultH: 3,
     description: "AUM split across strategies as a donut chart.",
     status: "ready",
   },
@@ -251,7 +246,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "allocation",
     icon: "◉",
     defaultW: 6,
-    defaultH: 3,
     description: "Stacked area chart showing how weights evolved over time.",
     status: "ready",
   },
@@ -261,7 +255,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "allocation",
     icon: "◉",
     defaultW: 6,
-    defaultH: 3,
     description: "Shows how actual weights have drifted from target allocations.",
     status: "ready",
   },
@@ -271,7 +264,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "allocation",
     icon: "◉",
     defaultW: 6,
-    defaultH: 3,
     description: "Actionable rebalancing trades to return to target weights.",
     status: "ready",
   },
@@ -281,7 +273,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "allocation",
     icon: "◉",
     defaultW: 6,
-    defaultH: 3,
     description: "Side-by-side metrics table for all strategies.",
     status: "ready",
   },
@@ -293,7 +284,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "attribution",
     icon: "▸",
     defaultW: 6,
-    defaultH: 4,
     description: "Waterfall chart breaking total return into per-strategy contributions.",
     status: "ready",
   },
@@ -303,7 +293,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "attribution",
     icon: "▸",
     defaultW: 6,
-    defaultH: 3,
     description: "Returns bucketed by day-of-week, month, or custom period.",
     status: "ready",
   },
@@ -313,7 +302,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "attribution",
     icon: "▸",
     defaultW: 6,
-    defaultH: 3,
     description: "Decompose returns into alpha (skill) and beta (market) components.",
     status: "ready",
   },
@@ -331,7 +319,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "positions",
     icon: "▦",
     defaultW: 3,
-    defaultH: 4,
     description:
       "Active positions with inline outcome recording — compact dashboard variant.",
     status: "ready",
@@ -345,7 +332,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     // looks broken when it sits alone in a half-width row with empty
     // whitespace to its right. Design review FINDING-009.
     defaultW: 12,
-    defaultH: 4,
     description: "Live positions with entry price, PnL, and weight.",
     status: "ready",
   },
@@ -355,7 +341,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "positions",
     icon: "▦",
     defaultW: 6,
-    defaultH: 4,
     description: "Chronological trade log with filters.",
     status: "ready",
   },
@@ -365,7 +350,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "positions",
     icon: "▦",
     defaultW: 4,
-    defaultH: 3,
     description: "Daily/weekly trade volume bars.",
     status: "ready",
   },
@@ -375,7 +359,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "positions",
     icon: "▦",
     defaultW: 4,
-    defaultH: 3,
     description: "Net exposure breakdown by underlying asset.",
     status: "ready",
   },
@@ -385,7 +368,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "positions",
     icon: "▦",
     defaultW: 4,
-    defaultH: 3,
     description: "Long vs short exposure over time.",
     status: "ready",
   },
@@ -397,7 +379,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "monitoring",
     icon: "●",
     defaultW: 6,
-    defaultH: 3,
     description: "Active alerts for drawdown, volatility, or weight drift thresholds.",
     status: "ready",
   },
@@ -407,7 +388,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "monitoring",
     icon: "●",
     defaultW: 4,
-    defaultH: 3,
     description: "Connection health for each linked exchange API key.",
     status: "ready",
   },
@@ -417,7 +397,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "monitoring",
     icon: "●",
     defaultW: 6,
-    defaultH: 3,
     description: "Per-strategy uptime, data freshness, and anomaly flags.",
     status: "ready",
   },
@@ -427,7 +406,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "monitoring",
     icon: "●",
     defaultW: 4,
-    defaultH: 3,
     description: "Last sync time per data source with staleness warnings.",
     status: "ready",
   },
@@ -439,7 +417,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "intelligence",
     icon: "◈",
     defaultW: 6,
-    defaultH: 4,
     description: "AI-generated daily summary of portfolio activity and market context.",
     status: "ready",
   },
@@ -449,7 +426,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "intelligence",
     icon: "◈",
     defaultW: 6,
-    defaultH: 3,
     description: "Hidden Markov Model regime classification (risk-on/off/neutral).",
     status: "ready",
   },
@@ -459,7 +435,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "intelligence",
     icon: "◈",
     defaultW: 4,
-    defaultH: 3,
     description: "Herfindahl index and top-N concentration metrics.",
     status: "ready",
   },
@@ -477,7 +452,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "meta",
     icon: "≡",
     defaultW: 4,
-    defaultH: 2,
     description: "Portfolio-wide KPI strip — AUM, YTD TWR, Sharpe, Max DD 12m, Avg ρ.",
     status: "ready",
   },
@@ -487,7 +461,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "meta",
     icon: "≡",
     defaultW: 12,
-    defaultH: 2,
     description: "User-configurable row of key metrics.",
     status: "ready",
   },
@@ -497,7 +470,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "meta",
     icon: "≡",
     defaultW: 4,
-    defaultH: 3,
     description: "Free-form markdown notes pinned to the dashboard.",
     status: "ready",
   },
@@ -507,7 +479,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "meta",
     icon: "≡",
     defaultW: 4,
-    defaultH: 2,
     description: "One-click shortcuts: rebalance, export, share, snapshot.",
     status: "ready",
   },
@@ -519,7 +490,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "outcomes",
     icon: "\u25C8",
     defaultW: 12,
-    defaultH: 5,
     description: "Timeline of recorded Bridge outcomes with win-rate KPIs and delta sparklines.",
     status: "ready",
   },
@@ -538,7 +508,6 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     category: "intelligence",
     icon: "B",
     defaultW: 4,
-    defaultH: 3,
     description: "Hero Bridge widget — flagged holdings summary + Review drawer.",
     status: "ready",
   },
@@ -557,8 +526,16 @@ export const WIDGET_CATEGORIES = [
   { id: "monitoring" as const, name: "Monitoring", icon: "●" },
   { id: "intelligence" as const, name: "Intelligence", icon: "◈" },
   { id: "meta" as const, name: "Meta", icon: "≡" },
-  { id: "outcomes" as const, name: "Outcomes", icon: "\u25C8" },
-];
+  { id: "outcomes", name: "Outcomes", icon: "\u25C8" },
+] as const;
+
+/**
+ * Derived category id union \u2014 single source of truth for WidgetMeta.category.
+ * Adding a category row to WIDGET_CATEGORIES extends this union automatically;
+ * removing a row collapses the union so the type-checker flags every registry
+ * entry that still uses the deleted category. (audit-2026-05-07 M-0157)
+ */
+export type WidgetCategory = (typeof WIDGET_CATEGORIES)[number]["id"];
 
 // ---------------------------------------------------------------------------
 // Designer short-key → WIDGET_REGISTRY id map (Phase 09.1 Plan 05 / D-19)
@@ -640,10 +617,72 @@ export const DESIGNER_KEY_TO_WIDGET_ID: Record<string, string> = {
  * on own-key membership so prototype keys are routed into the
  * "unknown" branch and dropped by the caller.
  */
-export function resolveWidgetId(k: string): string {
-  if (Object.prototype.hasOwnProperty.call(WIDGET_REGISTRY, k)) return k;
-  if (Object.prototype.hasOwnProperty.call(DESIGNER_KEY_TO_WIDGET_ID, k)) {
-    return DESIGNER_KEY_TO_WIDGET_ID[k];
+// Dedupe set for the unknown-input warn breadcrumb below. Capped to avoid
+// log floods when a poisoned blob iterates many unique unknown ids.
+const RESOLVE_UNKNOWN_WARNED = new Set<string>();
+const RESOLVE_UNKNOWN_WARN_CAP = 50;
+
+export function resolveWidgetId(k: string): RegistryWidgetId {
+  // brand-mint: `resolveWidgetId` is the canonical minter of
+  // RegistryWidgetId. The cast is honest for the two own-key branches
+  // (the returned value IS a real registry id). For the unknown-input
+  // fallback the brand is a structural promise only — `validateAndNormalizeTile`
+  // (the JSON.parse boundary) gates on `hasOwnProperty.call(WIDGET_REGISTRY, k)`
+  // and `WIDGET_COMPONENTS[k]` consumers fall through to an 'unknown widget' /
+  // `Component == null` placeholder for ids that slipped past normalization.
+  if (Object.prototype.hasOwnProperty.call(WIDGET_REGISTRY, k)) {
+    return k as RegistryWidgetId;
   }
-  return k;
+  if (Object.prototype.hasOwnProperty.call(DESIGNER_KEY_TO_WIDGET_ID, k)) {
+    return DESIGNER_KEY_TO_WIDGET_ID[k] as RegistryWidgetId;
+  }
+  // Sentry breadcrumb runs BEFORE the dedup gate so post-cap legitimate
+  // drift (e.g. a long-running SPA session that surfaces new widget ids past
+  // the 50-cap) still emits to the breadcrumb stream. Sentry has its own
+  // server-side dedup; the console cap stays to avoid local log flood.
+  captureToSentry(new Error("[resolveWidgetId] unknown widget id"), {
+    level: "info",
+    tags: { area: "widget-registry", reason: "unknown_widget_id" },
+    extra: { received: k },
+  });
+  if (
+    typeof console !== "undefined" &&
+    !RESOLVE_UNKNOWN_WARNED.has(k) &&
+    RESOLVE_UNKNOWN_WARNED.size < RESOLVE_UNKNOWN_WARN_CAP
+  ) {
+    RESOLVE_UNKNOWN_WARNED.add(k);
+    console.warn(
+      "[resolveWidgetId] unknown widget id; downstream consumers must gate on WIDGET_REGISTRY own-key",
+      { received: k },
+    );
+  }
+  return k as RegistryWidgetId;
+}
+
+/**
+ * Eager normalize-and-validate brand mint for literal widget keys known at
+ * module-init. Routes `k` through `resolveWidgetId` first so designer short
+ * keys collapse onto their canonical WIDGET_REGISTRY id, then asserts the
+ * resolved id is an OWN key of WIDGET_REGISTRY. Throws when normalization
+ * does not land on a registered widget — defaults / test fixtures are
+ * dev-controlled, so module-load failure is preferred over a silent
+ * "unknown widget" placeholder at first paint.
+ *
+ * Use this for hand-written TileConfig literals where the call site KNOWS
+ * the id is registered (DEFAULT_LAYOUT in dashboard-defaults.ts, the test
+ * fixture in components/WidgetGrid.test.tsx). For dynamic / untrusted input
+ * — JSON.parse, user typing, persisted blobs — use `resolveWidgetId` and
+ * gate the result on `hasOwnProperty.call(WIDGET_REGISTRY, k)`.
+ *
+ * audit-2026-05-07 H-0142 — see RegistryWidgetId brand above.
+ */
+export function asRegistryWidgetId(k: string): RegistryWidgetId {
+  const resolved = resolveWidgetId(k);
+  if (Object.prototype.hasOwnProperty.call(WIDGET_REGISTRY, resolved)) {
+    return resolved;
+  }
+  throw new Error(
+    `asRegistryWidgetId: '${k}' (resolved to '${resolved}') is not a WIDGET_REGISTRY own-key. ` +
+      `Defaults / test fixtures must reference a known widget; route untrusted input through resolveWidgetId + own-key gate instead.`,
+  );
 }

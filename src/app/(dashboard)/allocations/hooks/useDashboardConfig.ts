@@ -2,12 +2,15 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { captureToSentry } from "@/lib/sentry-capture";
-import type {
-  DashboardConfig,
-  TileConfig,
-  LegacyDashboardConfig,
-  LegacyTileConfig,
+import {
+  coerceTimeframe as coerceTimeframeShared,
+  type DashboardConfig,
+  type TileConfig,
+  type LegacyDashboardConfig,
+  type LegacyTileConfig,
+  type TimeframeKey,
 } from "../lib/types";
+import { TIMEFRAMES } from "@/components/ui/TimeframeSelector";
 // Phase 09.1 Plan 05 / D-19: write-time normalization. `resolveWidgetId` is
 // a thin wrapper around `DESIGNER_KEY_TO_WIDGET_ID` that collapses designer
 // short keys ("bridge", "kpi", ...) onto WIDGET_REGISTRY ids before any
@@ -75,7 +78,8 @@ const LAYOUT_VERSION_LEGACY = 3;
 export type DashboardRecoveryReason =
   | "parse_failed"
   | "version_reset"
-  | "legacy_in_v2_blob";
+  | "legacy_in_v2_blob"
+  | "unknown_timeframe";
 
 /**
  * Best-effort: mark that the V2 loader recovered from a corrupt or
@@ -137,7 +141,7 @@ const LEGACY_DEFAULT_LAYOUT: LegacyTileConfig[] = [
 
 function loadLegacyConfig(): LegacyDashboardConfig {
   if (typeof window === "undefined") {
-    return { tiles: LEGACY_DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION_LEGACY };
+    return { tiles: LEGACY_DEFAULT_LAYOUT, timeframe: DEFAULT_TIMEFRAME, layoutVersion: LAYOUT_VERSION_LEGACY };
   }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -158,10 +162,10 @@ function loadLegacyConfig(): LegacyDashboardConfig {
             },
           },
         );
-        return { tiles: LEGACY_DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION_LEGACY };
+        return { tiles: LEGACY_DEFAULT_LAYOUT, timeframe: DEFAULT_TIMEFRAME, layoutVersion: LAYOUT_VERSION_LEGACY };
       }
       if (Array.isArray(parsed.tiles) && parsed.tiles.length > 0) {
-        return parsed;
+        return { ...parsed, timeframe: coerceTimeframe(parsed.timeframe) };
       }
     }
   } catch (err) {
@@ -177,7 +181,7 @@ function loadLegacyConfig(): LegacyDashboardConfig {
       tags: { area: "dashboard-config", reason: "legacy_parse_failed" },
     });
   }
-  return { tiles: LEGACY_DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION_LEGACY };
+  return { tiles: LEGACY_DEFAULT_LAYOUT, timeframe: DEFAULT_TIMEFRAME, layoutVersion: LAYOUT_VERSION_LEGACY };
 }
 
 function persistLegacy(config: LegacyDashboardConfig): void {
@@ -244,7 +248,14 @@ export function useDashboardConfig(): UseDashboardConfigReturn {
       const meta = WIDGET_REGISTRY[widgetId];
       // Legacy 12-col widths: prefer registry's defaultW (3/4/6/12), default 6.
       const w = meta?.defaultW ?? 6;
-      const h = meta?.defaultH ?? 3;
+      // audit-2026-05-07 M-0155 — WidgetMeta.defaultH dropped (V2 grid is
+      // content-driven; this legacy hook is the only consumer and is
+      // dormant per the file header — no live caller observes this value).
+      // Hardcoded 3 to avoid keeping a field alive solely for a dead path;
+      // original defaultH ranged 2-5 across entries (e.g. outcomes-timeline
+      // was 5, several charts were 4). Behavior here would only change if
+      // this dormant hook were reactivated.
+      const h = 3;
       const newTile: LegacyTileConfig = {
         i: generateTileId(widgetId, prev.tiles),
         widgetId,
@@ -330,7 +341,7 @@ export function useDashboardConfig(): UseDashboardConfigReturn {
   }, []);
 
   const resetToDefault = useCallback(() => {
-    setConfig({ tiles: LEGACY_DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION_LEGACY });
+    setConfig({ tiles: LEGACY_DEFAULT_LAYOUT, timeframe: DEFAULT_TIMEFRAME, layoutVersion: LAYOUT_VERSION_LEGACY });
   }, []);
 
   return { config, addTile, removeTile, updateLayout, updateTileConfig, restoreTile, resetToDefault };
@@ -394,10 +405,52 @@ function looksLikeLegacyTile(tile: unknown): boolean {
  * ternary at two return sites plus a literal `'YTD'` in `defaultV2Config`;
  * a future change to the default had to be made in three places. Wrap the
  * coercion + default in one helper so every site agrees.
+ *
+ * audit-2026-05-07 H-0147 + M-1093 — timeframe narrowed to TimeframeKey.
+ * `coerceTimeframe` now validates against the live TIMEFRAMES list AND
+ * collapses the legacy "YTD" label (pre-narrowing builds wrote the label
+ * rather than the canonical key "1YTD") onto the canonical key. Anything
+ * else falls back to DEFAULT_TIMEFRAME so the type-narrowed
+ * DashboardConfig.timeframe contract is preserved on every load.
  */
-const DEFAULT_TIMEFRAME = "YTD";
-function coerceTimeframe(value: unknown): string {
-  return typeof value === "string" ? value : DEFAULT_TIMEFRAME;
+const DEFAULT_TIMEFRAME: TimeframeKey = "1YTD";
+// Thin wrapper around the shared `coerceTimeframe` in lib/types.ts: shared
+// helper does pure validation + legacy "YTD"→"1YTD" migration; the wrapper
+// adds Sentry + console reporting when an unrecognised value falls back to
+// DEFAULT_TIMEFRAME so dashboard load-path drift stays observable.
+function coerceTimeframe(value: unknown): TimeframeKey {
+  const coerced = coerceTimeframeShared(value, DEFAULT_TIMEFRAME);
+  // Report only the unknown-value fallback path. Non-string / undefined
+  // inputs (no persisted timeframe yet) and the legacy "YTD" migration are
+  // benign and stay silent.
+  if (typeof value === "string" && coerced !== value && value !== "YTD") {
+    if (typeof console !== "undefined") {
+      console.warn(
+        "[coerceTimeframe] unknown timeframe; falling back to default",
+        { received: value, fallback: DEFAULT_TIMEFRAME },
+      );
+    }
+    captureToSentry(new Error("coerceTimeframe: unknown timeframe value"), {
+      level: "warning",
+      tags: { area: "dashboard-config", reason: "unknown_timeframe" },
+      extra: { received: value },
+    });
+  }
+  return coerced;
+}
+
+/**
+ * Forward-compat helper for the timeframe vocabulary. Returns `true` when
+ * `value` is a string that is neither a known TimeframeKey nor the legacy
+ * "YTD" label — signalling a newer build wrote a timeframe key this build
+ * doesn't recognise. The load path treats this as a forward-compat signal
+ * (read-only mode) so a tab on the older build never overwrites the
+ * persisted blob's future timeframe with DEFAULT_TIMEFRAME.
+ */
+function isUnknownFutureTimeframe(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (value === "YTD") return false;
+  return !TIMEFRAMES.some((t) => t.key === value);
 }
 
 /**
@@ -519,6 +572,40 @@ function loadV2ConfigResult(): LoadV2Result {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DashboardConfig;
+      const rawTimeframe = (parsed as { timeframe?: unknown }).timeframe;
+      // Forward-compat for the timeframe vocabulary. The timeframe key space
+      // and layoutVersion evolve INDEPENDENTLY (a newer build can introduce
+      // "5YTD" without bumping LAYOUT_VERSION). Without this gate, an older
+      // tab would coerceTimeframe → DEFAULT_TIMEFRAME → next mutation persists
+      // DEFAULT_TIMEFRAME → silently destroys the user's future-build choice
+      // across all tabs. Mirror the layoutVersion read-only branch below:
+      // surface DEFAULT_TIMEFRAME in this tab's UI for the session, but keep
+      // the persisted blob untouched.
+      if (isUnknownFutureTimeframe(rawTimeframe)) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useDashboardConfigV2] persisted timeframe is unknown to this build; loading read-only",
+            { received: rawTimeframe, fallback: DEFAULT_TIMEFRAME },
+          );
+        }
+        captureToSentry(
+          new Error("dashboard layout read-only: unknown_timeframe"),
+          {
+            level: "warning",
+            tags: { area: "dashboard-config", reason: "unknown_timeframe" },
+            extra: { received: rawTimeframe },
+          },
+        );
+        setRecoveryFlag("unknown_timeframe");
+        return {
+          config: {
+            ...(parsed as DashboardConfig),
+            timeframe: coerceTimeframe(rawTimeframe),
+          },
+          wasReset: false,
+          readOnly: true,
+        };
+      }
       // NEW-C06-09: forward-compat — a newer build wrote a higher layoutVersion.
       // Return the blob read-only (skip persist) rather than down-converting,
       // so older tabs don't strip future additive fields on every save.
@@ -537,7 +624,14 @@ function loadV2ConfigResult(): LoadV2Result {
         // the readOnlyMode ref in useDashboardConfigV2, so future-build additive
         // fields are never stripped by this older tab's persist path.
         // wasReset is false — the user's layout was NOT reset, just read-only.
-        return { config: parsed as DashboardConfig, wasReset: false, readOnly: true };
+        return {
+          config: {
+            ...(parsed as DashboardConfig),
+            timeframe: coerceTimeframe(rawTimeframe),
+          },
+          wasReset: false,
+          readOnly: true,
+        };
       }
       // Reset on layoutVersion mismatch (Voice-D8 precedent).
       if (parsed.layoutVersion !== LAYOUT_VERSION) {
@@ -601,7 +695,7 @@ function loadV2ConfigResult(): LoadV2Result {
         return {
           config: {
             tiles: [],
-            timeframe: coerceTimeframe(parsed.timeframe),
+            timeframe: coerceTimeframe(rawTimeframe),
             layoutVersion: LAYOUT_VERSION,
           },
           wasReset: false,
@@ -666,7 +760,7 @@ function loadV2ConfigResult(): LoadV2Result {
       return {
         config: {
           tiles: validatedTiles,
-          timeframe: coerceTimeframe(parsed.timeframe),
+          timeframe: coerceTimeframe(rawTimeframe),
           layoutVersion: LAYOUT_VERSION,
         },
         wasReset: false,
@@ -757,7 +851,8 @@ export function consumeDashboardRecoveryFlag(): DashboardRecoveryReason | null {
     if (
       value === "parse_failed" ||
       value === "version_reset" ||
-      value === "legacy_in_v2_blob"
+      value === "legacy_in_v2_blob" ||
+      value === "unknown_timeframe"
     ) {
       window.sessionStorage.removeItem(RECOVERY_FLAG_KEY);
       return value;
@@ -799,7 +894,13 @@ export interface UseDashboardConfigV2Return {
   removeWidget: (k: string) => void;
   resizeWidget: (k: string, w: 1 | 2 | 3 | 4) => void;
   moveWidget: (fromK: string, toK: string) => void;
-  setTimeframe: (tf: string) => void;
+  /**
+   * audit-2026-05-07 H-0147 + M-1093 — narrowed from `string` to
+   * TimeframeKey. The TimeframeSelector union (1DTD/1WTD/1MTD/1QTD/1YTD/
+   * 3YTD/ALL) is the single source of truth; callers passing any other
+   * literal now fail to compile.
+   */
+  setTimeframe: (tf: TimeframeKey) => void;
   resetToDefaults: () => void;
 }
 
@@ -1127,7 +1228,7 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
     });
   }, [applyConfigUpdate]);
 
-  const setTimeframe = useCallback((tf: string) => {
+  const setTimeframe = useCallback((tf: TimeframeKey) => {
     applyConfigUpdate((prev) => ({ ...prev, timeframe: tf }));
   }, [applyConfigUpdate]);
 

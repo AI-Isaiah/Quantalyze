@@ -155,7 +155,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     >
       <EquityChartWidget
         data={props as unknown as Record<string, unknown>}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={0}
         height={0}
       />
@@ -188,6 +188,8 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
               ? "Your dashboard layout was reset after an app update. Widgets have been restored to defaults."
               : recoveryReason === "legacy_in_v2_blob"
               ? "Your saved layout used an older format and was reset to defaults."
+              : recoveryReason === "unknown_timeframe"
+              ? "Your saved timeframe was set in a newer version of the app. This tab is read-only — open the dashboard in the newer version to edit."
               : "Your dashboard layout could not be loaded and was reset to defaults."}
           </span>
           <button

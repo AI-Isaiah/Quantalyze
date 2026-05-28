@@ -68,7 +68,7 @@ const SNAPSHOT_POINTS: DailyPoint[] = Array.from({ length: 30 }, (_, i) => ({
 }));
 
 const baseProps: Omit<WidgetProps, "data"> = {
-  timeframe: "all",
+  timeframe: "ALL" as const,
   width: 6,
   height: 4,
 };

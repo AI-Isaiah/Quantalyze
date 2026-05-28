@@ -136,7 +136,7 @@ function renderWidget(data: unknown) {
     <MandateSnapshotWidget
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       data={data as any}
-      timeframe="YTD"
+      timeframe="1YTD"
       width={0}
       height={0}
     />,

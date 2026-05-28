@@ -900,7 +900,7 @@ export function ScenarioComposer({
               widget-data fields default to empty / safe values. */}
           <DrawdownChart
             data={{}}
-            timeframe="all"
+            timeframe="ALL"
             width={6}
             height={4}
             equityDailyPoints={equityDailyPoints}

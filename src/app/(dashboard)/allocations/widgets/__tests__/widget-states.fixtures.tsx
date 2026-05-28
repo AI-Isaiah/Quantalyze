@@ -155,7 +155,7 @@ export const WIDGET_MATRIX: ReadonlyArray<WidgetMatrixEntry> = [
     renderSuccess: () => (
       <BridgeHeroWidget
         data={bridgeSuccessFixture}
-        timeframe="6M"
+        timeframe="1YTD"
         width={4}
         height={3}
       />
@@ -169,7 +169,7 @@ export const WIDGET_MATRIX: ReadonlyArray<WidgetMatrixEntry> = [
     renderSuccess: () => (
       <KpiStripWidget
         data={kpiSuccessFixture}
-        timeframe="6M"
+        timeframe="1YTD"
         width={4}
         height={2}
       />
@@ -183,7 +183,7 @@ export const WIDGET_MATRIX: ReadonlyArray<WidgetMatrixEntry> = [
     renderSuccess: () => (
       <EquityChartWidget
         data={equitySuccessFixture}
-        timeframe="6M"
+        timeframe="1YTD"
         width={4}
         height={4}
       />
@@ -197,7 +197,7 @@ export const WIDGET_MATRIX: ReadonlyArray<WidgetMatrixEntry> = [
     renderSuccess: () => (
       <HoldingsTableWidget
         data={holdingsSuccessFixture}
-        timeframe="6M"
+        timeframe="1YTD"
         width={3}
         height={4}
       />
@@ -211,7 +211,7 @@ export const WIDGET_MATRIX: ReadonlyArray<WidgetMatrixEntry> = [
     renderSuccess: () => (
       <AllocationByStyleWidget
         data={allocationSuccessFixture}
-        timeframe="6M"
+        timeframe="1YTD"
         width={1}
         height={3}
       />
@@ -225,7 +225,7 @@ export const WIDGET_MATRIX: ReadonlyArray<WidgetMatrixEntry> = [
     renderSuccess: () => (
       <MandateSnapshotWidget
         data={mandateSuccessFixture}
-        timeframe="6M"
+        timeframe="1YTD"
         width={2}
         height={3}
       />
@@ -239,7 +239,7 @@ export const WIDGET_MATRIX: ReadonlyArray<WidgetMatrixEntry> = [
     renderSuccess: () => (
       <OutcomesWidget
         data={outcomesSuccessFixture}
-        timeframe="6M"
+        timeframe="1YTD"
         width={2}
         height={5}
       />

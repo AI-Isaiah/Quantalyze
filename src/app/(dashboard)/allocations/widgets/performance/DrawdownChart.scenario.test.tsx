@@ -44,7 +44,7 @@ vi.mock("recharts", async () => {
 // ---------------------------------------------------------------------------
 
 const baseProps: Omit<WidgetProps, "data"> = {
-  timeframe: "all",
+  timeframe: "ALL" as const,
   width: 6,
   height: 4,
 };

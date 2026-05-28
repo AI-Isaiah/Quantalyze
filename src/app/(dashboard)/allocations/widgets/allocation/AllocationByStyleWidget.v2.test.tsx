@@ -45,7 +45,7 @@ describe("AllocationByStyleWidget — UI-BLOCK-01 WidgetState v2 wiring", () => 
       <AllocationByStyleWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{ strategies: [] } as any}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={1}
         height={3}
       />,
@@ -66,7 +66,7 @@ describe("AllocationByStyleWidget — UI-BLOCK-01 WidgetState v2 wiring", () => 
       <AllocationByStyleWidget
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data={{ strategies: [] } as any}
-        timeframe="YTD"
+        timeframe="1YTD"
         width={1}
         height={3}
       />,

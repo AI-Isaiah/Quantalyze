@@ -65,7 +65,7 @@ const mockData = {
 
 const widgetProps = {
   data: mockData,
-  timeframe: "YTD",
+  timeframe: "1YTD" as const,
   width: 6,
   height: 3,
 };
