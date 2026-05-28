@@ -2813,6 +2813,157 @@ async def test_run_strategy_analytics_writes_sibling_kinds() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_strategy_analytics_strips_realized_pnl_per_trade_from_persisted_trade_metrics() -> None:
+    """Audit-2026-05-07 round-2 H-0737 (info-disclosure RLS leak) regression.
+
+    The per-trade ``realized_pnl_per_trade`` list is consumed INTERNALLY by
+    ``_compute_derived_trade_metrics`` (weighted R:R, SQN) but MUST NOT be
+    persisted to ``strategy_analytics.trade_metrics`` — that column is
+    readable via the ``analytics_read`` RLS policy by ANY authenticated
+    user for published strategies. Each entry exposes side ("long" /
+    "short") and PnL magnitude (capped at 10000), enough for an allocator
+    (or a competitor with allocator credentials) to reverse-engineer the
+    underlying algorithm's entry/exit cadence and direction bias.
+
+    This test drives the runner end-to-end with a patched
+    ``reconstruct_positions`` that returns a payload INCLUDING
+    ``realized_pnl_per_trade`` (so the strip is exercised, not bypassed by
+    a stub returning ``{}``), captures the resulting
+    ``strategy_analytics.upsert`` payload, and asserts the key is absent
+    from the persisted ``trade_metrics`` dict. A regression that removes
+    the ``merged_trade_metrics.pop(...)`` call in analytics_runner.py
+    would re-publish the per-trade list and this test fails.
+    """
+    from services.analytics_runner import run_strategy_analytics
+
+    daily_rows = _build_daily_rows(120)
+    rpc_calls: list[dict] = []
+    sa_upsert_calls: list[dict] = []
+    snap_rows = _sample_position_snapshot_rows()
+
+    mock_supabase = _build_runner_mock_supabase(
+        daily_pnl_rows=daily_rows,
+        fills_rows=[],
+        snapshot_rows=snap_rows,
+        rpc_calls=rpc_calls,
+        sa_upsert_calls=sa_upsert_calls,
+    )
+
+    async def _mock_db_execute(fn):
+        return await asyncio.to_thread(fn)
+
+    np.random.seed(7)
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    mock_returns = pd.Series(np.random.normal(0.001, 0.01, 120), index=dates)
+
+    # reconstruct_positions return value that INCLUDES the per-trade list
+    # (must reach merged_trade_metrics so the strip is actually exercised).
+    # Shape matches PositionTradeMetrics from
+    # services.position_reconstruction. avg_winning_trade/avg_losing_trade
+    # are needed so _compute_derived_trade_metrics doesn't short-circuit.
+    reconstruct_payload: dict = {
+        "total_positions": 4,
+        "open_positions": 0,
+        "closed_positions": 4,
+        "win_rate": 0.5,
+        "avg_roi": 0.05,
+        "avg_duration_days": 1.5,
+        "long_count": 2,
+        "short_count": 2,
+        "best_trade_roi": 0.2,
+        "worst_trade_roi": -0.1,
+        "avg_winning_trade": 150.0,
+        "avg_losing_trade": -75.0,
+        "winners_count": 2,
+        "losers_count": 2,
+        "realized_pnl_per_trade": [
+            {"side": "long", "realized_pnl": 200.0},
+            {"side": "long", "realized_pnl": 100.0},
+            {"side": "short", "realized_pnl": -100.0},
+            {"side": "short", "realized_pnl": -50.0},
+        ],
+    }
+
+    with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
+         patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
+         patch(
+             "services.analytics_runner.trades_to_daily_returns_with_status",
+             return_value=(mock_returns, _DEFAULT_RETURNS_META),
+         ), \
+         patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
+         patch(
+             "services.position_reconstruction.reconstruct_positions",
+             new=AsyncMock(return_value=reconstruct_payload),
+         ), \
+         patch(
+             "services.position_reconstruction.compute_exposure_metrics",
+             new=AsyncMock(return_value={}),
+         ):
+        result = await run_strategy_analytics("strat-test")
+
+    assert result["status"] in ("complete", "complete_with_warnings"), (
+        f"Runner did not reach a success-path upsert: {result}. "
+        f"Upserts: {sa_upsert_calls!r}"
+    )
+
+    completes = [
+        u for u in sa_upsert_calls
+        if u.get("computation_status") in ("complete", "complete_with_warnings")
+    ]
+    assert completes, (
+        f"No success-path upsert captured. All upserts: {sa_upsert_calls!r}"
+    )
+    persisted = completes[-1]
+    trade_metrics = persisted.get("trade_metrics") or {}
+    assert isinstance(trade_metrics, dict), (
+        f"trade_metrics must be a dict in the persisted payload, got "
+        f"{type(trade_metrics).__name__}"
+    )
+    # The load-bearing privacy assertion: the per-trade PnL list must NOT
+    # appear in the persisted JSONB even though it was present in the
+    # source `trade_metrics_from_positions`.
+    assert "realized_pnl_per_trade" not in trade_metrics, (
+        "H-0737 regression: realized_pnl_per_trade leaked into the "
+        "persisted strategy_analytics.trade_metrics JSONB. This list is "
+        "readable via the analytics_read RLS policy and would let "
+        "allocators / competitors reverse-engineer per-trade timing and "
+        "direction bias. Re-add the "
+        "`merged_trade_metrics.pop('realized_pnl_per_trade', None)` "
+        "strip in analytics_runner.py before deleting this test. "
+        f"Got trade_metrics keys: {sorted(trade_metrics.keys())}"
+    )
+    # And verify the derived metrics still computed (the strip must NOT
+    # disturb the internal consumers — weighted R:R and SQN both read the
+    # per-trade list before the strip fires).
+    assert trade_metrics.get("weighted_risk_reward_ratio") is not None, (
+        "Internal consumer regression: weighted_risk_reward_ratio is None "
+        "but realized_pnl_per_trade was non-empty — the strip is running "
+        "BEFORE _compute_derived_trade_metrics reads the list. Move the "
+        "strip back to AFTER the derived-metrics computation."
+    )
+
+
+def _build_daily_rows(n: int) -> list[dict]:
+    """Shared helper for tests that need ≥90 daily rows so the rolling
+    helpers populate. Mirrors the inline list builder used by
+    test_run_strategy_analytics_writes_sibling_kinds."""
+    return [
+        {
+            "id": f"trade-{i}",
+            "strategy_id": "strat-test",
+            "symbol": "PORTFOLIO",
+            "side": "buy" if i % 2 == 0 else "sell",
+            "price": 100 + i,
+            "quantity": 1,
+            "fee": 0,
+            "timestamp": f"2024-01-{i + 1:02d}T00:00:00+00:00",
+            "is_fill": False,
+        }
+        for i in range(n)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_real_compute_exposure_metrics_derives_series_from_snapshots() -> None:
     """audit-2026-05-07 H-0763 / H-0765 / M-0726 (non-tautological coverage).
 

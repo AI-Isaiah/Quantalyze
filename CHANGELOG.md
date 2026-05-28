@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.10.12] - 2026-05-28
+### Changed — position_reconstruction.py hardening (audit-2026-05-07 batch)
+- **H-0737 — info-disclosure RLS leak closed.** `realized_pnl_per_trade` (per-trade PnL+side, capped at 10k entries) was being written into `strategy_analytics.trade_metrics` JSONB, which `analytics_read` RLS exposes to any authenticated user for published strategies — competitor reverse-engineering surface. Now stripped post-merge in `analytics_runner.py` (internal `_compute_derived_trade_metrics` consumers still read the list upstream via `trade_metrics_from_positions`, so weighted R:R, SQN, etc. still compute correctly). Frontend `FROZEN_TRADE_METRICS_KEYS` updated, parity tests + golden expected fixtures mirror the strip. Regression test in `test_analytics_runner.py` drives end-to-end with a payload that INCLUDES the key, captures the upsert, asserts absence AND asserts `weighted_risk_reward_ratio is not None` (catches "strip before derive" regression).
+- **H-0739 — `compute_turnover_series` privatized.** Renamed to `_compute_turnover_series` to remove the public turnover-helper surface (no strategy_id/auth context). Public `compute_turnover_series_with_flags` still exposes the same shape but with the right call-site discipline. Comment honesty: noted that this is a convention-only change (no security delta on the privatized helper alone).
+- **M-0713 — `exposure_series_skipped_shared_api_key` flag.** Added to `data_quality_flags` payload on the shared-api-key short-circuit branch in `compute_exposure_metrics`. Companion to the pre-existing `exposure_metrics_skipped_shared_api_key`. Added the field to `DataQualityFlags` TypedDict (analytics_runner.py:177) so the typed contract enforces presence at the writer boundary.
+- **M-0715 — `position_side` exhaustive check.** `_match_positions_fifo` if/elif on `position_side` now has explicit `else: raise AssertionError(...)` with the offending value in the message (Rule 12 fail-loud). Provably unreachable today; defends against future fill types ("neutral" etc.) silently no-oping.
+- **M-0934 — bisect window scan.** `_attribute_funding` per-position funding lookup converted from O(P·F) linear scan to O(P·log F + window) via per-key timestamp arrays + `bisect.bisect_left` on both bounds (half-open `[opened, closed)` semantics). Two regression tests: 5!=120 permutations of mock payload pinning the in-Python sort, plus AST guard ensuring `bisect.bisect_left` is invoked.
+- **M-0935 — Sentry capture on funding fetch failure.** `sentry_sdk.capture_exception` + `set_tag` for `strategy_id` and `funding_attribution_failed` on funding fetch failure path. Wrapped in `sentry_sdk.new_scope()` so tags don't bleed across strategies in the same worker process. Test pins the new_scope contract (asserts global `set_tag` is NOT called).
+- **M-0939 — `.order("timestamp")` on funding-fetch range scan.** Adds explicit server-side ordering between `.lte()` and `.range()` so cross-page pagination is deterministic (was implicit). 8 mock chains updated symmetrically + AST guard.
+- **Deferred with documented rationale**: H-0742 (NewType Date/Symbol — cross-file), H-0746 (KEK rotation — needs schema column), M-0714 (Trade Pydantic — cross-file), M-0938 (page size pinned to PostgREST max_rows=1000; coordinated infra change, not code change).
+- **Stale**: M-0710, M-0716, M-0936, M-0937 (re-verified already addressed by prior changes).
+- Tests: analytics suite 2357 passed / 71 skipped. Position-recon focused: 167 passed. tsc clean. TS metrics-parity 19/19 passed.
+
+
 ## [0.24.10.11] - 2026-05-28
 ### Changed — claim_compute_jobs hardening (audit-2026-05-07 mig090 follow-up batch)
 - **New migration `20260528061155_claim_dedupe_tie_break_and_short_circuit.sql`** replaces both `claim_compute_jobs` (legacy) and `claim_compute_jobs_with_priority` (priority-aware) SECURITY DEFINER RPCs. Three behavioral changes, plus structural hardening.

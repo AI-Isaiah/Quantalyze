@@ -34,7 +34,7 @@ from services.analytics_runner import (
     _compute_volume_metrics,
 )
 from services.metrics import compute_all_metrics
-from services.position_reconstruction import compute_turnover_series
+from services.position_reconstruction import _compute_turnover_series
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -697,7 +697,7 @@ def test_turnover_series_has_nonzero_signal_floor():
     input_json = _load_golden_input(
         (FIXTURES_DIR / "golden_252d_input.json").read_text()
     )
-    series = compute_turnover_series(
+    series = _compute_turnover_series(
         input_json["positions_by_date"],
         input_json["prices_by_date"],
         input_json["nav_by_date"],
@@ -831,17 +831,23 @@ def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
         **derived,
         "trade_mix": trade_mix,
     }
+    # Audit-2026-05-07 round-2 H-0737: mirror the production strip — the
+    # per-trade realized PnL list is read INTERNALLY by
+    # `_compute_derived_trade_metrics` but MUST NOT reach the persisted
+    # JSONB (RLS-readable info leak). See analytics_runner.py for the
+    # matching prod call.
+    merged_trade_metrics.pop("realized_pnl_per_trade", None)
 
     metrics_json = dict(result.metrics_json)
     metrics_json["trade_metrics"] = merged_trade_metrics
     metrics_json["volume_metrics"] = volume_aggregator
 
     # audit-2026-05-07 G.1 / P2004: turnover_series is a runner-level
-    # sibling kind populated by analytics_runner via compute_turnover_series.
+    # sibling kind populated by analytics_runner via _compute_turnover_series.
     # Previously, this test contained an inline fallback that re-derived the
     # whole series if compute_all_metrics().sibling_kinds was missing the key
     # — that fallback duplicated production math, so a bug in
-    # compute_turnover_series could never fail the parity assertion. We now
+    # _compute_turnover_series could never fail the parity assertion. We now
     # invoke the production helper directly. If a future refactor moves
     # turnover_series into compute_all_metrics, fail loud so the engineer
     # updates the harness instead of double-computing.
@@ -854,7 +860,7 @@ def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
             "the parity test harness to stop computing it twice. "
             "(audit-2026-05-07 P2004)"
         )
-    sibling["turnover_series"] = compute_turnover_series(
+    sibling["turnover_series"] = _compute_turnover_series(
         positions_by_date, prices_by_date, nav_by_date
     )
     # exposure_series: the production helper compute_exposure_metrics is

@@ -10,7 +10,7 @@ Invariants (D-09 + cross-AI review fixes):
 - 252 trading days
 - ~5% annualized volatility, ~0.4 Sharpe, ~10% max DD
 - ~250 fills, ~50 closed positions
-- **H-A1: simulates positions/prices/NAV** so ``compute_turnover_series`` and
+- **H-A1: simulates positions/prices/NAV** so ``_compute_turnover_series`` and
   ``compute_exposure_metrics`` emit non-empty series in expected JSON
 - **B-01: uses ``_compute_derived_trade_metrics(volume_metrics,
   trade_metrics_from_positions)``** passing BOTH dicts (NOT extending
@@ -57,7 +57,7 @@ from services.analytics_runner import (
     _compute_volume_metrics,
 )
 from services.metrics import compute_all_metrics
-from services.position_reconstruction import compute_turnover_series
+from services.position_reconstruction import _compute_turnover_series
 
 FIXTURES_DIR = Path(__file__).parent
 SEED = 42
@@ -520,13 +520,21 @@ def main(argv: list[str] | None = None) -> None:
         **derived,
         "trade_mix": trade_mix,
     }
+    # Audit-2026-05-07 round-2 H-0737: mirror the production strip — the
+    # per-trade realized PnL list is read INTERNALLY by
+    # `_compute_derived_trade_metrics` but is REMOVED from the persisted
+    # JSONB to close an RLS-readable info leak. The regen fixture must
+    # match the persisted shape, otherwise the parity test will fail with
+    # a contract mismatch on the next regen. See
+    # analytics-service/services/analytics_runner.py for the matching strip.
+    merged_trade_metrics.pop("realized_pnl_per_trade", None)
     metrics_json["trade_metrics"] = merged_trade_metrics
     metrics_json["volume_metrics"] = volume_aggregator
 
     # H-A1: populate sibling kinds for exposure_series + turnover_series
     sibling = dict(result.sibling_kinds)
     sibling["exposure_series"] = inp["exposure_series"]
-    sibling["turnover_series"] = compute_turnover_series(
+    sibling["turnover_series"] = _compute_turnover_series(
         inp["positions_by_date"], inp["prices_by_date"], inp["nav_by_date"]
     )
 

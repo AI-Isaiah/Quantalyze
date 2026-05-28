@@ -75,7 +75,14 @@ export const FROZEN_TRADE_METRICS_KEYS: ReadonlyArray<string> = [
   "avg_losing_trade",
   "winners_count",
   "losers_count",
-  "realized_pnl_per_trade",
+  // Audit-2026-05-07 round-2 H-0737: `realized_pnl_per_trade` was REMOVED
+  // from the persisted JSONB to close a per-trade PnL leak via
+  // strategy_analytics' `analytics_read` RLS policy. Re-adding it requires
+  // a row-level security re-design (the list discloses entry/exit cadence
+  // and direction bias to any authenticated viewer of a published
+  // strategy). See analytics-service/services/analytics_runner.py
+  // `merged_trade_metrics.pop("realized_pnl_per_trade", None)` for the
+  // matching production strip.
   // Phase 12 / D-14 (optional)
   "trade_mix",
   // Plan 12-06 merges _compute_volume_metrics output keys

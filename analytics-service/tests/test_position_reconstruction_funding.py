@@ -56,13 +56,17 @@ def _make_mock_supabase_with_funding(
     m_sel.eq.return_value = m_eq1
     mock_trades.select.return_value = m_sel
 
-    # funding_fees: .select().eq().gte().lte().range().execute() — paginated fetch.
-    # Returns funding_rows on the first page, [] on the second (terminates).
+    # funding_fees: .select().eq().gte().lte().order().range().execute() —
+    # paginated fetch. Returns funding_rows on the first page, [] on the
+    # second (terminates). Audit-2026-05-07 M-0939: `.order("timestamp")`
+    # added between `.lte()` and `.range()` so test mock chains mirror the
+    # explicit-ordering production call.
     mock_funding = MagicMock()
     f_sel = MagicMock()
     f_eq1 = MagicMock()
     f_gte = MagicMock()
     f_lte = MagicMock()
+    f_order = MagicMock()
     f_range = MagicMock()
     # First call returns all rows (simulate short page to terminate loop);
     # subsequent calls return empty.
@@ -70,7 +74,8 @@ def _make_mock_supabase_with_funding(
         MagicMock(data=funding_rows),
         MagicMock(data=[]),
     ]
-    f_lte.range.return_value = f_range
+    f_order.range.return_value = f_range
+    f_lte.order.return_value = f_order
     f_gte.lte.return_value = f_lte
     f_eq1.gte.return_value = f_gte
     f_sel.eq.return_value = f_eq1
@@ -383,19 +388,22 @@ async def test_attribute_funding_pagination_includes_all_rows() -> None:
     m_sel.eq.return_value = m_eq1
     mock_trades.select.return_value = m_sel
 
-    # funding_fees: paginated — page1, page2, empty terminator
+    # funding_fees: paginated — page1, page2, empty terminator.
+    # M-0939: `.order("timestamp")` interposed between `.lte()` and `.range()`.
     mock_funding = MagicMock()
     f_sel = MagicMock()
     f_eq1 = MagicMock()
     f_gte = MagicMock()
     f_lte = MagicMock()
+    f_order = MagicMock()
     f_range = MagicMock()
     f_range.execute.side_effect = [
         MagicMock(data=page1_rows),
         MagicMock(data=page2_rows),
         MagicMock(data=[]),
     ]
-    f_lte.range.return_value = f_range
+    f_order.range.return_value = f_range
+    f_lte.order.return_value = f_order
     f_gte.lte.return_value = f_lte
     f_eq1.gte.return_value = f_gte
     f_sel.eq.return_value = f_eq1
@@ -493,6 +501,10 @@ async def test_attribute_funding_pagination_includes_all_rows() -> None:
                             .eq("strategy_id", strategy_id)
                             .gte("timestamp", min_opened_at)
                             .lte("timestamp", max_closed_at)
+                            # M-0939: mirror production's explicit .order()
+                            # call so the patched chain reaches `f_range`
+                            # (the prod chain is `.lte().order().range()`).
+                            .order("timestamp")
                             .range(s, e)
                             .execute()
                         )
@@ -682,15 +694,18 @@ def _make_mock_supabase_funding_fetch_raises(
     m_sel.eq.return_value = m_eq1
     mock_trades.select.return_value = m_sel
 
-    # funding_fees: .select().eq().gte().lte().range().execute() RAISES
+    # funding_fees: .select().eq().gte().lte().order().range().execute() RAISES.
+    # M-0939: ordering interposed; chain mirrors the production call.
     mock_funding = MagicMock()
     f_sel = MagicMock()
     f_eq1 = MagicMock()
     f_gte = MagicMock()
     f_lte = MagicMock()
+    f_order = MagicMock()
     f_range = MagicMock()
     f_range.execute.side_effect = exc
-    f_lte.range.return_value = f_range
+    f_order.range.return_value = f_range
+    f_lte.order.return_value = f_order
     f_gte.lte.return_value = f_lte
     f_eq1.gte.return_value = f_gte
     f_sel.eq.return_value = f_eq1
@@ -864,6 +879,139 @@ async def test_funding_fetch_failure_sets_data_quality_flag() -> None:
 
 
 @pytest.mark.asyncio
+async def test_funding_fetch_failure_captures_to_sentry() -> None:
+    """Audit-2026-05-07 M-0935: the funding fetch failure path must ALSO
+    capture the exception to Sentry so an RLS regression / transient outage
+    that silently zeros funding for every position is observable in error
+    tracking — not just buried in WARNING logs + a DQ flag the dashboard
+    has to surface. Fails without the fix: `sentry_sdk.capture_exception`
+    is never called even when the funding fetch raises.
+    """
+    fills = [
+        {
+            "symbol": "BTCUSDT",
+            "side": "buy",
+            "price": 100.0,
+            "quantity": 1.0,
+            "fee": 0.0,
+            "timestamp": "2024-01-01T00:00:00+00:00",
+            "raw_data": {},
+            "is_fill": True,
+        },
+        {
+            "symbol": "BTCUSDT",
+            "side": "sell",
+            "price": 110.0,
+            "quantity": 1.0,
+            "fee": 0.0,
+            "timestamp": "2024-01-02T00:00:00+00:00",
+            "raw_data": {},
+            "is_fill": True,
+        },
+    ]
+    err = RuntimeError("RLS denied funding_fees")
+    mock_supabase = _make_mock_supabase_funding_fetch_raises(fills, err)
+
+    fake_sentry = MagicMock()
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ), patch(
+        "services.position_reconstruction.sentry_sdk", fake_sentry
+    ):
+        result = await reconstruct_positions("strat-1", mock_supabase)
+
+    # Fail-soft path still completes.
+    assert result["closed_positions"] == 1
+    # And the exception is captured to Sentry exactly once with the
+    # underlying RuntimeError (not a wrapped string).
+    assert fake_sentry.capture_exception.call_count == 1, (
+        "expected sentry_sdk.capture_exception to be called once on funding "
+        f"fetch failure; got call_count={fake_sentry.capture_exception.call_count}"
+    )
+    captured_arg = fake_sentry.capture_exception.call_args.args[0]
+    assert captured_arg is err, (
+        f"expected the original RuntimeError to be captured; got {captured_arg!r}"
+    )
+    # And the strategy_id tag is set so on-call can pivot from a sentry alert
+    # straight to the affected strategy. Audit-2026-05-07 round-2 M2 moved
+    # the tag set into a `sentry_sdk.new_scope()` context (to bound the
+    # tag lifetime and prevent tag-bleed across strategies), so the tag is
+    # now installed via `scope.set_tag(...)` — where `scope` is the
+    # context-manager value yielded by `fake_sentry.new_scope()`. The mock
+    # records this as `fake_sentry.new_scope().__enter__().set_tag(...)`.
+    new_scope_cm = fake_sentry.new_scope.return_value
+    scope_obj = new_scope_cm.__enter__.return_value
+    scope_obj.set_tag.assert_any_call("strategy_id", "strat-1")
+    # The pre-M2 `sentry_sdk.set_tag(...)` GLOBAL-isolation-scope call must
+    # be gone — its presence is the tag-bleed bug we just fixed.
+    assert not fake_sentry.set_tag.called, (
+        "M2 regression: funding fetch failure path is calling "
+        "`sentry_sdk.set_tag(...)` directly on the GLOBAL isolation "
+        "scope. After this fires for strategy A, every subsequent "
+        "Sentry capture in the same worker request inherits "
+        "`strategy_id=A`. Wrap the tag set in `sentry_sdk.new_scope()` "
+        "(mirrors services/logging_config.py:116)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_funding_fetch_failure_no_sentry_installed_still_completes() -> None:
+    """Audit-2026-05-07 M-0935 (red-team follow-up): when the sentry_sdk
+    package is absent (CI / stripped-down test image — the module-top
+    `try: import sentry_sdk except ImportError: sentry_sdk = None` path),
+    the fail-soft reconstruction MUST still complete. The existing M-0935
+    test patched in a MagicMock sentry, leaving this no-sentry contract
+    uncovered: a future refactor that broadens the capture path beyond
+    the `if sentry_sdk is not None:` gate AND/OR weakens the `try/except
+    Exception` swallow (e.g. narrowed to `except sentry_sdk.Hub.Error`)
+    would silently regress the no-sentry contract. Both safety layers
+    are independently load-bearing for this contract — this test pins
+    the OUTCOME (reconstruction completes, position recorded with
+    funding_pnl=0) rather than either specific layer.
+    """
+    fills = [
+        {
+            "symbol": "BTCUSDT",
+            "side": "buy",
+            "price": 100.0,
+            "quantity": 1.0,
+            "fee": 0.0,
+            "timestamp": "2024-01-01T00:00:00+00:00",
+            "raw_data": {},
+            "is_fill": True,
+        },
+        {
+            "symbol": "BTCUSDT",
+            "side": "sell",
+            "price": 110.0,
+            "quantity": 1.0,
+            "fee": 0.0,
+            "timestamp": "2024-01-02T00:00:00+00:00",
+            "raw_data": {},
+            "is_fill": True,
+        },
+    ]
+    err = RuntimeError("RLS denied funding_fees")
+    mock_supabase = _make_mock_supabase_funding_fetch_raises(fills, err)
+
+    # Force the no-sentry path by patching sentry_sdk to None — mirrors a
+    # CI image without the sentry_sdk package installed.
+    with patch(
+        "services.position_reconstruction.db_execute",
+        side_effect=_mock_db_execute,
+    ), patch(
+        "services.position_reconstruction.sentry_sdk", None
+    ):
+        # Must NOT raise AttributeError.
+        result = await reconstruct_positions("strat-1", mock_supabase)
+
+    # Fail-soft path still completes: the position is recorded with
+    # funding_pnl=0 (the original DQ-flag-only degradation path).
+    assert result["closed_positions"] == 1
+
+
+@pytest.mark.asyncio
 async def test_funding_window_bounds_skip_corrupt_closed_at() -> None:
     """Audit H-1097: a single corrupt closed_at must NOT become the raw
     lexically-max value injected into PostgREST `.lte('timestamp', ...)`.
@@ -914,6 +1062,7 @@ async def test_funding_window_bounds_skip_corrupt_closed_at() -> None:
             f_eq = MagicMock()
             f_gte = MagicMock()
             f_lte = MagicMock()
+            f_order = MagicMock()
             f_range = MagicMock()
             f_range.execute.return_value = MagicMock(data=[])
 
@@ -926,7 +1075,9 @@ async def test_funding_window_bounds_skip_corrupt_closed_at() -> None:
                 captured["min_opened_at"] = value
                 return f_gte
 
-            f_lte.range.return_value = f_range
+            # M-0939: order() interposed before range().
+            f_order.range.return_value = f_range
+            f_lte.order.return_value = f_order
             f_gte.lte.side_effect = _capture_lte
             f_eq.gte.side_effect = _capture_gte
             f_sel.eq.return_value = f_eq
@@ -1107,6 +1258,7 @@ async def test_funding_window_all_closed_at_corrupt_defaults_to_now() -> None:
             f_eq = MagicMock()
             f_gte = MagicMock()
             f_lte = MagicMock()
+            f_order = MagicMock()
             f_range = MagicMock()
             f_range.execute.return_value = MagicMock(data=[])
 
@@ -1114,7 +1266,9 @@ async def test_funding_window_all_closed_at_corrupt_defaults_to_now() -> None:
                 captured["max_closed_at"] = value
                 return f_lte
 
-            f_lte.range.return_value = f_range
+            # M-0939: order() between lte and range.
+            f_order.range.return_value = f_range
+            f_lte.order.return_value = f_order
             f_gte.lte.side_effect = _capture_lte
             f_eq.gte.return_value = f_gte
             f_sel.eq.return_value = f_eq
@@ -1156,6 +1310,7 @@ def _capture_bounds_table(captured: dict, *, funding_data=None, fetch_exc=None):
             f_eq = MagicMock()
             f_gte = MagicMock()
             f_lte = MagicMock()
+            f_order = MagicMock()
             f_range = MagicMock()
             if fetch_exc is not None:
                 f_range.execute.side_effect = fetch_exc
@@ -1170,7 +1325,9 @@ def _capture_bounds_table(captured: dict, *, funding_data=None, fetch_exc=None):
                 captured["min_opened_at"] = value
                 return f_gte
 
-            f_lte.range.return_value = f_range
+            # M-0939: order() between lte and range.
+            f_order.range.return_value = f_range
+            f_lte.order.return_value = f_order
             f_gte.lte.side_effect = _cap_lte
             f_eq.gte.side_effect = _cap_gte
             f_sel.eq.return_value = f_eq

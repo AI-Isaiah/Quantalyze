@@ -92,9 +92,12 @@ def _make_trades_funding_mock(
     f_eq1 = MagicMock()
     f_gte = MagicMock()
     f_lte = MagicMock()
+    f_order = MagicMock()
     f_range = MagicMock()
     f_range.execute.side_effect = funding_execute_side_effect
-    f_lte.range.return_value = f_range
+    # M-0939: order() between lte and range.
+    f_order.range.return_value = f_range
+    f_lte.order.return_value = f_order
     f_gte.lte.return_value = f_lte
     f_eq1.gte.return_value = f_gte
     f_sel.eq.return_value = f_eq1

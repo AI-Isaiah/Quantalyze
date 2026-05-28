@@ -11,6 +11,7 @@ funding_fees rows in [opened_at, closed_at] window.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import logging
 import math
 import statistics
@@ -22,6 +23,15 @@ from typing import Any, Literal, TypedDict
 from uuid import UUID
 
 from services.db import db_execute
+
+# Audit-2026-05-07 M-0935: Sentry capture is best-effort. The sentry_sdk
+# import is guarded so a stripped-down test/CI environment without sentry
+# configured does not fail import on this module. The capture site below
+# also swallows any sentry-side error (mirrors services/audit.py).
+try:
+    import sentry_sdk
+except ImportError:  # pragma: no cover — sentry is a prod-only dependency
+    sentry_sdk = None  # type: ignore[assignment]
 
 
 # Audit-2026-05-27 H-0650: the canonical position-direction Literal. A
@@ -817,6 +827,15 @@ async def _attribute_funding(
 
     # Page size for funding_fees fetch. Small enough to stay well under
     # PostgREST's per-response limit; used in tests via patching.
+    #
+    # Audit-2026-05-07 M-0938 (raise page size): page size pinned to
+    # PostgREST `max_rows=1000` (repo supabase/config.toml). Raising the
+    # page size without bumping the server max would silently truncate:
+    # `.range(0, 9999)` would still return at most 1000 rows, and the
+    # `len(chunk) < _PAGE_SIZE` terminator would then declare the funding
+    # window complete after page 1 even when more data exists.
+    # Coordinated infra change, not a code change. Current pagination is
+    # correct.
     _PAGE_SIZE = 1000
 
     funding_rows: list[dict] = []
@@ -842,6 +861,15 @@ async def _attribute_funding(
                     .eq("strategy_id", strategy_id)
                     .gte("timestamp", min_opened_at)
                     .lte("timestamp", max_closed_at)
+                    # Audit-2026-05-07 M-0939: explicit ordering so pages are
+                    # stable across PostgREST default-ordering changes. Without
+                    # this the pagination relies on PostgREST's implicit
+                    # primary-key ordering — any future server tweak could
+                    # silently double-count or skip rows at page boundaries,
+                    # corrupting funding_pnl. Ascending by timestamp also
+                    # matches the per-(symbol, exchange) timeline sort below,
+                    # so a single-page response arrives pre-sorted.
+                    .order("timestamp")
                     .range(s, e)
                     .execute()
                 )
@@ -866,6 +894,26 @@ async def _attribute_funding(
         # implying the strategy simply paid none.
         if flags is not None:
             flags["funding_attribution_failed"] = True
+        # Audit-2026-05-07 M-0935: also capture to Sentry so an RLS regression
+        # or transient outage that silently zeros funding for every position
+        # is observable in error tracking — the WARNING log + DQ flag alone
+        # require dashboard inspection / log search to notice. Wrapped so a
+        # sentry-side failure cannot mask the original DQ flag.
+        #
+        # Audit-2026-05-07 round-2 M2 (Sentry tag-bleed): `sentry_sdk.set_tag`
+        # mutates the GLOBAL isolation scope, so after this fires for
+        # strategy A every subsequent Sentry capture in the same worker
+        # request inherits `strategy_id=A`. Wrap in `new_scope()` to bound
+        # the tag lifetime to this capture only — mirrors the surrounding
+        # request-scoped pattern at services/logging_config.py:116.
+        if sentry_sdk is not None:
+            try:
+                with sentry_sdk.new_scope() as scope:
+                    scope.set_tag("funding_attribution_failed", "true")
+                    scope.set_tag("strategy_id", str(strategy_id))
+                    sentry_sdk.capture_exception(exc)
+            except Exception:  # pragma: no cover — best-effort
+                pass
         return
 
     if not funding_rows:
@@ -1000,23 +1048,46 @@ async def _attribute_funding(
     # Earlier-opened (then earlier-closed) positions claim contested rows first.
     parsed_positions.sort(key=lambda x: (x[0], x[1]))
 
+    # Audit-2026-05-07 M-0934: bisect into the per-key SORTED-BY-TS timeline
+    # so each position only scans the funding rows whose timestamp falls in
+    # its window, not the whole symbol timeline. Pre-fix this was O(P * F)
+    # per (symbol, exchange): for a 5-year strategy with ~100 positions and
+    # ~1500 funding rows per symbol, that's ~150k comparisons per call vs
+    # ~O(P log F + total_window_rows) with bisect. Per-key timestamp arrays
+    # are extracted once so `bisect_left` can binary-search. Both window
+    # bounds use ``bisect_left`` (lower AND upper) to implement half-open
+    # ``[opened, closed)`` semantics — see the inline comment at the
+    # bisect call below for the upper-bound rationale.
+    # The `consumed` set still tracks single-assignment ownership for
+    # positions with OVERLAPPING windows on the same key — bisect bounds the
+    # scan window, the set picks the winner inside it.
+    key_timestamps: dict[tuple[str, str], list[datetime]] = {
+        key: [row[0] for row in rows] for key, rows in by_key.items()
+    }
     # Per-(symbol, exchange) set of funding-row indices already owned by a
     # position, so a row is summed into at most one position.
     consumed: dict[tuple[str, str], set[int]] = defaultdict(set)
     for opened_dt, closed_dt, pos in parsed_positions:
         key = (pos.get("symbol", ""), pos.get("exchange") or "unknown")
         rows = by_key.get(key, [])
+        if not rows:
+            continue
+        timestamps = key_timestamps[key]
+        # Half-open window: [opened, closed). bisect_left on opened_dt finds
+        # the first ts >= opened_dt; bisect_left on closed_dt finds the first
+        # ts >= closed_dt — i.e. the upper-exclusive bound. A row at exactly
+        # closed_dt is therefore EXCLUDED (it belongs to the NEXT leg or to
+        # no position) — preserves the prior half-open semantics that kills
+        # the flip-instant double count.
+        lo = bisect.bisect_left(timestamps, opened_dt)
+        hi = bisect.bisect_left(timestamps, closed_dt)
         owned = consumed[key]
         total = Decimal(0)
-        for idx, (ts, amt) in enumerate(rows):
+        for idx in range(lo, hi):
             if idx in owned:
                 continue
-            # Half-open window: [opened, closed). A row at exactly closed_dt
-            # belongs to the NEXT leg (or to no position if it is the final
-            # close), never to this one — kills the flip-instant double count.
-            if opened_dt <= ts < closed_dt:
-                total += amt
-                owned.add(idx)
+            total += rows[idx][1]
+            owned.add(idx)
 
         # Round to 8 decimals (funding amounts are typically ≤ 6 places
         # but we keep headroom to avoid premature truncation).
@@ -1313,6 +1384,21 @@ def _match_positions_fifo(
                 flip_eps = max(total_entry_qty * FLIP_EPS_FACTOR, MIN_QTY_DUST)
                 if abs(net_qty) < flip_eps:
                     net_qty = Decimal(0)
+        else:
+            # Audit-2026-05-07 M-0715: `position_side` is annotated
+            # `PositionSide | None` (Literal["long","short","flat"] | None),
+            # and inside this branch `net_qty != 0` guarantees a non-None
+            # position. The matcher never assigns `"flat"` (it is the
+            # snapshot/exposure no-position marker only). A future hedge-mode
+            # extension that introduces a new value would otherwise silently
+            # fall through here, leaving `net_qty` unchanged and `closing_qty`
+            # at 0 — booking the fill as a no-op and producing a phantom
+            # always-open position. Fail loud (Rule 12) so the gap is visible
+            # at the first bad fill, not in downstream KPI drift.
+            raise AssertionError(
+                f"unexpected position_side={position_side!r} "
+                f"(strategy={strategy_id} symbol={symbol})"
+            )
 
         # Audit-2026-05-07 G12.C.5: accumulate VWAP exit across all
         # closing fills (partial reductions PLUS the final closing fill).
@@ -1667,9 +1753,19 @@ async def compute_exposure_metrics(
                     "to avoid cross-strategy contamination",
                     api_key_id, len(sib_rows), strategy_id,
                 )
+                # Audit-2026-05-07 M-0713: the contamination short-circuit
+                # drops `exposure_series` silently (the function's contract
+                # promises one whenever exposure data was found). The
+                # sibling-table writer (kind=exposure_series) needs an
+                # explicit "series intentionally skipped" signal alongside
+                # the existing scalar-aggregates skip flag — without it the
+                # downstream consumer can't distinguish "no series produced
+                # this run because we refused to compute" from "writer
+                # silently lost the field".
                 return {
                     "data_quality_flags": {
                         "exposure_metrics_skipped_shared_api_key": True,
+                        "exposure_series_skipped_shared_api_key": True,
                     }
                 }
         except Exception as exc:  # noqa: BLE001
@@ -1999,7 +2095,7 @@ def compute_turnover_series_with_flags(
     return series, flags
 
 
-def compute_turnover_series(
+def _compute_turnover_series(
     positions_by_date: dict[str, dict[str, float]],
     prices_by_date: dict[str, dict[str, float]],
     nav_by_date: dict[str, float],
@@ -2007,9 +2103,23 @@ def compute_turnover_series(
     """Backwards-compatible wrapper around `compute_turnover_series_with_flags`.
 
     Returns only the series and discards the data quality flags — preserves
-    the pre-existing call-site shape used by analytics_runner and
-    tests/fixtures/regen_golden.py. Callers that want the flags should
-    use `compute_turnover_series_with_flags` directly.
+    the pre-existing call-site shape used by tests/fixtures/regen_golden.py.
+    Production callers (analytics_runner) use
+    `compute_turnover_series_with_flags` directly.
+
+    Audit-2026-05-07 H-0739: renamed from `compute_turnover_series` →
+    `_compute_turnover_series`. This is a CONVENTION-ONLY change with NO
+    security delta — the public `compute_turnover_series_with_flags` has
+    the same plain-dicts signature with the same lack of strategy_id /
+    allocator identity, so the underscore alone cannot defend against an
+    attacker-shaped grid the way the original H-0739 audit framing
+    implied. The honest benefit is narrower: it signals to future readers
+    that the only legitimate callers are the in-package test/regen
+    fixtures, so a new production caller MUST switch to the public
+    `compute_turnover_series_with_flags` and pick up the data-quality
+    flags it returns. Genuinely closing H-0739's info-disclosure surface
+    requires an allocator-identity-aware wrapper at the call-site (cross-
+    file, deferred to the dedicated H-0737 batch).
     """
     series, _flags = compute_turnover_series_with_flags(
         positions_by_date, prices_by_date, nav_by_date

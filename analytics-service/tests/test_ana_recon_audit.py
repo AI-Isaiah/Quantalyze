@@ -483,10 +483,11 @@ def test_c30_02_btc_denominated_funding_skipped_not_summed():
     ]
     mock_chain = MagicMock()
     mock_chain.execute.return_value = MagicMock(data=funding_data)
-    # _fetch_funding chain: .select().eq().gte().lte().range().execute()
+    # _fetch_funding chain: .select().eq().gte().lte().order().range().execute()
+    # M-0939: order() interposed between lte and range.
     (supabase.table.return_value.select.return_value
      .eq.return_value.gte.return_value.lte.return_value
-     .range.return_value) = mock_chain
+     .order.return_value.range.return_value) = mock_chain
 
     flags: dict = {}
     asyncio.run(
