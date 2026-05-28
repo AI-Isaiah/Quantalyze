@@ -61,6 +61,31 @@ class TestSimulateAddCandidate:
             assert key in result["current"]
             assert key in result["proposed"]
 
+    def test_corr_delta_null_when_single_strategy_baseline(self):
+        """NEW-C11-02: a single-strategy 'current' portfolio has NO existing
+        correlation pair, so corr_delta must be None (undefined baseline), not
+        a fabricated 0.0. Pre-fix _delta coerced the None baseline to 0.0,
+        which the panel renders as 'Correlation unchanged (+/-0.000)' — masking
+        that the candidate introduces the FIRST correlated pair and misleading
+        the allocator that diversification is neutral."""
+        portfolio = {"s1": _make_returns(1)}
+        candidate = _make_returns(10)
+        weights = {"s1": 1.0}
+
+        result = simulate_add_candidate(
+            portfolio_returns=portfolio,
+            candidate_id="c1",
+            candidate_returns=candidate,
+            weights=weights,
+        )
+
+        assert result["status"] == "ok"
+        # Undefined baseline, NOT zero. (Fails pre-fix: corr_delta == 0.0.)
+        assert result["deltas"]["corr_delta"] is None
+        assert result["current"]["avg_correlation"] is None
+        # The proposed 2-column portfolio DOES have a measurable correlation.
+        assert isinstance(result["proposed"]["avg_correlation"], float)
+
     def test_strong_candidate_improves_sharpe(self):
         """A clearly-better candidate should yield positive sharpe_delta."""
         portfolio = {

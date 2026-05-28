@@ -51,12 +51,23 @@ const INITIAL_STATE: DrawerState = { stage: "browse" };
  * — id + name + markets + strategy_types — so the composer (Plan 06) can
  * forward this directly to scenario-state.ts `addStrategyBridge`.
  *
- * markets and strategy_types are best-effort client-side approximations:
- * markets defaults to `[holding.venue]` (the strategy is necessarily live
- * on the holding's venue to be a valid swap candidate); strategy_types
- * defaults to []. The composer can refine these from `payload.strategies`
- * before passing to the scenario-state mutator if higher-fidelity metadata
- * is available.
+ * markets is a REAL value: `[holding.venue]` — the candidate is necessarily
+ * live on the holding's venue to be a valid swap. strategy_types is an
+ * UNKNOWN placeholder (`[]`), NOT a measured "this strategy has no types":
+ * per-candidate strategy types are not carried by the flagged-holdings
+ * projection (src/lib/queries.ts).
+ *
+ * NEW-C24-02 (audit-2026-05-26, no-invented-data): the original doc claimed the
+ * composer "refines these from `payload.strategies`". `payload.strategies` does
+ * exist and is load-bearing (returns + disclosure_tier/cagr/sharpe, see
+ * ScenarioComposer addedStrategyMetadataLookup) — but it carries NO per-candidate
+ * `strategy_types`, so the `[]` placeholder is never refined or overwritten
+ * downstream (scenario-adapter.ts forwards it verbatim). A consumer that derives
+ * a market/type-based verdict (e.g. mandate-fit) must NOT treat the `[]` as a
+ * real empty type-set. Today none does: the composer's projected
+ * correlation/concentration deltas are returns-based, so the placeholder is
+ * inert. If a future consumer reads strategy_types here, carry the candidate's
+ * real types from the server first.
  */
 export interface BridgeAddToScenarioCandidate {
   id: string;
@@ -187,10 +198,11 @@ export function BridgeDrawer({
   /**
    * Phase 10 D-05. Client-only "Add to scenario" — no POST. The composer
    * (Plan 06) consumes the callback to mutate the client-side scenario draft
-   * via scenario-state.ts addStrategyBridge. markets/strategy_types are
-   * best-effort approximations from the holding's venue + an empty list;
-   * the composer can refine from `payload.strategies` if richer metadata
-   * is available before forwarding to the scenario-state mutator.
+   * via scenario-state.ts addStrategyBridge. markets is the holding's real
+   * venue; strategy_types is an UNKNOWN placeholder (`[]`) — see
+   * BridgeAddToScenarioCandidate. NEW-C24-02: `payload.strategies` does not
+   * carry per-candidate strategy_types, so the placeholder is never refined;
+   * no live consumer derives a verdict from it today.
    */
   function handleAddToScenario() {
     if (state.stage !== "confirm" || !selected || !onAddToScenario) return;

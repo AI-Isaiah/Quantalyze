@@ -155,6 +155,15 @@ describe("<PortfolioImpactPanel>", () => {
       expect(screen.getByText(/Partial history:/)).toBeInTheDocument(),
     );
     expect(screen.getByText(/40 overlapping trading days/)).toBeInTheDocument();
+    // NEW-C11-04: window alignment (C11-03) shipped — both sides are now scored
+    // over the same overlap window. The banner must NOT claim they "mix two
+    // different periods" / use "your full history"; it must say both are
+    // measured over the shorter overlap window. Fails against the pre-fix copy.
+    expect(screen.queryByText(/use your full history/i)).toBeNull();
+    expect(screen.queryByText(/mix two different periods/i)).toBeNull();
+    expect(
+      screen.getByText(/measured over this shorter overlap window/i),
+    ).toBeInTheDocument();
   });
 
   it("renders a retryable error state on failed fetch", async () => {
