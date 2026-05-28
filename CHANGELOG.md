@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.15.5] - 2026-05-29
+### Fixed — mandate autosave no longer retries a timed-out write (audit-2026-05-07 NEW-C05-06)
+
+Editing an allocator mandate could silently revert a value you just set. The autosave hook aborts a slow save after 12 seconds and retried it — but an abort only cancels the browser's wait, not the request already on the wire. A timed-out save could still commit on the server *after* the retry (carrying a newer value) had landed, so the older value overwrote the newer one while the UI showed the newer value. The compliance field (max weight, exclusions) on disk and on screen silently diverged.
+
+The hook now treats a 12-second timeout as terminal: it does not retry the non-idempotent write, and surfaces "Save timed out — please re-confirm" so the allocator re-saves against the current value. Pure network errors (where the request never reached the server) still retry as before. (The broader multi-tab last-write-wins case — a server-side optimistic-concurrency token on the mandate write — is tracked as a separate hardening; it is out of scope here because it would redefine a production RPC that runs on every save.)
+
 ## [0.24.15.4] - 2026-05-28
 ### Fixed — GDPR Art.15 export no longer ships silently-incomplete when a parent row has a NULL key (audit-2026-05-07 NEW-C16-08)
 
