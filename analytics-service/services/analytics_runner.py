@@ -175,6 +175,13 @@ class DataQualityFlags(TypedDict, total=False):
     funding_rows_unparseable: int
     funding_currency_unsupported: int
     exposure_metrics_skipped_shared_api_key: bool
+    # Audit-2026-05-07 round-2 M1: companion to
+    # `exposure_metrics_skipped_shared_api_key` covering the SERIES sibling
+    # (`exposure_series`) that the same short-circuit drops alongside the
+    # scalar aggregates. Emitted by `compute_exposure_metrics` in
+    # services/position_reconstruction.py so the writer can distinguish
+    # "series intentionally skipped" from "writer silently lost the field".
+    exposure_series_skipped_shared_api_key: bool
     exposure_metrics_apikey_lookup_failed: bool
     exposure_metrics_no_snapshots: bool
     # --- cardinality-cap truncation siblings (realized_pnl + exposure) ---
@@ -1533,6 +1540,26 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             **derived,
             "trade_mix": trade_mix,
         }
+
+        # Audit-2026-05-07 round-2 H-0737 (info-disclosure RLS leak): strip the
+        # per-trade realized PnL list from the PERSISTED `strategy_analytics.
+        # trade_metrics` JSONB. The list is read INTERNALLY by
+        # `_compute_derived_trade_metrics` above (weighted R:R, SQN) — we
+        # keep it inside `trade_metrics_from_positions` for that computation,
+        # but it MUST NOT reach the public-readable column.
+        #
+        # Threat: the `analytics_read` RLS policy on `strategy_analytics`
+        # allows ANY authenticated user to SELECT trade_metrics for any
+        # published strategy. Each entry exposes per-trade PnL (capped at
+        # 10000) AND side ("long" / "short"), enough for an allocator or a
+        # competitor with allocator creds to reverse-engineer the underlying
+        # algorithm's entry/exit cadence and direction bias.
+        #
+        # Decision: option (a) from the round-2 brief — drop the key from the
+        # JSONB write entirely. The only `src/` reference is the schema gate
+        # in metrics-parity-helper.ts (FROZEN_TRADE_METRICS_KEYS); that list
+        # is updated in the same change. No UI surface renders this field.
+        merged_trade_metrics.pop("realized_pnl_per_trade", None)
 
         # H-A1: turnover_series from position_snapshots-derived grids.
         # Audit-2026-05-07 round-2 / P1995 follow-up: use the _with_flags

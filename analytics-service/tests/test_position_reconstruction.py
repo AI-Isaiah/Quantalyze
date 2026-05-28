@@ -15,12 +15,18 @@ import pytest
 
 # H-0811: all imports from the module under test are hoisted to the top
 # (PEP-8) so test ordering / module splits can't surface a confusing
-# mid-file ImportError. `compute_exposure_metrics` / `compute_turnover_series`
+# mid-file ImportError. `compute_exposure_metrics` / `_compute_turnover_series`
 # were previously imported mid-file as a TDD ("RED tests") artifact.
+# Audit-2026-05-07 H-0739: `compute_turnover_series` was renamed to
+# `_compute_turnover_series` — convention-only signal that the only
+# legitimate callers are in-package tests/regen fixtures (the public
+# `compute_turnover_series_with_flags` still carries the same plain-
+# dicts signature, so the underscore alone is NOT an info-disclosure
+# defence — see the rename note in services/position_reconstruction.py).
 from services.position_reconstruction import (
+    _compute_turnover_series,
     _match_positions_fifo,
     compute_exposure_metrics,
-    compute_turnover_series,
     reconstruct_positions,
 )
 
@@ -756,7 +762,7 @@ async def _run_sync(fn):
 # ---------------------------------------------------------------------------
 # METRICS-05: compute_exposure_metrics persists per-date exposure_series
 #             alongside aggregates (refactor lines 461-487 — was discarded).
-# METRICS-06: compute_turnover_series with explicit Pitfall #19 docstring
+# METRICS-06: _compute_turnover_series with explicit Pitfall #19 docstring
 #             contract (turnover = abs(Δposition × price) / nav).
 # (H-0811: imports hoisted to the top of the module.)
 
@@ -850,7 +856,7 @@ def test_turnover_series_contract() -> None:
         "2025-01-02": 10000.0,
         "2025-01-03": 10000.0,
     }
-    series = compute_turnover_series(positions_by_date, prices_by_date, nav_by_date)
+    series = _compute_turnover_series(positions_by_date, prices_by_date, nav_by_date)
     assert isinstance(series, list)
     days = {p["date"]: p["turnover"] for p in series}
     # Day 1: no prior position → turnover = 0
@@ -864,7 +870,7 @@ def test_turnover_series_contract() -> None:
 
 def test_turnover_series_empty_input() -> None:
     """METRICS-06: empty input returns empty list (graceful)."""
-    assert compute_turnover_series({}, {}, {}) == []
+    assert _compute_turnover_series({}, {}, {}) == []
 
 
 def test_turnover_series_zero_nav_short_circuit() -> None:
@@ -881,7 +887,7 @@ def test_turnover_series_zero_nav_short_circuit() -> None:
         "2025-01-01": 10000.0,
         "2025-01-02": 0.0,  # zero NAV → must short-circuit, not raise ZeroDivisionError
     }
-    series = compute_turnover_series(positions_by_date, prices_by_date, nav_by_date)
+    series = _compute_turnover_series(positions_by_date, prices_by_date, nav_by_date)
     days = {p["date"]: p["turnover"] for p in series}
     assert days["2025-01-02"] == 0.0
 
@@ -900,7 +906,7 @@ def test_turnover_series_multi_symbol() -> None:
         "2025-01-01": 10000.0,
         "2025-01-02": 10000.0,
     }
-    series = compute_turnover_series(positions_by_date, prices_by_date, nav_by_date)
+    series = _compute_turnover_series(positions_by_date, prices_by_date, nav_by_date)
     days = {p["date"]: p["turnover"] for p in series}
     # Δ_BTC × P_BTC + Δ_ETH × P_ETH = 1*100 + 5*50 = 350; nav=10000 → 0.035
     assert abs(days["2025-01-02"] - 0.035) < 1e-9
@@ -1469,11 +1475,15 @@ class TestExposureSharedApiKeyGuard:
 
         # When shared, computation is REFUSED — only the flag is returned.
         assert "mean_gross_exposure" not in result
-        assert (
-            result.get("data_quality_flags", {}).get(
-                "exposure_metrics_skipped_shared_api_key"
-            ) is True
-        )
+        flags_out = result.get("data_quality_flags", {})
+        assert flags_out.get("exposure_metrics_skipped_shared_api_key") is True
+        # Audit-2026-05-07 M-0713: the contamination short-circuit returns
+        # NO `exposure_series` key, so the sibling-table writer (kind=
+        # exposure_series) needs an explicit "series skipped" signal alongside
+        # the scalar-aggregates skip flag — otherwise the consumer cannot
+        # distinguish "skipped intentionally" from "writer silently lost it".
+        assert flags_out.get("exposure_series_skipped_shared_api_key") is True
+        assert "exposure_series" not in result
 
     @pytest.mark.asyncio
     async def test_apikey_lookup_failure_flags_fail_open(self) -> None:
@@ -1826,7 +1836,7 @@ class TestAvgWinningLosingTradeDollars:
 # ---------------------------------------------------------------------------
 # Audit-2026-05-07 round-2 / Block A — P1995
 # ---------------------------------------------------------------------------
-# compute_turnover_series sparse-day fix:
+# _compute_turnover_series sparse-day fix:
 #   1) First observed date must NOT emit a phantom turnover spike (pre-fix
 #      it treated the opening position as a same-day rotation against
 #      prev_positions={}).
@@ -1856,7 +1866,7 @@ class TestComputeTurnoverSeries:
             "2025-01-01": 10000.0,
             "2025-01-02": 10000.0,
         }
-        series = compute_turnover_series(
+        series = _compute_turnover_series(
             positions_by_date, prices_by_date, nav_by_date
         )
         days = {p["date"]: p["turnover"] for p in series}
@@ -1903,7 +1913,7 @@ class TestComputeTurnoverSeries:
         )
         # And the plain helper still returns a bare list (no flags) so
         # existing callers don't have to change.
-        plain_series = compute_turnover_series(
+        plain_series = _compute_turnover_series(
             positions_by_date, prices_by_date, nav_by_date
         )
         assert isinstance(plain_series, list)
@@ -1921,7 +1931,7 @@ class TestComputeTurnoverSeries:
 #   - turnover gap-detection boundary: consecutive vs exactly-2-day delta
 #   - turnover single-day input: no spurious flags
 #   - turnover unparseable date keys: math survives, no false-positive gap
-#   - compute_turnover_series wrapper === compute_turnover_series_with_flags[0]
+#   - _compute_turnover_series wrapper === compute_turnover_series_with_flags[0]
 
 
 class TestDecidedDenominatorEdgeCases:
@@ -2420,11 +2430,11 @@ class TestTurnoverEdgeCasesWithFlags:
         series_full, _flags = compute_turnover_series_with_flags(
             positions_by_date, prices_by_date, nav_by_date
         )
-        series_wrapper = compute_turnover_series(
+        series_wrapper = _compute_turnover_series(
             positions_by_date, prices_by_date, nav_by_date
         )
         assert series_wrapper == series_full, (
-            "compute_turnover_series wrapper must return exactly the series "
+            "_compute_turnover_series wrapper must return exactly the series "
             "portion of the _with_flags tuple"
         )
 
@@ -2876,7 +2886,7 @@ class TestDurationParseFailureSurfaced:
 
 
 # ---------------------------------------------------------------------------
-# Audit-2026-05-07 H-0744: compute_turnover_series differentiates
+# Audit-2026-05-07 H-0744: _compute_turnover_series differentiates
 # NAV-missing (data not ingested) from NAV<=0 (margin call) from
 # genuine quiet day, preserving prev_positions across NAV gaps.
 # ---------------------------------------------------------------------------
@@ -3111,7 +3121,7 @@ class TestUnboundedJsonbCaps:
 
 
 # ---------------------------------------------------------------------------
-# Audit-2026-05-07 H-0741: compute_turnover_series type-coerces inputs
+# Audit-2026-05-07 H-0741: _compute_turnover_series type-coerces inputs
 # and surfaces dropped dates in flags['turnover_series_dropped_dates'].
 # ---------------------------------------------------------------------------
 class TestTurnoverSeriesTypeValidation:
@@ -3528,3 +3538,453 @@ class TestFundingWindowAllNullOpenedAt:
         # (no window could be computed without any opened_at lower bound).
         assert rows[0]["funding_pnl"] == 0
         assert rows[0]["status"] == "open"
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 M-0715: `_match_positions_fifo` raises AssertionError
+# when the `position_side` enum-domain invariant is broken
+# (net_qty != 0 && position_side not in {"long","short"}).
+#
+# This branch is unreachable through any legitimate fill sequence today —
+# the matcher only ever assigns `"long"` / `"short"` (never `"flat"`), and
+# the only path that sets `position_side = None` also resets `net_qty = 0`.
+# The raise is a fail-loud (Rule 12) safety net so a future hedge-mode
+# extension that introduces a new side literal cannot silently slip through
+# as a no-op fill (which previously booked a phantom always-open position).
+#
+# Regression-test approach: an inspect-based test against the SOURCE so an
+# accidental removal of the else-raise (or downgrade to `pass`/logger.warn)
+# fails CI even though no input can reach the branch at runtime.
+# ---------------------------------------------------------------------------
+class TestMatchPositionsFifoUnknownSideRaises:
+    def test_else_branch_raises_assertion_error_on_unknown_position_side(
+        self,
+    ) -> None:
+        """Source-level guard: the matcher's `else:` branch in the
+        long/short dispatch MUST `raise AssertionError(...)` with a message
+        that names the unexpected `position_side` and includes the
+        strategy/symbol context. Pre-M-0715 it did not exist and a future
+        hedge-mode value would silently book a no-op fill — regenerating
+        the phantom-always-open class of bug.
+
+        Why source-level: by construction (matcher invariant: position_side
+        in {long,short} whenever net_qty != 0), no fill stream can reach
+        the branch. A pure behavior test would have to monkey-patch the
+        function's local state, which is brittle and tests our patch
+        machinery instead of the production guard. Asserting the raise is
+        present in the AST is the honest regression: the moment a future
+        refactor deletes/weakens it, this fails.
+        """
+        import ast
+        import inspect
+
+        import services.position_reconstruction as pr_mod
+
+        source = inspect.getsource(pr_mod._match_positions_fifo)
+        tree = ast.parse(source)
+
+        # Audit-2026-05-07 round-2 L2 — tightened from "ANY else.orelse
+        # contains a raise" to "the LONG/SHORT dispatch's else.orelse
+        # contains a raise whose message names the side". The previous
+        # check was satisfied by ANY `raise AssertionError` under any
+        # `if.orelse` in the function, so deleting the dispatch's
+        # guard while leaving an unrelated assert (e.g. on net_qty)
+        # elsewhere would have left the test green.
+        def _ast_test_mentions_position_side(test_node: ast.expr) -> bool:
+            """True iff the if-test compares ``position_side`` against
+            the string literal ``"long"`` or ``"short"`` — i.e. the
+            specific dispatch we want to guard."""
+            for child in ast.walk(test_node):
+                if isinstance(child, ast.Compare):
+                    left = child.left
+                    is_pos_side = (
+                        isinstance(left, ast.Name) and left.id == "position_side"
+                    )
+                    if not is_pos_side:
+                        continue
+                    for comp in child.comparators:
+                        if (
+                            isinstance(comp, ast.Constant)
+                            and comp.value in ("long", "short")
+                        ):
+                            return True
+            return False
+
+        def _orelse_raises_assertion_naming_side(
+            orelse: list[ast.stmt],
+        ) -> bool:
+            """True iff the orelse list contains a
+            ``raise AssertionError(<f-string mentioning 'position_side'>)``
+            statement."""
+            for stmt in orelse:
+                if not (
+                    isinstance(stmt, ast.Raise)
+                    and isinstance(stmt.exc, ast.Call)
+                    and isinstance(stmt.exc.func, ast.Name)
+                    and stmt.exc.func.id == "AssertionError"
+                ):
+                    continue
+                # Dump the call's args; any one must mention
+                # `position_side` so the message names the offending
+                # variable.
+                arg_dumps = [ast.dump(a) for a in stmt.exc.args]
+                if any("position_side" in d for d in arg_dumps):
+                    return True
+            return False
+
+        dispatch_else_raises = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            if not _ast_test_mentions_position_side(node.test):
+                continue
+            # Walk down the `elif` chain via `node.orelse`. The
+            # production code is `if long: ... elif short: ... else:
+            # raise`. AST represents `elif` as `if.orelse == [If(...)]`.
+            current = node
+            while True:
+                if _orelse_raises_assertion_naming_side(current.orelse):
+                    dispatch_else_raises = True
+                    break
+                # Descend into elif if present (orelse is a single If).
+                if (
+                    len(current.orelse) == 1
+                    and isinstance(current.orelse[0], ast.If)
+                ):
+                    current = current.orelse[0]
+                    continue
+                break
+            if dispatch_else_raises:
+                break
+        assert dispatch_else_raises, (
+            "M-0715 regression: the LONG/SHORT dispatch in "
+            "_match_positions_fifo must `raise AssertionError(...)` in its "
+            "terminal `else:` branch, with a message that names "
+            "`position_side`. A future hedge-mode literal would otherwise "
+            "silently fall through and book a phantom no-op fill. "
+            "Re-introduce the raise (with the offending value in the "
+            "message) before deleting this test."
+        )
+        # And the message must include both strategy_id and symbol so the
+        # operator can pivot from the sentry/log straight to the affected
+        # strategy — checked at the source level for the same reason.
+        assert "strategy=" in source and "symbol=" in source, (
+            "M-0715 regression: the AssertionError message must include "
+            "`strategy=` and `symbol=` context — without them on-call "
+            "cannot scope the failure."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 M-0934 / M-0939: funding pagination relies on
+# (a) `.order("timestamp")` being attached to the funding_fees query and
+# (b) the per-key `by_key` timeline being sorted by ts before bisect. Both
+# are silent-failure surfaces — drop either and funding rows in the page-
+# boundary or window-boundary regions silently mis-attribute.
+# ---------------------------------------------------------------------------
+class TestFundingPaginationOrderingInvariants:
+    def test_attribute_funding_query_calls_explicit_order_timestamp(self) -> None:
+        """M-0939 source-level guard: `_attribute_funding`'s funding_fees
+        query MUST call `.order("timestamp")` between `.lte(...)` and
+        `.range(...)`. Without it pagination ordering depends on
+        PostgREST's implicit primary-key ordering — any future server
+        tweak silently double-counts or skips rows at page boundaries,
+        corrupting funding_pnl. The existing tests UPDATE their mock
+        chains to mirror `.order().range()` so they would run BLIND if
+        the prod call ever lost `.order()`: removing it from production
+        would only break the mocks, not the assertions on the data. This
+        test pins the call.
+        """
+        import inspect
+
+        import services.position_reconstruction as pr_mod
+
+        source = inspect.getsource(pr_mod._attribute_funding)
+        # The `.order("timestamp")` call must appear inside the
+        # funding_fees fetch builder. We assert both the literal AND its
+        # position relative to `.lte(` / `.range(`.
+        assert '.order("timestamp")' in source, (
+            "M-0939 regression: _attribute_funding must call "
+            '`.order("timestamp")` on the funding_fees query so pagination '
+            "is deterministic across PostgREST default-ordering changes."
+        )
+        # Strip comment lines so a documentation reference to
+        # `.order("timestamp")` / `.range(` (e.g. the M-0938 deferral note)
+        # cannot satisfy the position-relative check below. We need to see
+        # the literal `.lte(...) → .order("timestamp") → .range(s, e)`
+        # sequence on the actual chained PostgREST call.
+        code_lines = [
+            line for line in source.splitlines()
+            if not line.lstrip().startswith("#")
+        ]
+        code = "\n".join(code_lines)
+        lte_idx = code.find(".lte(")
+        order_idx = code.find('.order("timestamp")')
+        range_idx = code.find(".range(")
+        assert 0 <= lte_idx < order_idx < range_idx, (
+            f"M-0939 regression: `.order(\"timestamp\")` must sit BETWEEN "
+            f"`.lte(...)` and `.range(...)` on the funding_fees query "
+            f"(lte={lte_idx}, order={order_idx}, range={range_idx}) — "
+            f"any other position breaks the PostgREST query builder "
+            f"contract assumed by the test mock chains."
+        )
+
+    @pytest.mark.asyncio
+    async def test_attribute_funding_bisect_window_matches_naive_scan(
+        self,
+    ) -> None:
+        """M-0934 invariant guard: the bisect window over `by_key` rows
+        MUST yield the same per-position funding totals as the pre-fix
+        naive `for ts in rows: if opened<=ts<closed` scan. Pinning the
+        equivalence prevents a future refactor from dropping the sort at
+        line ~986 (`for key in by_key: by_key[key].sort(...)`) — without
+        which `bisect_left` returns garbage indices and rows silently
+        skip / double-count.
+        """
+        from datetime import datetime, timezone
+        from decimal import Decimal
+
+        from services.position_reconstruction import _attribute_funding
+
+        # Three back-to-back closed positions on the same (symbol, exchange)
+        # — funding rows scattered across opened/closed boundaries.
+        positions = [
+            {
+                "symbol": "BTCUSDT",
+                "exchange": "binance",
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+            },
+            {
+                "symbol": "BTCUSDT",
+                "exchange": "binance",
+                "opened_at": "2024-01-02T00:00:00+00:00",
+                "closed_at": "2024-01-03T00:00:00+00:00",
+            },
+            {
+                "symbol": "BTCUSDT",
+                "exchange": "binance",
+                "opened_at": "2024-01-03T00:00:00+00:00",
+                "closed_at": "2024-01-04T00:00:00+00:00",
+            },
+        ]
+        # Funding rows: timestamps include exact boundary instants AND mid-
+        # window. The half-open `[opened, closed)` rule must put the
+        # boundary row in the NEXT leg. DELIBERATELY shuffled so the test
+        # exercises the per-key SORT step at line ~985 (`for key in by_key:
+        # by_key[key].sort(...)`) — without that sort, the bisect over
+        # timestamps would address unsorted indices and silently mis-
+        # attribute. PostgREST returns ts-sorted with `.order("timestamp")`,
+        # but the in-Python pre-sort is a separate invariant: a future
+        # refactor that removed the explicit sort relying on PostgREST
+        # ordering would re-introduce the silent-skip class for any caller
+        # path that bypassed `.order()`.
+        funding_rows = [
+            # Out-of-order on purpose:
+            {"symbol": "BTCUSDT", "exchange": "binance", "currency": "USDT",
+             "timestamp": "2024-01-03T12:00:00+00:00", "amount": "16.0"},
+            {"symbol": "BTCUSDT", "exchange": "binance", "currency": "USDT",
+             "timestamp": "2024-01-01T08:00:00+00:00", "amount": "1.0"},
+            {"symbol": "BTCUSDT", "exchange": "binance", "currency": "USDT",
+             "timestamp": "2024-01-03T00:00:00+00:00", "amount": "8.0"},
+            {"symbol": "BTCUSDT", "exchange": "binance", "currency": "USDT",
+             "timestamp": "2024-01-02T00:00:00+00:00", "amount": "2.0"},
+            {"symbol": "BTCUSDT", "exchange": "binance", "currency": "USDT",
+             "timestamp": "2024-01-02T12:00:00+00:00", "amount": "4.0"},
+        ]
+        # Mock the supabase chain to return all rows on page 1, [] on
+        # page 2 (terminates pagination).
+        mock_supabase = MagicMock()
+        mock_funding = MagicMock()
+        f_sel = MagicMock()
+        f_eq1 = MagicMock()
+        f_gte = MagicMock()
+        f_lte = MagicMock()
+        f_order = MagicMock()
+        f_range = MagicMock()
+        f_range.execute.side_effect = [
+            MagicMock(data=funding_rows),
+            MagicMock(data=[]),
+        ]
+        f_order.range.return_value = f_range
+        f_lte.order.return_value = f_order
+        f_gte.lte.return_value = f_lte
+        f_eq1.gte.return_value = f_gte
+        f_sel.eq.return_value = f_eq1
+        mock_funding.select.return_value = f_sel
+        mock_supabase.table.return_value = mock_funding
+
+        async def _mock_db_execute(fn):
+            return fn()
+
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_mock_db_execute,
+        ):
+            # _attribute_funding(strategy_id, positions, supabase, flags=None)
+            await _attribute_funding("strat-1", positions, mock_supabase, {})
+
+        # Half-open `[opened, closed)` single-assignment outcome:
+        # pos1 [01T00, 02T00): owns ts 01T08 = 1.0
+        # pos2 [02T00, 03T00): owns ts 02T00 + 02T12 = 2.0 + 4.0 = 6.0
+        # pos3 [03T00, 04T00): owns ts 03T00 + 03T12 = 8.0 + 16.0 = 24.0
+        # Pre-bisect-fix naive walk would produce the same totals (bisect
+        # optimization is a perf change — behaviour must be IDENTICAL).
+        assert positions[0]["funding_pnl"] == pytest.approx(1.0)
+        assert positions[1]["funding_pnl"] == pytest.approx(6.0)
+        assert positions[2]["funding_pnl"] == pytest.approx(24.0)
+        # Conservation: every funding row attributed exactly once.
+        total_attributed = sum(p["funding_pnl"] for p in positions)
+        assert total_attributed == pytest.approx(1.0 + 2.0 + 4.0 + 8.0 + 16.0)
+
+    @pytest.mark.asyncio
+    async def test_attribute_funding_bisect_pins_local_sort_under_shuffled_mock(
+        self,
+    ) -> None:
+        """Audit-2026-05-07 round-2 pr-test-analyzer #1: explicit pin on the
+        in-Python ``by_key`` sort that ``_attribute_funding`` performs
+        BEFORE the bisect window walk.
+
+        The companion test
+        ``test_attribute_funding_bisect_window_matches_naive_scan`` ALREADY
+        shuffles funding rows in the mock payload, but it does so as part
+        of a single shuffled scenario — a subtle refactor that deleted the
+        local sort but happened to leave a `.order("timestamp")` PostgREST
+        hint intact could pass on a future re-shuffle that, by chance, was
+        already in timestamp order at the mock boundary.
+
+        This variant drives the same scenario from EVERY possible
+        permutation of the input row order. If the local sort is removed,
+        at least one permutation will produce ``bisect_left`` indices that
+        address an unsorted timestamps list and the per-position totals
+        will diverge — failing here. Pins the local sort independently of
+        any single mock payload's accidental ordering.
+        """
+        import itertools
+        from datetime import datetime, timezone  # noqa: F401 — used in messages
+        from decimal import Decimal  # noqa: F401 — used in production helper
+
+        from services.position_reconstruction import _attribute_funding
+
+        positions_template = [
+            {
+                "symbol": "BTCUSDT",
+                "exchange": "binance",
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+            },
+            {
+                "symbol": "BTCUSDT",
+                "exchange": "binance",
+                "opened_at": "2024-01-02T00:00:00+00:00",
+                "closed_at": "2024-01-03T00:00:00+00:00",
+            },
+            {
+                "symbol": "BTCUSDT",
+                "exchange": "binance",
+                "opened_at": "2024-01-03T00:00:00+00:00",
+                "closed_at": "2024-01-04T00:00:00+00:00",
+            },
+        ]
+        # Five funding rows whose canonical owners (per the half-open
+        # [opened, closed) rule) are pos1 / pos2 / pos2 / pos3 / pos3.
+        canonical_rows = [
+            {"symbol": "BTCUSDT", "exchange": "binance", "currency": "USDT",
+             "timestamp": "2024-01-01T08:00:00+00:00", "amount": "1.0"},
+            {"symbol": "BTCUSDT", "exchange": "binance", "currency": "USDT",
+             "timestamp": "2024-01-02T00:00:00+00:00", "amount": "2.0"},
+            {"symbol": "BTCUSDT", "exchange": "binance", "currency": "USDT",
+             "timestamp": "2024-01-02T12:00:00+00:00", "amount": "4.0"},
+            {"symbol": "BTCUSDT", "exchange": "binance", "currency": "USDT",
+             "timestamp": "2024-01-03T00:00:00+00:00", "amount": "8.0"},
+            {"symbol": "BTCUSDT", "exchange": "binance", "currency": "USDT",
+             "timestamp": "2024-01-03T12:00:00+00:00", "amount": "16.0"},
+        ]
+        expected_totals = (1.0, 6.0, 24.0)
+
+        async def _mock_db_execute(fn):
+            return fn()
+
+        # 5! = 120 permutations — every input order is exercised so the
+        # local sort is the ONLY guarantee of correctness. Brute-force is
+        # fine for 5 rows.
+        for perm in itertools.permutations(canonical_rows):
+            positions = [dict(p) for p in positions_template]
+            mock_supabase = MagicMock()
+            mock_funding = MagicMock()
+            f_sel = MagicMock()
+            f_eq1 = MagicMock()
+            f_gte = MagicMock()
+            f_lte = MagicMock()
+            f_order = MagicMock()
+            f_range = MagicMock()
+            f_range.execute.side_effect = [
+                MagicMock(data=list(perm)),
+                MagicMock(data=[]),
+            ]
+            f_order.range.return_value = f_range
+            f_lte.order.return_value = f_order
+            f_gte.lte.return_value = f_lte
+            f_eq1.gte.return_value = f_gte
+            f_sel.eq.return_value = f_eq1
+            mock_funding.select.return_value = f_sel
+            mock_supabase.table.return_value = mock_funding
+
+            with patch(
+                "services.position_reconstruction.db_execute",
+                side_effect=_mock_db_execute,
+            ):
+                await _attribute_funding(
+                    "strat-1", positions, mock_supabase, {}
+                )
+
+            for i, expected in enumerate(expected_totals):
+                assert positions[i]["funding_pnl"] == pytest.approx(expected), (
+                    f"M-0934 local-sort regression at permutation "
+                    f"{[r['timestamp'] for r in perm]}: pos{i} "
+                    f"funding_pnl={positions[i]['funding_pnl']} != "
+                    f"expected {expected}. The in-Python by_key sort "
+                    f"appears to have been removed — bisect_left over an "
+                    f"unsorted timestamps list returns garbage indices."
+                )
+
+    def test_attribute_funding_uses_bisect_for_window_lookup(self) -> None:
+        """Audit-2026-05-07 round-2 pr-test-analyzer #2: AST-level pin
+        that ``_attribute_funding`` invokes ``bisect.bisect_left`` (or
+        ``bisect_left`` after ``import bisect``) to scope the funding
+        window scan.
+
+        Mirrors ``test_attribute_funding_query_calls_explicit_order_timestamp``
+        (which pins the PostgREST ``.order("timestamp")`` hint). A future
+        refactor that reverts to the pre-M-0934 linear scan over the full
+        per-key timeline would still produce correct totals (the
+        ``opened <= ts < closed`` filter still narrows correctly) — only
+        slower — so a pure behaviour test would not detect the perf
+        regression. The AST guard pins the optimisation explicitly so the
+        O(P*F) silent-revert class fails CI immediately, not when a
+        5-year strategy starts timing out.
+        """
+        import inspect
+
+        import services.position_reconstruction as pr_mod
+
+        source = inspect.getsource(pr_mod._attribute_funding)
+        # Accept either qualified or unqualified call form. The
+        # production code uses `bisect.bisect_left` after `import bisect`
+        # at module scope — but a future refactor that switches to
+        # `from bisect import bisect_left` is functionally equivalent and
+        # should not break this guard.
+        uses_bisect = (
+            "bisect.bisect_left" in source
+            or "bisect_left(" in source
+        )
+        assert uses_bisect, (
+            "M-0934 / pr-test-analyzer #2 regression: _attribute_funding "
+            "must call `bisect.bisect_left` (or `bisect_left` after "
+            "`from bisect import bisect_left`) to bound the per-key "
+            "funding-row scan. Without it, the function falls back to a "
+            "linear walk over the full per-(symbol, exchange) timeline — "
+            "an O(P*F) silent perf regression that only surfaces on "
+            "long-running strategies. Re-introduce the bisect call "
+            "before deleting this test."
+        )
