@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.15.6] - 2026-05-29
+### Fixed — portfolio-impact projection truthfulness (audit-2026-05-26 NEW-C11-02, NEW-C11-04, NEW-C24-02)
+
+The "Projected impact" panel could mislead an allocator about a candidate's effect on their portfolio:
+
+- **Correlation delta on a single-strategy portfolio (C11-02).** When the current portfolio held only one strategy, there was no existing correlation pair to compare against — but the delta was computed as `0.0` and rendered as a confident "Correlation unchanged (±0.000)". Adding a candidate to a one-strategy book introduces the *first* correlation pair; that is an undefined baseline, not a neutral one. The simulator now emits `null` for this case, which the panel already renders as "—" / "Correlation not computable", so the allocator is not told a concentration decision is risk-neutral when it is unmeasured.
+- **Partial-history banner copy (C11-04).** Since window alignment shipped, current and proposed metrics are both measured over the same overlap window — but the warning still said "Current metrics use your full history; proposed metrics use the shorter overlap window. Deltas mix two different periods," which was no longer true and undermined trust in correct numbers. The banner now states both sides are measured over the shorter overlap window (comparable, but based on limited history).
+- **Bridge "add to scenario" candidate metadata (C24-02).** Documentation cleanup: the candidate's `strategy_types` is an unknown placeholder, not a measured empty set, and a stale reference to a non-existent refinement source was corrected. No behavior change — no projection consumes the placeholder today.
+
 ## [0.24.15.5] - 2026-05-29
 ### Fixed — mandate autosave no longer retries a timed-out write (audit-2026-05-07 NEW-C05-06)
 

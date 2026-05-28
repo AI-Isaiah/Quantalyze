@@ -337,12 +337,14 @@ function SuccessBody({ data }: { data: SimulatorResponseOk }) {
   );
 }
 
-// NEW-C11-04: PartialHistoryBanner previously said "only {overlapDays} overlapping
-// trading days" which implied both sides are measured over those days. In reality,
-// `current_*` metrics use the full portfolio window while `proposed_*` use the
-// overlap window — the wording implied a symmetric short window that doesn't exist.
-// Clarify that the overlap applies to the candidate side only until window alignment
-// is implemented (NEW-C11-03, Python-side fix).
+// NEW-C11-04: window alignment (NEW-C11-03, simulator_scoring.py) HAS shipped —
+// both current_* and proposed_* metrics are now scored over the SAME intersection
+// (overlap) window (see simulator_scoring "the deltas are window-coincident"). The
+// prior banner copy ("Current metrics use your full history; proposed use the
+// shorter overlap window. Deltas mix two different periods") is now factually
+// FALSE and would erode trust in correct numbers. The only remaining caveat is
+// sample size: the comparison window is short (overlapDays), so the deltas are
+// comparable but based on limited history.
 function PartialHistoryBanner({ overlapDays }: { overlapDays: number }) {
   return (
     <div
@@ -351,9 +353,9 @@ function PartialHistoryBanner({ overlapDays }: { overlapDays: number }) {
     >
       <strong className="font-medium">Partial history:</strong>{" "}
       the candidate has only {overlapDays} overlapping trading days with your
-      portfolio. Current metrics use your full history; proposed metrics use
-      the shorter overlap window. Deltas mix two different periods — treat them
-      as directional signals, not precise measurements.
+      portfolio. Both current and proposed metrics are measured over this
+      shorter overlap window, so they are comparable but based on limited
+      history — treat them as directional signals, not precise measurements.
     </div>
   );
 }

@@ -182,7 +182,18 @@ def simulate_add_candidate(
     # MaxDD is a negative number; "less drawdown" means closer to 0, so
     # current - proposed is positive when the candidate reduces drawdown.
     dd_delta = _delta(current_max_dd, proposed_max_dd)
-    corr_delta = _delta(current_avg_corr, proposed_avg_corr)
+    # NEW-C11-02 (audit-2026-05-26): a single-strategy "current" portfolio has
+    # NO existing correlation pair, so _avg_corr(port_aligned) is None. Routing
+    # that through _delta coerces None -> 0.0, which the panel renders as a
+    # confident "Correlation unchanged (±0.000)" — telling the allocator that
+    # adding the FIRST correlated pair is diversification-neutral. The baseline
+    # is *undefined*, not zero. Emit None (the schema + panel already render it
+    # as "—" / "Correlation not computable") instead of a fabricated 0.0.
+    corr_delta = (
+        None
+        if current_avg_corr is None
+        else _delta(current_avg_corr, proposed_avg_corr)
+    )
     concentration_delta = _delta(current_concentration, proposed_concentration)
 
     partial_history = overlap_days < PARTIAL_HISTORY_THRESHOLD

@@ -493,6 +493,10 @@ describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () 
     fireEvent.click(screen.getByTestId("bridge-add-to-scenario"));
 
     expect(onAddToScenario).toHaveBeenCalledTimes(1);
+    // NEW-C24-02: markets is the holding's REAL venue; strategy_types is an
+    // UNKNOWN placeholder ([]), documented as such (not a measured empty set).
+    // No live consumer derives a verdict from it; if one is added it must carry
+    // the candidate's real types from the server rather than trust this [].
     expect(onAddToScenario).toHaveBeenCalledWith(
       "holding:binance:BTC/USDT:spot",
       {
