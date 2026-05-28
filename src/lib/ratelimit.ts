@@ -1,3 +1,4 @@
+import { NextResponse } from "next/server";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 
@@ -204,6 +205,44 @@ export function isRateLimitMisconfigured(
   );
 }
 
+/**
+ * PR-2 simplify (2026-05-28): canonical deny-response builder for the
+ * misconfig-503 / throttled-429 split. Pre-extract, the admin mutator
+ * surface inlined an identical 8-line branch per callsite. Routes whose
+ * tests vi.mock("@/lib/ratelimit") still inline the branch to keep their
+ * existing mocks intact — this helper is for the admin surface where
+ * the real ratelimit module loads (withAdminAuth, kill-switch,
+ * decisions, preferences, intro-request).
+ */
+type DenyResult = { success: false; retryAfter: number; reason?: "ratelimit_misconfigured" };
+
+export function rateLimitDenyJson(rl: DenyResult): NextResponse {
+  const misconfigured = isRateLimitMisconfigured(rl);
+  return NextResponse.json(
+    { error: misconfigured ? "Rate limiter unavailable" : "Too many requests" },
+    {
+      status: misconfigured ? 503 : 429,
+      headers: { "Retry-After": String(rl.retryAfter) },
+    },
+  );
+}
+
+/**
+ * Plain-text twin of rateLimitDenyJson for routes whose CDN cache contract
+ * disallows JSON bodies (PDF + image routes typically). Same status/headers
+ * shape; body is a short human-readable string instead of a JSON envelope.
+ */
+export function rateLimitDenyText(rl: DenyResult): NextResponse {
+  const misconfigured = isRateLimitMisconfigured(rl);
+  return new NextResponse(
+    misconfigured ? "Service temporarily unavailable" : "Rate limit exceeded",
+    {
+      status: misconfigured ? 503 : 429,
+      headers: { "Retry-After": String(rl.retryAfter) },
+    },
+  );
+}
+
 /** Synthetic Retry-After (seconds) for the misconfigured fail-CLOSED path. */
 const MISCONFIGURED_RETRY_AFTER_S = 60;
 
@@ -257,19 +296,32 @@ export async function checkLimit(
  * Extract a client IP from request headers for rate-limit bucketing.
  *
  * Ordering:
- *   1. `x-real-ip` — on Vercel this is the verified TCP peer and is
- *      NOT client-controllable. Trust it.
+ *   1. `x-real-ip` — ONLY trusted when `process.env.VERCEL === "1"` (set
+ *      automatically by Vercel's build env). On Vercel this header is
+ *      written by the edge after TCP-peer resolution and the client cannot
+ *      override it. Outside Vercel (self-hosted, `next start` behind a
+ *      different proxy, or vercel dev) the header is freely client-set, so
+ *      a malicious client rotating it per request defeats bucket isolation.
+ *      audit-2026-05-07 PR-2 (2026-05-28) code-reviewer C1.
  *   2. `x-forwarded-for` as a fallback. We take the RIGHTMOST entry,
  *      not the leftmost: the leftmost is attacker-controllable (a bot
  *      can inject its own value per request), the rightmost is the
  *      last trusted proxy's write and is stable per client.
  *
- * Returns "unknown" when neither header is present. Callers should
- * treat the return value as a bucket key, not as ground truth.
+ * Returns the literal string `"unknown"` when no usable IP can be
+ * extracted. Routes that need per-UA / aggregate-cap defense compose
+ * their own salt on top of this value (canonical shape: see the
+ * `for-quants-lead:unknown:<ua-hash>` + `for-quants-lead:unknown:_aggregate`
+ * pair in src/app/api/for-quants-lead/route.ts). An earlier PR-2 attempt
+ * to nonce-salt this fallback broke that aggregate cap (every request
+ * got its own bucket including the cap key), so the literal stays.
  */
 export function getClientIp(headers: Headers): string {
-  const real = headers.get("x-real-ip");
-  if (real) return real.trim();
+  const trustRealIp = process.env.VERCEL === "1";
+  if (trustRealIp) {
+    const real = headers.get("x-real-ip");
+    if (real) return real.trim();
+  }
 
   const forwarded = headers.get("x-forwarded-for");
   if (forwarded) {
@@ -278,6 +330,16 @@ export function getClientIp(headers: Headers): string {
     if (parts.length > 0) return parts[parts.length - 1];
   }
 
+  // PR-2 2026-05-28: returns the literal "unknown" so routes that need
+  // shared-bucket defense (e.g. for-quants-lead with per-UA salt +
+  // aggregate cap, see src/app/api/for-quants-lead/route.ts) can compose
+  // their own defense on top. The earlier UUID-nonce fallback broke the
+  // for-quants-lead aggregate cap (every request got its own bucket
+  // including the cap key). Routes that share the literal bucket
+  // ("portfolio-pdf:unknown", "factsheet-pdf:unknown", etc.) ACCEPT the
+  // documented tradeoff that header-stripped traffic collapses there
+  // because the cross-IP throttle at the platform edge (Vercel) is the
+  // outer defense; this layer's job is per-IP fairness, not global cap.
   return "unknown";
 }
 

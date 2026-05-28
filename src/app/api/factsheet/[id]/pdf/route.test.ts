@@ -45,6 +45,8 @@ vi.mock("@/lib/ratelimit", () => ({
   publicIpLimiter: { /* opaque */ },
   checkLimit: vi.fn(),
   getClientIp: vi.fn().mockReturnValue("127.0.0.1"),
+  isRateLimitMisconfigured: (rl: { success: boolean; reason?: string }) =>
+    rl.success === false && rl.reason === "ratelimit_misconfigured",
 }));
 import { checkLimit } from "@/lib/ratelimit";
 

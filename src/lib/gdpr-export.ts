@@ -2,6 +2,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/database.types";
 import { isUuid } from "@/lib/utils";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Closed keyset of every public-schema table name. Audit 2026-05-07
@@ -455,6 +456,23 @@ export function redactAllocatorMatchForUser(
   userId: string,
 ): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
+  // PR-2 perf #2 (2026-05-28): aggregate drift signals to ONE Sentry
+  // capture per redactor invocation. Pre-fix, a SQL-predicate drift
+  // exposing N rows would fire N captureToSentry calls — for a power
+  // user's 10K-row match_decisions export that's 10K events to Sentry,
+  // breaching tier and drowning the alert dashboard. Console.warn stays
+  // inside the loop (per-row visibility in Vercel function logs); the
+  // Sentry capture batches at function exit with a bounded sample of
+  // offending IDs (cap = 10) so a forensic reader can still cluster.
+  // Red-team H5 (2026-05-28): use a Set so the bounded sample dedupes
+  // by construction. Pre-fix an attacker who controlled row order could
+  // fill the first-N array with one repeated allocator_id, hiding the
+  // spread of a drift event from the alert page. The Set dedupes
+  // distinct UUIDs while still respecting the 10-element cap on Sentry
+  // payload size.
+  let driftCount = 0;
+  const driftSample = new Set<string>();
+  const DRIFT_SAMPLE_CAP = 10;
   for (const r of rows) {
     if (!r || typeof r !== "object") continue;
     const row = r as Record<string, unknown>;
@@ -464,6 +482,10 @@ export function redactAllocatorMatchForUser(
     // detect SQL predicate drift or RLS bypass — silent drops would
     // produce a partial export with partial:false and no alert.
     if (row.allocator_id !== userId) {
+      driftCount++;
+      if (driftSample.size < DRIFT_SAMPLE_CAP) {
+        driftSample.add(String(row.allocator_id));
+      }
       console.warn(
         `[gdpr-export] defense-in-depth: dropped row with allocator_id=${String(row.allocator_id)} !== userId for table (bridge_outcomes/match_candidates/match_decisions); SQL predicate may have drifted`,
       );
@@ -485,6 +507,26 @@ export function redactAllocatorMatchForUser(
       clone.decided_by = REDACTED_PLACEHOLDER;
     }
     out.push(clone);
+  }
+  // Bounded Sentry signal — one capture per invocation, regardless of
+  // how many rows drifted. Skipped entirely on the normal path where
+  // drift_count == 0.
+  if (driftCount > 0) {
+    captureToSentry(
+      new Error(
+        "gdpr-export: allocator_match rows dropped — SQL predicate drift or RLS bypass",
+      ),
+      {
+        tags: { area: "gdpr-export", gate: "allocator_match_redaction_drift" },
+        extra: {
+          user_id: userId,
+          drift_count: driftCount,
+          offending_allocator_id_sample: Array.from(driftSample),
+          total_rows_processed: rows.length,
+        },
+        level: "warning",
+      },
+    );
   }
   return out;
 }
@@ -1916,9 +1958,29 @@ async function fetchRowsForSpec(
     // Null parent ids: legitimate dropped rows. Log so schema drift is
     // observable but DO NOT fail the bundle — the user's other rows
     // are still exportable.
+    //
+    // PR-2 code-reviewer #1 (2026-05-28): promoted to captureToSentry so
+    // a parent-id-null drift class becomes observable on the alert path
+    // alongside the redactor drift signal. The 2000-row parent-id cap
+    // bounds the capture count (no Sentry-flood risk).
     const nullCount = parentIdsRaw.length - nonNullParentIds.length;
     console.warn(
       `[gdpr-export] dropped ${nullCount} null parent id(s) for ${spec.parent_table}.${parentIdColumn} (via ${spec.table}); child rows of those parents are absent from the bundle`,
+    );
+    captureToSentry(
+      new Error(
+        "gdpr-export: indirect path dropped null parent ids — schema drift candidate",
+      ),
+      {
+        tags: { area: "gdpr-export", gate: "parent_id_null_drift" },
+        extra: {
+          parent_table: spec.parent_table,
+          parent_id_column: parentIdColumn,
+          via_table: spec.table,
+          null_count: nullCount,
+        },
+        level: "warning",
+      },
     );
   }
   const parentIdTruncated = parentRowsArr.length >= EXPORT_PARENT_ID_CAP;

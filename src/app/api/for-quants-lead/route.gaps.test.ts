@@ -128,6 +128,11 @@ function makeRequest(
 
 describe("POST /api/for-quants-lead — gap coverage", () => {
   beforeEach(() => {
+    // PR-2 (2026-05-28): getClientIp now requires VERCEL=1 for x-real-ip
+    // to be trusted. The "unknown IP" branches deliberately do NOT set
+    // x-real-ip so they're unaffected; the x-real-ip case below DOES need
+    // VERCEL=1 to exercise prod behavior.
+    process.env.VERCEL = "1";
     dbState.inserted = [];
     dbState.updates = [];
     rlState.identifiers = [];

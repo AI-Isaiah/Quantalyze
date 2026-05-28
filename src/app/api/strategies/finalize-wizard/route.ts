@@ -2,7 +2,7 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { STRATEGY_NAMES, canonicalizeExchangeList } from "@/lib/constants";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
@@ -350,13 +350,33 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     `strategies-finalize-wizard:${user.id}`,
   );
   if (!rl.success) {
+    // PR-2 full-file reviewer #5 (2026-05-28): 503 on rate-limit misconfig.
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Rate limiter unavailable" },
+        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+      );
+    }
     return NextResponse.json(
       { error: "Too many requests" },
       { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
   }
 
-  const body = await req.json().catch(() => null);
+  // PR-2 silent-failure-hunter F5 (2026-05-28): explicit try/catch around
+  // req.json() so the parse/transport error class is logged. req.json()
+  // collapses transport read failures and JSON-parse errors into one
+  // rejection — pre-fix the .catch(() => null) chain dropped both into
+  // an unlogged null silently. SRE sees the err.message in console now.
+  let body: unknown = null;
+  try {
+    body = await req.json();
+  } catch (err) {
+    console.warn(
+      "[finalize-wizard] body JSON parse failed:",
+      err instanceof Error ? err.message : err,
+    );
+  }
 
   const validation = validatePayload(body as Record<string, unknown> | null);
   if (!validation.ok) return validation.response;

@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.24.12.0] - 2026-05-28
+### Changed — security + rate-limit + RBAC + GDPR hardening (PR-2 of cross-cutting refactor program)
+
+**Audit-trust + server-side recompute**
+- **NEW-C18-04 — scenario-commit audit-trust recompute.** `/api/allocator/scenario/commit` now derives `size_at_decision_usd` server-side from `allocator_holdings.value_usd` (latest `asof` per `(venue, symbol, holding_type)`, mirroring the RPC's `MAX(asof)` pattern) before persisting into `audit_events.metadata`. Pre-fix the client number was trusted verbatim. New `_size_source` sentinel union (`server_holding | server_aum | ref_not_found | no_holdings_snapshot | lookup_failed | client_unverified`) distinguishes recompute paths for forensic queries. 5 regression tests pin the contract, including the C1-bug regression that asserts AUM is NOT summed across history snapshots.
+- **Reviewer #2 — Idempotency-Key strict validation.** Malformed Idempotency-Key (`/^[A-Za-z0-9._~-]{16,128}$/` violation) now returns 400 instead of silently dropping the key and running a non-idempotent commit. RFC draft-ietf-httpapi-idempotency-key §2.5 alignment; prevents the duplicate-commit vector that a retry loop on a malformed key created.
+
+**Rate-limit hardening**
+- **4 admin checkLimit additions** — `/api/admin/match/preferences/[allocator_id]` PUT (H-0222/H-0223), `/api/admin/match/kill-switch` POST, `/api/admin/match/decisions` POST+DELETE, `/api/admin/for-quants-leads/process` POST. The for-quants-leads route uses a new `withAdminAuth({ rateLimitKey })` opt-in hook.
+- **H-0253 cross-file collision splits.** `pdf:${ip}` split into `portfolio-pdf:`/`factsheet-pdf:`/`tearsheet-pdf:`. `strategies-draft-get:` split into `-list:`/`-by-id:`. Per-surface budgets restored.
+- **Rate-limit misconfig 503 across 8 callers.** Every `checkLimit` denial path now distinguishes misconfigured-Upstash 503 from organic 429 via the new `rateLimitDenyJson` / `rateLimitDenyText` helpers, so an Upstash outage surfaces on SRE health dashboards instead of masquerading as throttled organic traffic.
+- **S-3 — admin-prefs UUID validation.** `allocator_id` URL param is `isUuid`-validated BEFORE it composes into the Upstash rate-limit key, defeating the Upstash command-fan-out amplification vector.
+- **C1 — withAdminAuth empty-string bypass.** `if (surfaceKey)` truthy check tightened — only the documented `null` opt-out is honored; empty-string returns now 503-fail-closed instead of silently bypassing the limiter.
+- **C1 — getClientIp x-real-ip gate.** `x-real-ip` is now ONLY trusted when `process.env.VERCEL === "1"`. Outside Vercel the header is freely client-set, so trusting it would defeat bucket isolation.
+
+**GDPR + audit observability**
+- **NEW-C16-05 — bounded Sentry capture for allocator-match drift.** `redactAllocatorMatchForUser` aggregates drift signals to ONE captureToSentry per redactor invocation (with deduplicated `offending_allocator_id_sample` Set, cap 10) instead of N captures per dropped row. Pre-fix a SQL-predicate drift on a 10K-row export would have fired 10K Sentry events and breached the tier.
+- **Indirect-path null parent-id drift → Sentry.** `gdpr-export.ts` parent-id walker now captures null-drift to Sentry (bounded by the 2000-row parent-id cap).
+
+**SECDEF privilege probes (H-0762)**
+- **`supabase/tests/test_upsert_strategy_analytics_series_batch_privilege.sql`** — pgTAP-style test asserting `prosecdef`, exact signature `(uuid, text[], jsonb)`, `proacl` posture (no PUBLIC / anon / authenticated EXECUTE), and exact `search_path=public, pg_temp` lock.
+- **`analytics-service/tests/test_upsert_strategy_analytics_series_batch_privilege.py`** — migration-source regex + live anon-key probe asserting PostgREST 42501 / `permission denied`.
+
+**Silent-failure observability fixes**
+- **F1 — kill-switch null-row 503.** Missing `system_flags` row no longer silently defaults to `enabled=true` and shows a misleading green pill. Returns 503 with `Retry-After: 60`.
+- **F3 — intro-request after() Sentry.** Allocator-notify failure inside the `after()` block now captures to Sentry instead of vanishing into Vercel logs.
+- **F4 — deletion-requests/approve signOut Sentry.** Sanitize-loop `signOut` failure (the documented fail-safe degradation path) now captures to Sentry with `gate: sanitize_loop_signout`.
+- **F5 — finalize-wizard explicit body-parse log.** `req.json()` rejections now log the err class instead of collapsing to a null silently.
+- **F6 — PDF generation Sentry (3 routes).** `portfolio-pdf`, `factsheet-pdf`, `tearsheet-pdf` route handlers now `captureToSentry` on generation failures and on browser-close errors. H3 — captureToSentry wrapped in try/catch inside `finally` so a Sentry-SDK regression cannot escape and mask the original PDF error.
+- **F7 — strategies/draft GET 500 envelope.** Pre-fix returned the same `{draft: null}` shape on both 200 (no draft) and 500 (DB error). Now distinct `{error: "draft_lookup_failed"}` + Sentry capture.
+- **F8 — strategies/draft/[id] GET 404 vs 500 split.** Transient Postgres errors no longer collapse into 404 "Draft not found" — distinct 500 + Sentry capture.
+- **PR-1 H3 — intro-request 500 SRE context.** 500-path now logs `{user_id, code, message}` instead of bare 500.
+
+**PR-1 follow-ups absorbed**
+- **PR-1 C1 — logging_config exc.args mutation reverted.** `_scrub_record_in_place` no longer mutates the shared exception's `.args` tuple. Pre-populates `record.exc_text` with the scrubbed formatted traceback instead. The live exception is untouched — downstream callers pattern-matching `str(exc)` see the original.
+- **PR-1 C2 — Sentry breadcrumb message scrub.** `_redact_before_send` now scrubs `crumb["message"]` (the LoggingIntegration leak surface) and `crumb["data"]` when it arrives as a string (not just a dict).
+- **PR-1 C3 — audit-close-findings.py while-break typo.** Replaced the `while ... j+=1; break` idiom (looked like a typo for `if`) with explicit single-blank-line consume.
+
+**Red-team findings landed**
+- **C2 — scenario/commit `holdingsLookupRan` explicit "not_run" guard** so a future cached-replay-audit refactor cannot falsely stamp `no_holdings_snapshot`.
+- **H1 — pickAuditDiffFields `never` default throws** on schema drift instead of silently spreading the live diff into audit metadata.
+- **H2 — structlog `dict_tracebacks` tree scrub.** New `_scrub_tree_freeform` walker in `_redact_processor` scrubs string leaves of the `exception` block (frame `vars`, exc `value`) through `scrub_freeform_string` so HMAC tokens cannot survive into the structlog JSON egress.
+- **H5 — gdpr-export drift sample dedupe via Set** so an attacker controlling row order cannot fill the cap-10 sample with one repeated UUID to hide the spread.
+- **H6 — decisions POST + DELETE audit await reverted** to documented fire-and-forget. Awaiting `logAuditEvent` extends the request window 5-15s under Supabase pool exhaustion (DoS amplifier) and widens the TOCTOU window for admin session revoke landing on an immutable audit row.
+
+**Re-verified-closed sweep (no code change)**
+- NEW-C16-02 (GDPR audit_log_for_user actor-only fetch — already widened to `or_filter` in PR #299).
+- NEW-C16-03 (audit_log_cold missing from Art.15 — already wired in gdpr-export.ts:688-707).
+- M-1016/M-1017/M-1018 (workflow permissions block — already shipped in supabase-migrate.yml).
+- Backlog sweep: deleted 146 `✅`-marked-but-undeleted findings from `.planning/audit-2026-05-07/FIX-LIST.md`. Net FIX-LIST shrink: 1108 → 934 findings (-174 / -16%).
+
+### Fixed
+- Stale `getClientIp` tests in `src/lib/ratelimit.test.ts` updated for the VERCEL=1 gate.
+- Stale Idempotency-Key tests in scenario/commit/route.test.ts updated for the 400-on-malformed-key behavior.
+- Stale exemption list in `admin-csrf-ratelimit-grep.test.ts` cleared (4 routes now bind the limiter).
+- Audit-coverage @audit-skip pragma re-positioned to stay within the 8-line window after the badge-err logging block landed.
+
 ## [0.24.11.0] - 2026-05-28
 ### Changed — failure-surfacing + audit-metadata + error-envelope (PR-1 of cross-cutting refactor program)
 - **NEW-C13-10 — stdlib LogRecord factory PII bridge.** `analytics-service/services/logging_config.py` installs a `setLogRecordFactory` wrapper that scrubs `record.msg`, `record.args` (tuple/dict/list shapes), `exc_info`'s exception args, and `stack_info` through `scrub_freeform_string` at LogRecord creation — closes the HMAC-signature leak path where `logger.warning("ccxt: %s", str(exc))` and `logger.exception(...)` in `exchange.py` previously emitted credentials verbatim to Railway stdout + Sentry breadcrumbs. Idempotent (`_REDACT_FACTORY_INSTALLED`); fail-open writes to stderr instead of recursing through the logger. 10 regression tests pin the contract.

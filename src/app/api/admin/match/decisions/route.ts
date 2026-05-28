@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
+import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 
 type Decision = "thumbs_up" | "thumbs_down" | "snoozed";
@@ -28,6 +29,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!(await isAdminUser(supabase, user))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  // audit-2026-05-07 (PR-2 2026-05-28): rate-limit on admin match decisions.
+  // Single per-admin bucket (no per-allocator scoping today — body parse
+  // would be required to add it, and the 20/min admin budget is generous
+  // enough that contention is not the bottleneck).
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin-match-decision:${user.id}`,
+  );
+  if (!rl.success) return rateLimitDenyJson(rl);
 
   let body: {
     allocator_id?: string;
@@ -91,6 +102,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // the inserted match_decisions row so the forensic trail records
   // "admin X thumbs-up/down'd allocator Y's match with strategy Z".
   if (inserted?.id) {
+    // PR-2 red-team H6 (2026-05-28): reverted from `await` to documented
+    // fire-and-forget. logAuditEvent uses Next 15's after() internally
+    // to keep the lambda alive past the response — see the after() call
+    // at audit.ts:662 — so the row lands without holding the response.
+    // Awaiting here would extend the request window 5-15s during
+    // Supabase pool exhaustion (DoS amplifier) AND widen the TOCTOU
+    // window for an admin session revoke landing on an immutable audit
+    // row. The earlier code-reviewer C1 fix over-corrected.
     logAuditEvent(supabase, {
       action: "match.decision_record",
       entity_type: "match_decision",
@@ -123,6 +142,14 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   if (!(await isAdminUser(supabase, user))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  // audit-2026-05-07 (PR-2 2026-05-28): mirror the POST-path rate-limit on
+  // DELETE so an admin un-deciding in a loop is also capped.
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin-match-decision:${user.id}`,
+  );
+  if (!rl.success) return rateLimitDenyJson(rl);
 
   const url = new URL(req.url);
   const allocator_id = url.searchParams.get("allocator_id");
@@ -161,6 +188,9 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   // the deleted row id so the forensic trail records what was un-done.
   // If multiple rows matched (shouldn't with the composite filter but
   // hypothetically), emit one event per row.
+  // PR-2 red-team H6 (2026-05-28): symmetric revert with the POST
+  // handler — logAuditEvent's internal after() guarantees execution
+  // without the DoS-amplifier + TOCTOU widener that awaiting introduces.
   const deletedRows = deleted ?? [];
   for (const row of deletedRows) {
     logAuditEvent(supabase, {

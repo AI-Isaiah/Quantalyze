@@ -225,12 +225,30 @@ def _redact_before_send(event: dict[str, Any], hint: dict[str, Any] | None) -> d
         # Breadcrumbs — every category may carry data. http breadcrumbs from
         # outbound fetch() include headers + body; user breadcrumbs include
         # form values. Scrub all of them.
+        #
+        # PR-2 background-reviewer C2 + security SEC-PR2-03 (2026-05-28):
+        # also scrub `crumb["message"]` (set by Sentry's LoggingIntegration
+        # to the rendered logger message — can carry unredacted ccxt URLs
+        # when the stdlib factory failed-open) AND `crumb["data"]` when it
+        # arrives as a STRING (some SDK versions stash exc_info text there).
         if isinstance(event.get("breadcrumbs"), dict):
             crumbs = event["breadcrumbs"].get("values")
             if isinstance(crumbs, list):
                 for crumb in crumbs:
-                    if isinstance(crumb, dict) and isinstance(crumb.get("data"), dict):
+                    if not isinstance(crumb, dict):
+                        continue
+                    if isinstance(crumb.get("data"), dict):
                         crumb["data"] = _scrub(crumb["data"])
+                    elif isinstance(crumb.get("data"), str):
+                        try:
+                            crumb["data"] = _redact_scrub_freeform_string(crumb["data"])
+                        except Exception:  # pragma: no cover — defensive
+                            pass
+                    if isinstance(crumb.get("message"), str):
+                        try:
+                            crumb["message"] = _redact_scrub_freeform_string(crumb["message"])
+                        except Exception:  # pragma: no cover — defensive
+                            pass
         # Exception locals — Sentry default with_locals=True attaches frame
         # vars on every captured exception. Wizard endpoints define `creds`,
         # `api_key`, `api_secret` in the failing scope; without this walker

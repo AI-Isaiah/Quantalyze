@@ -190,15 +190,28 @@ def test_stdlib_logger_skips_args_with_no_strings():
     assert "a=1 b=2 c=3" in buf.getvalue()
 
 
-def test_logger_exception_scrubs_exc_args():
-    """Security H conf=9 (2026-05-28 specialist): the headline NEW-C13-10
-    case is `logger.exception(...)` with a ccxt exception whose .args carry
-    the HMAC-bearing URL. The factory wrapper must scrub the exception's
-    args tuple BEFORE the formatter renders the traceback line."""
+def test_logger_exception_scrubs_traceback_via_exc_text():
+    """Security H conf=9 + PR-2 background-reviewer C1 (2026-05-28):
+    `logger.exception(...)` with a ccxt exception whose `.args` carry an
+    HMAC-bearing URL. The factory pre-populates `record.exc_text` with
+    the SCRUBBED formatted traceback so the stdlib Formatter renders the
+    scrubbed string (when using the standard `%(message)s` format the
+    Formatter appends `record.exc_text` after the message).
+
+    The LIVE exception's `.args` are intentionally NOT mutated (action-at-
+    a-distance risk: a wrapping `try/except` that re-raises and pattern-
+    matches `str(exc)` for rate-limit dispatching would otherwise see
+    scrubbed strings). Custom Formatters using `%(exc_info)s` directly
+    DO bypass exc_text — that is a documented Formatter foot-gun, not a
+    redact-bridge regression.
+    """
     configure_logging()
     buf = StringIO()
     handler = logging.StreamHandler(buf)
-    handler.setFormatter(logging.Formatter("%(message)s\n%(exc_info)s"))
+    # Standard format string: appends record.exc_text after the message
+    # when exc_info is attached. record.exc_text is pre-populated by the
+    # factory with the scrubbed traceback.
+    handler.setFormatter(logging.Formatter("%(message)s"))
     quant = logging.getLogger("quantalyze.analytics")
     quant.addHandler(handler)
     try:
@@ -213,8 +226,25 @@ def test_logger_exception_scrubs_exc_args():
         quant.removeHandler(handler)
     out = buf.getvalue()
     assert "EXC_LEAK_HMAC" not in out, (
-        f"NEW-C13-10 regression: HMAC leaked via exc_info. Got: {out!r}"
+        f"NEW-C13-10 regression: HMAC leaked through stdlib Formatter path. "
+        f"Got: {out!r}"
     )
+    # And the live exception's args remain UNTOUCHED — verifies the new
+    # action-at-a-distance defense.
+    try:
+        raise RuntimeError(
+            "ccxt PermissionDenied: GET /api/v3/order"
+            "?symbol=BTC&signature=ARGS_PRESERVED_LEAK"
+        )
+    except RuntimeError as exc:
+        # Trigger the factory by emitting a log record carrying this exc.
+        quant.exception("test args preservation", exc_info=exc)
+        # The live exception's .args[0] MUST still contain the original
+        # token — downstream try/except handlers must see the truth.
+        assert "ARGS_PRESERVED_LEAK" in exc.args[0], (
+            "PR-2 C1 regression: redact bridge mutated exc.args — breaks "
+            "downstream pattern matching on str(exc)."
+        )
 
 
 def test_scrub_freeform_fast_path_skips_prose_lines():
@@ -233,3 +263,45 @@ def test_scrub_freeform_fast_path_skips_prose_lines():
     out = scrub_freeform_string(s2)
     assert out is not s2
     assert "LEAK99887766" not in out
+
+
+def test_redact_processor_scrubs_dict_tracebacks_freeform_leaves():
+    """PR-2 red-team H2 (2026-05-28): structlog.processors.dict_tracebacks
+    writes the `exception` block as a nested dict whose string leaves can
+    carry HMAC-bearing ccxt URLs. The key-denylist `_redact_scrub_pii` does
+    NOT substring-scrub freeform strings. The processor must walk the tree
+    and scrub every string leaf through scrub_freeform_string.
+    """
+    from services.logging_config import _redact_processor
+
+    event_dict = {
+        "event": "ccxt failure",
+        "exception": [
+            {
+                "exc_type": "PermissionDenied",
+                "exc_value": "GET /api/v3/order?symbol=BTC&signature=DICTTBLEAK1234ABCD",
+                "syntax_error": None,
+                "is_cause": False,
+                "frames": [
+                    {
+                        "filename": "exchange.py",
+                        "lineno": 42,
+                        "name": "place_order",
+                        "vars": {
+                            "url": "https://api.binance.com/order?signature=FRAMEVARLEAK5678",
+                            "qty": "0.1",
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+    scrubbed = _redact_processor(None, "error", event_dict)
+    rendered = repr(scrubbed)
+    assert "DICTTBLEAK" not in rendered, (
+        f"dict_tracebacks exc_value leaked: {rendered!r}"
+    )
+    assert "FRAMEVARLEAK" not in rendered, (
+        f"dict_tracebacks frame vars leaked: {rendered!r}"
+    )
+    assert "[REDACTED]" in rendered

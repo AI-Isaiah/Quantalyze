@@ -304,7 +304,11 @@ describe("kill-switch — M-0278 validation + GET branches", () => {
     expect(res.status).toBe(403);
   });
 
-  it("GET returns 503 with the migration-011 hint when the system_flags select errors", async () => {
+  it("GET returns generic 503 when the system_flags select errors (PR-2 reviewer I3 hardening)", async () => {
+    // PR-2 (2026-05-28): error body is now the generic "Match engine
+    // unavailable" — the migration-name hint stays in server logs only,
+    // no infra detail leaks to the admin client. Retry-After header is
+    // attached for canary-alert visibility.
     userState.current = { id: "admin-1" };
     adminFlag.isAdmin = true;
     mockAdminSelect(null, { message: "relation system_flags does not exist" });
@@ -312,19 +316,23 @@ describe("kill-switch — M-0278 validation + GET branches", () => {
     const res = await GET();
     expect(res.status).toBe(503);
     const body = await res.json();
-    expect(body.error).toMatch(/migration 011/i);
+    expect(body.error).toBe("Match engine unavailable");
+    expect(res.headers.get("Retry-After")).toBe("60");
   });
 
-  it("GET falls back to enabled=true when no system_flags row exists (data null)", async () => {
+  it("GET returns 503 when no system_flags row exists (PR-2 silent-failure F1)", async () => {
+    // PR-2 (2026-05-28): pre-fix a missing row defaulted to `enabled=true`,
+    // showing operators a misleading green pill when the canonical row had
+    // been deleted/never-seeded. Now distinct 503 like the error path.
     userState.current = { id: "admin-1" };
     adminFlag.isAdmin = true;
     mockAdminSelect(null, null);
     const { GET } = await import("./route");
     const res = await GET();
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(503);
     const body = await res.json();
-    // No row → the engine is treated as enabled (fail-open default).
-    expect(body.enabled).toBe(true);
+    expect(body.error).toBe("Match engine unavailable");
+    expect(res.headers.get("Retry-After")).toBe("60");
   });
 
   it("GET reflects the persisted enabled=false flag when a row exists", async () => {

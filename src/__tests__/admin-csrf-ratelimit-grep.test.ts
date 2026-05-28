@@ -66,34 +66,18 @@ const ADMIN_ROUTES_DIR = join(__dirname, "..", "app", "api", "admin");
  * same-origin.
  */
 const RATE_LIMIT_EXEMPTIONS: Record<string, string> = {
-  // The following admin mutating routes enforce CSRF (via assertSameOrigin
-  // or a wrapper) but do NOT yet bind a checkLimit() call. They are
-  // out-of-scope for Lane 5 of audit-2026-05-07 (which was scoped to
-  // P197/P198/P199/P200/P203 — the four sibling routes touched by this
-  // PR). Each entry is tracked for a follow-up sweep so the grep gate
-  // doesn't false-fail on routes not in this PR's blast radius.
-  "src/app/api/admin/for-quants-leads/process/route.ts":
-    "out-of-scope for Lane 5; uses withAdminAuth (CSRF only). Follow-up sweep should add adminActionLimiter.",
-  "src/app/api/admin/match/decisions/route.ts":
-    "out-of-scope for Lane 5 (review-fix P-followup); CSRF via assertSameOrigin only. Covers BOTH POST and DELETE handlers. Follow-up sweep should add adminActionLimiter to both.",
-  "src/app/api/admin/match/kill-switch/route.ts":
-    "out-of-scope for Lane 5; CSRF via assertSameOrigin only. Follow-up sweep should add adminActionLimiter.",
-  // send-intro: rate-limit added in audit-2026-05-07 cluster-E fix-loop
-  // (v0.22.40.37) — exemption removed; route now binds adminActionLimiter.
-  "src/app/api/admin/match/preferences/[allocator_id]/route.ts":
-    "out-of-scope for Lane 5 (review-fix P-followup, C3 discovery); PUT handler — CSRF via assertSameOrigin only. Follow-up sweep should add adminActionLimiter.",
-  // Cluster-K C-0032 (audit-2026-05-07, 2026-05-17) closed the approve
-  // route's rate-limit gap — `adminActionLimiter` keyed on the acting
-  // admin's user id now fires BEFORE the irreversible sanitize_user
-  // RPC. The exemption was removed once the wrapper landed; if a future
-  // refactor strips checkLimit out, this test will catch it.
+  // audit-2026-05-07 PR-2 (2026-05-28): all four prior exemptions closed
+  // in one batch — for-quants-leads/process (via withAdminAuth opt-in),
+  // match/decisions (POST + DELETE), match/kill-switch (POST),
+  // match/preferences/[allocator_id] (PUT). Each route now binds
+  // adminActionLimiter with a per-surface key prefix. If a future refactor
+  // strips a checkLimit out, this test will catch it.
   //
-  // audit-2026-05-07 red-team-HIGH (reject-asymmetry-vs-approve-hardening,
-  // 2026-05-17) closed the sibling /reject route's rate-limit gap with
-  // the same `adminActionLimiter` keyed on `del-reject:${user.id}`. The
-  // /reject exemption was removed in the same PR — symmetric hardening
-  // so a stolen admin session cannot pivot to /reject as a back door
-  // for burst denial-of-deletion against pending Art. 17 requests.
+  // Historical closures:
+  //   - send-intro: rate-limit added in audit-2026-05-07 cluster-E
+  //     fix-loop (v0.22.40.37).
+  //   - deletion-requests/approve: cluster-K C-0032 (2026-05-17).
+  //   - deletion-requests/reject: red-team-HIGH symmetry sweep (2026-05-17).
 };
 
 /**
@@ -173,14 +157,23 @@ function hasCsrfDefense(source: string): boolean {
 }
 
 function hasRateLimit(source: string): boolean {
-  // Rate-limit currently has NO accepted wrapper — neither withAdminAuth
-  // nor withRole enforces a limiter. Require BOTH the import and the
-  // checkLimit() call site (C1 + C2).
+  // PR-2 2026-05-28: withAdminAuth now accepts a `rateLimitKey` option
+  // (src/lib/api/withAdminAuth.ts) that plumbs through to checkLimit in
+  // the wrapper. A route file that opts in via `{ rateLimitKey: ... }`
+  // gets the same per-admin rate limit as routes that call checkLimit
+  // directly — both shapes are accepted defenses.
   const importsRateLimit =
     source.includes('from "@/lib/ratelimit"') ||
     source.includes("from '@/lib/ratelimit'");
   const callsCheckLimit = /\bcheckLimit\s*\(/.test(source);
-  return importsRateLimit && callsCheckLimit;
+  if (importsRateLimit && callsCheckLimit) return true;
+
+  // Wrapper opt-in via withAdminAuth({ rateLimitKey: ... }). Require the
+  // wrapper IS applied (not just imported), and the rateLimitKey option
+  // is passed in the SAME export const that applies the wrapper. A
+  // dangling import or a separate options object should NOT count.
+  const wrapperWithOpt = /export\s+const\s+(POST|PUT|PATCH|DELETE)\s*=\s*withAdminAuth\([\s\S]*?rateLimitKey\s*:/;
+  return wrapperWithOpt.test(source);
 }
 
 describe("audit-2026-05-07 P200 — admin mutating routes must enforce CSRF + rate limit", () => {

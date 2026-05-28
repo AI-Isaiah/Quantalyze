@@ -54,16 +54,50 @@ def _redact_processor(_logger, _method_name, event_dict):
     so the contextvar-bound fields ARE included in the scrub pass (covers
     correlation_id and any future user_id-bound contextvar) and the level/
     timestamp/JSON-render processors still see the scrubbed dict.
+
+    PR-2 red-team H2 (2026-05-28): `structlog.processors.dict_tracebacks`
+    runs BEFORE this processor and writes `exception` as a nested dict
+    containing freeform string fields (frame `vars`, exception `value`,
+    `module`, etc.) that the key-denylist `_redact_scrub_pii` does NOT
+    substring-scrub. Pre-fix HMAC-bearing ccxt URLs would survive into
+    the JSON egress. Walk the `exception` block and scrub its string
+    leaves through scrub_freeform_string.
     """
     try:
         scrubbed = _redact_scrub_pii(event_dict)
         # scrub_pii on a Mapping returns a plain dict — that's exactly what
         # the next processor in the chain expects.
         if isinstance(scrubbed, dict):
-            return scrubbed
+            event_dict = scrubbed
+        # Walk the `exception` block written by dict_tracebacks and scrub
+        # string leaves through scrub_freeform_string. Bounded depth so a
+        # pathological self-referential exception cannot loop forever.
+        exc_node = event_dict.get("exception") if isinstance(event_dict, dict) else None
+        if exc_node is not None:
+            event_dict["exception"] = _scrub_tree_freeform(exc_node, depth=0)
         return event_dict
     except Exception:
         return event_dict
+
+
+def _scrub_tree_freeform(node, depth: int):
+    """Recursively scrub every str leaf in a (dict|list|tuple) tree through
+    scrub_freeform_string. Bounded at depth 8 to defend against pathological
+    self-referential / very-deep traceback trees. Fail-open per caller's
+    blanket try/except."""
+    if depth > 8:
+        return node
+    if isinstance(node, str):
+        try:
+            return scrub_freeform_string(node)
+        except Exception:
+            return node
+    if isinstance(node, dict):
+        return {k: _scrub_tree_freeform(v, depth + 1) for k, v in node.items()}
+    if isinstance(node, (list, tuple)):
+        scrubbed = [_scrub_tree_freeform(v, depth + 1) for v in node]
+        return tuple(scrubbed) if isinstance(node, tuple) else scrubbed
+    return node
 
 
 class _StdlibRedactFilter(logging.Filter):
@@ -125,25 +159,25 @@ def _scrub_record_in_place(record: logging.LogRecord) -> None:
         # Security H conf=9 (2026-05-28 specialist): logger.exception()
         # attaches str(exc) via exc_info; the stdlib Formatter renders that
         # through traceback.format_exception AFTER our msg/args scrub.
-        # Mutate exc.args so the next traceback render uses scrubbed strings,
-        # preventing HMAC-bearing ccxt messages from leaking into the
-        # formatted traceback line. Downstream re-raise sees the scrubbed args
-        # — desirable for credential cases; benign exceptions hit the
-        # scrub_freeform_string fast-path.
-        if record.exc_info and len(record.exc_info) > 1:
-            exc_value = record.exc_info[1]
-            if exc_value is not None and getattr(exc_value, "args", None):
-                try:
-                    exc_value.args = tuple(
-                        scrub_freeform_string(a) if isinstance(a, str) else a
-                        for a in exc_value.args
-                    )
-                except (AttributeError, TypeError):
-                    # Some exception types (BaseException subclasses with
-                    # __slots__, frozen exceptions, etc.) resist .args
-                    # mutation. Fail-open here; scrub_freeform_string on
-                    # exc_text below is the secondary line.
-                    pass
+        #
+        # PR-2 background-reviewer C1 (2026-05-28): pre-fix mutated
+        # `exc_value.args` IN-PLACE, which leaked into any caller that
+        # subsequently re-raised or string-matched on the live exception
+        # (e.g. a wrapping `try/except` that logs then re-raises into a
+        # different handler that pattern-matches `str(exc)` for circuit-
+        # breaker / rate-limit-token logic). Now: pre-populate
+        # `record.exc_text` with the scrubbed formatted traceback. The
+        # stdlib Formatter checks `exc_text is None` before calling
+        # `formatException`, so a non-None value short-circuits to OUR
+        # scrubbed string. The live exception is left untouched —
+        # downstream consumers see the original `.args`.
+        if record.exc_info and len(record.exc_info) >= 3 and record.exc_text is None:
+            import traceback as _tb
+            try:
+                formatted = "".join(_tb.format_exception(*record.exc_info))
+                record.exc_text = scrub_freeform_string(formatted)
+            except Exception:  # noqa: BLE001 — fail-open: stdlib will format normally
+                pass
         # Security H conf=9 (same): scrub record.stack_info — set by
         # log.* with stack_info=True; can carry credentials baked into the
         # formatted frame (e.g. f-string with the URL on the calling frame).

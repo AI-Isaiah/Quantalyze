@@ -7,9 +7,10 @@ import {
   acquirePdfSlot,
   PDF_QUEUE_TIMEOUT_MESSAGE,
 } from "@/lib/puppeteer";
-import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import { publicIpLimiter, checkLimit, getClientIp, rateLimitDenyText } from "@/lib/ratelimit";
 import { signPdfRenderToken } from "@/lib/pdf-render-token";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 export const maxDuration = 30;
 
@@ -25,13 +26,16 @@ export async function GET(
   // Cache hits served from Vercel's CDN bypass this entirely, which is the
   // correct behavior for a public IP-based limiter.
   const ip = getClientIp(req.headers);
-  const rl = await checkLimit(publicIpLimiter, `pdf:${ip}`);
-  if (!rl.success) {
-    return new NextResponse("Rate limit exceeded", {
-      status: 429,
-      headers: { "Retry-After": String(rl.retryAfter) },
-    });
-  }
+  // audit-2026-05-07 H-0253 follow-up (PR-2 2026-05-28): per-surface key
+  // prefix. Was `pdf:${ip}`, shared with factsheet/[id]/pdf + tearsheet —
+  // a user opening factsheet → tearsheet → portfolio PDF from the same IP
+  // burned a single 10/min budget. Now each PDF surface has its own bucket.
+  const rl = await checkLimit(publicIpLimiter, `portfolio-pdf:${ip}`);
+  // audit-2026-05-07 PR-2 silent-failure-hunter A: rateLimitDenyText
+  // distinguishes misconfig 503 from organic 429 so an Upstash outage
+  // surfaces on SRE health dashboards instead of looking like throttled
+  // organic traffic.
+  if (!rl.success) return rateLimitDenyText(rl);
 
   const { id } = await params;
 
@@ -93,7 +97,14 @@ export async function GET(
         headers: { "Retry-After": "10" },
       });
     }
+    // PR-2 silent-failure-hunter F6 (2026-05-28): PDF generation covers
+    // puppeteer crashes, OOM, navigation timeouts, Chromium SIGSEGV, font-
+    // loader failures — all previously invisible to Sentry.
     console.error("[portfolio-pdf] Generation failed:", err);
+    captureToSentry(err, {
+      tags: { area: "portfolio-pdf", step: "pdf_generation" },
+      level: "error",
+    });
     return NextResponse.json(
       { error: "PDF generation failed" },
       { status: 500 },
@@ -101,7 +112,19 @@ export async function GET(
   } finally {
     if (browser) {
       await browser.close().catch((closeErr) => {
+        // Browser leak compounds across requests — promote to Sentry.
+        // Red-team H3 (2026-05-28): wrap captureToSentry itself in
+        // try/catch so a Sentry-SDK regression cannot escape the finally
+        // and mask the original PDF generation error.
         console.error("[portfolio-pdf] Browser close failed:", closeErr);
+        try {
+          captureToSentry(closeErr, {
+            tags: { area: "portfolio-pdf", step: "browser_close" },
+            level: "warning",
+          });
+        } catch {
+          /* swallow — Sentry must never escape finally */
+        }
       });
     }
     if (release) release();
