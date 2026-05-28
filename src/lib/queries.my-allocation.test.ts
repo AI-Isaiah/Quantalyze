@@ -1200,5 +1200,144 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
   });
 });
 
+// =============================================================================
+// NEW-C09-08 (B1, audit-2026-05-07) — current_weight boundary clamp
+//
+// DEFERRED. See the comment block at src/lib/queries.ts (~line 2910) for
+// the rationale. The `safeFraction` constructor ships in `@/lib/units`
+// today; landing it at the payload boundary requires a co-PR that
+// sweeps the eight downstream aggregators that read
+// `current_weight ?? 0` and either branches on null or excludes the
+// rejected row. Until that lands, gating here would swap a visible
+// 5000% chip for a silent 0% slot in HHI / tracking error / alpha-beta.
+//
+// The spec block below is left in `describe.skip` form so the next
+// PR that does the consumer sweep can flip it back on by deleting
+// `.skip` — no test code to rewrite, just the boundary constructor to
+// re-introduce in queries.ts and the consumer sweep to land alongside.
+// =============================================================================
+
+describe.skip("NEW-C09-08 — current_weight clamped through safeFraction", () => {
+  beforeEach(() => {
+    resetState();
+    state.portfolios = [PORTFOLIO_FIXTURE];
+  });
+
+  it("valid in-range weight passes through unchanged", async () => {
+    state.portfolioStrategies = [
+      { ...PS_S1, current_weight: 0.42 } as unknown as
+        (typeof state.portfolioStrategies)[number],
+    ];
+    state.sentAsIntroDecisions = [];
+    state.bridgeOutcomes = [];
+    state.bridgeDismissals = [];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    const row = result.strategies.find((s) => s.strategy_id === "s1");
+    expect(row?.current_weight).toBe(0.42);
+  });
+
+  it("boundary values 0 and 1 accepted", async () => {
+    state.portfolioStrategies = [
+      { ...PS_S1, current_weight: 0 } as unknown as
+        (typeof state.portfolioStrategies)[number],
+      { ...PS_S2, current_weight: 1 } as unknown as
+        (typeof state.portfolioStrategies)[number],
+    ];
+    state.sentAsIntroDecisions = [];
+    state.bridgeOutcomes = [];
+    state.bridgeDismissals = [];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    const s1 = result.strategies.find((s) => s.strategy_id === "s1");
+    const s2 = result.strategies.find((s) => s.strategy_id === "s2");
+    expect(s1?.current_weight).toBe(0);
+    expect(s2?.current_weight).toBe(1);
+  });
+
+  it("out-of-range negative weight collapses to null (producer-side bug)", async () => {
+    state.portfolioStrategies = [
+      { ...PS_S1, current_weight: -0.05 } as unknown as
+        (typeof state.portfolioStrategies)[number],
+    ];
+    state.sentAsIntroDecisions = [];
+    state.bridgeOutcomes = [];
+    state.bridgeDismissals = [];
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+      const row = result.strategies.find((s) => s.strategy_id === "s1");
+      // Pre-fix: rendered as -5% chip. Post-fix: explicit null so UI shows "—".
+      expect(row?.current_weight).toBeNull();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("out-of-range >1 weight collapses to null (percent vs fraction drift)", async () => {
+    // A producer that ships current_weight=50 (meaning 50%) instead of 0.50
+    // would otherwise display as 5000% — exactly the drift NEW-C09-08 closes.
+    state.portfolioStrategies = [
+      { ...PS_S1, current_weight: 50 } as unknown as
+        (typeof state.portfolioStrategies)[number],
+    ];
+    state.sentAsIntroDecisions = [];
+    state.bridgeOutcomes = [];
+    state.bridgeDismissals = [];
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+      const row = result.strategies.find((s) => s.strategy_id === "s1");
+      expect(row?.current_weight).toBeNull();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("NaN / non-finite weight collapses to null silently", async () => {
+    state.portfolioStrategies = [
+      { ...PS_S1, current_weight: Number.NaN } as unknown as
+        (typeof state.portfolioStrategies)[number],
+    ];
+    state.sentAsIntroDecisions = [];
+    state.bridgeOutcomes = [];
+    state.bridgeDismissals = [];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    const row = result.strategies.find((s) => s.strategy_id === "s1");
+    expect(row?.current_weight).toBeNull();
+  });
+
+  it("null weight stays null (untouched-pass-through, no spurious warn)", async () => {
+    state.portfolioStrategies = [
+      { ...PS_S1, current_weight: null } as unknown as
+        (typeof state.portfolioStrategies)[number],
+    ];
+    state.sentAsIntroDecisions = [];
+    state.bridgeOutcomes = [];
+    state.bridgeDismissals = [];
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+      const row = result.strategies.find((s) => s.strategy_id === "s1");
+      expect(row?.current_weight).toBeNull();
+      // null is a legitimate "no weight" state, not a producer bug — must
+      // not pollute logs with the asWeightFraction out-of-range warn.
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
 // Silence unused-var for DAY_MS helper (kept for future TC authors).
 void DAY_MS;

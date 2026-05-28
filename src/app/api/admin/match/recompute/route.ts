@@ -40,7 +40,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   try {
-    const result = await recomputeMatch(body.allocator_id, body.force ?? false);
+    // C-PR5-01 (audit-2026-05-07): forward the authenticated admin's
+    // user.id as actor_id so analytics-service can assert the actor is
+    // entitled to recompute this allocator. Defense-in-depth against a
+    // future Next.js route that drops the admin gate above.
+    const result = await recomputeMatch(
+      body.allocator_id,
+      body.force ?? false,
+      user.id,
+    );
     return NextResponse.json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";

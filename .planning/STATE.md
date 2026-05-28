@@ -4,14 +4,14 @@ milestone: v1.0.0
 milestone_name: API-Key Rewrite
 status: executing
 stopped_at: context exhaustion at 76% (2026-05-07)
-last_updated: "2026-05-22T09:46:36.234Z"
-last_activity: 2026-05-22 -- Phase 19.1 execution started
+last_updated: "2026-05-28T04:45:00.000Z"
+last_activity: 2026-05-28 -- Phase 15 marked roadmap-complete (re-verified 10/10; PR #327 v0.24.9.35 close-out)
 progress:
   total_phases: 6
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 46
-  completed_plans: 35
-  percent: 76
+  completed_plans: 42
+  percent: 91
 ---
 
 # Project State
@@ -26,12 +26,36 @@ See: `.planning/PROJECT.md` (updated 2026-04-30 at v1.0.0 milestone start)
 
 ## Current Position
 
-Phase: 19.1 (csv-analytics-factsheet-pipeline-prior-work-on-feat-csv-anal) — EXECUTING
-Plan: 1 of 10
-Status: Executing Phase 19.1
-Last activity: 2026-05-22 -- Phase 19.1 execution started
+Phase: 19.1 (csv-analytics-factsheet-pipeline-prior-work-on-feat-csv-anal) — COMPLETE
+Plan: 10 of 10
+Status: Phase 19.1 COMPLETE — Plan 09 (prod e2e verification, VERDICT PASS: Orara-Statarb-L/S5 full pipeline) + Plan 10 (stop-gap removal + B3 render-gate widening across page + PDF exports + discarded-branch cleanup) shipped as v0.24.9.34 (PR #326, merge 4ec36ad2). B3 residual follow-up logged (6 other-surface computation_status gates, 0 prod rows, null-safe).
+Last activity: 2026-05-28 -- Phase 15 CLOSED via `/gsd-autonomous --only 15`: the two /qa bugs (P1 CSV-wizard strategyName lost on refresh; P2 /admin/csv-status "View factsheet" 404) were fixed + shipped as v0.24.9.35 (PR #327) on 2026-05-27, merged to main + Vercel prod deploy verified READY; ROADMAP/STATE/VERIFICATION markers reconciled 2026-05-28. (Prior same-day: Phase 19.1 completed via PR #326.)
 
-Progress: [██░░░░░░░░] 20% (1 of 5 phases complete; Phase 15 shipped local on v1.0.0-api-key-rewrite-15-16, awaiting milestone ship)
+Progress: 5 of 6 milestone phases complete (15, 16, 17, 18, 19.1 — disk-complete + roadmap-marked). Phase 19 disk-complete but roadmap markers not flipped; out of scope of `/gsd-autonomous --only 15`. NOTE: phase/percent counters drift across partial updates — reconcile at milestone-ship time, not blocking.
+
+## Phase 15 Closure (2026-05-28)
+
+Phase 15 (CSV Unblock) marked **roadmap-complete** via `/gsd-autonomous --only 15`. All 7 plans (15-01…15-07) executed; `15-VERIFICATION.md` re-verified 10/10 must-haves still wired in current main (commit `6228e855`). Status promoted **human_needed → passed**. The 5 human-needed live-validation items were resolved earlier via **PR #327 (v0.24.9.35, prod-deployed 2026-05-27)** which shipped two bug fixes the live verification surfaced:
+
+- **CSV wizard `strategyName` debounced-autosave** — `WizardClient.tsx:72,340` debounce window now wraps the autosave to localStorage so back-nav rehydrates the typed name.
+- **/admin/csv-status singular published-gated factsheet link** — `admin/csv-status/page.tsx:144` `status==='published' ?` gate prevents 404s for non-published rows.
+
+No re-plan/re-execute was run — the work was already complete on disk; only the ROADMAP Phase plans checkboxes + Phase heading needed ticking, VERIFICATION.md status flip, and STATE.md update.
+
+> **Note (out of scope this pass):** the "Current Position" block below still says Phase 19.1 EXECUTING; disk shows 19.1 complete. Only Phase 15 was reconciled here per the user's `--only 15` scope.
+
+## Phase 18 Closure (2026-05-27)
+
+Phase 18 (Root-Cause Fix + Founder LP Skeleton) marked **roadmap-complete** via `/gsd-autonomous --only 18`. All 4 plans (18-01…18-04) executed; `18-VERIFICATION.md` records **7/7 must-haves verified** (2026-05-06). Code shipped in-flight via PR #116 + commits `a48a92e`/`1960f54`. No re-plan/re-execute was run — the work was already complete on disk; only the ROADMAP Phase Summary checkbox needed ticking.
+
+Three items remain in `human_needed` status — **deferred to /ship-time founder action, NOT code work**:
+- **FIX-02** — founder runs own OKX key through wizard + fills `.planning/phase-18/founder-okx-smoke.md`
+- **FIX-03** — ≥3 of 10 onboarding teams reach `strategy_verifications.status='published'`
+- **LP-03** — founder writes verbatim dogfood commitment in `.planning/phase-18/dogfood-commitment.md` (currently `PENDING`)
+
+`scripts/verify-phase18-artifacts.ts` gates the /ship pre-flight on these three.
+
+> **Note (out of scope this pass):** the "Current Position" block above is stale (predates today; says 19.1 EXECUTING while disk shows 19.1 complete). Only Phase 18 was reconciled here per the user's `--only 18` scope. A full ROADMAP↔disk↔STATE reconciliation for phases 15/19/19.1 was not performed.
 
 ## Phase 16 prep gate status (2026-05-01)
 

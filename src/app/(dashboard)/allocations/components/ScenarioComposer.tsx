@@ -229,6 +229,16 @@ export interface ScenarioComposerProps {
  *
  * The shape conversion is purely a key rename — no math, no recomputation.
  * computeScenario is NOT invoked here; that's the whole point of M4.
+ *
+ * NEW-C18-09 (B1, audit-2026-05-07): `equity_curve` is left EMPTY here on
+ * purpose. The producer convention for `ComputedMetrics.equity_curve` is
+ * cumulative-RETURN form (0.18 = +18%), but `baseline.equity` is already
+ * in cumulative-WEALTH form (the SSR producer converted via `value + 1`).
+ * Stuffing the wealth-form array into the return-form field would silently
+ * mis-scale any future chart that reads `ComputedMetrics.equity_curve`
+ * directly. The chart pipeline already consumes `scenarioWealthSeries`
+ * (composer-level, post-`toWealth()`) separately, so this field is dead
+ * weight on the live-baseline path — better empty than mis-typed.
  */
 function liveBaselineToComputedMetrics(
   baseline: MyAllocationDashboardPayload["liveBaselineMetrics"],
@@ -244,7 +254,7 @@ function liveBaselineToComputedMetrics(
     max_dd_days: null,
     correlation_matrix: null,
     avg_pairwise_correlation: baseline.avgRho,
-    equity_curve: baseline.equity,
+    equity_curve: [],
     effective_start: baseline.equity[0]?.date ?? null,
     effective_end: baseline.equity[baseline.equity.length - 1]?.date ?? null,
   };
@@ -1059,6 +1069,7 @@ export function ScenarioComposer({
         isOpen={commitDrawerOpen}
         onClose={() => setCommitDrawerOpen(false)}
         diffs={commitDiffs}
+        scenarioAum={scenarioAum}
         onSubmitSuccess={() => {
           // NEW-C18-13: clear stale commitDiffs so a subsequent drawer open
           // does not re-submit already-committed rows under a fresh key.

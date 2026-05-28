@@ -2907,6 +2907,20 @@ export const getMyAllocationDashboard = cache(
       const redactedName =
         strategy.disclosure_tier === "institutional" ? strategy.name : null;
 
+      // NEW-C09-08 (B1, audit-2026-05-07) — DEFERRED. The audit calls for
+      // gating `current_weight` through a `safeFraction` boundary so a
+      // producer-side bug (paused-strategy negative weight, percent vs
+      // fraction confusion shipping `50` instead of `0.5`) renders the
+      // dashboard chip as `—` instead of a confident-looking `5000%`.
+      // Direct adoption here would be NET DEGRADATION today: every
+      // downstream aggregator (HHI, tracking error, alpha/beta, composite
+      // returns) reads `current_weight ?? 0` and would silently treat
+      // the rejected row as a 0% slot, swapping a visible-failure for a
+      // silent-failure across six analytics widgets. The safe constructor
+      // exists in `@/lib/units` (`safeFraction`); landing it here is
+      // blocked on the aggregator sweep that audits each `?? 0` site and
+      // either branches on null or excludes the row from the sum.
+
       return [
         {
           strategy_id: row.strategy_id,

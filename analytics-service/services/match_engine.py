@@ -538,12 +538,20 @@ def _compute_capacity_fit(
     """Concentration headroom. 0 = saturated, 1 = plenty of room."""
     manager_aum = candidate.get("manager_aum")
     ticket_size = preferences.get("target_ticket_size_usd")
-    max_concentration = preferences.get("max_aum_concentration") or 0.20
+    # B3.4 (audit-2026-05-07) truthy-sweep: `pref.get(...) or 0.20` collapsed
+    # an explicit 0 (user-set "no concentration tolerated") into the 0.20
+    # default. The class of bug NEW-C19-05/-06 closed. ``is None`` keeps
+    # the explicit-zero preference distinguishable from "no row set."
+    _raw_max_conc = preferences.get("max_aum_concentration")
+    max_concentration = 0.20 if _raw_max_conc is None else _raw_max_conc
 
-    # Unknown manager AUM → neutral
-    if not manager_aum or manager_aum <= 0:
+    # Unknown manager AUM → neutral. B3.4: mirror the ``is None``
+    # pattern from ``_liquidity_tier_from_aum`` (this file, line 432) so
+    # the two sites can't drift apart on the numeric-truthy vs presence
+    # question.
+    if manager_aum is None or manager_aum <= 0:
         return 0.5
-    if not ticket_size or ticket_size <= 0:
+    if ticket_size is None or ticket_size <= 0:
         return 0.5
 
     concentration = ticket_size / manager_aum
@@ -593,8 +601,24 @@ def _compute_portfolio_fit_components(
     current_port = (port_df * w_arr).sum(axis=1)
 
     # New portfolio = old × (1 - add_weight) + candidate × add_weight
-    aligned = pd.concat([port_df, candidate_returns.rename("__cand__")], axis=1).dropna()
-    if len(aligned) < 30:
+    #
+    # B3 (audit-2026-05-07): the intersection-of-dates join moved to the
+    # shared ``window_alignment.align_current_and_proposed`` helper.
+    # Same call shape as ``simulator_scoring``; a single edit changes
+    # both paths' alignment semantics. Pre-helper, an in-place
+    # ``pd.concat(...).dropna()`` lived here and an almost-identical one
+    # lived in simulator_scoring; the two could (and historically did)
+    # drift.
+    from services.window_alignment import align_current_and_proposed
+
+    alignment = align_current_and_proposed(
+        port_df,
+        candidate_returns,
+        candidate_id="__cand__",
+        min_overlap_days=30,
+    )
+    aligned = alignment.aligned_concat
+    if not alignment.sufficient:
         portfolio_count = max(len(portfolio_weights), 1)
         data_completeness_short = len(port_df.columns) / portfolio_count
         components = _empty_pf_components()
@@ -875,10 +899,22 @@ def score_candidates(
     # the strict gate. `active_prefs` / `relaxed_overrides` are persisted
     # in the audit trail so 'why was X scored this way?' replay is honest.
 
-    # Compute add_weight from ticket size + portfolio AUM
-    if mode == "personalized" and portfolio_aum and portfolio_aum > 0:
-        ticket = prefs.get("target_ticket_size_usd") or 0
-        add_weight = _clamp(ticket / portfolio_aum, 0.01, 0.5)
+    # Compute add_weight from ticket size + portfolio AUM.
+    # B3.4 (audit-2026-05-07) truthy-sweep: `prefs.get("...") or 0`
+    # collapsed an explicit 0 (user-set "no ticket configured yet")
+    # into the same code path as a missing key. Mirror the ``is None``
+    # discipline used elsewhere in this module so the explicit-zero
+    # preference falls through to the 0.10 default instead of dividing
+    # by zero downstream.
+    _raw_ticket = prefs.get("target_ticket_size_usd")
+    if (
+        mode == "personalized"
+        and portfolio_aum is not None
+        and portfolio_aum > 0
+        and _raw_ticket is not None
+        and _raw_ticket > 0
+    ):
+        add_weight = _clamp(_raw_ticket / portfolio_aum, 0.01, 0.5)
     else:
         add_weight = 0.10  # Default for cold-start or unknown AUM
 
@@ -919,8 +955,16 @@ def score_candidates(
         else:
             pf_components = _empty_pf_components()
 
-        manager_aum = cand.get("manager_aum") or 0
-        ticket = prefs.get("target_ticket_size_usd") or 0
+        # B3.4 (audit-2026-05-07) truthy-sweep: mirror the ``is None``
+        # discipline at the other two sites in this file. ``or 0``
+        # collapses an explicit 0 (data-quality blip on manager_aum,
+        # user-set "no ticket yet" on target_ticket_size_usd) into the
+        # ratio computation; using ``is None`` keeps them out so the
+        # sidecar reads as None (not 0.0) on the audit row.
+        _raw_manager_aum = cand.get("manager_aum")
+        manager_aum = _raw_manager_aum if _raw_manager_aum is not None else 0
+        _raw_ticket_inner = prefs.get("target_ticket_size_usd")
+        ticket = _raw_ticket_inner if _raw_ticket_inner is not None else 0
         ticket_concentration = (
             ticket / manager_aum if manager_aum > 0 else None
         )

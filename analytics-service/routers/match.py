@@ -172,6 +172,15 @@ class RecomputeRequest(BaseModel):
     # injection bait round-trip through to a 0-row Supabase result.
     allocator_id: UUID
     force: bool = False
+    # C-PR5-01 (audit-2026-05-07): the authenticated actor's user_id, as
+    # forwarded by the Next.js admin route from supabase.auth.getUser().
+    # Optional today for backward compatibility — when present, the
+    # endpoint asserts ``actor_id == allocator_id`` OR ``actor_id`` is
+    # an admin profile. When absent, the legacy SERVICE_KEY-only gate
+    # still applies (the Next.js admin route is the de facto gate), but
+    # a deprecation warning is logged so operators can track the
+    # rollout. Future PR will flip this to required.
+    actor_id: UUID | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1414,6 +1423,46 @@ def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _is_admin_profile(user_id: str) -> bool | None:
+    """C-PR5-01 (audit-2026-05-07): return True iff the user has admin role.
+
+    Two signal sources — ``profiles.is_admin = TRUE`` (legacy) and
+    ``user_app_roles.role = 'admin'`` (canonical). Either source proves
+    admin; mirroring the Next.js ``isAdminUser`` boolean OR keeps the two
+    layers in agreement. Returns None on transient DB error so the
+    caller can 503 instead of returning a misleading 403.
+
+    Synchronous — call via ``asyncio.to_thread``.
+    """
+    sb = get_supabase()
+    try:
+        profile = (
+            sb.table("profiles")
+            .select("is_admin")
+            .eq("id", user_id)
+            .maybe_single()
+            .execute()
+        )
+        if profile and profile.data and profile.data.get("is_admin"):
+            return True
+        roles = (
+            sb.table("user_app_roles")
+            .select("role")
+            .eq("user_id", user_id)
+            .eq("role", "admin")
+            .limit(1)
+            .execute()
+        )
+        return bool(roles.data)
+    except Exception as exc:
+        logger.error(
+            "match_engine: admin role check failed for user %s: %s "
+            "— returning None (transient; caller will 503)",
+            user_id, exc,
+        )
+        return None
+
+
 def _is_allocator_profile(allocator_id: str) -> bool | None:
     """NEW-C08-10: return True iff the profile exists and has role 'allocator' or 'both'.
 
@@ -1463,6 +1512,43 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
     """Single-allocator recompute. Called from the Next.js admin /api/admin/match/recompute."""
     # Stringify the UUID once for Supabase / downstream sync helpers.
     allocator_id = str(req.allocator_id)
+
+    # C-PR5-01 (audit-2026-05-07): actor binding. When the caller forwards
+    # an ``actor_id``, assert it can legitimately act on this allocator —
+    # either the actor IS the allocator (allocator running their own
+    # recompute) or the actor is an admin. Pre-fix the endpoint trusted
+    # any SERVICE_KEY-bearing caller, so any future Next.js route that
+    # forwarded user-supplied allocator_id without an admin gate became a
+    # cross-tenant batch-forgery vector (the audit's CRITICAL finding).
+    # Backward compat: if actor_id is None, log a deprecation warning so
+    # the rollout is observable; the legacy Next.js admin gate still
+    # protects production today.
+    if req.actor_id is None:
+        logger.warning(
+            "match_engine recompute: actor_id missing — falling back to "
+            "service-key-only gate. Caller must forward x-actor-id in a "
+            "future release (C-PR5-01). allocator_id=%s",
+            allocator_id,
+        )
+    else:
+        actor_id = str(req.actor_id)
+        if actor_id != allocator_id:
+            _is_admin = await asyncio.to_thread(_is_admin_profile, actor_id)
+            if _is_admin is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="actor admin check temporarily unavailable — please retry",
+                )
+            if not _is_admin:
+                logger.warning(
+                    "match_engine recompute: rejected cross-tenant write — "
+                    "actor_id=%s targeted allocator_id=%s without admin role",
+                    actor_id, allocator_id,
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail="actor does not own this allocator and is not an admin",
+                )
 
     # NEW-C08-10: validate that allocator_id is actually an allocator (or both).
     # Pre-fix any UUID (strategy-manager, admin, deleted profile) manufactured

@@ -30,6 +30,7 @@ import pandas as pd
 
 from services.metrics import _safe_float
 from services.portfolio_optimizer import _avg_corr, _compute_sharpe, _max_drawdown
+from services.window_alignment import align_current_and_proposed
 
 
 # Minimum overlapping trading days required to run the simulation. Matches
@@ -104,14 +105,23 @@ def simulate_add_candidate(
     # proposed_* used the shorter intersection — every delta subtracted
     # metrics over non-coincident windows, manufacturing artificial
     # Sharpe lift / diversification benefit from regime mismatch.
-    aligned = pd.concat(
-        [port_df, candidate_returns.rename(candidate_id)], axis=1
-    ).dropna()
-    overlap_days = int(len(aligned))
-
-    # Slice the portfolio-only columns to the intersection window for
-    # window-coincident current metrics.
-    port_aligned = aligned[list(port_df.columns)]
+    #
+    # B3 (audit-2026-05-07): the alignment logic moved to the shared
+    # ``window_alignment.align_current_and_proposed`` helper. Both this
+    # path and ``match_engine._compute_portfolio_fit_components`` consume
+    # the same helper so a future refactor that touches one path now
+    # touches both — the structural class of "current scored on the
+    # long window, proposed on the short window" bias cannot be
+    # silently re-introduced by a one-sided edit.
+    alignment = align_current_and_proposed(
+        port_df,
+        candidate_returns,
+        candidate_id=candidate_id,
+        min_overlap_days=MIN_DATA_POINTS,
+    )
+    aligned = alignment.aligned_concat
+    overlap_days = alignment.overlap_days
+    port_aligned = alignment.port_aligned
 
     # --- Current portfolio (without the candidate) --------------------
     w_arr = np.array([weights.get(sid, 0) for sid in port_aligned.columns])

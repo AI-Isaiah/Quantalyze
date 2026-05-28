@@ -1245,6 +1245,100 @@ class TestRecomputeRoleValidation:
         assert r.json()["status"] == "disabled"
 
 
+class TestRecomputeActorBinding:
+    """C-PR5-01 (audit-2026-05-07): when ``actor_id`` is present in the
+    request, the endpoint must assert the actor is allowed to recompute
+    this allocator — either ``actor_id == allocator_id`` (self-recompute)
+    or the actor profile has admin role. Defense-in-depth against any
+    future Next.js route that drops the admin gate before forwarding."""
+
+    def test_actor_same_as_allocator_passes_self_path(self, client, monkeypatch):
+        """An allocator running their own recompute (actor == allocator) skips
+        the admin check entirely."""
+        alloc_id = str(uuid4())
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: False)
+        # _is_admin_profile would error if called — assert it isn't.
+        def _raise(*_args, **_kw):
+            raise AssertionError("_is_admin_profile must not be called on self-path")
+        monkeypatch.setattr("routers.match._is_admin_profile", _raise)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": False, "actor_id": alloc_id},
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "disabled"
+
+    def test_actor_admin_passes_cross_tenant(self, client, monkeypatch):
+        """A real admin running recompute against another allocator passes
+        the gate."""
+        alloc_id = str(uuid4())
+        admin_id = str(uuid4())
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr("routers.match._is_admin_profile", lambda uid: uid == admin_id)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: False)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": alloc_id, "force": False, "actor_id": admin_id},
+        )
+        assert r.status_code == 200
+
+    def test_non_admin_actor_targeting_another_allocator_returns_403(
+        self, client, monkeypatch,
+    ):
+        """The core C-PR5-01 attack: actor A passes allocator B's id with no
+        admin role. Must be rejected with 403, not silently scored."""
+        actor_id = str(uuid4())
+        victim_id = str(uuid4())
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr("routers.match._is_admin_profile", lambda *_: False)
+        # If the gate failed, role check or engine gate would advance — but
+        # the 403 must come from the actor binding, not a downstream gate.
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": victim_id, "force": False, "actor_id": actor_id},
+        )
+        assert r.status_code == 403
+        assert "actor" in r.json()["detail"].lower()
+
+    def test_admin_check_transient_db_error_returns_503(self, client, monkeypatch):
+        """When the admin lookup raises (DB blip), the endpoint must 503,
+        not silently fail the cross-tenant gate open or closed."""
+        actor_id = str(uuid4())
+        victim_id = str(uuid4())
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
+        # _is_admin_profile returns None on transient error per its contract.
+        monkeypatch.setattr("routers.match._is_admin_profile", lambda *_: None)
+
+        r = client.post(
+            "/api/match/recompute",
+            json={"allocator_id": victim_id, "force": False, "actor_id": actor_id},
+        )
+        assert r.status_code == 503
+
+    def test_actor_id_absent_logs_deprecation_warning_and_proceeds(
+        self, client, monkeypatch, caplog,
+    ):
+        """Backward compat: legacy callers that don't forward actor_id still
+        get the same behavior, but the gap is observable in logs so the
+        rollout is trackable."""
+        monkeypatch.setattr("routers.match._is_allocator_profile", lambda *_: True)
+        monkeypatch.setattr("routers.match._engine_is_enabled", lambda: False)
+        # If actor_id were treated as required, this would 422.
+        with caplog.at_level("WARNING"):
+            r = client.post(
+                "/api/match/recompute",
+                json={"allocator_id": str(uuid4()), "force": False},
+            )
+        assert r.status_code == 200
+        assert any(
+            "actor_id missing" in record.message for record in caplog.records
+        ), "Missing actor_id must emit a deprecation warning (C-PR5-01)"
+
+
 # ---------------------------------------------------------------------------
 # NEW-C08-06 — force=True throttle (30s min interval)
 # ---------------------------------------------------------------------------

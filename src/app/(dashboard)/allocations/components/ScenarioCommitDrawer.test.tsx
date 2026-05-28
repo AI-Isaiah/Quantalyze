@@ -1561,3 +1561,161 @@ describe("M-5 (red-team) — non-ok response with structural mismatch fires Sent
     expect(warnCalls.length).toBeGreaterThan(0);
   });
 });
+
+// ===========================================================================
+// NEW-C18-06 (B1, audit-2026-05-07) — percent_allocated and
+// size_at_decision_usd cannot disagree on the wire
+// ===========================================================================
+
+describe("NEW-C18-06 — drawer recomputes size_at_decision_usd from edited percent_allocated", () => {
+  // The composer emits voluntary_add diffs with size = composer-time
+  // weight × scenarioAum. If the drawer then lets the user edit the
+  // percent without recomputing the size, the wire shape ships an
+  // inconsistent pair (new percent, old size). The server-side
+  // audit-trust recompute (NEW-C18-04) is the authoritative integrity
+  // gate, but the client-side audit sidecar (`size_at_decision_usd_client`)
+  // is what forensic queries compare against `percent_allocated` — they
+  // must stay coherent at the boundary.
+
+  it("voluntary_add: user edits percent from default → size recomputed via scenarioAum prop", async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string, init: { method: string; body: string }) =>
+        new Response(
+          JSON.stringify({
+            recorded: 1,
+            results: [{ index: 0, kind: "voluntary_add" }],
+            errors: [],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // Composer-time size on the diff is 2000 (e.g. 20% × $10k).
+    // Drawer prop scenarioAum = 10_000.
+    // User types percent=25 → expected size = 0.25 × 10_000 = 2_500.
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VA_DIFF]}
+        scenarioAum={10_000}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+
+    const percentInput = screen.getByTestId("commit-percent-0") as HTMLInputElement;
+    fireEvent.change(percentInput, { target: { value: "25" } });
+
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.diffs[0].kind).toBe("voluntary_add");
+    expect(body.diffs[0].percent_allocated).toBe(25);
+    // The fix: size_at_decision_usd recomputed from percent × scenarioAum,
+    // NOT the composer-time 2000.
+    expect(body.diffs[0].size_at_decision_usd).toBe(2_500);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("voluntary_add: user does NOT edit percent → no recompute (would be undefined; defaults to 10 from helper)", async () => {
+    // Sanity boundary: the drawer's fillRequiredInputs helper enters
+    // percent=10, so when scenarioAum=10_000 the recompute fires
+    // (percent IS defined). Result: size = 0.10 × 10_000 = 1_000,
+    // overriding the composer-time 2000 on the diff. This is the
+    // intended behavior — any time percent_allocated is set, the wire
+    // shape's size is derived from it deterministically.
+    const fetchSpy = vi.fn(
+      async (_url: string, init: { method: string; body: string }) =>
+        new Response(
+          JSON.stringify({
+            recorded: 1,
+            results: [{ index: 0, kind: "voluntary_add" }],
+            errors: [],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VA_DIFF]}
+        scenarioAum={10_000}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+
+    fillRequiredInputs([VA_DIFF]);
+
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.diffs[0].percent_allocated).toBe(10);
+    expect(body.diffs[0].size_at_decision_usd).toBe(1_000);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("voluntary_add: scenarioAum=0 → fallback to composer-time size (avoids server divide-by-zero gate)", async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string, init: { method: string; body: string }) =>
+        new Response(
+          JSON.stringify({
+            recorded: 1,
+            results: [{ index: 0, kind: "voluntary_add" }],
+            errors: [],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // When scenarioAum is 0 (all live holdings toggled off, but the
+    // composer let voluntary_adds through because they have explicit
+    // sizes), the drawer must NOT emit size=0 — that would hit the
+    // server-side scenarioAum-gt-0 gate and reject the whole batch.
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VA_DIFF]}
+        scenarioAum={0}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+
+    fillRequiredInputs([VA_DIFF]);
+
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    // size_at_decision_usd preserves the composer-time 2000 because
+    // scenarioAum=0 disables the recompute path.
+    expect(body.diffs[0].size_at_decision_usd).toBe(2000);
+
+    vi.unstubAllGlobals();
+  });
+});
