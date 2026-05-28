@@ -1845,18 +1845,19 @@ def test_claim_tie_breaks_on_id_when_next_attempt_at_ties(admin):
 
 
 def _insert_pending_intro_snapshot(
-    admin, *, strategy_id: str, allocator_id: str
+    admin, *, strategy_id: str
 ) -> str:
     """Insert a pending compute_intro_snapshot row and return its id.
 
-    Inserts via service-role admin client — the per-allocator scope is
-    set at enqueue time by the unified backbone (which we bypass for
-    the test).
+    Per `compute_jobs_kind_target_coherence` (mig 062), intro_snapshot
+    is STRATEGY-scoped: `strategy_id IS NOT NULL AND allocator_id IS NULL
+    AND portfolio_id IS NULL`. The per-allocator routing happens at job
+    enqueue time via the unified backbone (which we bypass here); the
+    `compute_jobs` row itself carries only the strategy reference.
     """
     res = admin.table("compute_jobs").insert({
         "kind": "compute_intro_snapshot",
         "strategy_id": strategy_id,
-        "allocator_id": allocator_id,
         "status": "pending",
         "priority": "normal",
         "next_attempt_at": "2020-01-01T00:00:00Z",
@@ -1864,15 +1865,20 @@ def _insert_pending_intro_snapshot(
     return res.data[0]["id"]
 
 
-def test_intro_snapshot_carve_out_allows_co_claim_across_allocators(admin):
+def test_intro_snapshot_carve_out_allows_co_claim_for_same_strategy(admin):
     """H-1235 positive case. Two compute_intro_snapshot pending rows for
-    the SAME strategy_id but DIFFERENT allocator_id must BOTH be
-    claimable in a single batch (batch_size >= 2).
+    the SAME strategy_id must BOTH be claimable in a single batch
+    (batch_size >= 2). Per the kind_target_coherence CHECK (mig 062)
+    intro_snapshot is strategy-scoped (allocator_id IS NULL), and mig
+    048's partial unique inflight index `compute_jobs_one_inflight_per_kind_strategy`
+    explicitly excludes `kind = 'compute_intro_snapshot'` — so multiple
+    rows sharing strategy_id legitimately coexist (per-allocator routing
+    happens at enqueue time, not on the compute_jobs row).
 
     Pre-mig: the `strategy_id IS NULL OR rn_s = 1` dedupe forced only
-    one to claim per batch, even though the partial unique inflight
-    index does NOT block them. The legitimate per-allocator queue was
-    serialized for no DB-side reason — pure perf cost.
+    one of the two to claim per batch, even though the partial unique
+    inflight index does NOT block them — pure throughput cost on
+    intro_snapshot queue depth.
 
     Post-mig the dedupe carve-out (`kind = 'compute_intro_snapshot' OR
     rn_s = 1`) lets both run in the same claim batch.
@@ -1891,28 +1897,11 @@ def test_intro_snapshot_carve_out_allows_co_claim_across_allocators(admin):
     }).execute().data[0]
     strategy_id = strat["id"]
 
-    # Two distinct allocator ids — the test project has 3 fixed test
-    # users (alloc/sm/admin@quantalyze.test). Take any two.
-    profile_res = (
-        admin.table("profiles").select("id").limit(2).execute()
-    )
-    if not profile_res.data or len(profile_res.data) < 2:
-        pytest.skip(
-            "test project needs ≥2 seeded profiles to exercise the "
-            "intro_snapshot carve-out (different allocator_id required)"
-        )
-    alloc_a, alloc_b = profile_res.data[0]["id"], profile_res.data[1]["id"]
-    assert alloc_a != alloc_b
-
     id_a: str | None = None
     id_b: str | None = None
     try:
-        id_a = _insert_pending_intro_snapshot(
-            admin, strategy_id=strategy_id, allocator_id=alloc_a,
-        )
-        id_b = _insert_pending_intro_snapshot(
-            admin, strategy_id=strategy_id, allocator_id=alloc_b,
-        )
+        id_a = _insert_pending_intro_snapshot(admin, strategy_id=strategy_id)
+        id_b = _insert_pending_intro_snapshot(admin, strategy_id=strategy_id)
 
         # batch_size = 50 (well above 2) so claim throughput isn't the
         # gate — the dedupe must NOT collapse these two.
@@ -1924,10 +1913,9 @@ def test_intro_snapshot_carve_out_allows_co_claim_across_allocators(admin):
 
         assert len(ours) == 2, (
             f"H-1235 regression: compute_intro_snapshot carve-out failed — "
-            f"only {len(ours)} of 2 same-strategy/different-allocator rows "
-            "co-claimed. Both should be claimable because the partial "
-            "unique inflight index excludes intro_snapshot from the "
-            "strategy_id predicate."
+            f"only {len(ours)} of 2 same-strategy rows co-claimed. Both "
+            "should be claimable because the partial unique inflight index "
+            "excludes intro_snapshot from the strategy_id predicate."
         )
     finally:
         if id_a is not None:
