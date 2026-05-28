@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.15.3] - 2026-05-28
+### Fixed — scenario-commit allocation range + audit-trail integrity (audit-2026-05-07 NEW-C18-02, NEW-C18-11)
+
+Committing a scenario with an ordinary allocation — 0%, 60%, 75%, 100% — could fail outright and roll back the entire batch. The `bridge_outcomes.percent_allocated` column carried two overlapping CHECK constraints: a stale inline `[0.1, 50]` from the original table migration that was never dropped, and the canonical `[0, 100]` everything else uses. Postgres ANDs them, so the real persistable range was the intersection `[0.1, 50]` — any allocation outside it passed the route, the drawer, and the validator, then raised a `23514` constraint violation deep inside the single-transaction commit RPC and rolled back every change in the batch with an opaque per-row error. This migration drops the stale `[0.1, 50]` check so the column enforces only the canonical `[0, 100]`; allocations of 0/60/75/100 now commit cleanly. Existing data is unaffected (every stored value already satisfied the tighter range).
+
+The `/api/bridge/outcome` endpoint, a second writer to the same column, still capped allocations at 50% and silently rejected larger ones with a 422 — it now accepts the full `[0, 100]` to match.
+
+Scenario-commit audit emission is now observable on failure. A committed financial decision whose audit-trail write fails (permission/role error) no longer drops its trail silently: the per-decision emits are flushed together after the response and a single, commit-scoped `scenario_commit_audit_incomplete` alert (carrying the commit batch id) is raised when any hard failure occurs, so operators can find and backfill the exact commit. The response still returns 200 — the financial data is already durably committed — and cached idempotency replays still skip re-emitting.
+
 ## [0.24.15.2] - 2026-05-28
 ### Fixed — current_weight boundary clamp (B1 / NEW-C09-08 of cross-cutting refactor program)
 
