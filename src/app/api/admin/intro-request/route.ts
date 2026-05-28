@@ -126,13 +126,32 @@ export async function POST(req: NextRequest) {
   // Sprint 6 Task 7.1b — audit the admin-driven status transition. We need a
   // USER-scoped client for log_audit_event (derives acting admin from
   // auth.uid()); admin client is service-role.
+  //
+  // audit-2026-05-07 H-0240: pre-fix the metadata recorded only
+  // `new_status / has_note`. Add prior_status, note_length, and the
+  // acting admin's user id so a forensic reader can reconstruct the
+  // transition without joining contact_requests history.
   logAuditEvent(supabase, {
     action: "contact_request.status_change",
     entity_type: "contact_request",
     entity_id: id as string,
     metadata: {
       new_status: status as string,
+      // Security L conf=9 (2026-05-28 specialist): the literal "pending" is
+      // honest IFF the UPDATE filter at L110 remains exactly
+      // `.eq("status", "pending")`. The 409 short-circuit at L116-124
+      // guarantees we only reach this audit emit when one row matched the
+      // filter, so `prior_status === "pending"` is provable from the code
+      // shape — NOT from data. If a future maintainer broadens the guard
+      // (e.g. `.in("status", ["pending", "queued"])`), this literal will
+      // claim "pending" for rows that were "queued". Hardened in a
+      // follow-up by either pre-fetching status or using a SECDEF RPC that
+      // RETURNS the OLD row.
+      prior_status: "pending",
       has_note: typeof admin_note === "string" && admin_note.length > 0,
+      note_length:
+        typeof admin_note === "string" ? admin_note.length : 0,
+      admin_user_id: user.id,
     },
   });
 

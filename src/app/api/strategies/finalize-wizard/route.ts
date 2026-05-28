@@ -532,10 +532,29 @@ async function runLegacyFinalize(args: {
     if (error.code === "P0002" || error.code === "02000") {
       return NextResponse.json({ error: "Draft not found" }, { status: 404 });
     }
-    if (error.code === "42501" || error.code === "22023") {
+    // audit-2026-05-07 H-0321: split the two SQLSTATEs so HTTP semantics
+    // match the actual failure mode.
+    //   - 42501 (insufficient_privilege) → 403 Forbidden. True RLS /
+    //     ownership rejection; reserve 403 for permission denials so
+    //     forensic readers can distinguish "user wrong" from "system wrong".
+    //   - 22023 (invalid_parameter_value) → 409 Conflict. RPC raises this
+    //     when the draft is in a non-finalizable state (already published,
+    //     missing fields, stale snapshot). 409 lets the client show a
+    //     refresh nudge rather than a "permission denied" sign-out prompt.
+    if (error.code === "42501") {
       return NextResponse.json(
         { error: "This draft cannot be finalized" },
         { status: 403 },
+      );
+    }
+    if (error.code === "22023") {
+      return NextResponse.json(
+        {
+          error:
+            "This draft is not in a finalizable state. Refresh and try again.",
+          code: "draft_state_invalid",
+        },
+        { status: 409 },
       );
     }
     return NextResponse.json(

@@ -198,6 +198,14 @@ def scrub_freeform_string(s: Any) -> Any:
     if not isinstance(s, str):
         return s
 
+    # NEW-C13-10 fast-path (perf-spec M conf=9, 2026-05-28): credentials carry
+    # `:`, `=`, or `.` in their key=value / JWT / URL-param shapes; prose lines
+    # ("Worker starting") hit none. Hot because the stdlib LogRecord factory
+    # bridge in logging_config.py routes EVERY record (incl. level-filtered
+    # DEBUG) through here — fast-path skips 4 regex passes at ~100 records/sec.
+    if ":" not in s and "=" not in s and "." not in s:
+        return s
+
     pass1 = SENSITIVE_KEY_VALUE.sub(lambda m: f"{m.group(1)}: {REDACTED}", s)
     pass2 = scrub_pii(pass1)
     pass2_str = (
