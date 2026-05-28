@@ -220,6 +220,44 @@ describe("useMandateAutoSave", () => {
     expect(result.current.savingFields.has("max_weight")).toBe(false);
   });
 
+  it("NEW-C05-06: a 12s per-attempt TIMEOUT is terminal and does NOT retry the non-idempotent write", async () => {
+    // WHY: the timeout aborts only the client wait, not the server write —
+    // update_allocator_mandates may still commit. Retrying re-issues the same
+    // non-idempotent write, so a stale attempt-1 can overwrite a newer
+    // attempt-2 value server-side. The hook must fail terminally on timeout
+    // (reason 'timeout'), NOT loop. Pre-fix the catch retried every abort.
+    (fetch as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      (_url: string, opts: { signal: AbortSignal }) =>
+        // Hang until the hook's 12s timer aborts the request.
+        new Promise<Response>((_resolve, reject) => {
+          opts.signal.addEventListener("abort", () => {
+            reject(
+              Object.assign(new Error("The operation was aborted."), {
+                name: "AbortError",
+              }),
+            );
+          });
+        }),
+    );
+
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    let res: Awaited<ReturnType<typeof result.current.save>> | undefined;
+    await act(async () => {
+      const promise = result.current.save("max_weight", 0.25);
+      // Fire the 12s per-attempt timeout → abort → fetch rejects (AbortError).
+      await vi.advanceTimersByTimeAsync(12_000);
+      res = await promise;
+    });
+
+    // No retry: the timed-out, possibly-committed write is NOT re-issued.
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(res).toMatchObject({ ok: false, reason: "timeout" });
+    expect(result.current.saveState).toBe("error");
+    // Field released so the spinner does not stick.
+    expect(result.current.savingFields.has("max_weight")).toBe(false);
+  });
+
   it("TC7 concurrent saves: second save wins, first stale response is dropped", async () => {
     // First save's response resolves after the second save's.
     let resolveFirst: (res: Response) => void = () => {};

@@ -30,7 +30,11 @@ export type SaveResult =
         | "network"
         | "server"
         | "superseded"
-        | "cancelled";
+        | "cancelled"
+        // NEW-C05-06: per-attempt 12s timeout on a non-idempotent write. Unlike
+        // "network" this is terminal-on-first-occurrence (NOT retried), because
+        // the timed-out PUT may still commit server-side.
+        | "timeout";
       message: string;
       retryAfter?: number;
     };
@@ -249,7 +253,13 @@ export function useMandateAutoSave(
         // retry logic, so the variable was dead discriminator code. Removed to
         // eliminate the misleading "intent to branch" signal.
         const attemptController = new AbortController();
+        // NEW-C05-06: flag a 12s TIMEOUT abort so the catch can tell it apart
+        // from a pure network error / mount-abort. A timeout means the PUT may
+        // still be in-flight on the server, so the non-idempotent write must
+        // NOT be retried (the retry is the amplification path the finding flags).
+        let timedOut = false;
         const timeout = setTimeout(() => {
+          timedOut = true;
           attemptController.abort();
         }, FETCH_TIMEOUT_MS);
         // Wire mount-abort into this attempt signal.
@@ -271,9 +281,28 @@ export function useMandateAutoSave(
             // Component unmounted — exit silently, no setState on dead component.
             return { ok: false, reason: "cancelled", message: "Cancelled." };
           }
-          // Per-attempt 12s timeout OR pure network error (e.g. offline).
-          // Both are transient — retry with exponential backoff.
-          // mount-abort is handled above and never reaches here.
+          // NEW-C05-06: a per-attempt 12s TIMEOUT aborts only the client wait,
+          // not the server write. update_allocator_mandates is non-idempotent
+          // (it stamps mandate_edited_at = now() and overwrites compliance
+          // fields), so a timed-out attempt-1 can still COMMIT after a retry
+          // (attempt-2) carrying a newer value lands — silently overwriting the
+          // newer value while generationRef hides the divergence in the UI.
+          // Do NOT retry on timeout: fail terminally so the allocator re-confirms
+          // against the current persisted value. (Pure network errors below —
+          // request never reached the server — remain safe to retry.)
+          if (timedOut) {
+            if (generationRef.current[fieldName] === gen) {
+              failTerminal(fieldName, "Save timed out — please re-confirm.");
+            }
+            return {
+              ok: false,
+              reason: "timeout",
+              message: "Save timed out — please re-confirm.",
+            };
+          }
+          // Pure network error (e.g. offline) — request did not reach the
+          // server, so retry with exponential backoff is safe.
+          // mount-abort + timeout are handled above and never reach here.
           if (attempt < MAX_ATTEMPTS) {
             await wait(1000 * Math.pow(2, attempt - 1), mountAbortRef.current.signal);
             if (mountAbortRef.current.signal.aborted) {
