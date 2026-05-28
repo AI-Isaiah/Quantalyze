@@ -250,15 +250,21 @@ BEGIN
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
 
-  -- M-1133: throttle probe converted from `SELECT count(*)` to a
-  -- `CASE WHEN EXISTS (...) THEN 1 ELSE 0 END` short-circuit. The
-  -- downstream decision only needs `v_high_pending = 0` vs `> 0`;
-  -- counting the full backlog every tick wastes CPU at Phase-12 backfill
-  -- scale. CASE/EXISTS eliminates the NULL gap entirely (vs the prior
-  -- SELECT 1 INTO + COALESCE shape — L1 / mig-reviewer): `EXISTS`
-  -- returns boolean (never NULL), so the 0/1 semantics for
-  -- `v_high_pending = 0` are preserved by construction with no probe
-  -- for downstream code to drift past.
+  -- M-1133: throttle probe converted from the legacy COUNT-into-INTEGER
+  -- shape to a `CASE WHEN EXISTS (...) THEN 1 ELSE 0 END` short-circuit.
+  -- (The literal pre-M-1133 form is documented in the migration file
+  -- header above and is NOT spelled out here because the STEP 3
+  -- verification block reads `pg_get_functiondef` AND regex-matches
+  -- against `select\s+count\s*\(` to detect regressions; a documentation
+  -- reference to the old shape inside the body would false-positive the
+  -- verification on the very migration that fixes it.) The downstream
+  -- decision only needs `v_high_pending = 0` vs `> 0`; counting the full
+  -- backlog every tick wastes CPU at Phase-12 backfill scale. CASE/EXISTS
+  -- eliminates the NULL gap entirely (vs the prior SELECT 1 INTO +
+  -- COALESCE shape — L1 / mig-reviewer): `EXISTS` returns boolean
+  -- (never NULL), so the 0/1 semantics for `v_high_pending = 0` are
+  -- preserved by construction with no probe for downstream code to drift
+  -- past.
   v_high_pending := CASE WHEN EXISTS (
     SELECT 1
       FROM compute_jobs
