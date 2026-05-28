@@ -878,10 +878,17 @@ def test_late_mark_failed_with_stale_token_raises_serialization_failure(admin, s
         admin.table("compute_jobs").delete().eq("id", job_id).execute()
 
 
-def test_mark_done_without_token_back_compat(admin, strategy_id):
-    """Pre-mig-117 callers passed only p_job_id. The new RPC defaults
-    p_claim_token to NULL and treats NULL as 'skip fence' so the rollout
-    is non-breaking. Verify a token-less mark_done still flips the row."""
+def test_mark_done_without_token_raises_strict(admin, strategy_id):
+    """audit-2026-05-07 B5 (C-PR5-02 defense-in-depth) — strict-token
+    follow-up to mig 117. The pre-mig-20260528183100 back-compat path
+    accepted p_claim_token=NULL as 'skip fence'; that was the latent
+    surface a stale caller (or a SERVICE_KEY holder) could exploit to
+    bypass the P97 race fence. Mig 20260528183100 makes the token
+    mandatory: NULL now raises 22023 invalid_parameter_value at the
+    function entry, BEFORE any UPDATE on compute_jobs.
+
+    This test pins the new strict contract: calling mark_compute_job_done
+    without p_claim_token must raise (was: silently flip to done)."""
     job = admin.table("compute_jobs").insert({
         "strategy_id": strategy_id,
         "kind": "sync_trades",
@@ -891,12 +898,27 @@ def test_mark_done_without_token_back_compat(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        _claim_one(admin, "p97-back-compat")
-        # Token-less call — emulates a legacy caller (Edge Function, manual
-        # admin runbook, etc.) that hasn't been updated to mig 117.
-        admin.rpc("mark_compute_job_done", {"p_job_id": job_id}).execute()
+        _claim_one(admin, "p97-strict")
+        raised = False
+        try:
+            admin.rpc("mark_compute_job_done", {"p_job_id": job_id}).execute()
+        except Exception as exc:  # noqa: BLE001
+            err_str = str(exc)
+            assert (
+                "p_claim_token is required" in err_str
+                or "22023" in err_str
+                or "invalid_parameter_value" in err_str
+            ), f"expected strict-NULL guard, got: {exc!r}"
+            raised = True
+        assert raised, (
+            "mark_compute_job_done(NULL) must now raise (B5 strict fence). "
+            "Got silent success — the post-mig-117 back-compat is no longer "
+            "in force; rerun the migration if this regresses."
+        )
+        # Row stayed in 'running' (claim_one promoted it) — NOT flipped to
+        # done by the rejected call.
         row = admin.table("compute_jobs").select("status").eq("id", job_id).single().execute().data
-        assert row["status"] == "done"
+        assert row["status"] == "running"
     finally:
         admin.table("compute_jobs").delete().eq("id", job_id).execute()
 
@@ -1041,7 +1063,13 @@ def test_mark_done_unexpected_status_raises(admin, strategy_id, status):
     pending row done and corrupt the queue's state machine.
 
     Note: 'done' is the IDEMPOTENT-RETURN branch (mig 109 P6) — not an
-    error — and is covered separately below."""
+    error — and is covered separately below.
+
+    audit-2026-05-07 B5 update: post-mig-20260528183100, p_claim_token is
+    REQUIRED (NULL raises 22023). Pass a fresh random UUID so the strict
+    gate passes; the UPDATE then yields 0 rows (status≠'running'), the
+    SELECT finds the row in the failed/done_pending state, and the
+    function raises the 'unexpected status' guard as before."""
     job = admin.table("compute_jobs").insert({
         "strategy_id": strategy_id,
         "kind": "sync_trades",
@@ -1053,7 +1081,10 @@ def test_mark_done_unexpected_status_raises(admin, strategy_id, status):
     try:
         raised = False
         try:
-            admin.rpc("mark_compute_job_done", {"p_job_id": job_id}).execute()
+            admin.rpc("mark_compute_job_done", {
+                "p_job_id": job_id,
+                "p_claim_token": str(uuid.uuid4()),
+            }).execute()
         except Exception as exc:  # noqa: BLE001
             _expect_unexpected_status_error(exc)
             raised = True
@@ -1069,18 +1100,30 @@ def test_mark_done_unexpected_status_raises(admin, strategy_id, status):
 def test_mark_done_idempotent_on_already_done(admin, strategy_id):
     """mig 109 P6 contract: mark_compute_job_done on an already-done row
     is idempotent (returns cleanly, no raise). This is the one non-error
-    non-running branch — verify it survives mig 117."""
+    non-running branch — verify it survives mig 117 + mig 20260528183100.
+
+    audit-2026-05-07 B5 update: idempotent retry only fires when the
+    caller's token matches the recorded token. Insert with an explicit
+    claim_token (the column is nullable but accepts UUIDs) so we can
+    re-present it. Pre-fix this test relied on the NULL back-compat
+    path which is gone."""
+    pinned_token = str(uuid.uuid4())
     job = admin.table("compute_jobs").insert({
         "strategy_id": strategy_id,
         "kind": "sync_trades",
         "status": "done",
         "priority": "normal",
         "exchange": "okx",
+        "claim_token": pinned_token,
     }).execute().data[0]
     job_id = job["id"]
     try:
-        # Must NOT raise.
-        admin.rpc("mark_compute_job_done", {"p_job_id": job_id}).execute()
+        # Must NOT raise: matching token on already-done row hits the
+        # idempotent-return branch.
+        admin.rpc("mark_compute_job_done", {
+            "p_job_id": job_id,
+            "p_claim_token": pinned_token,
+        }).execute()
         row = admin.table("compute_jobs").select("status").eq("id", job_id).single().execute().data
         assert row["status"] == "done"
     finally:
@@ -1091,13 +1134,21 @@ def test_mark_failed_on_done_raises(admin, strategy_id):
     """mark_compute_job_failed on an already-done row must raise (the
     runner believes the row is in retryable failure but it has already
     succeeded — surfacing this loudly is the contract). mig 117 STEP 5
-    preserves this from mig 109 P4."""
+    preserves this from mig 109 P4.
+
+    audit-2026-05-07 B5 update: thread p_claim_token to pass the strict
+    NULL gate (mig 20260528183100). The mark-failed path has no
+    idempotent-on-done branch, so even a matching token falls through
+    to the 'not running' raise — same end state, just via the strict
+    fence."""
+    pinned_token = str(uuid.uuid4())
     job = admin.table("compute_jobs").insert({
         "strategy_id": strategy_id,
         "kind": "sync_trades",
         "status": "done",
         "priority": "normal",
         "exchange": "okx",
+        "claim_token": pinned_token,
     }).execute().data[0]
     job_id = job["id"]
     try:
@@ -1107,6 +1158,7 @@ def test_mark_failed_on_done_raises(admin, strategy_id):
                 "p_job_id": job_id,
                 "p_error": "should-not-flip-done-to-failed",
                 "p_error_kind": "transient",
+                "p_claim_token": pinned_token,
             }).execute()
         except Exception as exc:  # noqa: BLE001
             err_str = str(exc)
