@@ -108,6 +108,22 @@ Priority = Literal["low", "normal", "high"]
 # 'failed_retry'} when the per-row next_attempt_at backoff has elapsed).
 CLAIMABLE_STATUSES: Final[tuple[JobStatus, ...]] = ("pending", "failed_retry")
 
+# M-1128: name the 4-tuple of partition columns that the claim RPCs dedupe
+# by. The four columns mirror the partial unique indices
+# `compute_jobs_one_inflight_per_kind_<col>` and the four
+# `row_number() OVER (PARTITION BY kind, <col>)` clauses in
+# `claim_compute_jobs` + `claim_compute_jobs_with_priority` (see migration
+# 090 + the H-1235/H-1238/M-1133 hardening migration). Adding a 5th
+# partition column (e.g. workspace_id) must touch BOTH this tuple AND the
+# SQL — the test in tests/test_compute_jobs_fencing.py parses the SQL
+# directly so the change is deliberate.
+PARTITION_COLUMNS: Final[tuple[str, ...]] = (
+    "portfolio_id",
+    "strategy_id",
+    "allocator_id",
+    "api_key_id",
+)
+
 # M-0673: Feature flag is read once at module import — re-reading per job
 # can produce rollout-window inconsistency (workers spawned mid-deploy with
 # different env values processing different jobs differently). Tests can
