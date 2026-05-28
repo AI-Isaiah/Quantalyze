@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.10.13] - 2026-05-28
+### Changed — wizard/bridge/seed cluster hardening (audit-2026-05-07 batch)
+- **H-0435 — `sendBridgeIntro` bare-catch fixed.** `catch {}` → `catch (err)` + `console.error` + `captureToSentry`. HTTP status now logged to console (not leaked into user-facing toast — fix preserves "This comparison isn't available." copy). New tests pin: `TypeError("Failed to fetch")` (CORS/offline), 2xx body parse rejection, HTTP non-2xx path.
+- **H-0522 — dead `formatSavedAt` removed.** Zero consumers, no behavior change.
+- **H-1020 (partial) — demo-allocator UUID drift guard.** Added test pinning `SEED_ALLOCATOR_*` UUIDs across `demo.ts`, `seed-demo-profiles.ts`, AND `personas.ts` (extended from initial 2-file pin per red-team).
+- **H-1021 — `PortfolioAnalyticsJSONB` 4-arm discriminated union** matching DB CHECK + Python writer (`pending|computing|complete|failed`). `CompletePortfolioAnalyticsJSONB` is the narrower contract for the seed generator. New `seed-demo-data-types.test.ts` pins compile-time narrowing via `@ts-expect-error` on metric access from non-complete arms.
+- **H-1022 — `StrategyIdx` literal index union** derived from `STRATEGY_UUIDS` tuple length (`Exclude<Partial<...>["length"], typeof T["length"]>` → `0|1|...|7`). Promoted from `main()`-scope to module-scope `export type` for testability. `@ts-expect-error` test pins out-of-bounds rejection.
+- **H-1023 — `isScriptEntryPoint` exported + branch-tested.** 6 branches: VITEST, VITEST_WORKER_ID, SEED_SKIP_MAIN, canonical `.ts`, canonical `.js`, unrelated path.
+- **M-0845 — `assertWeightsSumToOne` invariant.** Throws on sum mismatch + `Number.isFinite` short-circuit for NaN/Infinity. 3 regression tests (mismatch, float-drift, NaN). Wrapped per-persona iteration in try/catch + continue so one bad persona doesn't poison the whole seed run.
+- **M-0847 — `analyticsSeeds satisfies Record<PersonaPortfolioId, number>`** for bidirectional exhaustiveness (missing keys AND excess keys rejected). `PersonaPortfolio.portfolio_id` narrowed to same union.
+- **Deferred with rationale:** H-0433/H-0434/H-0436/H-0523/H-0524/H-0525 (cross-cutting refactors, 5+ consumer files, documented in JSDoc).
+- Tests: full vitest 5652 pass / 253 skipped. tsc clean. npm run lint 0 errors.
+
+
 ## [0.24.10.12] - 2026-05-28
 ### Changed — position_reconstruction.py hardening (audit-2026-05-07 batch)
 - **H-0737 — info-disclosure RLS leak closed.** `realized_pnl_per_trade` (per-trade PnL+side, capped at 10k entries) was being written into `strategy_analytics.trade_metrics` JSONB, which `analytics_read` RLS exposes to any authenticated user for published strategies — competitor reverse-engineering surface. Now stripped post-merge in `analytics_runner.py` (internal `_compute_derived_trade_metrics` consumers still read the list upstream via `trade_metrics_from_positions`, so weighted R:R, SQN, etc. still compute correctly). Frontend `FROZEN_TRADE_METRICS_KEYS` updated, parity tests + golden expected fixtures mirror the strip. Regression test in `test_analytics_runner.py` drives end-to-end with a payload that INCLUDES the key, captures the upsert, asserts absence AND asserts `weighted_risk_reward_ratio is not None` (catches "strip before derive" regression).

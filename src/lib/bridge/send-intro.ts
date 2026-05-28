@@ -45,20 +45,54 @@ export async function sendBridgeIntro(
       }),
     });
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
+      const body = await res.json().catch((err) => {
+        // H-0435: a real backend that begins emitting HTML 502s (CDN truncation,
+        // proxy timeout) reaches here. Log the parse failure so the fallback copy
+        // isn't the only diagnostic signal.
+        console.error(
+          `[sendBridgeIntro] non-OK body parse failed (HTTP ${res.status}):`,
+          err,
+        );
+        return {};
+      });
       const error =
         (body as Record<string, unknown>)?.error;
-      return {
-        ok: false,
-        error: typeof error === "string" ? error : "This comparison isn't available.",
-      };
+      if (typeof error === "string") {
+        return { ok: false, error };
+      }
+      // Red-team F1: keep the user-facing copy clean (the toast is rendered
+      // verbatim in BridgeDrawer / ScenarioFlaggedHoldingsList). The HTTP
+      // status is diagnostic — log it for ops, do NOT leak it to allocators.
+      console.error("[sendBridgeIntro] HTTP error:", {
+        status: res.status,
+        body,
+      });
+      return { ok: false, error: "This comparison isn't available." };
     }
-    const body = (await res.json()) as { match_decision_id?: unknown };
-    if (typeof body.match_decision_id !== "string") {
+    const body = await res
+      .json()
+      .catch((err) => {
+        // H-0435 / G3: a malformed 2xx body (HTML masquerading as JSON from a
+        // CDN, truncated stream) reaches here. Without the catch the helper
+        // would propagate the parse failure as an unhandled rejection up to
+        // the UI's submit handler. Log + fall through to the generic
+        // network-error copy below.
+        console.error("[sendBridgeIntro] 2xx body parse failed:", err);
+        return { __parseFailed: true } as const;
+      });
+    if ((body as { __parseFailed?: true }).__parseFailed) {
+      return { ok: false, error: "Network error. Please retry." };
+    }
+    const typedBody = body as { match_decision_id?: unknown };
+    if (typeof typedBody.match_decision_id !== "string") {
       return { ok: false, error: "Malformed response from intro endpoint" };
     }
-    return { ok: true, matchDecisionId: body.match_decision_id };
-  } catch {
+    return { ok: true, matchDecisionId: typedBody.match_decision_id };
+  } catch (err) {
+    // H-0435: bind the error and emit telemetry so a real connectivity
+    // regression (TypeError CORS/offline/DNS, AbortError) produces a
+    // diagnostic signal instead of an opaque user-facing string.
+    console.error("[sendBridgeIntro] failed:", err);
     return { ok: false, error: "Network error. Please retry." };
   }
 }
