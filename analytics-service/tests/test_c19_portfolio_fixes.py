@@ -86,7 +86,13 @@ def _restore_slowapi():
 
 _install_router_stubs()
 
-from routers.portfolio import _build_normalized_weights  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
+
+from routers.portfolio import (  # noqa: E402
+    _MAX_PORTFOLIO_STRATEGIES,
+    _assert_portfolio_within_cap,
+    _build_normalized_weights,
+)
 from services.portfolio_optimizer import generate_narrative  # noqa: E402
 
 
@@ -1111,3 +1117,34 @@ class TestPortfolioOwnershipHTTPLevelM002:
         assert eq_chain.eq.call_count >= 1, (
             "M-002: the portfolios SELECT must chain two .eq() calls"
         )
+
+
+class TestPortfolioStrategyCapC19:
+    """NEW-C19-07: OWN-portfolio membership cap. The candidate pool (30) and
+    published pool (200) were bounded, but OWN membership N was uncapped and
+    attacker-controllable, so a portfolio stuffed with thousands of rows builds
+    an N-column DataFrame + N×N cov/correlation inside the 3-permit compute
+    semaphore -> DoS. _assert_portfolio_within_cap rejects oversized portfolios
+    at the boundary (413) before any compute permit is consumed."""
+
+    def test_max_constant_is_100(self):
+        # Pins the contract; the value is ~16x the current prod max (6).
+        assert _MAX_PORTFOLIO_STRATEGIES == 100
+
+    def test_exactly_at_cap_does_not_raise(self):
+        rows = [{"strategy_id": f"s{i}"} for i in range(_MAX_PORTFOLIO_STRATEGIES)]
+        # Must not raise — exactly at the cap is allowed.
+        _assert_portfolio_within_cap(rows)
+
+    def test_over_cap_raises_413_before_compute(self):
+        rows = [
+            {"strategy_id": f"s{i}"}
+            for i in range(_MAX_PORTFOLIO_STRATEGIES + 1)
+        ]
+        with pytest.raises(HTTPException) as exc_info:
+            _assert_portfolio_within_cap(rows)
+        # 413 Payload Too Large — distinct from the 400 empty-portfolio path.
+        assert exc_info.value.status_code == 413
+        # Detail names the actual + max counts (no schema leak).
+        assert str(_MAX_PORTFOLIO_STRATEGIES) in str(exc_info.value.detail)
+        assert str(_MAX_PORTFOLIO_STRATEGIES + 1) in str(exc_info.value.detail)

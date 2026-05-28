@@ -36,6 +36,7 @@ from slowapi.util import get_remote_address
 
 from services.audit import log_audit_event
 from services.db import get_supabase
+from services.portfolio_limits import assert_portfolio_within_cap
 from services.rate_limit import limiter
 from services.simulator_scoring import simulate_add_candidate
 
@@ -311,6 +312,11 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
             status_code=400,
             detail="No strategies found in portfolio",
         )
+    # NEW-C19-07: the simulator is a 4th OWN-membership O(N^2) path —
+    # simulate_add_candidate builds an (N+1)-column DataFrame and runs df.corr()
+    # (_avg_corr) over OWN membership, under asyncio.to_thread WITHOUT the
+    # _compute_semaphore. Cap N before the returns map + correlation matmul.
+    assert_portfolio_within_cap(portfolio_strategies)
 
     # If the candidate is already in the portfolio, fail fast — the ADD
     # scenario is ill-defined. The scoring module also guards this, but

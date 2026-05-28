@@ -339,6 +339,37 @@ class TestEmptyPortfolio:
 
 
 # ---------------------------------------------------------------------------
+# NEW-C19-07 — OWN-membership cap (the simulator is the 4th O(N^2) path)
+# ---------------------------------------------------------------------------
+
+
+@_BODY_PARSER_SKIP
+class TestPortfolioStrategyCapC19:
+    def test_oversized_portfolio_returns_413_before_corr_matmul(self, client, supabase_mock):
+        """NEW-C19-07: the simulator builds an (N+1)-column DataFrame + df.corr()
+        over OWN membership (under to_thread, NOT the compute semaphore). An
+        oversized OWN portfolio must be rejected with 413 BEFORE that matmul.
+        Fails pre-fix — the simulator path had no cap (only the analytics /
+        optimizer / bridge paths were guarded)."""
+        oversized = [
+            {"strategy_id": f"s-{i}", "current_weight": 1.0}
+            for i in range(101)  # MAX_PORTFOLIO_STRATEGIES (100) + 1
+        ]
+        _table_router(
+            supabase_mock,
+            portfolio_data={"id": "p-1"},
+            candidate_data={"id": "c-1", "name": "Cand", "status": "published"},
+            portfolio_strategies_data=oversized,
+            sa_portfolio_data=[],
+            sa_candidate_data=None,
+        )
+
+        r = _post(client)
+        assert r.status_code == 413, r.text
+        assert "maximum supported" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
 # Candidate already in portfolio
 # ---------------------------------------------------------------------------
 
