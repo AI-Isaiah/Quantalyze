@@ -28,7 +28,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 type MockResult = {
   data: unknown;
-  error: null | { message: string };
+  error: null | { message: string; code?: string };
   count?: number;
 };
 
@@ -38,6 +38,12 @@ const buildResult = vi.hoisted(() => ({
   countByTable: {} as Record<string, number>,
   // For `.maybeSingle()` results — keyed by table.
   maybeSingleByTable: {} as Record<string, MockResult>,
+  // For `.maybeSingle()` results keyed by `${table}|${eqKey}=${eqValue}`,
+  // so callers can differentiate two queries against the same table that
+  // only differ by an `.eq()` filter (e.g.
+  // `getPortfolioAnalyticsWithFallback`'s latest vs "complete-only" pair).
+  // Falls back to maybeSingleByTable when no match.
+  maybeSingleByTableEq: {} as Record<string, MockResult>,
   // audit-2026-05-07 H-0502: getMyAllocationDashboard now asserts
   // auth.uid() === userId. Tests that exercise the happy path keep
   // authUserId = "user-1"; the H-0502 mismatch test overrides it.
@@ -48,17 +54,24 @@ function reset() {
   buildResult.byTable = {};
   buildResult.countByTable = {};
   buildResult.maybeSingleByTable = {};
+  buildResult.maybeSingleByTableEq = {};
   buildResult.authUserId = "user-1";
 }
 
 function chainFor(table: string) {
   let headCount = false;
+  // Track the `eq` filters applied so maybeSingle can pick differently
+  // for two queries on the same table that only differ by a column filter.
+  const eqFilters: Array<{ col: string; value: unknown }> = [];
   const chain: Record<string, unknown> = {
     select: (_cols?: string, opts?: { head?: boolean }) => {
       if (opts?.head === true) headCount = true;
       return chain;
     },
-    eq: () => chain,
+    eq: (col: string, value: unknown) => {
+      eqFilters.push({ col, value });
+      return chain;
+    },
     in: () => chain,
     is: () => chain,
     not: () => chain,
@@ -66,6 +79,12 @@ function chainFor(table: string) {
     order: () => chain,
     limit: () => chain,
     maybeSingle: async () => {
+      // First, try to match by an `eq` filter (most specific).
+      for (const { col, value } of eqFilters) {
+        const eqKey = `${table}|${col}=${String(value)}`;
+        const eqHit = buildResult.maybeSingleByTableEq[eqKey];
+        if (eqHit) return eqHit;
+      }
       const r = buildResult.maybeSingleByTable[table];
       if (r) return r;
       return { data: null, error: null };
@@ -117,7 +136,38 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-beforeEach(reset);
+// audit-2026-05-07 M-0557 round-2: capture all `captureToSentry` invocations
+// so the 4 new logging tests can assert ops alerting actually fires (the
+// previous round only added `console.error` — half-fix). Pattern mirrors
+// `src/app/api/strategies/finalize-wizard/route.test.ts`.
+const captureToSentryState = vi.hoisted(() => ({
+  calls: [] as Array<{
+    err: unknown;
+    options: {
+      tags: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }>,
+}));
+
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: (
+    err: unknown,
+    options: {
+      tags: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    },
+  ) => {
+    captureToSentryState.calls.push({ err, options });
+  },
+}));
+
+beforeEach(() => {
+  reset();
+  captureToSentryState.calls = [];
+});
 
 describe("getRealPortfolio — audit-2026-05-07 G8.A.9 (P42)", () => {
   it("throws when supabase reports an error (was: silently null)", async () => {
@@ -738,5 +788,401 @@ describe("getUserApiKeys — audit-2026-05-07 H-0499", () => {
     buildResult.byTable["api_keys"] = { data: [], error: null };
     const { getUserApiKeys } = await import("./queries");
     await expect(getUserApiKeys("user-1")).resolves.toEqual([]);
+  });
+});
+
+// audit-2026-05-07 M-0557 round-2 c9 — the round-1 fix added `console.error`
+// to 4 helpers but skipped `captureToSentry`, leaving ops alerting silent.
+// Each test asserts BOTH log channels fire (console + Sentry) on a non-trivial
+// RLS-style error AND that the empty fallback shape is still returned so
+// downstream consumers stay shape-compatible.
+describe("portfolio helpers — audit-2026-05-07 M-0557 round-2 (Sentry alerting)", () => {
+  it("getPortfolioDetail logs to console AND captureToSentry on a non-PGRST116 error", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    buildResult.byTable["portfolios"] = {
+      data: null,
+      error: { code: "42501", message: "rls denied" },
+    };
+    const { getPortfolioDetail } = await import("./queries");
+    const result = await getPortfolioDetail("p-1");
+    expect(result).toBeNull();
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[queries.getPortfolioDetail]"),
+      expect.objectContaining({ portfolioId: "p-1", code: "42501" }),
+    );
+    expect(captureToSentryState.calls).toHaveLength(1);
+    expect(captureToSentryState.calls[0].options.tags).toEqual({
+      op: "getPortfolioDetail",
+    });
+    expect(captureToSentryState.calls[0].options.level).toBe("error");
+    errSpy.mockRestore();
+  });
+
+  it("getPortfolioStrategies logs to console AND captureToSentry on error", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    buildResult.byTable["portfolio_strategies"] = {
+      data: null,
+      error: { code: "42501", message: "rls denied" },
+    };
+    const { getPortfolioStrategies } = await import("./queries");
+    const result = await getPortfolioStrategies("p-1");
+    // Empty fallback shape preserved so the consumer's "no strategies" UI
+    // still renders rather than throwing.
+    expect(result).toEqual([]);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[queries.getPortfolioStrategies]"),
+      expect.objectContaining({ portfolioId: "p-1" }),
+    );
+    expect(captureToSentryState.calls).toHaveLength(1);
+    expect(captureToSentryState.calls[0].options.tags).toEqual({
+      op: "getPortfolioStrategies",
+    });
+    errSpy.mockRestore();
+  });
+
+  it("getPortfolioAlerts logs to console AND captureToSentry on error", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    buildResult.byTable["portfolio_alerts"] = {
+      data: null,
+      error: { code: "42501", message: "rls denied" },
+    };
+    const { getPortfolioAlerts } = await import("./queries");
+    const result = await getPortfolioAlerts("p-1");
+    expect(result).toEqual([]);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[queries.getPortfolioAlerts]"),
+      expect.objectContaining({ portfolioId: "p-1" }),
+    );
+    expect(captureToSentryState.calls).toHaveLength(1);
+    expect(captureToSentryState.calls[0].options.tags).toEqual({
+      op: "getPortfolioAlerts",
+    });
+    errSpy.mockRestore();
+  });
+
+  it("getAllocationEvents logs to console AND captureToSentry on error", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    buildResult.byTable["allocation_events"] = {
+      data: null,
+      error: { code: "42501", message: "rls denied" },
+    };
+    const { getAllocationEvents } = await import("./queries");
+    const result = await getAllocationEvents("p-1");
+    expect(result).toEqual([]);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[queries.getAllocationEvents]"),
+      expect.objectContaining({ portfolioId: "p-1" }),
+    );
+    expect(captureToSentryState.calls).toHaveLength(1);
+    expect(captureToSentryState.calls[0].options.tags).toEqual({
+      op: "getAllocationEvents",
+    });
+    errSpy.mockRestore();
+  });
+});
+
+// audit-2026-05-07 L-0028 — `getPortfolioDetail` must SILENCE the PGRST116
+// "no rows found" path (genuine not-found, not an infra failure). The error
+// channel must remain quiet so server logs only surface real fetch / RLS
+// failures.
+describe("getPortfolioDetail — audit-2026-05-07 L-0028 (PGRST116 silence)", () => {
+  it("returns null and does NOT log on PGRST116 (not-found)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    buildResult.byTable["portfolios"] = {
+      data: null,
+      error: { code: "PGRST116", message: "no rows found" },
+    };
+    const { getPortfolioDetail } = await import("./queries");
+    const result = await getPortfolioDetail("nonexistent");
+    expect(result).toBeNull();
+    expect(errSpy).not.toHaveBeenCalled();
+    expect(captureToSentryState.calls).toHaveLength(0);
+    errSpy.mockRestore();
+  });
+
+  it("returns null AND logs on a non-PGRST116 error (sibling assertion)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    buildResult.byTable["portfolios"] = {
+      data: null,
+      error: { code: "42501", message: "rls denied" },
+    };
+    const { getPortfolioDetail } = await import("./queries");
+    const result = await getPortfolioDetail("p-1");
+    expect(result).toBeNull();
+    expect(errSpy).toHaveBeenCalled();
+    expect(captureToSentryState.calls).toHaveLength(1);
+    errSpy.mockRestore();
+  });
+});
+
+// audit-2026-05-07 M-0553 — sort each symbol series ONCE outside the
+// per-holding loop so aliased holdings (BTC@binance + BTC@okx) share the same
+// pre-sorted array instead of re-cloning + re-sorting per holding. The
+// invariant we pin: aliased holdings produce identical ascending series, and
+// the per-symbol sort runs once per symbol rather than once per holding.
+describe("reconstructHoldingReturnsByScopeRef — audit-2026-05-07 M-0553", () => {
+  it("returns identical ascending series for two holdings sharing a symbol (reverse-order snapshots)", async () => {
+    const { reconstructHoldingReturnsByScopeRef } = await import("./queries");
+    // Snapshots seeded in REVERSE-CHRONOLOGICAL order to verify the helper
+    // sorts internally — DB queries are not guaranteed to return ascending
+    // by asof, and the per-symbol sort is the M-0553 invariant.
+    const equitySnapshots = [
+      { asof: "2026-04-03", breakdown: { BTC: 110 } },
+      { asof: "2026-04-01", breakdown: { BTC: 100 } },
+      { asof: "2026-04-02", breakdown: { BTC: 105 } },
+    ];
+    const holdingsSummary = [
+      { symbol: "BTC", venue: "binance", holding_type: "spot" as const },
+      { symbol: "BTC", venue: "okx", holding_type: "spot" as const },
+    ];
+    const result = reconstructHoldingReturnsByScopeRef(
+      equitySnapshots,
+      holdingsSummary,
+    );
+    const binanceKey = "holding:binance:BTC:spot";
+    const okxKey = "holding:okx:BTC:spot";
+    expect(result[binanceKey]).toBeDefined();
+    expect(result[okxKey]).toBeDefined();
+    // Aliased holdings must produce the SAME derived series.
+    expect(result[binanceKey]).toEqual(result[okxKey]);
+    // Series must be ascending by date (proves the internal sort fired).
+    const dates = result[binanceKey].map((p) => p.date);
+    expect(dates).toEqual([...dates].sort((a, b) => a.localeCompare(b)));
+    expect(dates).toEqual(["2026-04-02", "2026-04-03"]);
+  });
+
+  it("sorts each symbol series exactly once (not once per holding)", async () => {
+    const sortSpy = vi.spyOn(Array.prototype, "sort");
+    const { reconstructHoldingReturnsByScopeRef } = await import("./queries");
+    const equitySnapshots = [
+      { asof: "2026-04-03", breakdown: { BTC: 110, ETH: 60 } },
+      { asof: "2026-04-01", breakdown: { BTC: 100, ETH: 50 } },
+      { asof: "2026-04-02", breakdown: { BTC: 105, ETH: 55 } },
+    ];
+    const holdingsSummary = [
+      { symbol: "BTC", venue: "binance", holding_type: "spot" as const },
+      { symbol: "BTC", venue: "okx", holding_type: "spot" as const },
+      { symbol: "BTC", venue: "bybit", holding_type: "spot" as const },
+      { symbol: "ETH", venue: "binance", holding_type: "spot" as const },
+      { symbol: "ETH", venue: "okx", holding_type: "spot" as const },
+    ];
+    const before = sortSpy.mock.calls.length;
+    reconstructHoldingReturnsByScopeRef(equitySnapshots, holdingsSummary);
+    const sortCalls = sortSpy.mock.calls.length - before;
+    // 2 unique symbols (BTC + ETH) → exactly 2 sort calls. The pre-M-0553
+    // implementation would have called sort 5x (once per holding).
+    expect(sortCalls).toBe(2);
+    sortSpy.mockRestore();
+  });
+});
+
+// audit-2026-05-07 M-0559 round-2 — pin `getPortfolioAnalyticsWithFallback`'s
+// 4-arm discriminated union. The helper picks `kind` based on whether a
+// latest row exists, whether the latest is `complete`, and whether a prior
+// `complete` row is present.
+describe("getPortfolioAnalyticsWithFallback — audit-2026-05-07 M-0559", () => {
+  it("returns kind='none' when both queries resolve null", async () => {
+    // Both latest + lastGood queries return null (no rows).
+    const { getPortfolioAnalyticsWithFallback } = await import("./queries");
+    const result = await getPortfolioAnalyticsWithFallback("p-1");
+    expect(result.kind).toBe("none");
+  });
+
+  it("returns kind='fresh' when latest.computation_status='complete'", async () => {
+    buildResult.maybeSingleByTable["portfolio_analytics"] = {
+      data: {
+        portfolio_id: "p-1",
+        computation_status: "complete",
+        computed_at: "2026-05-01T00:00:00Z",
+      },
+      error: null,
+    };
+    const { getPortfolioAnalyticsWithFallback } = await import("./queries");
+    const result = await getPortfolioAnalyticsWithFallback("p-1");
+    expect(result.kind).toBe("fresh");
+    if (result.kind === "fresh") {
+      expect(result.row.computation_status).toBe("complete");
+    }
+  });
+
+  it("returns kind='fallback' when latest='failed' AND a lastGood row exists", async () => {
+    // Differentiate the two queries via the computation_status `eq` filter:
+    // only the "complete" branch carries that filter.
+    buildResult.maybeSingleByTableEq[
+      "portfolio_analytics|computation_status=complete"
+    ] = {
+      data: {
+        portfolio_id: "p-1",
+        computation_status: "complete",
+        computed_at: "2026-04-15T00:00:00Z",
+      },
+      error: null,
+    };
+    buildResult.maybeSingleByTable["portfolio_analytics"] = {
+      data: {
+        portfolio_id: "p-1",
+        computation_status: "failed",
+        computed_at: "2026-05-01T00:00:00Z",
+        computation_error: "redis pipeline broke",
+      },
+      error: null,
+    };
+    const { getPortfolioAnalyticsWithFallback } = await import("./queries");
+    const result = await getPortfolioAnalyticsWithFallback("p-1");
+    expect(result.kind).toBe("fallback");
+    if (result.kind === "fallback") {
+      expect(result.latest.computation_status).toBe("failed");
+      expect(result.lastGood.computation_status).toBe("complete");
+    }
+  });
+
+  it("returns kind='latest_only' when latest='failed' AND no lastGood row exists", async () => {
+    // Only the unfiltered query returns a row; the .eq("computation_status","complete")
+    // query returns null.
+    buildResult.maybeSingleByTable["portfolio_analytics"] = {
+      data: {
+        portfolio_id: "p-1",
+        computation_status: "failed",
+        computed_at: "2026-05-01T00:00:00Z",
+      },
+      error: null,
+    };
+    // The maybeSingleByTableEq lookup falls through to maybeSingleByTable for
+    // BOTH queries, which would pick the same row for both. To produce the
+    // "failed, no fallback" arm we need the eq-filtered query to return null.
+    buildResult.maybeSingleByTableEq[
+      "portfolio_analytics|computation_status=complete"
+    ] = { data: null, error: null };
+    const { getPortfolioAnalyticsWithFallback } = await import("./queries");
+    const result = await getPortfolioAnalyticsWithFallback("p-1");
+    expect(result.kind).toBe("latest_only");
+    if (result.kind === "latest_only") {
+      expect(result.latest.computation_status).toBe("failed");
+    }
+  });
+
+  it("returns kind='latest_only' when latest='computing' AND lastGood exists (computing wins over fallback)", async () => {
+    // Per the implementation: only `computation_status === "failed"` triggers
+    // the fallback branch. `computing` falls through to latest_only even if
+    // a prior complete row exists.
+    buildResult.maybeSingleByTableEq[
+      "portfolio_analytics|computation_status=complete"
+    ] = {
+      data: {
+        portfolio_id: "p-1",
+        computation_status: "complete",
+        computed_at: "2026-04-15T00:00:00Z",
+      },
+      error: null,
+    };
+    buildResult.maybeSingleByTable["portfolio_analytics"] = {
+      data: {
+        portfolio_id: "p-1",
+        computation_status: "computing",
+        computed_at: "2026-05-01T00:00:00Z",
+      },
+      error: null,
+    };
+    const { getPortfolioAnalyticsWithFallback } = await import("./queries");
+    const result = await getPortfolioAnalyticsWithFallback("p-1");
+    expect(result.kind).toBe("latest_only");
+    if (result.kind === "latest_only") {
+      expect(result.latest.computation_status).toBe("computing");
+    }
+  });
+});
+
+// audit-2026-05-07 M-0559 round-2 — pin `chooseAnalytics` arm selection.
+// The fallback arm has the most behaviour: it merges lastGood data with the
+// latest row's `computation_status='failed'` flag + `computation_error`
+// fallback default. Pinning these prevents a future refactor from silently
+// dropping the stale-badge signal.
+describe("chooseAnalytics — audit-2026-05-07 M-0559", () => {
+  const makeRow = (overrides: Partial<{
+    computation_status: "complete" | "failed" | "computing";
+    computation_error: string | null;
+    total_return_twr: number | null;
+  }> = {}) => ({
+    portfolio_id: "p-1",
+    computation_status: "complete" as "complete" | "failed" | "computing",
+    computed_at: "2026-05-01T00:00:00Z",
+    computation_error: null as string | null,
+    total_return_twr: 0.12 as number | null,
+    ...overrides,
+  });
+
+  it("'none' arm returns null", async () => {
+    const { chooseAnalytics } = await import(
+      "@/app/(dashboard)/portfolios/[id]/page"
+    );
+    expect(chooseAnalytics({ kind: "none" })).toBeNull();
+  });
+
+  it("'fresh' arm returns the row verbatim", async () => {
+    const { chooseAnalytics } = await import(
+      "@/app/(dashboard)/portfolios/[id]/page"
+    );
+    const row = makeRow({ computation_status: "complete" });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = chooseAnalytics({ kind: "fresh", row: row as any });
+    expect(result).toBe(row);
+  });
+
+  it("'latest_only' arm returns the latest row verbatim (failed-no-fallback)", async () => {
+    const { chooseAnalytics } = await import(
+      "@/app/(dashboard)/portfolios/[id]/page"
+    );
+    const latest = makeRow({ computation_status: "failed" });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = chooseAnalytics({ kind: "latest_only", latest: latest as any });
+    expect(result).toBe(latest);
+  });
+
+  it("'fallback' arm: returned row is shaped from lastGood, computation_status='failed', computation_error falls back to default when null", async () => {
+    const { chooseAnalytics } = await import(
+      "@/app/(dashboard)/portfolios/[id]/page"
+    );
+    const lastGood = makeRow({
+      computation_status: "complete",
+      total_return_twr: 0.42, // distinctive value to prove lastGood is the data source
+    });
+    const latest = makeRow({
+      computation_status: "failed",
+      computation_error: null, // null → must fall back to the default string
+      total_return_twr: -0.99,
+    });
+    const result = chooseAnalytics({
+      kind: "fallback",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      latest: latest as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      lastGood: lastGood as any,
+    });
+    expect(result).not.toBeNull();
+    expect(result!.total_return_twr).toBe(0.42); // shape from lastGood
+    expect(result!.computation_status).toBe("failed"); // preserved from latest
+    // computation_error falls back to the default string when latest.computation_error is null.
+    expect(result!.computation_error).toBe(
+      "Latest computation failed; showing last-good values.",
+    );
+  });
+
+  it("'fallback' arm: preserves latest.computation_error when non-null (no default substitution)", async () => {
+    const { chooseAnalytics } = await import(
+      "@/app/(dashboard)/portfolios/[id]/page"
+    );
+    const lastGood = makeRow({ computation_status: "complete" });
+    const latest = makeRow({
+      computation_status: "failed",
+      computation_error: "specific upstream redis timeout",
+    });
+    const result = chooseAnalytics({
+      kind: "fallback",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      latest: latest as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      lastGood: lastGood as any,
+    });
+    expect(result!.computation_error).toBe("specific upstream redis timeout");
   });
 });

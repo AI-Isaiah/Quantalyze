@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.10.14] - 2026-05-28
+### Changed — queries.ts portfolio helpers + Phase 10 reconstruct helper (audit-2026-05-07)
+- **H-0500 — `getUserApiKeys` typed projection.** Replaced inline structural tuple cast with `ApiKeyUserView = Pick<ApiKey, ApiKeyUserColumn>` derived from `API_KEY_USER_COLUMNS_ARR` (single source of truth). Caller types narrow on `exchange: SupportedExchange` (with inline runtime guard via `SUPPORTED_EXCHANGES` set; unknown-exchange rows dropped + `captureToSentry({reason:"unknown_exchange_in_api_key_row"})`).
+- **M-0557 — 4 portfolio fetch helpers un-silenced.** `getPortfolioDetail`, `getPortfolioStrategies`, `getPortfolioAlerts`, `getAllocationEvents` now destructure `{ data, error }`, `console.error` AND `captureToSentry({tags:{op}, level:"error"})` on error (matches in-file convention from `getDecks`, `getPercentiles`, `getStrategyDetail`). Consumer-side empty-vs-error UI distinguishing deferred as cross-cutting (page.tsx:283,466 + AllocationTimeline.tsx:14).
+- **M-0558 — `getPortfolioAnalytics` deleted.** Zero callers anywhere in `src/`.
+- **M-0559 — `PortfolioAnalyticsWithFallback` discriminated union.** 4 arms: `none|fresh|fallback|latest_only` (covers all `computation_status` values: pending/computing/complete/complete_with_warnings/failed). Impossible-state `{latest:null, lastGood:<row>}` removed. `chooseAnalytics` switch is exhaustive with `assertNever` sentinel (catches 5th-arm regressions at compile time).
+- **M-0553 — `symbolSeriesUSD` pre-sort once.** Was sorted in-place per holding (O(H·S log S)); now sorted ONCE before the per-holding loop (O(S log S)). Regression test asserts call count is per-symbol, not per-holding.
+- **M-0554 — `reconstructHoldingReturnsByScopeRef` input contract aliased.** `ReconstructEquitySnapshot` + `ReconstructHoldingRow` from `MyAllocationDashboardPayload`; `holding_type` narrows from `string` to `"spot" | "derivative"`.
+- **L-0028 — PGRST116 noise silenced.** `getPortfolioDetail` silences PGRST116 (expected "not found" for new portfolios) but still logs + captures all other Supabase errors.
+- **Regression tests added**: 4 M-0557 logging tests (assert console.error AND captureToSentry on RLS-denied path); 2 L-0028 PGRST116 silence tests; 2 M-0553 multi-holding pre-sort tests (incl. Array.prototype.sort call-count spy); 5 `getPortfolioAnalyticsWithFallback` arm-selection tests; 5 `chooseAnalytics` arm tests (exported helper from `page.tsx`).
+- **Deferred cross-cutting (documented JSDoc)**: H-0485/H-0486/H-0487/H-0493 (DailyPoint primitive obsession, multi-venue aliasing — touches 7+ test fixtures + consumer code); M-0551 (already covered by `fetchStrategyLazyMetrics` Sentry capture); M-0552/M-0560 (perf re-architecture); M-0556 (Rule 7 conflict — existing test codifies null-data as legitimate visibility-miss); M-0561 (alertCount IS consumed by `PortfolioAlerts.tsx`).
+- Tests: full vitest **5656 / 253 skipped** (+12 net). tsc + lint clean.
+
+
 ## [0.24.10.13] - 2026-05-28
 ### Changed — wizard/bridge/seed cluster hardening (audit-2026-05-07 batch)
 - **H-0435 — `sendBridgeIntro` bare-catch fixed.** `catch {}` → `catch (err)` + `console.error` + `captureToSentry`. HTTP status now logged to console (not leaked into user-facing toast — fix preserves "This comparison isn't available." copy). New tests pin: `TypeError("Failed to fetch")` (CORS/offline), 2xx body parse rejection, HTTP non-2xx path.

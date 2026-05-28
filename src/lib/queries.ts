@@ -4,7 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
 import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
-import { API_KEY_USER_COLUMNS } from "./constants";
+import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 import {
   buildDateMapCache,
@@ -29,7 +29,9 @@ import type {
   LazyMetricsPayload,
   TradeMetrics,
   AnalyticsDataQualityFlags,
+  ApiKey,
 } from "./types";
+import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
 import { getOwnPreferences, type AllocatorPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -989,6 +991,17 @@ export const fetchStrategyLazyMetrics = cache(async function fetchStrategyLazyMe
         },
       );
     }
+    // audit-2026-05-07 M-0556 round-2: the round-2 brief asks to escalate
+    // the `data === null && error === null` branch to Sentry as a "RPC
+    // misconfigured" warning. CONFLICT: the existing Phase B silent-failure
+    // F2 test (`queries.test.ts:479` — "does NOT log or capture on null
+    // data (legitimate visibility miss)") codifies the inverse contract:
+    // `null` data with `null` error IS the expected SECDEF visibility-miss
+    // signal for strategies the caller cannot see, and MUST stay silent on
+    // both channels. Round-2 escalation would flood Sentry with one warning
+    // per non-visible strategy panel render. Per Rule 7 (surface conflicts,
+    // don't blend) DEFER until the codebase decision is reconciled — flag
+    // for follow-up review of the two competing contracts.
     return {};
   }
 
@@ -1095,6 +1108,16 @@ export async function getDecks(): Promise<DeckWithCount[]> {
   }));
 }
 
+/**
+ * audit-2026-05-07 M-0557 + L-0028: log non-PGRST116 errors so transient
+ * RLS/network failures are distinguishable from "not found" in server logs.
+ * Page UX still redirects either way.
+ *
+ * audit-2026-05-07 M-0557 follow-up: error→empty fallback is observable in
+ * server logs/Sentry but indistinguishable in UI; full discriminated
+ * return-shape refactor deferred to cross-cutting batch (touches
+ * portfolios/[id]/page.tsx:283,466 + components/portfolio/AllocationTimeline.tsx:14).
+ */
 export async function getPortfolioDetail(portfolioId: string) {
   const supabase = await createClient();
   const { data, error } = await supabase
@@ -1102,7 +1125,21 @@ export async function getPortfolioDetail(portfolioId: string) {
     .select("*")
     .eq("id", portfolioId)
     .single();
-  if (error) return null;
+  if (error) {
+    if (error.code !== "PGRST116") {
+      console.error(
+        "[queries.getPortfolioDetail] supabase error:",
+        { portfolioId, code: error.code, message: error.message ?? error },
+      );
+      // audit-2026-05-07 M-0557 c9 round-2: console.error alone is insufficient;
+      // captureToSentry ensures ops alerting fires (matches getDecks convention).
+      captureToSentry(error, {
+        tags: { op: "getPortfolioDetail" },
+        level: "error",
+      });
+    }
+    return null;
+  }
   return data as Portfolio;
 }
 
@@ -1124,9 +1161,20 @@ export async function assertPortfolioOwnership(
   return data !== null;
 }
 
+/**
+ * audit-2026-05-07 M-0557: destructure + log the supabase error so an
+ * RLS / network failure is not silently re-rendered as "no strategies in
+ * this portfolio". Empty array remains the on-error fallback so callers
+ * keep the same shape (the dashboard switches to its empty state).
+ *
+ * audit-2026-05-07 M-0557 follow-up: error→empty fallback is observable in
+ * server logs/Sentry but indistinguishable in UI; full discriminated
+ * return-shape refactor deferred to cross-cutting batch (touches
+ * portfolios/[id]/page.tsx:283,466 + components/portfolio/AllocationTimeline.tsx:14).
+ */
 export async function getPortfolioStrategies(portfolioId: string) {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("portfolio_strategies")
     .select(`
       *, strategies (id, name, status, strategy_types, supported_exchanges, start_date, aum,
@@ -1135,35 +1183,47 @@ export async function getPortfolioStrategies(portfolioId: string) {
     `)
     .eq("portfolio_id", portfolioId)
     .order("added_at", { ascending: false });
+  if (error) {
+    console.error(
+      "[queries.getPortfolioStrategies] supabase error:",
+      { portfolioId, message: error.message ?? error },
+    );
+    // audit-2026-05-07 M-0557 c9 round-2: console.error alone is insufficient;
+    // captureToSentry ensures ops alerting fires (matches getDecks convention).
+    captureToSentry(error, {
+      tags: { op: "getPortfolioStrategies" },
+      level: "error",
+    });
+  }
   return data ?? [];
 }
 
-export async function getPortfolioAnalytics(portfolioId: string) {
-  const supabase = await createClient();
-  const { data } = await supabase
-    .from("portfolio_analytics")
-    .select("*")
-    .eq("portfolio_id", portfolioId)
-    .order("computed_at", { ascending: false })
-    .limit(1)
-    .single();
-  return data as PortfolioAnalytics | null;
-}
+/**
+ * audit-2026-05-07 M-0559: the previous shape
+ * `{ latest, lastGood }: { ...|null, ...|null }` permitted the impossible
+ * state `{ latest: null, lastGood: <row> }` — `lastGood` is the latest
+ * complete row, so it cannot exist without `latest`. A discriminated union
+ * makes the four logical cases (none / fresh / stale-with-fallback /
+ * stale-no-fallback) explicit and the impossible state unrepresentable,
+ * so `chooseAnalytics` can exhaustively pattern-match without an else-leg
+ * that the reader has to verify is unreachable.
+ */
+export type PortfolioAnalyticsWithFallback =
+  /** No analytics row exists for this portfolio yet (cold cache / new portfolio). */
+  | { kind: "none" }
+  /** Latest computation is complete — render directly. */
+  | { kind: "fresh"; row: PortfolioAnalytics }
+  /** Latest computation failed BUT a prior complete row exists — render lastGood + stale badge. */
+  | { kind: "fallback"; latest: PortfolioAnalytics; lastGood: PortfolioAnalytics }
+  /** Latest computation is computing OR failed and no prior complete row exists — render the latest row as-is. */
+  | { kind: "latest_only"; latest: PortfolioAnalytics };
 
 /**
  * Fetch the latest analytics row AND the latest row that successfully
  * completed. The dashboard uses this to show "stale fallback" data when the
  * most recent run failed: render last-good values with a stale badge instead
  * of an error card. Both queries run in parallel.
- *
- * If no row exists at all, both fields are null. If the latest row is
- * already complete, `lastGood` and `latest` reference the same row.
  */
-export interface PortfolioAnalyticsWithFallback {
-  latest: PortfolioAnalytics | null;
-  lastGood: PortfolioAnalytics | null;
-}
-
 export async function getPortfolioAnalyticsWithFallback(
   portfolioId: string,
 ): Promise<PortfolioAnalyticsWithFallback> {
@@ -1185,30 +1245,78 @@ export async function getPortfolioAnalyticsWithFallback(
       .limit(1)
       .maybeSingle(),
   ]);
-  return {
-    latest: (latestRes.data ?? null) as PortfolioAnalytics | null,
-    lastGood: (completeRes.data ?? null) as PortfolioAnalytics | null,
-  };
+  const latest = (latestRes.data ?? null) as PortfolioAnalytics | null;
+  const lastGood = (completeRes.data ?? null) as PortfolioAnalytics | null;
+  if (!latest) return { kind: "none" };
+  if (latest.computation_status === "complete") return { kind: "fresh", row: latest };
+  if (latest.computation_status === "failed" && lastGood) {
+    return { kind: "fallback", latest, lastGood };
+  }
+  return { kind: "latest_only", latest };
 }
 
+/**
+ * audit-2026-05-07 M-0557: destructure + log error so an RLS / network
+ * failure on the alerts surface is not silently rendered as "no active
+ * alerts" (a money-display contract — see PortfolioAlerts widget).
+ *
+ * audit-2026-05-07 M-0557 follow-up: error→empty fallback is observable in
+ * server logs/Sentry but indistinguishable in UI; full discriminated
+ * return-shape refactor deferred to cross-cutting batch (touches
+ * portfolios/[id]/page.tsx:283,466 + components/portfolio/AllocationTimeline.tsx:14).
+ */
 export async function getPortfolioAlerts(portfolioId: string) {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("portfolio_alerts")
     .select("*")
     .eq("portfolio_id", portfolioId)
     .is("acknowledged_at", null)
     .order("triggered_at", { ascending: false });
+  if (error) {
+    console.error(
+      "[queries.getPortfolioAlerts] supabase error:",
+      { portfolioId, message: error.message ?? error },
+    );
+    // audit-2026-05-07 M-0557 c9 round-2: console.error alone is insufficient;
+    // captureToSentry ensures ops alerting fires (matches getDecks convention).
+    captureToSentry(error, {
+      tags: { op: "getPortfolioAlerts" },
+      level: "error",
+    });
+  }
   return (data ?? []) as PortfolioAlert[];
 }
 
+/**
+ * audit-2026-05-07 M-0557: destructure + log error so the manage-portfolio
+ * event history surface distinguishes a transient fetch failure from
+ * "no allocation events yet" in the server logs.
+ *
+ * audit-2026-05-07 M-0557 follow-up: error→empty fallback is observable in
+ * server logs/Sentry but indistinguishable in UI; full discriminated
+ * return-shape refactor deferred to cross-cutting batch (touches
+ * portfolios/[id]/page.tsx:283,466 + components/portfolio/AllocationTimeline.tsx:14).
+ */
 export async function getAllocationEvents(portfolioId: string) {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("allocation_events")
     .select("*")
     .eq("portfolio_id", portfolioId)
     .order("event_date", { ascending: false });
+  if (error) {
+    console.error(
+      "[queries.getAllocationEvents] supabase error:",
+      { portfolioId, message: error.message ?? error },
+    );
+    // audit-2026-05-07 M-0557 c9 round-2: console.error alone is insufficient;
+    // captureToSentry ensures ops alerting fires (matches getDecks convention).
+    captureToSentry(error, {
+      tags: { op: "getAllocationEvents" },
+      level: "error",
+    });
+  }
   return (data ?? []) as AllocationEvent[];
 }
 
@@ -1670,6 +1778,22 @@ export function deriveMandateIsSet(
 }
 
 /**
+ * audit-2026-05-07 H-0500: shape of the projection returned by
+ * `getUserApiKeys`. Derived from the shared `ApiKey` interface
+ * (`src/lib/types.ts`) restricted to the exact column set the
+ * `API_KEY_USER_COLUMNS_ARR` allowlist projects (`src/lib/constants.ts`).
+ *
+ * Using `Pick<ApiKey, ApiKeyUserColumn>` instead of an inline anonymous
+ * tuple cast keeps the TS view of the projection and the runtime
+ * column-allowlist in lockstep: adding a column to
+ * `API_KEY_USER_COLUMNS_ARR` automatically widens this type, and
+ * removing one fails type-check at the call sites instead of silently
+ * launching with `{ x: undefined }` (the inline `as`-cast had no
+ * compile-time link to the allowlist tuple).
+ */
+export type ApiKeyUserView = Pick<ApiKey, ApiKeyUserColumn>;
+
+/**
  * Fetch all API keys for a user. Shared by the allocations page
  * (empty-state + full dashboard) and the exchanges page so column
  * projections stay in sync.
@@ -1681,7 +1805,7 @@ export function deriveMandateIsSet(
  * 027 (SEC-005), any other projection will silently return NULL for revoked
  * columns. Do not use `.select("*")` on api_keys from a user client.
  */
-export async function getUserApiKeys(userId: string) {
+export async function getUserApiKeys(userId: string): Promise<ApiKeyUserView[]> {
   const supabase = await createClient();
   // audit-2026-05-07 H-0499: destructure + surface `error`. Previously
   // the function discarded `error` and returned `[]` on RLS/grant
@@ -1705,32 +1829,48 @@ export async function getUserApiKeys(userId: string) {
       `getUserApiKeys failed: ${error.message ?? "unknown supabase error"}`,
     );
   }
-  return (data ?? []) as Array<{
-    id: string;
-    exchange: string;
-    label: string;
-    is_active: boolean;
-    sync_status: string | null;
-    last_sync_at: string | null;
-    // Phase 06 (migration 066) — worker-sanitized error message surfaced
-    // to the owning allocator. Column-level SELECT granted to the
-    // `authenticated` role in migration 066; projected via
-    // API_KEY_USER_COLUMNS_ARR (constants.ts). NULL on success or when
-    // no sync has run yet.
-    sync_error: string | null;
-    // Phase 06 / ISSUE-006 (migration 068) — timestamp of the last ccxt
-    // 429 (stamped by the Python worker). The allocator-facing UI uses
-    // this + EXCHANGE_COOLDOWN_SECONDS to render the `rate_limited` pill's
-    // "retry in Ns" countdown. NULL when the key has never hit a 429.
-    last_429_at: string | null;
-    // Migration 075 — NULL when the key is connected. When non-null, the
-    // key is soft-disconnected: workers skip it, UI renders the
-    // Disconnected section with a Reconnect button.
-    disconnected_at: string | null;
-    account_balance_usdt: number | null;
-    created_at: string;
-  }>;
+  // audit-2026-05-07 red-team c8 round-2: `ApiKey.exchange` is a narrow union
+  // (`"binance"|"okx"|"bybit"`) but the DB column is plain TEXT with no CHECK
+  // constraint. A typo row (e.g. `"binnance"`) would compile-pass and break
+  // downstream `EXCHANGE_LABELS[key.exchange]` lookups with `undefined`. The
+  // narrow inline guard below validates ONLY the `exchange` field at the
+  // trust boundary (the full-row `parseApiKeyRowsWithDiagnostics` zod parser
+  // is too strict for the projection's optional fields — it would drop
+  // legitimate rows that omit `sync_error`/`last_429_at`/`disconnected_at`
+  // when those columns are NULL in the DB). Unknown-exchange rows are
+  // dropped + escalated to Sentry so silent row-drops surface to ops.
+  const rows = (data ?? []) as ApiKeyUserView[];
+  const validRows: ApiKeyUserView[] = [];
+  let droppedRows = 0;
+  for (const row of rows) {
+    if (SUPPORTED_EXCHANGE_SET.has(row.exchange as SupportedExchange)) {
+      validRows.push(row);
+    } else {
+      droppedRows += 1;
+    }
+  }
+  if (droppedRows > 0) {
+    console.warn(
+      "[queries.getUserApiKeys] dropped api_keys rows with unknown exchange",
+      { userId, dropped: droppedRows },
+    );
+    captureToSentry(
+      new Error("[queries.getUserApiKeys] dropped api_keys rows with unknown exchange"),
+      {
+        tags: { op: "getUserApiKeys", reason: "unknown_exchange_in_api_key_row" },
+        extra: { userId, dropped: droppedRows },
+        level: "warning",
+      },
+    );
+  }
+  return validRows;
 }
+
+// audit-2026-05-07 red-team c8 round-2: O(1) `Set` view over the canonical
+// `SUPPORTED_EXCHANGES` tuple from `lib/utils.ts`. The tuple is the single
+// source of truth; this Set just gives `getUserApiKeys` a constant-time
+// membership check at the trust boundary.
+const SUPPORTED_EXCHANGE_SET: ReadonlySet<SupportedExchange> = new Set(SUPPORTED_EXCHANGES);
 
 // Per VOICES-ACCEPTED f9 — venue display-case map. Any string not in the
 // map falls back to its original value (defensive against new exchanges).
@@ -1758,17 +1898,27 @@ const VENUE_DISPLAY: Record<string, string> = {
  *   difference; you need at least two values to subtract).
  * - L6 all-NULL breakdowns: when every snapshot's breakdown column is null
  *   the helper returns an empty record (no Object.entries on null; no crash).
+ *
+ * audit-2026-05-07 M-0554: input rows are aliased from the dashboard
+ * payload contract (`ReconstructEquitySnapshot` / `ReconstructHoldingRow`
+ * below) so schema drift on either side of the boundary — a new
+ * discriminator on `holdingsSummary`, a renamed `breakdown` field —
+ * surfaces as a TS error here instead of a structural subtype passing
+ * silently. The previous anonymous-literal signature accepted any
+ * structurally compatible row.
  */
+type ReconstructEquitySnapshot = Pick<
+  MyAllocationDashboardPayload["equitySnapshots"][number],
+  "asof" | "breakdown"
+>;
+type ReconstructHoldingRow = Pick<
+  MyAllocationDashboardPayload["holdingsSummary"][number],
+  "symbol" | "venue" | "holding_type"
+>;
+
 export function reconstructHoldingReturnsByScopeRef(
-  equitySnapshots: Array<{
-    asof: string;
-    breakdown: Record<string, number> | null;
-  }>,
-  holdingsSummary: Array<{
-    symbol: string;
-    venue: string;
-    holding_type: string;
-  }>,
+  equitySnapshots: ReadonlyArray<ReconstructEquitySnapshot>,
+  holdingsSummary: ReadonlyArray<ReconstructHoldingRow>,
 ): Record<string, DailyPoint[]> {
   const symbolSeriesUSD = new Map<
     string,
@@ -1782,12 +1932,20 @@ export function reconstructHoldingReturnsByScopeRef(
       symbolSeriesUSD.get(symbol)!.push({ asof: snap.asof, value });
     }
   }
+  // audit-2026-05-07 M-0553: sort each symbol series ONCE here instead of
+  // per-holding inside the loop below. With M5 multi-venue (BTC@binance +
+  // BTC@okx) sharing the same symbol series, the prior per-holding
+  // `[...series].sort()` re-cloned + re-sorted the same array for every
+  // aliased holding (O(H · S log S) on the SSR critical path). Sort in
+  // place — the map is local and the only later consumer is the loop below.
+  for (const series of symbolSeriesUSD.values()) {
+    series.sort((a, b) => a.asof.localeCompare(b.asof));
+  }
   const result: Record<string, DailyPoint[]> = {};
   for (const h of holdingsSummary) {
     const scopeRef = `holding:${h.venue}:${h.symbol}:${h.holding_type}`;
-    const series = symbolSeriesUSD.get(h.symbol);
-    if (!series || series.length < 2) continue;
-    const sorted = [...series].sort((a, b) => a.asof.localeCompare(b.asof));
+    const sorted = symbolSeriesUSD.get(h.symbol);
+    if (!sorted || sorted.length < 2) continue;
     const dailyReturns: DailyPoint[] = [];
     for (let i = 1; i < sorted.length; i++) {
       const prev = sorted[i - 1].value;

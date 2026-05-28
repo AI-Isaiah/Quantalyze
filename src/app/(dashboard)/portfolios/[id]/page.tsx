@@ -475,23 +475,41 @@ function resolveDashboardState(
  * the latest is in a failed state but a prior complete row exists, return
  * that one with the failed-status flag preserved so the dashboard still
  * shows a stale badge.
+ *
+ * audit-2026-05-07 M-0559: pattern-match the discriminated bundle so each
+ * logical case (none / fresh / fallback / latest_only) is handled exactly
+ * once. The previous `{ latest, lastGood }` shape permitted the impossible
+ * state `{ latest: null, lastGood: <row> }`; the new union makes that
+ * unrepresentable at the type level.
  */
-function chooseAnalytics(
+export function chooseAnalytics(
   bundle: PortfolioAnalyticsWithFallback,
 ): PortfolioAnalytics | null {
-  const { latest, lastGood } = bundle;
-  if (!latest) return null;
-  if (latest.computation_status === "complete") return latest;
-  if (latest.computation_status === "failed" && lastGood) {
-    return {
-      ...lastGood,
-      // Preserve the failed-status signal so the dashboard renders a stale
-      // badge instead of letting the user think the data is fresh.
-      computation_status: "failed",
-      computation_error:
-        latest.computation_error ??
-        "Latest computation failed; showing last-good values.",
-    };
+  switch (bundle.kind) {
+    case "none":
+      return null;
+    case "fresh":
+      return bundle.row;
+    case "fallback":
+      return {
+        ...bundle.lastGood,
+        // Preserve the failed-status signal so the dashboard renders a stale
+        // badge instead of letting the user think the data is fresh.
+        computation_status: "failed",
+        computation_error:
+          bundle.latest.computation_error ??
+          "Latest computation failed; showing last-good values.",
+      };
+    case "latest_only":
+      return bundle.latest;
+    // audit-2026-05-07 red-team c8 round-2: explicit assertNever sentinel.
+    // Strict TS already narrows the union exhaustively, but the JSDoc above
+    // promises "exhaustively pattern-match" — make that visible at runtime
+    // so a future case added to PortfolioAnalyticsWithFallback fails the
+    // type check here rather than silently returning undefined.
+    default: {
+      const _exhaustive: never = bundle;
+      return _exhaustive;
+    }
   }
-  return latest;
 }
