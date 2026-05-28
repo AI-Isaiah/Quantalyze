@@ -90,3 +90,12 @@ next-env.d.ts
 analytics-service/supabase/
 .env*.local
 fix-list.md
+
+# audit-fix campaign working artifacts — per-developer tooling, never in the repo
+# (mirrors .planning/ and fix-list.md above).
+fix-list-cluster.md
+fix-list-cluster.md.bak*
+.review/
+scripts/audit-close-findings.py
+scripts/extract-fixlist-section.sh
+scripts/mark-reverified-closed.py

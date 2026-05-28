@@ -25,12 +25,35 @@ import { CommitDiffSchema } from "./route";
 //      `20260528183000_validate_scenario_diff_percent_range_fix.sql` from
 //      the stale [0, 1] guard to [0, 100].
 //
-// This file pins the Zod range. The migration's verification DO block pins
-// the validator range. The column CHECK is enforced by Postgres. Together
-// the three should NEVER drift again. If a future PR widens Zod beyond
-// 100, this test fails BEFORE the request can 23514 on insert; if a PR
-// narrows it below 100, the test still fails (parity violated even when
-// "safer"), surfacing the divergence so it can be reconciled cleanly.
+// NEW-C18-02 (LIVE BUG, fixed 2026-05-28): the original table-create
+// migration `20260418060747_bridge_outcomes.sql` ALSO installed an inline
+// `bridge_outcomes_percent_allocated_check` of [0.1, 50] that was never
+// dropped. Postgres ANDs CHECKs, so the EFFECTIVE persistable range was the
+// intersection [0.1, 50] — a normal 0%/60%/100% allocation passed Zod here
+// and the validator but raised 23514 on insert, rolling back the whole
+// single-tx batch. Migration `20260528223200_drop_stale_bridge_outcomes_
+// percent_inline_check.sql` DROPs that stale inline check so the column now
+// truly enforces only the canonical [0, 100]. THIS Zod test alone could
+// never have caught the divergence (no DB in vitest), which is exactly why
+// it went live — the authoritative DB-layer regression is that migration's
+// verification DO block (asserts the inline check is gone) plus a post-apply
+// MCP probe that percent_allocated=0/60/100 is now persistable.
+//
+//   4. Sibling writer  — `/api/bridge/outcome` (route.ts) writes the SAME
+//      column. CL1 reconciled its stale `.max(50)` to the canonical
+//      `.max(100)`; it keeps `.min(0.1)` as a deliberate per-endpoint rule
+//      (an "allocated" outcome must be strictly positive — use kind='rejected'
+//      otherwise), which is a STRICTER subset of the column range, not drift.
+//      That route's own test (bridge/outcome/route.test.ts) pins 60/100/>100.
+//
+// This file pins the scenario-commit Zod range. The migration's verification
+// DO block pins the validator range AND the dropped-inline-check state. The
+// column CHECK is enforced by Postgres. The bridge/outcome writer is pinned
+// in its own suite. Together they should NEVER drift on the UPPER bound (100)
+// again. If a future PR widens scenario-commit Zod beyond 100, this test
+// fails BEFORE the request can 23514 on insert; if a PR narrows it below 100,
+// the test still fails (parity violated even when "safer"), surfacing the
+// divergence so it can be reconciled cleanly.
 //
 // Numeric anchors. We probe at the boundaries (0, 100) and just outside
 // (-0.01, 100.01) per discriminated union arm.

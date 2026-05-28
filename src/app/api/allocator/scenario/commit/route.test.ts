@@ -108,7 +108,7 @@ const mockRpc = vi.fn();
 // data (the holdings.value_usd column) instead of trusting the client's
 // number. The from() mock must therefore return a thenable chain shaped like
 // `.from("allocator_holdings").select(...).eq(...)` resolving to
-// `{ data: [], error: null }`. Other from() callers (logAuditEvent's internal
+// `{ data: [], error: null }`. Other from() callers (emit's internal
 // supabase calls etc.) just need an object that exposes `.select()` returning
 // the same shape — keep the surface narrow so a test that needs to inspect a
 // different from() chain can override locally.
@@ -174,7 +174,16 @@ vi.mock("@/lib/ratelimit", () => ({
 // ---------------------------------------------------------------------------
 
 vi.mock("@/lib/audit", () => ({
-  logAuditEvent: vi.fn(),
+  // Default async impl so the route's `emit(...).then(ok, fail)` per-promise
+  // guard resolves; survives clearAllMocks (it only clears call history, not
+  // the vi.fn implementation). Individual tests override with mockRejectedValueOnce.
+  emit: vi.fn(async () => {}),
+}));
+
+// NEW-C18-11: spy on the Sentry capture so the audit-incompleteness alert
+// is assertable.
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: vi.fn(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -182,7 +191,8 @@ vi.mock("@/lib/audit", () => ({
 // ---------------------------------------------------------------------------
 
 import { POST } from "./route";
-import { logAuditEvent } from "@/lib/audit";
+import { emit } from "@/lib/audit";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { checkLimit } from "@/lib/ratelimit";
 
 // ---------------------------------------------------------------------------
@@ -289,7 +299,7 @@ describe("T_R1b — 401 short-circuits the handler body (H-0243)", () => {
     // The handler body must be fully short-circuited by the gate.
     expect(checkLimit).not.toHaveBeenCalled();
     expect(mockRpc).not.toHaveBeenCalled();
-    expect(logAuditEvent).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
   });
 
   it("does not reach RPC or audit when the allocator-role gate denies (403)", async () => {
@@ -298,7 +308,7 @@ describe("T_R1b — 401 short-circuits the handler body (H-0243)", () => {
     expect(res.status).toBe(403);
     expect(checkLimit).not.toHaveBeenCalled();
     expect(mockRpc).not.toHaveBeenCalled();
-    expect(logAuditEvent).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
   });
 });
 
@@ -683,7 +693,7 @@ describe("H4 single-tx full-failure paths", () => {
         expect.objectContaining({ index: 0, error: expect.stringContaining("not owned") }),
       ]),
     );
-    expect(logAuditEvent).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
   });
 
   it("T_R10: voluntary_add with non-existent strategy_id → 422", async () => {
@@ -743,7 +753,7 @@ describe("H4 single-tx full-failure paths", () => {
     const body = await res.json();
     expect(body.recorded).toBe(0);
     expect(body.errors[0].index).toBe(1);
-    expect(logAuditEvent).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
   });
 });
 
@@ -769,8 +779,8 @@ describe("T_R13 — audit emission", () => {
     );
     expect(res.status).toBe(200);
 
-    expect(logAuditEvent).toHaveBeenCalledTimes(2);
-    expect(logAuditEvent).toHaveBeenNthCalledWith(
+    expect(emit).toHaveBeenCalledTimes(2);
+    expect(emit).toHaveBeenNthCalledWith(
       1,
       expect.anything(),
       expect.objectContaining({
@@ -780,13 +790,50 @@ describe("T_R13 — audit emission", () => {
         metadata: expect.objectContaining({ kind: "voluntary_remove", source: "scenario_commit" }),
       }),
     );
-    expect(logAuditEvent).toHaveBeenNthCalledWith(
+    expect(emit).toHaveBeenNthCalledWith(
       2,
       expect.anything(),
       expect.objectContaining({
         action: "match.decision_record",
         entity_id: "md-2",
         metadata: expect.objectContaining({ kind: "voluntary_add" }),
+      }),
+    );
+  });
+
+  it("NEW-C18-11: a hard audit emit failure raises a commit-scoped scenario_commit_audit_incomplete alert", async () => {
+    // WHY: a scenario commit is a financial decision; its Art.-grade audit
+    // trail must never drop silently. Pre-fix the per-row logAuditEvent
+    // swallowed emit()'s re-throw, so a dropped audit row produced NO
+    // commit-scoped signal and a cached replay returned 200 trusting the
+    // original. Now one hard failure raises a single Sentry alert carrying
+    // the commit_batch_id so ops can backfill the exact commit.
+    vi.mocked(emit).mockRejectedValueOnce(new Error("permission_denied"));
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+          { index: 1, match_decision_id: "md-2", bridge_outcome_id: "bo-2", kind: "voluntary_add" },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReq({ diffs: [VALID_VR, VALID_VA] }));
+    // Data already committed inside the RPC — the response stays 200; the
+    // audit gap is surfaced out-of-band, not by failing the commit.
+    expect(res.status).toBe(200);
+
+    // The completeness alert fires from the deferred after()/microtask
+    // flush — drain the microtask queue before asserting.
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(captureToSentry).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: expect.objectContaining({ scenario_commit_audit_incomplete: "true" }),
+        extra: expect.objectContaining({ failed: 1, total: 2 }),
       }),
     );
   });
@@ -1012,7 +1059,7 @@ describe("T_R20 — Idempotency-Key dedup (P1945, migration 131 SQL-side)", () =
     const body = await res.json();
     expect(body.recorded).toBe(1);
     // Critical: NO audit emission on cached replay.
-    expect(logAuditEvent).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
   });
 
   it("RPC ok:false + code=idempotency_body_mismatch → 422 (RFC §2.5)", async () => {
@@ -1035,7 +1082,7 @@ describe("T_R20 — Idempotency-Key dedup (P1945, migration 131 SQL-side)", () =
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
     expect(body.error).toMatch(/Idempotency-Key reuse/i);
-    expect(logAuditEvent).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
   });
 
   it("RPC ok:false + code=idempotency_in_flight → 409 with Retry-After", async () => {
@@ -1059,7 +1106,7 @@ describe("T_R20 — Idempotency-Key dedup (P1945, migration 131 SQL-side)", () =
     expect(res.status).toBe(409);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(res.headers.get("Retry-After")).toBe("1");
-    expect(logAuditEvent).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
   });
 
   it("RPC ok:false + code=idempotency_schema_drift → 503", async () => {
@@ -1192,7 +1239,7 @@ describe("T_R21 — RPC error 500 path", () => {
     );
     expect(res.status).toBe(500);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
-    expect(logAuditEvent).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
     // Migration 131: when the RPC raises EXCEPTION the function's
     // transaction (including the idempotency placeholder reservation) rolls
     // back. The route does not need to do anything else — the cache stays
@@ -1319,9 +1366,9 @@ describe("T_R23 — audit metadata.commit_batch_id", () => {
 
     const res = await POST(mkReq({ diffs: [VALID_VR, VALID_VA] }));
     expect(res.status).toBe(200);
-    expect(logAuditEvent).toHaveBeenCalledTimes(2);
+    expect(emit).toHaveBeenCalledTimes(2);
 
-    const calls = (logAuditEvent as unknown as { mock: { calls: unknown[][] } })
+    const calls = (emit as unknown as { mock: { calls: unknown[][] } })
       .mock.calls as Array<
       [unknown, { metadata: { commit_batch_id: string } }]
     >;
@@ -1346,7 +1393,7 @@ describe("T_R23 — audit metadata.commit_batch_id", () => {
 
 describe("NEW-C18-04 — server-side audit recompute of size_at_decision_usd", () => {
   function getAuditMetadata(call: number): Record<string, unknown> {
-    const calls = (logAuditEvent as unknown as { mock: { calls: unknown[][] } })
+    const calls = (emit as unknown as { mock: { calls: unknown[][] } })
       .mock.calls as Array<[unknown, { metadata: Record<string, unknown> }]>;
     return calls[call][1].metadata;
   }
