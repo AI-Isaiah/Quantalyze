@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.15.2] - 2026-05-28
+### Fixed — current_weight boundary clamp (B1 / NEW-C09-08 of cross-cutting refactor program)
+
+The allocator dashboard could render a strategy's current weight as a confident-looking `5000%` (or `-5%`) chip when a producer-side bug shipped a percent value where a fraction was expected (`50` instead of `0.5`), a paused-strategy negative weight, or a non-finite value. These rendered as fact on a surface allocators use to judge concentration.
+
+`getMyAllocationDashboard` now gates `current_weight` through the `safeFraction` boundary constructor: out-of-range and non-finite weights become `null` (rendered as `—`, "not computable") instead of a misleading number, and out-of-range producer drift emits a `[units.safeFraction]` warning so the bad value is observable rather than silent. The eight downstream weight aggregators were audited and need no change — normalizing widgets (HHI, tracking error, risk decomposition) treat `null → 0` as exclusion, composite-returns and allocation-by-style already skip zero-weight rows, and the rebalance/drift/alpha-beta widgets fall back to an equal-weight target. Clamping a garbage weight is a strict improvement over propagating it. Pinned by a now-unskipped 6-spec regression block.
+
 ## [0.24.15.1] - 2026-05-28
 ### Fixed — supabase-migrate prod recovery (follow-up to PR #348)
 
