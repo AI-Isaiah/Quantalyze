@@ -95,9 +95,9 @@ describe("KeyFilterPanel — toggle behavior", () => {
     fireEvent.click(screen.getAllByRole("checkbox")[0]);
     const caveat = screen.getByTestId("overview-key-filter-caveat");
     expect(caveat.textContent).toMatch(/1 of 2 excluded/i);
-    // Persisted with allocator-scoped key.
+    // Persisted with allocator-scoped key, B7 versioned shape.
     expect(lsStore.get(`allocations.excludedKeyIds.${ALLOCATOR_ID}`)).toBe(
-      JSON.stringify(["k1"]),
+      JSON.stringify({ ids: ["k1"], version: 1 }),
     );
   });
 
