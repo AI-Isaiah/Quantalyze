@@ -93,6 +93,39 @@ _force_last_run: dict[str, float] = {}  # allocator_id → monotonic timestamp
 # against. The lock is created on first use (defaultdict pattern).
 _force_lock: dict[str, asyncio.Lock] = {}
 
+# NEW-C08-06: per-allocator serialization lock for the FULL
+# skip-check → score → match_batches insert sequence. Distinct in PURPOSE
+# from _force_lock (which makes only the force-throttle check-then-stamp
+# atomic and is released FAST so a throttled force request gets an immediate
+# 429 rather than queueing behind 30s of scoring): _recompute_lock is HELD
+# across scoring + the insert, so a non-forced POST /recompute cannot race
+# cron_recompute (or another POST) into a DUPLICATE batch for the same
+# allocator — the second holder runs _should_skip_allocator AFTER the first
+# commits and sees the fresh batch, so it skips. Acquired in BOTH recompute()
+# and cron_recompute(), always AFTER _force_lock is released (no nested hold)
+# so there is no lock-ordering deadlock. Process-local: this closes the
+# finding's stated single-process race (the match engine runs one worker
+# today; cron awaits _score_one_allocator sequentially). Multi-worker
+# durability (a Postgres advisory lock or a UNIQUE constraint on
+# match_batches) is the separately-tracked H-0562 — see the module comment.
+_recompute_lock: dict[str, asyncio.Lock] = {}
+
+
+def _get_recompute_lock(allocator_id: str) -> asyncio.Lock:
+    """Return the per-allocator recompute serialization lock (NEW-C08-06),
+    creating it on first use. No await between the get and the caller's
+    ``async with`` (and asyncio.Lock.acquire on a free lock does not yield),
+    so the create-then-acquire is not interleaved — mirrors _force_lock.
+    Bounded by the role-gated allocator population: only real allocator_ids
+    reach here (recompute()'s NEW-C08-10 role gate and cron's
+    role IN ('allocator','both') filter run before acquisition). Idle entries
+    are pruned by _prune_stale_force_entries."""
+    lock = _recompute_lock.get(allocator_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _recompute_lock[allocator_id] = lock
+    return lock
+
 
 def _prune_stale_force_entries(now: float | None = None) -> None:
     """MA1 (red-team LOW9): evict stale per-allocator force-throttle state.
@@ -135,6 +168,16 @@ def _prune_stale_force_entries(now: float | None = None) -> None:
         lock = _force_lock.get(aid)
         if lock is not None and not lock.locked():
             del _force_lock[aid]
+    # NEW-C08-06: prune idle recompute-serialization locks on the same cadence.
+    # Same safety rule as above — never drop a HELD lock (an in-flight
+    # skip→score→insert is inside it; dropping it would let a concurrent waiter
+    # acquire a different lock object and break serialization, the M-1 hazard).
+    # These have no paired stamp, so lock.locked() is the only guard; an unheld
+    # lock is safe to drop because the next request lazily recreates one.
+    for aid in list(_recompute_lock.keys()):
+        lock = _recompute_lock.get(aid)
+        if lock is not None and not lock.locked():
+            del _recompute_lock[aid]
 
 # C-01 (code-review): page size for analytics SELECT .in_() fetches
 # (NEW-C08-02 / NEW-C08-03). Previously defined at line 1007 (below its call
@@ -1633,32 +1676,38 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
             # failure the stamp is cleared (below) so the operator can retry.
             _force_last_run[allocator_id] = time.monotonic()
 
-    if await _should_skip_allocator(allocator_id, req.force):
-        logger.info("match_engine recompute: skipping recent batch for %s", allocator_id)
-        return {"status": "skipped", "skipped": True, "reason": "recent_batch"}
+    # NEW-C08-06: serialize the skip-check → score → insert sequence per
+    # allocator (shared with cron_recompute) so a non-forced POST cannot race
+    # cron — or another POST — into a duplicate match_batches row. The second
+    # holder's _should_skip_allocator runs AFTER the first commits, sees the
+    # fresh batch, and skips. Acquired after _force_lock is released above.
+    async with _get_recompute_lock(allocator_id):
+        if await _should_skip_allocator(allocator_id, req.force):
+            logger.info("match_engine recompute: skipping recent batch for %s", allocator_id)
+            return {"status": "skipped", "skipped": True, "reason": "recent_batch"}
 
-    # NEW-C08-09: wire demo_only at the call site so the DB-layer guard is in
-    # place (defense at the boundary). Pre-fix the call was unconditionally
-    # _load_candidate_universe() with demo_only=False; the only protection was
-    # the in-memory post-filter in _score_one_allocator, which a refactor could
-    # silently drop. Now the universe is filtered at the DB for the demo allocator.
-    universe = await asyncio.to_thread(
-        _load_candidate_universe,
-        allocator_id == _DEMO_ALLOCATOR_ID,
-    )
-    if not universe["strategies_by_id"]:
-        raise HTTPException(status_code=400, detail="No eligible strategies in the directory")
+        # NEW-C08-09: wire demo_only at the call site so the DB-layer guard is in
+        # place (defense at the boundary). Pre-fix the call was unconditionally
+        # _load_candidate_universe() with demo_only=False; the only protection was
+        # the in-memory post-filter in _score_one_allocator, which a refactor could
+        # silently drop. Now the universe is filtered at the DB for the demo allocator.
+        universe = await asyncio.to_thread(
+            _load_candidate_universe,
+            allocator_id == _DEMO_ALLOCATOR_ID,
+        )
+        if not universe["strategies_by_id"]:
+            raise HTTPException(status_code=400, detail="No eligible strategies in the directory")
 
-    try:
-        result = await _score_one_allocator(allocator_id, universe)
-    except Exception as err:
-        logger.exception("match_engine recompute failed for %s", allocator_id)
-        # M-1 (red-team): clear the optimistic stamp so the operator can retry
-        # immediately after a scoring failure. The stamp was written inside the
-        # lock before scoring; clearing it here releases the throttle window.
-        if req.force:
-            _force_last_run.pop(allocator_id, None)
-        raise HTTPException(status_code=500, detail=f"Scoring failed: {err}") from err
+        try:
+            result = await _score_one_allocator(allocator_id, universe)
+        except Exception as err:
+            logger.exception("match_engine recompute failed for %s", allocator_id)
+            # M-1 (red-team): clear the optimistic stamp so the operator can retry
+            # immediately after a scoring failure. The stamp was written inside the
+            # lock before scoring; clearing it here releases the throttle window.
+            if req.force:
+                _force_last_run.pop(allocator_id, None)
+            raise HTTPException(status_code=500, detail=f"Scoring failed: {err}") from err
 
     # Retention sweep (keep last 7). A sweep failure must not 500 the
     # request after the batch was successfully persisted — log and continue.
@@ -1834,18 +1883,24 @@ async def cron_recompute() -> dict[str, Any]:
             logger.info("match_engine cron: kill switch flipped mid-run, aborting")
             break
 
-        if await _should_skip_allocator(allocator_id, force=False):
-            skipped += 1
-            continue
+        # NEW-C08-06: serialize skip-check → score per allocator (shared with
+        # POST /recompute) so a concurrent admin recompute cannot race this
+        # cron iteration into a duplicate batch for the same allocator. The
+        # lock is per-allocator, so cross-allocator cron throughput is
+        # unaffected (and cron already awaits each allocator sequentially).
+        async with _get_recompute_lock(allocator_id):
+            if await _should_skip_allocator(allocator_id, force=False):
+                skipped += 1
+                continue
 
-        try:
-            await _score_one_allocator(allocator_id, universe)
-            processed += 1
-            swept_allocator_ids.append(allocator_id)
-        except Exception as err:
-            logger.exception("match_engine cron: allocator %s failed: %s", allocator_id, err)
-            failed += 1
-            # Continue the loop — one allocator failure doesn't fail the cron
+            try:
+                await _score_one_allocator(allocator_id, universe)
+                processed += 1
+                swept_allocator_ids.append(allocator_id)
+            except Exception as err:
+                logger.exception("match_engine cron: allocator %s failed: %s", allocator_id, err)
+                failed += 1
+                # Continue the loop — one allocator failure doesn't fail the cron
 
     # Retention sweep at end of cron. Log at ERROR so a silently-broken
     # sweep (RLS regression, FK error, URL truncation) lights up alerts

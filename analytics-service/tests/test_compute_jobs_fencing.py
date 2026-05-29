@@ -724,6 +724,97 @@ def test_reclaim_invalidates_claim_token(admin, strategy_id):
         admin.table("compute_jobs").delete().eq("id", job_id).execute()
 
 
+def test_defer_compute_job_token_fence(admin, strategy_id):
+    """NEW-C12-06 (CL10): defer_compute_job must reject a stale claim_token on
+    a still-running row (serialization_failure) so a preempted worker (W1)
+    cannot yank a job the watchdog reclaimed and W2 re-claimed under a fresh
+    token. A MATCHING token defers normally and NULLs the stale fence token.
+
+    Deterministic setup: drive the row to status='running' with a known token
+    via a direct UPDATE (rather than _claim_one, which on the shared test DB
+    could claim a different pending job). defer_compute_job gates only on
+    status='running' + claim_token, so this faithfully exercises the fence.
+    """
+    job = admin.table("compute_jobs").insert({
+        "strategy_id": strategy_id,
+        "kind": "poll_positions",
+        "status": "pending",
+        "priority": "normal",
+        "exchange": "okx",
+    }).execute().data[0]
+    job_id = job["id"]
+    try:
+        real_token = str(uuid.uuid4())
+        admin.table("compute_jobs").update({
+            "status": "running",
+            "claim_token": real_token,
+            "attempts": 1,
+        }).eq("id", job_id).execute()
+
+        # (1) Mismatched token → serialization_failure, running row UNTOUCHED.
+        wrong_token = str(uuid.uuid4())
+        with pytest.raises(Exception) as exc_info:
+            admin.rpc("defer_compute_job", {
+                "p_job_id": job_id,
+                "p_defer_seconds": 60,
+                "p_reason": "c12-06 mismatch probe",
+                "p_claim_token": wrong_token,
+            }).execute()
+        assert "preempted" in str(exc_info.value) or "serialization" in str(exc_info.value).lower(), (
+            f"mismatched-token defer must raise serialization_failure, got: {exc_info.value}"
+        )
+        row = admin.table("compute_jobs").select("status,claim_token,attempts").eq("id", job_id).single().execute().data
+        assert row["status"] == "running", "mismatched-token defer must NOT yank the running job (W2 keeps it)"
+        assert row["claim_token"] == real_token, "mismatched-token defer must not clear the live token"
+        assert row["attempts"] == 1, "mismatched-token defer must not decrement attempts"
+
+        # (2) Matching token → defers: running→pending, attempts decremented,
+        # claim_token NULLed so the pending row drops its stale fence token.
+        admin.rpc("defer_compute_job", {
+            "p_job_id": job_id,
+            "p_defer_seconds": 60,
+            "p_reason": "c12-06 match probe",
+            "p_claim_token": real_token,
+        }).execute()
+        row = admin.table("compute_jobs").select("status,claim_token,attempts").eq("id", job_id).single().execute().data
+        assert row["status"] == "pending"
+        assert row["claim_token"] is None, "defer must NULL the stale fence token (C12-06)"
+        assert row["attempts"] == 0, "defer decrements attempts to cancel the claim increment"
+    finally:
+        admin.table("compute_jobs").delete().eq("id", job_id).execute()
+
+
+def test_defer_compute_job_null_token_backcompat(admin, strategy_id):
+    """NEW-C12-06 back-compat arm: a NULL p_claim_token still defers a running
+    row (the deploy-window path for the pre-rollout worker). This is the arm a
+    later strict-NULL tightening would remove once the worker rollout lands."""
+    job = admin.table("compute_jobs").insert({
+        "strategy_id": strategy_id,
+        "kind": "poll_positions",
+        "status": "pending",
+        "priority": "normal",
+        "exchange": "okx",
+    }).execute().data[0]
+    job_id = job["id"]
+    try:
+        admin.table("compute_jobs").update({
+            "status": "running",
+            "claim_token": str(uuid.uuid4()),
+            "attempts": 1,
+        }).eq("id", job_id).execute()
+        # NULL token (omit the param) → back-compat match, defers.
+        admin.rpc("defer_compute_job", {
+            "p_job_id": job_id,
+            "p_defer_seconds": 30,
+            "p_reason": "c12-06 null backcompat probe",
+        }).execute()
+        row = admin.table("compute_jobs").select("status,claim_token").eq("id", job_id).single().execute().data
+        assert row["status"] == "pending", "NULL-token defer must still work (back-compat arm)"
+        assert row["claim_token"] is None
+    finally:
+        admin.table("compute_jobs").delete().eq("id", job_id).execute()
+
+
 @pytest.mark.skip(reason=(
     "P1 TODO — flaky httpx.ReadTimeout at ~120s under live-DB suite load. "
     "Fence logic in mig 117 mark_compute_job_done verified correct by inspection: "

@@ -2599,3 +2599,209 @@ class TestMonotonicCursorAdvance:
             "Balance-only update must not carry a .or_() monotonic guard; "
             f"unexpected .or_() calls: {or_calls}"
         )
+
+
+class TestCircuitBreakerSingleDbClock:
+    """NEW-C12-10: the circuit breaker computes the remaining cooldown
+    SERVER-SIDE via the api_key_cooldown_remaining RPC (single DB clock) and
+    stamps via stamp_api_key_429 — NOT Python datetime.now() math against a
+    table().update(). NEW-C12-06: the defer threads the job's claim_token.
+
+    These pin the contracts that fix the two defects: a direct table()
+    stamp/select would re-introduce the cross-replica wall-clock skew, and an
+    untokened defer would re-open the watchdog-reclaim race.
+    """
+
+    @staticmethod
+    def _supabase_capturing_rpcs(cooldown_remaining: int):
+        """Return (supabase_mock, rpc_calls). api_key_cooldown_remaining
+        resolves to `cooldown_remaining`; every other rpc returns data=None.
+        Any table() access fails loudly — the breaker must be RPC-only now."""
+        rpc_calls: list[tuple[str, dict]] = []
+
+        def _fake_rpc(name, params):
+            rpc_calls.append((name, params))
+            builder = MagicMock()
+            if name == "api_key_cooldown_remaining":
+                builder.execute.return_value = MagicMock(data=cooldown_remaining)
+            else:
+                builder.execute.return_value = MagicMock(data=None)
+            return builder
+
+        supabase = MagicMock()
+        supabase.rpc.side_effect = _fake_rpc
+        supabase.table.side_effect = AssertionError(
+            "circuit breaker must not touch tables directly — cooldown is "
+            "computed server-side via api_key_cooldown_remaining (C12-10)"
+        )
+        return supabase, rpc_calls
+
+    @pytest.mark.asyncio
+    async def test_defers_via_cooldown_rpc_and_threads_claim_token(self):
+        from services.job_worker import _check_circuit_breaker
+
+        supabase, rpc_calls = self._supabase_capturing_rpcs(cooldown_remaining=90)
+        job = {"id": "job-1", "claim_token": "tok-W2"}
+        key_row = {"id": "key-1", "exchange": "okx", "last_429_at": "2026-05-29T00:00:00Z"}
+
+        result = await _check_circuit_breaker(supabase, job, key_row)
+
+        assert result is not None and result.outcome == DispatchOutcome.DEFERRED
+
+        names = [n for n, _ in rpc_calls]
+        assert "api_key_cooldown_remaining" in names, (
+            "breaker must compute remaining via the DB-clock RPC, not Python "
+            "datetime.now() math (C12-10)"
+        )
+        cd_params = next(p for n, p in rpc_calls if n == "api_key_cooldown_remaining")
+        assert cd_params == {"p_api_key_id": "key-1", "p_cooldown_seconds": 300}, (
+            "must pass the per-exchange cooldown (OKX=300s) and key id"
+        )
+        defer_params = next(p for n, p in rpc_calls if n == "defer_compute_job")
+        assert defer_params["p_claim_token"] == "tok-W2", (
+            "defer MUST thread the job's claim_token so a preempted worker "
+            "cannot yank a re-claimed job (C12-06 fence)"
+        )
+        assert defer_params["p_defer_seconds"] == 95, "90s remaining + 5s buffer"
+
+    @pytest.mark.asyncio
+    async def test_proceeds_when_cooldown_expired(self):
+        """Complementary proceed-path guard: when api_key_cooldown_remaining
+        reports 0, the breaker does NOT defer. The C12-10 single-DB-clock
+        INVARIANT itself is pinned by test_defers_via_cooldown_rpc_* and
+        test_stamp_429_uses_db_clock_rpc_* (those fail on the pre-fix Python-
+        clock code); this test only asserts the no-defer-when-expired branch.
+        """
+        from services.job_worker import _check_circuit_breaker
+
+        supabase, rpc_calls = self._supabase_capturing_rpcs(cooldown_remaining=0)
+        # last_429_at only needs to be non-null to pass the snapshot fast-path;
+        # its value is irrelevant since the cooldown RPC is mocked (no Python
+        # clock math runs). Use a fixed sentinel rather than a real date, which
+        # could misread as wall-clock-dependent and flake near UTC midnight.
+        job = {"id": "job-2", "claim_token": "tok"}
+        key_row = {"id": "key-2", "exchange": "binance", "last_429_at": "SENTINEL-non-null-stamp"}
+
+        result = await _check_circuit_breaker(supabase, job, key_row)
+
+        assert result is None, "remaining=0 → breaker not tripped, proceed"
+        assert not any(n == "defer_compute_job" for n, _ in rpc_calls), (
+            "must NOT defer when the cooldown RPC reports 0 remaining"
+        )
+
+    @pytest.mark.asyncio
+    async def test_defer_serialization_failure_yields_deferred_not_failed(self):
+        """NEW-C12-06 caller-side integration contract: when defer_compute_job
+        RAISES a claim-token serialization_failure (this worker was preempted —
+        watchdog reclaim + another worker re-claimed under a fresh token), the
+        breaker must YIELD the job as DEFERRED, NOT let the 40001 propagate to
+        dispatch's catch-all where it'd be classified error_kind='unknown',
+        retried, and carry this worker's stale token into mark_compute_job_failed.
+        Owning the preemption signal here is what keeps corruption-safety from
+        depending on the incidental downstream mark fence.
+        """
+        from services.job_worker import _check_circuit_breaker
+
+        class _FakeAPIError(Exception):
+            def __init__(self, message, code):
+                super().__init__(message)
+                self.code = code
+
+        rpc_calls: list[tuple[str, dict]] = []
+
+        def _fake_rpc(name, params):
+            rpc_calls.append((name, params))
+            builder = MagicMock()
+            if name == "api_key_cooldown_remaining":
+                builder.execute.return_value = MagicMock(data=120)  # cooldown active → will defer
+            elif name == "defer_compute_job":
+                # The fence fired: this worker lost ownership (40001).
+                builder.execute.side_effect = _FakeAPIError(
+                    "defer_compute_job: job X preempted by watchdog reclaim "
+                    "(caller token=t1, current token=t2)",
+                    "40001",
+                )
+            else:
+                builder.execute.return_value = MagicMock(data=None)
+            return builder
+
+        supabase = MagicMock()
+        supabase.rpc.side_effect = _fake_rpc
+        supabase.table.side_effect = AssertionError("breaker must be RPC-only")
+        job = {"id": "job-preempted", "claim_token": "tok-W1-stale"}
+        key_row = {"id": "key-1", "exchange": "okx", "last_429_at": "SENTINEL-non-null-stamp"}
+
+        result = await _check_circuit_breaker(supabase, job, key_row)
+
+        assert result is not None and result.outcome == DispatchOutcome.DEFERRED, (
+            "a preempted defer (serialization_failure) must yield DEFERRED, not "
+            "propagate a 40001 that dispatch would classify 'unknown' and retry"
+        )
+        assert any(n == "defer_compute_job" for n, _ in rpc_calls), (
+            "it must have ATTEMPTED the defer (and been fenced) — not silently skipped"
+        )
+
+    @pytest.mark.asyncio
+    async def test_genuine_defer_failure_propagates(self):
+        """A NON-preemption defer failure (e.g. DB down) must NOT be swallowed
+        as DEFERRED — it must propagate so dispatch classifies it transient and
+        the job retries. Only the claim-token preemption is treated as yield."""
+        from services.job_worker import _check_circuit_breaker
+
+        def _fake_rpc(name, params):
+            builder = MagicMock()
+            if name == "api_key_cooldown_remaining":
+                builder.execute.return_value = MagicMock(data=120)
+            elif name == "defer_compute_job":
+                builder.execute.side_effect = RuntimeError("connection reset by peer")
+            else:
+                builder.execute.return_value = MagicMock(data=None)
+            return builder
+
+        supabase = MagicMock()
+        supabase.rpc.side_effect = _fake_rpc
+        supabase.table.side_effect = AssertionError("breaker must be RPC-only")
+        job = {"id": "job-dbdown", "claim_token": "tok"}
+        key_row = {"id": "key-2", "exchange": "okx", "last_429_at": "SENTINEL-non-null-stamp"}
+
+        with pytest.raises(RuntimeError, match="connection reset"):
+            await _check_circuit_breaker(supabase, job, key_row)
+
+    @pytest.mark.asyncio
+    async def test_no_stamp_in_snapshot_skips_rpc(self):
+        from services.job_worker import _check_circuit_breaker
+
+        supabase, rpc_calls = self._supabase_capturing_rpcs(cooldown_remaining=999)
+        job = {"id": "job-3", "claim_token": "tok"}
+        key_row = {"id": "key-3", "exchange": "okx", "last_429_at": None}
+
+        result = await _check_circuit_breaker(supabase, job, key_row)
+
+        assert result is None
+        assert rpc_calls == [], "no stamp in the fresh snapshot → skip the RPC round-trip entirely"
+
+    @pytest.mark.asyncio
+    async def test_stamp_429_uses_db_clock_rpc_not_table_update(self):
+        from services.job_worker import _stamp_429
+
+        rpc_calls: list[tuple[str, dict]] = []
+
+        def _fake_rpc(name, params):
+            rpc_calls.append((name, params))
+            builder = MagicMock()
+            builder.execute.return_value = MagicMock(data=None)
+            return builder
+
+        supabase = MagicMock()
+        supabase.rpc.side_effect = _fake_rpc
+        supabase.table.side_effect = AssertionError(
+            "_stamp_429 must stamp via the stamp_api_key_429 RPC (DB clock), "
+            "not table().update() with datetime.now() (C12-10)"
+        )
+
+        await _stamp_429(supabase, {"id": "key-9"})
+
+        assert rpc_calls == [("stamp_api_key_429", {"p_api_key_id": "key-9"})], (
+            "stamp must go through the DB-clock RPC so the stamp and the "
+            "cooldown check share one clock"
+        )
