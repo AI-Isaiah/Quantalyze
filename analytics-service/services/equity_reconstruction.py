@@ -1363,6 +1363,13 @@ async def persist_equity_snapshots(
             "allocator_id": allocator_id,
             "reconstructed_at": reconstructed_at,
             "history_depth_months": row_depth,
+            # NEW-C01-11 (CL9): persist the per-row DQ flag on the multi-key
+            # upsert path too. `{**r}` already carries it for reconstructed
+            # rows; the explicit COALESCE-to-false keeps the column concrete for
+            # any caller (e.g. the daily-refresh row) regardless of `r`'s shape.
+            "pre_terminus_balance_unknown": bool(
+                r.get("pre_terminus_balance_unknown", False)
+            ),
         })
 
     # Single atomic upsert — chunked batching would leave partial state if
@@ -1579,6 +1586,12 @@ async def replace_equity_snapshots(
                 "value_usd": r["value_usd"],
                 "breakdown": r.get("breakdown"),
                 "source": r.get("source", "exchange_primary"),
+                # NEW-C01-11 (CL9): per-row DQ flag. COALESCE-to-false here
+                # mirrors the RPC backstop so a row that never went through the
+                # terminus stamp still inserts a concrete false.
+                "pre_terminus_balance_unknown": bool(
+                    r.get("pre_terminus_balance_unknown", False)
+                ),
             }
             for r in rows
         ]
@@ -1935,6 +1948,15 @@ async def _fetch_and_price_window(
             "equity levels are unreliable (pre_terminus_balance_unknown, "
             "NEW-C01-11). Anchor applied to last row only."
         )
+    # NEW-C01-11 (CL9): stamp the per-row DQ flag onto every reconstructed row
+    # so it survives to allocator_equity_snapshots (via both the replace RPC and
+    # the upsert path) and getMyAllocationDashboard can exclude zero-baseline
+    # rows from level-derived surfaces (equity curve / drawdown / TWR). The flag
+    # is curve-level — every row in a terminus-clamped window is suspect — so all
+    # rows carry the same value; the daily-refresh row (today's live mark) sets
+    # it false separately.
+    for _r in rows:
+        _r["pre_terminus_balance_unknown"] = hit_terminus
     telemetry = {
         "skipped_symbols": sorted(skipped_symbols),
         "unknown_perp_symbols": sorted(unknown_perp_symbols),
@@ -2530,6 +2552,12 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
             "value_usd": round(total, 2),
             "breakdown": capped_bd,
             "source": "exchange_primary",
+            # NEW-C01-11 (CL9): the daily refresh marks TODAY's live holdings
+            # against current prices — this is the true, fully-known equity, so
+            # it is never terminus-clamped. Explicit false keeps the column
+            # concrete and lets trustworthy live rows render normally even when
+            # the older reconstructed window was suppressed.
+            "pre_terminus_balance_unknown": False,
         }
         depth_months = history_depth_months_for_venue(venue)
         count = await persist_equity_snapshots(
