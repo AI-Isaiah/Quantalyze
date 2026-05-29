@@ -31,6 +31,13 @@ import ccxt.async_support as ccxt
 import httpx
 import pandas as pd
 
+from services.closed_sets import (
+    STABLECOINS,
+    STABLECOIN_SPLIT_SUFFIXES as _EXTRA_STABLECOIN_SUFFIXES,
+    STABLECOINS_LONGEST_FIRST as _STABLECOINS_LONGEST_FIRST,
+    TRADE_SIDES,
+    perp_quote,
+)
 from services.db import db_execute, get_supabase
 from services.job_worker import (
     DispatchOutcome,
@@ -52,18 +59,12 @@ logger = logging.getLogger("quantalyze.analytics.equity_reconstruction")
 # Constants
 # ---------------------------------------------------------------------------
 
-STABLECOINS: set[str] = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USD"}
-# NEW-C01-12: also recognise USDe / PYUSD / USDB as stablecoin suffixes so that
-# split_holdings_symbol_to_base_quote can correctly parse them for the canonical
-# BASE:QUOTE:PERP key on non-USDT-settled perps (e.g. ETHUSD/USDe markets).
-# These are NOT added to STABLECOINS itself (which drives price-skip logic);
-# they are only used by the splitter.
-_EXTRA_STABLECOIN_SUFFIXES: frozenset[str] = frozenset({"USDE", "PYUSD", "USDB"})
-# Pre-sorted longest-first so the holdings.symbol splitter picks
-# USDC/BUSD/etc before USD, avoiding false-positive substring matches.
-_STABLECOINS_LONGEST_FIRST: tuple[str, ...] = tuple(
-    sorted(STABLECOINS | _EXTRA_STABLECOIN_SUFFIXES, key=len, reverse=True)
-)
+# B8b: STABLECOINS (the "treat as cash / skip price fetch" set),
+# _EXTRA_STABLECOIN_SUFFIXES (splitter-only extras — NEW-C01-12: USDe / PYUSD /
+# USDB, deliberately NOT in STABLECOINS so a token like PYUSDETH isn't skipped
+# as cash), and the longest-first suffix tuple are single-sourced from
+# services.closed_sets (imported above) so they can't fork from the allocator
+# spot-valuation copy.
 RAW_PAYLOAD_CAP_BYTES: int = 4096
 OKX_TRADE_TERMINUS_DAYS: int = 90          # documented OKX cap (RESEARCH.md §1B, A3)
 BACKFILL_CAP_DAYS: int = 730                # 2 years (RESEARCH.md §1E recommended cap)
@@ -1007,28 +1008,25 @@ def _compute_daily_equity(
                 cost = float(ev.get("cost") or 0.0)
                 if not sym or amt <= 0:
                     continue
-                # NEW-C01-09: whitelist side to {buy, sell}. Pre-fix a perp
-                # fill with side=None/unknown silently opened a SHORT (the
-                # `else` branch of `signed = amt if side == "buy" else -amt`);
-                # a spot fill with unknown side was silently dropped but with
-                # no diagnostic. Either way the position state is corrupt.
-                if side not in ("buy", "sell"):
+                # NEW-C01-09: whitelist side to TRADE_SIDES ({buy, sell}).
+                # Pre-fix a perp fill with side=None/unknown silently opened a
+                # SHORT (the `else` branch of `signed = amt_base if side ==
+                # "buy" else -amt_base`); a spot fill with unknown side was
+                # silently dropped but with no diagnostic. Either way the
+                # position state is corrupt. The same allowlist gates ingest
+                # (_make_fill_dict).
+                if side not in TRADE_SIDES:
                     logger.warning(
                         "equity_reconstruction: skipping fill with unknown "
                         "side=%r (symbol=%s) — expected 'buy' or 'sell'",
                         side, raw_symbol,
                     )
                     continue
-                # WR-03: CCXT normalises linear perpetuals as "BTC/USDT:USDT"
-                # and inverse contracts as "BTC/USD:BTC". A naive split("/")[-1]
-                # would yield "USDT:USDT" and leak non-existent symbols into
-                # the quantities dict, producing unpriced base balances that
-                # never offset the buy side. Strip the `:settle` suffix so
-                # the quote side lands on the canonical currency code.
-                if "/" in raw_symbol:
-                    quote = raw_symbol.split("/")[-1].split(":")[0].upper()
-                else:
-                    quote = "USDT"
+                # WR-03: perp_quote strips the CCXT `:settle` suffix
+                # ("BTC/USDT:USDT" -> "USDT", "BTC/USD:BTC" -> "USD") so the
+                # quote leg lands on the canonical currency code instead of
+                # leaking "USDT:USDT" into the quantities dict.
+                quote = perp_quote(raw_symbol)
                 # `:` in the ccxt symbol marks a derivative (linear or
                 # inverse). Spot never has it.
                 is_perp = ":" in raw_symbol
@@ -1250,10 +1248,7 @@ def _compute_daily_equity(
             if pos.size == 0.0:
                 continue
             base = perp_sym.split("/")[0].upper()
-            quote_sym = (
-                perp_sym.split("/")[-1].split(":")[0].upper()
-                if "/" in perp_sym else "USDT"
-            )
+            quote_sym = perp_quote(perp_sym)
             px, src = _price_on(base, iso)
             if px is None:
                 # C-0330: same symbol-skip surfacing applies to perp marks.

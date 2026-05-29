@@ -193,6 +193,49 @@ class TestMatchPositionsFIFO:
         expected_roi = round((110.0 - 100.0) / 110.0, 6)
         assert pos["roi"] == expected_roi
 
+    def test_unknown_side_fill_dropped_not_phantom_long(self) -> None:
+        """NEW-C01-09 (FIFO half): a persisted fill whose side is not in
+        TRADE_SIDES is DROPPED, not opened as a phantom long.
+
+        Ingest (exchange._make_fill_dict) flags-but-persists an unrecognized
+        side, so `trades` can hold one. Without the matcher guard, the open
+        branch `"short" if side == "sell" else "long"` books a phantom LONG
+        for ANY non-sell side ("", "long", garbage) — corrupting
+        win_rate/expectancy with no signal. Assert the fill is dropped and
+        surfaced via the drop-and-count channel."""
+        dropped: dict = {}
+        fills = [
+            _make_fill(side="LONG", price=100.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo(
+            "BTCUSDT", fills, "strat-1", dropped_flags=dropped
+        )
+        assert positions == []  # no phantom position opened
+        assert dropped.get("unknown_side_dropped") == 1
+
+    def test_unknown_side_fill_does_not_corrupt_real_position(self) -> None:
+        """A garbage-side fill interleaved with a real buy→sell round trip is
+        dropped (counted), leaving exactly one clean closed long — it neither
+        opens a phantom position nor is silently consumed as a close."""
+        dropped: dict = {}
+        fills = [
+            _make_fill(side="buy", price=100.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="garbage", price=105.0, quantity=1.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+            _make_fill(side="sell", price=110.0, quantity=1.0,
+                       timestamp="2024-01-03T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo(
+            "BTCUSDT", fills, "strat-1", dropped_flags=dropped
+        )
+        closed = [p for p in positions if p["status"] == "closed"]
+        assert len(closed) == 1
+        assert closed[0]["side"] == "long"
+        assert closed[0]["exit_price_avg"] == 110.0
+        assert dropped.get("unknown_side_dropped") == 1
+
     def test_multiple_positions(self) -> None:
         """buy -> sell -> buy -> sell -> 2 closed positions."""
         fills = [

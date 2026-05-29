@@ -787,17 +787,26 @@ def test_c01_09_unknown_side_skipped_in_compute_daily_equity():
 
     src = inspect.getsource(er._compute_daily_equity)
 
-    # The fix: side not in ("buy", "sell") → skip + warn
-    assert 'side not in ("buy", "sell")' in src or "side not in" in src, (
-        "NEW-C01-09: side whitelist missing from _compute_daily_equity"
-    )
+    # The fix: side not in TRADE_SIDES → skip + warn. B8b single-sourced the
+    # {buy,sell} allowlist as services.closed_sets.TRADE_SIDES; accept the
+    # registry form or the legacy literal so the test pins the GUARD's
+    # presence (and position, below), not its exact spelling.
+    assert (
+        "side not in TRADE_SIDES" in src
+        or 'side not in ("buy", "sell")' in src
+    ), "NEW-C01-09: side whitelist missing from _compute_daily_equity"
     # A perp fill with unknown side must NOT proceed past the guard to the
     # `signed = amt_base if side == "buy" else -amt_base` line, which previously
     # silently booked a SHORT for ANY non-"buy" side value.
     # Validate that the whitelist appears BEFORE the `signed` assignment.
+    # Match the CONTIGUOUS assignment statement, not a 2-word fragment: the
+    # explanatory comment above mentions the assignment too (line-wrapped), so
+    # a short `signed = amt_base` substring would collide with the comment that
+    # sits BEFORE the guard and spuriously fail the ordering check.
     guard_pos = src.find('side not in')
-    signed_pos = src.find('signed = amt_base')
+    signed_pos = src.find('signed = amt_base if side == "buy" else -amt_base')
     assert guard_pos != -1, "NEW-C01-09: side guard not found in source"
+    assert signed_pos != -1, "NEW-C01-09: signed= assignment not found in source"
     assert guard_pos < signed_pos, (
         "NEW-C01-09: side whitelist must appear before the signed= assignment"
     )
