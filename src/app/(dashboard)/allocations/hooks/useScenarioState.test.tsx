@@ -164,69 +164,79 @@ describe("useScenarioState", () => {
     expect(result.current.draft.weightOverrides[REF_BTC]).toBeCloseTo(0.6, 9);
   });
 
-  it("T_USE4 toggleHolding → draft updates AND localStorage.setItem called with the allocator-scoped key", () => {
-    const { result } = renderHook(() =>
+  // T_USE4-8 — persistence is now debounced (B7a-2 / H-0125), so a mutation no
+  // longer writes localStorage synchronously. The in-memory draft updates
+  // immediately; the (coalesced) write lands on the guaranteed unmount flush.
+  // Each asserts both: the immediate in-memory update AND the flushed blob.
+  it("T_USE4 toggleHolding → draft updates immediately; the (debounced) write flushes to the allocator-scoped key", () => {
+    const { result, unmount } = renderHook(() =>
       useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
     );
 
     act(() => {
       result.current.toggleHolding(REF_BTC);
     });
-
+    // In-memory draft updates synchronously.
     expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(false);
-    // setItem called with the allocator-scoped key.
+
+    // Flush the debounced write (unmount cleanup flushes the pending value).
+    act(() => {
+      unmount();
+    });
+
     const scopedKey = scenarioStorageKey(ALLOCATOR_A);
     const setCalls = localStorageMock.setItem.mock.calls.filter(
       (c) => c[0] === scopedKey,
     );
     expect(setCalls.length).toBeGreaterThan(0);
-    // Stored blob reflects the toggle.
     const stored = JSON.parse(store.get(scopedKey)!);
     expect(stored.toggleByScopeRef[REF_BTC]).toBe(false);
   });
 
-  it("T_USE5 addStrategyBrowse → draft updates + localStorage updated", () => {
-    const { result } = renderHook(() =>
+  it("T_USE5 addStrategyBrowse → draft updates + localStorage updated (post-flush)", () => {
+    const { result, unmount } = renderHook(() =>
       useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
     );
 
     act(() => {
       result.current.addStrategyBrowse(STRAT_A);
     });
-
     expect(result.current.draft.addedStrategies.map((s) => s.id)).toContain(
       STRAT_A.id,
     );
+
+    act(() => {
+      unmount();
+    });
     const stored = JSON.parse(store.get(scenarioStorageKey(ALLOCATOR_A))!);
     expect(
-      stored.addedStrategies.some(
-        (s: { id: string }) => s.id === STRAT_A.id,
-      ),
+      stored.addedStrategies.some((s: { id: string }) => s.id === STRAT_A.id),
     ).toBe(true);
   });
 
-  it("T_USE6 addStrategyBridge → draft updates + localStorage updated", () => {
-    const { result } = renderHook(() =>
+  it("T_USE6 addStrategyBridge → draft updates + localStorage updated (post-flush)", () => {
+    const { result, unmount } = renderHook(() =>
       useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
     );
 
     act(() => {
       result.current.addStrategyBridge(REF_BTC, STRAT_A);
     });
-
     expect(result.current.draft.addedStrategies.map((s) => s.id)).toContain(
       STRAT_A.id,
     );
+
+    act(() => {
+      unmount();
+    });
     const stored = JSON.parse(store.get(scenarioStorageKey(ALLOCATOR_A))!);
     expect(
-      stored.addedStrategies.some(
-        (s: { id: string }) => s.id === STRAT_A.id,
-      ),
+      stored.addedStrategies.some((s: { id: string }) => s.id === STRAT_A.id),
     ).toBe(true);
   });
 
-  it("T_USE7 removeAddedStrategy → draft updates + localStorage updated", () => {
-    const { result } = renderHook(() =>
+  it("T_USE7 removeAddedStrategy → draft updates + localStorage updated (post-flush)", () => {
+    const { result, unmount } = renderHook(() =>
       useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
     );
 
@@ -238,24 +248,61 @@ describe("useScenarioState", () => {
     act(() => {
       result.current.removeAddedStrategy(STRAT_A.id);
     });
-
     expect(result.current.draft.addedStrategies.length).toBe(0);
+
+    act(() => {
+      unmount();
+    });
     const stored = JSON.parse(store.get(scenarioStorageKey(ALLOCATOR_A))!);
     expect(stored.addedStrategies.length).toBe(0);
   });
 
-  it("T_USE8 setWeightOverride → draft updates + localStorage updated", () => {
-    const { result } = renderHook(() =>
+  it("T_USE8 setWeightOverride → draft updates + localStorage updated (post-flush)", () => {
+    const { result, unmount } = renderHook(() =>
       useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
     );
 
     act(() => {
       result.current.setWeightOverride(REF_BTC, 0.8);
     });
-
     expect(result.current.draft.weightOverrides[REF_BTC]).toBeCloseTo(0.8, 9);
+
+    act(() => {
+      unmount();
+    });
     const stored = JSON.parse(store.get(scenarioStorageKey(ALLOCATOR_A))!);
     expect(stored.weightOverrides[REF_BTC]).toBeCloseTo(0.8, 9);
+  });
+
+  it("H-0125 — a mutation does NOT write localStorage synchronously; the debounce coalesces a burst into ONE flushed write", () => {
+    const { result, unmount } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+    const scopedKey = scenarioStorageKey(ALLOCATOR_A);
+    const writesToKey = () =>
+      localStorageMock.setItem.mock.calls.filter((c) => c[0] === scopedKey)
+        .length;
+
+    // Deferred hydration does not persist — baseline is zero writes.
+    expect(writesToKey()).toBe(0);
+
+    // A burst of weight edits (pre-B7: one synchronous setItem PER edit).
+    act(() => {
+      result.current.setWeightOverride(REF_BTC, 0.7);
+      result.current.setWeightOverride(REF_BTC, 0.8);
+      result.current.setWeightOverride(REF_BTC, 0.9);
+    });
+    // Debounced — NOT written synchronously.
+    expect(writesToKey()).toBe(0);
+
+    // The guaranteed flush coalesces the burst into exactly ONE write of the
+    // last value.
+    act(() => {
+      unmount();
+    });
+    expect(writesToKey()).toBe(1);
+    const stored = JSON.parse(store.get(scopedKey)!);
+    expect(stored.weightOverrides[REF_BTC]).toBeCloseTo(0.9, 9);
   });
 
   it("T_USE9 reset → removeItem called with allocator-scoped key + draft reinitialized + fingerprintMismatch cleared", () => {
@@ -475,36 +522,93 @@ describe("useScenarioState", () => {
     expect(result.current.diffCount).toBe(1);
   });
 
-  // H-0124 — pins the CONSERVATIVE M8 contract the source documents
-  // (useScenarioState.ts:174-189): diffCount counts toggle changes + added
-  // strategies + ONLY user-explicit weight overrides tracked via the optional
-  // `userWeightOverrides` field. The `setWeightOverride` mutator writes to
-  // `weightOverrides` (the renormalizable map), NOT `userWeightOverrides`, so
-  // by design a direct weight drag does NOT increment diffCount under Plan 01's
-  // current draft shape. This is intended behavior — the footer chip showing
-  // "No changes yet" after a manual weight edit is the documented conservative
-  // stance, since toggle-off renormalization also writes the entire weights map
-  // and the two cannot be distinguished at this layer. T_USE13 only covers the
-  // toggle path; this pins the weight-override path that the hook reads but the
-  // existing suite never wrote.
-  it("H-0124 — setWeightOverride alone does NOT increment diffCount (conservative M8 contract; userWeightOverrides absent in Plan 01 shape)", () => {
+  // H-0126 (was H-0124, FLIPPED by B7a-2) — `setWeightOverride` now records the
+  // user-touched ref in `userWeightOverrides` (the only writer of that map), so
+  // a PURE-REBALANCE (weight edits with no toggle/add) increments diffCount and
+  // un-blocks the Commit button. The prior "conservative zero" silently locked
+  // out the documented voluntary_modify workflow (CONTEXT D-17). Toggle-off
+  // renormalization rewrites `weightOverrides` but NOT `userWeightOverrides`, so
+  // T_USE13's "1 toggle = 1 change" contract still holds (no double-count).
+  it("H-0126 — setWeightOverride alone DOES increment diffCount now (records a user-explicit override; un-blocks pure-rebalance Commit)", () => {
     const { result } = renderHook(() =>
       useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
     );
     expect(result.current.diffCount).toBe(0);
 
     act(() => {
-      // User explicitly drags BTC's weight to 0.9. weightOverrides updates,
-      // but the draft carries no `userWeightOverrides` field (Plan 01 shape),
-      // so diffCount stays 0 by design.
+      // User explicitly drags BTC's weight to 0.9.
       result.current.setWeightOverride(REF_BTC, 0.9);
     });
 
-    // The weight DID change in the draft...
     expect(result.current.draft.weightOverrides[REF_BTC]).toBeCloseTo(0.9, 9);
-    // ...but diffCount stays 0 (no toggle change, no added strategy, and the
-    // weight change is not a tracked user-explicit override).
+    // userWeightOverrides[BTC]=0.9 diverges from the default 0.6 → diffCount 1.
+    expect(result.current.diffCount).toBe(1);
+    // And the touched ref is recorded for forensic/round-trip clarity.
+    expect(result.current.draft.userWeightOverrides?.[REF_BTC]).toBeCloseTo(0.9, 9);
+  });
+
+  // H-0126 (review fix, silent-failure-hunter conf 8) — a user-weighted holding
+  // that is then toggled OFF must count as ONE change, not two. The stale
+  // userWeightOverrides entry for a now-disabled ref is not part of the
+  // committed allocation (the commit path skips toggled-off refs), so diffCount
+  // must skip it. Pre-fix this double-counted (toggle change + stale override).
+  it("H-0126 — weight-edit then toggle-OFF of the SAME ref counts as 1 change, not 2 (disabled ref's override is excluded)", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
     expect(result.current.diffCount).toBe(0);
+
+    act(() => {
+      result.current.setWeightOverride(REF_BTC, 0.8);
+    });
+    expect(result.current.diffCount).toBe(1); // one user weight override
+
+    act(() => {
+      result.current.toggleHolding(REF_BTC); // BTC → OFF
+    });
+    // One net change (BTC toggled off). The stale userWeightOverrides[BTC] for
+    // the now-disabled row must NOT add a second count.
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(false);
+    expect(result.current.diffCount).toBe(1);
+
+    // Toggling BTC back ON re-counts its still-divergent override (BTC enabled
+    // again, override 0.8 ≠ default 0.6) → 1.
+    act(() => {
+      result.current.toggleHolding(REF_BTC);
+    });
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(true);
+    expect(result.current.diffCount).toBe(1);
+  });
+
+  it("B7a-2 — editing while the fingerprint-mismatch banner is up rebases onto the default draft and clears the mismatch", () => {
+    // Stored draft is a valid v1 blob but for a DIFFERENT holdings set.
+    const persisted: ScenarioDraft = {
+      schema_version: 1,
+      init_holdings_fingerprint: "stale-different-holdings",
+      toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: false },
+      addedStrategies: [],
+      weightOverrides: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+      lastEditedAt: "2026-01-01T00:00:00.000Z",
+    };
+    store.set(scenarioStorageKey(ALLOCATOR_A), JSON.stringify(persisted));
+
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+
+    // Mismatch surfaces; the WORKING draft is the default (both holdings ON),
+    // NOT the stale stored draft (which had BTC off).
+    expect(result.current.fingerprintMismatch).toBe(true);
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(true);
+
+    // Editing operates on the default the user actually sees, and the resulting
+    // write carries the current fingerprint → the mismatch clears.
+    act(() => {
+      result.current.toggleHolding(REF_ETH);
+    });
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(true);
+    expect(result.current.draft.toggleByScopeRef[REF_ETH]).toBe(false);
+    expect(result.current.fingerprintMismatch).toBe(false);
   });
 
   // H-0124 (companion) — prove the diffCount math DOES read userWeightOverrides
@@ -569,15 +673,13 @@ describe("useScenarioState", () => {
     expect(addedIds.length).toBe(2);
   });
 
-  // (b) The hook installs NO `storage` event listener (useScenarioState.ts —
-  // only the persist effect + auth-change clear). A second browser tab editing
-  // the SAME allocator's draft writes to localStorage and dispatches a
-  // `storage` event, but tab A's hook does NOT subscribe, so its in-memory
-  // draft is unchanged — and tab A's next persist will overwrite tab B's
-  // write. This is a real two-tab race for a long-form scenario builder. The
-  // test pins the CURRENT (no-cross-tab-sync) contract so a future change that
-  // adds a listener surfaces here intentionally rather than silently.
-  it("M-0136: cross-tab write does NOT propagate — hook installs no `storage` listener (pins the known limitation)", () => {
+  // (b) FLIPPED by B7a-2 — the hook now routes through `useCrossTabStorage`,
+  // which installs a `storage` event listener with flush-before-adopt + no-op
+  // detection. A second tab editing the SAME allocator's draft (same holdings
+  // fingerprint) now propagates to tab A's in-memory draft with no reload and
+  // no clobber. This closes the two-tab race the pre-B7 contract pinned as a
+  // known limitation.
+  it("M-0136: a cross-tab write to the SAME allocator key DOES propagate (B7 storage-event sync)", () => {
     const { result } = renderHook(() =>
       useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
     );
@@ -585,8 +687,8 @@ describe("useScenarioState", () => {
     // Baseline: BTC enabled.
     expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(true);
 
-    // Simulate ANOTHER tab persisting an edited draft for the SAME allocator
-    // and the browser firing the cross-tab `storage` event.
+    // ANOTHER tab persists an edited draft for the SAME allocator (same
+    // fingerprint) and the browser fires the cross-tab `storage` event.
     const scopedKey = scenarioStorageKey(ALLOCATOR_A);
     const otherTabDraft: ScenarioDraft = {
       ...defaultDraftFromHoldings(HOLDINGS_2, computeHoldingsFingerprint(HOLDINGS_2)),
@@ -602,8 +704,132 @@ describe("useScenarioState", () => {
       );
     });
 
-    // No listener → tab A's draft is unchanged (still BTC enabled). This is the
-    // documented limitation, not a bug fix.
+    // The primitive's storage listener adopted the foreign write — tab A's
+    // draft now reflects BTC toggled off.
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(false);
+  });
+
+  // B7a-2 review-hardening (pr-test-analyzer) — a cross-tab write carrying a
+  // DIFFERENT fingerprint (the other tab is on a stale holdings set) is adopted
+  // into the primitive's value, and the derived state then surfaces the
+  // mismatch banner + falls back to the default draft (not the stale foreign
+  // toggles).
+  it("M-0136 — a cross-tab write with a DIFFERENT fingerprint adopts then surfaces fingerprintMismatch (draft falls back to default)", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+    expect(result.current.fingerprintMismatch).toBe(false);
     expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(true);
+
+    const scopedKey = scenarioStorageKey(ALLOCATOR_A);
+    const staleForeign: ScenarioDraft = {
+      schema_version: 1,
+      init_holdings_fingerprint: "stale-other-tab-holdings",
+      toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: false },
+      addedStrategies: [],
+      weightOverrides: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+      lastEditedAt: "2026-01-01T00:00:00.000Z",
+    };
+    act(() => {
+      store.set(scopedKey, JSON.stringify(staleForeign));
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: scopedKey,
+          newValue: JSON.stringify(staleForeign),
+        }),
+      );
+    });
+
+    // Adopted (value is the foreign draft) → mismatch surfaces, working draft is
+    // the default (both holdings ON), not the foreign all-off toggles.
+    expect(result.current.fingerprintMismatch).toBe(true);
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(true);
+    expect(result.current.draft.toggleByScopeRef[REF_ETH]).toBe(true);
+  });
+
+  // B7a-2 review-hardening — the in-place allocator key-flip (a single mounted
+  // hook whose allocatorId prop changes) must not surface a SPURIOUS mismatch
+  // for a new allocator whose stored draft matches their holdings, and MUST
+  // surface a real one for a stale new allocator. Pins the deferred-hydration
+  // key-flip race the hook claims immunity to (storedMismatch derives from the
+  // freshly hydrated `value`, never a stale prior-allocator value).
+  it("M1 — in-place A→B key-flip: B's matching-fingerprint draft does NOT surface a spurious mismatch", () => {
+    const fpB = computeHoldingsFingerprint(HOLDINGS_B);
+    store.set(
+      scenarioStorageKey(ALLOCATOR_B),
+      JSON.stringify(defaultDraftFromHoldings(HOLDINGS_B, fpB)),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ allocatorId, holdings }: { allocatorId: string; holdings: HoldingForDefault[] }) =>
+        useScenarioState({ holdingsSummary: holdings, allocatorId }),
+      { initialProps: { allocatorId: ALLOCATOR_A, holdings: HOLDINGS_2 } },
+    );
+    expect(result.current.fingerprintMismatch).toBe(false);
+
+    rerender({ allocatorId: ALLOCATOR_B, holdings: HOLDINGS_B });
+    // B's stored draft matches B's holdings → no spurious banner from the flip.
+    expect(result.current.fingerprintMismatch).toBe(false);
+    expect(
+      result.current.draft.toggleByScopeRef["holding:kraken:DOGE:spot"],
+    ).toBe(true);
+  });
+
+  it("M1 — in-place A→B key-flip: B's STALE-fingerprint draft surfaces fingerprintMismatch", () => {
+    store.set(
+      scenarioStorageKey(ALLOCATOR_B),
+      JSON.stringify({
+        schema_version: 1,
+        init_holdings_fingerprint: "stale-not-matching-B",
+        toggleByScopeRef: { "holding:kraken:DOGE:spot": true },
+        addedStrategies: [],
+        weightOverrides: { "holding:kraken:DOGE:spot": 1.0 },
+        lastEditedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ allocatorId, holdings }: { allocatorId: string; holdings: HoldingForDefault[] }) =>
+        useScenarioState({ holdingsSummary: holdings, allocatorId }),
+      { initialProps: { allocatorId: ALLOCATOR_A, holdings: HOLDINGS_2 } },
+    );
+    expect(result.current.fingerprintMismatch).toBe(false);
+
+    rerender({ allocatorId: ALLOCATOR_B, holdings: HOLDINGS_B });
+    expect(result.current.fingerprintMismatch).toBe(true);
+    // Default-init from B's holdings (DOGE on).
+    expect(
+      result.current.draft.toggleByScopeRef["holding:kraken:DOGE:spot"],
+    ).toBe(true);
+  });
+
+  it("B7a-2 — reset() before the debounce flush does NOT let a pending write resurrect the removed key", () => {
+    vi.useFakeTimers();
+    try {
+      const scopedKey = scenarioStorageKey(ALLOCATOR_A);
+      const { result } = renderHook(() =>
+        useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+      );
+
+      // Arm the debounce with a mutation, then reset BEFORE the 150ms window.
+      act(() => {
+        result.current.setWeightOverride(REF_BTC, 0.7);
+      });
+      act(() => {
+        result.current.reset();
+      });
+      // Advance well past the debounce window — no resurrected write.
+      act(() => {
+        vi.advanceTimersByTime(500);
+      });
+
+      expect(store.has(scopedKey)).toBe(false);
+      const setCallsAfterReset = localStorageMock.setItem.mock.calls.filter(
+        (c) => c[0] === scopedKey,
+      );
+      expect(setCallsAfterReset.length).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

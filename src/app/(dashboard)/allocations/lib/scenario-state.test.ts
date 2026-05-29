@@ -27,6 +27,7 @@ import {
   removeAddedStrategy,
   setWeightOverride,
   renormalizeWeights,
+  scenarioDraftCodec,
   SCENARIO_SCHEMA_VERSION,
   type ScenarioDraft,
   type AddedStrategy,
@@ -127,6 +128,28 @@ describe("toggleHolding", () => {
     expect(next).not.toBe(initial);
     // Original untouched
     expect(initial.toggleByScopeRef["holding:binance:BTC:spot"]).toBe(true);
+  });
+
+  // M-0152 — the "Toggle ON" branch must restore a preserved weight of EXACTLY
+  // 1.0 (boundary) as the source of truth, scaling the others to 0. The pre-B7
+  // guard `w > 0 && w < 1` excluded w === 1 and fell into equal-distribution,
+  // silently discarding the 100% intent.
+  it("M-0152 toggle ON restores a preserved weight of EXACTLY 1.0 (others → 0), not equal-distribution", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    // Drive BTC to 1.0 (ETH renormalizes to 0).
+    const btcFull = setWeightOverride(initial, "holding:binance:BTC:spot", 1.0);
+    expect(btcFull.weightOverrides["holding:binance:BTC:spot"]).toBeCloseTo(1.0, 9);
+    // Toggle BTC OFF — its 1.0 is preserved; ETH (sole remaining) → 1.0.
+    const btcOff = toggleHolding(btcFull, "holding:binance:BTC:spot");
+    expect(btcOff.toggleByScopeRef["holding:binance:BTC:spot"]).toBe(false);
+    expect(btcOff.weightOverrides["holding:binance:BTC:spot"]).toBeCloseTo(1.0, 9);
+    // Toggle BTC back ON — preserved 1.0 is the source of truth: BTC=1.0,
+    // ETH scaled by (1 - 1) = 0. Pre-fix this lost the intent (BTC→0, ETH→1.0).
+    const btcOn = toggleHolding(btcOff, "holding:binance:BTC:spot");
+    expect(btcOn.toggleByScopeRef["holding:binance:BTC:spot"]).toBe(true);
+    expect(btcOn.weightOverrides["holding:binance:BTC:spot"]).toBeCloseTo(1.0, 9);
+    expect(btcOn.weightOverrides["holding:binance:ETH:spot"]).toBeCloseTo(0, 9);
+    expect(sumEnabled(btcOn)).toBeCloseTo(1.0, 9);
   });
 });
 
@@ -321,6 +344,129 @@ describe("setWeightOverride", () => {
       Number.POSITIVE_INFINITY,
     );
     expect(out).toBe(initial);
+  });
+
+  // H-0126 — setWeightOverride is the ONLY writer of `userWeightOverrides`; it
+  // records exactly the user-touched ref (not the renormalized siblings), which
+  // is what lets diffCount count a pure-rebalance without double-counting
+  // toggle-off renormalization.
+  it("H-0126 setWeightOverride records the touched ref in userWeightOverrides (only that ref)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    expect(initial.userWeightOverrides).toBeUndefined();
+    const out = setWeightOverride(initial, "holding:binance:BTC:spot", 0.8);
+    expect(out.userWeightOverrides).toEqual({ "holding:binance:BTC:spot": 0.8 });
+    // ETH was renormalized to 0.2 (a side-effect), NOT user-touched → unrecorded.
+    expect(out.userWeightOverrides?.["holding:binance:ETH:spot"]).toBeUndefined();
+  });
+
+  it("H-0126 toggle/add do NOT write userWeightOverrides (renormalization never inflates diffCount)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    expect(
+      toggleHolding(initial, "holding:binance:BTC:spot").userWeightOverrides,
+    ).toBeUndefined();
+    expect(addStrategyBrowse(initial, STRAT_A).userWeightOverrides).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scenarioDraftCodec — B7a-2 zod parse + version trichotomy (M-0153)
+// ---------------------------------------------------------------------------
+describe("scenarioDraftCodec", () => {
+  const def = defaultDraftFromHoldings(HOLDINGS_2);
+  const codec = scenarioDraftCodec(def);
+  const validV1 = (): ScenarioDraft => ({
+    schema_version: SCENARIO_SCHEMA_VERSION,
+    init_holdings_fingerprint: "fp",
+    toggleByScopeRef: { "holding:binance:BTC:spot": true },
+    addedStrategies: [],
+    weightOverrides: { "holding:binance:BTC:spot": 1 },
+    lastEditedAt: "2026-04-25T00:00:00.000Z",
+  });
+
+  it("null → default, outcome ok", () => {
+    const r = codec.decode(null);
+    expect(r.outcome).toBe("ok");
+    expect(r.value).toBe(def);
+  });
+
+  it("valid v1 → adopt, outcome ok", () => {
+    const r = codec.decode(JSON.stringify(validV1()));
+    expect(r.outcome).toBe("ok");
+    expect(r.value.weightOverrides["holding:binance:BTC:spot"]).toBe(1);
+  });
+
+  it("corrupt JSON → reset(parse_failed) → default (fail-loud, was silent pre-B7)", () => {
+    const r = codec.decode("{not json");
+    expect(r.outcome).toBe("reset");
+    expect(r.reason).toBe("parse_failed");
+    expect(r.value).toBe(def);
+  });
+
+  // M-0153 — the pre-B7 `JSON.parse(raw) as ScenarioDraft` flowed a wrong-typed
+  // toggleByScopeRef straight through (localStorage.test.ts M-0150 pins that for
+  // the legacy helper). The codec zod-rejects it → reset → default.
+  it("M-0153 schema-invalid v1 (toggleByScopeRef is an array) → reset(schema_invalid) → default", () => {
+    const bad = { ...validV1(), toggleByScopeRef: ["not", "an", "object"] };
+    const r = codec.decode(JSON.stringify(bad));
+    expect(r.outcome).toBe("reset");
+    expect(r.reason).toBe("schema_invalid");
+    expect(r.value).toBe(def);
+  });
+
+  it("missing schema_version → reset(version_mismatch)", () => {
+    const noVer: Partial<ScenarioDraft> = { ...validV1() };
+    delete noVer.schema_version;
+    const r = codec.decode(JSON.stringify(noVer));
+    expect(r.outcome).toBe("reset");
+    expect(r.reason).toBe("version_mismatch");
+  });
+
+  // Forward-compat: a newer build wrote a higher version. Show the data
+  // read-only; never down-convert (the pre-B7 path reset → default → next save
+  // silently down-converted the newer blob to v1).
+  it("forward version (schema_version=2) → readonly(version_ahead), shows the user's data", () => {
+    const ahead = { ...validV1(), schema_version: SCENARIO_SCHEMA_VERSION + 1 };
+    const r = codec.decode(JSON.stringify(ahead));
+    expect(r.outcome).toBe("readonly");
+    expect(r.reason).toBe("version_ahead");
+    expect(r.value.weightOverrides["holding:binance:BTC:spot"]).toBe(1);
+  });
+
+  it("encode is byte-compatible with the pre-B7 JSON.stringify(draft)", () => {
+    const d = validV1();
+    expect(codec.encode(d)).toBe(JSON.stringify(d));
+  });
+
+  // Review-hardening (pr-test-analyzer) — pin every non-canonical schema_version
+  // branch. Only a legit higher INTEGER version is forward-compat (readonly);
+  // a string / 0 / negative / float / NaN version is malformed → reset, NOT
+  // trusted as a future build.
+  it.each([
+    ["string '1'", "1"],
+    ["zero", 0],
+    ["negative", -1],
+    ["float 1.5 (malformed, NOT a real future build)", 1.5],
+    ["float 2.5", 2.5],
+  ])("non-canonical schema_version (%s) → reset, never readonly/ok", (_label, version) => {
+    const blob = { ...validV1(), schema_version: version };
+    const r = codec.decode(JSON.stringify(blob));
+    expect(r.outcome).toBe("reset");
+    expect(r.value).toBe(def);
+  });
+
+  // userWeightOverrides is an additive optional field (H-0126). Pin that it
+  // survives a full encode→decode round-trip so diffCount's dependency on it
+  // can't silently break.
+  it("round-trips userWeightOverrides through encode → decode", () => {
+    const withOverrides: ScenarioDraft = {
+      ...validV1(),
+      userWeightOverrides: { "holding:binance:BTC:spot": 0.8 },
+    };
+    const r = codec.decode(codec.encode(withOverrides));
+    expect(r.outcome).toBe("ok");
+    expect(r.value.userWeightOverrides).toEqual({
+      "holding:binance:BTC:spot": 0.8,
+    });
   });
 });
 
