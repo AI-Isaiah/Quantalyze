@@ -610,7 +610,7 @@ const ORIGINAL_LOCALSTORAGE_DESCRIPTOR = Object.getOwnPropertyDescriptor(
   "localStorage",
 );
 
-describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / H-0060)", () => {
+describe("AllocationsTabs — audit-2026-05-07 cluster P ui_v2 flag (C-0336 / H-0060)", () => {
   // Vitest's jsdom environment here exposes a localStorage backend that
   // doesn't permit direct setItem/spyOn (see `--localstorage-file` warning).
   // Override `window.localStorage` with a vanilla in-memory shim so the
@@ -664,7 +664,7 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / 
     }
   });
 
-  it("localStorage getItem throw emits loadUiV2Flag_failed breadcrumb (C-0336)", () => {
+  it("localStorage getItem throw surfaces a fail-loud cross-tab breadcrumb (C-0336)", () => {
     const warnSpy = vi
       .spyOn(console, "warn")
       .mockImplementation(() => undefined);
@@ -675,15 +675,21 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / 
     setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
 
+    // B7: the ui_v2 read routes through useCrossTabStorage; a getItem throw is
+    // caught + logged by the primitive (tagged with the key + the actual
+    // error), replacing the old readUiV2Flag try/catch breadcrumb. Default V2
+    // behaviour is preserved (the flag falls back to "default"). The co-mounted
+    // TweaksProvider also reads localStorage through the primitive, so we
+    // target the ui_v2-keyed breadcrumb specifically rather than the first one.
     const matching = warnSpy.mock.calls.find(
       (c) =>
         typeof c[0] === "string" &&
-        c[0].includes("loadUiV2Flag_failed"),
+        c[0].includes("[cross-tab] localStorage read threw") &&
+        (c[1] as { key?: string } | undefined)?.key === "allocations.ui_v2",
     );
     expect(matching).toBeDefined();
-    expect(
-      (matching![1] as { reason: string }).reason,
-    ).toContain("SecurityError");
+    // The underlying error (C-0336 reason) is preserved as the third warn arg.
+    expect(String(matching![2])).toContain("SecurityError");
     warnSpy.mockRestore();
   });
 
@@ -720,6 +726,49 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P loadUiV2Flag (C-0336 / 
         c[0].includes("ui_v2_rollback_scope_scenario_only"),
     );
     expect(matching).toBeUndefined();
+    warnSpy.mockRestore();
+  });
+
+  it("B7: a cross-tab storage event flipping allocations.ui_v2 to 'false' is adopted post-mount", () => {
+    // Rule-9 coverage gap (type-design review): the read-only ui_v2 flag now
+    // routes through useCrossTabStorage, so an operator setting the rollback
+    // flag in ANOTHER tab must sync into this one. Mount with no flag (default
+    // V2, no breadcrumb), then dispatch a foreign storage event and assert the
+    // primitive adopted the flip — observed via the H-1188 breadcrumb firing
+    // only AFTER the event (not on mount).
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+
+    const rollbackBefore = warnSpy.mock.calls.filter(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("ui_v2_rollback_scope_scenario_only"),
+    ).length;
+    expect(rollbackBefore).toBe(0);
+
+    // Another tab sets the rollback flag → storage event (the primitive decodes
+    // e.newValue directly; setItem keeps the shim consistent for any re-read).
+    act(() => {
+      storageShim.setItem("allocations.ui_v2", "false");
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: "allocations.ui_v2",
+          newValue: "false",
+        }),
+      );
+    });
+
+    const rollbackAfter = warnSpy.mock.calls.filter(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("ui_v2_rollback_scope_scenario_only") &&
+        (c[1] as { affected_surface?: string } | undefined)?.affected_surface ===
+          "scenario",
+    ).length;
+    expect(rollbackAfter).toBeGreaterThan(0);
     warnSpy.mockRestore();
   });
 });

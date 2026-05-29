@@ -6,10 +6,15 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from "react";
+import {
+  useCrossTabStorage,
+  type DecodeResult,
+  type StorageCodec,
+} from "@/lib/storage/cross-tab";
+import { stripPoisonKeys } from "@/lib/storage/codecs";
 
 /**
  * PR3 (HANDOFF G5) — TweaksProvider
@@ -26,9 +31,18 @@ import {
  *   showOutcomes     boolean                       → outcomes tile visibility
  *
  * Side effects flow through useEffect inside the provider so consumers
- * only re-render when the slice they read changes. Persistence is in
- * localStorage under "allocations.tweaks" (keeps the v0.15.x key from
- * the QA-gated component so stored preferences survive the lift).
+ * only re-render when the slice they read changes.
+ *
+ * B7 (cross-tab/cross-version storage safety) — persistence now routes
+ * through the `useCrossTabStorage` primitive + {@link tweakStateCodec}. The
+ * primitive owns the localStorage mechanics (SSR-safe deferred hydration,
+ * cross-tab StorageEvent sync, the dirtyRef observe-without-rewrite guard that
+ * replaces the old hand-rolled `fromCrossTabEventRef` write-back loop guard,
+ * fail-loud console + Sentry breadcrumbs on a corrupt/failed read or write);
+ * the codec owns parse + per-field validate + serialize. The persisted key
+ * stays "allocations.tweaks" with the UNVERSIONED `JSON.stringify(state)` shape
+ * from the v0.15.x QA-gated component, so stored preferences survive the lift
+ * byte-for-byte (the codec adds no version envelope).
  */
 
 export type TweakState = {
@@ -56,7 +70,7 @@ const STORAGE_KEY = "allocations.tweaks";
 // Field-by-field guards keep persisted blobs from smuggling values outside
 // the declared unions through the JSON.parse cast — guarding the schema-less
 // parse anti-pattern (a raw cast that lets unvalidated values into typed
-// state). The load path is the single seam where runtime data crosses in.
+// state). The codec's decode is the single seam where runtime data crosses in.
 const DENSITY_VALUES: ReadonlySet<TweakState["density"]> = new Set([
   "tight",
   "comfortable",
@@ -84,67 +98,41 @@ function pickUnion<T extends string>(
   candidate: unknown,
   allowed: ReadonlySet<T>,
   fallback: T,
-  fieldName?: string,
 ): T {
-  if (typeof candidate === "string") {
-    if ((allowed as ReadonlySet<string>).has(candidate)) {
-      return candidate as T;
-    }
-    // retro audit (silent-failure-hunter L9 c9): distinguish "never
-    // set" (skip log) from "set to invalid value" (warn). A persisted
-    // ultra-tight density (from a feature flag that shipped a 4th
-    // option and was rolled back, or hand-edited localStorage)
-    // previously snapped to the fallback with no breadcrumb — exactly
-    // the silent-drift the audit said this fix was supposed to close.
-    if (candidate.length > 0 && typeof console !== "undefined") {
-      console.warn(
-        "[TweaksContext] parseTweakState — discarding unknown value, falling back to default",
-        { field: fieldName ?? "unknown", value: candidate, fallback },
-      );
-    }
+  if (typeof candidate === "string" && (allowed as ReadonlySet<string>).has(candidate)) {
+    return candidate as T;
   }
   return fallback;
 }
 
-function parseTweakState(raw: unknown): TweakState {
-  if (!raw || typeof raw !== "object") return TWEAK_DEFAULTS;
-  // retro audit (red-team L12 c7): rebase the input through
-  // Object.create(null) so a hostile `__proto__` payload in
-  // localStorage cannot smuggle a value through the prototype chain
-  // when we read r.density / r.bridgeVariant / etc. Without this,
-  // a hand-edited blob like `{"__proto__":{"density":"tight"}}`
-  // could surface "tight" via prototype lookup even though the own-
-  // property is absent.
-  const r = Object.assign(
-    Object.create(null) as Record<string, unknown>,
-    raw as Record<string, unknown>,
-  );
+/**
+ * Per-field coercion of an already-poison-stripped plain record into a
+ * `TweakState`. Each field independently falls back to its default when the
+ * persisted value is absent or outside its union — a single drifted field (a
+ * rolled-back 4th density option, a hand-edited blob) folds to that field's
+ * default while every other valid field survives. Unknown extra keys are
+ * dropped (the projection only reads the 7 known fields), so a stray
+ * `version`/`futureKnob` cannot leak into typed state.
+ */
+function parseTweakFields(r: Record<string, unknown>): TweakState {
   return {
-    density: pickUnion(r.density, DENSITY_VALUES, TWEAK_DEFAULTS.density, "density"),
+    density: pickUnion(r.density, DENSITY_VALUES, TWEAK_DEFAULTS.density),
     accentIntensity: pickUnion(
       r.accentIntensity,
       ACCENT_VALUES,
       TWEAK_DEFAULTS.accentIntensity,
-      "accentIntensity",
     ),
     displayFont: pickUnion(
       r.displayFont,
       DISPLAY_FONT_VALUES,
       TWEAK_DEFAULTS.displayFont,
-      "displayFont",
     ),
     bridgeVariant: pickUnion(
       r.bridgeVariant,
       BRIDGE_VARIANT_VALUES,
       TWEAK_DEFAULTS.bridgeVariant,
-      "bridgeVariant",
     ),
-    chartStyle: pickUnion(
-      r.chartStyle,
-      CHART_STYLE_VALUES,
-      TWEAK_DEFAULTS.chartStyle,
-      "chartStyle",
-    ),
+    chartStyle: pickUnion(r.chartStyle, CHART_STYLE_VALUES, TWEAK_DEFAULTS.chartStyle),
     showBench:
       typeof r.showBench === "boolean" ? r.showBench : TWEAK_DEFAULTS.showBench,
     showOutcomes:
@@ -154,22 +142,56 @@ function parseTweakState(raw: unknown): TweakState {
   };
 }
 
-function loadTweaks(): TweakState {
-  if (typeof window === "undefined") return TWEAK_DEFAULTS;
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return TWEAK_DEFAULTS;
-    return parseTweakState(JSON.parse(raw));
-  } catch (err) {
-    // Surfacing the failure (corrupt JSON, Safari SecurityError, quota exceeded
-    // on a stale browser, etc.) gives ops a console signal — the prior bare
-    // catch coerced every failure mode into 'defaults' indistinguishably.
-    if (typeof console !== "undefined") {
-      console.warn("[TweaksContext] loadTweaks failed; falling back to defaults", err);
+/**
+ * B7 cross-tab storage codec for the UNVERSIONED `allocations.tweaks` blob.
+ *
+ * The cross-tab primitive owns the localStorage mechanics; this codec owns
+ * parse + per-field validate + serialize. The persisted shape is the bare
+ * `JSON.stringify(TweakState)` the v0.15.x QA-gated component shipped (no
+ * version envelope), so {@link tweakStateCodec.encode} is a plain
+ * `JSON.stringify` — a round-trip is byte-identical and existing blobs load
+ * unchanged (the byte-compat gate). Decode salvages field-by-field rather than
+ * resetting the whole blob on one drifted field; a hard failure (non-JSON, or a
+ * non-object top level) returns the defaults with a "reset" outcome so the
+ * primitive emits its fail-loud console + Sentry breadcrumb.
+ *
+ * MUST be pure / side-effect free (the StorageCodec contract): decode runs on
+ * every cross-tab StorageEvent, and during render under "lazy" hydration. The
+ * per-field invalid-value console.warn the pre-B7 loader emitted (the L9
+ * silent-failure audit fix) is therefore dropped here. The primitive's
+ * blob-level fail-loud breadcrumb (parse_failed / schema_invalid → console.warn
+ * + Sentry) is STRONGER for whole-blob corruption, but does NOT cover a single
+ * drifted field on an otherwise-valid blob — that case decodes "ok" and emits
+ * nothing. This is a knowing, accepted narrowing of the L9 fix's debuggability
+ * intent: the field still self-heals to its default (no wrong value reaches
+ * state, pinned by the union-whitelist tests), and faithfully restoring the
+ * per-field signal would require the shared primitive to surface per-field
+ * coercion on an "ok" decode — out of scope for this consumer, tracked.
+ */
+export const tweakStateCodec: StorageCodec<TweakState> = {
+  decode(raw: string | null): DecodeResult<TweakState> {
+    if (raw == null) return { value: TWEAK_DEFAULTS, outcome: "ok", reason: null };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { value: TWEAK_DEFAULTS, outcome: "reset", reason: "parse_failed" };
     }
-    return TWEAK_DEFAULTS;
-  }
-}
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { value: TWEAK_DEFAULTS, outcome: "reset", reason: "schema_invalid" };
+    }
+    // Strip prototype-poison own keys (e.g. a hand-edited `{"__proto__":{...}}`
+    // blob) before reading r.density / r.bridgeVariant so a hostile payload
+    // cannot surface a value through the prototype chain.
+    const r = stripPoisonKeys(parsed) as Record<string, unknown>;
+    return { value: parseTweakFields(r), outcome: "ok", reason: null };
+  },
+  encode(value: TweakState): string {
+    // Byte-compatible with the pre-B7 `JSON.stringify(state)` write — no version
+    // envelope, so a round-trip is byte-identical and v0.15.x blobs survive.
+    return JSON.stringify(value);
+  },
+};
 
 type TweaksContextValue = {
   state: TweakState;
@@ -183,61 +205,20 @@ type TweaksContextValue = {
 const TweaksContext = createContext<TweaksContextValue | null>(null);
 
 export function TweaksProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<TweakState>(TWEAK_DEFAULTS);
+  // B7 — the primitive owns SSR-safe deferred hydration, cross-tab sync, and
+  // the dirtyRef observe-without-rewrite guard (cross-tab adoption + the
+  // hydration load never re-persist; only a user `setValue` does). debounceMs:0
+  // keeps writes synchronous, preserving the pre-B7 write-on-every-change
+  // semantics (display-pref writes are infrequent enough that debounce buys
+  // little, and the Tweaks panel tests pin a synchronous getItem-after-change).
+  const { value: state, setValue } = useCrossTabStorage<TweakState>({
+    key: STORAGE_KEY,
+    initial: TWEAK_DEFAULTS,
+    codec: tweakStateCodec,
+    debounceMs: 0,
+    sentryArea: STORAGE_KEY,
+  });
   const [panelOpen, setPanelOpen] = useState(false);
-  const [hydrated, setHydrated] = useState(false);
-
-  // retro audit (red-team L6 c8): the persist effect re-enters on every
-  // state change. In Safari private mode / quota-exhausted contexts the
-  // catch fires per keystroke (chip click flips state, persist effect
-  // runs, throws, warns). A user dragging the density slider could emit
-  // 3-4 warnings in <100ms; Sentry capture-console converts each to a
-  // separate event. The audit's "support paper trail" becomes a flood
-  // that buries the actual signal. Dedupe with a ref so we warn at most
-  // once per session.
-  const persistWarnedRef = useRef(false);
-  // red-team C1: guard to break the cross-tab write-back loop.
-  // When Tab B's onStorage listener fires, it sets this ref to true
-  // BEFORE calling setState so the persist effect can check it and
-  // skip the redundant re-write that would fire the storage event
-  // back at Tab A (and thus loop indefinitely). The ref is reset to
-  // false inside the persist effect after the check, once per render.
-  const fromCrossTabEventRef = useRef(false);
-
-  // Hydrate post-mount to avoid SSR mismatch.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState(loadTweaks());
-    setHydrated(true);
-  }, []);
-
-  // Persist whenever state changes (after hydration so we never overwrite
-  // the stored value with TWEAK_DEFAULTS on the initial render).
-  useEffect(() => {
-    if (!hydrated) return;
-    // red-team C1: if this render was triggered by a cross-tab storage event,
-    // skip the write-back — writing the same JSON would fire storage in the
-    // other tab, which would setState here again, looping indefinitely.
-    if (fromCrossTabEventRef.current) {
-      fromCrossTabEventRef.current = false;
-      return;
-    }
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch (err) {
-      // Safari private mode / quota errors are non-fatal for the in-memory
-      // state, but they DO mean the user's preferences won't survive reload —
-      // surface that to the console so a support ticket can be diagnosed.
-      // Dedupe so a quota-exhausted browser doesn't flood console / Sentry.
-      if (!persistWarnedRef.current && typeof console !== "undefined") {
-        persistWarnedRef.current = true;
-        console.warn(
-          "[TweaksContext] localStorage write failed; preferences will not persist",
-          err,
-        );
-      }
-    }
-  }, [state, hydrated]);
 
   // Apply density via body[data-density] so the truth file's
   // body[data-density="tight"] / "loose" CSS rules can swap --row-h
@@ -302,45 +283,14 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
     };
   }, [state.accentIntensity]);
 
-  // NEW-C22-01: cross-tab sync. Without this listener, Tab A toggles density
-  // → Tab B's in-memory state stays stale → Tab B's next knob change persists
-  // its stale snapshot, overwriting Tab A's edit (last-writer-wins). Re-parse
-  // + setState on same-key storage events, wrapped in the same try/catch as
-  // loadTweaks so Safari private-mode failures stay silent.
-  //
-  // red-team C1 fix: set fromCrossTabEventRef BEFORE calling setState so the
-  // persist effect (keyed on [state, hydrated]) knows this state change came
-  // from another tab and must not write back to localStorage. Without this
-  // guard, Tab B receives storage → setState → persist effect fires → writes
-  // same JSON → fires storage in Tab A → onStorage → setState → ... loop.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    function onStorage(e: StorageEvent) {
-      if (e.key !== STORAGE_KEY) return;
-      if (e.newValue === null) return; // ignore clears
-      try {
-        fromCrossTabEventRef.current = true;
-        setState(parseTweakState(JSON.parse(e.newValue)));
-      } catch (err) {
-        // Parse failed — reset the flag so the next local user change
-        // does persist normally.
-        fromCrossTabEventRef.current = false;
-        if (typeof console !== "undefined") {
-          console.warn("[TweaksContext] cross-tab storage event parse failed", err);
-        }
-      }
-    }
-    window.addEventListener("storage", onStorage);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-    };
-  }, []);
+  const set = useCallback<TweaksContextValue["set"]>(
+    (key, value) => {
+      setValue((prev) => ({ ...prev, [key]: value }));
+    },
+    [setValue],
+  );
 
-  const set = useCallback<TweaksContextValue["set"]>((key, value) => {
-    setState((prev) => ({ ...prev, [key]: value }));
-  }, []);
-
-  const reset = useCallback(() => setState(TWEAK_DEFAULTS), []);
+  const reset = useCallback(() => setValue(TWEAK_DEFAULTS), [setValue]);
   const togglePanel = useCallback(() => setPanelOpen((v) => !v), []);
   const closePanel = useCallback(() => setPanelOpen(false), []);
 

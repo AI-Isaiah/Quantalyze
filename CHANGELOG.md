@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.19] - 2026-05-29
+### Changed — Tweaks panel + ui_v2 rollback flag move onto the cross-tab storage primitive (cross-cutting refactor B7, part 4)
+
+The allocator dashboard's two remaining live `localStorage` consumers now persist through the same `useCrossTabStorage` primitive the rest of the cluster consolidated on, completing the B7 storage-safety class for the dashboard. You get the hardening for free: the 7-knob Tweaks state syncs across tabs without the bespoke write-back-loop guard the old provider hand-rolled, a corrupt or non-object blob falls back to defaults with a fail-loud console + Sentry breadcrumb (instead of a silent bare catch), and the dashboard no longer writes a redundant defaults blob to `localStorage` just by mounting.
+
+- **`TweaksProvider` routed through the primitive.** `context/TweaksContext.tsx` gains `tweakStateCodec` — an UNVERSIONED, byte-compatible codec (`encode` is a plain `JSON.stringify`, so existing `allocations.tweaks` blobs load unchanged and a decode→encode round-trip is byte-identical). Per-field union validation is preserved; the hand-rolled persist effect, cross-tab listener, and `fromCrossTabEventRef` write-back-loop guard are deleted in favor of the primitive's `dirtyRef` observe-without-rewrite. Writes stay synchronous (`debounceMs: 0`). The four body-attribute side effects (density / displayFont / showOutcomes / accent) are unchanged.
+- **`allocations.ui_v2` rollback flag routed through the primitive.** `AllocationsTabs.tsx` reads the external operator-set rollback flag via `rawStringCodec` instead of a hand-rolled `readUiV2Flag` + post-mount `setState`-in-effect. SSR-safe deferred hydration replaces the manual SSR-stability dance; the H-1188 scenario-only-scope breadcrumb and the C-0336 read-failure breadcrumb are preserved (the latter now centralized in the primitive).
+- **Findings closed by construction (audit-2026-05-07).** TweaksContext's unvalidated-`JSON.parse`, three silent-catch findings, and the union-rename-not-validated finding, plus the stale AllocationsTabs SSR-flag-churn finding (which described a V1↔V2 *dashboard* swap that no longer exists), are closed by this refactor.
+- **New coverage.** `TweaksContext.codec.test.ts` pins the unversioned byte-compat round-trip (no version envelope added), the fail-loud reset outcomes, per-field salvage, and prototype-poison stripping at the decode boundary.
+
 ## [0.24.15.18] - 2026-05-29
 ### Removed — the dormant configurable widget-grid dashboard (cross-cutting refactor B7, part 3)
 

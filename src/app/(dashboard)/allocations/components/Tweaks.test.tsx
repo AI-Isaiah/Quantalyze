@@ -283,52 +283,48 @@ describe("Tweaks — hydration", () => {
     expect(document.body.getAttribute("data-display-font")).toBe("serif");
   });
 
-  // M-1085 (pr-test-analyzer) — TweaksContext.tsx:209-226 gates the persist
-  // effect behind `if (!hydrated) return;`. Without that gate, the persist
-  // effect fires on the FIRST render (before the hydrate effect has read
-  // localStorage) and writes TWEAK_DEFAULTS — clobbering a concurrent write
-  // from another tab and producing a redundant second write once hydration
-  // completes. The existing "restores persisted state" test seeds storage
-  // and never asserts the WRITE side, so a revert that drops the gate would
-  // pass. These pin the no-overwrite-before-hydration contract by counting
-  // the `allocations.tweaks` setItem writes:
-  //   - clean mount → exactly ONE write (the guard collapses the
-  //     pre-hydration default write; the single write is the post-hydration
-  //     persist of the loaded/default state).
-  //   - first user toggle → exactly one MORE write.
-  // (Empirically verified: removing the guard yields TWO writes on a clean
-  // mount, the first carrying TWEAK_DEFAULTS — the clobber bug.)
+  // M-1085 (pr-test-analyzer) — the original bug was a persist effect that
+  // fired on the FIRST render and wrote TWEAK_DEFAULTS before hydration read
+  // localStorage, clobbering a concurrent cross-tab write. B7 routes
+  // persistence through useCrossTabStorage, whose `dirtyRef` makes hydration
+  // (and cross-tab adoption) observe-without-rewrite: NOTHING is persisted
+  // until the user actually mutates a knob. That is strictly stronger than the
+  // old single-default-write-on-mount — there is no default write to clobber
+  // with. These pin the contract by counting `allocations.tweaks` setItem
+  // writes:
+  //   - clean mount → ZERO writes (nothing persisted until a user change).
+  //   - first user knob change → exactly ONE write (carrying the change).
   function tweaksSetItemCount(): number {
     return (
       localStorageMock.setItem.mock.calls as unknown as Array<[string, string]>
     ).filter(([k]) => k === "allocations.tweaks").length;
   }
 
-  it("M-1085: clean mount writes 'allocations.tweaks' exactly once (no pre-hydration default clobber)", () => {
+  it("M-1085: clean mount writes 'allocations.tweaks' zero times (observe-without-rewrite)", () => {
     // localStorage is clean (beforeEach clears the store + the setItem spy).
     act(() => {
       render(<Harness />);
     });
-    // Exactly one write — the post-hydration persist. A regression that
-    // drops the `if (!hydrated) return;` guard fires a SECOND, earlier write
-    // carrying TWEAK_DEFAULTS before the hydrate read.
-    expect(tweaksSetItemCount()).toBe(1);
+    // Zero writes — deferred hydration loads defaults but the primitive's
+    // dirtyRef keeps the load observe-without-rewrite, so the dashboard never
+    // persists TWEAK_DEFAULTS just by mounting (no key to clobber another tab).
+    expect(tweaksSetItemCount()).toBe(0);
   });
 
-  it("M-1085: first user toggle adds exactly one more 'allocations.tweaks' write", () => {
+  it("M-1085: first user knob change writes 'allocations.tweaks' exactly once", () => {
     act(() => {
       render(<Harness />);
     });
-    expect(tweaksSetItemCount()).toBe(1);
+    expect(tweaksSetItemCount()).toBe(0);
     fireEvent.click(
       screen.getByRole("button", { name: /toggle tweaks panel/i }),
     );
     // Opening the panel changes only panelOpen (not persisted state), so no
-    // new tweaks write is triggered by the toggle itself.
-    expect(tweaksSetItemCount()).toBe(1);
-    // A real knob change flips persisted state → exactly one more write.
+    // tweaks write is triggered by the toggle itself.
+    expect(tweaksSetItemCount()).toBe(0);
+    // A real knob change flips persisted state → exactly one write.
     fireEvent.click(screen.getByRole("button", { name: /^Tight$/i }));
-    expect(tweaksSetItemCount()).toBe(2);
+    expect(tweaksSetItemCount()).toBe(1);
     const lastWrite = (
       localStorageMock.setItem.mock.calls as unknown as Array<[string, string]>
     )
@@ -401,7 +397,10 @@ describe("Tweaks — hydration", () => {
  * These tests pin all three contracts so the audit-2026-05-07 fix
  * survives future cleanup passes.
  */
-describe("Tweaks — retroactive audit-2026-05-16 — parseTweakState union whitelist (pr-test L17 c9)", () => {
+// B7: the field-by-field union whitelist these cases pin now lives in
+// tweakStateCodec.decode (parseTweakFields); they run through the provider so
+// they exercise the codec end-to-end via useCrossTabStorage.
+describe("Tweaks — retroactive audit-2026-05-16 — tweakStateCodec union whitelist (pr-test L17 c9)", () => {
   it("density:'ultra-tight' falls back to TWEAK_DEFAULTS.density='comfortable'", () => {
     window.localStorage.setItem(
       "allocations.tweaks",
@@ -582,13 +581,16 @@ describe("Tweaks — retroactive audit-2026-05-16 — parseTweakState union whit
 });
 
 describe("Tweaks — retroactive audit-2026-05-16 — corrupt-JSON warn (pr-test L18 c8)", () => {
-  it("loadTweaks emits console.warn when localStorage contains malformed JSON", () => {
+  it("emits a fail-loud console.warn when localStorage contains malformed JSON", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     window.localStorage.setItem("allocations.tweaks", "not-json");
     render(<Harness />);
+    // B7: tweakStateCodec returns outcome "reset" (parse_failed); the
+    // useCrossTabStorage primitive surfaces the fail-loud breadcrumb (and a
+    // Sentry breadcrumb tagged area="allocations.tweaks").
     expect(
       warnSpy.mock.calls.some(
-        (c) => typeof c[0] === "string" && c[0].includes("[TweaksContext] loadTweaks failed"),
+        (c) => typeof c[0] === "string" && c[0].includes("[cross-tab] storage reset"),
       ),
     ).toBe(true);
     warnSpy.mockRestore();
@@ -598,9 +600,11 @@ describe("Tweaks — retroactive audit-2026-05-16 — corrupt-JSON warn (pr-test
 describe("Tweaks — retroactive audit-2026-05-16 — persist setItem failure warn (pr-test L19 c8)", () => {
   it("persist effect emits console.warn when localStorage.setItem throws", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    // Make the persist write throw — the hydrate read still succeeds
-    // (returns null → defaults) so the provider mounts cleanly; only
-    // the post-hydration persist effect hits the throw path.
+    // Make the FIRST persist write throw. The mount itself is now
+    // observe-without-rewrite (zero writes — B7), so the mockOnce throw lands
+    // on the first user knob change below, where the primitive's persist
+    // catch surfaces the fail-loud warn. The hydrate read still succeeds
+    // (returns null → defaults) so the provider mounts cleanly.
     localStorageMock.setItem.mockImplementationOnce(() => {
       throw new Error("storage unavailable");
     });
@@ -613,7 +617,7 @@ describe("Tweaks — retroactive audit-2026-05-16 — persist setItem failure wa
       warnSpy.mock.calls.some(
         (c) =>
           typeof c[0] === "string" &&
-          c[0].includes("[TweaksContext] localStorage write failed"),
+          c[0].includes("[cross-tab] localStorage write failed"),
       ),
     ).toBe(true);
     warnSpy.mockRestore();
@@ -637,20 +641,24 @@ describe("Tweaks — context fallback outside provider", () => {
 });
 
 describe("Tweaks — red-team C1: cross-tab write-back loop prevention", () => {
-  // WHY this matters: without the fromCrossTabEventRef guard, Tab B receives a
-  // storage event → setState → persist effect fires → writes same JSON back to
-  // localStorage → fires storage event in Tab A → onStorage → setState → …
-  // The loop terminates only when a tab is closed. This test verifies that a
-  // cross-tab storage event does NOT cause a write-back to localStorage, i.e.
-  // localStorage.setItem is NOT called as a result of receiving the event.
+  // WHY this matters: a provider that re-persists on every state change would
+  // loop — Tab B receives a storage event → setState → persist effect fires →
+  // writes the same JSON back → fires a storage event in Tab A → onStorage →
+  // setState → … until a tab closes. The pre-B7 provider guarded this with a
+  // hand-rolled `fromCrossTabEventRef`; B7 deletes that guard and relies on the
+  // primitive's `dirtyRef`: cross-tab adoption sets state via setValueState (not
+  // setValue), so dirtyRef stays false and the persist effect early-returns,
+  // never writing the adopted value back.
   it("cross-tab storage event updates in-memory state but does NOT write back to localStorage", () => {
     act(() => {
       render(<Harness />);
     });
-    // Count the setItem calls BEFORE the cross-tab event (1 post-hydration write).
+    // Under B7 a clean mount is observe-without-rewrite, so the baseline is ZERO
+    // writes (M-1085). Pin that here too, then prove the cross-tab event adds none.
     const writesBefore = (
       localStorageMock.setItem.mock.calls as unknown as Array<[string, string]>
     ).filter(([k]) => k === "allocations.tweaks").length;
+    expect(writesBefore).toBe(0);
 
     const newBlob = JSON.stringify({
       density: "loose",
@@ -673,8 +681,9 @@ describe("Tweaks — red-team C1: cross-tab write-back loop prevention", () => {
     // In-memory state MUST have updated (cross-tab sync works).
     expect(document.body.getAttribute("data-density")).toBe("loose");
 
-    // localStorage.setItem MUST NOT have been called again — the write-back
-    // guard (fromCrossTabEventRef) must have suppressed the persist effect.
+    // localStorage.setItem MUST NOT have been called — the primitive's dirtyRef
+    // keeps cross-tab adoption observe-without-rewrite (the persist effect
+    // early-returns on !dirtyRef), so no write-back fires.
     const writesAfter = (
       localStorageMock.setItem.mock.calls as unknown as Array<[string, string]>
     ).filter(([k]) => k === "allocations.tweaks").length;
