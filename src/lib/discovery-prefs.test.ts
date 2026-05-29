@@ -29,6 +29,9 @@ import {
   useDiscoveryPrefs,
   type DiscoveryViewPreferences,
 } from "./discovery-prefs";
+import { captureToSentry } from "@/lib/sentry-capture";
+
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
 const SLUG = "crypto-sma";
 const UID_A = "uid-A";
@@ -163,9 +166,12 @@ describe("discovery-prefs: safeRead", () => {
     });
   });
 
-  it("rejects a future-version shape and returns DEFAULTS (forward compat)", () => {
-    // A user who briefly used a future build would have v2 data; stable
-    // builds must not silently coerce it (could mis-cast renamed fields).
+  it("shows a future-version shape read-only rather than down-converting it (forward compat)", () => {
+    // A user who briefly used a future build has v2 data. The pre-B7 path
+    // returned DEFAULTS and then the next setPrefs DOWN-CONVERTED the v2 blob
+    // to v1 defaults — a silent forward-compat data loss. B7 fix: surface the
+    // (merged) data for display; the hook's read-only mode suppresses writes
+    // so the v2 blob is never clobbered.
     store.set(
       keyFor(UID_A, SLUG),
       JSON.stringify({
@@ -175,7 +181,20 @@ describe("discovery-prefs: safeRead", () => {
         hide_examples: false,
       }),
     );
-    expect(safeRead(UID_A, SLUG)).toEqual(DEFAULTS);
+    expect(safeRead(UID_A, SLUG)).toEqual({
+      view: "grid",
+      sort: { key: "sharpe", dir: "desc" },
+      hide_examples: false,
+    });
+  });
+
+  it("strips prototype-poison keys from a stored blob (B7 hardening)", () => {
+    store.set(
+      keyFor(UID_A, SLUG),
+      '{"version":1,"view":"grid","sort":{"key":"sharpe","dir":"desc"},"hide_examples":true,"__proto__":{"polluted":true}}',
+    );
+    expect(safeRead(UID_A, SLUG).view).toBe("grid");
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });
 
@@ -286,37 +305,68 @@ describe("discovery-prefs: useDiscoveryPrefs", () => {
     expect(result.current.prefs).toEqual(DEFAULTS);
   });
 
-  it("logs '[discovery-prefs] localStorage write failed:' when setItem throws (M-1150 observability contract)", async () => {
-    // PR #90 v0.17.1.8 replaced a silent `catch {}` with a console.error so
-    // a flood of Safari-private-mode / quota write failures surfaces in the
-    // console. The Map-backed mock never throws, so the catch branch was
-    // unexercised — a revert to `catch {}` would regress silently. Here we
-    // force setItem to throw AFTER hydration and assert the log fires.
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  it("surfaces a write failure (Sentry breadcrumb) instead of swallowing it (M-1150/M-1151 observability contract)", async () => {
+    // Pre-B7 this hook logged a console.error on write failure. B7 routes
+    // persistence through the cross-tab primitive, which captures the failure
+    // to Sentry (plus a console.warn). A revert to a silent catch would drop
+    // the breadcrumb. Force setItem to throw AFTER hydration and assert the
+    // primitive captured it.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const { result } = renderHook(() => useDiscoveryPrefs(UID_A, SLUG));
       await waitFor(() => {
         expect(result.current.hydrated).toBe(true);
       });
-      // Swap in a throwing setItem only now (post-hydration) so the write
-      // effect triggered by setPrefs hits the catch branch.
       setItemSpy.mockImplementationOnce(() => {
         throw new Error("QuotaExceededError");
       });
-      errSpy.mockClear();
+      vi.mocked(captureToSentry).mockClear();
 
       act(() => {
         result.current.setPrefs({ ...DEFAULTS, view: "grid" });
       });
 
       await waitFor(() => {
-        expect(errSpy).toHaveBeenCalled();
+        expect(captureToSentry).toHaveBeenCalled();
       });
-      const firstArg = errSpy.mock.calls[0]?.[0] as unknown;
-      expect(firstArg).toBe("[discovery-prefs] localStorage write failed:");
     } finally {
-      errSpy.mockRestore();
+      warnSpy.mockRestore();
     }
+  });
+
+  it("supports the functional-updater form of setPrefs (H-0443 — previously untested)", async () => {
+    const { result } = renderHook(() => useDiscoveryPrefs(UID_A, SLUG));
+    await waitFor(() => expect(result.current.hydrated).toBe(true));
+    act(() => {
+      result.current.setPrefs((prev) => ({ ...prev, view: "grid" }));
+    });
+    expect(result.current.prefs.view).toBe("grid");
+    // sort/hide_examples preserved from prev (the updater read live state).
+    expect(result.current.prefs.sort).toEqual(DEFAULTS.sort);
+  });
+
+  it("adopts a cross-tab write for the same uid/slug (B7 cross-tab sync)", async () => {
+    const key = keyFor(UID_A, SLUG);
+    const { result } = renderHook(() => useDiscoveryPrefs(UID_A, SLUG));
+    await waitFor(() => expect(result.current.hydrated).toBe(true));
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key,
+          newValue: JSON.stringify({
+            version: 1,
+            view: "grid",
+            sort: { key: "cagr", dir: "asc" },
+            hide_examples: false,
+          }),
+        }),
+      );
+    });
+    expect(result.current.prefs).toEqual({
+      view: "grid",
+      sort: { key: "cagr", dir: "asc" },
+      hide_examples: false,
+    });
   });
 
   it("setPrefs(...) BEFORE hydration does NOT write the mutated value (case 10 — hydration write gate)", async () => {
