@@ -21,6 +21,8 @@ import { OnboardingBanner } from "./components/OnboardingBanner";
 import { MandateQuickSetCard } from "./components/MandateQuickSetCard";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
+import { useCrossTabStorage } from "@/lib/storage/cross-tab";
+import { rawStringCodec } from "@/lib/storage/codecs";
 
 // audit-2026-05-07 cluster P (C-0336, M-1045, M-1047) — surface previously
 // silent failure paths to the browser console so support has a breadcrumb
@@ -158,23 +160,23 @@ const UI_V2_STORAGE_KEY = "allocations.ui_v2";
 // when a second consumer needs it.
 type UiV2FlagState = "explicit-false" | "default";
 
-function readUiV2Flag(): UiV2FlagState {
-  if (typeof window === "undefined") {
-    return "default";
-  }
-  try {
-    const raw = window.localStorage.getItem(UI_V2_STORAGE_KEY);
-    if (raw === "false") return "explicit-false";
-    return "default";
-  } catch (err) {
-    // audit-2026-05-07 C-0336 (silent-failure-hunter c10) — log the
-    // storage failure so a P1 "V1 users seeing V2" / "rollback not
-    // honoured" issue is debuggable. Default-true behaviour is preserved.
-    const reason = err instanceof Error ? err.message : String(err);
-    warnAudit("loadUiV2Flag_failed", { reason });
-    return "default";
-  }
-}
+// B7 — the cross-tab primitive owns the localStorage read; this codec owns the
+// coercion. The flag is stored as a plain string ("false" = explicit opt-out;
+// absent / anything else = default V2), so a `rawStringCodec` (no JSON, no
+// version envelope) folds the raw value to the 2-variant discriminator. A read
+// failure is handled by the primitive (it returns the `initial` "default" and
+// emits a fail-loud `[cross-tab] localStorage read threw` console + Sentry
+// breadcrumb tagged with this key — the C-0336 debuggability the old
+// readUiV2Flag try/catch provided, now centralized in the primitive).
+const uiV2FlagCodec = rawStringCodec<UiV2FlagState>({
+  parse: (raw) => (raw === "false" ? "explicit-false" : "default"),
+  // The app NEVER writes this key (no setValue is destructured below), so
+  // serialize is never a persistence path — it is reached only by the
+  // primitive's cross-tab no-op equality check. The two-variant discriminator
+  // maps losslessly ("explicit-false"→"false", "default"→"true"), so equality
+  // is exact.
+  serialize: (state) => (state === "explicit-false" ? "false" : "true"),
+});
 
 // Live-refresh polling. Phase 06 D-11 used 5s for active-ingest sync status;
 // Phase 07 is a monitoring surface where data changes slowly (daily equity,
@@ -334,29 +336,34 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // keeps the rollback path reachable while eliminating the hydration error
   // that an inline localStorage read would surface for users who explicitly
   // opted out (raw=="false" on the client, but SSR rendered the V2 path).
-  const [isUiV2, setUiV2Flag] = useState<boolean>(true);
+  // B7: routed through useCrossTabStorage. The primitive's "deferred"
+  // hydration renders `initial` ("default" → V2) on the server AND the first
+  // client render, so the SSR HTML and first client render agree byte-for-byte
+  // (no hydration mismatch); an explicit-false flag flips the value to
+  // "explicit-false" post-mount, keeping the rollback path reachable. This
+  // replaces the hand-rolled useState(true) + post-mount setState-in-effect.
+  const { value: uiV2State } = useCrossTabStorage<UiV2FlagState>({
+    key: UI_V2_STORAGE_KEY,
+    initial: "default",
+    codec: uiV2FlagCodec,
+    sentryArea: UI_V2_STORAGE_KEY,
+  });
+  const isUiV2 = uiV2State !== "explicit-false";
+
+  // audit-2026-05-07 H-1188 (red-team c8) — the persisted flag's SCOPE is
+  // Scenario only in current main; the Overview / Holdings / Outcomes /
+  // Mandate / Risk panels remain V2 regardless. Log a breadcrumb when the
+  // explicit-false rollback path is hit so support can correlate "I set the
+  // flag but my dashboard didn't roll back" tickets. Fires on the
+  // post-hydration value, and again only if a cross-tab flip arrives.
   useEffect(() => {
-    // The setState-in-effect is intentional and bounded: it fires AT MOST
-    // ONCE on mount, only when the localStorage rollback flag is set to
-    // the literal string "false". The alternative (useSyncExternalStore)
-    // is overkill for a one-shot post-mount read of a stable value.
-    const result = readUiV2Flag();
-    /* eslint-disable react-hooks/set-state-in-effect */
-    if (result === "explicit-false") {
-      setUiV2Flag(false);
-      // audit-2026-05-07 H-1188 (red-team c8) — the persisted flag's
-      // SCOPE is Scenario only in current main; the Overview / Holdings /
-      // Outcomes / Mandate / Risk panels remain V2 regardless. Log a
-      // breadcrumb when the explicit-false rollback path is hit so
-      // support can correlate "I set the flag but my dashboard didn't
-      // roll back" tickets.
+    if (uiV2State === "explicit-false") {
       warnAudit("ui_v2_rollback_scope_scenario_only", {
         storage_key: UI_V2_STORAGE_KEY,
         affected_surface: "scenario",
       });
     }
-    /* eslint-enable react-hooks/set-state-in-effect */
-  }, []);
+  }, [uiV2State]);
 
   // Scroll-safe URL cleanup: if the allocator lands on ?tab=overview
   // (the new default — redundant) OR ?tab=performance (legacy Phase 07
