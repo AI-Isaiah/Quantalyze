@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.24.15.8] - 2026-05-29
+### Hardened — document and test the signup role allowlist as the trust boundary (audit-2026-05-07 NEW-C15-05)
+
+`profiles.role` is seeded at signup from `auth.users.raw_user_meta_data.role`, which the signup form passes through `supabase.auth.signUp({ options: { data: { role } } })`. That metadata is attacker-controllable — a scripted client can POST any string, not just the form's `"allocator" | "manager"` UI choices. The only thing that constrains the seeded role is the `handle_new_user` allowlist `IN ('manager', 'allocator', 'both')`, which fails closed to `'manager'` for everything else. That guard is correct and not exploitable today, but neither the migration nor the form documented it *as* the security boundary, and there was no test pinning it — so a future refactor that trusted the metadata, or a widened allowlist, could silently re-open self-elevation at signup. This change documents the allowlist as the boundary in both places (no executable SQL change — the applied function body is untouched) and adds `supabase/tests/test_handle_new_user_role_allowlist.sql`, which drives 12 cases through the real signup trigger and asserts hostile/invalid roles collapse to `'manager'` while the three legitimate product roles pass through unchanged. No behavior change.
+
 ## [0.24.15.7] - 2026-05-29
 ### Fixed — cap OWN-portfolio strategy count to prevent O(N²) compute DoS (audit-2026-05-26 NEW-C19-07)
 

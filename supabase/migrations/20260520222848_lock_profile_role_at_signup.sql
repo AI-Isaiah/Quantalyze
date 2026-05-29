@@ -56,6 +56,25 @@
 -- Read role from auth.users.raw_user_meta_data->>'role' with a fallback.
 -- Validates that the value is one of the schema's allowed roles before
 -- using it, otherwise falls back to 'manager' (the legacy default).
+--
+-- ┌─ SECURITY BOUNDARY (NEW-C15-05) ─────────────────────────────────────────┐
+-- │ The `v_raw_role IN ('manager', 'allocator', 'both')` allowlist below is  │
+-- │ THE trust boundary for the role a new account gets — NOT the SignupForm  │
+-- │ TS union `"allocator" | "manager"`. `raw_user_meta_data.role` is fully   │
+-- │ ATTACKER-CONTROLLED: it comes from `supabase.auth.signUp({ options: {    │
+-- │ data: { role } } })`, so a scripted client can POST any string (e.g.     │
+-- │ 'admin', 'service_role', 'both'). This allowlist is fail-CLOSED — every  │
+-- │ value outside the three product roles (including NULL / absent) collapses │
+-- │ to 'manager', the least-privileged account type. Nothing upstream is a   │
+-- │ guard; the client union only shapes the UI.                              │
+-- │                                                                          │
+-- │ DO NOT widen this `IN (...)` set to add an internal/elevated value       │
+-- │ (e.g. 'admin', 'support') and rely on the client to never send it —     │
+-- │ that re-opens self-elevation at signup. An elevated role must be granted │
+-- │ post-signup through a service_role path (see prevent_profile_role_change │
+-- │ below), never seeded from attacker metadata. Guarded by                  │
+-- │ supabase/tests/test_handle_new_user_role_allowlist.sql.                  │
+-- └──────────────────────────────────────────────────────────────────────────┘
 CREATE OR REPLACE FUNCTION handle_new_user()
 RETURNS TRIGGER AS $$
 DECLARE

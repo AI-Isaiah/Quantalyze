@@ -63,6 +63,14 @@ export function SignupForm() {
     // Setting `role` here is the only way to seed a profile with the
     // intended role — after signup the role-lock trigger prevents
     // authenticated clients from mutating it.
+    //
+    // SECURITY (NEW-C15-05): the `SignupRole` union below is UI shaping, NOT a
+    // trust boundary. `options.data.role` lands verbatim in attacker-controllable
+    // auth.users.raw_user_meta_data — a scripted signup can POST any string. The
+    // sole guard is the `handle_new_user` allowlist `IN ('manager','allocator',
+    // 'both')`, fail-closed to 'manager' (see migration 20260520222848 +
+    // supabase/tests/test_handle_new_user_role_allowlist.sql). Do not assume
+    // only these two values reach the DB.
     // `emailRedirectTo` must point at our /auth/callback route so the
     // link in Supabase's confirmation email lands on a real page instead
     // of 404ing. The callback route handles both the PKCE (?code=) and
