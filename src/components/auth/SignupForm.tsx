@@ -6,6 +6,7 @@ import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { cn } from "@/lib/utils";
+import type { SignupRole as ProfileRole } from "@/lib/closed-sets";
 
 /**
  * Account types collected at signup. The signup form ALWAYS asks the user
@@ -15,8 +16,13 @@ import { cn } from "@/lib/utils";
  * rows; signup intentionally does NOT expose that option because "both"
  * is not a coherent first-time user identity — a quant who also wants to
  * allocate asks support.
+ *
+ * B8: derived from the registry SIGNUP_ROLES closed set (minus "both") so
+ * this UI subset is provably a member of the DB-accepted allowlist and
+ * cannot drift to include a non-signup value. The authoritative trust
+ * boundary remains the handle_new_user trigger (see SECURITY note below).
  */
-type SignupRole = "allocator" | "manager";
+type SignupRole = Exclude<ProfileRole, "both">;
 
 const SIGNUP_ROLE_OPTIONS: {
   value: SignupRole;

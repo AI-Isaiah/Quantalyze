@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
+import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import {
   CSV_UPLOAD_STEP_HEADINGS,
   WIZARD_ERROR_COPY,
@@ -60,7 +61,7 @@ const FORMATS: FormatOption[] = [
   },
 ];
 
-const MAX_NAME_CHARS = 80;
+const MAX_NAME_CHARS = MAGNITUDE_CAPS.MAX_NAME_CHARS;
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 interface PreviewShape {

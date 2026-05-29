@@ -25,6 +25,7 @@
  */
 
 import { z } from "zod";
+import { exchangeEnum } from "./closed-sets";
 
 // --- /api/validate-key ---
 export const ValidateKeyResponseSchema = z.object({
@@ -194,7 +195,7 @@ export const GetUserComputeJobsRowSchema = z
     last_error: z.null(),
     error_kind: z.enum(["transient", "permanent", "unknown"]).nullable(),
     idempotency_key: z.string().max(128).nullable(),
-    exchange: z.enum(["binance", "okx", "bybit"]).nullable(),
+    exchange: exchangeEnum.nullable(),
     trade_count: z.number().int().nonnegative().nullable(),
     created_at: z.string(),
     updated_at: z.string(),

@@ -8,6 +8,7 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { logAuditEvent } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { checkDebugKeyFlowRateLimit } from "./rate-limit";
+import { exchangeEnum } from "@/lib/closed-sets";
 
 // Phase 16 / OBSERV-07 — admin-gated diagnostic SSE endpoint.
 // runtime=nodejs (NOT edge — Pitfall 2; Vercel knowledge-update 2026-02-27).
@@ -32,7 +33,8 @@ const PER_STEP_TIMEOUT_MS = 60_000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 
 const REQUEST_SCHEMA = z.object({
-  broker: z.enum(["okx", "binance", "bybit"]),
+  // B8: the user-allowlist exchange set, single-sourced.
+  broker: exchangeEnum,
 });
 
 interface SseEventBase {

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AlertSeverity, DocType, SupportedExchange } from "./utils";
+import { SIGNUP_ROLES, exchangeEnum } from "./closed-sets";
 
 // ---------------------------------------------------------------------------
 // audit-2026-05-07 H-0517 — branded identifier vocabulary
@@ -104,7 +105,9 @@ export const asSeconds = (n: number): Seconds => n as Seconds;
 export const asUsd = (n: number): Usd => n as Usd;
 export const asUsdt = (n: number): Usdt => n as Usdt;
 
-export type Role = "manager" | "allocator" | "both";
+// B8: the profiles.role closed set — single source is the registry SIGNUP_ROLES
+// (mirrors the handle_new_user trigger allowlist + the profiles.role CHECK).
+export type Role = (typeof SIGNUP_ROLES)[number];
 
 export const ROLES: { value: Role; label: string; description: string }[] = [
   { value: "manager", label: "Asset Manager", description: "Publish strategies with verified exchange data" },
@@ -922,7 +925,7 @@ export const FundingFeeRowSchema = z
   .object({
     id: z.string(),
     strategy_id: z.string(),
-    exchange: z.enum(["binance", "okx", "bybit"]),
+    exchange: exchangeEnum,
     symbol: z.string(),
     amount: _strictNumberOrStringNumeric,
     currency: z.string(),
@@ -1075,7 +1078,7 @@ export const ApiKeyRowSchema = z
   .object({
     id: z.string(),
     user_id: z.string(),
-    exchange: z.enum(["binance", "okx", "bybit"]),
+    exchange: exchangeEnum,
     label: z.string(),
     is_active: z.boolean(),
     sync_status: z.string().nullable(),

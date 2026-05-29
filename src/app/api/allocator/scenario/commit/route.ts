@@ -53,6 +53,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { emit, type AuditEvent } from "@/lib/audit";
 import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
+import { holdingScopeKey } from "@/lib/keys";
 
 export const runtime = "nodejs";
 
@@ -704,7 +705,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
       });
     } else {
       for (const row of holdingRows ?? []) {
-        const ref = `holding:${row.venue}:${row.symbol}:${row.holding_type}`;
+        const ref = holdingScopeKey(row);
         // Order is asof DESC; the FIRST row seen for a given ref is the
         // newest snapshot. Skip subsequent (older) rows.
         if (holdingValueByRef.has(ref)) continue;

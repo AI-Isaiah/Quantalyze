@@ -5,6 +5,7 @@ import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
 import { isUuid } from "@/lib/utils";
+import { isSupportedExchange } from "@/lib/closed-sets";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -15,8 +16,6 @@ import type { User } from "@supabase/supabase-js";
  * status='draft') rows in one transaction. Errors are mapped to stable
  * wizardErrors.ts codes — raw server messages never reach the client.
  */
-
-const ALLOWED_EXCHANGES = new Set(["binance", "okx", "bybit"]);
 
 function pickPlaceholderCodename(): string {
   // The codename is overwritten at finalize time, so collisions during
@@ -54,10 +53,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     wizard_session_id,
   } = body as Record<string, unknown>;
 
-  if (
-    typeof exchange !== "string" ||
-    !ALLOWED_EXCHANGES.has(exchange.toLowerCase())
-  ) {
+  if (typeof exchange !== "string" || !isSupportedExchange(exchange)) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "Unsupported exchange" },
       { status: 400 },

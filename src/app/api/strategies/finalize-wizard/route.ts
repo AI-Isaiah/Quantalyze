@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { STRATEGY_NAMES, canonicalizeExchangeList } from "@/lib/constants";
+import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
@@ -199,7 +200,7 @@ function validatePayload(
   if (
     typeof description !== "string" ||
     description.length < 10 ||
-    description.length > 5000
+    description.length > MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS
   ) {
     return {
       ok: false,
@@ -226,7 +227,7 @@ function validatePayload(
   // exposure for a "Verified by Quantalyze" factsheet with no AUM. The
   // contract: client must send a finite number in [0, 1e12), or omit
   // the field (null / undefined) entirely.
-  const MAX_DOLLAR_VALUE = 1_000_000_000_000;
+  const MAX_DOLLAR_VALUE = MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD;
   const isValidDollar = (v: unknown): v is number =>
     typeof v === "number" &&
     Number.isFinite(v) &&
