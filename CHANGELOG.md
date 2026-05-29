@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.16] - 2026-05-29
+### Changed — cross-tab / cross-version localStorage safety: one primitive for client persistence (cross-cutting refactor B7, part 1)
+
+The first half of B7. A single hook — `useCrossTabStorage` — becomes the only way client state is meant to cross the `localStorage` boundary, baking in the hardening the dashboard hook grew finding-by-finding: SSR-safe hydration, a version trichotomy (newer blob → read-only, older/corrupt → reset-with-breadcrumb, equal → adopt), debounced persist with a `beforeunload`/`pagehide`/unmount final flush, cross-tab `storage`-event sync with flush-before-adopt, prototype-poison stripping, and a recovery breadcrumb. This part ships the primitive and migrates the two simplest consumers onto it; the dashboard + tweaks consolidation (under a byte-compat gate) and the scenario-draft migration follow in later parts.
+
+- **New `src/lib/storage/cross-tab.ts` + `src/lib/storage/codecs.ts`.** The primitive owns the React/localStorage mechanics; a consumer-supplied `StorageCodec` owns parse+validate+version+serialize (`versionedObjectCodec` for zod-validated objects, `rawStringCodec` for scalars, or a custom codec for richer domain logic). 76 unit tests pin the version trichotomy, flush-before-adopt, no-op detection, read-only write-suppression, proto-poison stripping, recovery-flag emission, disabled (unready-scope) mode, and key-change re-hydration.
+- **Fixed (NEW-C26-01): the per-key "excluded API keys" set no longer soft-locks across tabs.** `useExcludedKeyIds` had no cross-tab `storage` listener, so two tabs on the same allocator raced and the last writer silently clobbered the other's exclusions. It now syncs across tabs via the primitive, and its blob is version-gated (`{ids, version:1}`, migrating the pre-existing bare-array form in place) with per-element validation that drops only the malformed entries instead of wiping the whole set.
+- **Migrated `discovery-prefs` onto the primitive** — gaining cross-tab sync, prototype-poison stripping, a fail-loud breadcrumb on corrupt reads (was a silent reset), and a fix for a latent forward-compat bug where a newer-version blob was shown as defaults and then down-converted on the next write (now shown read-only, never overwritten).
+- **Deleted the dead `useTimeframe` hook** (no production importers; the dashboard reads the timeframe from its own config), closing its lazy-init hydration-mismatch and multi-tab-conflict findings by removal.
+
 ## [0.24.15.15] - 2026-05-29
 ### Changed — closed-set discipline: the analytics worker's trade sides, stablecoins, and quote derivation (cross-cutting refactor B8b, Python half)
 
