@@ -104,6 +104,7 @@ function basePayload(
     hasSyncing: false,
     equityDailyPoints: [],
     minHistoryDepthMonths: null,
+    equityBaselineUnknown: false,
     activeVenues: [],
     flaggedHoldings: [],
     matchDecisionsByHoldingRef: {},

@@ -19,6 +19,7 @@ vi.mock("server-only", () => ({}));
 import {
   reconstructHoldingReturnsByScopeRef,
   holdingEquityContribution,
+  partitionTrustworthyEquitySnapshots,
   type MyAllocationDashboardPayload,
 } from "../queries";
 
@@ -396,5 +397,87 @@ describe("NEW-C03-02 — multi-venue / spot+derivative holdings are NOT collapse
     expect(result["holding:binance:BTC:derivative"]).toBeDefined();
     // Exactly 2 keys — no over-collapsing, no over-expanding.
     expect(Object.keys(result)).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CL9 / NEW-C01-11 — partitionTrustworthyEquitySnapshots
+//
+// WHY this matters: when OKX's 90-day trade terminus clamps the funding
+// deposit out of the fetch window, the reconstructed rows carry a garbage
+// absolute baseline. getMyAllocationDashboard drops them at the read boundary
+// so they can't feed the equity curve / drawdown / TWR / per-holding returns /
+// warm-up gate — and raises `baselineUnknown` so the dashboard explains the
+// gap instead of letting it read as a broken connection. These tests pin BOTH
+// halves of that contract; a regression that stopped filtering (re-exposing
+// the garbage curve) or stopped flagging (silent gap) must fail here.
+// ---------------------------------------------------------------------------
+describe("partitionTrustworthyEquitySnapshots (CL9 / NEW-C01-11)", () => {
+  type Row = { asof: string; pre_terminus_balance_unknown: boolean };
+
+  it("drops flagged rows and raises baselineUnknown when a terminus-clamped row is present", () => {
+    const rows: Row[] = [
+      { asof: "2026-01-01", pre_terminus_balance_unknown: true },
+      { asof: "2026-01-02", pre_terminus_balance_unknown: true },
+      { asof: "2026-01-03", pre_terminus_balance_unknown: false },
+    ];
+    const { trustworthy, baselineUnknown } =
+      partitionTrustworthyEquitySnapshots(rows);
+    expect(baselineUnknown).toBe(true);
+    // Only the trustworthy (live-refresh) row survives — the level-derived
+    // surfaces never see the zero-baseline rows.
+    expect(trustworthy.map((r) => r.asof)).toEqual(["2026-01-03"]);
+  });
+
+  it("keeps every row and leaves baselineUnknown false for a fully-trustworthy series", () => {
+    const rows: Row[] = [
+      { asof: "2026-01-01", pre_terminus_balance_unknown: false },
+      { asof: "2026-01-02", pre_terminus_balance_unknown: false },
+    ];
+    const { trustworthy, baselineUnknown } =
+      partitionTrustworthyEquitySnapshots(rows);
+    expect(baselineUnknown).toBe(false);
+    expect(trustworthy).toHaveLength(2);
+  });
+
+  it("flags the gap even when 0 trustworthy rows remain (fully-clamped allocator)", () => {
+    const rows: Row[] = [
+      { asof: "2026-01-01", pre_terminus_balance_unknown: true },
+    ];
+    const { trustworthy, baselineUnknown } =
+      partitionTrustworthyEquitySnapshots(rows);
+    expect(baselineUnknown).toBe(true);
+    expect(trustworthy).toHaveLength(0);
+  });
+
+  it("preserves input order of the trustworthy rows", () => {
+    const rows: Row[] = [
+      { asof: "2026-01-03", pre_terminus_balance_unknown: false },
+      { asof: "2026-01-01", pre_terminus_balance_unknown: true },
+      { asof: "2026-01-02", pre_terminus_balance_unknown: false },
+    ];
+    const { trustworthy } = partitionTrustworthyEquitySnapshots(rows);
+    expect(trustworthy.map((r) => r.asof)).toEqual(["2026-01-03", "2026-01-02"]);
+  });
+
+  it("empty input → empty trustworthy set, baselineUnknown false", () => {
+    const { trustworthy, baselineUnknown } =
+      partitionTrustworthyEquitySnapshots([]);
+    expect(trustworthy).toEqual([]);
+    expect(baselineUnknown).toBe(false);
+  });
+
+  it("treats null / omitted pre_terminus_balance_unknown as trustworthy (pins the optional|null contract)", () => {
+    // The helper's generic bound is `pre_terminus_balance_unknown?: boolean|null`
+    // and the migration's COALESCE-to-false covers an omitted field. Pin the TS
+    // analogue: null and missing both classify as trustworthy and don't flag.
+    const rows = [
+      { asof: "2026-01-01", pre_terminus_balance_unknown: null },
+      { asof: "2026-01-02" }, // field omitted entirely
+    ] as Array<{ asof: string; pre_terminus_balance_unknown?: boolean | null }>;
+    const { trustworthy, baselineUnknown } =
+      partitionTrustworthyEquitySnapshots(rows);
+    expect(baselineUnknown).toBe(false);
+    expect(trustworthy.map((r) => r.asof)).toEqual(["2026-01-01", "2026-01-02"]);
   });
 });

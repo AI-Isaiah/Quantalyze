@@ -1579,6 +1579,12 @@ export interface MyAllocationDashboardPayload {
     breakdown: Record<string, number> | null;
     source: "exchange_primary" | "coingecko_fallback" | "mixed";
     history_depth_months: number | null;
+    // CL9 / NEW-C01-11: true when the row was reconstructed against an unknown
+    // absolute baseline (OKX 90-day terminus clamped the funding deposit out of
+    // the fetch window). Flagged rows are EXCLUDED from this array before it
+    // reaches the payload (see getMyAllocationDashboard), so every row here is
+    // false — the field is retained for the DB-read cast + symmetry.
+    pre_terminus_balance_unknown: boolean;
   }>;
   /**
    * Latest-asof-per-symbol collapse of `allocator_holdings` (Phase 06
@@ -1614,8 +1620,19 @@ export interface MyAllocationDashboardPayload {
     entry_price: number | null;
     unrealized_pnl_usd: number | null;
   }>;
-  /** Row count in allocator_equity_snapshots for this allocator — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
+  /** Row count of TRUSTWORTHY snapshots (flagged zero-baseline rows excluded) — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
   snapshotCount: number;
+  /**
+   * CL9 / NEW-C01-11: true when ANY of the allocator's reconstructed snapshots
+   * had an unknown absolute baseline (OKX 90-day terminus clamped the funding
+   * deposit out of the fetch window). When true, the flagged rows have been
+   * dropped from `equitySnapshots` / `equityDailyPoints` / `snapshotCount` and
+   * all level-derived metrics, and the dashboard surfaces a banner explaining
+   * that absolute equity/drawdown history before the live-refresh window is
+   * unavailable (live holdings + AUM remain accurate). Stays true even once
+   * trustworthy daily-refresh rows accrue, so the gap is always explained.
+   */
+  equityBaselineUnknown: boolean;
   /** True when every active api_key's last_sync_at is older than 24h. Drives the stale KPI render + WarningBanner. */
   allKeysStale: boolean;
   /** Most recent `last_sync_at` across all active api_keys (ISO string) or null. */
@@ -1882,6 +1899,49 @@ const VENUE_DISPLAY: Record<string, string> = {
 };
 
 /**
+ * CL9 / NEW-C01-11 — split reconstructed equity snapshots into the trustworthy
+ * set and a single `baselineUnknown` flag.
+ *
+ * A row with `pre_terminus_balance_unknown` was reconstructed against an
+ * unknown opening balance (OKX's 90-day trade terminus clamped the funding
+ * deposit out of the fetch window), so its absolute equity level — and any
+ * drawdown / TWR / per-holding return derived from it — is garbage. Such rows
+ * must not feed a level/return-derived surface. This helper is the canonical
+ * filter for getMyAllocationDashboard's consumers (equity daily points, the
+ * per-holding return reconstruction, live-baseline metrics, the warm-up gate),
+ * applied once at that read boundary below.
+ *
+ * NOTE — `allocator_equity_snapshots` has OTHER read boundaries that consume
+ * the same flag and must apply the same predicate at their own query:
+ *   - the /compare per-holding adapter (holding-compare-adapter.ts) filters
+ *     flagged rows inline before reconstructing its metrics; and
+ *   - the analytics scoring engine (analytics-service/routers/match.py) is a
+ *     SERVER-SIDE consumer that does NOT yet filter — tracked as a separate
+ *     follow-up (changing scoring inputs is a behavioural change that needs its
+ *     own analytics review; see the CL9 review notes).
+ * So this is not the only place suppression happens — it is the dashboard's.
+ *
+ * `baselineUnknown` is true whenever ANY flagged row exists — it stays true
+ * even after trustworthy daily-refresh rows accrue, so the dashboard keeps
+ * explaining why the absolute history starts where it does rather than letting
+ * the gap read as a broken connection. Single pass; preserves input order.
+ */
+export function partitionTrustworthyEquitySnapshots<
+  T extends { pre_terminus_balance_unknown?: boolean | null },
+>(rows: readonly T[]): { trustworthy: T[]; baselineUnknown: boolean } {
+  let baselineUnknown = false;
+  const trustworthy: T[] = [];
+  for (const r of rows) {
+    if (r.pre_terminus_balance_unknown) {
+      baselineUnknown = true;
+    } else {
+      trustworthy.push(r);
+    }
+  }
+  return { trustworthy, baselineUnknown };
+}
+
+/**
  * Phase 10 / D-04 — Reconstruct per-holding daily-return series from
  * allocator_equity_snapshots.breakdown JSONB. Mirrors the Phase 09 Python
  * engine convention (analytics-service/routers/match.py::_load_allocator_context):
@@ -2135,6 +2195,10 @@ function derivePhase07Fields(
     entry_price: number | null;
     unrealized_pnl_usd: number | null;
   }>,
+  // CL9 / NEW-C01-11: computed at the read boundary (any flagged row present),
+  // threaded through so both payload branches surface it via the `...phase07`
+  // spread.
+  equityBaselineUnknown: boolean,
 ): Pick<
   MyAllocationDashboardPayload,
   | "equitySnapshots"
@@ -2146,6 +2210,7 @@ function derivePhase07Fields(
   | "equityDailyPoints"
   | "minHistoryDepthMonths"
   | "activeVenues"
+  | "equityBaselineUnknown"
 > {
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const activeKeys = apiKeys.filter((k) => k.is_active);
@@ -2224,6 +2289,7 @@ function derivePhase07Fields(
     equityDailyPoints,
     minHistoryDepthMonths,
     activeVenues,
+    equityBaselineUnknown,
   };
 }
 
@@ -2323,7 +2389,11 @@ export const getMyAllocationDashboard = cache(
       getRealPortfolio(userId),
       supabase
         .from("allocator_equity_snapshots")
-        .select("asof, value_usd, breakdown, source, history_depth_months")
+        .select(
+          // CL9 / NEW-C01-11: pre_terminus_balance_unknown drives the
+          // zero-baseline suppression below.
+          "asof, value_usd, breakdown, source, history_depth_months, pre_terminus_balance_unknown",
+        )
         .eq("allocator_id", userId)
         .order("asof", { ascending: true })
         // Cap to the reconstruction BACKFILL_CAP_DAYS (2 years) so the
@@ -2524,11 +2594,29 @@ export const getMyAllocationDashboard = cache(
     // Phase 11 / D-04 — derive once via the pure helper (W-02 unit-tested).
     const mandateIsSet = deriveMandateIsSet(mandate);
 
-    const equitySnapshots = (phase07EquityRes.data ??
+    const rawEquitySnapshots = (phase07EquityRes.data ??
       []) as MyAllocationDashboardPayload["equitySnapshots"];
-    // The equity query returns every row in the allocator's window with no
-    // pagination, so `length` is the authoritative count — a separate
-    // head-only count query would be a redundant round-trip.
+    // CL9 / NEW-C01-11: rows whose absolute baseline is unknown (OKX 90-day
+    // terminus clamped the funding deposit out of the fetch window) carry
+    // garbage absolute levels — the dashboard's level/return-derived surfaces
+    // (equity curve, drawdown, TWR, Sharpe, per-holding returns, warm-up gate)
+    // must exclude them. Filter ONCE here so EVERY consumer downstream OF THIS
+    // read (derivePhase07Fields, reconstructHoldingReturnsByScopeRef,
+    // liveBaselineMetricsFromHoldings) reads the filtered array — no need to
+    // touch each derivation. (Other read boundaries on this table — the
+    // /compare adapter, and the server-side match.py scorer — apply / will
+    // apply the same predicate at their own query; see the
+    // partitionTrustworthyEquitySnapshots docstring.) The daily-refresh rows
+    // (today's live mark, flag=false) survive and render as they accrue, so a
+    // terminus-clamped allocator who keeps a key connected progressively
+    // regains a trustworthy curve. `equityBaselineUnknown` stays true whenever
+    // ANY flagged row exists, so the dashboard explains the gap (in both the
+    // main view and the empty-holdings branch).
+    const { trustworthy: equitySnapshots, baselineUnknown: equityBaselineUnknown } =
+      partitionTrustworthyEquitySnapshots(rawEquitySnapshots);
+    // Count of TRUSTWORTHY rows — drives the warm-up gate, so a fully
+    // terminus-clamped allocator (0 trustworthy rows) correctly shows warm-up
+    // rather than full-confidence KPIs over zero data.
     const snapshotCount = equitySnapshots.length;
     const holdingsRows = (phase07HoldingsRes.data ?? []) as Array<{
       symbol: string;
@@ -2552,6 +2640,7 @@ export const getMyAllocationDashboard = cache(
       equitySnapshots,
       snapshotCount,
       holdingsRows,
+      equityBaselineUnknown,
     );
 
     // Phase 09 / D-07 + D-08 + D-11 + finding f5

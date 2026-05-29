@@ -257,6 +257,7 @@ function makePayload(
       { date: "2026-01-02", value: 101_000 },
     ],
     minHistoryDepthMonths: 12,
+    equityBaselineUnknown: false,
     activeVenues: ["Binance"],
     flaggedHoldings: [],
     matchDecisionsByHoldingRef: {},

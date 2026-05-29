@@ -151,17 +151,34 @@ export async function fetchHoldingCompareItem(params: {
 
   const { data, error } = await params.supabase
     .from("allocator_equity_snapshots")
-    .select("asof, breakdown")
+    .select("asof, breakdown, pre_terminus_balance_unknown")
     .eq("allocator_id", params.allocator_id)
     .order("asof", { ascending: true })
     .limit(730);
 
   if (error || !data || data.length === 0) return null;
 
-  const analytics = reconstructAndAnalyze(
-    data as Array<{ asof: string; breakdown: Record<string, number> | null }>,
-    parsed.symbol,
-  );
+  // CL9 / NEW-C01-11: this is a SECOND read boundary on allocator_equity_snapshots
+  // (the allocator dashboard's getMyAllocationDashboard is the first). Rows whose
+  // absolute baseline is unknown (OKX 90-day terminus clamped the funding deposit
+  // out of the fetch window) carry a garbage per-symbol breakdown: positions
+  // opened pre-terminus ramp up from zero as in-window trades land, so even the
+  // pct_change return series is distorted — not just the absolute level. They MUST
+  // NOT feed reconstructAndAnalyze (return / Sharpe / drawdown / vol). Drop them
+  // here, mirroring the dashboard's partitionTrustworthyEquitySnapshots filter
+  // (kept inline rather than imported — @/lib/queries is server-only and the
+  // predicate is a one-liner). A fully terminus-clamped holding then has <2
+  // trustworthy points → null analytics → the caller surfaces "not available",
+  // the same honest degradation the dashboard shows.
+  const trustworthy = (
+    data as Array<{
+      asof: string;
+      breakdown: Record<string, number> | null;
+      pre_terminus_balance_unknown: boolean | null;
+    }>
+  ).filter((r) => !r.pre_terminus_balance_unknown);
+
+  const analytics = reconstructAndAnalyze(trustworthy, parsed.symbol);
 
   // If all metrics are null the symbol had insufficient data — treat as not available
   if (

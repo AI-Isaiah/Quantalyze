@@ -132,6 +132,7 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
   hasSyncing: false,
   equityDailyPoints: [],
   minHistoryDepthMonths: null,
+  equityBaselineUnknown: false,
   activeVenues: [],
   flaggedHoldings: [],
   matchDecisionsByHoldingRef: {},
