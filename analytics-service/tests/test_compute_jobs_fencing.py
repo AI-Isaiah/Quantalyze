@@ -722,6 +722,58 @@ def test_claim_stamps_claim_token(admin, strategy_id):
         admin.table("compute_jobs").delete().eq("id", job_id).execute()
 
 
+def test_mark_compute_job_failed_writes_error_kind(admin, strategy_id):
+    """HOTFIX 20260529180000 regression: mark_compute_job_failed must write the
+    `error_kind` column.
+
+    Mig 20260528183100 rewrote the RPC with `SET ... last_error_kind = p_error_kind`,
+    but compute_jobs has no `last_error_kind` column (the classification column is
+    `error_kind`). plpgsql doesn't validate column refs at CREATE, so it deployed
+    clean and 42703-errored EVERY failed-job marking in prod — failing jobs never
+    transitioned to failed_retry/failed_final and looped via the watchdog.
+
+    Seed → claim → mark failed 'permanent' → assert failed_final WITH error_kind
+    persisted. Against the buggy function the mark RPC raises
+    'column "last_error_kind" of relation "compute_jobs" does not exist'.
+    """
+    job = admin.table("compute_jobs").insert({
+        "strategy_id": strategy_id,
+        "kind": "sync_trades",
+        "status": "pending",
+        "priority": "normal",
+        "exchange": "okx",
+    }).execute().data[0]
+    job_id = job["id"]
+    try:
+        claimed = _claim_one(admin, "hotfix-mark-failed")
+        assert claimed is not None and claimed["id"] == job_id
+        token = claimed["claim_token"]
+
+        # The call that 42703'd on the buggy function. _rpc_retry_timeout
+        # re-raises a non-timeout error immediately (so a regressed column ref
+        # FAILS the test), and only pytest.skips on a genuine shared-DB timeout.
+        _rpc_retry_timeout(lambda: admin.rpc("mark_compute_job_failed", {
+            "p_job_id": job_id,
+            "p_error": "hotfix regression: synthetic permanent failure",
+            "p_error_kind": "permanent",
+            "p_claim_token": token,
+        }).execute())
+
+        row = admin.table("compute_jobs").select(
+            "status, error_kind, last_error"
+        ).eq("id", job_id).single().execute().data
+        assert row["status"] == "failed_final", (
+            f"permanent failure must go failed_final, got {row['status']!r}"
+        )
+        assert row["error_kind"] == "permanent", (
+            "error_kind must persist (the column the last_error_kind typo "
+            f"missed), got {row['error_kind']!r}"
+        )
+        assert row["last_error"] == "hotfix regression: synthetic permanent failure"
+    finally:
+        admin.table("compute_jobs").delete().eq("id", job_id).execute()
+
+
 def test_reclaim_invalidates_claim_token(admin, strategy_id):
     """reset_stalled_compute_jobs (watchdog) must NULL the claim_token on
     reclaim — defense in depth before the next worker stamps a new one."""
