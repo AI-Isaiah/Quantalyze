@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.15.13] - 2026-05-29
+### Fixed — HOTFIX: failed analytics jobs could not be recorded as failed (prod incident)
+
+Since 2026-05-28, the analytics worker could not mark any failed job as failed. The database function that records a job failure was writing to a column name that doesn't exist (`last_error_kind` instead of `error_kind`), so every attempt errored. A job that failed therefore never moved to its terminal "failed" state — it stayed stuck and was picked up again by the stalled-job watchdog, retrying in a loop well past its retry budget, while the failure reason never reached the admin UI.
+
+This recreates the `mark_compute_job_failed` function to write the correct `error_kind` column (the rest of the function — the worker-ownership fence, retry backoff schedule, and status-bridge — is unchanged). Failed jobs now transition cleanly to `failed_retry` / `failed_final` again with their error classification recorded, and the watchdog retry-loop stops accumulating stuck jobs. The pre-existing stuck jobs are reset as a one-off after deploy. No user-facing behavior change beyond correct job-failure handling.
+
 ## [0.24.15.12] - 2026-05-29
 ### Fixed — poison rescore re-scanned the full strategy universe on every retry (audit-2026-05-07 cluster NEW-C12-09)
 
