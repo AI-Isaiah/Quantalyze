@@ -40,11 +40,17 @@ from typing import Any
 
 import ccxt.async_support as ccxt
 
+from services.closed_sets import STABLECOINS
 from services.db import db_execute
 from services.positions import fetch_positions
 
 
-STABLECOINS: set[str] = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "USD"}
+# B8b: STABLECOINS (the "treat as cash, mark at $1, skip the ticker fetch" set)
+# is single-sourced from services.closed_sets so it can't fork from the equity-
+# reconstruction copy. This unifies on the canonical set, which additionally
+# treats FDUSD as cash here (the local copy historically omitted it) — FDUSD is
+# a $1-pegged stablecoin, so marking it at 1.0 is strictly more correct than
+# fetching an FDUSD/USDT ticker.
 RAW_PAYLOAD_CAP_BYTES: int = 4096  # D-02 / ~4KB JSONB cap
 
 

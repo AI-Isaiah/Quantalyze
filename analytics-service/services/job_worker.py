@@ -57,6 +57,10 @@ from fastapi import HTTPException
 
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
+from services.closed_sets import (  # B8b: single-sourced closed sets, re-exported
+    PositionDirection as PositionDirection,
+    Side as Side,
+)
 from services.db import db_execute, get_supabase
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
@@ -78,10 +82,10 @@ from services.positions import fetch_positions, persist_position_snapshots
 # audit (G12.A.3, conf=10) flagged that downstream code branches on
 # `'buy'/'sell'/'long'/'short'` interchangeably and `_compute_volume_metrics`
 # historically aliased `long_volume_pct = buy_pct` — wrong for hedge-mode
-# shorts opened via 'sell'. Migration 112 enforces the DB-side CHECK; these
-# aliases enforce the same distinction at the type layer for future code.
-Side = Literal["buy", "sell"]
-PositionDirection = Literal["long", "short"]
+# shorts opened via 'sell'. Migration 112 enforces the DB-side CHECK.
+# B8b: `Side` / `PositionDirection` are now single-sourced from
+# `services.closed_sets` (imported + re-exported above) so the type-layer
+# distinction can't drift from the SQL one.
 
 # ---------------------------------------------------------------------------
 # Compute-queue type aliases — G21 / audit-2026-05-07

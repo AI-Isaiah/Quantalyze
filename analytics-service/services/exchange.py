@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, TypedDict
 
+from services.closed_sets import is_trade_side
 from services.ingestion._timestamps import coerce_to_aware_utc
 from services.metrics import _safe_float
 from services.redact import scrub_freeform_string
@@ -185,6 +186,15 @@ def _infer_quote_currency(symbol: str) -> str | None:
 # Cap on the per-task fee-currency mismatch sample list — keeps the
 # JSONB row bounded while still giving operators a representative set.
 _FEE_CCY_MISMATCH_SAMPLE_CAP = 16
+
+# NEW-C01-09 (ingest half) — bounds on the per-task unknown-trade-side sample
+# list. `symbol` and `side` are exchange-controlled and unbounded, so a COUNT
+# cap alone does NOT bound the JSONB row size (a single ~200KB hostile `side`
+# would bloat data_quality_flags). Cap both the count AND the per-entry length:
+# 16 entries × 96 chars is a few KB — well inside the PostgreSQL TOAST inline
+# threshold even against a flood of long/garbage sides.
+_UNKNOWN_SIDE_SAMPLE_CAP = 16
+_UNKNOWN_SIDE_SAMPLE_MAXLEN = 96
 
 
 def _check_fee_currency_mismatch(
@@ -508,6 +518,35 @@ def _make_fill_dict(
     schema change. This keeps the persist path safe while still
     constraining the value upstream.
     """
+    # NEW-C01-09 (ingest half) — validate the trade side against the
+    # TRADE_SIDES allowlist at this single fill chokepoint. Pre-fix the OKX /
+    # Bybit / CCXT paths all lower-cased the side but NONE whitelisted it, so an
+    # exchange returning an unrecognized side ("", a hedge-mode artifact, a
+    # garbage value) silently persisted it to `trades`; the downstream
+    # equity-replay guard then skipped the fill, corrupting the equity curve
+    # with no operator signal. We keep persisting the fill — dropping it would
+    # lose volume/fee reconciliation, and the downstream guard already prevents
+    # a phantom SHORT — but surface a bounded data-quality flag so the issue is
+    # visible on `strategy_analytics.data_quality_flags`. Mirrors the
+    # fee-currency-mismatch sampling above (read-only `.get({})` chain — never
+    # mutate the shared module default).
+    if not is_trade_side(side):
+        logger.warning(
+            "_make_fill_dict: unrecognized trade side=%r (exchange=%s "
+            "symbol=%s) — persisting fill but flagging data quality "
+            "(NEW-C01-09)",
+            side, exchange, symbol,
+        )
+        _record_dq_flag("unknown_trade_side", True)
+        existing = _LAST_DQ_FLAGS.get({}).get("unknown_trade_side_samples", [])
+        if len(existing) < _UNKNOWN_SIDE_SAMPLE_CAP:
+            # Truncate per entry — symbol/side are exchange-controlled and
+            # unbounded, so the count cap alone wouldn't bound the JSONB row.
+            sample = scrub_freeform_string(
+                f"{exchange}:{symbol}:{side}"
+            )[:_UNKNOWN_SIDE_SAMPLE_MAXLEN]
+            if sample not in existing:
+                _record_dq_flag("unknown_trade_side_samples", [sample])
     # Adversarial-review hardening (security specialist, PR #137 follow-up):
     # the CCXT `_normalize_fill` path passes `trade.get("info")` straight
     # into raw_data with zero whitelisting — so a hostile exchange response

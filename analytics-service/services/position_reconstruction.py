@@ -22,6 +22,7 @@ from decimal import Decimal
 from typing import Any, Literal, TypedDict
 from uuid import UUID
 
+from services.closed_sets import PositionSide, TRADE_SIDES
 from services.db import db_execute
 
 # Audit-2026-05-07 M-0935: Sentry capture is best-effort. The sentry_sdk
@@ -34,21 +35,14 @@ except ImportError:  # pragma: no cover — sentry is a prod-only dependency
     sentry_sdk = None  # type: ignore[assignment]
 
 
-# Audit-2026-05-27 H-0650: the canonical position-direction Literal. A
-# reconstructed position's direction is one of these three (`flat` is the
-# snapshot/exposure no-position marker; FIFO matching only ever assigns
-# `long`/`short`). Centralizing the type lets every direction-bearing local
-# share one contract — see `position_side` in `_match_positions_fifo`.
-#
-# Renamed from `Side` (2026-05-27 type-hygiene): the bare `Side` name
-# collided with `job_worker.Side = Literal["buy","sell"]` — a same-name,
-# different-meaning alias across two modules in the same package. The
-# position-direction subset is `PositionSide`; the buy/sell fill action
-# stays `job_worker.Side`. NOTE: this is the *direction* contract, NOT the
-# return type of `_normalize_side` (which returns an arbitrary lowercased
-# `str` — it case-folds raw `buy`/`sell`/etc. before any narrowing; see its
-# docstring).
-PositionSide = Literal["long", "short", "flat"]
+# Audit-2026-05-27 H-0650: `PositionSide` is the canonical position-direction
+# Literal (`long`/`short`/`flat`). It is now single-sourced from
+# `services.closed_sets` (imported above) — B8b — so it can't drift from the
+# buy/sell `Side` it was historically (and dangerously) conflated with. `flat`
+# is the snapshot/exposure no-position marker; FIFO matching only ever assigns
+# `long`/`short`. NOTE: this is the *direction* contract, NOT the return type
+# of `_normalize_side` (which returns an arbitrary lowercased `str` — it
+# case-folds raw `buy`/`sell`/etc. before any narrowing; see its docstring).
 
 
 def _normalize_side(raw: Any) -> str:
@@ -1232,6 +1226,30 @@ def _match_positions_fifo(
         # `fill.get("side", "").lower()`). Behavior-identical for current
         # lowercase/falsy input.
         side = _normalize_side(fill.get("side"))
+        # NEW-C01-09 (FIFO-matcher half): `trades` can hold a fill whose side is
+        # not in TRADE_SIDES — the ingest layer (exchange._make_fill_dict)
+        # deliberately FLAGS-but-PERSISTS such fills. Guard it HERE too: without
+        # this, the open branch below (`"short" if side == "sell" else "long"`)
+        # defaults ANY non-"sell" side (incl. "", "long", garbage) to a phantom
+        # LONG, and the close branch silently consumes it — corrupting
+        # win_rate / expectancy / long_count on trade_metrics with no signal.
+        # The equity-curve consumer is already guarded
+        # (equity_reconstruction._compute_daily_equity); this closes the second
+        # consumer the ingest comment's "downstream guard" rationale omitted.
+        # Drop the corrupt fill and surface it through the same drop-and-count
+        # channel as malformed_fill_field_dropped / zero_entry_price_dropped.
+        if side not in TRADE_SIDES:
+            if dropped_flags is not None:
+                dropped_flags["unknown_side_dropped"] = (
+                    dropped_flags.get("unknown_side_dropped", 0) + 1
+                )
+            logger.warning(
+                "position_reconstruction: dropping fill with side=%r not in "
+                "TRADE_SIDES (strategy=%s symbol=%s) — would otherwise open a "
+                "phantom long (NEW-C01-09)",
+                side, strategy_id, symbol,
+            )
+            continue
         # Audit-2026-05-07 M-0717: parse the NUMERIC columns as Decimal
         # (preserving the PostgREST string precision) instead of float. A
         # missing value coerces to Decimal(0) — preserving the prior
