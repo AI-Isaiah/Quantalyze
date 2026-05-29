@@ -20,6 +20,8 @@
  *     live holdings; identical idiom to useDashboardConfig.ts:82-109 + 296-320).
  */
 
+import { holdingScopeKey } from "@/lib/keys";
+
 /**
  * H5 — phantom branded type. At runtime this is just a string; at compile time
  * it acts as a guard so a hand-rolled string can't be used as an `AddedStrategy.id`
@@ -83,11 +85,12 @@ export interface HoldingForDefault extends HoldingForFingerprint {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-/** Internal: build the holding scope_ref. Inlined here to keep this module
- *  dependency-free of the FlaggedHolding type from holding-outcome-adapter
- *  (Plan-01 directive: scenario-state.ts has zero adapter imports). */
+/** Internal: build the holding scope_ref via the canonical B8 key builder so
+ *  this module cannot drift from the persisted/bridge scope_ref shape it is
+ *  compared against cross-module. (keys.ts is import-free, so the Plan-01
+ *  directive — no FlaggedHolding/adapter imports — is preserved.) */
 function holdingRefOf(h: HoldingForFingerprint): string {
-  return `holding:${h.venue}:${h.symbol}:${h.holding_type}`;
+  return holdingScopeKey(h);
 }
 
 /**

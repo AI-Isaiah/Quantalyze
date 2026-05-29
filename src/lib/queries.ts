@@ -32,6 +32,7 @@ import type {
   ApiKey,
 } from "./types";
 import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
+import { holdingScopeKey } from "./keys";
 import { getOwnPreferences, type AllocatorPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -2004,7 +2005,7 @@ export function reconstructHoldingReturnsByScopeRef(
   }
   const result: Record<string, DailyPoint[]> = {};
   for (const h of holdingsSummary) {
-    const scopeRef = `holding:${h.venue}:${h.symbol}:${h.holding_type}`;
+    const scopeRef = holdingScopeKey(h);
     const sorted = symbolSeriesUSD.get(h.symbol);
     if (!sorted || sorted.length < 2) continue;
     const dailyReturns: DailyPoint[] = [];
@@ -2093,7 +2094,7 @@ function liveBaselineMetricsFromHoldings(
   // contribute to the live baseline.
   const strategies: StrategyForBuilder[] = [];
   for (const h of holdingsSummary) {
-    const scopeRef = `holding:${h.venue}:${h.symbol}:${h.holding_type}`;
+    const scopeRef = holdingScopeKey(h);
     const returns = holdingReturnsByScopeRef[scopeRef];
     if (!returns || returns.length === 0) continue;
     strategies.push({
@@ -2124,7 +2125,7 @@ function liveBaselineMetricsFromHoldings(
   const weights: Record<string, number> = {};
   const startDates: Record<string, string> = {};
   for (const h of holdingsSummary) {
-    const scopeRef = `holding:${h.venue}:${h.symbol}:${h.holding_type}`;
+    const scopeRef = holdingScopeKey(h);
     if (!holdingReturnsByScopeRef[scopeRef]) continue;
     selected[scopeRef] = true;
     weights[scopeRef] = Math.max(0, holdingEquityContribution(h));
@@ -2262,7 +2263,10 @@ function derivePhase07Fields(
   // format (see reconstructHoldingReturnsByScopeRef, buildHoldingRef).
   const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
   for (const r of holdingsRows) {
-    const key = `${r.venue}:${r.symbol}:${r.holding_type}`;
+    // B8: same canonical triple key as the scope_ref sites above
+    // (holdingScopeKey) so the dedup keyspace cannot drift from the rest of
+    // the pipeline. The "holding:" prefix is immaterial to a local dedup map.
+    const key = holdingScopeKey(r);
     const existing = holdingsMap.get(key);
     if (!existing || r.asof > existing.asof) holdingsMap.set(key, r);
   }

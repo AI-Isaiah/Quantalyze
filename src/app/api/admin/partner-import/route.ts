@@ -13,6 +13,7 @@ import {
   ProfileValidationError,
 } from "@/lib/profile-validation";
 import type { DisclosureTier } from "@/lib/types";
+import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 
 /**
  * Audit-2026-05-07 red-team R-0003 (HIGH c7): cross-tenant profile
@@ -109,17 +110,11 @@ class StrategyTierConflictError extends Error {
 // misclassified as a header. The query parameter is now the single source
 // of truth; the parser never sniffs.
 
-// NEW-C28-01: ticket_size_usd invariants (mirrors validateSelfEditableInput in
-// preferences.ts:107-111). Reject rows outside [0, 1e9] at parse boundary.
-const MAX_TICKET_SIZE_USD = 1_000_000_000;
-
-// NEW-C28-02: mandate_archetype length cap (mirrors preferences.ts:105).
-const MAX_MANDATE_ARCHETYPE_CHARS = 500;
-
-// NEW-C28-03: strategy_name length cap (mirrors wizard 1-80 / csv-finalize >80).
-// We enforce the same upper bound here; the lower bound is handled by the
-// !row.strategy_name null-check below.
-const MAX_STRATEGY_NAME_CHARS = 80;
+// NEW-C28-01/02/03 (B8): ticket_size_usd ([0, 1e9]), mandate_archetype (≤500),
+// and strategy_name (≤80) invariants are enforced at the parse boundary using
+// the shared MAGNITUDE_CAPS registry — the same caps validateSelfEditableInput
+// (preferences.ts) and the wizard/csv-finalize routes consume, so they cannot
+// drift from this admin import path.
 
 // NEW-C28-04: row count cap to prevent unbounded GoTrue createUser fan-out.
 // 500 rows = ~100 managers × 5 strategies + 500 allocators, well above any
@@ -173,7 +168,7 @@ function parseManagerRows(
       // Reject (drop) rows with overlong names or embedded control chars
       // so they surface in the raw-vs-parsed delta (H-0239), not silently
       // persist as arbitrary-length / control-char-contaminated strings.
-      if (row.strategy_name.length > MAX_STRATEGY_NAME_CHARS) return null;
+      if (row.strategy_name.length > MAGNITUDE_CAPS.MAX_NAME_CHARS) return null;
       if (/[\r\n\0]/.test(row.strategy_name)) return null;
       const tier = row.disclosure_tier.toLowerCase();
       const disclosure_tier: DisclosureTier =
@@ -199,20 +194,20 @@ function parseAllocatorRows(
     ["allocator_email", "mandate_archetype", "ticket_size_usd"],
     (row) => {
       if (!row.allocator_email || !row.mandate_archetype) return null;
-      // NEW-C28-02: mandate_archetype length cap (mirrors preferences.ts:105).
-      // Reject rows with overlong mandate cells — they surface in the
-      // raw-vs-parsed delta (H-0239) rather than persisting a multi-KB blob.
+      // NEW-C28-02: mandate_archetype length cap. Reject rows with overlong
+      // mandate cells — they surface in the raw-vs-parsed delta (H-0239) rather
+      // than persisting a multi-KB blob.
       const mandate = row.mandate_archetype.trim();
-      if (mandate.length === 0 || mandate.length > MAX_MANDATE_ARCHETYPE_CHARS) return null;
-      // NEW-C28-01: ticket_size_usd invariants (mirrors validateSelfEditableInput).
-      // sanitizeCsvValue keeps a leading '-', so raw negative values would land
-      // in allocator_preferences; reject rather than clamp (loud failure rule).
+      if (mandate.length === 0 || mandate.length > MAGNITUDE_CAPS.MAX_MANDATE_CHARS) return null;
+      // NEW-C28-01: ticket_size_usd invariants. sanitizeCsvValue keeps a leading
+      // '-', so raw negative values would land in allocator_preferences; reject
+      // rather than clamp (loud failure rule).
       const ticket_size_usd = Number.parseFloat(
         (row.ticket_size_usd || "0").replace(/[,_$]/g, ""),
       );
       if (!Number.isFinite(ticket_size_usd)) return null;
       if (ticket_size_usd < 0) return null;
-      if (ticket_size_usd > MAX_TICKET_SIZE_USD) return null;
+      if (ticket_size_usd > MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD) return null;
       return {
         allocator_email: row.allocator_email,
         mandate_archetype: mandate,

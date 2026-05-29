@@ -8,6 +8,7 @@ import type {
 } from "@/lib/types";
 import { DELTA_UNITS } from "@/lib/api/simulatorSchema";
 import type { SimulatorResponseOk } from "@/lib/api/simulatorSchema";
+import { dateMapStrict } from "@/lib/keys";
 
 interface PortfolioImpactPanelProps {
   portfolioId: string;
@@ -504,20 +505,10 @@ function EquityOverlay({
   // SF-F5: the original NODE_ENV guard meant the production chart silently
   // rendered incorrect data (last-write-wins) with no operator signal. Removed.
   const merged = useMemo(() => {
-    function buildDateMap(points: TimeSeriesPoint[], label: string) {
-      const map = new Map<string, number>();
-      for (const p of points) {
-        if (map.has(p.date)) {
-          console.warn(
-            `[EquityOverlay] duplicate date "${p.date}" in ${label} series — last-write-wins`,
-          );
-        }
-        map.set(p.date, p.value);
-      }
-      return map;
-    }
-    const mapCurrent = buildDateMap(current, "current");
-    const mapProposed = buildDateMap(proposed, "proposed");
+    // B8: shared dateMapStrict — duplicate dates are surfaced (warn,
+    // last-write-wins), not silently dropped (NEW-C11-08).
+    const mapCurrent = dateMapStrict(current, "warn", "current");
+    const mapProposed = dateMapStrict(proposed, "warn", "proposed");
     const dates = Array.from(
       new Set([...mapCurrent.keys(), ...mapProposed.keys()]),
     ).sort();

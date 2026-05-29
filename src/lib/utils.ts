@@ -145,9 +145,13 @@ export const SEVERITY_HEX: Record<AlertSeverity, string> = {
 export const DOC_TYPES = ["contract", "note", "factsheet", "founder_update", "other"] as const;
 export type DocType = (typeof DOC_TYPES)[number];
 
-/** Supported exchanges for verification + analytics. Must match the Python schema check. */
-export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit"] as const;
-export type SupportedExchange = (typeof SUPPORTED_EXCHANGES)[number];
+/**
+ * Supported exchanges for verification + analytics (lowercase, the wire/DB form).
+ * B8: canonical definition is the closed-set registry; re-exported here so the
+ * many `@/lib/utils` importers (routes, cron, queries, forms) are unchanged.
+ * Must match the Python schema check (analytics-service schemas.py).
+ */
+export { SUPPORTED_EXCHANGES, type SupportedExchange } from "./closed-sets";
 
 /** Supabase returns embedded relations as object (unique FK) or array. */
 export function extractAnalytics(raw: unknown): StrategyAnalytics | null {

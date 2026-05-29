@@ -8,6 +8,7 @@ import { isUuid } from "@/lib/utils";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
 import { canonicalizeExchangeList } from "@/lib/constants";
+import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
@@ -47,7 +48,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
  */
 
 const ALLOWED_FMTS = new Set(["daily_returns", "daily_nav", "trades"]);
-const MAX_NAME_CHARS = 80;
+const MAX_NAME_CHARS = MAGNITUDE_CAPS.MAX_NAME_CHARS;
 
 // Phase 19.1 — CSV → analytics pipeline. The wizard's csv-validate step
 // canonicalises every supported `fmt` into a `daily_returns_series` array
@@ -241,13 +242,13 @@ interface CsvMetadataPayload {
   max_capacity?: string;
 }
 
-const MAX_DESCRIPTION_CHARS = 5000;
+const MAX_DESCRIPTION_CHARS = MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS;
 const MAX_CHIP_GROUP_SIZE = 32;
 const MAX_LEVERAGE_RANGE_CHARS = 80;
-// Mirrors audit-2026-05-07 H-0325/H-0326 in finalize-wizard. Anything
-// north of 1e12 USD is garbage (a typo, scientific notation, or hostile
-// client) — reject so the public sheet doesn't render absurd numbers.
-const MAX_DOLLAR_VALUE = 1_000_000_000_000;
+// Anything north of 1e12 USD is garbage (a typo, scientific notation, or
+// hostile client) — reject so the public sheet doesn't render absurd numbers.
+// Shared AUM/capacity cap (B8), distinct from the 1e9 ticket-size cap.
+const MAX_DOLLAR_VALUE = MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD;
 
 /**
  * NEW-C14-03 + NEW-C14-05: parseCsvMetadata now returns a discriminated

@@ -10,6 +10,7 @@
  * leak the raw FlaggedHolding shape into the Bridge V2 components.
  */
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
+import { holdingScopeKey } from "@/lib/keys";
 
 export type HoldingType = "spot" | "derivative";
 
@@ -36,7 +37,8 @@ export type FlaggedHolding = {
  * === `buildHoldingRef(h)`).
  */
 export function buildHoldingRef(h: Pick<FlaggedHolding, "venue" | "symbol" | "holding_type">): string {
-  return `holding:${h.venue}:${h.symbol}:${h.holding_type}`;
+  // B8: single impl — delegate to the canonical key builder.
+  return holdingScopeKey(h);
 }
 
 export type BridgeOutcomeBannerCallbacks = {

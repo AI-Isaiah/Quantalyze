@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.15.14] - 2026-05-29
+### Changed — closed-set discipline: one registry for exchanges, caps, and keys (cross-cutting refactor B8a, TypeScript half)
+
+A unifying refactor that gives the project a single source of truth for its closed string sets, magnitude caps, and composite keys, so a whole class of "the set/cap/key was re-widened or hand-copied at a consuming layer" bugs becomes structurally hard to reintroduce. No user-facing behavior change except the one validation fix below.
+
+- **New `src/lib/closed-sets.ts` registry.** The supported-exchange allowlist `{binance, okx, bybit}` is now declared once (lowercase wire form), with the display labels (`Binance`/`OKX`/`Bybit`) and the Zod enum DERIVED from it — the two casings can no longer drift. The four-plus places that previously hand-listed exchanges (`constants.ts`, `utils.ts`, `analytics-schemas.ts`, `types.ts` funding-fee + api-key schemas, `create-with-key`, `debug-key-flow`, `ConnectKeyStep`) now all resolve to that one set. The wider ccxt provider set (deribit/kraken/coinbase) stays deliberately separate. Magnitude/length caps (strategy name, mandate, description, ticket size, AUM dollar, founder notes, excluded-exchange count/length) are now a single `MAGNITUDE_CAPS` constant; the hand-copied "mirrors preferences.ts:NNN" duplicates in the partner-import, csv-finalize, finalize-wizard, and CSV-upload paths were deleted in favor of it. The `profiles.role` signup allowlist is a single security-boundary constant that the `Role` type and the signup form both derive from (the SQL `handle_new_user` trigger remains the authoritative gate).
+- **New `src/lib/keys.ts` composite-key helpers.** `holdingScopeKey` (the `holding:venue:symbol:holding_type` scope_ref) and `dateMapStrict` (date-keyed map that surfaces duplicate dates instead of silently dropping them) are now single implementations; the previously-inlined copies across `queries.ts`, the scenario state/commit paths, the holding-outcome adapter, and the portfolio-impact panel all delegate to them, so a reordered or re-prefixed key can no longer silently fail to match.
+- **Fixed (NEW-C07-01): `excluded_exchanges` now rejects non-allowlisted values.** An allocator's mandate `excluded_exchanges` was validated for count and per-element length but accepted ANY string. Since the match engine only ever excludes strategies on the `{binance, okx, bybit}` allowlist, a non-allowlisted exclusion was dead data — or a typo silently masking a real exclusion. The preferences API now rejects (400) any `excluded_exchanges` entry that is not a supported exchange (case-insensitive, so the UI's display-case chips still pass).
+
 ## [0.24.15.13] - 2026-05-29
 ### Fixed — HOTFIX: failed analytics jobs could not be recorded as failed (prod incident)
 

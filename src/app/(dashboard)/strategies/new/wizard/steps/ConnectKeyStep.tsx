@@ -8,6 +8,7 @@ import { type WizardErrorCode } from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
+import type { SupportedExchange } from "@/lib/utils";
 
 /**
  * ConnectKeyStep renders the exchange selector, the inline permission
@@ -40,7 +41,9 @@ function readCorrelationId(): string {
   return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-type ExchangeId = "binance" | "okx" | "bybit";
+// B8: the user-allowlist exchange ids derive from the single SupportedExchange
+// set; the ExchangeOption[] array below adds component-specific UI metadata.
+type ExchangeId = SupportedExchange;
 
 interface ExchangeOption {
   id: ExchangeId;

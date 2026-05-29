@@ -188,25 +188,48 @@ describe("preferences helpers", () => {
       ).toMatch(/at most 100/);
     });
 
-    it("NEW-C07-01: accepts excluded_exchanges with exactly 100 entries", () => {
-      const exactly100 = Array.from({ length: 100 }, (_, i) => `exch${i}`);
+    it("NEW-C07-01: accepts excluded_exchanges at the count cap when every entry is allowlisted", () => {
+      // B8: count cap is 100 and the cap check precedes the per-element
+      // allowlist check; 100 allowlisted entries must pass.
+      const exactly100 = Array.from({ length: 100 }, () => "bybit");
       expect(
         validateSelfEditableInput({ excluded_exchanges: exactly100 }),
       ).toBeNull();
     });
 
-    it("NEW-C07-01: rejects excluded_exchanges with an entry longer than 100 chars", () => {
+    it("NEW-C07-01: rejects excluded_exchanges with an entry longer than 100 chars (before the allowlist check)", () => {
       const longEntry = "x".repeat(101);
       expect(
         validateSelfEditableInput({ excluded_exchanges: [longEntry] }),
       ).toMatch(/100 characters or less/);
     });
 
-    it("NEW-C07-01: accepts excluded_exchanges with entries of exactly 100 chars", () => {
-      const exactly100Chars = "x".repeat(100);
+    // B8 (2026-05-29): NEW-C07-01 allowlist half. Previously excluded_exchanges
+    // accepted ANY string ≤100 chars; the match engine only ever excludes
+    // strategies on the {binance,okx,bybit} allowlist, so a non-allowlisted
+    // value is dead data / a typo masking a real exclusion — reject-hard.
+    it("NEW-C07-01: accepts allowlisted exchanges in lowercase (wire form)", () => {
       expect(
-        validateSelfEditableInput({ excluded_exchanges: [exactly100Chars] }),
+        validateSelfEditableInput({ excluded_exchanges: ["binance", "okx", "bybit"] }),
       ).toBeNull();
+    });
+
+    it("NEW-C07-01: accepts allowlisted exchanges in display case (UI chip form)", () => {
+      expect(
+        validateSelfEditableInput({ excluded_exchanges: ["Binance", "OKX", "Bybit"] }),
+      ).toBeNull();
+    });
+
+    it("NEW-C07-01: rejects a non-allowlisted exchange (reject-hard)", () => {
+      expect(
+        validateSelfEditableInput({ excluded_exchanges: ["binance", "ftx"] }),
+      ).toMatch(/unsupported exchange: ftx/);
+    });
+
+    it("NEW-C07-01: rejects a free-text string that is not an exchange", () => {
+      expect(
+        validateSelfEditableInput({ excluded_exchanges: ["not-an-exchange"] }),
+      ).toMatch(/unsupported exchange/);
     });
 
     it("rejects NaN target_ticket_size_usd", () => {

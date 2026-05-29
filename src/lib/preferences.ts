@@ -13,6 +13,17 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { STRATEGY_TYPES, SUBTYPES } from "./constants";
+import {
+  SELF_EDITABLE_PREFERENCE_FIELDS,
+  ADMIN_ONLY_PREFERENCE_FIELDS,
+  MAGNITUDE_CAPS,
+  LIQUIDITY_PREFERENCES,
+  isSupportedExchange,
+} from "./closed-sets";
+
+// B8: the closed sets + caps live in the registry; re-export the field tuples
+// here so existing importers (useMandateAutoSave, preferences.test) are unchanged.
+export { SELF_EDITABLE_PREFERENCE_FIELDS, ADMIN_ONLY_PREFERENCE_FIELDS };
 
 export interface AllocatorPreferences {
   user_id: string;
@@ -40,29 +51,6 @@ export interface AllocatorPreferences {
   // via the feedback engine; not exposed in SELF_EDITABLE_PREFERENCE_FIELDS.
   scoring_weight_overrides: Record<string, number> | null;
 }
-
-/** Fields a regular allocator can write to about themselves. */
-export const SELF_EDITABLE_PREFERENCE_FIELDS = [
-  "mandate_archetype",
-  "target_ticket_size_usd",
-  "excluded_exchanges",
-  // Phase 2 promotions (D-03, D-06, D-07)
-  "max_weight",
-  "preferred_strategy_types",
-  "correlation_ceiling",
-  "max_drawdown_tolerance",
-  "liquidity_preference",
-  "style_exclusions",
-] as const;
-
-/** Fields only the admin (founder) can write to about another user. */
-export const ADMIN_ONLY_PREFERENCE_FIELDS = [
-  "min_track_record_days",
-  "min_sharpe",
-  "max_aum_concentration",
-  "preferred_markets",
-  "founder_notes",
-] as const;
 
 /** Default fallbacks used by the match engine when an allocator has no preferences row. */
 export const DEFAULT_PREFERENCES: Partial<AllocatorPreferences> = {
@@ -102,26 +90,34 @@ export function pickAdminEditableFields(
 export function validateSelfEditableInput(input: Partial<AllocatorPreferences>): string | null {
   if (input.mandate_archetype !== undefined && input.mandate_archetype !== null) {
     if (typeof input.mandate_archetype !== "string") return "mandate_archetype must be a string";
-    if (input.mandate_archetype.length > 500) return "mandate_archetype must be 500 characters or less";
+    if (input.mandate_archetype.length > MAGNITUDE_CAPS.MAX_MANDATE_CHARS)
+      return `mandate_archetype must be ${MAGNITUDE_CAPS.MAX_MANDATE_CHARS} characters or less`;
   }
   if (input.target_ticket_size_usd !== undefined && input.target_ticket_size_usd !== null) {
     if (typeof input.target_ticket_size_usd !== "number") return "target_ticket_size_usd must be a number";
     if (!Number.isFinite(input.target_ticket_size_usd)) return "target_ticket_size_usd must be finite";
     if (input.target_ticket_size_usd < 0) return "target_ticket_size_usd must be non-negative";
-    if (input.target_ticket_size_usd > 1_000_000_000) return "target_ticket_size_usd is unrealistically large";
+    if (input.target_ticket_size_usd > MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD)
+      return "target_ticket_size_usd is unrealistically large";
   }
   if (input.excluded_exchanges !== undefined && input.excluded_exchanges !== null) {
     if (!Array.isArray(input.excluded_exchanges)) return "excluded_exchanges must be an array";
-    // NEW-C07-01 (audit-2026-05-26 security+red-team): cap count and
-    // per-element length. Without these guards an authenticated allocator
-    // can PUT 500k single-char entries or a handful of multi-MB strings,
-    // inflating the allocator_preferences row to multi-MB TOAST and
-    // making every `getOwnPreferences` SELECT * expensive. The caps mirror
-    // the UI's exchange chip model (≤100 exchange codes, each ≤100 chars).
-    if (input.excluded_exchanges.length > 100) return "excluded_exchanges must have at most 100 entries";
+    // NEW-C07-01 (audit-2026-05-26 security+red-team; B8 allowlist 2026-05-29):
+    // cap count and per-element length so an authenticated allocator cannot PUT
+    // 500k single-char entries or a handful of multi-MB strings (multi-MB TOAST
+    // → every `getOwnPreferences` SELECT * gets expensive); AND reject any value
+    // that is not a supported exchange. The match engine only ever excludes
+    // strategies whose exchange is in the {binance,okx,bybit} allowlist, so a
+    // non-allowlisted exclusion is dead data at best and a typo masking a real
+    // exclusion at worst — fail loud (Rule 12). Membership is case-insensitive
+    // because the UI chip group emits display case ("Binance").
+    if (input.excluded_exchanges.length > MAGNITUDE_CAPS.MAX_EXCLUDED_EXCHANGES_COUNT)
+      return `excluded_exchanges must have at most ${MAGNITUDE_CAPS.MAX_EXCLUDED_EXCHANGES_COUNT} entries`;
     for (const e of input.excluded_exchanges) {
       if (typeof e !== "string") return "excluded_exchanges must be string[]";
-      if (e.length > 100) return "excluded_exchanges entries must be 100 characters or less";
+      if (e.length > MAGNITUDE_CAPS.MAX_EXCLUDED_EXCHANGE_LENGTH)
+        return `excluded_exchanges entries must be ${MAGNITUDE_CAPS.MAX_EXCLUDED_EXCHANGE_LENGTH} characters or less`;
+      if (!isSupportedExchange(e)) return `excluded_exchanges contains an unsupported exchange: ${e}`;
     }
   }
   // max_weight — Phase 2 (MANDATE-01). 0.05-0.50 per D-17.
@@ -145,7 +141,8 @@ export function validateSelfEditableInput(input: Partial<AllocatorPreferences>):
   // liquidity_preference — enum per D-05.
   if (input.liquidity_preference !== undefined && input.liquidity_preference !== null) {
     if (typeof input.liquidity_preference !== "string") return "liquidity_preference must be a string";
-    if (!["high", "medium", "low"].includes(input.liquidity_preference)) return "liquidity_preference must be high, medium, or low";
+    if (!(LIQUIDITY_PREFERENCES as readonly string[]).includes(input.liquidity_preference))
+      return "liquidity_preference must be high, medium, or low";
   }
   // style_exclusions — subset of SUBTYPES per D-04.
   if (input.style_exclusions !== undefined && input.style_exclusions !== null) {
@@ -206,7 +203,8 @@ export function validateAdminEditableInput(input: Partial<AllocatorPreferences>)
   // founder_notes: free text, cap length
   if (input.founder_notes !== undefined && input.founder_notes !== null) {
     if (typeof input.founder_notes !== "string") return "founder_notes must be a string";
-    if (input.founder_notes.length > 10_000) return "founder_notes must be 10,000 characters or less";
+    if (input.founder_notes.length > MAGNITUDE_CAPS.MAX_FOUNDER_NOTES_CHARS)
+      return `founder_notes must be ${MAGNITUDE_CAPS.MAX_FOUNDER_NOTES_CHARS.toLocaleString("en-US")} characters or less`;
   }
 
   return null;

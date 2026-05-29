@@ -1,3 +1,5 @@
+import { EXCHANGES } from "./closed-sets";
+
 export const STRATEGY_NAMES = [
   "Alpha Centauri",
   "Black Swan",
@@ -60,7 +62,11 @@ export const SUBTYPES = [
 
 export const MARKETS = ["Futures", "Spot"] as const;
 
-export const EXCHANGES = ["Binance", "OKX", "Bybit"] as const;
+// B8: EXCHANGES (display case) is derived from the lowercase SUPPORTED_EXCHANGES
+// base in the closed-set registry (imported at the top of this file); re-exported
+// here so the UI chip-group importers keep the `@/lib/constants` path.
+// `(typeof EXCHANGES)[number]` stays the "Binance" | "OKX" | "Bybit" union.
+export { EXCHANGES };
 
 /**
  * Normalize an exchange name to its canonical-case form (matches the
