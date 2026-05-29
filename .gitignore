@@ -96,6 +96,7 @@ fix-list.md
 fix-list-cluster.md
 fix-list-cluster.md.bak*
 .review/
+tool-results/
 scripts/audit-close-findings.py
 scripts/extract-fixlist-section.sh
 scripts/mark-reverified-closed.py

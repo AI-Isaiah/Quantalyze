@@ -120,6 +120,7 @@ export type Database = {
           asof: string
           breakdown: Json | null
           history_depth_months: number | null
+          pre_terminus_balance_unknown: boolean
           reconstructed_at: string
           source: string
           value_usd: number
@@ -129,6 +130,7 @@ export type Database = {
           asof: string
           breakdown?: Json | null
           history_depth_months?: number | null
+          pre_terminus_balance_unknown?: boolean
           reconstructed_at?: string
           source?: string
           value_usd: number
@@ -138,6 +140,7 @@ export type Database = {
           asof?: string
           breakdown?: Json | null
           history_depth_months?: number | null
+          pre_terminus_balance_unknown?: boolean
           reconstructed_at?: string
           source?: string
           value_usd?: number

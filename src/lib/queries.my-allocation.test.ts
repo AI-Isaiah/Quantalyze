@@ -89,6 +89,9 @@ const state = vi.hoisted(() => ({
     breakdown: Record<string, number> | null;
     source: "exchange_primary" | "coingecko_fallback" | "mixed";
     history_depth_months: number | null;
+    // CL9 / NEW-C01-11 — optional so existing seeds (which omit it) compile;
+    // the read boundary treats undefined as trustworthy.
+    pre_terminus_balance_unknown?: boolean;
   }>,
   // Phase 07 / 07-03 — allocator holdings (Phase 06 table) read for holdingsSummary
   allocatorHoldings: [] as Array<{
@@ -908,6 +911,100 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     expect(result.snapshotCount).toBeGreaterThan(0);
     expect(result.equitySnapshots.length).toBeGreaterThan(0);
     expect(result.equityDailyPoints.length).toBeGreaterThan(0);
+  });
+
+  it("TC p7-CL9: terminus-flagged rows are excluded end-to-end + equityBaselineUnknown set (NEW-C01-11)", async () => {
+    // The read-boundary wiring (partitionTrustworthyEquitySnapshots feeding
+    // snapshotCount / equityDailyPoints / equitySnapshots) is exercised here
+    // through the real getMyAllocationDashboard — the pure-helper unit tests
+    // alone cannot catch a mis-wired call site (e.g. feeding the raw array to
+    // derivePhase07Fields, or computing snapshotCount off the raw count).
+    state.portfolios = [P7_PORTFOLIO];
+    state.allocatorEquitySnapshots = [
+      // Two flagged (zero-baseline garbage) rows — must be dropped everywhere.
+      {
+        allocator_id: "user-1",
+        asof: "2026-03-01",
+        value_usd: 5,
+        breakdown: null,
+        source: "exchange_primary",
+        history_depth_months: 3,
+        pre_terminus_balance_unknown: true,
+      },
+      {
+        allocator_id: "user-1",
+        asof: "2026-03-02",
+        value_usd: 18_000,
+        breakdown: null,
+        source: "exchange_primary",
+        history_depth_months: 3,
+        pre_terminus_balance_unknown: true,
+      },
+      // Two trustworthy (live-refresh) rows — must survive.
+      {
+        allocator_id: "user-1",
+        asof: "2026-03-10",
+        value_usd: 10_000,
+        breakdown: null,
+        source: "exchange_primary",
+        history_depth_months: 3,
+        pre_terminus_balance_unknown: false,
+      },
+      {
+        allocator_id: "user-1",
+        asof: "2026-03-11",
+        value_usd: 10_100,
+        breakdown: null,
+        source: "exchange_primary",
+        history_depth_months: 3,
+        pre_terminus_balance_unknown: false,
+      },
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // Any flagged row present → the dashboard explains the gap.
+    expect(result.equityBaselineUnknown).toBe(true);
+    // Flagged rows excluded from the payload + the warm-up count.
+    expect(result.equitySnapshots.map((s) => s.asof)).toEqual([
+      "2026-03-10",
+      "2026-03-11",
+    ]);
+    expect(result.snapshotCount).toBe(2);
+    // The garbage dates (and their forward-fill) never enter the daily series:
+    // the curve starts at the first TRUSTWORTHY row.
+    expect(result.equityDailyPoints.length).toBeGreaterThan(0);
+    expect(result.equityDailyPoints[0].date).toBe("2026-03-10");
+    expect(result.equityDailyPoints.some((p) => p.date < "2026-03-10")).toBe(
+      false,
+    );
+  });
+
+  it("TC p7-CL9b: a fully-clean series leaves equityBaselineUnknown false and keeps every row", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.allocatorEquitySnapshots = [
+      {
+        allocator_id: "user-1",
+        asof: "2026-03-10",
+        value_usd: 10_000,
+        breakdown: null,
+        source: "exchange_primary",
+        history_depth_months: 24,
+        pre_terminus_balance_unknown: false,
+      },
+      {
+        allocator_id: "user-1",
+        asof: "2026-03-11",
+        value_usd: 10_100,
+        breakdown: null,
+        source: "exchange_primary",
+        history_depth_months: 24,
+      },
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.equityBaselineUnknown).toBe(false);
+    expect(result.snapshotCount).toBe(2);
   });
 
   it("TC p7-03: snapshotCount equals mocked row count when < 30", async () => {

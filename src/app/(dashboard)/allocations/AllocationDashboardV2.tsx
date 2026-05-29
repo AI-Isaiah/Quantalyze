@@ -57,6 +57,13 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // looking at full-confidence numbers computed on stale data.
     allKeysStale = false,
     lastSyncAt = null,
+    // CL9 / NEW-C01-11: true when the allocator's reconstructed equity history
+    // was built against an unknown absolute baseline (OKX 90-day terminus
+    // clamped the funding deposit out of the fetch window). The flagged rows
+    // are already excluded server-side from equityDailyPoints / KPIs; this just
+    // drives the explanatory banner so the missing absolute history doesn't
+    // read as a broken connection.
+    equityBaselineUnknown = false,
   } = props;
 
   // NEW-C06-02: drain the one-shot recovery flag set by useDashboardConfigV2
@@ -119,6 +126,15 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   if (holdingsEmpty && !hasSyncing) {
     return (
       <div data-ui-v2-shell="true">
+        {/* CL9 / NEW-C01-11: holdingsSummary (allocator_holdings) and
+            equityBaselineUnknown (allocator_equity_snapshots) are independent
+            sources. A terminus-clamped allocator whose holdings poll hasn't
+            landed yet (first-connect race) would otherwise see only the bare
+            "connect an exchange" CTA — actively wrong, since they DO have a
+            connected key with reconstructed (if baseline-unknown) history.
+            Surface the banner here too so the gap reads as a data-horizon
+            limit, not a missing connection. */}
+        {equityBaselineUnknown && <BaselineUnknownBanner />}
         <EmptyState hasSyncing={false} />
       </div>
     );
@@ -223,6 +239,12 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       {allKeysStale && !hasSyncing && (
         <StalenessBanner lastSyncAt={lastSyncAt} />
       )}
+      {/* CL9 / NEW-C01-11: absolute equity/drawdown history before the live
+          window can't be reconstructed (positions were funded before the
+          venue's data horizon). Non-blocking — live holdings + AUM behind it
+          remain accurate; the trustworthy curve rebuilds as daily snapshots
+          accrue. */}
+      {equityBaselineUnknown && <BaselineUnknownBanner />}
       <InsightStrip
         analytics={analytics}
         portfolioId={portfolio?.id ?? null}
@@ -308,6 +330,46 @@ function StalenessBanner({ lastSyncAt }: { lastSyncAt: string | null }) {
           : "No successful sync recorded yet."}
         {" "}Use the API keys panel below to reconnect a key, or wait for
         the next scheduled sync.
+      </span>
+    </div>
+  );
+}
+
+/**
+ * CL9 / NEW-C01-11: non-blocking banner shown when the allocator's
+ * reconstructed equity history was built against an unknown absolute baseline.
+ *
+ * On venues with a capped trade horizon (OKX's 90-day window), positions
+ * funded before that horizon leave the reconstruction with no opening balance,
+ * so the absolute equity level — and the drawdown / time-weighted return
+ * derived from it — is unreliable for the clamped window. Those rows are
+ * excluded server-side from every level-derived surface; this banner explains
+ * why the absolute history is short so it doesn't read as a broken connection.
+ *
+ * Uses the same warning design tokens + role="status" shape as StalenessBanner
+ * so the freshness/quality banners stay visually coherent. Not dismissible: the
+ * condition is data-driven (resolves only as trustworthy daily-refresh rows
+ * accrue), so a one-shot dismiss would let the user re-acquire the wrong mental
+ * model on the next load.
+ */
+function BaselineUnknownBanner() {
+  return (
+    <div
+      role="status"
+      data-testid="dashboard-baseline-unknown-banner"
+      className="mb-3 rounded-md border px-4 py-2 text-sm"
+      style={{
+        background: "var(--color-warning-bg)",
+        borderColor: "var(--color-warning-border)",
+        color: "var(--color-text-secondary)",
+      }}
+    >
+      <span className="font-medium">Limited equity history.</span>{" "}
+      <span>
+        Some positions were funded before your exchange&apos;s available data
+        window, so absolute equity and drawdown can&apos;t be reconstructed for
+        that earlier period. Your live holdings and current AUM are accurate, and
+        a full performance history builds up from here as daily snapshots accrue.
       </span>
     </div>
   );

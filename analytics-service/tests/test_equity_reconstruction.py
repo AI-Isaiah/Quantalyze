@@ -328,6 +328,11 @@ class FakeSupabaseClient:
                     "breakdown": r.get("breakdown"),
                     "source": src,
                     "history_depth_months": depth if src == "exchange_primary" else None,
+                    # CL9 / NEW-C01-11: mirror the RPC's COALESCE(...false) so the
+                    # in-memory store reflects the persisted per-row flag.
+                    "pre_terminus_balance_unknown": bool(
+                        r.get("pre_terminus_balance_unknown", False)
+                    ),
                 }
                 inserted += 1
 
@@ -487,6 +492,13 @@ async def test_reconstruct_happy_path(monkeypatch):
             f"Binance rows must have history_depth_months=24; got {r!r}"
         )
         assert "value_usd" in r and r["value_usd"] is not None
+        # CL9 / NEW-C01-11: a non-terminus reconstruction has a known baseline,
+        # so the flag MUST be false (contrast to the OKX-terminus test). This
+        # pins the flag to the actual hit_terminus signal — it can't silently
+        # default-true and over-suppress a healthy curve.
+        assert r["pre_terminus_balance_unknown"] is False, (
+            f"non-terminus rows must persist pre_terminus_balance_unknown=False; got {r!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -644,6 +656,93 @@ async def test_reconstruct_okx_3month_terminus(monkeypatch, caplog):
     for r in rows:
         assert r["history_depth_months"] == 3, (
             f"OKX rows must have history_depth_months=3; got {r!r}"
+        )
+        # CL9 / NEW-C01-11: a terminus-clamped reconstruction starts from a zero
+        # baseline, so every persisted row must carry pre_terminus_balance_unknown
+        # =True. Without the fix the flag never leaves the audit metadata and the
+        # dashboard renders the garbage absolute-level curve.
+        assert r["pre_terminus_balance_unknown"] is True, (
+            f"terminus rows must persist pre_terminus_balance_unknown=True; got {r!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_reconstruct_okx_terminus_multikey_upsert_path_flags_rows(monkeypatch, caplog):
+    """CL9 / NEW-C01-11: the MULTI-KEY reconstruct branch (persist_equity_snapshots
+    upsert) must also persist pre_terminus_balance_unknown=True on a terminus hit.
+
+    The sole-key terminus test above exercises the atomic replace_equity_snapshots
+    RPC path. The two persistence paths are asymmetric — the RPC projects an
+    explicit payload while the upsert relies on {**r} + an explicit COALESCE — so
+    RPC-path coverage does NOT cover the upsert. Here we seed a CONNECTED SIBLING
+    api_key so _allocator_has_other_api_keys returns has_siblings=True, forcing the
+    persist_equity_snapshots branch (equity_reconstruction.py:2299). A regression
+    that dropped the flag from the upsert `stamped` dict would slip past every
+    other test (Test 5/7 assert False, which is the default)."""
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_audit(monkeypatch)
+
+    # Connected sibling key for the SAME allocator → multi-key (upsert) branch.
+    fake_supabase.store[("api_keys", (API_KEY_ID_2,))] = {
+        "id": API_KEY_ID_2,
+        "user_id": ALLOCATOR_ID,
+        "is_active": True,
+        "sync_status": "ok",
+        "disconnected_at": None,
+    }
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=60)
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + day * day_ms, 50000.0) for day in range(61)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    _trade_pages = iter([trades, []])
+
+    async def _ft(_symbol, _since, _limit, _params=None):
+        try:
+            return next(_trade_pages)
+        except StopIteration:
+            return []
+
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=_ft)
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "okx", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    job = {"id": "job-okx-mk", "kind": "reconstruct_allocator_history", "api_key_id": API_KEY_ID_1}
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    # Confirm we took the MULTI-KEY (upsert) branch, NOT the sole-key replace RPC.
+    assert not any(
+        name == "replace_allocator_equity_snapshots" for name, _ in fake_supabase.rpc_calls
+    ), f"expected multi-key upsert path, but the replace RPC was called: {fake_supabase.rpc_calls!r}"
+
+    rows = fake_supabase.rows_for("allocator_equity_snapshots")
+    assert len(rows) >= 1
+    for r in rows:
+        assert r["pre_terminus_balance_unknown"] is True, (
+            f"multi-key (upsert) terminus rows must persist "
+            f"pre_terminus_balance_unknown=True; got {r!r}"
         )
 
 
@@ -836,6 +935,13 @@ async def test_refresh_daily_appends_one_row(monkeypatch):
         f"expected exactly one row for today; got {len(today_rows)}: {today_rows!r}"
     )
     assert today_rows[0]["allocator_id"] == ALLOCATOR_ID
+    # CL9 / NEW-C01-11: the daily refresh marks today's live holdings to current
+    # price — a fully-known baseline — so the appended row must be false. This
+    # lets trustworthy live rows render even when an older terminus-clamped
+    # reconstruction was suppressed.
+    assert today_rows[0]["pre_terminus_balance_unknown"] is False, (
+        f"daily-refresh row must persist pre_terminus_balance_unknown=False; got {today_rows[0]!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
