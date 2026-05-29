@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.17] - 2026-05-29
+### Changed — scenario draft persistence moves onto the cross-tab storage primitive (cross-cutting refactor B7, part 2)
+
+The scenario builder's draft now persists through the same `useCrossTabStorage` primitive the rest of the app is consolidating on, instead of its own bespoke `localStorage` read/write. You get the hardening for free: weight edits are debounced (no `setItem` per keystroke), the stored blob is validated on read (a corrupted or wrong-shaped draft falls back to a fresh one with a fail-loud breadcrumb instead of flowing garbage into the builder), a draft saved by a newer build is shown read-only instead of being silently down-converted, and a second tab editing the same scenario now syncs across tabs instead of one tab silently clobbering the other on its next save.
+
+- **`useScenarioState` routed through the primitive.** `src/app/(dashboard)/allocations/lib/scenario-state.ts` gains `scenarioDraftCodec` (zod whole-shape validation + version trichotomy; only a higher *integer* schema version is treated as forward-compat, a malformed float resets). The hook derives the holdings-fingerprint-mismatch banner as pure render state and rebases edits onto the default draft during a mismatch. The legacy `loadScenarioDraft`/`saveScenarioDraft`/`clearScenarioDraft` helpers are retained for back-compat.
+- **"N changes" chip is now accurate.** A pure weight rebalance (no toggles/adds) now counts toward the change count and un-blocks Commit — the documented voluntary-modify workflow the prior "conservative zero" silently locked out. A holding you re-weighted and then toggled off counts once, not twice.
+- **Toggle-on restores a 100% preserved weight.** Re-enabling a holding that was at full weight before being toggled off now restores its 100% intent instead of falling into equal distribution.
+- **Findings folded by construction (audit B7):** H-0125 (per-keystroke write → debounced), M-0137 (double read → single decode), M-0153 (unchecked cast → zod), H-0126 (Commit disabled on pure-rebalance), H-0127 (diffCount memo churn), M-0152 (toggle-on boundary). H-0137/H-0138 re-verified closed (sign-out namespace purge + the commit drawer's strict `recorded === diffs.length` success gate). 13 regression tests added; full suite green (5858 pass).
+
 ## [0.24.15.16] - 2026-05-29
 ### Changed — cross-tab / cross-version localStorage safety: one primitive for client persistence (cross-cutting refactor B7, part 1)
 
