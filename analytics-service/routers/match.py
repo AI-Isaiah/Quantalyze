@@ -47,7 +47,6 @@ from services.db import get_supabase
 from services.equity_reconstruction import reconstruct_symbol_returns
 from services.match_engine import (
     ENGINE_VERSION,
-    TOP_N_CANDIDATES,
     WEIGHTS_VERSION,
     score_candidates,
 )
@@ -945,17 +944,35 @@ class _ScoredProxy:
 async def _score_one_allocator(
     allocator_id: str,
     universe: dict[str, Any],
+    *,
+    precomputed_ctx: dict[str, Any] | None = None,
+    precomputed_overrides: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Score a single allocator and persist the batch + candidates."""
+    """Score a single allocator and persist the batch + candidates.
+
+    NEW-C12-09: run_rescore_allocator_job loads the allocator context +
+    feedback overrides in its pre-universe-scan preflight (to fail a poison
+    mandate 'permanent' before the ~30k scan) and threads them in via
+    precomputed_ctx/precomputed_overrides so the healthy rescore path neither
+    re-loads the allocator-scoped rows nor double-emits compute_adjusted_weights'
+    audit event + _persist_overrides write. The HTTP recompute() and
+    cron_recompute() callers pass neither, so they self-load exactly as before
+    (keyword-only with None defaults — purely additive, no shared-path change).
+    """
     # Body-placed import keeps services.feedback_engine lazy — it should NOT
     # land in sys.modules at module load time, only when scoring runs.
     from services.feedback_engine import compute_adjusted_weights
     async with _scoring_semaphore:
         start = time.monotonic()
 
-        ctx = await asyncio.to_thread(_load_allocator_context, allocator_id)
+        if precomputed_ctx is not None:
+            # Rescore preflight already loaded these (single-allocator, cheap).
+            ctx = precomputed_ctx
+            overrides = precomputed_overrides
+        else:
+            ctx = await asyncio.to_thread(_load_allocator_context, allocator_id)
 
-        overrides = await asyncio.to_thread(compute_adjusted_weights, allocator_id)
+            overrides = await asyncio.to_thread(compute_adjusted_weights, allocator_id)
         # ctx["preferences"] can be None when the allocator has no
         # allocator_preferences row; normalize to {} before merging overrides.
         #

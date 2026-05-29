@@ -3819,3 +3819,109 @@ class TestRecomputeSerializationLock:
             "different allocators must score CONCURRENTLY — the per-allocator "
             "lock must not serialize across distinct allocators"
         )
+
+
+class TestScoreOneAllocatorPrecomputedCtx:
+    """NEW-C12-09: _score_one_allocator's keyword-only precomputed_ctx /
+    precomputed_overrides path is the load-bearing guard that makes
+    compute_adjusted_weights — which does a _persist_overrides DB write AND a
+    log_audit_event (services/feedback_engine.py) — run EXACTLY ONCE per
+    rescore. run_rescore_allocator_job loads ctx+overrides in its pre-scan
+    preflight and threads them in; if _score_one_allocator still re-loaded,
+    every rescore would emit a DUPLICATE audit event + redundant overrides
+    write.
+
+    These exercise the REAL _score_one_allocator branch (not a mock): a DROP of
+    the `if precomputed_ctx is not None` skip would call _load_allocator_context
+    / compute_adjusted_weights on the precomputed path and fail
+    test_precomputed_path_skips_reload_and_threads_overrides. We stop the
+    function right after the branch (+ the overrides assignment) by making
+    score_candidates raise a sentinel — persistence/retention are out of scope
+    for this contract.
+    """
+
+    class _StopAfterBranch(Exception):
+        pass
+
+    @classmethod
+    def _stub(cls, monkeypatch, match_mod, alloc_mock, weights_mock):
+        import services.feedback_engine
+
+        monkeypatch.setattr(match_mod, "_load_allocator_context", alloc_mock)
+        # _score_one_allocator body-imports compute_adjusted_weights from
+        # services.feedback_engine, so patch it at the source module.
+        monkeypatch.setattr(
+            services.feedback_engine, "compute_adjusted_weights", weights_mock
+        )
+
+        def _stop(**_kw):
+            raise cls._StopAfterBranch("branch + overrides assignment done")
+
+        monkeypatch.setattr(match_mod, "score_candidates", _stop)
+
+    @pytest.mark.asyncio
+    async def test_precomputed_path_skips_reload_and_threads_overrides(
+        self, monkeypatch
+    ) -> None:
+        from routers import match as match_mod
+
+        alloc_mock = MagicMock(name="_load_allocator_context")
+        weights_mock = MagicMock(name="compute_adjusted_weights")
+        self._stub(monkeypatch, match_mod, alloc_mock, weights_mock)
+
+        ctx = {
+            "preferences": {"min_sharpe": 1.0},
+            "portfolio_strategies": [{"strategy_id": "s1"}],
+            "portfolio_weights": {},
+            "portfolio_returns": {},
+            "portfolio_aum": None,
+            "thumbs_down_ids": set(),
+            "_holdings_rows_eligible": [],
+        }
+        overrides = {"W_PORTFOLIO_FIT": 1.2}
+        universe = {"strategies_by_id": {"s1": {"strategy_id": "s1"}}, "returns_by_id": {}}
+
+        with pytest.raises(self._StopAfterBranch):
+            await match_mod._score_one_allocator(
+                "alloc-pre", universe,
+                precomputed_ctx=ctx, precomputed_overrides=overrides,
+            )
+
+        # The point of the precomputed path: NEITHER allocator-scoped loader
+        # runs, so compute_adjusted_weights' audit event + _persist_overrides
+        # write fire exactly once (in the preflight), never twice per rescore.
+        alloc_mock.assert_not_called()
+        weights_mock.assert_not_called()
+        # And the precomputed overrides are threaded into the scoring prefs.
+        assert ctx["preferences"]["scoring_weight_overrides"] == overrides
+
+    @pytest.mark.asyncio
+    async def test_default_path_loads_context_and_weights_exactly_once(
+        self, monkeypatch
+    ) -> None:
+        from routers import match as match_mod
+
+        alloc_mock = MagicMock(
+            name="_load_allocator_context",
+            return_value={
+                "preferences": {},
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": None,
+                "thumbs_down_ids": set(),
+                "_holdings_rows_eligible": [],
+            },
+        )
+        weights_mock = MagicMock(name="compute_adjusted_weights", return_value={})
+        self._stub(monkeypatch, match_mod, alloc_mock, weights_mock)
+
+        universe = {"strategies_by_id": {"s1": {"strategy_id": "s1"}}, "returns_by_id": {}}
+
+        with pytest.raises(self._StopAfterBranch):
+            await match_mod._score_one_allocator("alloc-default", universe)
+
+        # No precomputed args → self-load EXACTLY once each. A double-call here
+        # would mean a duplicate audit event + _persist_overrides write.
+        alloc_mock.assert_called_once_with("alloc-default")
+        weights_mock.assert_called_once_with("alloc-default")
