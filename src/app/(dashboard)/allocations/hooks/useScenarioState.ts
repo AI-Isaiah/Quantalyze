@@ -124,9 +124,9 @@ export function useScenarioState(
     // No recoveryKey: a corrupt/forward-version read still fails loud via the
     // primitive's console.warn + Sentry breadcrumb. We deliberately do NOT emit
     // the sessionStorage recovery breadcrumb because the scenario surface has no
-    // banner draining it yet — an un-drained breadcrumb is a dead surface. The
-    // forward-version read-only UX (a banner + reset-to-recover) is deferred to
-    // B7b, where the dashboard's recovery-banner pattern is generalized.
+    // banner draining it yet — an un-drained breadcrumb is a dead surface. A
+    // user-facing forward-version read-only UX (a banner + reset-to-recover) is
+    // deferred until the scenario surface grows a recovery banner of its own.
   });
 
   // Stable refs so the mutator callbacks can rebase onto the current default
