@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.18] - 2026-05-29
+### Removed — the dormant configurable widget-grid dashboard (cross-cutting refactor B7, part 3)
+
+The allocator Overview became the factsheet view in v0.23.0.0 (#227), which left the entire configurable widget-grid dashboard with no live caller. This retires the dead subsystem outright. Deleting it closes a whole class of cross-tab / cross-version `localStorage`-safety risk *by construction* — that code can never drift and never trips the B25 raw-`localStorage` lint ban. No user-visible behavior changes: nothing rendered this code.
+
+- **Deleted (20 files).** The V1 (`useDashboardConfig`) + V2 (`useDashboardConfigV2`) hooks with their `loadV2Config` / recovery-flag machinery (`hooks/useDashboardConfig.ts`), the widget registry + default layout (`lib/widget-registry.ts`, `lib/dashboard-defaults.ts`), and the grid UI (`WidgetGrid`, `WidgetChrome`, `SizeStepper`, `WidgetPicker`, `AddWidgetModal`) — plus every matching test. All had zero non-comment importers, verified end-to-end (tsc 0, lint 0, full vitest 5706 pass, no e2e references to the deleted UI).
+- **Removed the dead dashboard-recovery banner** from `AllocationDashboardV2.tsx`: its `dashboard.config.recoveredFromCorruption` sessionStorage flag was set *only* inside the deleted `loadV2Config`, so the banner could never fire. `lib/types.ts` is reduced to its live surface (`WidgetProps` + the `TimeframeKey` re-export); the dead `TileConfig` / `DashboardConfig` / `Legacy*` / `WidgetMeta` / `coerceTimeframe` exports are gone.
+- **Findings closed by deletion (audit-2026-05-07).** Every finding filed against a deleted file — `useDashboardConfig` (17), `widget-registry` (6), `dashboard-defaults` (5), `WidgetGrid` (7), `AddWidgetModal` (4), `WidgetPicker` (2), plus the `TileConfig`/`WidgetMeta` findings in `types.ts` and the recovery-banner findings in `AllocationDashboardV2` — is closed by construction.
+- **Follow-up (tracked, not in this PR).** The ~37 `widgets/*` renderers the grid used to mount are now reachable only through the lazy `WIDGET_COMPONENTS` barrel; ~9 remain mounted live (RiskTabPanel's curated set + the factsheet Overview's direct `EquityChart`/`DrawdownChart` + `OutcomesWidget`). Pruning the orphaned renderers — or formally retaining them as a feature-flag-gated library — is a separate change.
+
 ## [0.24.15.17] - 2026-05-29
 ### Changed — scenario draft persistence moves onto the cross-tab storage primitive (cross-cutting refactor B7, part 2)
 

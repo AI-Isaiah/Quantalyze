@@ -23,7 +23,7 @@ export function Tweaks() {
   const { state, set, reset, panelOpen, closePanel } = useTweaks();
   const panelRef = useRef<HTMLDivElement>(null);
 
-  // Outside-click + Esc dismissal — clones AddWidgetModal:29-62 pattern.
+  // Outside-click + Esc dismissal.
   useEffect(() => {
     if (!panelOpen) return;
     const onKey = (e: KeyboardEvent) => {

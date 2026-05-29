@@ -8,8 +8,9 @@ import { captureToSentry } from "@/lib/sentry-capture";
  *
  * `useCrossTabStorage` is the single primitive through which client state
  * crosses the `localStorage` boundary. It generalizes — by construction — the
- * hardening that `useDashboardConfigV2` (the reference implementation) grew
- * piecemeal across the audit-2026-05-07 findings:
+ * hardening that the allocator dashboard-config hook grew piecemeal across the
+ * audit-2026-05-07 findings (that hook was retired in B7b; this primitive is
+ * now the single home for the pattern):
  *
  *   - version trichotomy (higher → read-only, equal → adopt, lower → reset),
  *   - flush-before-adopt cross-tab sync (the StorageEvent listener),

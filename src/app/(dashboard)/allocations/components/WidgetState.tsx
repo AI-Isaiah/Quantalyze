@@ -17,11 +17,10 @@ import { Skeleton } from "@/components/ui/Skeleton";
  * its zero-state copy — the primitive accepts caller-supplied strings
  * via the `empty` prop so each widget tells its own story.
  *
- * RISK-1 (review feedback): universal rollout to the 32 long-tail
- * WIDGET_REGISTRY widgets is gated behind the `widget_state_v2`
- * feature flag (see src/lib/widget-state-flag.ts). The 7 DEFAULT_LAYOUT
- * widgets are wrapped in this phase regardless; the rest opt in via
- * the flag, isolating blast radius.
+ * RISK-1 (review feedback): universal rollout to the long-tail widget
+ * renderers is gated behind the `widget_state_v2` feature flag (see
+ * src/lib/widget-state-flag.ts). The core widgets are wrapped in this
+ * phase regardless; the rest opt in via the flag, isolating blast radius.
  *
  * Mode dispatch (locked contract):
  *   - mode='loading' → Card with `aria-busy="true"` + animate-pulse

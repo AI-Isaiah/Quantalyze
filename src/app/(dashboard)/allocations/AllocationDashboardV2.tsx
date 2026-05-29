@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
@@ -13,10 +13,6 @@ import {
   FactsheetProvider,
 } from "@/app/factsheet/[id]/v2/factsheet-context";
 import { FactsheetBody } from "@/app/factsheet/[id]/v2/FactsheetView";
-import {
-  consumeDashboardRecoveryFlag,
-  type DashboardRecoveryReason,
-} from "./hooks/useDashboardConfig";
 
 /**
  * Overview = factsheet shell. Full-width blended equity curve mounted at
@@ -65,21 +61,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // read as a broken connection.
     equityBaselineUnknown = false,
   } = props;
-
-  // NEW-C06-02: drain the one-shot recovery flag set by useDashboardConfigV2
-  // whenever a corrupt blob / version mismatch caused a layout reset. Display
-  // a non-blocking dismissible banner so the allocator knows their
-  // customizations were reset and why — previously this was invisible.
-  const [recoveryReason, setRecoveryReason] = useState<DashboardRecoveryReason | null>(null);
-  useEffect(() => {
-    const reason = consumeDashboardRecoveryFlag();
-    // One-shot mount-time drain of a browser-only flag (sessionStorage) that
-    // only exists post-hydration; a lazy useState initializer would run during
-    // render (SSR-unsafe + double-consume under StrictMode). The intentional
-    // one-extra-render is harmless. Same pattern as the factsheet v2 contexts.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (reason) setRecoveryReason(reason);
-  }, []);
 
   // Per-API-key include/exclude — display-time filter for Overview
   // aggregates. Excluded keys still ingest server-side (the toggle does
@@ -191,44 +172,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
 
   return (
     <div data-ui-v2-shell="true" className="relative">
-      {/* NEW-C06-02: one-shot recovery banner when useDashboardConfigV2 reset
-          the layout due to corruption / version mismatch. Dismissible and
-          non-blocking (the dashboard loads with defaults behind it). */}
-      {recoveryReason != null && (
-        <div
-          role="alert"
-          data-testid="dashboard-recovery-banner"
-          className="mb-3 flex items-center justify-between rounded-md border px-4 py-2 text-sm"
-          style={{
-            // I3 fix: use explicit DESIGN.md tokens instead of ad-hoc color-mix().
-            // --color-warning-bg (#FEF3C7) and --color-warning-border (#FDE68A)
-            // were added in Phase 09.1 UI-FLAG-01 for exactly this use case.
-            // color-mix() produced a different tint (#FDF5E8) from the named
-            // tokens, causing a visual inconsistency with HoldingsTable warning chips.
-            background: "var(--color-warning-bg)",
-            borderColor: "var(--color-warning-border)",
-            color: "var(--color-text-secondary)",
-          }}
-        >
-          <span>
-            {recoveryReason === "version_reset"
-              ? "Your dashboard layout was reset after an app update. Widgets have been restored to defaults."
-              : recoveryReason === "legacy_in_v2_blob"
-              ? "Your saved layout used an older format and was reset to defaults."
-              : recoveryReason === "unknown_timeframe"
-              ? "Your saved timeframe was set in a newer version of the app. This tab is read-only — open the dashboard in the newer version to edit."
-              : "Your dashboard layout could not be loaded and was reset to defaults."}
-          </span>
-          <button
-            type="button"
-            aria-label="Dismiss"
-            onClick={() => setRecoveryReason(null)}
-            className="ml-4 shrink-0 text-text-muted hover:text-text-secondary"
-          >
-            ✕
-          </button>
-        </div>
-      )}
       {portfolio != null && <AlertBanner portfolioId={portfolio.id} />}
       {/* NEW-C09-04 (B14): freshness banner. Renders only when every active
           API key's last_sync_at is >24h old AND the dashboard is not actively
