@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.9] - 2026-05-29
+### Security — lock privileged profiles columns against client self-write (audit-2026-05-07 CL-SEC, privilege escalation)
+
+Closes two client-side privilege escalations on the `profiles` table, both reachable by any logged-in user via a plain `PATCH /rest/v1/profiles?id=eq.<own-uid>`:
+
+- **CRITICAL — admin self-grant (UPDATE).** `authenticated` held a whole-table UPDATE grant on `profiles`, and the `profiles_self_update` RLS policy constrains the *row* (`auth.uid() = id`), not the *columns*. There was no trigger on `is_admin`. Since `is_admin = true` is a live admin gate (admin-only RLS on other tables + the admin-route check), a user could set `{"is_admin": true}` on their own row and obtain full back-office admin.
+- **CRITICAL — admin self-grant (DELETE + re-INSERT).** `profiles_self_delete` + `profiles_self_insert` (whose `WITH CHECK` only pins `id`) plus the table-level INSERT grant let a user delete their own profile and re-insert a replacement with `is_admin = true` (or any `tenant_id`/status), bypassing any UPDATE-side guard.
+- **Ineffective role lock.** The `prevent_profile_role_change` trigger meant to freeze `role` after signup was `SECURITY DEFINER`, so its `current_user` check evaluated as the function owner and never blocked anyone — `role` was client-mutable (within the CHECK-allowed product values).
+
+The fix removes `authenticated`'s blanket write access and re-grants UPDATE back on only the non-privileged columns: it REVOKEs table-level `INSERT`, `UPDATE`, `DELETE` from `authenticated`/`anon`, then `GRANT`s UPDATE to `authenticated` on every column *except* the six privileged ones (`is_admin`, `role`, `tenant_id`, `allocator_status`, `manager_status`, `partner_tag`) — mirroring the existing SELECT column-allowlist pattern. (A bare column-level `REVOKE UPDATE` is a no-op against a table-level grant, so the table-revoke-then-regrant form is required.) PostgREST now rejects any write that names a privileged column. Ordinary profile self-edits (display name, company, bio, telegram, website, LinkedIn, etc.) are unaffected; the only profile-creation path is the `handle_new_user` signup trigger (service-definer) and account deletion is the service-role purge, so the now-inert `profiles_self_insert`/`profiles_self_delete` policies are dropped; every privileged-column writer (admin approval routes, the role-revoke flow, backfills, analytics worker) uses the service-role client. A new `SECURITY INVOKER` trigger (`prevent_profile_privileged_change`) backstops the grants — it correctly identifies the caller and blocks a privileged-column change even if a future migration re-grants one, superseding the no-op role lock. A SQL regression test (gated on the trigger's presence) asserts each privileged column rejects a client self-write — via UPDATE and via DELETE+re-INSERT — while ordinary edits still succeed.
+
 ## [0.24.15.8] - 2026-05-29
 ### Hardened — document and test the signup role allowlist as the trust boundary (audit-2026-05-07 NEW-C15-05)
 
