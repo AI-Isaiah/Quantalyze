@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.15.11] - 2026-05-29
+### Fixed — worker-concurrency hardening: job-defer fence, single-clock circuit breaker, per-allocator recompute lock (audit-2026-05-07 cluster NEW-C12-06 / NEW-C12-10 / NEW-C08-06)
+
+Three concurrency fixes in the analytics job worker and match engine that prevent silent data corruption and rate-limit storms under racing / multi-worker conditions:
+
+- **Job-defer claim-token fence (NEW-C12-06).** When a worker fell behind and the watchdog handed its job to another worker, the slow worker's circuit-breaker "defer" could still yank that now-running job back to pending — silently decrementing its retry budget and clobbering its error state. `defer_compute_job` is now fenced on the per-claim token (matching the already-fenced completion path): a stale-token defer is rejected instead of stealing the job, and the deferred row drops its stale token. The worker recognizes the rejection and yields cleanly instead of mis-classifying it as a failed job and retrying.
+- **Single-clock circuit breaker (NEW-C12-10).** The per-exchange 429 cooldown subtracted a timestamp written on one server from the wall clock of a different server, so clock drift between machines could release the breaker early — straight back into the rate-limit window, risking an IP ban. The stamp and the remaining-cooldown computation now both run on the database clock (new `stamp_api_key_429` / `api_key_cooldown_remaining` functions), eliminating cross-machine skew.
+- **Per-allocator recompute serialization (NEW-C08-06).** An admin "recompute" racing the daily cron for the same allocator could both pass the freshness check and both write a match batch, leaving two overlapping batches (a non-deterministic queue winner and duplicated retention). Recompute and cron now serialize per allocator, so the second caller sees the first's fresh batch and skips.
+
 ## [0.24.15.10] - 2026-05-29
 ### Fixed — suppress unreliable equity history when the exchange data window is too short (audit-2026-05-07 NEW-C01-11)
 

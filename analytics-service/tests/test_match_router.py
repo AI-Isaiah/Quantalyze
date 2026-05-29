@@ -3708,3 +3708,114 @@ class TestForceThrottleStateEviction:
             "forever"
         )
         assert alloc_id in match_mod._force_last_run
+
+
+class TestRecomputeSerializationLock:
+    """NEW-C08-06: two concurrent (non-forced) recompute() calls for the SAME
+    allocator must NOT both score — that would write two match_batches rows
+    with overlapping computed_at (a non-deterministic admin-queue winner,
+    double retention). The per-allocator _recompute_lock serializes the
+    skip-check → score sequence so the SECOND caller's _should_skip_allocator
+    runs AFTER the first commits and sees the fresh batch, then skips.
+
+    Pre-fix (no lock around skip→score) both callers passed the skip-check
+    before either scored → both scored → this test's score-count assertion
+    would read 2.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_recompute_same_allocator_scores_exactly_once(self, monkeypatch):
+        import routers.match as m
+
+        aid = str(uuid4())
+        # Make sure no stale lock leaks in from another test.
+        m._recompute_lock.pop(aid, None)
+
+        # Stateful skip-check: "no batch yet" until a score persists one, then
+        # "skip" — emulates _should_skip_allocator seeing the batch the first
+        # scorer wrote. Serialization is what guarantees the 2nd call observes
+        # batch_exists=True (it only runs after the 1st releases the lock).
+        batch_exists = {"v": False}
+        score_calls: list[str] = []
+
+        async def fake_skip(allocator_id, force):
+            return batch_exists["v"]
+
+        async def fake_score(allocator_id, universe):
+            score_calls.append(allocator_id)
+            # Hold the lock long enough that the 2nd coroutine is definitely
+            # parked on it before the batch becomes visible.
+            await asyncio.sleep(0.05)
+            batch_exists["v"] = True
+            return {"batch_id": "b-1", "candidate_count": 0}
+
+        # Stub the cheap gates so recompute() reaches the locked section.
+        monkeypatch.setattr(m, "_is_allocator_profile", lambda a: True)
+        monkeypatch.setattr(m, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(m, "_should_skip_allocator", fake_skip)
+        monkeypatch.setattr(m, "_score_one_allocator", fake_score)
+        monkeypatch.setattr(
+            m, "_load_candidate_universe",
+            lambda demo_only=False: {"strategies_by_id": {"s-1": {}}},
+        )
+        monkeypatch.setattr(m, "_retention_sweep", lambda allocator_id, keep=7: 0)
+
+        req1 = m.RecomputeRequest(allocator_id=aid)
+        req2 = m.RecomputeRequest(allocator_id=aid)
+        r1, r2 = await asyncio.gather(m.recompute(req1), m.recompute(req2))
+
+        assert len(score_calls) == 1, (
+            f"expected exactly ONE score for the same allocator, got "
+            f"{len(score_calls)} — the per-allocator lock failed to serialize "
+            f"skip→score, so a duplicate match_batches row would be written"
+        )
+        statuses = sorted([r1["status"], r2["status"]])
+        assert statuses == ["ok", "skipped"], (
+            f"one call must score (status=ok) and the other must skip the "
+            f"recent batch (status=skipped); got {statuses}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_different_allocators_are_not_serialized(self, monkeypatch):
+        """Sanity: the lock is PER-allocator — two DIFFERENT allocators score
+        concurrently (the lock must not become a global bottleneck)."""
+        import routers.match as m
+
+        aid1, aid2 = str(uuid4()), str(uuid4())
+        m._recompute_lock.pop(aid1, None)
+        m._recompute_lock.pop(aid2, None)
+
+        score_calls: list[str] = []
+        in_flight = {"n": 0, "max": 0}
+
+        async def fake_skip(allocator_id, force):
+            return False
+
+        async def fake_score(allocator_id, universe):
+            score_calls.append(allocator_id)
+            in_flight["n"] += 1
+            in_flight["max"] = max(in_flight["max"], in_flight["n"])
+            await asyncio.sleep(0.05)
+            in_flight["n"] -= 1
+            return {"batch_id": f"b-{allocator_id}", "candidate_count": 0}
+
+        monkeypatch.setattr(m, "_is_allocator_profile", lambda a: True)
+        monkeypatch.setattr(m, "_engine_is_enabled", lambda: True)
+        monkeypatch.setattr(m, "_should_skip_allocator", fake_skip)
+        monkeypatch.setattr(m, "_score_one_allocator", fake_score)
+        monkeypatch.setattr(
+            m, "_load_candidate_universe",
+            lambda demo_only=False: {"strategies_by_id": {"s-1": {}}},
+        )
+        monkeypatch.setattr(m, "_retention_sweep", lambda allocator_id, keep=7: 0)
+
+        await asyncio.gather(
+            m.recompute(m.RecomputeRequest(allocator_id=aid1)),
+            m.recompute(m.RecomputeRequest(allocator_id=aid2)),
+        )
+
+        assert sorted(score_calls) == sorted([aid1, aid2]), "both allocators scored"
+        assert in_flight["max"] == 2, (
+            "different allocators must score CONCURRENTLY — the per-allocator "
+            "lock must not serialize across distinct allocators"
+        )

@@ -27,14 +27,18 @@ decision:
   everything else -> unknown (retried by default)
 
 Circuit breaker: before creating the exchange in sync_trades and
-poll_positions, check api_keys.last_429_at. If within the per-exchange
-cooldown window (Binance 120s, OKX 300s, Bybit 600s), call defer_compute_job
-RPC and return DispatchResult(outcome=DEFERRED).
+poll_positions, check the per-exchange cooldown window (Binance 120s,
+OKX 300s, Bybit 600s). NEW-C12-10: the remaining cooldown is computed
+SERVER-SIDE via the api_key_cooldown_remaining RPC (now() - last_429_at
+both on the DB clock) so a stamp written by one Railway replica and the
+check on another compare against ONE clock — no cross-container wall-clock
+skew. If remaining > 0, call defer_compute_job and return
+DispatchResult(outcome=DEFERRED).
 
-On 429 (ccxt.RateLimitExceeded), stamp api_keys.last_429_at via
-update_api_key_rate_limit before classifying as transient. This feeds the
-circuit breaker so subsequent jobs for the same API key defer instead of
-hammering the exchange.
+On 429 (ccxt.RateLimitExceeded), stamp api_keys.last_429_at via the
+stamp_api_key_429 RPC (DB clock) before classifying as transient. This
+feeds the circuit breaker so subsequent jobs for the same API key defer
+instead of hammering the exchange.
 """
 from __future__ import annotations
 
@@ -399,6 +403,26 @@ async def _load_strategy_and_key(
     return strategy_row, key_row, None
 
 
+def _defer_lost_ownership(exc: Exception) -> bool:
+    """True when a defer_compute_job call failed because THIS worker no longer
+    owns the job. NEW-C12-06 fenced defer_compute_job on claim_token: a
+    watchdog reclaim + re-claim under a fresh token makes defer raise
+    serialization_failure (SQLSTATE 40001, message 'preempted by watchdog
+    reclaim'); a row that is no longer 'running' raises no_data_found
+    (message 'not found or not running'). Either way the job belongs to
+    another worker now and must be yielded (DEFERRED), not failed/retried with
+    a stale token. Matched by SQLSTATE when PostgREST surfaces it, else by the
+    RPC's own RAISE-message text. Kept local to avoid a circular import with
+    main_worker (which imports this module)."""
+    if getattr(exc, "code", None) == "40001":  # serialization_failure
+        return True
+    msg = str(exc).lower()
+    return (
+        "preempted by watchdog reclaim" in msg
+        or "not found or not running" in msg
+    )
+
+
 async def _check_circuit_breaker(
     supabase, job: dict, key_row: dict
 ) -> DispatchResult | None:
@@ -407,84 +431,94 @@ async def _check_circuit_breaker(
     Returns a DEFERRED DispatchResult if the job should be deferred, or
     None if the circuit breaker is not tripped (proceed normally).
 
-    NEW-C12-10: re-fetch last_429_at from the DB so a fresher stamp written by
-    another container is picked up before the cooldown decision. The delta is
-    compared against Python datetime.now(); Railway container wall-clock drift
-    is sub-second, well under the per-exchange cooldown buffer.
+    NEW-C12-10: the remaining cooldown is computed SERVER-SIDE via the
+    api_key_cooldown_remaining RPC, which evaluates now() - last_429_at
+    entirely on the DB clock. Because the stamp (stamp_api_key_429) and this
+    check both reference the single DB clock, a stamp written by one Railway
+    replica and a check on another are no longer compared across two
+    wall clocks — the skew window where the breaker released early into a
+    429 storm is eliminated. Once the fast path below is passed (the snapshot
+    already shows a stamp), the RPC re-reads the freshest last_429_at, so a
+    newer stamp on another replica is not masked by the stale snapshot. (When
+    the snapshot's last_429_at is NULL the fast path returns early without the
+    RPC — identical to the pre-fix behavior; a stamp landing on another replica
+    after this job's key_row was loaded is first seen on the next dispatch.)
     """
-    last_429_str = key_row.get("last_429_at")
-    if not last_429_str:
+    # Fast path: the per-job key_row snapshot (loaded fresh at dispatch) has
+    # no stamp → no cooldown to evaluate, skip the RPC round-trip. The RPC
+    # below re-reads last_429_at authoritatively for the case that matters.
+    if not key_row.get("last_429_at"):
         return None
 
-    # NEW-C12-10: re-read last_429_at from the DB to get the freshest stamp
-    # (another container may have stamped a more recent value) AND so the
-    # value we compare was written by the DB write path, not an older in-memory
-    # snapshot. We still use Python datetime.now() for `now`, but that is
-    # fine: both the stamp (from _stamp_429) and the check use Python UTC,
-    # so the only cross-container skew that matters is wall-clock drift between
-    # two Railway replicas — typically sub-second, well under the cooldown buffer.
-    # This re-read is the primary defence: it ensures a fresher stamp on any
-    # OTHER container is respected, not masked by the stale key_row snapshot.
-    try:
-        def _read_429_fresh():
-            # silent-failure/F-10: use maybe_single() — .single() raises
-            # APIError/PGRST116 when zero rows are returned (row deleted
-            # between initial load and re-fetch). maybe_single() returns
-            # None cleanly, avoiding a spurious exception that would be
-            # swallowed here and leave the stale snapshot in use.
-            return (
-                supabase.table("api_keys")
-                .select("last_429_at")
-                .eq("id", key_row["id"])
-                .maybe_single()
-                .execute()
-            )
-        fresh = await db_execute(_read_429_fresh)
-        if fresh and fresh.data and fresh.data.get("last_429_at"):
-            last_429_str = fresh.data["last_429_at"]
-    except asyncio.CancelledError:
-        raise  # never swallow cancellation — propagate to worker shutdown
-    except Exception as _refetch_exc:  # noqa: BLE001
-        # silent-failure/F-02: bare `pass` silenced all errors including
-        # network failures, KeyError, and asyncio.CancelledError (pre-3.11).
-        # Log so operators know the freshness guarantee is inactive when this
-        # fires — the stale in-memory key_row snapshot governs the cooldown.
-        logger.warning(
-            "_check_circuit_breaker: DB re-fetch of last_429_at failed for "
-            "api_key %s — falling back to in-memory snapshot (clock-skew "
-            "guard inactive): %s",
-            key_row.get("id"), _refetch_exc,
-        )
-
-    try:
-        last_429 = datetime.fromisoformat(
-            last_429_str.replace("Z", "+00:00")
-        )
-    except (ValueError, TypeError):
-        return None
-
-    now = datetime.now(timezone.utc)
     exchange_name = key_row.get("exchange", "")
     cooldown = EXCHANGE_COOLDOWNS.get(exchange_name, 120)
-    remaining = cooldown - (now - last_429).total_seconds()
+
+    def _cooldown_remaining():
+        return supabase.rpc("api_key_cooldown_remaining", {
+            "p_api_key_id": key_row["id"],
+            "p_cooldown_seconds": cooldown,
+        }).execute()
+
+    try:
+        res = await db_execute(_cooldown_remaining)
+        remaining = int(res.data) if res is not None and res.data is not None else 0
+    except asyncio.CancelledError:
+        raise  # never swallow cancellation — propagate to worker shutdown
+    except Exception as _cd_exc:  # noqa: BLE001
+        # silent-failure: log loudly. On a transient cooldown-RPC failure we
+        # proceed (breaker check skipped) rather than deferring forever — a DB
+        # blip must not park every job. The exchange's own rate limiter is the
+        # backstop, and the next dispatch re-checks.
+        logger.warning(
+            "_check_circuit_breaker: api_key_cooldown_remaining RPC failed for "
+            "api_key %s — proceeding without breaker check: %s",
+            key_row.get("id"), _cd_exc,
+        )
+        return None
 
     if remaining <= 0:
         return None
 
-    defer_seconds = int(remaining) + 5  # small buffer
+    defer_seconds = remaining + 5  # small buffer
 
     def _defer():
         supabase.rpc("defer_compute_job", {
             "p_job_id": job["id"],
             "p_defer_seconds": defer_seconds,
-            "p_reason": f"exchange_cooldown:{exchange_name}:{int(remaining)}s_remaining",
+            "p_reason": f"exchange_cooldown:{exchange_name}:{remaining}s_remaining",
+            # NEW-C12-06: thread the claim token so a preempted worker cannot
+            # defer a job the watchdog reclaimed and another worker re-claimed.
+            "p_claim_token": job.get("claim_token"),
         }).execute()
 
-    await db_execute(_defer)
+    try:
+        await db_execute(_defer)
+    except asyncio.CancelledError:
+        raise  # never swallow cancellation — propagate to worker shutdown
+    except Exception as _defer_exc:  # noqa: BLE001
+        # NEW-C12-06: defer_compute_job is now claim-token fenced. If THIS
+        # worker was preempted (watchdog reclaim + another worker re-claimed
+        # under a fresh token), the defer raises serialization_failure; if the
+        # row is no longer running, no_data_found. In both cases this worker no
+        # longer owns the job — yield it as DEFERRED (the owner will process
+        # it). Owning the preemption signal HERE is the point: otherwise the
+        # raw 40001 propagates to dispatch's catch-all, is classified
+        # error_kind='unknown' and RETRIED, then carries our stale token into
+        # mark_compute_job_failed — corruption-safe only incidentally via the
+        # mig-117 mark fence. A genuine defer failure (DB down, etc.) is
+        # re-raised so dispatch classifies it transient and retries.
+        if _defer_lost_ownership(_defer_exc):
+            logger.info(
+                "Circuit-breaker defer preempted for job %s — another worker "
+                "owns it after a watchdog reclaim; yielding without retry: %s",
+                job["id"], _defer_exc,
+            )
+            return DispatchResult(outcome=DispatchOutcome.DEFERRED)
+        raise
 
     logger.info(
         "Circuit breaker tripped for job %s (exchange=%s, %ds remaining)",
-        job["id"], exchange_name, int(remaining),
+        job["id"], exchange_name, remaining,
     )
     return DispatchResult(outcome=DispatchOutcome.DEFERRED)
 
@@ -495,19 +529,21 @@ async def _stamp_429(supabase, key_row: dict) -> None:
     Called before classify_exception returns, so subsequent jobs for the
     same API key will be deferred by the circuit breaker.
 
-    NEW-C12-10: see _check_circuit_breaker. The check re-fetches last_429_at
-    fresh from the DB so a stamp written by a DIFFERENT container is always
-    picked up before the cooldown decision is made. Both stamp and check use
-    Python UTC clocks; Railway container drift is sub-second, well under the
-    per-exchange cooldown buffer.
+    NEW-C12-10: stamp via the stamp_api_key_429 RPC so last_429_at is set
+    from the DB clock (now()), not the stamping replica's Python wall clock.
+    Paired with _check_circuit_breaker's api_key_cooldown_remaining RPC, this
+    puts both the stamp and the cooldown comparison on the single DB clock —
+    a stamp written by one Railway replica and a check on another no longer
+    drift apart. A direct table().update() with datetime.now() would
+    re-introduce the cross-container skew this RPC exists to remove.
     """
-    def _update():
-        supabase.table("api_keys").update({
-            "last_429_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", key_row["id"]).execute()
+    def _stamp():
+        supabase.rpc("stamp_api_key_429", {
+            "p_api_key_id": key_row["id"],
+        }).execute()
 
     try:
-        await db_execute(_update)
+        await db_execute(_stamp)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Failed to stamp last_429_at for api_key %s: %s",

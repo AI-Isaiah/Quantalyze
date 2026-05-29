@@ -683,19 +683,33 @@ def test_c12_04_final_attempt_marks_intro_snapshot_failed():
 
 
 def test_c12_10_circuit_breaker_refetches_last_429_at():
-    """NEW-C12-10: _check_circuit_breaker must re-read last_429_at from the
-    DB (not just use the stale key_row snapshot) so a stamp written by a
-    different container is picked up before the cooldown decision.
+    """NEW-C12-10: _check_circuit_breaker must compute the remaining cooldown
+    SERVER-SIDE via the api_key_cooldown_remaining RPC (now() - last_429_at on
+    the single DB clock) rather than subtracting a stamp from the checking
+    replica's Python datetime.now(). The RPC re-reads the freshest last_429_at
+    server-side — the same cross-container freshness the prior inline .select()
+    re-read provided — AND removes the two-replica wall-clock skew that let the
+    breaker release early into a 429 storm.
+
+    The CL10 rewrite moved the fresh read out of an inline supabase .select()
+    and into the RPC, so this test now pins the RPC contract, not the removed
+    .select()/`_read_429_fresh` strings.
     """
     import inspect
     from services import job_worker
     src = inspect.getsource(job_worker._check_circuit_breaker)
 
-    # The re-read SELECT must be present in the check function
-    assert "last_429_at" in src
-    # The re-read must use a fresh DB query (not just key_row)
-    assert "_read_429_fresh" in src or "select" in src.lower(), (
-        "NEW-C12-10: _check_circuit_breaker must re-fetch last_429_at from DB"
+    # The cooldown decision must delegate to the DB-clock RPC (the fresh-read
+    # + single-clock mechanism that replaced the inline .select() re-read).
+    assert "api_key_cooldown_remaining" in src, (
+        "NEW-C12-10: _check_circuit_breaker must compute remaining via the "
+        "api_key_cooldown_remaining RPC (single DB clock), not Python math"
+    )
+    # The two-clock bug WAS a Python datetime.now() subtraction against the
+    # stamp; the fixed breaker must not reintroduce any wall-clock computation.
+    assert "datetime.now" not in src and "datetime.utcnow" not in src, (
+        "NEW-C12-10: _check_circuit_breaker must not compute the cooldown from "
+        "a Python wall clock — that cross-replica skew is what the RPC fixes"
     )
 
 
