@@ -2,37 +2,43 @@
 
 /**
  * Phase 10 Plan 06a — React hook wrapping the Plan 01 pure scenario-state
- * module with localStorage hydration + persistence + per-allocator scoped
- * storage key (N1 defense-in-depth: eliminates cross-tenant collision at
- * the persistence layer).
+ * module. As of B7a-2 the React/localStorage lifecycle is owned by the B7
+ * `useCrossTabStorage` primitive; this hook layers the scenario-domain concerns
+ * (default-init from live holdings, fingerprint-mismatch banner, diff count,
+ * per-allocator auth-change clear) on top of it.
  *
- * Plan 01's `lib/scenario-state.ts` ships:
- *   - scenarioStorageKey(allocatorId)         — base key + ".{allocatorId}"
- *   - loadScenarioDraft(allocatorId)          — SSR-safe, schema-version
- *                                                gated, returns null on miss
- *   - saveScenarioDraft(allocatorId, draft)   — SSR-safe, swallows quota
- *   - clearScenarioDraft(allocatorId)         — SSR-safe removeItem
- *   - defaultDraftFromHoldings(holdings, fp?) — initial draft
- *   - toggleHolding / addStrategyBrowse / addStrategyBridge /
- *     removeAddedStrategy / setWeightOverride — pure transforms
+ * What the primitive handles by construction (the unifying refactor):
+ *   - debounced persist (H-0125 — no more JSON.stringify+setItem per keystroke),
+ *   - a single mount-time decode (M-0137 — no double localStorage read),
+ *   - zod-validated parse + version trichotomy via `scenarioDraftCodec`
+ *     (M-0153 — no unchecked cast; forward-version blobs are read-only, never
+ *     down-converted),
+ *   - cross-tab `storage`-event sync with flush-before-adopt (the documented
+ *     two-tab limitation M-0136 pinned is now closed),
+ *   - fail-loud recovery breadcrumb + Sentry on a quota/corrupt write
+ *     (H-0137's silently-swallowed quota error).
  *
- * This hook ENCAPSULATES React state lifecycle for scenario draft:
- * hydration, persistence, mutation, fingerprint detection, allocator-scope
- * guard. The pure module remains pure; this hook is the integration layer
- * between pure functions and React's render cycle.
- *
- * Auth-change clear is the T-10-02 mitigation, made redundant-but-defended-
- * in-depth by N1's per-allocator scoped key. The hook clears the OLD
- * allocator's key on auth change (NOT the new one — the new allocator may
- * already have a draft they want to resume).
+ * What stays here (scenario domain):
+ *   - `defaultDraftFromHoldings` initial draft, memoized once per
+ *     (holdings, fingerprint) so `diffCount` no longer rebuilds it — and busts
+ *     its memo via `new Date()` — on every draft mutation (H-0127),
+ *   - `fingerprintMismatch`: a stored draft whose `init_holdings_fingerprint`
+ *     no longer matches live holdings is surfaced as the reset-vs-keep banner,
+ *     and the working draft falls back to the default (the stored draft is for
+ *     a different holdings set). Derived as pure render state from the
+ *     primitive's hydrated `value`, so an allocator-key flip can't race it,
+ *   - the OLD allocator's scoped key clear on an in-session allocatorId change
+ *     (T-10-02). H-0137's cross-account leak on real sign-out is closed by the
+ *     `allocations.` namespace purge in SignOutButton (storage-namespaces.ts);
+ *     this clear is the in-session defense-in-depth.
  */
 
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   computeHoldingsFingerprint,
   defaultDraftFromHoldings,
-  loadScenarioDraft,
-  saveScenarioDraft,
+  scenarioDraftCodec,
+  scenarioStorageKey,
   clearScenarioDraft,
   toggleHolding as toggleHoldingPure,
   addStrategyBrowse as addBrowsePure,
@@ -43,6 +49,7 @@ import {
   type AddedStrategy,
   type HoldingForDefault,
 } from "../lib/scenario-state";
+import { useCrossTabStorage } from "@/lib/storage/cross-tab";
 
 export interface UseScenarioStateOptions {
   holdingsSummary: HoldingForDefault[];
@@ -60,9 +67,9 @@ export interface UseScenarioStateReturn {
   /**
    * `fingerprintMismatch` is true when the allocator's stored draft has an
    * `init_holdings_fingerprint` that does not match the current live
-   * holdings fingerprint. The composer uses this `fingerprintMismatch`
-   * flag to render the warning banner offering reset-vs-keep — once the
-   * allocator chooses, `dismissFingerprintMismatchBanner()` clears it.
+   * holdings fingerprint. The composer uses this flag to render the warning
+   * banner offering reset-vs-keep — once the allocator chooses,
+   * `dismissFingerprintMismatchBanner()` clears it.
    */
   fingerprintMismatch: boolean;
   diffCount: number;
@@ -85,128 +92,181 @@ export function useScenarioState(
     [holdingsSummary],
   );
 
-  const [draft, setDraft] = useState<ScenarioDraft>(() => {
-    const stored = loadScenarioDraft(allocatorId);
-    if (stored && stored.init_holdings_fingerprint === fingerprint) {
-      return stored;
-    }
-    return defaultDraftFromHoldings(holdingsSummary, fingerprint);
-  });
-
-  const [fingerprintMismatch, setFingerprintMismatch] = useState<boolean>(
-    () => {
-      const stored = loadScenarioDraft(allocatorId);
-      return !!stored && stored.init_holdings_fingerprint !== fingerprint;
-    },
+  // H-0127 — the default draft is memoized once per (holdings, fingerprint).
+  // diffCount reads it without rebuilding it (and re-running its
+  // `new Date().toISOString()`) on every draft mutation, and the codec uses it
+  // as the absent/corrupt/version-ahead fallback.
+  const defaultDraft = useMemo(
+    () => defaultDraftFromHoldings(holdingsSummary, fingerprint),
+    [holdingsSummary, fingerprint],
   );
 
-  // Track the previous allocatorId AS STATE (not as a ref) so we can detect
-  // prop transitions during render. React 19 idiom per
-  // https://react.dev/learn/you-might-not-need-an-effect §"Adjusting some
-  // state when a prop changes" — calling setState during render lets React
-  // discard the in-progress render and re-run with the updated state in a
-  // single commit, avoiding the extra effect pass that the linter rejects
-  // (`react-hooks/set-state-in-effect`).
+  // Codec recreated only when the default fallback changes. decode is pure;
+  // fingerprint-mismatch is handled below, not inside the codec.
+  const codec = useMemo(() => scenarioDraftCodec(defaultDraft), [defaultDraft]);
+
+  const {
+    value,
+    setValue,
+    removeStored,
+    isHydrated,
+  } = useCrossTabStorage<ScenarioDraft>({
+    key: scenarioStorageKey(allocatorId),
+    initial: defaultDraft,
+    codec,
+    // Empty allocatorId (pre-auth) runs the hook in pure in-memory mode — never
+    // touches a prefix-only `allocations.scenario_v0_15.` key.
+    enabled: Boolean(allocatorId),
+    // Long-form weight edits debounce so a fast typist/slider drag coalesces
+    // into one write instead of a setItem per keystroke (H-0125).
+    debounceMs: 150,
+    sentryArea: "scenario-draft",
+    // No recoveryKey: a corrupt/forward-version read still fails loud via the
+    // primitive's console.warn + Sentry breadcrumb. We deliberately do NOT emit
+    // the sessionStorage recovery breadcrumb because the scenario surface has no
+    // banner draining it yet — an un-drained breadcrumb is a dead surface. The
+    // forward-version read-only UX (a banner + reset-to-recover) is deferred to
+    // B7b, where the dashboard's recovery-banner pattern is generalized.
+  });
+
+  // Stable refs so the mutator callbacks can rebase onto the current default
+  // without re-creating. Updated in an effect (not during render — the
+  // react-hooks/refs lint forbids render-time ref writes); `baseOf` reads them
+  // only at event time, by which point the effect has run and they are current.
+  // useRef's initializer seeds them correctly for the first render too.
+  const fingerprintRef = useRef(fingerprint);
+  const defaultDraftRef = useRef(defaultDraft);
+  useEffect(() => {
+    fingerprintRef.current = fingerprint;
+    defaultDraftRef.current = defaultDraft;
+  }, [fingerprint, defaultDraft]);
+
+  // Fingerprint-mismatch is PURE derived state, not an effect: a stored draft
+  // whose fingerprint differs from current holdings means the draft was built
+  // for a different holdings set. The default draft's fingerprint always equals
+  // `fingerprint` by construction, so `value.init_holdings_fingerprint !==
+  // fingerprint` identifies "the hydrated stored draft is for a stale holdings
+  // set". Deriving it (instead of reconciling in an effect) re-evaluates it on
+  // every render, so once the primitive re-hydrates `value` for a flipped
+  // allocator key the flag settles to the correct result. There is a brief
+  // window on an in-session key flip where `value` still holds the prior key's
+  // draft while `fingerprint` is already the new holdings' — the flag is gated
+  // on `isHydrated` and is only advisory (mutators rebase via `baseOf`, the
+  // banner is dismissable), so a transient read is benign and self-corrects on
+  // the re-hydration render.
+  const storedMismatch =
+    isHydrated &&
+    Boolean(allocatorId) &&
+    value.init_holdings_fingerprint !== fingerprint;
+
+  const [mismatchDismissed, setMismatchDismissed] = useState(false);
+  // A new allocator gets a fresh banner — un-dismiss when the allocator
+  // changes. React's "adjust state on a prop change during render" idiom
+  // (https://react.dev/learn/you-might-not-need-an-effect) rather than an
+  // effect, which the react-hooks/set-state-in-effect lint forbids.
   const [prevAllocatorId, setPrevAllocatorId] = useState(allocatorId);
-
-  // We also keep a ref to the allocator id whose key was last cleared on
-  // an auth change, so the localStorage side effect runs exactly once per
-  // transition and knows which OLD key to remove.
-  const lastClearedAllocatorId = useRef(allocatorId);
-
   if (prevAllocatorId !== allocatorId) {
-    // Re-hydrate for the new allocator: respect their stored draft if its
-    // fingerprint matches their current holdings; otherwise default-init
-    // and surface the fingerprintMismatch banner.
-    const stored = loadScenarioDraft(allocatorId);
-    if (stored && stored.init_holdings_fingerprint === fingerprint) {
-      setDraft(stored);
-      setFingerprintMismatch(false);
-    } else {
-      setDraft(defaultDraftFromHoldings(holdingsSummary, fingerprint));
-      setFingerprintMismatch(!!stored);
-    }
     setPrevAllocatorId(allocatorId);
+    setMismatchDismissed(false);
   }
 
-  // Auth-change side effect — clear the OLD allocator's scoped key. T-10-02
-  // mitigation made redundant-but-defended-in-depth by N1's per-allocator
-  // scoped key. The ref tracks the LAST allocator we cleared, so a back-to-
-  // back rerender with the same id is a no-op.
+  const fingerprintMismatch = storedMismatch && !mismatchDismissed;
+
+  // On a mismatch the WORKING draft is the default (the stored draft is for a
+  // different holdings set); the stale stored blob is left untouched until the
+  // user edits (which persists the default-derived draft, fingerprint-current)
+  // or resets (which removes it). This reproduces the pre-B7 "mismatch →
+  // default-init + banner" contract without an extra write on mount.
+  const draft = storedMismatch ? defaultDraft : value;
+
+  // Auth-change side effect — clear the OLD allocator's scoped key on an
+  // in-session allocatorId change. T-10-02 in-session defense-in-depth; real
+  // sign-out is covered by the `allocations.` namespace purge.
+  const lastClearedAllocatorId = useRef(allocatorId);
   useEffect(() => {
     if (lastClearedAllocatorId.current === allocatorId) return;
     clearScenarioDraft(lastClearedAllocatorId.current);
     lastClearedAllocatorId.current = allocatorId;
   }, [allocatorId]);
 
-  // Persist on every draft change (per-allocator scoped key).
-  useEffect(() => {
-    saveScenarioDraft(allocatorId, draft);
-  }, [allocatorId, draft]);
+  // Mutators rebase onto the default when the primitive currently holds a
+  // stale (fingerprint-mismatched) stored draft, so an edit during the banner
+  // operates on the default the user actually sees — and the resulting write,
+  // carrying the current fingerprint, clears the mismatch.
+  const baseOf = useCallback((prev: ScenarioDraft): ScenarioDraft => {
+    return prev.init_holdings_fingerprint !== fingerprintRef.current
+      ? defaultDraftRef.current
+      : prev;
+  }, []);
 
-  const toggleHolding = useCallback((scopeRef: string) => {
-    setDraft((d) => toggleHoldingPure(d, scopeRef));
-  }, []);
-  const addStrategyBrowse = useCallback((s: AddedStrategy) => {
-    setDraft((d) => addBrowsePure(d, s));
-  }, []);
+  const toggleHolding = useCallback(
+    (scopeRef: string) => {
+      setValue((prev) => toggleHoldingPure(baseOf(prev), scopeRef));
+    },
+    [setValue, baseOf],
+  );
+  const addStrategyBrowse = useCallback(
+    (s: AddedStrategy) => {
+      setValue((prev) => addBrowsePure(baseOf(prev), s));
+    },
+    [setValue, baseOf],
+  );
   const addStrategyBridge = useCallback(
     (holdingScopeRef: string, s: AddedStrategy) => {
-      setDraft((d) => addBridgePure(d, holdingScopeRef, s));
+      setValue((prev) => addBridgePure(baseOf(prev), holdingScopeRef, s));
     },
-    [],
+    [setValue, baseOf],
   );
-  const removeAddedStrategy = useCallback((id: string) => {
-    setDraft((d) => removePure(d, id));
-  }, []);
-  const setWeightOverride = useCallback((scopeRef: string, weight: number) => {
-    setDraft((d) => setWeightPure(d, scopeRef, weight));
-  }, []);
+  const removeAddedStrategy = useCallback(
+    (id: string) => {
+      setValue((prev) => removePure(baseOf(prev), id));
+    },
+    [setValue, baseOf],
+  );
+  const setWeightOverride = useCallback(
+    (scopeRef: string, weight: number) => {
+      setValue((prev) => setWeightPure(baseOf(prev), scopeRef, weight));
+    },
+    [setValue, baseOf],
+  );
   const reset = useCallback(() => {
-    clearScenarioDraft(allocatorId);
-    setDraft(defaultDraftFromHoldings(holdingsSummary, fingerprint));
-    setFingerprintMismatch(false);
-  }, [allocatorId, holdingsSummary, fingerprint]);
+    // removeStored: removeItem the scoped key + set in-memory to the default
+    // WITHOUT re-persisting it (the next user edit persists). Clears the banner.
+    removeStored(defaultDraftRef.current);
+    setMismatchDismissed(false);
+  }, [removeStored]);
   const dismissFingerprintMismatchBanner = useCallback(() => {
-    setFingerprintMismatch(false);
+    setMismatchDismissed(true);
   }, []);
 
-  // M8 — diffCount must NOT double-count weight overrides that are caused
-  // by toggle-off renormalization (which writes new weights to ALL remaining
-  // enabled rows). To avoid the "1 toggle = N changes" bug, we count:
-  //   (a) toggle changes vs the default-init toggleByScopeRef
-  //   (b) added strategies (each is a user-explicit add)
-  //   (c) ONLY user-explicit weight overrides (not auto-renormalized weights)
-  //
-  // user-explicit weight overrides are tracked via the optional
-  // `userWeightOverrides` field on the persisted draft. When the field is
-  // absent (Plan 01's current shape), no weight changes count toward
-  // diffCount — the conservative correct behavior, since toggle-off
-  // renormalization writes the entire weights map and we cannot distinguish
-  // explicit vs renormalized at that level. Plan 06b (composer) wires direct
-  // weight inputs and may extend Plan 01 with userWeightOverrides at that
-  // point; this hook reads it through a soft-typed accessor so the wiring
-  // is forward-compatible.
+  // M8 / H-0126 — diffCount counts:
+  //   (a) toggle changes vs the default-init toggleByScopeRef,
+  //   (b) added strategies (each is a user-explicit add),
+  //   (c) user-explicit weight overrides via `userWeightOverrides`.
+  // Toggle-off renormalization rewrites the entire weightOverrides map but NOT
+  // userWeightOverrides, so it counts as exactly one toggle change (T_USE13),
+  // never N weight changes. `setWeightOverride` is the only writer of
+  // userWeightOverrides, so a pure-rebalance now counts (H-0126) — the prior
+  // "conservative zero" locked out the voluntary_modify workflow.
   const diffCount = useMemo(() => {
-    const defaultDraft = defaultDraftFromHoldings(holdingsSummary, fingerprint);
     let count = 0;
-    // (a) toggle changes
     for (const [k, v] of Object.entries(draft.toggleByScopeRef)) {
       if (defaultDraft.toggleByScopeRef[k] !== v) count++;
     }
-    // (b) added strategies
     count += draft.addedStrategies.length;
-    // (c) user-explicit weight overrides (forward-compatible read)
-    const userExplicit =
-      (draft as { userWeightOverrides?: Record<string, number> })
-        .userWeightOverrides ?? {};
+    const userExplicit = draft.userWeightOverrides ?? {};
     for (const [k, v] of Object.entries(userExplicit)) {
+      // A disabled ref's user weight is not part of the committed allocation
+      // (the commit path skips toggled-off refs), so it must NOT count — else a
+      // weight-edit-then-toggle-off of the SAME ref double-counts (one toggle
+      // change + one stale override) and the "N changes" chip over-reports.
+      if (draft.toggleByScopeRef[k] !== true) continue;
       const defaultWeight = defaultDraft.weightOverrides[k];
       if (defaultWeight == null) continue;
       if (Math.abs(v - defaultWeight) > 1e-9) count++;
     }
     return count;
-  }, [draft, holdingsSummary, fingerprint]);
+  }, [draft, defaultDraft]);
 
   return {
     draft,

@@ -20,7 +20,10 @@
  *     live holdings; identical idiom to useDashboardConfig.ts:82-109 + 296-320).
  */
 
+import { z } from "zod";
 import { holdingScopeKey } from "@/lib/keys";
+import type { DecodeResult, StorageCodec } from "@/lib/storage/cross-tab";
+import { stripPoisonKeys } from "@/lib/storage/codecs";
 
 /**
  * H5 — phantom branded type. At runtime this is just a string; at compile time
@@ -68,6 +71,17 @@ export interface ScenarioDraft {
   addedStrategies: AddedStrategy[];
   /** ref → 0..1 weight; sum over enabled refs === 1.0. */
   weightOverrides: Record<string, number>;
+  /**
+   * H-0126 — refs the user explicitly re-weighted via `setWeightOverride`
+   * (NOT the auto-renormalized weights that toggle-off / add* write across the
+   * whole enabled set). `diffCount` reads ONLY this map for weight changes, so
+   * a pure-rebalance (weight edits without any toggle/add) now counts toward
+   * `diffCount` and un-blocks the Commit button — the documented
+   * voluntary_modify (CONTEXT D-17) workflow the prior "conservative" zero
+   * silently locked out. Optional + additive: pre-B7 drafts (field absent)
+   * load unchanged; the zod codec marks it optional so no schema_version bump.
+   */
+  userWeightOverrides?: Record<string, number>;
   lastEditedAt: string;
 }
 
@@ -241,9 +255,21 @@ export function toggleHolding(
       }
     }
   } else {
-    // Toggle ON: this row had weight `w` historically. Scale OTHER enabled
-    // rows by `(1 - w)` so the new sum (this row + others) equals 1.0.
-    if (w > 0 && w < 1) {
+    // Toggle ON: this row had weight `w` historically. Restore `w` as the
+    // source of truth and scale OTHER enabled rows by `(1 - w)` so the new sum
+    // (this row + others) equals 1.0.
+    //
+    // M-0152: the guard is `w > 0 && w <= 1` (not the old `w < 1`) AND there
+    // must be other enabled rows to absorb the complement. The old `w < 1`
+    // boundary dropped a preserved weight of EXACTLY 1 (a holding toggled off
+    // while it was the sole position, weight 1.0 preserved) into the
+    // equal-distribution fallback below, silently discarding the 100% intent.
+    // With `w === 1` + others, `scale = 0` zeroes the others and this row keeps
+    // the full 1.0 — restoring intent. A preserved `w === 0` (sold-down row) or
+    // a first-time enable (no stored weight) or the sole-row case still take the
+    // proportional-renormalize fallback, where the sum-zero branch hands a lone
+    // row the full 1.0.
+    if (otherEnabled.length > 0 && w > 0 && w <= 1) {
       const scale = 1 - w;
       for (const id of otherEnabled) {
         nextWeights[id] = (draft.weightOverrides[id] ?? 0) * scale;
@@ -251,11 +277,11 @@ export function toggleHolding(
       // `nextWeights[scopeRef]` already === w (carried from prior state).
       nextWeights[scopeRef] = w;
     } else {
-      // No useful prior weight (first time enabling, or stored value pathological)
-      // — fall back to plain renormalization over the new enabled set, treating
-      // this row's prior weight as 0 so it picks up an equal-share-of-zero
-      // fallback when others were also zero, or its proportional share
-      // otherwise.
+      // No useful prior weight (first time enabling, stored value 0, or sole
+      // enabled row) — fall back to plain renormalization over the new enabled
+      // set, treating this row's prior weight as 0 so it picks up an
+      // equal-share-of-zero fallback when others were also zero, or its
+      // proportional share otherwise.
       const newEnabled = [scopeRef, ...otherEnabled];
       const renormed = renormalizeWeights(
         { ...draft.weightOverrides, [scopeRef]: 0 },
@@ -286,8 +312,9 @@ export function toggleHolding(
  * iteration below — which only touches `enabledBefore` ids — would drop the
  * disabled row's preserved value, and a subsequent toggle-on of that row
  * would fall back to equal-distribution instead of restoring the original
- * stored weight (toggleHolding's "Toggle ON" branch only restores when
- * `w > 0 && w < 1`).
+ * stored weight (toggleHolding's "Toggle ON" branch only restores a preserved
+ * weight when there are other enabled rows and `w > 0 && w <= 1` — the M-0152
+ * guard, which now also restores at exactly `w === 1`).
  */
 export function addStrategyBrowse(
   draft: ScenarioDraft,
@@ -425,14 +452,137 @@ export function setWeightOverride(
   return {
     ...draft,
     weightOverrides: clampAllWeights(nextWeights),
+    // H-0126 — record the ref the USER explicitly re-weighted. This is the
+    // only writer of userWeightOverrides; toggle-off / add* renormalization
+    // (which rewrites the whole enabled set) deliberately does NOT touch it, so
+    // diffCount counts a pure-rebalance without double-counting renormalization.
+    userWeightOverrides: {
+      ...(draft.userWeightOverrides ?? {}),
+      [scopeRef]: clamped,
+    },
     lastEditedAt: new Date().toISOString(),
   };
 }
 
 // ---------------------------------------------------------------------------
+// B7 cross-tab storage codec — zod-validated parse + version trichotomy.
+// The cross-tab primitive (useCrossTabStorage) owns the localStorage
+// mechanics; this codec owns parse + validate + version + serialize for the
+// ScenarioDraft shape. M-0153 — replaces the pre-B7 unchecked
+// `JSON.parse(raw) as ScenarioDraft` with a whole-shape zod parse so a
+// localStorage blob whose shape drifted from the in-memory type can no longer
+// flow a wrong-typed toggleByScopeRef / missing weightOverrides into the
+// running draft.
+// ---------------------------------------------------------------------------
+
+const addedStrategySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  markets: z.array(z.string()),
+  strategy_types: z.array(z.string()),
+});
+
+/** Whole-shape validation for a persisted ScenarioDraft. `schema_version` is
+ *  validated as a number here; the version *trichotomy* (higher → read-only,
+ *  equal → adopt, lower/missing → reset) is applied by the codec below, not by
+ *  the schema. `userWeightOverrides` is optional so pre-B7 blobs validate. */
+const scenarioDraftSchema = z.object({
+  schema_version: z.number(),
+  init_holdings_fingerprint: z.string(),
+  toggleByScopeRef: z.record(z.string(), z.boolean()),
+  addedStrategies: z.array(addedStrategySchema),
+  weightOverrides: z.record(z.string(), z.number()),
+  userWeightOverrides: z.record(z.string(), z.number()).optional(),
+  lastEditedAt: z.string(),
+});
+
+/**
+ * Build the {@link StorageCodec} for a per-allocator scenario draft.
+ *
+ * `defaultDraft` is the value returned for an absent / corrupt / version-
+ * mismatched blob (the primitive then surfaces a recovery breadcrumb on the
+ * non-"ok" outcomes). The codec is intentionally agnostic to
+ * `init_holdings_fingerprint` — a valid v1 blob whose fingerprint differs from
+ * the current holdings is still returned `"ok"` (it is not corrupt). The
+ * fingerprint-mismatch decision (show the reset-vs-keep banner, fall back to the
+ * default draft) is a domain concern owned by `useScenarioState`, not a storage
+ * concern owned here.
+ */
+export function scenarioDraftCodec(
+  defaultDraft: ScenarioDraft,
+): StorageCodec<ScenarioDraft> {
+  return {
+    decode(raw: string | null): DecodeResult<ScenarioDraft> {
+      if (raw == null) return { value: defaultDraft, outcome: "ok", reason: null };
+      let parsedUnknown: unknown;
+      try {
+        parsedUnknown = JSON.parse(raw);
+      } catch {
+        return { value: defaultDraft, outcome: "reset", reason: "parse_failed" };
+      }
+      const parsed = stripPoisonKeys(parsedUnknown);
+      const rawVersion =
+        parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? (parsed as Record<string, unknown>).schema_version
+          : undefined;
+
+      // Forward-compat: a newer build wrote a higher schema_version. Show the
+      // user's data read-only; never down-convert by re-writing this build's
+      // version (the pre-B7 path returned null → default → next save silently
+      // down-converted the newer blob to v1). Require an INTEGER version — a
+      // float/garbage version (e.g. 1.5) is malformed, not a real future build,
+      // so it falls through to the reset path rather than being trusted.
+      if (Number.isInteger(rawVersion) && (rawVersion as number) > SCENARIO_SCHEMA_VERSION) {
+        const safe = scenarioDraftSchema.safeParse(parsed);
+        return {
+          value: safe.success
+            ? (safe.data as unknown as ScenarioDraft)
+            : defaultDraft,
+          outcome: "readonly",
+          reason: "version_ahead",
+        };
+      }
+
+      // Exact version — whole-shape validate (M-0153) and adopt.
+      if (rawVersion === SCENARIO_SCHEMA_VERSION) {
+        const safe = scenarioDraftSchema.safeParse(parsed);
+        if (safe.success) {
+          return {
+            value: safe.data as unknown as ScenarioDraft,
+            outcome: "ok",
+            reason: null,
+          };
+        }
+        return { value: defaultDraft, outcome: "reset", reason: "schema_invalid" };
+      }
+
+      // Missing / lower / non-integer / non-numeric version — no legacy
+      // migration exists (CURRENT === 1, no prior persisted shape). A
+      // non-integer like 1.5 reaches here too (the readonly guard above requires
+      // Number.isInteger). Reset, mirroring the pre-B7 strict
+      // `schema_version !== 1 → null` behavior, but fail-loud (the primitive
+      // emits a console.warn + Sentry breadcrumb on "reset").
+      return { value: defaultDraft, outcome: "reset", reason: "version_mismatch" };
+    },
+    encode(value: ScenarioDraft): string {
+      // Byte-compatible with the pre-B7 `JSON.stringify(draft)` — the value IS
+      // the full draft (schema_version is an in-shape field, not an envelope).
+      return JSON.stringify(value);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // localStorage persistence — SSR-safe + Safari-private-mode safe.
-// Pattern verbatim from useDashboardConfig.ts:82-109 + 296-320; per-allocator
-// scoped key (N1 defense-in-depth) eliminates cross-tenant collision.
+// Per-allocator scoped key (N1 defense-in-depth) eliminates cross-tenant
+// collision.
+//
+// RETAINED FOR BACK-COMPAT. As of B7a-2 the `useScenarioState` hook reads and
+// writes drafts through the `useCrossTabStorage` primitive + `scenarioDraftCodec`
+// above (debounced persist, cross-tab sync, zod validation, version trichotomy,
+// fail-loud recovery). These bare helpers remain for any non-React caller and
+// for the SSR-safe one-shot read contract their tests pin; they are NOT the
+// hook's hot path.
 // ---------------------------------------------------------------------------
 
 /** SSR-safe localStorage read. Returns null on SSR, missing key, schema-version

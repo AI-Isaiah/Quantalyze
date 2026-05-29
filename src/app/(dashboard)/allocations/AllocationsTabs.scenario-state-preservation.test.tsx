@@ -252,8 +252,9 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
     // Default: BTC is ON.
     expect(btcSwitch.getAttribute("aria-checked")).toBe("true");
 
-    // Toggle BTC OFF — useScenarioState updates the draft AND persists it to
-    // the allocator-scoped localStorage key.
+    // Toggle BTC OFF — useScenarioState updates the in-memory draft. As of
+    // B7a-2 the localStorage write is DEBOUNCED (no synchronous setItem per
+    // toggle, H-0125); the pending write flushes on the composer unmount below.
     await act(async () => {
       fireEvent.click(btcSwitch);
     });
@@ -263,20 +264,22 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
         .getAttribute("aria-checked"),
     ).toBe("false");
 
-    // The draft was persisted under the allocator-scoped scenario key.
-    const persistedKeys = Array.from(storageShim.map.keys()).filter((k) =>
-      k.startsWith("allocations.scenario_v0_15."),
-    );
-    expect(persistedKeys.length).toBeGreaterThan(0);
-
     // LEAVE the scenario tab → Overview. This UNMOUNTS the composer (and with
-    // it the useScenarioState React state).
+    // it the useScenarioState React state) — the unmount flush writes the
+    // pending debounced draft to the allocator-scoped key.
     setSearchParams("");
     rerender(<AllocationsTabs {...STUB_PROPS} />);
     expect(screen.getByTestId("overview-v2")).toBeInTheDocument();
     expect(
       screen.queryByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
     ).toBeNull();
+
+    // The draft was persisted under the allocator-scoped scenario key (flushed
+    // on unmount), so it can be rehydrated on re-entry.
+    const persistedKeys = Array.from(storageShim.map.keys()).filter((k) =>
+      k.startsWith("allocations.scenario_v0_15."),
+    );
+    expect(persistedKeys.length).toBeGreaterThan(0);
 
     // RE-ENTER scenario → composer remounts → useScenarioState hydrates from
     // localStorage. The BTC toggle-off MUST survive the round trip.
