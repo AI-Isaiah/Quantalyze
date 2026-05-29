@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.15.10] - 2026-05-29
+### Fixed — suppress unreliable equity history when the exchange data window is too short (audit-2026-05-07 NEW-C01-11)
+
+When an account's open positions were funded before the exchange's available trade history (OKX caps trade history at 90 days), the equity reconstruction had no opening balance to start from — it replayed from zero. Every reconstructed day was then built against that missing baseline, so the allocator dashboard could show a garbage absolute-equity curve and a nonsensical drawdown (large negative swings, impossible percentages) for the affected window. The analytics worker already declined to anchor such a curve and recorded the condition, but only in the internal audit log — the dashboard never saw it and rendered the bad numbers anyway.
+
+This persists that data-quality signal on the equity snapshots themselves (`pre_terminus_balance_unknown`) and consumes it everywhere the user sees level-derived numbers:
+
+- The allocator dashboard now **excludes** the unreliable rows from the equity curve, drawdown, time-weighted return, per-holding returns, and the warm-up gate — so it shows nothing rather than something wrong. A non-blocking banner explains that absolute history before the live window can't be reconstructed, while making clear that live holdings and current AUM remain accurate.
+- The **/compare** per-holding view applies the same filter, so a terminus-clamped holding no longer reports a corrupted return / Sharpe / max-drawdown.
+- Trustworthy daily-refresh snapshots (today's live mark) are kept, so an allocator who keeps a key connected progressively rebuilds a clean curve as new days accrue.
+
+The migration adds the column and updates the atomic snapshot-replace RPC to persist it (backward-compatible — a pre-deploy worker that omits the field still writes `false`). The full server-side fix (seeding the opening balance from a separate live-balance fetch) and applying the same filter to the analytics scoring engine (`match.py`) are tracked as follow-ups. No behavior change for accounts whose full funding history is inside the data window.
+
 ## [0.24.15.9] - 2026-05-29
 ### Security — lock privileged profiles columns against client self-write (audit-2026-05-07 CL-SEC, privilege escalation)
 
