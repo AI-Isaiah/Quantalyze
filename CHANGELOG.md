@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.12] - 2026-05-29
+### Fixed — poison rescore re-scanned the full strategy universe on every retry (audit-2026-05-07 cluster NEW-C12-09)
+
+When an allocator's mandate was structurally corrupt (a malformed scoring-weight override, a non-dict preferences row, corrupt feedback inputs), the `rescore_allocator` worker job loaded the entire ~30,000-strategy candidate universe — and held a scoring-concurrency slot — *before* it ever touched that allocator's own data. The resulting deterministic error was then classified "unknown" and retried up to three times, so one allocator's broken mandate re-paid the full universe scan on every attempt, throttling everyone else's rescores and the daily cron.
+
+The job now validates the allocator's own mandate first — a cheap, single-allocator load — *before* scanning the universe:
+
+- A structurally-broken mandate fails the job **permanent** (no retry, no scan) instead of looping through three full universe scans.
+- A **transient** database blip during that preflight still propagates and stays retryable, so a momentary hiccup never permanently fails a recoverable allocator (the preflight catches only deterministic Python errors by type, never transport faults).
+- The **healthy path is unchanged in cost**: the preflight's results are threaded into scoring so the allocator's context + feedback overrides are loaded exactly once (no duplicate feedback-audit write or redundant override persist).
+- The weight-renormalization guard is now a single shared function used by both the live scorer and the preflight, so the two cannot drift.
+
+No behavior change for allocators with a valid mandate. A default / screening-mode allocator (no preferences row, no portfolio) scores normally and is never rejected.
+
 ## [0.24.15.11] - 2026-05-29
 ### Fixed — worker-concurrency hardening: job-defer fence, single-clock circuit breaker, per-allocator recompute lock (audit-2026-05-07 cluster NEW-C12-06 / NEW-C12-10 / NEW-C08-06)
 

@@ -2264,7 +2264,7 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
         links = await db_execute(_load_links)
 
         # Per-strategy sharpe lookup (single query rather than N+1).
-        strategy_ids = [l["strategy_id"] for l in links if l.get("strategy_id")]
+        strategy_ids = [link["strategy_id"] for link in links if link.get("strategy_id")]
         sharpe_map: dict[str, float | None] = {}
         if strategy_ids:
             def _load_strategy_sharpes() -> list[dict]:
@@ -2282,8 +2282,8 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
 
         # Concentration (HHI): prefer current_weight, fall back to allocated_amount.
         weights = [
-            l.get("current_weight") for l in links
-            if isinstance(l.get("current_weight"), (int, float))
+            link.get("current_weight") for link in links
+            if isinstance(link.get("current_weight"), (int, float))
         ]
         if len(weights) == len(links) and len(weights) > 0:
             total = sum(weights)
@@ -2291,9 +2291,9 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
                 snapshot["concentration"] = sum((w / total) ** 2 for w in weights)
         else:
             amounts = [
-                l.get("allocated_amount") for l in links
-                if isinstance(l.get("allocated_amount"), (int, float))
-                and l.get("allocated_amount") > 0
+                link.get("allocated_amount") for link in links
+                if isinstance(link.get("allocated_amount"), (int, float))
+                and link.get("allocated_amount") > 0
             ]
             if amounts:
                 total = sum(amounts)
@@ -2302,9 +2302,9 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
         # Rank by sharpe for top/bottom 3 (strategies without a sharpe are
         # excluded — a NULL ranking tells the manager nothing).
         ranked = []
-        for l in links:
-            sid = l.get("strategy_id")
-            strat = l.get("strategies") or {}
+        for link in links:
+            sid = link.get("strategy_id")
+            strat = link.get("strategies") or {}
             name = strat.get("name") if isinstance(strat, dict) else None
             sh = sharpe_map.get(sid)
             if sh is not None:
@@ -2393,7 +2393,13 @@ async def run_rescore_allocator_job(job: dict) -> DispatchResult:
     """
     # Deferred import to avoid circular dependency — routers/match.py
     # imports from services.match_engine, which is a peer of services.job_worker.
-    from routers.match import _load_candidate_universe, _score_one_allocator
+    from routers.match import (
+        _load_allocator_context,
+        _load_candidate_universe,
+        _score_one_allocator,
+    )
+    from services.feedback_engine import compute_adjusted_weights
+    from services.match_engine import compute_effective_weights
 
     allocator_id = job.get("allocator_id")
     if not allocator_id:
@@ -2403,6 +2409,69 @@ async def run_rescore_allocator_job(job: dict) -> DispatchResult:
             error_message="rescore_allocator job missing allocator_id — check migration 062 kind_target_coherence",
         )
 
+    # NEW-C12-09: validate the allocator's OWN (cheap, single-allocator-scoped)
+    # mandate BEFORE the ~30k-strategy, allocator-INDEPENDENT universe scan.
+    # A structurally-broken mandate (corrupt allocator_preferences row, a
+    # non-dict / non-numeric scoring_weight_overrides, corrupt feedback inputs)
+    # raises a DETERMINISTIC Python error. Pre-fix that surfaced only inside
+    # _score_one_allocator AFTER the scan, classified 'unknown', and was
+    # RETRIED up to 3x — re-paying the entire universe scan + a _scoring_semaphore
+    # slot on every attempt for a failure caused by one allocator's data,
+    # throttling concurrent rescores and the daily cron for everyone. Catching
+    # it here fails the job 'permanent' (no retry, no scan). ctx + overrides are
+    # threaded into _score_one_allocator below so the healthy path neither
+    # re-loads the allocator rows nor double-emits compute_adjusted_weights'
+    # audit event.
+    #
+    # Discriminate by TYPE, NOT via classify_exception: a transient transport
+    # fault (postgrest.APIError, httpx.*, OSError) is a plain Exception subclass
+    # that classify_exception buckets as 'unknown' (and asyncio.TimeoutError as
+    # 'transient') — neither is distinguishable from a deterministic mandate
+    # error by classify_exception, and both are RETRYABLE. The point is they
+    # must NOT be in the caught deterministic-error tuple, so a momentary DB
+    # blip propagates to the post-scoring classifier and stays retryable instead
+    # of permanently failing a recoverable allocator.
+    try:
+        ctx = await asyncio.to_thread(_load_allocator_context, allocator_id)
+        overrides = await asyncio.to_thread(compute_adjusted_weights, allocator_id)
+        # Approximate _score_one_allocator's preference normalization and
+        # score_candidates' mode gate: a missing allocator_preferences row
+        # (None → default mandate) and an empty/None overrides dict are VALID.
+        # (_load_allocator_context always populates the 'preferences' key, so the
+        # defensive .get vs the scorer's ctx["preferences"] never diverges.)
+        # The overridable-weight renormalization runs ONLY in personalized mode
+        # (portfolio_strategies present), so only validate it then — a
+        # screening-mode allocator (no portfolio) never renormalizes overrides
+        # and must not be rejected for them.
+        preferences = ctx.get("preferences")
+        if preferences is not None and not isinstance(preferences, dict):
+            raise TypeError(
+                f"allocator_preferences is not a mapping (allocator_id={allocator_id})"
+            )
+        if ctx.get("portfolio_strategies"):
+            # compute_effective_weights normalizes falsy overrides to {} itself,
+            # so pass overrides straight through (matches the score_candidates
+            # call site).
+            compute_effective_weights(overrides, allocator_id)
+    except (
+        KeyError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        AssertionError,
+        ZeroDivisionError,
+    ) as exc:
+        logger.exception(
+            "run_rescore_allocator_job preflight: deterministic bad mandate for allocator=%s",
+            allocator_id,
+        )
+        _, sanitized = classify_exception(exc)
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_kind="permanent",
+            error_message=f"rescore mandate invalid: {sanitized}",
+        )
+
     universe = await asyncio.to_thread(_load_candidate_universe)
     if not universe["strategies_by_id"]:
         # No eligible strategies — no-op success (not a failure).
@@ -2410,7 +2479,12 @@ async def run_rescore_allocator_job(job: dict) -> DispatchResult:
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
     try:
-        await _score_one_allocator(allocator_id, universe)
+        await _score_one_allocator(
+            allocator_id,
+            universe,
+            precomputed_ctx=ctx,
+            precomputed_overrides=overrides,
+        )
     except Exception as exc:  # noqa: BLE001
         # H-0682: previously hardcoded `error_kind='transient'` for every
         # exception — meaning KeyError on bad mandate, AssertionError on
@@ -2423,6 +2497,14 @@ async def run_rescore_allocator_job(job: dict) -> DispatchResult:
         # permanent, generic Python errors → unknown (still retried, but
         # the admin UI flags them for human triage instead of silent
         # infinite-loop).
+        #
+        # NEW-C12-09: the cheap-precheckable deterministic mandate errors
+        # (corrupt allocator_preferences / overrides / feedback inputs) are now
+        # caught by the preflight ABOVE and fail 'permanent' before the universe
+        # is ever scanned. This backstop remains for errors that only surface
+        # against real candidates inside _score_one_allocator (transient DB
+        # persist faults stay retryable; a deterministic per-candidate bug still
+        # reaches failed_final after the retry budget, never an infinite loop).
         logger.exception("run_rescore_allocator_job failed for allocator=%s", allocator_id)
         error_kind, sanitized = classify_exception(exc)
         return DispatchResult(

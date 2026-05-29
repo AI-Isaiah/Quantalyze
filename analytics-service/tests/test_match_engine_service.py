@@ -559,24 +559,36 @@ def test_top_excluded_style_excluded_sorts_below_soft_near_misses():
 def test_renormalization_guard_is_not_a_bare_assert():
     """Source-pattern assertion (defense in depth, not behavioural).
 
-    Pins the textual contract: the renormalization site uses
+    Pins the textual contract: the renormalization guard uses
     `raise ValueError`, not `assert`. This guards against a future
     refactor that silently reintroduces `assert total > 0` (which
-    `python -O` strips). A true behavioural assertion lives in
-    `test_renormalization_raises_on_non_positive_total_weight` below;
-    this one is the cheap source-pattern backstop."""
+    `python -O` strips). NEW-C12-09 extracted the guard from
+    score_candidates into compute_effective_weights so the rescore-job
+    preflight validates a corrupt overrides dict through the SAME guard
+    before the universe scan — so the source check now targets the helper,
+    and additionally pins that score_candidates DELEGATES to it (the live
+    scorer cannot bypass the guard). A true behavioural assertion lives in
+    `test_renormalization_raises_on_non_positive_total_weight` below; this
+    one is the cheap source-pattern backstop."""
     import inspect
 
     import services.match_engine as me
 
-    src = inspect.getsource(me.score_candidates)
-    # The renormalization site must NOT contain a bare assert on `total`.
-    assert "assert total" not in src, (
+    guard_src = inspect.getsource(me.compute_effective_weights)
+    # The renormalization guard must NOT be a bare assert on `total`.
+    assert "assert total" not in guard_src, (
         "Bare assert detected — Python -O strips it. "
         "Use explicit `if total <= 0: raise ValueError(...)`."
     )
-    # And the explicit guard must be present.
-    assert "if total <= 0" in src or "if total <= 0:" in src
+    # And the explicit guard must be present in the shared helper.
+    assert "if total <= 0" in guard_src
+    # score_candidates must renormalize VIA the helper so the guard (and the
+    # rescore preflight) share one source of truth — no bypass.
+    score_src = inspect.getsource(me.score_candidates)
+    assert "compute_effective_weights" in score_src, (
+        "score_candidates must renormalize via compute_effective_weights so "
+        "the guard and the NEW-C12-09 rescore preflight stay in lockstep."
+    )
 
 
 def test_renormalization_raises_on_non_positive_total_weight(monkeypatch):

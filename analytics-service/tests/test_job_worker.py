@@ -2805,3 +2805,205 @@ class TestCircuitBreakerSingleDbClock:
             "stamp must go through the DB-clock RPC so the stamp and the "
             "cooldown check share one clock"
         )
+
+
+class TestRescorePoisonMandatePreflight:
+    """NEW-C12-09: run_rescore_allocator_job must validate the allocator's OWN
+    (cheap, single-allocator-scoped) mandate BEFORE the ~30k-strategy,
+    allocator-INDEPENDENT universe scan.
+
+    Pre-fix, a poison mandate raised a deterministic Python error only INSIDE
+    _score_one_allocator (after the scan); classify_exception bucketed it
+    'unknown' and it was RETRIED up to 3x — re-paying the entire universe scan +
+    a _scoring_semaphore slot on EVERY attempt for a failure caused by one
+    allocator's own data, throttling everyone else's rescores + the daily cron.
+
+    The preflight must:
+      * fail a deterministic bad mandate 'permanent' (no retry) in ONE call,
+        WITHOUT ever scanning the universe;
+      * let a transient DB fault PROPAGATE (stay retryable — NOT permanent);
+      * on the healthy path, scan + score exactly once, threading the
+        preflight's ctx/overrides into _score_one_allocator so the >99% path
+        does not double-load the allocator rows or double-emit
+        compute_adjusted_weights' audit event;
+      * keep the empty-universe no-op DONE and the default/screening mandate
+        paths working (never reject a no-mandate or no-portfolio allocator).
+
+    Patch targets are the SOURCE modules (routers.match.*,
+    services.feedback_engine.compute_adjusted_weights) because the handler
+    body-imports them, mirroring test_dispatch_routes_reconstruct_allocator_history.
+    The real services.match_engine.compute_effective_weights runs so the
+    preflight validates a poison overrides dict through the live guard.
+    """
+
+    @staticmethod
+    def _patch(*, ctx=None, ctx_exc=None, overrides=None, overrides_exc=None,
+               universe=None):
+        """Build the standard patch set as a list of context managers.
+
+        _load_allocator_context + compute_adjusted_weights are sync (the handler
+        calls them via asyncio.to_thread); _load_candidate_universe is sync;
+        _score_one_allocator is async. Returns (patchers, universe_mock,
+        score_mock) so each test can assert on the universe + score mocks.
+        """
+        alloc_mock = MagicMock(
+            return_value=ctx, side_effect=ctx_exc,
+        ) if ctx_exc is not None else MagicMock(return_value=ctx)
+        weights_mock = MagicMock(
+            return_value=overrides, side_effect=overrides_exc,
+        ) if overrides_exc is not None else MagicMock(return_value=overrides)
+        universe_mock = MagicMock(
+            return_value=universe
+            if universe is not None
+            else {"strategies_by_id": {"s1": {"strategy_id": "s1"}}, "returns_by_id": {}}
+        )
+        score_mock = AsyncMock(return_value={})
+        patchers = [
+            patch("routers.match._load_allocator_context", new=alloc_mock),
+            patch("services.feedback_engine.compute_adjusted_weights", new=weights_mock),
+            patch("routers.match._load_candidate_universe", new=universe_mock),
+            patch("routers.match._score_one_allocator", new=score_mock),
+        ]
+        return patchers, universe_mock, score_mock
+
+    @pytest.mark.asyncio
+    async def test_poison_overrides_fail_permanent_without_universe_scan(self) -> None:
+        """A non-dict scoring_weight_overrides (corrupt feedback output) makes
+        the live compute_effective_weights raise AttributeError in the preflight
+        → FAILED 'permanent' (no retry) and the universe is NEVER scanned."""
+        from services.job_worker import run_rescore_allocator_job
+
+        job = {"id": "j1", "kind": "rescore_allocator", "allocator_id": "a-poison"}
+        patchers, universe_mock, score_mock = self._patch(
+            ctx={"preferences": {}, "portfolio_strategies": [{"strategy_id": "s1"}]},
+            overrides=["not", "a", "dict"],  # personalized mode → renormalized → .get fails
+        )
+        with patchers[0], patchers[1], patchers[2], patchers[3]:
+            result = await run_rescore_allocator_job(job)
+
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent"  # no retry → no re-scan
+        universe_mock.assert_not_called()
+        score_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_poison_feedback_inputs_fail_permanent_without_scan(self) -> None:
+        """Corrupt feedback inputs make compute_adjusted_weights raise a
+        deterministic KeyError — caught by the preflight as permanent before
+        the universe scan (the feedback path is part of the cheap allocator
+        work the finding cites)."""
+        from services.job_worker import run_rescore_allocator_job
+
+        job = {"id": "j2", "kind": "rescore_allocator", "allocator_id": "a-fb"}
+        patchers, universe_mock, score_mock = self._patch(
+            ctx={"preferences": {}, "portfolio_strategies": []},
+            overrides_exc=KeyError("strategy_id"),
+        )
+        with patchers[0], patchers[1], patchers[2], patchers[3]:
+            result = await run_rescore_allocator_job(job)
+
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent"
+        universe_mock.assert_not_called()
+        score_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_dict_preferences_fail_permanent_without_scan(self) -> None:
+        """A non-dict allocator_preferences row (the match.py:976 TypeError,
+        previously surfacing only after the scan) is now caught in the preflight
+        → permanent, no scan."""
+        from services.job_worker import run_rescore_allocator_job
+
+        job = {"id": "j3", "kind": "rescore_allocator", "allocator_id": "a-badprefs"}
+        patchers, universe_mock, score_mock = self._patch(
+            ctx={"preferences": "i-am-a-string", "portfolio_strategies": []},
+            overrides={},
+        )
+        with patchers[0], patchers[1], patchers[2], patchers[3]:
+            result = await run_rescore_allocator_job(job)
+
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent"
+        universe_mock.assert_not_called()
+        score_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_transient_db_fault_in_preflight_stays_retryable_no_scan(self) -> None:
+        """A transport/DB fault during the preflight (ConnectionError — NOT in
+        the deterministic-error tuple) must PROPAGATE so dispatch's classifier
+        keeps it retryable ('unknown'), NEVER converted to 'permanent'. The
+        universe is not scanned past the fault."""
+        job = {"id": "j4", "kind": "rescore_allocator", "allocator_id": "a-blip"}
+        patchers, universe_mock, score_mock = self._patch(
+            ctx_exc=ConnectionError("db blip"),
+            overrides={},
+        )
+        with patchers[0], patchers[1], patchers[2], patchers[3]:
+            result = await dispatch(job)
+
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "unknown"  # retryable — a momentary blip must not fail-final
+        assert result.error_kind != "permanent"
+        universe_mock.assert_not_called()
+        score_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_healthy_mandate_scans_once_and_threads_precomputed(self) -> None:
+        """A valid mandate passes the preflight; the universe is scanned exactly
+        ONCE and _score_one_allocator is awaited once WITH the preflight's
+        ctx+overrides threaded in (so the healthy path does not re-load the
+        allocator rows or double-emit the feedback audit event)."""
+        from services.job_worker import run_rescore_allocator_job
+
+        job = {"id": "j5", "kind": "rescore_allocator", "allocator_id": "a-ok"}
+        ctx = {"preferences": {"min_sharpe": 1.0}, "portfolio_strategies": [{"strategy_id": "s1"}]}
+        overrides = {"W_PORTFOLIO_FIT": 1.1}
+        patchers, universe_mock, score_mock = self._patch(ctx=ctx, overrides=overrides)
+        with patchers[0], patchers[1], patchers[2], patchers[3]:
+            result = await run_rescore_allocator_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        universe_mock.assert_called_once()
+        score_mock.assert_awaited_once()
+        _, kwargs = score_mock.await_args
+        assert kwargs.get("precomputed_ctx") is ctx
+        assert kwargs.get("precomputed_overrides") is overrides
+
+    @pytest.mark.asyncio
+    async def test_default_mandate_no_preferences_row_passes_preflight(self) -> None:
+        """A genuinely-default allocator (no allocator_preferences row → None,
+        empty overrides) in personalized mode must NOT be classified permanent —
+        the default mandate renormalizes to a positive sum and scores normally
+        (risk: never reject a no-mandate allocator)."""
+        from services.job_worker import run_rescore_allocator_job
+
+        job = {"id": "j6", "kind": "rescore_allocator", "allocator_id": "a-default"}
+        patchers, universe_mock, score_mock = self._patch(
+            ctx={"preferences": None, "portfolio_strategies": [{"strategy_id": "s1"}]},
+            overrides={},
+        )
+        with patchers[0], patchers[1], patchers[2], patchers[3]:
+            result = await run_rescore_allocator_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        score_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_universe_is_noop_done_after_preflight(self) -> None:
+        """Preflight passes (screening-mode allocator) + empty universe → DONE
+        no-op; _score_one_allocator is NOT awaited (preserved behavior — the
+        empty-universe short-circuit still runs AFTER the preflight)."""
+        from services.job_worker import run_rescore_allocator_job
+
+        job = {"id": "j7", "kind": "rescore_allocator", "allocator_id": "a-empty"}
+        patchers, universe_mock, score_mock = self._patch(
+            ctx={"preferences": None, "portfolio_strategies": []},
+            overrides={},
+            universe={"strategies_by_id": {}, "returns_by_id": {}},
+        )
+        with patchers[0], patchers[1], patchers[2], patchers[3]:
+            result = await run_rescore_allocator_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        universe_mock.assert_called_once()
+        score_mock.assert_not_awaited()

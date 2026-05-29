@@ -29,6 +29,16 @@ from typing import Any, Literal, Optional, TypedDict
 import numpy as np
 import pandas as pd
 
+# Import existing private helpers without extracting them. Aliased below
+# (compute_sharpe / avg_corr / max_drawdown) so the regression test can import
+# them from this module too.
+from services.match_defaults import merge_with_defaults
+from services.portfolio_optimizer import (
+    _avg_corr,
+    _compute_sharpe,
+    _max_drawdown,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -127,15 +137,6 @@ class ScoreCandidatesResult(TypedDict, total=False):
     excluded_total: int
     source_strategy_count: int
 
-# Import existing private helpers without extracting them. Aliased for the file
-# so the regression test can import them from this module too.
-from services.portfolio_optimizer import (
-    _avg_corr,
-    _compute_sharpe,
-    _max_drawdown,
-)
-from services.match_defaults import merge_with_defaults
-
 # Public re-exports so callers can import from either location.
 compute_sharpe = _compute_sharpe
 avg_corr = _avg_corr
@@ -200,6 +201,51 @@ def _safe_float(value: Any) -> Optional[float]:
 
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
+
+
+def compute_effective_weights(
+    overrides: Optional[dict[str, Any]],
+    allocator_id: str,
+) -> dict[str, float]:
+    """Scale the four overridable personalized-mode scoring weights by their
+    feedback-derived multipliers and renormalize to sum 1.0.
+
+    Pure + side-effect-free. Extracted from score_candidates so the
+    rescore-job preflight (NEW-C12-09, services/job_worker.run_rescore_allocator_job)
+    validates an allocator's overrides through the EXACT SAME guard the live
+    scorer uses — a corrupt overrides dict raises the identical error in both
+    places, with no drift between the preflight and the renormalization that
+    runs inside score_candidates.
+
+    Raises (all deterministic — a function bug, not a transient fault):
+      AttributeError - overrides is a non-mapping (e.g. list/str): .get fails.
+      TypeError      - an override VALUE is non-numeric: _clamp's max/min on a
+                       str raises.
+      ValueError     - the scaled weights sum to <= 0 (a non-positive
+                       renormalization denominator that would divide every
+                       candidate score by zero — see C-0230 / H-0699).
+    """
+    overrides = overrides or {}
+    scaled = {
+        "W_PORTFOLIO_FIT":  W_PORTFOLIO_FIT
+            * _clamp(overrides.get("W_PORTFOLIO_FIT", 1.0), 0.5, 1.5),
+        "W_PREFERENCE_FIT": W_PREFERENCE_FIT
+            * _clamp(overrides.get("W_PREFERENCE_FIT", 1.0), 0.5, 1.5),
+        "W_TRACK_RECORD":   W_TRACK_RECORD
+            * _clamp(overrides.get("W_TRACK_RECORD", 1.0), 0.5, 1.5),
+        "W_CAPACITY_FIT":   W_CAPACITY_FIT
+            * _clamp(overrides.get("W_CAPACITY_FIT", 1.0), 0.5, 1.5),
+    }
+    total = sum(scaled.values())
+    # C-0230 / H-0699: explicit raise (NOT a bare `assert`, which is stripped
+    # under `python -O` — the typical production container flag) so a
+    # non-positive denominator can never silently divide-by-zero into NaN.
+    if total <= 0:
+        raise ValueError(
+            "scoring_weight_overrides renormalization produced "
+            f"non-positive sum (allocator_id={allocator_id})"
+        )
+    return {k: v / total for k, v in scaled.items()}
 
 
 def _normalize_min_max(values: list[Optional[float]]) -> list[float]:
@@ -1015,29 +1061,13 @@ def score_candidates(
     # JSONB error trail with user-controlled content.
     effective: Optional[dict[str, float]] = None
     if mode == "personalized":
-        overrides = prefs.get("scoring_weight_overrides") or {}
-        scaled = {
-            "W_PORTFOLIO_FIT":  W_PORTFOLIO_FIT
-                * _clamp(overrides.get("W_PORTFOLIO_FIT", 1.0), 0.5, 1.5),
-            "W_PREFERENCE_FIT": W_PREFERENCE_FIT
-                * _clamp(overrides.get("W_PREFERENCE_FIT", 1.0), 0.5, 1.5),
-            "W_TRACK_RECORD":   W_TRACK_RECORD
-                * _clamp(overrides.get("W_TRACK_RECORD", 1.0), 0.5, 1.5),
-            "W_CAPACITY_FIT":   W_CAPACITY_FIT
-                * _clamp(overrides.get("W_CAPACITY_FIT", 1.0), 0.5, 1.5),
-        }
-        total = sum(scaled.values())
-        # C-0230 / H-0699 fix: bare `assert` is stripped under `python -O`
-        # (typical production container flag), which would let the next
-        # line silently divide by zero and propagate NaN through every
-        # candidate's score. Use an explicit raise so the guard survives
-        # bytecode optimization.
-        if total <= 0:
-            raise ValueError(
-                "scoring_weight_overrides renormalization produced "
-                f"non-positive sum (allocator_id={allocator_id})"
-            )
-        effective = {k: v / total for k, v in scaled.items()}
+        # compute_effective_weights holds the scale+renormalize+non-positive-sum
+        # guard. Extracted (NEW-C12-09) so the rescore-job preflight validates a
+        # corrupt overrides dict through this SAME path BEFORE the ~30k universe
+        # scan, instead of letting it raise here on every one of 3 retries.
+        effective = compute_effective_weights(
+            prefs.get("scoring_weight_overrides"), allocator_id
+        )
 
     # Final scoring
     scored: list[dict[str, Any]] = []
