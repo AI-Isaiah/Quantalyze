@@ -600,11 +600,36 @@ def admin():
     client.postgrest.session = type(session)(
         base_url=session.base_url,
         headers=session.headers,
-        timeout=session.timeout,
+        # CL10: bump the read timeout well above supabase-py's tight default.
+        # The python job runs CONCURRENTLY with the e2e job against the same
+        # shared test project; under that contention a fencing RPC's response
+        # (defer_compute_job does SELECT ... FOR UPDATE) can exceed the default
+        # and raise httpx.ReadTimeout — the documented live-DB-suite-load flake
+        # (see the skipped test below). 60s absorbs the contention spike.
+        timeout=60.0,
         follow_redirects=True,
         http2=False,
     )
     return client
+
+
+def _rpc_retry_timeout(fn, attempts: int = 4):
+    """Call a live-DB RPC, retrying ONLY on transient httpx read timeouts
+    (the live-DB-suite-load flake: the python CI job runs concurrently with
+    e2e against the shared test project). Any non-timeout exception — including
+    the serialization_failure these fence tests assert — re-raises immediately
+    so the assertion still observes it. Pairs with the 60s timeout above."""
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            if "timed out" not in str(exc).lower():
+                raise
+            last = exc
+            time.sleep(0.5 * (attempt + 1))
+    assert last is not None
+    raise last
 
 
 def _seed_user_id(admin) -> str:
@@ -754,12 +779,12 @@ def test_defer_compute_job_token_fence(admin, strategy_id):
         # (1) Mismatched token → serialization_failure, running row UNTOUCHED.
         wrong_token = str(uuid.uuid4())
         with pytest.raises(Exception) as exc_info:
-            admin.rpc("defer_compute_job", {
+            _rpc_retry_timeout(lambda: admin.rpc("defer_compute_job", {
                 "p_job_id": job_id,
                 "p_defer_seconds": 60,
                 "p_reason": "c12-06 mismatch probe",
                 "p_claim_token": wrong_token,
-            }).execute()
+            }).execute())
         assert "preempted" in str(exc_info.value) or "serialization" in str(exc_info.value).lower(), (
             f"mismatched-token defer must raise serialization_failure, got: {exc_info.value}"
         )
@@ -770,12 +795,12 @@ def test_defer_compute_job_token_fence(admin, strategy_id):
 
         # (2) Matching token → defers: running→pending, attempts decremented,
         # claim_token NULLed so the pending row drops its stale fence token.
-        admin.rpc("defer_compute_job", {
+        _rpc_retry_timeout(lambda: admin.rpc("defer_compute_job", {
             "p_job_id": job_id,
             "p_defer_seconds": 60,
             "p_reason": "c12-06 match probe",
             "p_claim_token": real_token,
-        }).execute()
+        }).execute())
         row = admin.table("compute_jobs").select("status,claim_token,attempts").eq("id", job_id).single().execute().data
         assert row["status"] == "pending"
         assert row["claim_token"] is None, "defer must NULL the stale fence token (C12-06)"
@@ -803,11 +828,11 @@ def test_defer_compute_job_null_token_backcompat(admin, strategy_id):
             "attempts": 1,
         }).eq("id", job_id).execute()
         # NULL token (omit the param) → back-compat match, defers.
-        admin.rpc("defer_compute_job", {
+        _rpc_retry_timeout(lambda: admin.rpc("defer_compute_job", {
             "p_job_id": job_id,
             "p_defer_seconds": 30,
             "p_reason": "c12-06 null backcompat probe",
-        }).execute()
+        }).execute())
         row = admin.table("compute_jobs").select("status,claim_token").eq("id", job_id).single().execute().data
         assert row["status"] == "pending", "NULL-token defer must still work (back-compat arm)"
         assert row["claim_token"] is None
