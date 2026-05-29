@@ -1441,3 +1441,77 @@ def test_C0230_renormalization_guard_raises_valueerror_not_assert(monkeypatch):
     # reconstruct the failing batch from a JSONB error trail.
     with _pytest.raises(ValueError, match=r"allocator_id=a1"):
         match_engine.score_candidates(**args)
+
+
+# --- NEW-C12-09: compute_effective_weights shared validator -------------------
+class TestComputeEffectiveWeights:
+    """NEW-C12-09: compute_effective_weights is the SINGLE source of truth for
+    the personalized-mode override renormalization — shared by score_candidates
+    (live scoring) and run_rescore_allocator_job's pre-universe-scan preflight.
+
+    Pinning its contract directly is what lets the rescore preflight catch a
+    poison overrides dict and fail 'permanent' BEFORE the ~30k universe scan: a
+    corrupt overrides dict must raise the exact same error type the live scorer
+    would have raised, with no drift between the two call sites.
+    """
+
+    def test_none_overrides_normalizes_to_base_weight_ratios(self) -> None:
+        from services import match_engine as me
+
+        eff = me.compute_effective_weights(None, "a1")
+        assert abs(sum(eff.values()) - 1.0) < 1e-9
+        # No overrides → each weight equals its base constant (they already
+        # sum to 1.0, so renormalization is the identity).
+        assert abs(eff["W_PORTFOLIO_FIT"] - me.W_PORTFOLIO_FIT) < 1e-9
+        assert abs(eff["W_PREFERENCE_FIT"] - me.W_PREFERENCE_FIT) < 1e-9
+        assert abs(eff["W_TRACK_RECORD"] - me.W_TRACK_RECORD) < 1e-9
+        assert abs(eff["W_CAPACITY_FIT"] - me.W_CAPACITY_FIT) < 1e-9
+
+    def test_empty_dict_overrides_equals_none(self) -> None:
+        from services import match_engine as me
+
+        assert me.compute_effective_weights({}, "a1") == me.compute_effective_weights(None, "a1")
+
+    def test_uniform_override_cancels_in_renormalization(self) -> None:
+        from services import match_engine as me
+
+        base = me.compute_effective_weights(None, "a1")
+        scaled = me.compute_effective_weights({k: 1.3 for k in base}, "a1")
+        # A uniform multiplier on all four weights cancels in the /total step,
+        # so the renormalized weights are unchanged.
+        for k in base:
+            assert abs(base[k] - scaled[k]) < 1e-9
+
+    def test_extreme_override_is_clamped_to_band(self) -> None:
+        from services import match_engine as me
+
+        # 10.0 clamps to 1.5; -5 clamps to 0.5 — same as scoring the clamped
+        # values directly.
+        a = me.compute_effective_weights({"W_PORTFOLIO_FIT": 10.0}, "a1")
+        b = me.compute_effective_weights({"W_PORTFOLIO_FIT": 1.5}, "a1")
+        assert a == b
+        assert abs(sum(a.values()) - 1.0) < 1e-9
+
+    def test_non_dict_overrides_raises_attributeerror(self) -> None:
+        from services import match_engine as me
+
+        with pytest.raises(AttributeError):
+            me.compute_effective_weights(["not", "a", "dict"], "a1")
+
+    def test_non_numeric_override_value_raises_typeerror(self) -> None:
+        from services import match_engine as me
+
+        with pytest.raises(TypeError):
+            me.compute_effective_weights({"W_PORTFOLIO_FIT": "high"}, "a1")
+
+    def test_nonpositive_sum_raises_valueerror_with_allocator_id(self, monkeypatch) -> None:
+        from services import match_engine as me
+
+        # Zero the base constants so the scaled sum is 0 regardless of override —
+        # mirrors the C-0230 guard, proving the extracted helper carries it.
+        monkeypatch.setattr(me, "W_PORTFOLIO_FIT", 0.0)
+        monkeypatch.setattr(me, "W_PREFERENCE_FIT", 0.0)
+        monkeypatch.setattr(me, "W_TRACK_RECORD", 0.0)
+        monkeypatch.setattr(me, "W_CAPACITY_FIT", 0.0)
+        with pytest.raises(ValueError, match=r"non-positive sum.*allocator_id=a9"):
+            me.compute_effective_weights({}, "a9")
