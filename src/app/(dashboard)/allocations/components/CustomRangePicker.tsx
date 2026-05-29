@@ -30,7 +30,7 @@ import {
 //   [ MTD / YTD    | └───────────────────────────┘ |
 //   [ Max (180d)  | footer: range label + Apply  ]
 //
-// Outside-click + Esc cloned from AddWidgetModal:29-62.
+// Outside-click + Esc dismissal (standard drawer/popover pattern).
 // ---------------------------------------------------------------------------
 
 type Props = {

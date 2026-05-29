@@ -78,7 +78,7 @@
 
   /* Designer-bundle-origin grid gap (10px). Ported verbatim from
      `Allocator Dashboard.html` / `designer-bundle/project/src/widget-grid.jsx`.
-     Consumed by WidgetGrid + Bridge inline styles + a small number of
+     Consumed by Bridge inline styles + a small number of
      widget legend rows (CustomRangePicker, EquityChart card header,
      MandateSnapshotWidget row, AllocationByStyleWidget legend).
      NOT a member of the DESIGN.md 4/8/12/16/24 spacing ladder — snapping

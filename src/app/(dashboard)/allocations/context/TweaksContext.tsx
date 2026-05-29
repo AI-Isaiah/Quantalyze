@@ -54,9 +54,9 @@ export const TWEAK_DEFAULTS: TweakState = {
 const STORAGE_KEY = "allocations.tweaks";
 
 // Field-by-field guards keep persisted blobs from smuggling values outside
-// the declared unions through the JSON.parse cast. Mirrors the schema-less
-// parse anti-pattern flagged on useDashboardConfig.loadV2Config — the load
-// path is the single seam where runtime data crosses into typed state.
+// the declared unions through the JSON.parse cast — guarding the schema-less
+// parse anti-pattern (a raw cast that lets unvalidated values into typed
+// state). The load path is the single seam where runtime data crosses in.
 const DENSITY_VALUES: ReadonlySet<TweakState["density"]> = new Set([
   "tight",
   "comfortable",

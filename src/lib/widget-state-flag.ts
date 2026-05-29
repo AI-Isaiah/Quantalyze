@@ -3,11 +3,11 @@
  * universal rollout.
  *
  * The <WidgetState> primitive (Plan 11-04) is shipped in this phase and
- * the 7 DEFAULT_LAYOUT widgets are wired through it via per-state
- * fixtures. The remaining 32 WIDGET_REGISTRY entries are NOT
+ * the core widgets are wired through it via per-state
+ * fixtures. The remaining long-tail renderers are NOT
  * universally re-wrapped in this phase — gating universal consumption
- * behind this flag prevents a primitive bug from regressing all 39
- * widgets simultaneously.
+ * behind this flag prevents a primitive bug from regressing every
+ * widget simultaneously.
  *
  * Default OFF. Flip via:
  *   - localStorage.setItem("widget_state_v2", "true")  → persistent ON

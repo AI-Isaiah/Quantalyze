@@ -111,7 +111,7 @@ export function BridgeDrawer({
 
   // 09.1-REVIEW IN-04: split the previous combined effect into two so
   // the eslint-disable scope only wraps the reset path, not the unrelated
-  // keydown listener. Mirrors AddWidgetModal:29-62. A cleaner alternative
+  // keydown listener. A cleaner alternative
   // is key-based remount at the call site, but every existing caller
   // depends on stable identity + internal reset semantics.
 

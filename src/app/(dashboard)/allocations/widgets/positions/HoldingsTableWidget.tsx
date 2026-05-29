@@ -6,9 +6,8 @@
  * Compact dashboard variant of `components/HoldingsTable.tsx` (NEW MODE).
  * Distinct from the existing `widgets/positions/PositionsTable` widget,
  * which is the wider detail surface registered as the `positions-table`
- * tile and surfaced via the picker. PR1 brings up `holdings-table` as a
- * first-class entry so `DESIGNER_KEY_TO_WIDGET_ID["holdings"]` resolves to
- * a real component instead of aliasing onto positions-table.
+ * tile. PR1 brings up `holdings-table` as a first-class entry with its
+ * own component instead of aliasing onto positions-table.
  *
  * Wiring is byte-for-byte equivalent to `HoldingsTabPanel` (Plan 08): the
  * same `toDesignHoldings` adapter call, the same revoked-status join over

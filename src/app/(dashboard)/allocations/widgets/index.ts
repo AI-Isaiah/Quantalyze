@@ -3,7 +3,7 @@ import type { WidgetProps } from "../lib/types";
 
 // ---------------------------------------------------------------------------
 // Widget barrel — maps widgetId strings to lazy-loaded components.
-// Every key must match a key in WIDGET_REGISTRY (lib/widget-registry.ts).
+// Every key is a widget id; this barrel is the canonical id → component map.
 //
 // Widgets with default exports use `lazy(() => import(...))` directly.
 // Widgets with named exports use `.then(m => ({ default: m.Name }))`.
@@ -47,8 +47,7 @@ export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
   "tracking-error": lazy(() =>
     import("./risk/TrackingError").then((m) => ({ default: m.TrackingError })),
   ),
-  // PR1 (dashboard parity) — V2 Overview mandate tile, default-routed by
-  // DESIGNER_KEY_TO_WIDGET_ID["mandate"] post-PR1.
+  // PR1 (dashboard parity) — V2 Overview mandate tile.
   "mandate-snapshot": lazy(() => import("./risk/MandateSnapshotWidget")),
 
   // ── Allocation (6) ─────────────────────────────────────────────────

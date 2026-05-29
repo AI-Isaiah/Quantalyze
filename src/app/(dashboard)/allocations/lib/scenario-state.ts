@@ -17,7 +17,7 @@
  *   - localStorage keys are scoped per allocator (N1 defense-in-depth) — eliminates
  *     cross-tenant collision at the persistence layer.
  *   - schema_version mismatch on load returns null (forces default-init from current
- *     live holdings; identical idiom to useDashboardConfig.ts:82-109 + 296-320).
+ *     live holdings on schema drift).
  */
 
 import { z } from "zod";
@@ -42,8 +42,8 @@ export const SCENARIO_STORAGE_KEY_BASE = "allocations.scenario_v0_15";
 
 /** Bumped when the persisted ScenarioDraft shape changes incompatibly. Loads with
  *  a different schema_version are dropped on read (return null) so the hook
- *  re-initializes from current live holdings — same reset-on-mismatch idiom as
- *  useDashboardConfig.ts (LAYOUT_VERSION). */
+ *  re-initializes from current live holdings — the reset-on-mismatch idiom
+ *  shared by the versioned-storage codecs. */
 export const SCENARIO_SCHEMA_VERSION = 1;
 
 /** N1 — eliminates cross-tenant collision at the persistence layer. Returns

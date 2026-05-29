@@ -120,7 +120,7 @@ describe("SignOutButton — T-13-02-01 cross-account localStorage purge", () => 
     // across src/ — a missed key here means the purge silently leaks
     // it across user accounts on shared devices (T-13-02-01).
     const KNOWN_APP_KEYS = [
-      "quantalyze-dashboard-config", // useDashboardConfig.ts
+      "quantalyze-dashboard-config", // legacy widget-grid config (writer retired in B7b; still prefix-purged)
       "quantalyze-timeframe", // useTimeframe.ts
       "quantalyze_wizard_state_v1", // wizard/localStorage.ts
       "allocations.scenario_v0_15.{allocatorId}", // scenario-state.ts (templated)
