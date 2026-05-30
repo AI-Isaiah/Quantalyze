@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.26] - 2026-05-30
+### Changed — close the 2 remaining HIGH widget findings from the B21 residual (B21 follow-up)
+
+The B21 fold left 14 findings open as out-of-class for the validation-boundary refactor (perf / type-design / UX). This closes the two HIGH ones, both in the allocations widget surface:
+
+- **H-0076 — vestigial `WidgetProps.width`/`height`.** They were `number` (required), yet no widget reads them (every chart sizes via Recharts `ResponsiveContainer width="100%"`), so the three tab-panel mounts passed a fake `width={0} height={0}` that would silently defeat any future `width > 0` guard. Marked both optional on `WidgetProps` + `BaseWidgetProps` and dropped the literal-zero from the RiskTabPanel / OutcomesTabPanel / AllocationDashboardV2 mounts — a mount now omits them (the honest "unmeasured" signal) rather than asserting a zero size. (The `<YAxis width={0}>` in AlphaBetaDecomposition is a Recharts prop, untouched.)
+- **H-0160 — `__error` magic-boolean state machine.** OutcomesWidget inferred error / loading / empty / populated from an ad-hoc `Boolean(data.__error)` + `outcomes === undefined` + `length === 0` chain. Replaced with an explicit `OutcomesView` discriminated union resolved once in `resolveOutcomesView`, with a `never`-typed exhaustiveness guard before the populated branch — a future state is now a COMPILE error unless its render arm is added. `__error` stays as the (declared, schema-typed) producer of the error state; all four render branches and copy are byte-identical.
+
+**Verified:** tsc 0, lint 0 errors; the existing `outcomes.test.tsx` 4-state matrix (error via `__error`, loading, empty, populated) + boundary suites pass unchanged (62 tests across the outcomes/risk/dashboard surface) — proof the refactor preserves behavior. Authed in-browser /qa of the Risk + Outcomes tabs (sparse payload → clean per-widget empty cards, no crash) also passed.
+
 ## [0.24.15.25] - 2026-05-30
 ### Tests — close the B21 boundary test-coverage gaps surfaced by adversarial review (B21 follow-up)
 

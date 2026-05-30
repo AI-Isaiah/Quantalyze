@@ -165,10 +165,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         // B21: `data` is `unknown` on WidgetProps; EquityChartWidget validates
         // it through equityChartWidgetDataSchema, so the payload passes as-is
         // (the prior `as unknown as Record<string, unknown>` double-cast is gone).
+        // H-0076: width/height omitted — the chart sizes via ResponsiveContainer.
         data={props}
         timeframe="1YTD"
-        width={0}
-        height={0}
       />
     </section>
   );

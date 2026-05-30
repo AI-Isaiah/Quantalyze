@@ -8,9 +8,10 @@ import OutcomesWidget from "./widgets/outcomes/OutcomesWidget";
  * Plan 02 stub; Plan 10 fills with the restyled OutcomesWidget (designer
  * outcomes.jsx shape: 3-KPI strip + delta table + OutcomeDetail).
  *
- * The OutcomesWidget consumes WidgetProps `{ data, timeframe, width, height }`.
+ * The OutcomesWidget consumes WidgetProps `{ data, timeframe, width?, height? }`.
  * `data` accepts the full payload — the widget reads `data.outcomes` only.
- * `width`/`height` are ignored by the widget body (it uses `flex h-full`).
+ * `width`/`height` are omitted (H-0076): the widget body sizes via `flex h-full`
+ * / Recharts `ResponsiveContainer`, so there is no real pixel size to pass.
  */
 export function OutcomesTabPanel(props: MyAllocationDashboardPayload) {
   return (
@@ -20,8 +21,6 @@ export function OutcomesTabPanel(props: MyAllocationDashboardPayload) {
         // through outcomesWidgetDataSchema, so the whole payload passes as-is.
         data={props}
         timeframe="1YTD"
-        width={0}
-        height={0}
       />
     </div>
   );

@@ -42,6 +42,14 @@ export interface WidgetProps {
    * H-0147 + M-1093: narrowed from `string` to TimeframeKey.
    */
   timeframe: TimeframeKey;
-  width: number;
-  height: number;
+  /**
+   * audit-2026-05-07 H-0076: vestigial. No widget reads these — every chart
+   * sizes itself via Recharts `ResponsiveContainer width="100%"`. They were
+   * `number` (required), so the three tab-panel mounts passed a fake `width={0}
+   * height={0}` that would silently defeat any future `width > 0` guard. Marked
+   * optional so a mount can omit them (the honest "unmeasured" signal) instead
+   * of asserting a literal zero size.
+   */
+  width?: number;
+  height?: number;
 }

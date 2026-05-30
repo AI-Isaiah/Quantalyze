@@ -782,20 +782,45 @@ function LoadingState() {
 
 // ---------------------------------------------------- top-level default export
 
+/**
+ * H-0160: the widget's four render states as an explicit discriminated union,
+ * replacing the ad-hoc `hasError` / `outcomes === undefined` / `length === 0`
+ * chain. `resolveOutcomesView` is the single place the state machine is decided,
+ * and the `switch (view.kind)` in render has a `never`-typed default, so TS
+ * proves exhaustiveness — a new state cannot be added without handling it, and
+ * the error path now carries a typed shape rather than a bare magic boolean.
+ */
+type OutcomesView =
+  | { kind: "error" }
+  | { kind: "loading" }
+  | { kind: "empty" }
+  | { kind: "ok"; outcomes: OutcomeRow[] };
+
+function resolveOutcomesView(data: OutcomesWidgetData): OutcomesView {
+  // `{ __error: true }` sentinel: a consumer may splice it onto the payload on
+  // an upstream fetch failure, keeping error copy inside the widget bounds
+  // rather than failing the whole /allocations page. It is a declared schema
+  // field (`__error: z.unknown().optional()`), so this is a real producer path.
+  if (data.__error) return { kind: "error" };
+  // `outcomes` absent = not loaded yet (the schema marks it optional so a
+  // still-loading payload validates and reaches here).
+  if (data.outcomes === undefined) return { kind: "loading" };
+  // `.loose()` validated the row fields the widget reads; the cast bridges that
+  // narrower inferred element to the richer OutcomeRow that computeOutcomeKPIs /
+  // TimelineRow consume (sound — the extra fields survive at runtime).
+  const outcomes = data.outcomes as OutcomeRow[];
+  if (outcomes.length === 0) return { kind: "empty" };
+  return { kind: "ok", outcomes };
+}
+
 function OutcomesWidgetInner({
   data,
 }: { data: OutcomesWidgetData } & BaseWidgetProps) {
-  // `{ __error: true }` sentinel: a consumer may splice it in on an upstream
-  // fetch failure. Keeps error copy inside the widget bounds rather than failing
-  // the whole /allocations page. `data` is the boundary-validated payload (always
-  // a present object inside Inner), so the prior `data && typeof data` guard +
-  // `data as MyAllocationDashboardPayload` cast (H-0160 / M-0187) collapse away.
-  const hasError = Boolean(data.__error);
-
-  // `.loose()` validated the row leaves the widget reads; the cast bridges that
-  // narrower inferred element to the richer OutcomeRow that computeOutcomeKPIs /
-  // TimelineRow consume (sound — the extra fields survive at runtime).
-  const outcomes = data.outcomes as OutcomeRow[] | undefined;
+  const view = resolveOutcomesView(data);
+  // `outcomes` for the hooks below: the populated rows, or [] for the
+  // loading/empty/error states (hooks must run unconditionally, before the
+  // `switch` returns). computeOutcomeKPIs([]) is a no-op zero-KPI result.
+  const outcomes = view.kind === "ok" ? view.outcomes : [];
 
   const curvesCache = useRef<Map<string, CurveData>>(new Map());
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -843,7 +868,7 @@ function OutcomesWidgetInner({
   const v2 = isWidgetStateV2Enabled();
 
   // Error
-  if (hasError) {
+  if (view.kind === "error") {
     if (v2) {
       return (
         <WidgetState
@@ -887,12 +912,12 @@ function OutcomesWidgetInner({
   }
 
   // Loading
-  if (outcomes === undefined) {
+  if (view.kind === "loading") {
     return <LoadingState />;
   }
 
   // Empty
-  if (outcomes.length === 0) {
+  if (view.kind === "empty") {
     return (
       <div className="flex h-full flex-col">
         <WidgetHeader pendingCount={0} />
@@ -922,7 +947,14 @@ function OutcomesWidgetInner({
     );
   }
 
-  // Populated
+  // Populated. H-0160 exhaustiveness: the three guards above leave only
+  // kind === "ok"; this assertion makes any future OutcomesView variant a
+  // COMPILE error here unless its render branch is added above.
+  if (view.kind !== "ok") {
+    const _exhaustive: never = view;
+    return _exhaustive;
+  }
+
   const populated = (
     <div className="flex h-full flex-col">
       <WidgetHeader pendingCount={kpis.pendingCount} />
