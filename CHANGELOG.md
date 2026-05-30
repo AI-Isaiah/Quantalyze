@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.25] - 2026-05-30
+### Tests — close the B21 boundary test-coverage gaps surfaced by adversarial review (B21 follow-up)
+
+A 5-dimension adversarial review of the B21 widget-validation-boundary diff (run after #372 merged) surfaced three test-intent / convention findings — all non-functional, but two are coverage gaps that, per the repo's Rule 9 ("a test must fail when business logic changes"), are fixed here rather than deferred.
+
+- **Sentry-dedup regression test (was the one MEDIUM).** `withWidgetBoundary`'s `reportOnce()` collapses repeated same-area failures to a single Sentry breadcrumb (the whole reason the module-scoped `reportedAreas` Set exists — a long hover/Tweaks session must not saturate the Sentry tier). Every prior assertion was a single render into a unique area, so deleting `if (reportedAreas.has(area)) return;` regressed the guarantee with ZERO test failures. New test re-renders two distinct malformed payloads into the SAME area and asserts `captureToSentry` fires exactly once — it now fails if the dedup guard is removed.
+- **RiskDecomposition boundary test (LOW).** It was the only HOC-migrated widget without a dedicated `*.boundary.test.tsx` failure-path test; a wrong-schema / wrong-`onInvalid` copy-paste in its `withWidgetBoundary` call would have escaped every test. Added, mirroring the sibling pattern (malformed payload → error card; valid payload → no alert).
+- **Apostrophe convention (LOW).** The two boundary error strings ("This widget couldn't render/load.") used a typographic apostrophe (U+2019) where every other rendered string in the allocations tree uses a straight `'` (U+0027). De-curled to match (Rule 11 + DESIGN.md).
+
+No production-behavior change beyond the two cosmetic apostrophes. tsc 0, lint 0 errors; new + existing boundary suites green.
+
 ## [0.24.15.24] - 2026-05-30
 ### Changed — every dashboard widget now validates its data at a single contain-and-recover seam (cross-cutting refactor B21)
 
