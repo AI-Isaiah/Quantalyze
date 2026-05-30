@@ -176,4 +176,39 @@ describe("POST /api/admin/notify-submission", () => {
       expect(denied).toBe(100);
     });
   });
+
+  describe("B15b — body validated before the limiter", () => {
+    it("malformed JSON body → 400 (not an uncaught 500) and checkLimit is NOT called", async () => {
+      // B15b moved the body parse ahead of the limiter. The parse is now
+      // try/catch-guarded so a malformed body returns 400 without an uncaught
+      // 500 AND without consuming a token. A regression that drops the guard
+      // surfaces as a 500 here; one that moves the limiter back above the
+      // parse makes checkLimitCalls > 0.
+      let checkLimitCalls = 0;
+      vi.doMock("@/lib/ratelimit", async () => {
+        const actual = await vi.importActual<typeof import("@/lib/ratelimit")>(
+          "@/lib/ratelimit",
+        );
+        return {
+          ...actual,
+          checkLimit: async () => {
+            checkLimitCalls += 1;
+            return { success: true, retryAfter: 0 };
+          },
+        };
+      });
+      const { POST } = await import("./route");
+      const req = new NextRequest(
+        "http://localhost:3000/api/admin/notify-submission",
+        {
+          method: "POST",
+          headers: { ...VALID_ORIGIN, "content-type": "application/json" },
+          body: "{ not valid json",
+        },
+      );
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+      expect(checkLimitCalls).toBe(0);
+    });
+  });
 });

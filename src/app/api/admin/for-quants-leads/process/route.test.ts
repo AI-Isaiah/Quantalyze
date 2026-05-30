@@ -173,12 +173,18 @@ describe("POST /api/admin/for-quants-leads/process — C-0037", () => {
     expect(STATE.unmarkCalls).toHaveLength(0);
   });
 
-  it("returns 400 when id is not a UUID (no audit emission, no helper call)", async () => {
+  it("returns 400 when id is not a UUID (validated in withAdminAuth before the limiter, no helper call)", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeReq({ id: "not-a-uuid" }));
     expect(res.status).toBe(400);
+    // B15b: the uuid check now lives in the route's Zod schema, which
+    // withAdminAuth runs BEFORE consuming a rate-limit token. The wrapper
+    // returns `{ error: "Invalid request body", issues: [...] }`; the issues
+    // array names the uuid failure. A regression that drops the schema would
+    // let markLeadProcessed run on a bad id (STATE.markCalls below), so this
+    // still fails loudly if the validation is removed.
     const body = await res.json();
-    expect(body.error).toMatch(/uuid/i);
+    expect(JSON.stringify(body.issues ?? body)).toMatch(/uuid/i);
     expect(auditEmissions).toHaveLength(0);
     expect(STATE.markCalls).toHaveLength(0);
     expect(STATE.unmarkCalls).toHaveLength(0);

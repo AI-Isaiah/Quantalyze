@@ -48,15 +48,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const rl = await checkLimit(
-    adminActionLimiter,
-    `admin:${user.id}:intro-request`,
-  );
-  // PR-2 full-file reviewer #6 (2026-05-28): 503 on rate-limit misconfig
-  // so an Upstash outage surfaces on SRE health dashboards instead of
-  // masquerading as throttled organic admin traffic. (See rateLimitDenyJson.)
-  if (!rl.success) return rateLimitDenyJson(rl);
-
   let body: Record<string, unknown>;
   try {
     const parsed = await req.json();
@@ -71,12 +62,24 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const admin = createAdminClient();
-
   const { id, status, admin_note } = body;
   if (!id || !VALID_STATUSES.includes(status as (typeof VALID_STATUSES)[number])) {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
+
+  // B15b (audit-2026-05-07): rate-limit AFTER input validation so a
+  // malformed/invalid body (rejected 400 above) never consumes one of the
+  // admin's adminActionLimiter tokens.
+  // PR-2 full-file reviewer #6 (2026-05-28): 503 on rate-limit misconfig
+  // so an Upstash outage surfaces on SRE health dashboards instead of
+  // masquerading as throttled organic admin traffic. (See rateLimitDenyJson.)
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin:${user.id}:intro-request`,
+  );
+  if (!rl.success) return rateLimitDenyJson(rl);
+
+  const admin = createAdminClient();
 
   const update: Record<string, unknown> = {
     status,

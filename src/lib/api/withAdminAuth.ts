@@ -7,9 +7,10 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { logAuditEventAsUser } from "@/lib/audit";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
+import type { ZodType } from "zod";
 
-type AdminHandler = (
-  body: Record<string, unknown>,
+type AdminHandler<T> = (
+  body: T,
   admin: SupabaseClient,
   // B4b: the verified acting admin. Handlers that mutate via the `admin`
   // (service-role) client must audit via logAuditEventAsUser(admin, user.id, …)
@@ -17,22 +18,33 @@ type AdminHandler = (
   user: User,
 ) => Promise<NextResponse>;
 
-export interface WithAdminAuthOptions {
+export interface WithAdminAuthOptions<T> {
   /**
    * audit-2026-05-07 (PR-2 2026-05-28) — opt-in per-surface rate limit.
    *
    * When supplied, the wrapper calls `checkLimit(adminActionLimiter, key)`
-   * after the admin authz block and before body parse. The key MUST already
-   * include the surface name (e.g. `admin-fql-process:`) — only the trailing
-   * user id is appended here. Returning `null` from this callback opts the
-   * call out of rate limiting for one specific request (currently unused;
-   * kept for forward-compat with conditional opt-outs).
+   * after the body is parsed AND validated (B15b ordering — see below). The
+   * key MUST already include the surface name (e.g. `admin-fql-process:`) —
+   * only the trailing user id is appended here. Returning `null` from this
+   * callback opts the call out of rate limiting for one specific request
+   * (currently unused; kept for forward-compat with conditional opt-outs).
    *
    * The per-route inline limiters (preferences, kill-switch, decisions)
    * deliberately do NOT use this hook — they need bespoke per-target-user
    * key shapes that depend on URL params unavailable here.
    */
   rateLimitKey?: (user: { id: string }) => string | null;
+  /**
+   * B15b (audit-2026-05-07) — optional Zod schema for the request body. When
+   * supplied, the parsed body is validated BEFORE the `rateLimitKey` limiter
+   * consumes a token, so a schema-invalid admin request returns 400 without
+   * burning the admin's bucket (the canonical auth → validate → limit order,
+   * mirroring `withAuthLimited` for the authenticated user surface). The typed
+   * result is passed to the handler. Omit for routes that do their own
+   * in-handler validation — the handler then receives the raw object
+   * (`Record<string, unknown>`), which is the backward-compatible default.
+   */
+  schema?: ZodType<T>;
 }
 
 /**
@@ -70,9 +82,9 @@ export interface WithAdminAuthOptions {
  *      400 instead of crashing the handler with `const { id } = body`
  *      against a primitive.
  */
-export function withAdminAuth(
-  handler: AdminHandler,
-  options: WithAdminAuthOptions = {},
+export function withAdminAuth<T = Record<string, unknown>>(
+  handler: AdminHandler<T>,
+  options: WithAdminAuthOptions<T> = {},
 ) {
   return async (request: Request): Promise<NextResponse> => {
     // CSRF defense-in-depth: admin routes are always mutating (POST).
@@ -107,9 +119,47 @@ export function withAdminAuth(
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
+    // B15b (audit-2026-05-07): parse AND validate the body BEFORE the
+    // limiter. Pre-B15b the wrapper consumed a rate-limit token before
+    // parsing, so a malformed/schema-invalid admin request burned one of the
+    // caller's own adminActionLimiter tokens (20/min) and then got a 400 — a
+    // buggy client retrying on 400 could 429 the admin's next legitimate
+    // action. Validating first makes "invalid input cannot consume a token"
+    // hold by construction for any route that adopts this wrapper, mirroring
+    // `withAuthLimited` on the authenticated user surface.
+    let parsedBody: Record<string, unknown>;
+    try {
+      const parsed = await request.json();
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return NextResponse.json(
+          { error: "Request body must be a JSON object" },
+          { status: 400 },
+        );
+      }
+      parsedBody = parsed as Record<string, unknown>;
+    } catch {
+      return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    }
+
+    // Schema validation (when supplied) runs before the limiter too, so a
+    // well-formed-object-but-schema-invalid body (e.g. a non-UUID id) is also
+    // rejected 400 without a token. Schema-less routes get the raw object.
+    let body = parsedBody as unknown as T;
+    if (options.schema) {
+      const result = options.schema.safeParse(parsedBody);
+      if (!result.success) {
+        return NextResponse.json(
+          { error: "Invalid request body", issues: result.error.issues },
+          { status: 400 },
+        );
+      }
+      body = result.data;
+    }
+
     // audit-2026-05-07 (PR-2 2026-05-28): opt-in rate limit on admin
     // mutators routed through this wrapper. The key shape is per-route;
-    // the wrapper just consumes whatever the caller provides.
+    // the wrapper just consumes whatever the caller provides. B15b: this
+    // now fires only AFTER the body parses + validates above.
     //
     // Red-team C1 (2026-05-28): tighten the truthy check so an empty
     // string (e.g. a buggy caller `(u) => process.env.X ?? ""`) does
@@ -131,20 +181,6 @@ export function withAdminAuth(
         const rl = await checkLimit(adminActionLimiter, surfaceKey);
         if (!rl.success) return rateLimitDenyJson(rl);
       }
-    }
-
-    let body: Record<string, unknown>;
-    try {
-      const parsed = await request.json();
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return NextResponse.json(
-          { error: "Request body must be a JSON object" },
-          { status: 400 },
-        );
-      }
-      body = parsed as Record<string, unknown>;
-    } catch {
-      return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
     }
 
     const admin = createAdminClient();

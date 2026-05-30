@@ -71,34 +71,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  // audit-2026-05-07 fix-loop H-0228 / H-0232 / M-0283 — rate-limit gate.
-  // send-intro fires two Resend emails AND writes match_decisions+
-  // contact_requests rows per call; every sibling admin POST in this slice
-  // already binds adminActionLimiter. Bucket the limiter on the verified
-  // admin uid so a stolen admin session cannot spam intros.
-  const rl = await checkLimit(
-    adminActionLimiter,
-    `admin:${user.id}:send-intro`,
-  );
-  if (!rl.success) {
-    if (isRateLimitMisconfigured(rl)) {
-      return NextResponse.json(
-        { error: "Service temporarily unavailable" },
-        {
-          status: 503,
-          headers: { "Retry-After": String(rl.retryAfter) },
-        },
-      );
-    }
-    return NextResponse.json(
-      { error: "Too many requests" },
-      {
-        status: 429,
-        headers: { "Retry-After": String(rl.retryAfter) },
-      },
-    );
-  }
-
   // audit-2026-05-07 fix-loop H-0234 — kill-switch gate.
   // The match_engine_enabled flag (system_flags) is consulted by the
   // analytics worker for recompute. The admin write paths (this route +
@@ -290,6 +262,40 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         : null,
     admin_note: rawBody.admin_note,
   };
+
+  // audit-2026-05-07 fix-loop H-0228 / H-0232 / M-0283 — rate-limit gate.
+  // send-intro fires two Resend emails AND writes match_decisions+
+  // contact_requests rows per call; every sibling admin POST in this slice
+  // already binds adminActionLimiter. Bucket the limiter on the verified
+  // admin uid so a stolen admin session cannot spam intros.
+  //
+  // B15b (audit-2026-05-07): consumed AFTER the body is parsed, byte-capped,
+  // and field-validated above (and after the kill-switch 503 gate), so a
+  // malformed/invalid request — or one against a disabled engine — never
+  // burns one of the admin's tokens. The token now gates only the expensive
+  // ownership-verification reads + RPC + emails below.
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin:${user.id}:send-intro`,
+  );
+  if (!rl.success) {
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Service temporarily unavailable" },
+        {
+          status: 503,
+          headers: { "Retry-After": String(rl.retryAfter) },
+        },
+      );
+    }
+    return NextResponse.json(
+      { error: "Too many requests" },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
+    );
+  }
 
   // audit-2026-05-07 fix-loop H-0229 / M-0282 / C-0047 — verify the
   // supplied original_strategy_id is actually one of the named allocator's

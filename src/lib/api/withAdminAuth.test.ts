@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { NextResponse } from "next/server";
+import { z } from "zod";
 
 /**
  * Unit tests for `withAdminAuth` — the CSRF + admin gate + body guard
@@ -21,6 +23,7 @@ const {
   createAdminClientMock,
   assertSameOriginMock,
   logAuditEventAsUserMock,
+  checkLimitMock,
 } = vi.hoisted(() => {
   return {
     getUserMock: vi.fn<() => Promise<{ data: { user: unknown } }>>(),
@@ -30,6 +33,13 @@ const {
       () => null,
     ),
     logAuditEventAsUserMock: vi.fn<(...args: unknown[]) => void>(),
+    checkLimitMock: vi.fn<
+      (...args: unknown[]) => Promise<{
+        success: boolean;
+        retryAfter: number;
+        reason?: string;
+      }>
+    >(async () => ({ success: true, retryAfter: 0 })),
   };
 });
 
@@ -58,6 +68,28 @@ vi.mock("@/lib/audit", () => ({
     actingUserId: unknown,
     event: unknown,
   ) => logAuditEventAsUserMock(client, actingUserId, event),
+}));
+
+// B15b: the wrapper's rateLimitKey path consumes adminActionLimiter via
+// checkLimit. Mock it so the ordering invariant (NOT called on invalid input)
+// is observable. The existing gate/body-guard tests don't pass rateLimitKey,
+// so checkLimit is never reached there and this mock is inert for them.
+vi.mock("@/lib/ratelimit", () => ({
+  adminActionLimiter: { __mock: "adminActionLimiter" },
+  checkLimit: (...args: unknown[]) => checkLimitMock(...args),
+  rateLimitDenyJson: (rl: { retryAfter: number; reason?: string }) =>
+    NextResponse.json(
+      {
+        error:
+          rl.reason === "ratelimit_misconfigured"
+            ? "Rate limiter unavailable"
+            : "Too many requests",
+      },
+      {
+        status: rl.reason === "ratelimit_misconfigured" ? 503 : 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
+    ),
 }));
 
 import { withAdminAuth } from "./withAdminAuth";
@@ -232,5 +264,82 @@ describe("withAdminAuth", () => {
       expect(adminArg).toEqual({ __admin: true });
       expect(createAdminClientMock).toHaveBeenCalled();
     });
+  });
+});
+
+describe("withAdminAuth — B15b validate-before-limit", () => {
+  const SCHEMA = z.object({ id: z.string().uuid() });
+  const VALID_ID = "11111111-1111-4111-8111-111111111111";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getUserMock.mockResolvedValue({ data: { user: adminUser } });
+    isAdminUserMock.mockResolvedValue(true);
+    assertSameOriginMock.mockReturnValue(null);
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+  });
+
+  it("schema-invalid body → 400 and checkLimit is NEVER called (no token burned)", async () => {
+    // The load-bearing B15b invariant for the admin wrapper, mirroring
+    // withAuthLimited: a well-formed-object-but-schema-invalid body (here a
+    // non-UUID id) is rejected before the rateLimitKey limiter runs. If a
+    // refactor reverts the order (limit before validate), this fails.
+    const handler = vi.fn(async () => NextResponse.json({ ok: true }));
+    const wrapped = withAdminAuth(handler, {
+      schema: SCHEMA,
+      rateLimitKey: (u) => `t:${u.id}`,
+    });
+    const res = await wrapped(makeRequest({ id: "not-a-uuid" }));
+    expect(res.status).toBe(400);
+    expect(checkLimitMock).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("malformed JSON → 400 before the limiter (no token consumed)", async () => {
+    const handler = vi.fn(async () => NextResponse.json({ ok: true }));
+    const wrapped = withAdminAuth(handler, {
+      schema: SCHEMA,
+      rateLimitKey: (u) => `t:${u.id}`,
+    });
+    const res = await wrapped(makeRequest("INVALID_JSON"));
+    expect(res.status).toBe(400);
+    expect(checkLimitMock).not.toHaveBeenCalled();
+  });
+
+  it("valid body → checkLimit called once, then handler with the typed body", async () => {
+    const handler = vi.fn(async () => NextResponse.json({ ok: true }));
+    const wrapped = withAdminAuth(handler, {
+      schema: SCHEMA,
+      rateLimitKey: (u) => `t:${u.id}`,
+    });
+    const res = await wrapped(makeRequest({ id: VALID_ID }));
+    expect(res.status).toBe(200);
+    expect(checkLimitMock).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect((handler.mock.calls[0] as unknown[])[0]).toEqual({ id: VALID_ID });
+  });
+
+  it("valid body but over limit → 429, handler not called", async () => {
+    checkLimitMock.mockResolvedValueOnce({ success: false, retryAfter: 30 });
+    const handler = vi.fn(async () => NextResponse.json({ ok: true }));
+    const wrapped = withAdminAuth(handler, {
+      schema: SCHEMA,
+      rateLimitKey: (u) => `t:${u.id}`,
+    });
+    const res = await wrapped(makeRequest({ id: VALID_ID }));
+    expect(res.status).toBe(429);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("schema-less rateLimitKey route still object-guards the body before limiting", async () => {
+    // Even without a schema, the object-guard parse runs before the limiter
+    // (B15b reorder), so a non-object body is 400 with no token consumed.
+    const handler = vi.fn(async () => NextResponse.json({ ok: true }));
+    const wrapped = withAdminAuth(handler, {
+      rateLimitKey: (u) => `t:${u.id}`,
+    });
+    const res = await wrapped(makeRequest([1, 2, 3]));
+    expect(res.status).toBe(400);
+    expect(checkLimitMock).not.toHaveBeenCalled();
   });
 });
