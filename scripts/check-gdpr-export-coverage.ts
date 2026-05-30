@@ -60,12 +60,15 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  USER_EXPORT_TABLES,
+  type UserExportTable,
+} from "@/lib/gdpr-export-manifest";
 
 // Resolve repo root from this file's location (scripts/ sibling to supabase/).
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..");
 const MIGRATIONS_DIR = join(REPO_ROOT, "supabase", "migrations");
-const MANIFEST_FILE = join(REPO_ROOT, "src", "lib", "gdpr-export.ts");
 
 /**
  * Tables whose rows are NOT user-owned in a way the GDPR export should
@@ -189,40 +192,32 @@ export const EXCLUDED_TABLES: Record<string, { reason: string }> = {
 };
 
 /**
- * Read the manifest file as text, then extract the list of `table: "..."`
- * AND `source_table: "..."` literals from the `USER_EXPORT_TABLES`
- * array. `source_table` is the underlying table for the `projected`
- * entries (e.g. audit_log -> audit_log_for_user); from the migration
- * coverage perspective the raw source is what's covered.
- * A regex is sufficient because we control the file's shape - see
- * gdpr-export.ts.
+ * Covered-table names from the manifest: each entry's `table` plus the
+ * `source_table` of `projected` entries (e.g. audit_log ->
+ * audit_log_for_user); from the migration-coverage perspective the raw
+ * source is what's covered.
+ *
+ * B13: reads the imported typed `USER_EXPORT_TABLES` array directly
+ * instead of regex-scraping the source text — drift between this gate
+ * and the real manifest is now impossible by construction.
  */
 function readManifestTables(): Set<string> {
-  const src = readFileSync(MANIFEST_FILE, "utf8");
-  return extractManifestTables(src);
+  return extractManifestTables();
 }
 
 /**
  * Pure helper used by `readManifestTables` and tests. Returns the
- * `table` + `source_table` literals from USER_EXPORT_TABLES.
- *
- * Throws if the array is missing — the caller turns that into exit 2.
+ * `table` + `source_table` names from USER_EXPORT_TABLES. Accepts the
+ * array so tests can drive it with a synthetic manifest; defaults to
+ * the real imported manifest.
  */
-export function extractManifestTables(src: string): Set<string> {
-  const arrMatch = src.match(
-    /USER_EXPORT_TABLES:\s*readonly\s+UserExportTable\[\]\s*=\s*\[([\s\S]*?)\]\s*as\s*const\s*;/,
-  );
-  if (!arrMatch) {
-    throw new Error(
-      "Could not find USER_EXPORT_TABLES in manifest",
-    );
-  }
-  const body = arrMatch[1];
+export function extractManifestTables(
+  tables: readonly UserExportTable[] = USER_EXPORT_TABLES,
+): Set<string> {
   const names = new Set<string>();
-  const tableLiteralRe = /\b(?:table|source_table):\s*"([a-z0-9_]+)"/g;
-  let m: RegExpExecArray | null;
-  while ((m = tableLiteralRe.exec(body)) !== null) {
-    names.add(m[1]);
+  for (const t of tables) {
+    names.add(t.table);
+    if (t.kind === "projected") names.add(t.source_table);
   }
   return names;
 }
@@ -387,22 +382,17 @@ export function extractSanitizeCoverageFromContent(
  * BOTH child and parent_table.
  */
 function readManifestTablesForParity(): Set<string> {
-  const src = readFileSync(MANIFEST_FILE, "utf8");
-  return extractManifestTablesForParity(src);
+  return extractManifestTablesForParity();
 }
 
-export function extractManifestTablesForParity(src: string): Set<string> {
-  const arrMatch = src.match(
-    /USER_EXPORT_TABLES:\s*readonly\s+UserExportTable\[\]\s*=\s*\[([\s\S]*?)\]\s*as\s*const\s*;/,
-  );
-  if (!arrMatch) return new Set();
-  const body = arrMatch[1];
+export function extractManifestTablesForParity(
+  tables: readonly UserExportTable[] = USER_EXPORT_TABLES,
+): Set<string> {
   const names = new Set<string>();
-  const tableLiteralRe =
-    /\b(?:source_table|parent_table|table):\s*"([a-z0-9_]+)"/g;
-  let m: RegExpExecArray | null;
-  while ((m = tableLiteralRe.exec(body)) !== null) {
-    names.add(m[1]);
+  for (const t of tables) {
+    names.add(t.table);
+    if (t.kind === "projected") names.add(t.source_table);
+    if (t.kind === "indirect") names.add(t.parent_table);
   }
   return names;
 }
@@ -422,27 +412,16 @@ function readProjectedManifestEntries(): Array<{
   bundleName: string;
   sourceTable: string;
 }> {
-  const src = readFileSync(MANIFEST_FILE, "utf8");
-  return extractProjectedEntries(src);
+  return extractProjectedEntries();
 }
 
 export function extractProjectedEntries(
-  src: string,
+  tables: readonly UserExportTable[] = USER_EXPORT_TABLES,
 ): Array<{ bundleName: string; sourceTable: string }> {
-  const arrMatch = src.match(
-    /USER_EXPORT_TABLES:\s*readonly\s+UserExportTable\[\]\s*=\s*\[([\s\S]*?)\]\s*as\s*const\s*;/,
-  );
-  if (!arrMatch) return [];
-  const body = arrMatch[1];
   const out: Array<{ bundleName: string; sourceTable: string }> = [];
-  const projectedRe = /\{\s*kind:\s*"projected"\s*,([\s\S]*?)\}/g;
-  let m: RegExpExecArray | null;
-  while ((m = projectedRe.exec(body)) !== null) {
-    const entryBody = m[1];
-    const tableMatch = entryBody.match(/\btable:\s*"([a-z0-9_]+)"/);
-    const sourceMatch = entryBody.match(/\bsource_table:\s*"([a-z0-9_]+)"/);
-    if (tableMatch && sourceMatch) {
-      out.push({ bundleName: tableMatch[1], sourceTable: sourceMatch[1] });
+  for (const t of tables) {
+    if (t.kind === "projected") {
+      out.push({ bundleName: t.table, sourceTable: t.source_table });
     }
   }
   return out;
@@ -468,37 +447,29 @@ function readManifestEntries(): Array<{
   kind: string;
   hasUserFilter: boolean;
 }> {
-  const src = readFileSync(MANIFEST_FILE, "utf8");
-  return extractManifestEntries(src);
+  return extractManifestEntries();
 }
 
 export function extractManifestEntries(
-  src: string,
+  tables: readonly UserExportTable[] = USER_EXPORT_TABLES,
 ): Array<{ table: string; kind: string; hasUserFilter: boolean }> {
-  const arrMatch = src.match(
-    /USER_EXPORT_TABLES:\s*readonly\s+UserExportTable\[\]\s*=\s*\[([\s\S]*?)\]\s*as\s*const\s*;/,
-  );
-  if (!arrMatch) return [];
-  const body = arrMatch[1];
-
-  const entries: Array<{ table: string; kind: string; hasUserFilter: boolean }> = [];
-  const entryRe = /\{\s*kind:\s*"(direct|indirect|projected)"\s*,([\s\S]*?)\}/g;
-  let m: RegExpExecArray | null;
-  while ((m = entryRe.exec(body)) !== null) {
-    const kind = m[1];
-    const entryBody = m[2];
-    const tableMatch = entryBody.match(/\btable:\s*"([a-z0-9_]+)"/);
-    if (!tableMatch) continue;
-    const table = tableMatch[1];
+  // The TYPED manifest guarantees the filter column exists (direct /
+  // projected -> user_column, indirect -> parent_user_column). This
+  // runtime re-check is defense-in-depth: it still reports
+  // hasUserFilter=false if a future entry is cast past the type system
+  // (or drifts) without a non-empty filter column, so the P698 gate
+  // below cannot be silently bypassed.
+  const isNonEmptyString = (v: unknown): boolean =>
+    typeof v === "string" && v.length > 0;
+  return tables.map((t) => {
     let hasUserFilter = false;
-    if (kind === "direct" || kind === "projected") {
-      hasUserFilter = /\buser_column:\s*"[a-z0-9_]+"/.test(entryBody);
-    } else if (kind === "indirect") {
-      hasUserFilter = /\bparent_user_column:\s*"[a-z0-9_]+"/.test(entryBody);
+    if (t.kind === "direct" || t.kind === "projected") {
+      hasUserFilter = isNonEmptyString(t.user_column);
+    } else if (t.kind === "indirect") {
+      hasUserFilter = isNonEmptyString(t.parent_user_column);
     }
-    entries.push({ table, kind, hasUserFilter });
-  }
-  return entries;
+    return { table: t.table, kind: t.kind, hasUserFilter };
+  });
 }
 
 /**

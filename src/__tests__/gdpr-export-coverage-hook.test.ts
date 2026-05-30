@@ -26,13 +26,87 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { extractUserTablesFromMigration } from "../../scripts/check-gdpr-export-coverage";
+import {
+  extractManifestEntries,
+  extractManifestTables,
+  extractUserTablesFromMigration,
+} from "../../scripts/check-gdpr-export-coverage";
+import { USER_EXPORT_TABLES } from "@/lib/gdpr-export-manifest";
 
 const REPO_ROOT = process.cwd();
 const HOOK_SCRIPT = join(REPO_ROOT, "scripts", "check-gdpr-export-coverage.ts");
-const MANIFEST_REL = join("src", "lib", "gdpr-export.ts");
+// B13: USER_EXPORT_TABLES (and the redactors the hook's checks reference)
+// live in the server-only-free manifest MODULE, which the hook imports as
+// typed data. The mutation tests below therefore edit THIS file, not
+// gdpr-export.ts.
+const MANIFEST_REL = join("src", "lib", "gdpr-export-manifest.ts");
 const MANIFEST_ABS = join(REPO_ROOT, MANIFEST_REL);
+const SENTRY_CAPTURE_REL = join("src", "lib", "sentry-capture.ts");
 const MIGRATIONS_REL = join("supabase", "migrations");
+
+/**
+ * Build a scratch sandbox the copied hook can run inside.
+ *
+ * B13: the hook `import`s `@/lib/gdpr-export-manifest` instead of
+ * regex-scraping the manifest text, so the sandbox must contain the
+ * manifest MODULE (verbatim or mutated), its self-contained
+ * `sentry-capture` value dep, and a `tsconfig.json` that resolves the
+ * `@/*` alias to the sandbox's own `src/` — otherwise `npx tsx` cannot
+ * load the manifest and the subprocess fails for the wrong reason. The
+ * `Database` import in the manifest is type-only and erased by tsx, so
+ * `database.types.ts` is not needed. Migrations are read
+ * script-relative, exactly as the live hook reads them.
+ */
+function setupScratchRepo(
+  prefix: string,
+  opts: { manifestModule?: string; hook?: string } = {},
+): string {
+  const scratch = mkdtempSync(join(tmpdir(), prefix));
+  mkdirSync(join(scratch, "scripts"), { recursive: true });
+  mkdirSync(join(scratch, "src", "lib"), { recursive: true });
+  mkdirSync(join(scratch, MIGRATIONS_REL), { recursive: true });
+
+  if (opts.hook !== undefined) {
+    writeFileSync(
+      join(scratch, "scripts", "check-gdpr-export-coverage.ts"),
+      opts.hook,
+    );
+  } else {
+    cpSync(
+      HOOK_SCRIPT,
+      join(scratch, "scripts", "check-gdpr-export-coverage.ts"),
+    );
+  }
+
+  cpSync(join(REPO_ROOT, MIGRATIONS_REL), join(scratch, MIGRATIONS_REL), {
+    recursive: true,
+  });
+
+  if (opts.manifestModule !== undefined) {
+    writeFileSync(join(scratch, MANIFEST_REL), opts.manifestModule);
+  } else {
+    cpSync(MANIFEST_ABS, join(scratch, MANIFEST_REL));
+  }
+  cpSync(
+    join(REPO_ROOT, SENTRY_CAPTURE_REL),
+    join(scratch, SENTRY_CAPTURE_REL),
+  );
+
+  writeFileSync(
+    join(scratch, "tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        baseUrl: ".",
+        paths: { "@/*": ["./src/*"] },
+        moduleResolution: "bundler",
+        module: "esnext",
+        target: "esnext",
+      },
+    }),
+  );
+
+  return scratch;
+}
 
 describe("scripts/check-gdpr-export-coverage.ts", () => {
   it("exits 0 against the current checked-in manifest", () => {
@@ -52,18 +126,6 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     // Add a brand-new manifest entry whose name does NOT appear in
     // the sanitize_user matrix or DELETE/UPDATE body — and is NOT in
     // SANITIZE_PARITY_ALLOWLIST. The parity check should fail loud.
-    const scratch = mkdtempSync(join(tmpdir(), "gdpr-parity-test-"));
-    mkdirSync(join(scratch, "scripts"), { recursive: true });
-    mkdirSync(join(scratch, "src", "lib"), { recursive: true });
-    mkdirSync(join(scratch, "supabase"), { recursive: true });
-
-    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-gdpr-export-coverage.ts"));
-    cpSync(
-      join(REPO_ROOT, MIGRATIONS_REL),
-      join(scratch, MIGRATIONS_REL),
-      { recursive: true },
-    );
-
     const originalManifest = readFileSync(MANIFEST_ABS, "utf8");
     // Inject a synthetic manifest entry whose table name is "xxx_orphan_table".
     // The sanitize_user matrix has no row for it AND the regex won't
@@ -76,7 +138,9 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
   { kind: "direct", table: "xxx_orphan_table", user_column: "user_id" },`,
     );
     expect(mutated).not.toBe(originalManifest);
-    writeFileSync(join(scratch, MANIFEST_REL), mutated);
+    const scratch = setupScratchRepo("gdpr-parity-test-", {
+      manifestModule: mutated,
+    });
 
     const result = spawnSync("npx", ["tsx", "scripts/check-gdpr-export-coverage.ts"], {
       encoding: "utf8",
@@ -100,18 +164,6 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     // source_table doesn't exist anywhere — no matrix coverage, no
     // migration declaration, not in allowlist. The new check should
     // fail loud with a message naming the source_table.
-    const scratch = mkdtempSync(join(tmpdir(), "gdpr-rt9-test-"));
-    mkdirSync(join(scratch, "scripts"), { recursive: true });
-    mkdirSync(join(scratch, "src", "lib"), { recursive: true });
-    mkdirSync(join(scratch, "supabase"), { recursive: true });
-
-    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-gdpr-export-coverage.ts"));
-    cpSync(
-      join(REPO_ROOT, MIGRATIONS_REL),
-      join(scratch, MIGRATIONS_REL),
-      { recursive: true },
-    );
-
     const originalManifest = readFileSync(MANIFEST_ABS, "utf8");
     // Inject a synthetic projected entry that names a non-existent
     // source_table. The bundle name is also synthetic (so it's not in
@@ -130,7 +182,9 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
   },`,
     );
     expect(mutated).not.toBe(originalManifest);
-    writeFileSync(join(scratch, MANIFEST_REL), mutated);
+    const scratch = setupScratchRepo("gdpr-rt9-test-", {
+      manifestModule: mutated,
+    });
 
     const result = spawnSync(
       "npx",
@@ -152,11 +206,6 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     // comparing every allowlist key against the manifest's
     // table/source_table/parent_table union and failing loud on any
     // miss.
-    const scratch = mkdtempSync(join(tmpdir(), "gdpr-rt9-stale-"));
-    mkdirSync(join(scratch, "scripts"), { recursive: true });
-    mkdirSync(join(scratch, "src", "lib"), { recursive: true });
-    mkdirSync(join(scratch, "supabase"), { recursive: true });
-
     const originalHook = readFileSync(HOOK_SCRIPT, "utf8");
     // Add a stale allowlist entry pointing at a non-existent table.
     // The manifest is untouched, so the new check fails with a
@@ -167,16 +216,7 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
         `${m}\n  xxx_stale_dangling_entry: { reason: "test-injection", addedIn: "test" },`,
     );
     expect(mutatedHook).not.toBe(originalHook);
-    writeFileSync(
-      join(scratch, "scripts", "check-gdpr-export-coverage.ts"),
-      mutatedHook,
-    );
-    cpSync(
-      join(REPO_ROOT, MIGRATIONS_REL),
-      join(scratch, MIGRATIONS_REL),
-      { recursive: true },
-    );
-    cpSync(MANIFEST_ABS, join(scratch, MANIFEST_REL));
+    const scratch = setupScratchRepo("gdpr-rt9-stale-", { hook: mutatedHook });
 
     const result = spawnSync(
       "npx",
@@ -199,19 +239,9 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     // the gap and names the new table. A regression that scanned only a
     // subset of migrations (e.g. globbed the wrong dir, or stopped at
     // the first file) would let this slip through with exit 0.
-    const scratch = mkdtempSync(join(tmpdir(), "gdpr-hook-scan-all-"));
-    mkdirSync(join(scratch, "scripts"), { recursive: true });
-    mkdirSync(join(scratch, "src", "lib"), { recursive: true });
-    mkdirSync(join(scratch, "supabase"), { recursive: true });
-
-    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-gdpr-export-coverage.ts"));
-    cpSync(
-      join(REPO_ROOT, MIGRATIONS_REL),
-      join(scratch, MIGRATIONS_REL),
-      { recursive: true },
-    );
-    // Manifest copied VERBATIM — the gap is on the migration side.
-    cpSync(MANIFEST_ABS, join(scratch, MANIFEST_REL));
+    // Manifest copied VERBATIM (by the helper) — the gap is on the
+    // migration side.
+    const scratch = setupScratchRepo("gdpr-hook-scan-all-");
 
     // A late-timestamp filename so it sorts after the real migrations;
     // the table name is unique so it cannot collide with any manifest
@@ -244,24 +274,9 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
   }, 30_000);
 
   it("exits 1 with a specific error when a user-owned table is missing", () => {
-    // Copy the script + manifest + migrations into a scratch dir so we
-    // can mutate the manifest without polluting the working tree.
-    const scratch = mkdtempSync(join(tmpdir(), "gdpr-hook-test-"));
-    mkdirSync(join(scratch, "scripts"), { recursive: true });
-    mkdirSync(join(scratch, "src", "lib"), { recursive: true });
-    mkdirSync(join(scratch, "supabase"), { recursive: true });
-
-    // Copy the hook
-    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-gdpr-export-coverage.ts"));
-    // Copy migrations
-    cpSync(
-      join(REPO_ROOT, MIGRATIONS_REL),
-      join(scratch, MIGRATIONS_REL),
-      { recursive: true },
-    );
-
-    // Copy manifest, then mutate: delete the 'user_notes' entry so the
-    // hook should report it as missing.
+    // Mutate the manifest module: delete the 'user_notes' entry so the
+    // hook should report it as missing. The helper sandboxes the script
+    // + migrations + (mutated) manifest so the working tree is untouched.
     const originalManifest = readFileSync(MANIFEST_ABS, "utf8");
     const mutated = originalManifest.replace(
       /\{\s*kind:\s*"direct",\s*table:\s*"user_notes",\s*user_column:\s*"user_id"\s*\},?/,
@@ -269,7 +284,9 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     );
     // Sanity-check that the mutation actually fired
     expect(mutated).not.toBe(originalManifest);
-    writeFileSync(join(scratch, MANIFEST_REL), mutated);
+    const scratch = setupScratchRepo("gdpr-hook-test-", {
+      manifestModule: mutated,
+    });
 
     const result = spawnSync("npx", ["tsx", "scripts/check-gdpr-export-coverage.ts"], {
       encoding: "utf8",
@@ -305,22 +322,15 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     expect(declaringMigrations.length).toBeGreaterThanOrEqual(1);
     const declaringMigration = declaringMigrations[0];
 
-    const scratch = mkdtempSync(join(tmpdir(), "gdpr-hook-derived-"));
-    mkdirSync(join(scratch, "scripts"), { recursive: true });
-    mkdirSync(join(scratch, "src", "lib"), { recursive: true });
-    mkdirSync(join(scratch, "supabase"), { recursive: true });
-    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-gdpr-export-coverage.ts"));
-    cpSync(join(REPO_ROOT, MIGRATIONS_REL), join(scratch, MIGRATIONS_REL), {
-      recursive: true,
-    });
-
     const originalManifest = readFileSync(MANIFEST_ABS, "utf8");
     const mutated = originalManifest.replace(
       /\{\s*kind:\s*"direct",\s*table:\s*"user_notes",\s*user_column:\s*"user_id"\s*\},?/,
       "// (user_notes removed by M-0009 coverage-hook test)",
     );
     expect(mutated).not.toBe(originalManifest);
-    writeFileSync(join(scratch, MANIFEST_REL), mutated);
+    const scratch = setupScratchRepo("gdpr-hook-derived-", {
+      manifestModule: mutated,
+    });
 
     const result = spawnSync(
       "npx",
@@ -648,5 +658,49 @@ CREATE TABLE audit_log_cold (
     // The wider regex detects it; EXCLUDED_TABLES does not suppress it.
     // This is the correct behavior — runCoverageCheck allowlist handles it.
     expect(out.has("audit_log_cold")).toBe(true);
+  });
+});
+
+/**
+ * B13: the coverage hook now derives its checks from the imported typed
+ * `USER_EXPORT_TABLES` array (not a source-text regex). These tests pin
+ * the by-construction guarantees that the typed seam buys us, against the
+ * REAL live manifest — so they fail in CI the moment the manifest drifts,
+ * not just when a hand-written fixture does.
+ */
+describe("B13: typed-manifest coverage derivation (live USER_EXPORT_TABLES)", () => {
+  it("P698: EVERY manifest entry declares a user-scoping filter column", () => {
+    // The single contractual guarantee that a service-role SELECT cannot
+    // leak cross-tenant rows: direct/projected -> user_column,
+    // indirect -> parent_user_column. The runCoverageCheck() gate fails
+    // CI if this is ever false; this assertion surfaces the same invariant
+    // directly over the typed array so a regression is named, not buried
+    // in a subprocess exit code.
+    const entries = extractManifestEntries();
+    expect(entries.length).toBe(USER_EXPORT_TABLES.length);
+    const offenders = entries.filter((e) => !e.hasUserFilter);
+    expect(
+      offenders,
+      `manifest entries missing a user-scoping filter: ${offenders
+        .map((o) => `${o.table} (${o.kind})`)
+        .join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("covered-table derivation includes every entry's table plus projected source_table", () => {
+    // The default (no-arg) derivation reads the live manifest — proving
+    // the gate sees exactly what the runtime exports. Spot-check a direct
+    // table, a projected bundle name, and its underlying source table.
+    const names = extractManifestTables();
+    expect(names.has("profiles")).toBe(true); // direct
+    expect(names.has("audit_log_for_user")).toBe(true); // projected bundle name
+    expect(names.has("audit_log")).toBe(true); // projected source_table
+    // Every entry's bundle-facing `table` is present.
+    for (const spec of USER_EXPORT_TABLES) {
+      expect(
+        names.has(spec.table),
+        `derived coverage set is missing manifest entry "${spec.table}"`,
+      ).toBe(true);
+    }
   });
 });

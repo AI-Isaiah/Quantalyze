@@ -35,23 +35,35 @@ import {
   extractUserTablesFromMigration,
   runCoverageCheck,
 } from "./check-gdpr-export-coverage";
+import type { UserExportTable } from "@/lib/gdpr-export-manifest";
 
 /**
- * Minimal manifest fixture. Mirrors the real
- * `USER_EXPORT_TABLES` shape from `src/lib/gdpr-export.ts` so the
- * regex extractors exercise the same patterns.
+ * Minimal TYPED manifest fixtures. B13: the extractors now derive from
+ * the imported `USER_EXPORT_TABLES` typed array (not a source-text
+ * regex), so the tests drive them with synthetic `UserExportTable[]`
+ * values. The objects must satisfy the real interfaces — a missing or
+ * mistyped field fails `tsc`, which is the by-construction guarantee
+ * the regex scrape never had.
  */
-function buildManifestSrc(entries: string[]): string {
-  return `
-export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
-  ${entries.join(",\n  ")}
-] as const;
-`;
-}
-
-const MANIFEST_DIRECT_ENTRY = `{ kind: "direct", table: "profiles", user_column: "id" }`;
-const MANIFEST_INDIRECT_ENTRY = `{ kind: "indirect", table: "trades", parent_table: "strategies", parent_user_column: "user_id", parent_pk_column: "id", child_fk_column: "strategy_id" }`;
-const MANIFEST_PROJECTED_ENTRY = `{ kind: "projected", table: "audit_log_for_user", source_table: "audit_log", user_column: "user_id" }`;
+const MANIFEST_DIRECT_ENTRY: UserExportTable = {
+  kind: "direct",
+  table: "profiles",
+  user_column: "id",
+};
+const MANIFEST_INDIRECT_ENTRY: UserExportTable = {
+  kind: "indirect",
+  table: "trades",
+  via_column: "strategy_id",
+  parent_table: "strategies",
+  parent_user_column: "user_id",
+};
+const MANIFEST_PROJECTED_ENTRY: UserExportTable = {
+  kind: "projected",
+  table: "audit_log_for_user",
+  source_table: "audit_log",
+  user_column: "user_id",
+  project: (rows) => rows as Array<Record<string, unknown>>,
+};
 
 describe("extractUserTablesFromMigration — CREATE TABLE parser edge cases", () => {
   it("matches a plain CREATE TABLE with a user_id FK", () => {
@@ -165,22 +177,26 @@ CREATE TABLE c (id UUID, strategy_id UUID REFERENCES strategies(id));
 });
 
 describe("extractManifestTables / extractManifestEntries", () => {
-  it("extracts table + source_table literals", () => {
-    const src = buildManifestSrc([
+  it("extracts table + source_table names", () => {
+    const names = extractManifestTables([
       MANIFEST_DIRECT_ENTRY,
       MANIFEST_PROJECTED_ENTRY,
     ]);
-    const names = extractManifestTables(src);
     expect(names.has("profiles")).toBe(true);
     expect(names.has("audit_log_for_user")).toBe(true);
     expect(names.has("audit_log")).toBe(true); // from source_table
   });
 
   it("reports hasUserFilter=false for a direct entry missing user_column", () => {
-    const src = buildManifestSrc([
-      `{ kind: "direct", table: "leak_risk" }`,
-    ]);
-    const entries = extractManifestEntries(src);
+    // The typed manifest makes this impossible at compile time — a
+    // DirectUserTable REQUIRES user_column. We deliberately cast a
+    // malformed entry past the type system to prove the runtime
+    // defense-in-depth check (the P698 gate) still catches drift.
+    const malformed = {
+      kind: "direct",
+      table: "leak_risk",
+    } as unknown as UserExportTable;
+    const entries = extractManifestEntries([malformed]);
     expect(entries).toHaveLength(1);
     expect(entries[0]).toEqual({
       table: "leak_risk",
@@ -190,8 +206,7 @@ describe("extractManifestTables / extractManifestEntries", () => {
   });
 
   it("reports hasUserFilter=true for an indirect entry with parent_user_column", () => {
-    const src = buildManifestSrc([MANIFEST_INDIRECT_ENTRY]);
-    const entries = extractManifestEntries(src);
+    const entries = extractManifestEntries([MANIFEST_INDIRECT_ENTRY]);
     expect(entries[0]).toMatchObject({
       table: "trades",
       kind: "indirect",
@@ -200,25 +215,32 @@ describe("extractManifestTables / extractManifestEntries", () => {
   });
 
   it("extracts projected (bundle, source) pairs", () => {
-    const src = buildManifestSrc([MANIFEST_PROJECTED_ENTRY]);
-    const pairs = extractProjectedEntries(src);
+    const pairs = extractProjectedEntries([MANIFEST_PROJECTED_ENTRY]);
     expect(pairs).toEqual([
       { bundleName: "audit_log_for_user", sourceTable: "audit_log" },
     ]);
   });
 
-  it("readManifestTablesForParity includes parent_table and source_table", () => {
-    const src = buildManifestSrc([
+  it("extractManifestTablesForParity includes parent_table and source_table", () => {
+    const set = extractManifestTablesForParity([
       MANIFEST_DIRECT_ENTRY,
       MANIFEST_INDIRECT_ENTRY,
       MANIFEST_PROJECTED_ENTRY,
     ]);
-    const set = extractManifestTablesForParity(src);
     expect(set.has("profiles")).toBe(true);
     expect(set.has("trades")).toBe(true);
     expect(set.has("strategies")).toBe(true); // parent_table
     expect(set.has("audit_log_for_user")).toBe(true);
     expect(set.has("audit_log")).toBe(true); // source_table
+  });
+
+  it("defaults to the real imported USER_EXPORT_TABLES when no array is passed", () => {
+    // By-construction guarantee: the live manifest is the default
+    // source, so the gate reads exactly what the runtime exports.
+    const names = extractManifestTables();
+    expect(names.has("profiles")).toBe(true);
+    expect(names.has("audit_log")).toBe(true); // projected source_table
+    expect(names.size).toBeGreaterThan(20);
   });
 });
 
