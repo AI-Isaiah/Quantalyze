@@ -4,10 +4,14 @@
  * test fallback in `e2e/discovery-prefs-isolation.spec.ts` (T-13-02-01).
  *
  * Adding a new app-namespaced localStorage key? Add its prefix here OR pick a
- * key name that starts with one of the existing prefixes. A unit test
- * (`storage-namespaces.test.ts`) walks the codebase for `localStorage.setItem`
- * call sites and asserts every literal key name matches at least one entry —
- * a missed prefix breaks CI before it reaches a shared device.
+ * key name that starts with one of the existing prefixes. Enforcement is the
+ * manual `KNOWN_APP_KEYS` inventory in `SignOutButton.test.tsx`: it seeds one
+ * representative key per prefix (and per documented raw-storage exception) and
+ * asserts the sign-out purge removes exactly the app-namespaced ones. Most app
+ * keys now flow through `useCrossTabStorage({ key })` rather than a raw
+ * `localStorage.setItem` literal, so keep that inventory in step when you add a
+ * prefix here — a missed entry means a key survives a shared-device sign-out.
+ * (The B25 raw-`localStorage` lint ban is the planned automated capstone.)
  *
  * Supabase auth keys (`sb-*`) are NOT in this list — they're owned by
  * `supabase.auth.signOut()` and must persist across the purge so the SDK can
@@ -21,6 +25,8 @@ export const APP_NAMESPACED_PREFIXES: readonly string[] = [
   "discovery_",
   "discovery.",
   "admin-compute-",
+  "factsheet-v2:",
+  "factsheet-collapse:",
 ] as const;
 
 /**

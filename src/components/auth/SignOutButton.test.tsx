@@ -77,6 +77,8 @@ describe("SignOutButton — T-13-02-01 cross-account localStorage purge", () => 
       "discovery_view_preferences:user-a:digital-assets": '{"view":"grid"}',
       "discovery.uiV2": "1",
       "admin-compute-jobs-auto-refresh": "true",
+      "factsheet-v2:strat-uuid": '{"range":"0-9","cmp":"none"}',
+      "factsheet-collapse:strat-uuid:perf": "closed",
       // sb-* must survive
       "sb-access-token": "eyJ-survives",
       // Foreign extension key not owned by this app must survive
@@ -128,6 +130,8 @@ describe("SignOutButton — T-13-02-01 cross-account localStorage purge", () => 
       "widget_state_v2", // widget-state-flag.ts
       "discovery_view_preferences:{uid}:{slug}", // discovery-prefs.ts (templated)
       "admin-compute-jobs-auto-refresh", // ComputeJobsTable.tsx
+      "factsheet-v2:{strategyId}", // factsheet-context.tsx (templated, B7c)
+      "factsheet-collapse:{strategyId}:{section}", // CollapsibleSection.tsx (templated, B7c)
     ];
 
     for (const key of KNOWN_APP_KEYS) {

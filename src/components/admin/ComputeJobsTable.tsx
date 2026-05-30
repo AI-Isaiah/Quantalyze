@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { formatRelativeTime } from "@/lib/utils";
+import { useCrossTabStorage } from "@/lib/storage/cross-tab";
+import { rawStringCodec } from "@/lib/storage/codecs";
 import type { ComputeJobAdminRow } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -45,6 +47,15 @@ const KIND_OPTIONS = [
 
 const AUTO_REFRESH_KEY = "admin-compute-jobs-auto-refresh";
 
+// B7 — the auto-refresh preference persists as the literal "true"/"false"
+// string (no JSON envelope), byte-compatible with the pre-B7
+// `localStorage.setItem(KEY, String(next))` write so an existing stored
+// preference loads unchanged.
+const autoRefreshCodec = rawStringCodec<boolean>({
+  parse: (raw) => raw === "true",
+  serialize: (v) => String(v),
+});
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -57,9 +68,17 @@ export function ComputeJobsTable() {
   const [kindFilter, setKindFilter] = useState("");
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(true);
-  const [autoRefresh, setAutoRefresh] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem(AUTO_REFRESH_KEY) === "true";
+  // B7 — auto-refresh preference routes through the cross-tab primitive
+  // (SSR-safe deferred hydration, cross-tab StorageEvent sync, fail-loud
+  // read/write). Deferred hydration trades the prior lazy sync-read (one extra
+  // render on mount) for SSR safety + the hardened storage path; the auto-
+  // refresh interval keys off the hook's `value`.
+  const { value: autoRefresh, setValue: setAutoRefresh } = useCrossTabStorage<boolean>({
+    key: AUTO_REFRESH_KEY,
+    initial: false,
+    codec: autoRefreshCodec,
+    hydration: "deferred",
+    sentryArea: "admin.compute-jobs.auto-refresh",
   });
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -107,9 +126,8 @@ export function ComputeJobsTable() {
   }, [autoRefresh, fetchJobs]);
 
   function toggleAutoRefresh() {
-    const next = !autoRefresh;
-    setAutoRefresh(next);
-    localStorage.setItem(AUTO_REFRESH_KEY, String(next));
+    // setValue persists through the primitive (debounced + cross-tab flush).
+    setAutoRefresh((prev) => !prev);
   }
 
   function loadMore() {

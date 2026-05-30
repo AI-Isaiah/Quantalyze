@@ -36,6 +36,16 @@
  * v1 payloads (unsigned) from pre-fix sessions are treated as cold-start
  * (loadWizardState returns null) so a half-deployed environment cannot
  * resume an unsigned wizard.
+ *
+ * B7 sanctioned-exception: this module deliberately does NOT route through the
+ * `useCrossTabStorage` primitive. Its persistence is an async Web-Crypto
+ * HMAC-signed `{v,p,h}` envelope bound to a per-tab sessionStorage signing
+ * nonce (tamper + cross-tab/cross-user replay defense, P473). The primitive's
+ * `StorageCodec.decode`/`encode` interface is SYNCHRONOUS and cannot express
+ * `await crypto.subtle.sign`, so it cannot carry the HMAC/replay hardening.
+ * This is a STRONGER-than-primitive integrity story that must remain a
+ * standalone async API (callers await save/load). (B25 raw-localStorage lint
+ * ban: allowlist this module with this justification.)
  */
 
 const STORAGE_KEY = "quantalyze_wizard_state_v1";
