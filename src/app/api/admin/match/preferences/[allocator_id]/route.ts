@@ -41,16 +41,6 @@ export async function PUT(
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  // audit-2026-05-07 H-0222/H-0223 (PR-2 2026-05-28): mutating admin
-  // surface MUST consume a rate-limit token. Key scoped per (admin, target
-  // allocator) so a buggy admin client running PUT-in-a-loop against one
-  // mandate cannot starve a different admin's edits on a different mandate.
-  const rl = await checkLimit(
-    adminActionLimiter,
-    `admin-prefs:${user.id}:${allocator_id}`,
-  );
-  if (!rl.success) return rateLimitDenyJson(rl);
-
   let body: Record<string, unknown>;
   try {
     body = await req.json();
@@ -64,6 +54,19 @@ export async function PUT(
   if (validationError) {
     return NextResponse.json({ error: validationError }, { status: 400 });
   }
+
+  // audit-2026-05-07 H-0222/H-0223 (PR-2 2026-05-28): mutating admin
+  // surface MUST consume a rate-limit token. Key scoped per (admin, target
+  // allocator) so a buggy admin client running PUT-in-a-loop against one
+  // mandate cannot starve a different admin's edits on a different mandate.
+  // B15b (audit-2026-05-07): consumed AFTER the body parses + validates
+  // above (the allocator_id URL param is UUID-checked earlier), so an
+  // invalid body never burns a token.
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin-prefs:${user.id}:${allocator_id}`,
+  );
+  if (!rl.success) return rateLimitDenyJson(rl);
 
   const admin = createAdminClient();
   const { error } = await admin

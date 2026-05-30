@@ -31,10 +31,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // B15b (audit-2026-05-07): guard the parse so a malformed body returns 400
+  // (matching the sibling admin routes) instead of an uncaught 500. The parse
+  // now runs BEFORE the limiter, so an unguarded throw would let a malformed
+  // body 500 without ever consuming a token — bypassing the rate limit.
+  let body: { strategy_id?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+  const { strategy_id } = body;
+  if (!strategy_id) {
+    return NextResponse.json({ error: "Missing strategy_id" }, { status: 400 });
+  }
+
   // Rate-limit keyed on the authenticated (non-admin) user — see the
   // top-of-file comment for why this uses userActionLimiter rather than
   // adminActionLimiter. 5/min is the standard sensitive-POST cadence and
   // is well above the realistic strategy-submission notification rate.
+  //
+  // B15b (audit-2026-05-07): consumed AFTER validating strategy_id so a
+  // body missing strategy_id never burns one of the user's tokens.
   const rl = await checkLimit(
     userActionLimiter,
     `notify-submission:${user.id}`,
@@ -47,11 +65,6 @@ export async function POST(req: NextRequest) {
         headers: { "Retry-After": String(rl.retryAfter) },
       },
     );
-  }
-
-  const { strategy_id } = await req.json();
-  if (!strategy_id) {
-    return NextResponse.json({ error: "Missing strategy_id" }, { status: 400 });
   }
 
   // Verify the caller owns this strategy
