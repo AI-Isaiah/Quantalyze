@@ -1080,9 +1080,16 @@ describe("requireAdmin — TOCTOU close + CSRF defense-in-depth", () => {
   const mockUser = { id: "user-1", email: "user@test.com" } as Parameters<
     typeof requireAdmin
   >[1];
+  // NEW-C36-01 (B4): requireAdmin's `req` is now REQUIRED. A safe-method (GET)
+  // request threads through without triggering the mutating-method CSRF check,
+  // so these admin-status assertions are unaffected by the parameter change.
+  const getReq = () =>
+    new Request("http://localhost:3000/api/admin/x", {
+      method: "GET",
+    }) as unknown as Parameters<typeof requireAdmin>[2];
 
   it("returns { status: 401 } when user is null", async () => {
-    const res = await requireAdmin(makeFromOnly(), null);
+    const res = await requireAdmin(makeFromOnly(), null, getReq());
     expect(res).not.toBeNull();
     if (res) expect(res.status).toBe(401);
   });
@@ -1092,14 +1099,14 @@ describe("requireAdmin — TOCTOU close + CSRF defense-in-depth", () => {
       data: [{ role: "admin" }],
       error: null,
     });
-    const res = await requireAdmin(makeFromOnly(), mockUser);
+    const res = await requireAdmin(makeFromOnly(), mockUser, getReq());
     expect(res).toBeNull();
   });
 
   it("returns { status: 403 } when user is NOT an admin", async () => {
     userRolesQueryMock.mockResolvedValue({ data: [], error: null });
     // profiles.is_admin defaults to false (beforeEach reset above).
-    const res = await requireAdmin(makeFromOnly(), mockUser);
+    const res = await requireAdmin(makeFromOnly(), mockUser, getReq());
     expect(res).not.toBeNull();
     if (res) expect(res.status).toBe(403);
   });
@@ -1140,21 +1147,10 @@ describe("requireAdmin — TOCTOU close + CSRF defense-in-depth", () => {
     expect(assertSameOriginMock).not.toHaveBeenCalled();
   });
 
-  it("red-team CSRF: when `req` is OMITTED, does NOT run assertSameOrigin (source-compat)", async () => {
-    // Source-compat path: pre-fix callers passed only (supabase, user)
-    // — they must keep working without a CSRF check at this layer
-    // because the outer wrapper (withRole/withAdminAuth) already ran one.
-    // New mutating call sites are expected to pass `req`; this test
-    // pins the back-compat behaviour for the existing sub-resource
-    // TOCTOU-close call sites.
-    userRolesQueryMock.mockResolvedValue({
-      data: [{ role: "admin" }],
-      error: null,
-    });
-    const res = await requireAdmin(makeFromOnly(), mockUser);
-    expect(res).toBeNull();
-    expect(assertSameOriginMock).not.toHaveBeenCalled();
-  });
+  // NEW-C36-01 (B4): the former "when `req` is OMITTED, does NOT run
+  // assertSameOrigin (source-compat)" test was DELETED — `req` is now required,
+  // so omitting it is a compile error and the back-compat contract it pinned no
+  // longer exists (Rule 9: a test must encode a real, current contract).
 
   it("red-team CSRF: 401 (no user) short-circuits BEFORE the CSRF check (consistent with withRole's auth-first ordering)", async () => {
     // M-0499 set the precedent: auth runs FIRST so unauth callers

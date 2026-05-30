@@ -1,73 +1,53 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { withRole, requireAdmin, APP_ROLES, type AppRole } from "@/lib/auth";
+import { withRole, APP_ROLES, type AppRole } from "@/lib/auth";
 import { captureToSentry } from "@/lib/sentry-capture";
-import { createClient } from "@/lib/supabase/server";
 import {
   adminActionLimiter,
   checkLimit,
   isRateLimitMisconfigured,
 } from "@/lib/ratelimit";
-// audit-2026-05-07 fix C-0065 (red-team conf-6): for RBAC-mutating
-// routes we use the synchronous `emit` directly (aliased here to
-// `logAuditEvent` so the audit-coverage grep gate matches) rather than
-// the `logAuditEvent` wrapper from @/lib/audit which schedules the RPC
-// via `after()`. After-the-response emission runs against a supabase
-// client whose session cookie was captured at the start of withRole's
-// auth.getUser(); if the admin's session is revoked or expires in the
-// window between handler return and after()-callback execution, the
-// log_audit_event RPC raises (auth.uid() = NULL) and the row drops to
-// a silent console.error. The audit-coverage gate
-// (src/__tests__/audit-coverage.test.ts) matches the literal name
-// `logAuditEvent(` so the alias keeps the gate happy without ad-hoc
-// `@audit-skip` pragmas that would weaken the coverage promise.
+// audit-2026-05-07 fix C-0065 (red-team conf-6): RBAC-mutating routes await the
+// synchronous `emit` (aliased to `logAuditEvent` so the audit-coverage grep gate
+// matches the literal) rather than the fire-and-forget `logAuditEvent` wrapper.
+// The wrapper schedules the RPC via `after()`, which runs AFTER the response
+// flushes against a session-cookie client captured at withRole's auth.getUser();
+// if the admin's session expires in that window the log_audit_event RPC raises
+// (auth.uid()=NULL) and the row drops to a silent console.error. Awaiting the
+// user-scoped emit inside the request keeps auth.uid() = the acting admin.
 import { emit as logAuditEvent } from "@/lib/audit";
 
 /**
  * Admin role provisioning endpoint.
  *
- * Sprint 6 closeout Task 7.2 — pilot route for `withRole("admin")`.
+ * GET  /api/admin/users/[id]/roles  → { user_id, roles: AppRole[] }  (404 if no profile)
+ * POST /api/admin/users/[id]/roles  body { action: "grant"|"revoke", role: AppRole }
+ *                                   → { user_id, roles: AppRole[] }  (post-mutation set)
  *
- * GET /api/admin/users/[id]/roles
- *   200 on success → { user_id, roles: AppRole[] }
- *   404 if the target user does not exist
- *   401/403 if caller is unauthenticated / lacks admin role (via withRole)
+ * B4 (audit-2026-05-07) — Atomic Admin RBAC RPC
+ * ---------------------------------------------
+ * The grant/revoke mutation runs entirely inside the `admin_role_mutate`
+ * SECURITY DEFINER RPC (migration 20260530120000): one transaction under a
+ * per-target advisory lock that does the dual-store write (profiles.is_admin +
+ * user_app_roles), the dedup-UNION last-admin guard, fresh-actor authz, and the
+ * took-effect verify atomically. That closes — by construction — the whole class
+ * the former 660-line hand-rolled POST body fought one finding at a time:
+ *   NEW-C17-01 ghost-admin half-write  · NEW-C17-02/H-02 double-counted last-admin
+ *   NEW-C17-03 case-sensitive self-revoke rail · NEW-C17-05 JS-side TOCTOU window.
+ * The route now only: rate-limits, validates the body, calls the RPC, maps the
+ * returned SQLSTATE/outcome to an HTTP response, and emits the (type-checked,
+ * TS-side) audit events. Audit emission stays in TS — the awaited `emit`-aliased
+ * `logAuditEvent` keeps both the audit-coverage grep gate and the C-0065/C-0067
+ * ordering guarantees (the SECDEF write authority is service-role-only EXECUTE).
  *
- * POST /api/admin/users/[id]/roles
- *   Body: { action: "grant" | "revoke", role: AppRole }
- *   200 on success → { user_id, roles: AppRole[] } (post-mutation role set)
- *   400 on invalid body, 403 if caller lacks admin role.
- *
- * Why this is the pilot for withRole
- * ----------------------------------
- * Task 7.2's spec scopes broad `withRole` adoption to Sprint 7 — this
- * route is the single end-to-end proof of the wrapper's integration with
- * the Next 16 route handler shape (dynamic `{ params }` threaded through
- * the wrapper's context), CSRF check, and audit-event emission path. The
- * rest of the admin surface continues to use `withAdminAuth` (which reads
- * `profiles.is_admin` via `isAdminUser()`) unchanged.
- *
- * Audit emission
- * --------------
- * Both grant and revoke emit audit events via the AWAITED `logAuditEvent`
- * (alias for the synchronous `emit` from @/lib/audit — see import comment
- * above for the audit-2026-05-07 C-0065 rationale). The entity_type is
- * `user_app_role` and entity_id is the TARGET user id (the user being
- * granted/revoked), not the row id of user_app_roles — a (user_id, role)
- * composite-key row doesn't have a stable UUID to anchor on. Metadata
- * carries {role, granted_by|revoked_by} plus the audit-2026-05-07
- * discriminators: `was_new_grant` (M-0288) on role.grant, `removed_rows`
- * on role.revoke (always > 0 now per M-0287). A second
- * `role.state_observed` event (C-0067) emits AFTER the post-mutation
- * re-read carrying `holds_role` so concurrent grant+revoke races have
- * a forensic anchor.
- *
- * We emit through the USER-scoped supabase client supplied by `withRole`
- * via the handler context so that `auth.uid()` inside the log_audit_event
- * RPC resolves to the acting admin's id. `createAdminClient()` is used
- * only for the user_app_roles mutation itself (service-role bypasses
- * the user_app_roles_service_insert policy).
+ * SQLSTATE → HTTP map (from the RPC):
+ *   42501 insufficient_privilege  → 403  (hint=self_revoke_forbidden ⇒ self-revoke 403)
+ *   23514 check_violation         → 409  would_orphan_last_admin
+ *   P0002 no_data_found           → 404  user_not_found
+ *   22023 invalid_parameter_value → 400  (defensive; body is Zod-validated)
+ * Outcome → response: granted/revoked → role.grant|role.revoke (+state_observed) → 200;
+ *   revoke_noop → role.revoke_noop → 404 role_not_held; took_effect:false → 409.
  */
 
 const BODY_SCHEMA = z.object({
@@ -76,26 +56,29 @@ const BODY_SCHEMA = z.object({
 });
 
 /**
+ * Shape returned by the `admin_role_mutate` RPC (migration 20260530120000).
+ * The RPC performs the mutation atomically; the route reads these fields to map
+ * the result to an HTTP response and build the audit-event metadata.
+ */
+interface AdminRoleMutateResult {
+  outcome: "granted" | "revoked" | "revoke_noop";
+  was_new_grant: boolean;
+  removed_rows: number;
+  is_admin_changed: boolean;
+  holds_role: boolean;
+  took_effect: boolean;
+  roles: string[];
+}
+
+/**
  * Read the current role set for a target user via the service-role client.
- * Mirrors `getUserRoles` in `@/lib/auth` but bypasses RLS so an admin can
- * inspect any user's roles. Filters to known AppRole values defensively.
- *
- * Issue 3 (audit-2026-05-07 follow-up): previously returned `[]` on PG
- * error after a successful grant/revoke mutation. The UI then saw "user
- * has zero roles" and an admin could re-grant — producing duplicate audit
- * rows for what was actually one logical operation. The function now
- * returns a discriminated result so callers can surface a 500 (mutation
- * already committed; instructs the user to refresh, not retry) rather
- * than silently masking the read failure.
+ * Used by GET only (POST gets the post-mutation set back from the RPC).
+ * Returns a discriminated result so a read failure surfaces a stable 500 rather
+ * than masquerading as "user has zero roles".
  */
 type FetchUserRolesResult =
   | { roles: AppRole[] }
-  | {
-      error: {
-        code: string | null;
-        message: string;
-      };
-    };
+  | { error: { code: string | null; message: string } };
 
 async function fetchUserRoles(
   admin: ReturnType<typeof createAdminClient>,
@@ -106,12 +89,7 @@ async function fetchUserRoles(
     .select("role")
     .eq("user_id", userId);
   if (error) {
-    return {
-      error: {
-        code: error.code ?? null,
-        message: error.message,
-      },
-    };
+    return { error: { code: error.code ?? null, message: error.message } };
   }
   const rows = data ?? [];
   const roles = rows
@@ -125,28 +103,15 @@ async function fetchUserRoles(
 /**
  * GET /api/admin/users/[id]/roles
  *
- * Returns the target user's current role set. The admin UI calls this to
- * refresh the role panel after a grant/revoke without trusting the
- * mutation response alone.
- *
- * 404 is emitted when the target user does not exist in `profiles`. We
- * check profiles (not `auth.users`) because RLS-safe and because the
- * grant/revoke endpoints already operate on the same `(user_id, role)`
- * keyspace anchored to profile ids in practice. A 404 is preferable to
- * silently returning `{ roles: [] }` for a typo'd id.
- *
- * P442 (audit-2026-05-07) — fills the missing-GET gap on the role panel.
- * P462 — envelope matches POST: `{ user_id, roles: string[] }`.
+ * Returns the target user's current role set. 404 (code=user_not_found) when the
+ * target has no `profiles` row. P442/P462: envelope is `{ user_id, roles }`.
  */
 export const GET = withRole<{ id: string }>("admin")(
   async (_req: NextRequest, { user, params }) => {
-    // audit-2026-05-07 specialist-apply (code-reviewer M conf-7):
-    // POST has adminActionLimiter; GET previously had none. The same
-    // threat model applies — a compromised admin session can probe
-    // every user_id in profiles to map the full role assignment table
-    // with no audit emit (read path is deliberately not audited).
-    // Apply the same bucket with a `:get` suffix so the GET cadence
-    // doesn't interfere with legitimate POST rate-limit accounting.
+    // audit-2026-05-07 specialist-apply (code-reviewer M conf-7): the same
+    // adminActionLimiter as POST (a `:get` suffix so the read cadence doesn't
+    // pollute POST accounting) — a compromised admin session can otherwise probe
+    // every user_id to map the full role table with no audit (reads aren't audited).
     const rl = await checkLimit(
       adminActionLimiter,
       `admin:${user.id}:users-roles:get`,
@@ -154,22 +119,13 @@ export const GET = withRole<{ id: string }>("admin")(
     if (!rl.success) {
       if (isRateLimitMisconfigured(rl)) {
         return NextResponse.json(
-          {
-            error: "Rate limiter unavailable",
-            code: "ratelimit_misconfigured",
-          },
-          {
-            status: 503,
-            headers: { "Retry-After": String(rl.retryAfter) },
-          },
+          { error: "Rate limiter unavailable", code: "ratelimit_misconfigured" },
+          { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
         );
       }
       return NextResponse.json(
         { error: "Too many requests" },
-        {
-          status: 429,
-          headers: { "Retry-After": String(rl.retryAfter) },
-        },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
       );
     }
 
@@ -183,8 +139,6 @@ export const GET = withRole<{ id: string }>("admin")(
 
     const admin = createAdminClient();
 
-    // Existence check. profiles has a row-per-auth.user via trigger; an id
-    // not present here is a genuine 404 (not just "user has no roles").
     const { data: profile, error: profileError } = await admin
       .from("profiles")
       .select("id")
@@ -197,29 +151,18 @@ export const GET = withRole<{ id: string }>("admin")(
         code: profileError.code,
         message: profileError.message,
       });
-      // audit-2026-05-07 specialist-apply (api-contract M conf-9):
-      // add stable `code` so the UI can disambiguate this 500 from
-      // the post-mutation read failure 500 ({roles_read_failed}).
       return NextResponse.json(
         { error: "Failed to fetch user roles", code: "profile_read_failed" },
         { status: 500 },
       );
     }
-
     if (!profile) {
-      // audit-2026-05-07 specialist-apply (api-contract M conf-8):
-      // add `code: "user_not_found"` so the UI can disambiguate this
-      // 404 from the revoke `role_not_held` 404 — same status, two
-      // semantically distinct conditions.
       return NextResponse.json(
         { error: "User not found", code: "user_not_found" },
         { status: 404 },
       );
     }
 
-    // Issue 3: surface read errors instead of returning `{ roles: [] }`.
-    // For the GET path there's no prior mutation, so the right answer is
-    // "couldn't load roles — retry the request later" (stable 500).
     const result = await fetchUserRoles(admin, targetUserId);
     if ("error" in result) {
       console.error("[admin/users/roles] GET fetchUserRoles failed:", {
@@ -237,73 +180,39 @@ export const GET = withRole<{ id: string }>("admin")(
 );
 
 export const POST = withRole<{ id: string }>("admin")(
-  async (
-    req: NextRequest,
-    { user, supabase, params },
-  ) => {
-    // audit-2026-05-07 review fix I4 (red-team conf 9) — withRole runs
-    // assertSameOrigin + the admin role check but enforces NO rate limit.
-    // A compromised admin session would otherwise spam role grants
-    // unbounded. adminActionLimiter (20/min/user) is well above
-    // legitimate operator cadence and well below abuse.
-    //
-    // Key is the verified admin's id (withRole has already proven
-    // `user.id` holds the admin role), so the bucket cannot be polluted
-    // by unauthenticated or non-admin callers and the gate sits AFTER
-    // auth — no timing oracle on admin-status (mirrors the C4 reorder
-    // applied to the other admin POST routes).
-    const rl = await checkLimit(
-      adminActionLimiter,
-      `admin:${user.id}:users-roles`,
-    );
+  async (req: NextRequest, { user, supabase, params }) => {
+    // audit-2026-05-07 review fix I4 (red-team conf 9): withRole runs CSRF + the
+    // admin gate but no rate limit. adminActionLimiter (20/min/user) caps a
+    // compromised admin session. Keyed on the verified admin id, AFTER auth — no
+    // timing oracle on admin status. The admin-csrf-ratelimit grep gate requires
+    // this checkLimit call to stay present on this route.
+    const rl = await checkLimit(adminActionLimiter, `admin:${user.id}:users-roles`);
     if (!rl.success) {
-      // audit-2026-05-07 specialist-apply (silent-failure-hunter HIGH conf-9):
-      // checkLimit() returns {success:false, reason:'ratelimit_misconfigured'}
-      // when Upstash env is missing or the limiter throws (ratelimit.ts:215-240).
-      // Pre-fix the route collapsed both quota-exhaustion AND misconfiguration
-      // into 429, masking an Upstash outage as ordinary throttling. The
-      // rate-limit module exposes `isRateLimitMisconfigured(rl)` precisely
-      // so callers can translate the misconfigured variant into 503 — the
-      // contract documented in ratelimit.ts:182-195. Canary/health checks
-      // observe the configuration outage instead of seeing healthy 429s.
+      // silent-failure-hunter HIGH conf-9: translate the misconfigured-limiter
+      // variant to 503 (Upstash outage) instead of masking it as an ordinary 429.
       if (isRateLimitMisconfigured(rl)) {
         return NextResponse.json(
-          {
-            error: "Rate limiter unavailable",
-            code: "ratelimit_misconfigured",
-          },
-          {
-            status: 503,
-            headers: { "Retry-After": String(rl.retryAfter) },
-          },
+          { error: "Rate limiter unavailable", code: "ratelimit_misconfigured" },
+          { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
         );
       }
       return NextResponse.json(
         { error: "Too many requests" },
-        {
-          status: 429,
-          headers: { "Retry-After": String(rl.retryAfter) },
-        },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
       );
     }
 
     const rawTargetUserId = params?.id;
-
     if (!rawTargetUserId) {
       return NextResponse.json(
         { error: "Missing target user id in path" },
         { status: 400 },
       );
     }
-
-    // NEW-C17-03 (code-review H conf=8): normalize targetUserId to lowercase
-    // ONCE, immediately after the null-check, so ALL subsequent comparisons
-    // (self-revoke guard, DB ops via .eq() which is UUID case-insensitive) use
-    // the canonical form. The path param is attacker-controlled; an uppercase
-    // variant of the admin's own UUID mismatches `targetUserId === user.id`
-    // (string comparison, case-sensitive) but matches the DELETE's `.eq()`
-    // (Postgres UUID comparison, case-insensitive) — allowing self-lockout
-    // through the exact self-revoke rail this guard exists to prevent.
+    // Normalize to lowercase so the actor/target comparison and the audit
+    // entity_id are canonical. (The case-sensitive self-revoke rail NEW-C17-03
+    // is now enforced server-side in SQL inside admin_role_mutate, but a
+    // canonical id keeps the audit trail consistent.)
     const targetUserId = rawTargetUserId.toLowerCase();
 
     const rawBody = await req.json().catch(() => null);
@@ -314,585 +223,103 @@ export const POST = withRole<{ id: string }>("admin")(
         { status: 400 },
       );
     }
-
     const { action, role } = parsed.data;
 
-    // Hard rail: an admin cannot revoke their own admin role via this
-    // endpoint. This prevents a self-lockout and closes a narrow race
-    // where an admin UI accidentally shows a revoke button for the
-    // current user's own admin row. A second admin with service-role
-    // credentials can still demote the first admin via a direct RPC or
-    // migration if genuinely needed.
-    //
-    // audit-2026-05-07 fix C-0066 (api-contract conf-7): standardize
-    // self-action rejection on 403 across admin routes. The sibling
-    // deletion-requests/[id]/(approve|reject) routes return 403 via
-    // _shared.ts:84-94 for the same conceptual error class (admin
-    // attempting a self-action). 400 implied a malformed request — but
-    // the request IS well-formed, the action is just forbidden. Aligning
-    // on 403 lets the UI use a single 4xx→message mapping for "this
-    // self-action is forbidden — have another admin act."
-    //
-    // NEW-C17-03: targetUserId is now lowercase-normalized above so this
-    // string comparison is case-insensitive by construction.
-    if (
-      action === "revoke" &&
-      role === "admin" &&
-      targetUserId === user.id.toLowerCase()
-    ) {
-      return NextResponse.json(
-        {
-          error:
-            "Admins cannot revoke their own admin role — another admin must act.",
-        },
-        { status: 403 },
-      );
-    }
-
+    // ── The entire mutation, atomically (B4 / admin_role_mutate) ─────────────
+    // Dual-store write + dedup-UNION last-admin guard + per-target advisory lock
+    // + fresh-actor authz + took-effect verify, all in one SECDEF transaction.
     const admin = createAdminClient();
+    const { data, error: rpcError } = await admin.rpc("admin_role_mutate", {
+      p_actor_id: user.id.toLowerCase(),
+      p_target_id: targetUserId,
+      p_role: role,
+      p_action: action,
+    });
 
-    // audit-2026-05-07 specialist-apply (api-contract HIGH conf-9 +
-    // code-reviewer M-#4 conf-7 + security #4 conf-7): POST previously
-    // skipped the profile-existence check that GET enforces. A
-    // grant/revoke against a typo'd or deleted user id fell through to
-    // a Supabase FK violation (500 'Grant failed') OR the new no-op
-    // revoke 404 with code='role_not_held' — three different envelopes
-    // for the same missing-user condition. Mirror GET's contract:
-    // 404 with code='user_not_found' uniformly for missing users so
-    // the UI can disambiguate "user doesn't exist" from "user exists
-    // but doesn't hold role".
-    const { data: targetProfile, error: profileLookupError } = await admin
-      .from("profiles")
-      .select("id")
-      .eq("id", targetUserId)
-      .maybeSingle();
-    if (profileLookupError) {
-      console.error(
-        "[admin/users/roles] POST profile lookup failed:",
-        {
-          target_user_id: targetUserId,
-          code: profileLookupError.code,
-          message: profileLookupError.message,
-        },
-      );
-      return NextResponse.json(
-        {
-          error: "Failed to look up target user",
-          code: "profile_read_failed",
-        },
-        { status: 500 },
-      );
-    }
-    if (!targetProfile) {
-      return NextResponse.json(
-        { error: "User not found", code: "user_not_found" },
-        { status: 404 },
-      );
-    }
-
-    if (action === "grant") {
-      // audit-2026-05-07 fix M-0288 (silent-failure-hunter conf-8):
-      // determine `was_new_grant` BEFORE upsert by reading the existing
-      // row. ignoreDuplicates returns {error: null} whether the row was
-      // newly inserted or already existed — without this read, every
-      // re-grant produces an indistinguishable audit row and the
-      // forensic query "when did user X first acquire <role>" silently
-      // returns the latest re-grant timestamp instead of the original.
-      const { data: preExisting, error: preExistingError } = await admin
-        .from("user_app_roles")
-        .select("granted_at")
-        .eq("user_id", targetUserId)
-        .eq("role", role)
-        .maybeSingle();
-      if (preExistingError) {
-        console.error("[admin/users/roles] grant pre-read failed:", {
-          target_user_id: targetUserId,
-          role,
-          code: preExistingError.code,
-          message: preExistingError.message,
-        });
-        // audit-2026-05-07 specialist-apply (api-contract M conf-9):
-        // distinguish pre-read failure from upsert failure with a
-        // stable code so the UI can decide whether to retry safely.
-        return NextResponse.json(
-          { error: "Grant failed", code: "grant_pre_read_failed" },
-          { status: 500 },
-        );
-      }
-      const wasNewGrant = preExisting == null;
-      // audit-2026-05-07 specialist-apply (silent-failure HIGH #3 +
-      // code-reviewer M #5): `wasNewGrant` is TOCTOU-racy — between
-      // this maybeSingle() and the upsert below another admin could
-      // insert the same (user_id, role) row. We accept this race
-      // explicitly and anchor it forensically via role.state_observed
-      // (C-0067) which records the post-write reality. The audit row's
-      // was_new_grant reflects what THIS handler observed, NOT a
-      // serialized snapshot. A definitive fix requires a SECURITY
-      // DEFINER RPC returning xmax=0 atomically — tracked as a
-      // follow-up in the audit-2026-05-07 long-tail backlog.
-
-      // ON CONFLICT DO NOTHING via upsert — a repeat grant is a no-op,
-      // not an error. We still emit the audit event so the operator
-      // trail reflects the intent, even on a re-grant, but the
-      // `was_new_grant` flag in metadata makes the forensic intent
-      // unambiguous.
-      const { error } = await admin.from("user_app_roles").upsert(
-        {
-          user_id: targetUserId,
-          role,
-          granted_by: user.id,
-          granted_at: new Date().toISOString(),
-        },
-        { onConflict: "user_id,role", ignoreDuplicates: true },
-      );
-      if (error) {
-        console.error("[admin/users/roles] grant failed:", {
-          target_user_id: targetUserId,
-          role,
-          code: error.code,
-          message: error.message,
-        });
-        // audit-2026-05-07 specialist-apply (api-contract M conf-9):
-        // distinguish upsert failure from pre-read failure with a
-        // stable code so the UI knows the mutation did NOT commit.
-        return NextResponse.json(
-          { error: "Grant failed", code: "grant_mutation_failed" },
-          { status: 500 },
-        );
-      }
-
-      // audit-2026-05-07 fix C-0065 (red-team conf-6): for RBAC-mutating
-      // routes, await the audit emit synchronously instead of scheduling
-      // it via `after()`. `after()` runs the emit outside the request
-      // scope, against a supabase client whose session cookie was
-      // captured at the start of withRole's auth.getUser(). If the
-      // acting admin's session expires or is revoked between handler
-      // return and after()-callback execution, the log_audit_event RPC
-      // raises (auth.uid() = NULL) and the emit drops silently to
-      // console.error. That gap is exactly where forensic interest is
-      // highest (concurrent admin-management activity). The extra ~30ms
-      // latency cost is acceptable on a route this rarely called.
-      //
-      // The supabase client here is the user-scoped client supplied by
-      // withRole: auth.uid() inside log_audit_event resolves to the
-      // acting admin's id, which is the audit-trail invariant.
-      //
-      // audit-2026-05-07 fix M-0288 / H-0241: include `was_new_grant`
-      // so re-grant audit rows are distinguishable from first-time
-      // grants — analogous to `was_first_run` in account.sanitize
-      // (deletion-requests/approve/route.ts).
-      //
-      // audit-2026-05-07 specialist-apply (code-reviewer HIGH conf-8 +
-      // security HIGH conf-8 + api-contract M conf-7): wrap the
-      // awaited emit in try/catch. emit() re-throws on permission_denied
-      // and unknown errors (audit.ts:469-519). Without try/catch a
-      // failed emit becomes an unhandled rejection, bubbles to Next's
-      // 500 response with NO stable envelope, AND the mutation has
-      // already committed. Return a stable
-      // {code:'mutation_succeeded_but_audit_failed'} 500 so the UI
-      // can prompt a refresh without re-firing the grant.
-      try {
-        await logAuditEvent(supabase, {
-          action: "role.grant",
-          entity_type: "user_app_role",
-          entity_id: targetUserId,
-          metadata: {
-            role,
-            granted_by: user.id,
-            was_new_grant: wasNewGrant,
-          },
-        });
-      } catch (auditError) {
-        console.error(
-          "[admin/users/roles] grant committed but role.grant audit emit failed:",
-          {
-            target_user_id: targetUserId,
-            role,
-            error:
-              auditError instanceof Error
-                ? auditError.message
-                : String(auditError),
-          },
-        );
-        return NextResponse.json(
-          {
-            error:
-              "Grant committed but audit emission failed. Refresh to verify state.",
-            code: "mutation_succeeded_but_audit_failed",
-          },
-          { status: 500 },
-        );
-      }
-
-      // NEW-C17-04 (security H conf=7): alert on every admin role grant
-      // so rogue self-elevation or bulk backdoor minting surfaces to
-      // on-call in real time. The role.grant audit row is already
-      // committed above; this is an ADDITIONAL observability signal, not
-      // a control-flow gate.  captureToSentry is fire-and-forget
-      // (best-effort) — a Sentry transport failure must NOT change the
-      // response the caller sees.
-      if (role === "admin") {
-        captureToSentry(
-          new Error(`[admin/users/roles] admin role granted to ${targetUserId} by ${user.id}`),
-          {
-            tags: {
-              area: "admin-roles",
-              action: "role.grant",
-              role: "admin",
-              granted_by: user.id,
-              target_user_id: targetUserId,
-            },
-            extra: { was_new_grant: wasNewGrant },
-            level: "warning",
-          },
-        );
-      }
-
-      // P462 (audit-2026-05-07) — unify the response envelope across GET,
-      // grant, and revoke. The UI's role panel uses the same parser for
-      // all three: { user_id, roles: string[] }. Pre-fix grant returned
-      // `{ role: ... }`, revoke returned `{ removed_rows: ... }` — the
-      // shape drift forced two separate UI parsers and made the GET added
-      // for P442 awkward to consume. Single shape, single parser.
-      //
-      // Issue 3 (audit-2026-05-07 follow-up): if the post-mutation read
-      // fails, the GRANT has already committed — returning `{ roles: [] }`
-      // would deceive the UI into thinking the user has no roles and
-      // tempt the admin to re-grant (producing a duplicate audit row for
-      // one logical operation). Surface a 500 with a stable code so the
-      // UI can prompt the admin to refresh instead of retrying.
-      const grantResult = await fetchUserRoles(admin, targetUserId);
-      if ("error" in grantResult) {
-        console.error(
-          "[admin/users/roles] grant succeeded but post-mutation read failed:",
-          {
-            target_user_id: targetUserId,
-            role,
-            code: grantResult.error.code,
-            message: grantResult.error.message,
-          },
-        );
-        return NextResponse.json(
-          {
-            error:
-              "Grant committed but the role set could not be re-read. Refresh to see the latest state.",
-            code: "mutation_succeeded_but_read_failed",
-          },
-          { status: 500 },
-        );
-      }
-
-      // audit-2026-05-07 fix C-0067 (red-team conf-7): emit a
-      // `role.state_observed` event with the post-write boolean so
-      // forensic reconstruction has an anchor when two admins race a
-      // concurrent grant+revoke. Without this anchor, the operator
-      // timeline "did target T hold <role> between t=A and t=B" is
-      // race-dependent — the post-write observation is the only signal
-      // that survives the interleave. Note: this records what THIS
-      // request saw; it does not serialize the underlying race.
-      //
-      // audit-2026-05-07 specialist-apply (silent-failure HIGH conf-8 +
-      // code-reviewer HIGH conf-8 + security LOW conf-8 +
-      // silent-failure M conf-7): role.state_observed is a FORENSIC
-      // ANCHOR, not a control-flow signal. If THIS secondary emit
-      // fails AFTER role.grant has landed AND the mutation committed,
-      // surfacing 500 would (a) make the admin retry → producing a
-      // second role.grant audit row with was_new_grant=false (the
-      // exact regression C-0067 was designed to prevent), and
-      // (b) leave audit_log + response state divergent. Mirror the
-      // primary/secondary asymmetry called out in the specialist
-      // briefs: role.grant/role.revoke is fail-loud (primary intent
-      // row); role.state_observed is fail-soft (secondary observation).
-      //
-      // Red-team correction (was: gated on wasNewGrant per api-contract
-      // M conf-8): the grant path's 200 response is symmetric with the
-      // revoke 200 path (count>0) — both change state. The revoke 404
-      // path now emits role.revoke_noop, so the audit symmetry is
-      // "every code path emits SOMETHING". A re-grant on an existing
-      // row STILL benefits from a state_observed anchor: if between
-      // pre-read and the (no-op) upsert another admin revoked, the
-      // upsert reinserts and state_observed records the race outcome.
-      // Keeping the emit unconditional preserves the C-0067 anchor
-      // value the api-contract finding was trying to economize.
-      const holdsRoleAfterGrant = grantResult.roles.includes(role);
-      try {
-        await logAuditEvent(supabase, {
-          action: "role.state_observed",
-          entity_type: "user_app_role",
-          entity_id: targetUserId,
-          metadata: {
-            role,
-            observed_by: user.id,
-            following_action: "grant",
-            holds_role: holdsRoleAfterGrant,
-          },
-        });
-      } catch (auditError) {
-        console.error(
-          "[admin/users/roles] grant succeeded but role.state_observed emit failed (non-fatal):",
-          {
-            target_user_id: targetUserId,
-            role,
-            error:
-              auditError instanceof Error
-                ? auditError.message
-                : String(auditError),
-          },
-        );
-        // Intentionally do NOT propagate — observability metric
-        // drops, but the response stays honest. The primary
-        // role.grant row already landed above.
-      }
-
-      return NextResponse.json({
-        user_id: targetUserId,
-        roles: grantResult.roles,
-      });
-    }
-
-    // action === "revoke"
-
-    // NEW-C17-01 (security H conf=8): for admin revocation only, check
-    // profiles.is_admin BEFORE the DELETE. The admin gate is an OR:
-    //   profiles.is_admin = TRUE  OR  user_app_roles.role = 'admin'
-    // Migration-054 backfilled is_admin=TRUE for historical admins without
-    // creating user_app_roles rows ("ghost-admins"). Deleting the
-    // user_app_roles row for such a user has no effect on their admin
-    // access — the route returns 200 "Revoked admin" and logs role.revoke,
-    // yet the target still passes every admin gate.  The fix: refuse with
-    // 409 (not 400/403 — the request is well-formed and the caller is
-    // authorized, but the operation cannot be completed via this endpoint)
-    // and instruct the operator to use the DB break-glass path instead.
-    if (role === "admin") {
-      const { data: profileRow, error: profileIsAdminErr } = await admin
-        .from("profiles")
-        .select("is_admin")
-        .eq("id", targetUserId)
-        .maybeSingle();
-      if (profileIsAdminErr) {
-        console.error(
-          "[admin/users/roles] revoke admin: profiles.is_admin lookup failed:",
-          {
-            target_user_id: targetUserId,
-            code: profileIsAdminErr.code,
-            message: profileIsAdminErr.message,
-          },
-        );
-        return NextResponse.json(
-          {
-            error: "Failed to verify admin profile flag before revoke",
-            code: "profile_read_failed",
-          },
-          { status: 500 },
-        );
-      }
-      // C-01 (red-team CRITICAL): previously returned 409 here, but that left
-      // the ghost-admin permanently privileged — no UI/API path could clear
-      // the flag, so a ghost-admin could never actually be demoted.
-      // Fix: clear profiles.is_admin=FALSE via the service-role client so the
-      // revoke fully removes access regardless of which admission signal was
-      // authoritative. The user_app_roles DELETE that follows handles the row
-      // side; this update handles the flag side. Both paths are idempotent.
-      if (profileRow?.is_admin === true) {
-        // @audit-skip: ghost-admin flag clear — this update is a prerequisite
-        // step within the admin-role revoke flow. The role.revoke audit event
-        // emitted later in this same request (after the user_app_roles DELETE)
-        // covers the full revocation action, including clearing is_admin=FALSE.
-        // A separate audit row for the profiles.update would double-count the
-        // same logical operation and add noise to forensic queries.
-        const { error: clearIsAdminErr } = await admin
-          .from("profiles")
-          .update({ is_admin: false })
-          .eq("id", targetUserId);
-        if (clearIsAdminErr) {
-          console.error(
-            "[admin/users/roles] revoke admin: failed to clear profiles.is_admin:",
-            {
-              target_user_id: targetUserId,
-              code: clearIsAdminErr.code,
-              message: clearIsAdminErr.message,
-            },
-          );
+    if (rpcError) {
+      const code = rpcError.code;
+      const hint = (rpcError as { hint?: string | null }).hint;
+      // 42501 insufficient_privilege → 403. The hint distinguishes the self-revoke
+      // rail (NEW-C17-03) from an actor-no-longer-admin TOCTOU rejection (NEW-C17-05).
+      if (code === "42501") {
+        if (hint === "self_revoke_forbidden") {
           return NextResponse.json(
             {
-              error: "Failed to clear ghost-admin flag before revoke",
-              code: "ghost_admin_clear_failed",
+              error:
+                "Admins cannot revoke their own admin role — another admin must act.",
             },
-            { status: 500 },
+            { status: 403 },
           );
         }
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
       }
-
-      // NEW-C17-02 (red-team H conf=8) + H-02 fix: last-admin lockout guard.
-      // Count surviving admins across BOTH sources (profiles.is_admin=TRUE
-      // UNION user_app_roles.role='admin'), excluding the target. If
-      // deleting this row would drop the surviving count to zero, refuse
-      // with 409 would_orphan_last_admin so the org cannot be stripped to
-      // zero reachable admins via this endpoint.
-      //
-      // H-02 (red-team HIGH): the prior implementation summed two counts, which
-      // double-counts users who hold BOTH signals (is_admin=TRUE AND a
-      // user_app_roles row). If the SINGLE surviving admin holds both, the
-      // sum is 2 — the guard passes, the revoke fires, and the org has zero
-      // admins. The comment's "conservative" claim was backwards: over-counting
-      // produces a false "safe" signal, not a false "orphan".
-      //
-      // Fix: deduplicate via a UNION of the two distinct user_id sets.
-      // We query the actual user_id values (not just counts) for the
-      // small surviving set, union them in JS, and count distinct.
-      // Admin surfaces are low-volume (typically < 5 admins) so this is
-      // not a performance concern.
-      const [
-        { data: profileAdminRows, error: profileAdminRowsErr },
-        { data: roleAdminRows, error: roleAdminRowsErr },
-      ] = await Promise.all([
-        admin
-          .from("profiles")
-          .select("id")
-          .eq("is_admin", true)
-          .neq("id", targetUserId),
-        admin
-          .from("user_app_roles")
-          .select("user_id")
-          .eq("role", "admin")
-          .neq("user_id", targetUserId),
-      ]);
-      if (profileAdminRowsErr || roleAdminRowsErr) {
-        const err = profileAdminRowsErr ?? roleAdminRowsErr;
-        console.error(
-          "[admin/users/roles] last-admin dedup query failed:",
-          { target_user_id: targetUserId, code: err?.code, message: err?.message },
-        );
-        return NextResponse.json(
-          {
-            error: "Failed to count surviving admins before revoke",
-            code: "last_admin_count_failed",
-          },
-          { status: 500 },
-        );
-      }
-      // Union distinct user_ids across both sources.
-      const survivingAdminIds = new Set<string>([
-        ...(profileAdminRows ?? []).map((r: { id: string }) => r.id),
-        ...(roleAdminRows ?? []).map((r: { user_id: string }) => r.user_id),
-      ]);
-      const survivingAdminCount = survivingAdminIds.size;
-      if (survivingAdminCount === 0) {
+      // 23514 check_violation → 409 last-admin lockout (NEW-C17-02 / H-02).
+      if (code === "23514") {
         return NextResponse.json(
           {
             error:
-              "Cannot revoke: this is the last admin account. " +
-              "Grant admin to another user first.",
+              "Cannot revoke: this is the last admin account. Grant admin to another user first.",
             code: "would_orphan_last_admin",
           },
           { status: 409 },
         );
       }
-    }
-
-    // H-01 / M-01 (red-team HIGH): TOCTOU re-check placed immediately before
-    // the service-role DELETE — the only point where narrowing the window
-    // matters. Placing it at the top of the handler (original position) left
-    // multiple DB round-trips between the check and the mutation, preserving
-    // a TOCTOU window nearly as wide as having no re-check at all.
-    //
-    // H-01 fix: re-fetch the actor's identity via freshClient.auth.getUser()
-    // BEFORE passing user.id to requireAdmin. The original code passed the
-    // stale `user` object captured by withRole; if the JWT was revoked after
-    // withRole ran but before this point, the DB role-row queries in
-    // requireAdmin → isAdminUser still ran against a revoked session's uid.
-    // Re-fetching via freshClient ensures session validity is checked at the
-    // JWT layer, not only at the DB-row layer.
-    //
-    // Fail-CLOSED: any failure in client construction or getUser() blocks the
-    // DELETE — a network blip or missing env var must not let a potentially-
-    // demoted admin reach the service-role mutation unchecked.
-    {
-      let freshClient: Awaited<ReturnType<typeof createClient>>;
-      try {
-        freshClient = await createClient();
-      } catch (err) {
-        console.error("[admin/users/roles] TOCTOU createClient failed:", err);
+      // P0002 no_data_found → 404 user_not_found (mirrors GET).
+      if (code === "P0002") {
         return NextResponse.json(
-          { error: "Authorization re-check unavailable", code: "toctou_check_failed" },
-          { status: 500 },
+          { error: "User not found", code: "user_not_found" },
+          { status: 404 },
         );
       }
-      // Re-fetch the actor via the fresh client to validate JWT validity,
-      // not just the DB role row. A revoked JWT with a valid role row would
-      // pass requireAdmin's DB queries but fail here.
-      const { data: { user: freshUser }, error: freshUserErr } = await freshClient.auth.getUser();
-      if (freshUserErr || !freshUser) {
-        console.error("[admin/users/roles] TOCTOU getUser failed:", freshUserErr);
+      // 22023 invalid_parameter_value → 400 (defensive; body is Zod-validated).
+      if (code === "22023") {
         return NextResponse.json(
-          { error: "Authorization re-check failed — session may have been revoked", code: "toctou_session_invalid" },
-          { status: 401 },
+          { error: "Invalid role mutation request", code: "invalid_role_mutation" },
+          { status: 400 },
         );
       }
-      // requireAdmin checks DB role rows via the fresh client — using freshUser
-      // (not the outer stale `user`) so the uid is consistent with the
-      // re-validated session.
-      const toctouGuard = await requireAdmin(freshClient, freshUser, req);
-      if (toctouGuard) return toctouGuard;
-    }
-
-    const { error, count } = await admin
-      .from("user_app_roles")
-      .delete({ count: "exact" })
-      .eq("user_id", targetUserId)
-      .eq("role", role);
-
-    if (error) {
-      console.error("[admin/users/roles] revoke failed:", {
+      console.error("[admin/users/roles] admin_role_mutate failed:", {
         target_user_id: targetUserId,
+        action,
         role,
-        code: error.code,
-        message: error.message,
+        code,
+        message: rpcError.message,
       });
-      // audit-2026-05-07 specialist-apply (api-contract M conf-9):
-      // stable code so the UI can distinguish the various 500 classes
-      // on this route.
       return NextResponse.json(
-        { error: "Revoke failed", code: "revoke_mutation_failed" },
+        { error: "Role mutation failed", code: "admin_role_mutate_failed" },
         { status: 500 },
       );
     }
 
-    // audit-2026-05-07 fix M-0287 + M-0289 (code-reviewer + silent-failure
-    // conf-8): if no row was deleted, the target user never held this
-    // role. Pre-fix the route emitted role.revoke unconditionally with
-    // `removed_rows: 0`, producing audit rows that say "admin X revoked
-    // role Y from user Z" when Y was never granted — a false-positive
-    // forensic signal. The UI also flashed a "Revoked '<role>'" success
-    // toast (UserRolesPanel.tsx:115-117) on any 2xx, so the operator saw
-    // a false success. Return 404 idempotent on no-op, do NOT emit the
-    // role.revoke audit row, do NOT emit role.state_observed (the state
-    // didn't change because of THIS call).
-    const removedRows = count ?? 0;
-    if (removedRows === 0) {
-      // audit-2026-05-07 specialist-apply (code-reviewer HIGH conf-8 +
-      // security HIGH conf-9 + silent-failure M conf-8): emit a distinct
-      // `role.revoke_noop` audit row on the no-op path. Pre-apply the
-      // route returned 404 + suppressed BOTH role.revoke and
-      // role.state_observed — eliminating the only forensic signal that
-      // a probe occurred. A compromised admin could enumerate (user, role)
-      // pairs (~20/min via the rate limiter) entirely off-the-books.
-      // The new action preserves M-0287's intent (no ghost `role.revoke`
-      // rows polluting "who-revoked-what" forensic queries) while keeping
-      // operator INTENT recorded for SOC/compliance review. Fail-soft on
-      // the emit itself: a forensic anchor failure must not change the
-      // 404 the caller sees (consistent with the state_observed pattern).
+    // Defensive shape guard on the RPC's `any`-typed return (createAdminClient
+    // is intentionally untyped). A non-null jsonb carrying `outcome` is the
+    // contract every SQL path satisfies today (RETURNS jsonb, single
+    // jsonb_build_object exit); this guards a FUTURE SQL refactor (an early
+    // RETURN / void / SETOF) from turning a contract break into an unhandled
+    // TypeError instead of this route's stable, logged 500.
+    if (!data || typeof data !== "object" || !("outcome" in data)) {
+      console.error(
+        "[admin/users/roles] admin_role_mutate returned an empty/malformed result:",
+        { target_user_id: targetUserId, action, role },
+      );
+      return NextResponse.json(
+        { error: "Role mutation failed", code: "admin_role_mutate_failed" },
+        { status: 500 },
+      );
+    }
+    const result = data as AdminRoleMutateResult;
+
+    // ── No-op revoke: target never held the role → 404 + role.revoke_noop ────
+    // (M-0287/M-0289 — do NOT emit role.revoke; keep the operator-intent anchor
+    // so an off-the-books (user,role) probe still leaves a forensic trail.
+    // Fail-soft: an anchor failure must not change the 404.)
+    if (result.outcome === "revoke_noop") {
       try {
         await logAuditEvent(supabase, {
           action: "role.revoke_noop",
           entity_type: "user_app_role",
           entity_id: targetUserId,
-          metadata: {
-            role,
-            attempted_by: user.id,
-            was_held: false,
-            removed_rows: 0,
-          },
+          metadata: { role, attempted_by: user.id, was_held: false, removed_rows: 0 },
         });
       } catch (auditError) {
         console.error(
@@ -901,111 +328,84 @@ export const POST = withRole<{ id: string }>("admin")(
             target_user_id: targetUserId,
             role,
             error:
-              auditError instanceof Error
-                ? auditError.message
-                : String(auditError),
+              auditError instanceof Error ? auditError.message : String(auditError),
           },
         );
       }
       return NextResponse.json(
-        {
-          error: `User does not hold role '${role}' — nothing to revoke.`,
-          code: "role_not_held",
-        },
+        { error: `User does not hold role '${role}' — nothing to revoke.`, code: "role_not_held" },
         { status: 404 },
       );
     }
 
-    // audit-2026-05-07 fix C-0065 (red-team conf-6): await the audit
-    // emit synchronously. See the grant-path comment above for the full
-    // rationale (after() runs the emit outside the request scope on a
-    // potentially-revoked admin session, dropping the row to a silent
-    // console.error). For RBAC-mutating routes the latency cost is
-    // acceptable; the alternative is a forensic gap on exactly the
-    // action class regulators scrutinize most.
-    //
-    // audit-2026-05-07 fix M-0287 / M-0289 / H-0241: only emit when
-    // removedRows > 0 — the early-return above guarantees that here.
-    // The `removed_rows` metadata is now always > 0 (no more ghost
-    // revoke rows with `removed_rows: 0` polluting the timeline).
-    //
-    // audit-2026-05-07 specialist-apply (silent-failure HIGH conf-8 +
-    // code-reviewer HIGH conf-8 + security HIGH conf-8 + api-contract M
-    // conf-7): wrap awaited emit in try/catch + return stable
-    // mutation_succeeded_but_audit_failed envelope. Same rationale as
-    // the grant path — the DELETE already committed, surfacing a
-    // bare 500 to the caller has the UI re-firing the revoke
-    // (next call → count=0 → 404 → role.revoke_noop, audit
-    // forensics + UX diverge).
+    const isGrant = result.outcome === "granted";
+
+    // ── Primary intent row (role.grant | role.revoke) — awaited + fail-LOUD.
+    // C-0065: the RPC already committed; if THIS emit fails surface a stable
+    // mutation_succeeded_but_audit_failed 500 so the UI refreshes rather than
+    // re-firing the mutation. ────────────────────────────────────────────────
     try {
       await logAuditEvent(supabase, {
-        action: "role.revoke",
+        action: isGrant ? "role.grant" : "role.revoke",
         entity_type: "user_app_role",
         entity_id: targetUserId,
-        metadata: { role, revoked_by: user.id, removed_rows: removedRows },
+        metadata: isGrant
+          ? { role, granted_by: user.id, was_new_grant: result.was_new_grant }
+          : {
+              role,
+              revoked_by: user.id,
+              removed_rows: result.removed_rows,
+              // Ghost-admin revoke (is_admin=TRUE, no row) demotes via the flag
+              // with removed_rows:0 — surface is_admin_changed so a forensic
+              // reader understands a removed_rows:0 role.revoke was still a real
+              // demotion (NEW-C17-01), not a stray no-op row.
+              is_admin_changed: result.is_admin_changed,
+            },
       });
     } catch (auditError) {
       console.error(
-        "[admin/users/roles] revoke committed but role.revoke audit emit failed:",
+        `[admin/users/roles] ${isGrant ? "grant" : "revoke"} committed but audit emit failed:`,
         {
           target_user_id: targetUserId,
           role,
           error:
-            auditError instanceof Error
-              ? auditError.message
-              : String(auditError),
+            auditError instanceof Error ? auditError.message : String(auditError),
         },
       );
       return NextResponse.json(
         {
-          error:
-            "Revoke committed but audit emission failed. Refresh to verify state.",
+          error: `${isGrant ? "Grant" : "Revoke"} committed but audit emission failed. Refresh to verify state.`,
           code: "mutation_succeeded_but_audit_failed",
         },
         { status: 500 },
       );
     }
 
-    // P462 (audit-2026-05-07) — same envelope as grant + GET. The
-    // `removed_rows` count is dropped from the response body; it was a
-    // diagnostic-only field never read by any UI and the audit-event
-    // metadata above already retains it for the forensic trail.
-    //
-    // Issue 3 (audit-2026-05-07 follow-up): mirror the grant path — if
-    // the post-mutation read fails after a successful REVOKE, surface
-    // a 500 with the same stable code instead of returning `[]`. The
-    // mutation already committed; the admin should refresh, not retry.
-    const revokeResult = await fetchUserRoles(admin, targetUserId);
-    if ("error" in revokeResult) {
-      console.error(
-        "[admin/users/roles] revoke succeeded but post-mutation read failed:",
+    // NEW-C17-04 observability: alert on every admin grant so rogue
+    // self-elevation / bulk backdoor minting surfaces to on-call. Fire-and-forget
+    // — a Sentry failure must not change the caller's response.
+    if (isGrant && role === "admin") {
+      captureToSentry(
+        new Error(
+          `[admin/users/roles] admin role granted to ${targetUserId} by ${user.id}`,
+        ),
         {
-          target_user_id: targetUserId,
-          role,
-          code: revokeResult.error.code,
-          message: revokeResult.error.message,
+          tags: {
+            area: "admin-roles",
+            action: "role.grant",
+            role: "admin",
+            granted_by: user.id,
+            target_user_id: targetUserId,
+          },
+          extra: { was_new_grant: result.was_new_grant },
+          level: "warning",
         },
-      );
-      return NextResponse.json(
-        {
-          error:
-            "Revoke committed but the role set could not be re-read. Refresh to see the latest state.",
-          code: "mutation_succeeded_but_read_failed",
-        },
-        { status: 500 },
       );
     }
 
-    // audit-2026-05-07 fix C-0067 (red-team conf-7): emit
-    // `role.state_observed` with the post-write boolean for the same
-    // race-anchor reason as the grant path. See the grant-side comment.
-    //
-    // audit-2026-05-07 specialist-apply (silent-failure HIGH conf-8 +
-    // code-reviewer HIGH conf-8 + security LOW conf-8): role.state_observed
-    // is forensic-secondary; failure here must not turn a successful
-    // revoke into a 500. Log + Sentry, continue with the unified
-    // envelope. Same fail-soft pattern as the grant path.
-    const holdsRoleAfterRevoke = revokeResult.roles.includes(role);
+    // ── role.state_observed anchor (C-0067) — awaited, fail-SOFT. The RPC's
+    // took-effect verify re-read the post-mutation reality under the advisory
+    // lock; record holds_role for the concurrent-race forensic anchor. ───────
     try {
       await logAuditEvent(supabase, {
         action: "role.state_observed",
@@ -1014,45 +414,42 @@ export const POST = withRole<{ id: string }>("admin")(
         metadata: {
           role,
           observed_by: user.id,
-          following_action: "revoke",
-          holds_role: holdsRoleAfterRevoke,
+          following_action: isGrant ? "grant" : "revoke",
+          holds_role: result.holds_role,
         },
       });
     } catch (auditError) {
       console.error(
-        "[admin/users/roles] revoke succeeded but role.state_observed emit failed (non-fatal):",
+        "[admin/users/roles] role.state_observed emit failed (non-fatal):",
         {
           target_user_id: targetUserId,
           role,
           error:
-            auditError instanceof Error
-              ? auditError.message
-              : String(auditError),
+            auditError instanceof Error ? auditError.message : String(auditError),
         },
       );
     }
 
-    // NEW-C17-06 (silent-failure H conf=7): if the role is STILL held
-    // after the DELETE (e.g. a concurrent grant re-inserted the row
-    // between the DELETE and the post-mutation re-read), return 409 so
-    // the UI warns the operator instead of toasting a false "Revoked"
-    // success. The role.state_observed audit anchor above already
-    // recorded holds_role=true for the forensic trail.
-    if (holdsRoleAfterRevoke) {
+    // ── Took-effect gate (NEW-C17-06 / NEW-C17-07). Under the RPC's advisory
+    // lock this is structurally unreachable, but the RPC reports took_effect and
+    // the route surfaces 409 defensively rather than a false 200. ────────────
+    if (!result.took_effect) {
       return NextResponse.json(
-        {
-          error:
-            "Revoke committed but the role is still observed as held " +
-            "(possible concurrent re-grant). Refresh and retry if needed.",
-          code: "revoke_did_not_take",
-        },
+        isGrant
+          ? {
+              error:
+                "Grant committed but the role is not observed as held (possible concurrent revoke). Refresh and retry if needed.",
+              code: "grant_did_not_take",
+            }
+          : {
+              error:
+                "Revoke committed but the role is still observed as held (possible concurrent re-grant). Refresh and retry if needed.",
+              code: "revoke_did_not_take",
+            },
         { status: 409 },
       );
     }
 
-    return NextResponse.json({
-      user_id: targetUserId,
-      roles: revokeResult.roles,
-    });
+    return NextResponse.json({ user_id: targetUserId, roles: result.roles });
   },
 );

@@ -136,51 +136,65 @@ describe("H-04 sanitizeMetricsSnapshot", () => {
 // integration tests do). These catch accidental regression of the fixes.
 // ---------------------------------------------------------------------------
 
-describe("C-01 — ghost-admin: profiles.is_admin cleared before DELETE", () => {
-  it("roles/route.ts clears profiles.is_admin=false before user_app_roles DELETE", () => {
+// B4 (2026-05-30): NEW-C17-01 (ghost-admin), -02/H-02 (last-admin dedup), -03
+// (self-revoke), -05/H-01/M-01 (TOCTOU) were UNIFIED into the
+// admin_role_mutate SECURITY DEFINER RPC (migration 20260530120000). The route
+// no longer hand-rolls the is_admin clear / Set-dedup / fresh-client TOCTOU
+// re-check — those invariants now live in SQL inside one atomic, advisory-locked
+// transaction, closing the whole class by construction. The regression guards
+// below therefore assert (a) the route routes the mutation through the RPC (so
+// the bug class cannot be reintroduced via hand-rolled chains) and (b) the
+// migration SQL implements each guard. (Behavioural coverage of the route's
+// SQLSTATE→HTTP mapping lives in roles/route.test.ts; SQL semantics are
+// live-DB validated.)
+
+const MIGRATION_DIR = join(
+  import.meta.dirname ?? __dirname,
+  "../../supabase/migrations",
+);
+function readMigration(): string {
+  return readFileSync(
+    join(MIGRATION_DIR, "20260530120000_admin_role_mutate.sql"),
+    "utf8",
+  );
+}
+
+describe("B4 — admin RBAC mutation unified in the admin_role_mutate RPC", () => {
+  it("roles/route.ts routes the mutation through admin_role_mutate (no hand-rolled chains)", () => {
     const src = read("admin/users/[id]/roles/route.ts");
-    // The fix must update profiles.is_admin=false (not just return 409).
-    expect(src).toMatch(/update\(\s*\{\s*is_admin:\s*false\s*\}/);
-    // The 409 revoke_admin_ineffective response must NOT exist — it was replaced.
-    expect(src).not.toMatch(/revoke_admin_ineffective/);
+    expect(src).toMatch(/\.rpc\(\s*["']admin_role_mutate["']/);
+    // The former hand-rolled mutation surface must be gone from the route POST.
+    expect(src).not.toMatch(/\.upsert\(/);
+    expect(src).not.toMatch(/\.delete\(\s*\{\s*count/);
+    expect(src).not.toMatch(/freshClient\.auth\.getUser/);
   });
 
-  it("roles/route.ts has @audit-skip pragma on the is_admin clear update", () => {
-    const src = read("admin/users/[id]/roles/route.ts");
-    expect(src).toMatch(/@audit-skip:.*ghost-admin/);
-  });
-});
-
-describe("H-01 / M-01 — TOCTOU re-check: placed immediately before DELETE, uses fresh user", () => {
-  it("re-check block appears after last-admin guard (near the DELETE), not at top of handler", () => {
-    const src = read("admin/users/[id]/roles/route.ts");
-    // The toctou block must come AFTER the last-admin guard text.
-    const lastAdminIdx = src.indexOf("would_orphan_last_admin");
-    const toctouIdx = src.indexOf("toctou_session_invalid");
-    expect(lastAdminIdx).toBeGreaterThan(0);
-    expect(toctouIdx).toBeGreaterThan(lastAdminIdx);
+  it("C-01 ghost-admin: the RPC clears profiles.is_admin on admin revoke (dual-store, atomic)", () => {
+    const sql = readMigration();
+    // The is_admin clear and the user_app_roles DELETE live in the SAME locked
+    // transaction — no half-write window, so a ghost-admin is unrepresentable.
+    expect(sql).toMatch(/UPDATE profiles SET is_admin = FALSE/i);
+    expect(sql).toMatch(/DELETE FROM user_app_roles/i);
   });
 
-  it("re-check fetches user via freshClient.auth.getUser() — not just requireAdmin(freshClient, user)", () => {
-    const src = read("admin/users/[id]/roles/route.ts");
-    // Must call getUser() on the fresh client.
-    expect(src).toMatch(/freshClient\.auth\.getUser\(\)/);
-    // Must use the freshUser result in requireAdmin.
-    expect(src).toMatch(/requireAdmin\(freshClient,\s*freshUser/);
+  it("H-01/M-01 TOCTOU: the RPC serializes on a per-target advisory lock + fresh actor authz", () => {
+    const sql = readMigration();
+    expect(sql).toMatch(/pg_advisory_xact_lock/);
+    expect(sql).toMatch(/is not an admin/i);
   });
-});
 
-describe("H-02 — last-admin guard uses Set deduplication, not summation", () => {
-  it("roles/route.ts uses Set union for surviving admin count, not arithmetic sum", () => {
-    const src = read("admin/users/[id]/roles/route.ts");
-    // Must use a Set for deduplication.
-    expect(src).toMatch(/new Set</);
-    // Must NOT use the old arithmetic summation (the variable names may appear
-    // in comments, but the live expression `(profileAdminCount ?? 0) + (roleAdminCount ?? 0)`
-    // must not be present in executable code).
-    expect(src).not.toMatch(/\(profileAdminCount\s*\?\?\s*0\)\s*\+\s*\(roleAdminCount/);
-    // The surviving count must come from .size.
-    expect(src).toMatch(/survivingAdminIds\.size/);
+  it("H-02 last-admin: the RPC counts the DEDUP'd UNION across both stores, not a sum", () => {
+    const sql = readMigration();
+    // UNION dedups dual-signal admins — the H-02 double-count bug cannot recur.
+    expect(sql).toMatch(/UNION\s+SELECT user_id\s+AS uid FROM user_app_roles/i);
+    expect(sql).toMatch(/would_orphan_last_admin/);
+    expect(sql).not.toMatch(/profileAdminCount\s*\+\s*roleAdminCount/);
+  });
+
+  it("NEW-C17-03 self-revoke: enforced server-side in SQL (canonical UUID compare)", () => {
+    const sql = readMigration();
+    expect(sql).toMatch(/self_revoke_forbidden/);
+    expect(sql).toMatch(/p_actor_id = p_target_id/);
   });
 });
 

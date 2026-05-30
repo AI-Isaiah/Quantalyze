@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.22] - 2026-05-30
+### Changed — admin role grant/revoke is now one atomic SECURITY DEFINER RPC (cross-cutting refactor B4a)
+
+B4a replaces the hand-rolled admin RBAC route with a single `admin_role_mutate` SECURITY DEFINER RPC (migration `20260530120000`) that does the dual-store write, last-admin guard, advisory lock, and took-effect verify in one atomic transaction — closing a whole class of admin-mutation bugs by construction instead of patching them one route at a time.
+
+- **One atomic RPC.** `admin_role_mutate(p_actor_id, p_target_id, p_role, p_action)` (service-role EXECUTE only) does the `profiles.is_admin` + `user_app_roles` write under a per-target `pg_advisory_xact_lock`, with fresh actor authz, a deduplicated-UNION last-admin guard, a self-revoke guard, and a post-mutation took-effect verify — all in one transaction. A half-write (ghost-admin), a double-counted last admin, a case-sensitive self-revoke bypass, or a TOCTOU window between check and mutation is now unrepresentable.
+- **The route collapses ~820 → ~170 lines.** `POST /api/admin/users/[id]/roles` now rate-limits, validates, calls the RPC, maps the returned SQLSTATE to an HTTP response (`42501→403`, `23514→409`, `P0002→404`, `22023→400`), and emits the type-checked audit events (`role.grant`/`role.revoke`/`role.state_observed`/`role.revoke_noop`) in TypeScript. Closes NEW-C17-01/02/03/05/06/07 by construction.
+- **`requireAdmin`'s `req` is now required.** Omitting the request (and its CSRF re-check) is a compile error — structurally closing NEW-C36-01 for any future standalone mutating call site.
+- **Reconciliation backfill.** The migration aligns each admin store to their union (ghost-admins gain a `user_app_roles` row; row-only admins gain the `is_admin` flag) so the two stores agree going forward; nobody's admin status changes.
+- **Verified:** live-DB validated on the test project (all error SQLSTATEs, grant/revoke/no-op/ghost-admin outcomes, dual-store flip, reconciliation drift→0 correct); tsc 0, lint 0 errors, full vitest 5496 pass; 5-specialist review + Claude adversarial verification returned 0 must-fix.
+
 ## [0.24.15.21] - 2026-05-30
 ### Changed — the last localStorage consumers move onto the cross-tab primitive (cross-cutting refactor B7c — B7 CLOSED)
 
