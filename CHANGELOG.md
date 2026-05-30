@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.15.20] - 2026-05-30
+### Removed — the orphaned widget-grid renderers (cross-cutting refactor B7b-2)
+
+The configurable widget-grid dashboard was deleted in v0.24.15.18 (#366), but its ~37 chart/table renderers survived, reachable only through the lazy `WIDGET_COMPONENTS` barrel. A full live/dead trace confirmed only 9 are mounted by live code (RiskTabPanel's 6 curated risk widgets + the factsheet Overview's direct `EquityChart`/`DrawdownChart`/`OutcomesWidget`), and — the deciding fact — that the `widget_state_v2` flag only *wraps* already-mounted renderers in `<WidgetState>`; it never *mounts* an extra one. So the orphaned set is genuinely dead, not a dormant flag-gated library. This removes it. No user-visible behavior changes: nothing rendered this code.
+
+- **Deleted 62 files:** 38 orphaned renderers + 16 collateral test files + 8 dead subdir re-export barrels. Trimmed the `WIDGET_COMPONENTS` barrel to the exact 6 keys RiskTabPanel mounts.
+- **Kept (live):** `EquityChart`, `DrawdownChart`, `OutcomesWidget` (direct imports) + the 6 RiskTabPanel risk widgets; the `WidgetState` primitive, `widget-state-flag`, `WidgetProps`/`TimeframeKey` types, and `composite-returns` (still used by kept renderers + `queries.ts`). All 9 kept renderers retain test coverage.
+- **Verified end-to-end:** tsc 0, lint 0 errors, full vitest 5471 pass, no e2e / dynamic-key / string references to any deleted renderer (every grep hit cleared as a same-name-different-file false positive).
+
 ## [0.24.15.19] - 2026-05-29
 ### Changed — Tweaks panel + ui_v2 rollback flag move onto the cross-tab storage primitive (cross-cutting refactor B7, part 4)
 

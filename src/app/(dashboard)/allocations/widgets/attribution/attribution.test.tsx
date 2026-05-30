@@ -1,8 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 
-import AttributionWaterfall from "./AttributionWaterfall";
-import PerformanceByPeriod from "./PerformanceByPeriod";
 import AlphaBetaDecomposition from "./AlphaBetaDecomposition";
 
 // ---------------------------------------------------------------------------
@@ -87,54 +85,6 @@ const widgetProps = {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-describe("AttributionWaterfall", () => {
-  it("renders without crash with attribution data", () => {
-    const { container } = render(<AttributionWaterfall {...widgetProps} />);
-    // Recharts renders SVG elements
-    expect(container.querySelector("svg") || container.firstChild).toBeTruthy();
-  });
-
-  it("shows placeholder when attribution_breakdown is null", () => {
-    render(
-      <AttributionWaterfall
-        {...widgetProps}
-        data={{
-          ...mockData,
-          analytics: { ...mockData.analytics, attribution_breakdown: null },
-        }}
-      />,
-    );
-    expect(screen.getByText("Attribution data not available")).toBeTruthy();
-  });
-});
-
-describe("PerformanceByPeriod", () => {
-  it("renders without crash with mock data", () => {
-    render(<PerformanceByPeriod {...widgetProps} />);
-    expect(screen.getByTestId("performance-by-period-table")).toBeTruthy();
-  });
-
-  it("renders period headers", () => {
-    render(<PerformanceByPeriod {...widgetProps} />);
-    expect(screen.getByText("MTD")).toBeTruthy();
-    expect(screen.getByText("QTD")).toBeTruthy();
-    expect(screen.getByText("YTD")).toBeTruthy();
-    expect(screen.getByText("1Y")).toBeTruthy();
-  });
-
-  it("renders portfolio total row", () => {
-    render(<PerformanceByPeriod {...widgetProps} />);
-    expect(screen.getByText("Portfolio")).toBeTruthy();
-  });
-
-  it("renders all strategy names", () => {
-    render(<PerformanceByPeriod {...widgetProps} />);
-    expect(screen.getByText("Alpha Seeker")).toBeTruthy();
-    expect(screen.getByText("Beta Neutral")).toBeTruthy();
-    expect(screen.getByText("Gamma Scalper")).toBeTruthy();
-  });
-});
 
 describe("AlphaBetaDecomposition", () => {
   it("renders without crash with sufficient data", () => {

@@ -88,7 +88,12 @@ describe("recharts accessibilityLayer={false} contract (whole codebase)", () => 
 
   it("scans the expected recharts files (smoke check on coverage breadth)", () => {
     const files = readChartFiles();
-    // 12 charts in src/components/charts + 16 allocations widgets + 3 portfolio + 1 strategy + 4 strategy-v2 + spillover = at least 30
-    expect(files.length).toBeGreaterThanOrEqual(28);
+    // Post-B7b-2 (pruned the orphaned widget-grid renderers): the dead
+    // allocations chart widgets were deleted, so the surviving recharts files
+    // are ~21 (12 src/components/charts + the surviving allocations widgets +
+    // 3 portfolio + 1 strategy + 4 strategy-v2). Floor kept just below the live
+    // count purely as a glob/path-regression guard (catches readChartFiles
+    // silently matching 0 files).
+    expect(files.length).toBeGreaterThanOrEqual(20);
   });
 });

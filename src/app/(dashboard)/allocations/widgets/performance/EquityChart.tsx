@@ -57,7 +57,7 @@ function captureChartIssue(
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / D-10 — SVG EquityChart
 //
-// Replaces the Recharts-based EquityCurve for the V2 Overview tile.
+// Replaces the prior Recharts-based equity-curve widget for the V2 Overview tile.
 // Designer source: designer-bundle/project/src/charts.jsx:5-245.
 // Preserves the Phase 07 / VOICES-ACCEPTED f7 parallel-prop path:
 // `equityDailyPoints` is the canonical data input; the f7 firstPositiveIdx
@@ -531,10 +531,9 @@ export function EquityChart({
     return () => ro.disconnect();
   }, []);
 
-  // Phase 07 f7 anchor — re-anchor from the first positive value. This is
-  // the SAME `firstPositiveIdx` semantics consumed by EquityCurve.tsx
-  // (lines 52-61); preserving it keeps zero-holdings / warm-up / stale
-  // dimmer states rendering consistently across the legacy + V2 paths.
+  // Phase 07 f7 anchor — re-anchor from the first positive value. This
+  // preserves the original `firstPositiveIdx` f7 semantics so zero-holdings /
+  // warm-up / stale dimmer states keep rendering consistently.
   //
   // NEW-C04-07: sort defensively by date before anchoring so out-of-order
   // input (late-arriving backfill row appended at the end, unsorted merge)
@@ -1867,11 +1866,11 @@ function TooltipRow({
 }
 
 // ---------------------------------------------------------------------------
-// Default export — WidgetProps adapter so `WIDGET_COMPONENTS["equity-chart"]`
-// can lazy-import this module directly. Shape-compatible with the existing
-// EquityCurve default export; reads `equityDailyPoints` from the data bag
-// (Phase 07 f7 parallel-prop path). Benchmark + overlays + stale forwarded
-// from the data bag too — when not present they default to undefined / false.
+// Default export — WidgetProps adapter consumed via direct import (e.g.
+// AllocationDashboardV2 / ScenarioComposer). Reads `equityDailyPoints` from
+// the data bag (Phase 07 f7 parallel-prop path). Benchmark + overlays + stale
+// forwarded from the data bag too — when not present they default to
+// undefined / false.
 //
 // PR4 #1 — lifts period + customRange + pickerOpen state up here so the
 // card header can render `Equity curve` title, legend chips, period

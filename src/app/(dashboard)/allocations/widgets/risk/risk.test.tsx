@@ -1,11 +1,9 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { CorrelationMatrix } from "./CorrelationMatrix";
-import { CorrelationOverTime } from "./CorrelationOverTime";
 import { VarExpectedShortfall } from "./VarExpectedShortfall";
 import { RiskDecomposition } from "./RiskDecomposition";
 import { TailRisk } from "./TailRisk";
-import { TrackingError } from "./TrackingError";
 
 // ---------------------------------------------------------------------------
 // Shared mock data
@@ -118,48 +116,6 @@ describe("Risk Widgets — render without crash", () => {
     expect(screen.getByTestId("correlation-matrix")).toBeInTheDocument();
   });
 
-  // M-0220 — the prior `if (chart) {...} else {empty}` branch passed
-  // vacuously whether the chart rendered OR silently degraded to empty.
-  // Split into two deterministically-tuned cases so each outcome is pinned.
-  it("M-0220: CorrelationOverTime renders the chart with >= 90 aligned days, 2+ strategies (chart MUST appear)", () => {
-    render(<CorrelationOverTime {...WIDGET_PROPS} />);
-    // MOCK_STRATEGIES carry 200 aligned, non-flat daily returns → > the
-    // 90-day rolling window with non-zero variance, so the chart MUST
-    // render. The insufficient-data empty state MUST be absent.
-    expect(screen.getByTestId("correlation-over-time")).toBeInTheDocument();
-    expect(
-      screen.queryByText(/Insufficient data for rolling correlation/i),
-    ).not.toBeInTheDocument();
-  });
-
-  it("M-0220: CorrelationOverTime shows the empty state below the 90-day window (empty MUST appear)", () => {
-    // Two strategies but only 50 aligned days — strictly below the 90-day
-    // ROLLING_WINDOW, so no rolling-correlation points exist and the chart
-    // MUST collapse to the insufficient-data state.
-    const shortStrategies = MOCK_STRATEGIES.slice(0, 2).map((s, i) => ({
-      ...s,
-      strategy: {
-        ...s.strategy,
-        strategy_analytics: {
-          ...s.strategy.strategy_analytics,
-          daily_returns: makeDailyReturns(50, 0.001 + i * 0.001, 42 + i),
-        },
-      },
-    }));
-    render(
-      <CorrelationOverTime
-        data={{ strategies: shortStrategies, analytics: null }}
-        timeframe="1YTD"
-        width={4}
-        height={3}
-      />,
-    );
-    expect(screen.queryByTestId("correlation-over-time")).toBeNull();
-    expect(
-      screen.getByText(/Insufficient data for rolling correlation/i),
-    ).toBeInTheDocument();
-  });
-
   it("VarExpectedShortfall renders", () => {
     render(<VarExpectedShortfall {...WIDGET_PROPS} />);
     expect(screen.getByTestId("var-expected-shortfall")).toBeInTheDocument();
@@ -223,11 +179,6 @@ describe("Risk Widgets — render without crash", () => {
       screen.getByText(/No extreme loss events detected/i),
     ).toBeInTheDocument();
   });
-
-  it("TrackingError renders", () => {
-    render(<TrackingError {...WIDGET_PROPS} />);
-    expect(screen.getByTestId("tracking-error")).toBeInTheDocument();
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -255,11 +206,6 @@ describe("Risk Widgets — empty data handling", () => {
   it("RiskDecomposition shows empty state with no strategies", () => {
     render(<RiskDecomposition {...emptyProps} />);
     expect(screen.getByText(/No strategy data/i)).toBeInTheDocument();
-  });
-
-  it("TrackingError shows empty state with no strategies", () => {
-    render(<TrackingError {...emptyProps} />);
-    expect(screen.getByText(/Insufficient data/i)).toBeInTheDocument();
   });
 });
 

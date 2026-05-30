@@ -3,12 +3,11 @@ import { describe, expect, it } from "vitest";
 import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
-import EquityCurve from "./EquityCurve";
 import DrawdownChart, { deriveSnapshotDrawdowns } from "./DrawdownChart";
 
 /**
  * Phase 07 / 07-03 — parallel-prop test coverage for the f7 equityDailyPoints
- * prop on EquityCurve and DrawdownChart.
+ * prop on DrawdownChart.
  *
  * Spec (per VOICES-ACCEPTED f7):
  *   - When equityDailyPoints is PRESENT (including empty array [] — an
@@ -72,45 +71,6 @@ const baseProps: Omit<WidgetProps, "data"> = {
   width: 6,
   height: 4,
 };
-
-describe("EquityCurve — equityDailyPoints parallel-prop (f7)", () => {
-  it("(a) when equityDailyPoints is provided, the widget renders a chart (snapshot-derived path)", () => {
-    const { container } = render(
-      <EquityCurve
-        {...baseProps}
-        data={EMPTY_DATA}
-        equityDailyPoints={SNAPSHOT_POINTS}
-      />,
-    );
-    // Snapshot-derived path MUST render even when strategies is empty.
-    // With strategies empty + no prop, the existing baseline renders the
-    // "No equity curve data available" text (per performance.test.tsx).
-    // When equityDailyPoints is provided, we expect an SVG instead.
-    expect(container.querySelector("svg")).toBeTruthy();
-  });
-
-  it("(b) when equityDailyPoints is absent (undefined), widget falls back to strategies-derived compute", () => {
-    const { container } = render(
-      <EquityCurve {...baseProps} data={STRATEGIES_DATA} />,
-    );
-    // Strategies-derived path renders the SVG (confirms fallback works).
-    expect(container.querySelector("svg")).toBeTruthy();
-  });
-
-  it("(c) when equityDailyPoints === [], widget renders empty chart instead of falling back to strategies", () => {
-    const { queryByText } = render(
-      <EquityCurve
-        {...baseProps}
-        data={STRATEGIES_DATA}
-        equityDailyPoints={[]}
-      />,
-    );
-    // Explicit empty override: even though STRATEGIES_DATA has content,
-    // the widget MUST honour the empty prop and not render the
-    // strategies-derived curve. The empty-message copy is the signal.
-    expect(queryByText(/no equity curve/i)).not.toBeNull();
-  });
-});
 
 describe("DrawdownChart — equityDailyPoints parallel-prop (f7)", () => {
   it("(a) when equityDailyPoints is provided, widget renders (snapshot-derived path)", () => {
