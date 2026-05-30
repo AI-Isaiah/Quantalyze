@@ -4,7 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 import { notifyUserSignupApproved } from "@/lib/email";
 
 // audit-2026-05-07 P199 + P200 — see intro-request/route.ts for the rationale.
@@ -72,12 +72,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
 
-  // Sprint 6 Task 7.1b — audit the allocator approval. Use the user-scoped
-  // `supabase` client so log_audit_event resolves auth.uid() to the acting
-  // admin's id. PR #266 red-team: `await` instead of fire-and-forget so a
-  // failed audit insert surfaces as a 500 rather than a silent drop —
-  // non-repudiation depends on the trail.
-  await logAuditEvent(supabase, {
+  // Sprint 6 Task 7.1b — audit the allocator approval. B4b: the approval
+  // UPDATE above rides the service-role `admin` client, so the audit emits
+  // via the service path with the explicit acting-admin id
+  // (log_audit_event_service) — JWT-immune. Fire-and-forget: it runs in
+  // after() AFTER the response flushes and does NOT gate the HTTP status.
+  // (The prior `await logAuditEvent` implied a 500-on-failure guard, but the
+  // wrapper returns void so the await was a no-op — that guard never existed;
+  // failures are Sentry-reported. Hard gating via `await emitAsUser` is a
+  // separate decision.)
+  logAuditEventAsUser(admin, user.id, {
     action: "allocator.approve",
     entity_type: "user",
     entity_id: id as string,

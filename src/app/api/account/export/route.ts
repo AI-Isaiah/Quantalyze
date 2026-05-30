@@ -9,7 +9,7 @@ import {
   getClientIp,
 } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEvent, logAuditEventAsUser } from "@/lib/audit";
 import {
   collectUserExportBundle,
   encodeExportBundle,
@@ -476,7 +476,7 @@ async function handleExportRequest(
     // truncation" for regulator forensics without revealing which
     // internal tables. The full table-name lists remain on the
     // console.error above (server-only durable forensics).
-    logAuditEvent(supabase, {
+    logAuditEventAsUser(admin, exportSubjectId, {
       action: "account.export_refused",
       entity_type: "user",
       entity_id: exportSubjectId,
@@ -616,7 +616,7 @@ async function handleExportRequest(
     // in memory). For a forensic question "did the controller ever
     // decrypt/aggregate user X's data?" the answer must be discoverable
     // from audit_log, not silently absorbed by the 500 response.
-    logAuditEvent(supabase, {
+    logAuditEventAsUser(admin, exportSubjectId, {
       action: "account.export_refused",
       entity_type: "user",
       entity_id: exportSubjectId,
@@ -675,7 +675,7 @@ async function handleExportRequest(
     // storage (and may have been briefly visible before the orphan
     // cleanup landed). A future incident response asking "did we ever
     // serialize/store user X's data?" must find the row in audit_log.
-    logAuditEvent(supabase, {
+    logAuditEventAsUser(admin, exportSubjectId, {
       action: "account.export_refused",
       entity_type: "user",
       entity_id: exportSubjectId,
@@ -707,7 +707,7 @@ async function handleExportRequest(
   // route would have returned 500 already. We still serialize it
   // into the audit metadata for forensic uniformity (one shape, easy
   // to query).
-  logAuditEvent(supabase, {
+  logAuditEventAsUser(admin, exportSubjectId, {
     action: "account.export",
     entity_type: "user",
     entity_id: exportSubjectId,

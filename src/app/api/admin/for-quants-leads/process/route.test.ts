@@ -41,9 +41,9 @@ vi.mock("@/lib/supabase/server", () => ({
     auth: {
       getUser: async () => ({ data: { user: STATE.authUser }, error: null }),
     },
-    // logAuditEvent uses this client — mocked at the boundary below, but
-    // a minimal rpc stub keeps it safe if a future change adds a direct
-    // call from the route.
+    // withAdminAuth uses this user-scoped client for auth.getUser(). The
+    // route's audit now rides the service path (logAuditEventAsUser on the
+    // admin client); the minimal rpc stub stays as a safety net.
     rpc: async () => ({ data: null, error: null }),
   }),
 }));
@@ -86,14 +86,29 @@ const auditEmissions: Array<{
   metadata: Record<string, unknown>;
 }> = [];
 
+// B4b: the acting-admin id passed to the service-path emit
+// (logAuditEventAsUser). A revert to the user-JWT logAuditEvent wrapper leaves
+// this empty, so the happy-path assertion below fails loudly.
+const auditServiceActors: string[] = [];
+
 vi.mock("@/lib/audit", async () => {
   const actual = await vi.importActual<typeof import("@/lib/audit")>(
     "@/lib/audit",
   );
   return {
     ...actual,
-    logAuditEvent: (
-      _client: unknown,
+    // B4b: the route reverted to logAuditEventAsUser (service path). Stub
+    // logAuditEvent as a no-op so a regression that reverts the emit back to
+    // the user-JWT wrapper drops the lead.process row and fails the
+    // happy-path length assertion loudly.
+    logAuditEvent: () => {},
+    // The route emission (lead.process / lead.unprocess) AND withAdminAuth's
+    // admin.access.denied both ride this service-path wrapper. Capture the
+    // event into auditEmissions (the 403 test filters to the route's own
+    // actions) and the acting-admin id into auditServiceActors.
+    logAuditEventAsUser: (
+      _admin: unknown,
+      actingUserId: string,
       event: {
         action: string;
         entity_type: string;
@@ -101,6 +116,7 @@ vi.mock("@/lib/audit", async () => {
         metadata?: Record<string, unknown>;
       },
     ) => {
+      auditServiceActors.push(actingUserId);
       auditEmissions.push({
         action: event.action,
         entity_type: event.entity_type,
@@ -108,11 +124,6 @@ vi.mock("@/lib/audit", async () => {
         metadata: event.metadata ?? {},
       });
     },
-    // The withAdminAuth wrapper also calls logAuditEventAsUser on the
-    // non-admin denial branch. Stub it so the 403 test does not bleed
-    // a row into auditEmissions[] (we only assert on the route's own
-    // emissions).
-    logAuditEventAsUser: () => {},
   };
 });
 
@@ -140,6 +151,7 @@ beforeEach(() => {
   STATE.markCalls = [];
   STATE.unmarkCalls = [];
   auditEmissions.length = 0;
+  auditServiceActors.length = 0;
 });
 
 describe("POST /api/admin/for-quants-leads/process — C-0037", () => {
@@ -148,10 +160,10 @@ describe("POST /api/admin/for-quants-leads/process — C-0037", () => {
     const { POST } = await import("./route");
     const res = await POST(makeReq({ id: VALID_UUID }));
     expect(res.status).toBe(403);
-    // No route-level emission should land — withAdminAuth's
-    // admin.access.denied is mocked out via logAuditEventAsUser stub
-    // above. This pins the contract that mutation-site emission only
-    // happens AFTER the role gate succeeds.
+    // No route-level emission should land. withAdminAuth's admin.access.denied
+    // DOES ride logAuditEventAsUser (captured into auditEmissions), so we
+    // filter to the route's own actions to pin the contract that mutation-site
+    // emission only happens AFTER the role gate succeeds.
     expect(
       auditEmissions.filter(
         (e) => e.action === "lead.process" || e.action === "lead.unprocess",
@@ -190,6 +202,10 @@ describe("POST /api/admin/for-quants-leads/process — C-0037", () => {
       entity_type: "for_quants_lead",
       entity_id: VALID_UUID,
     });
+    // B4b: the emit rides the service path with the explicit acting-admin id
+    // (JWT-immune). A revert to the user-JWT logAuditEvent wrapper leaves
+    // auditServiceActors empty and fails here.
+    expect(auditServiceActors).toEqual([STATE.authUser!.id]);
 
     expect(STATE.markCalls).toEqual([VALID_UUID]);
     expect(STATE.unmarkCalls).toHaveLength(0);

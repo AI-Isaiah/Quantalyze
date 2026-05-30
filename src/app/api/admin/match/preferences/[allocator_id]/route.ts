@@ -5,7 +5,7 @@ import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { pickAdminEditableFields, validateAdminEditableInput } from "@/lib/preferences";
 import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 import { isUuid } from "@/lib/utils";
 
 // PUT /api/admin/match/preferences/[allocator_id]
@@ -83,10 +83,12 @@ export async function PUT(
     return NextResponse.json({ error: "Failed to save preferences" }, { status: 500 });
   }
 
-  // Sprint 8 Phase 2 — audit the admin-edited mandate. user-scoped
-  // `supabase` client already bound to the acting admin; log_audit_event
-  // derives the acting admin from auth.uid().
-  logAuditEvent(supabase, {
+  // Sprint 8 Phase 2 — audit the admin-edited mandate. B4b: the mandate
+  // writes above ride the service-role `admin` client (RLS-bypassing), so
+  // the audit emits via the service path with the explicit acting-admin id
+  // (log_audit_event_service) — JWT-immune, unlike the user-JWT auth.uid()
+  // path which can silently drop in the post-response after() window.
+  logAuditEventAsUser(admin, user!.id, {
     action: "mandate_preference.admin_update",
     entity_type: "allocator_preference_mandate",
     entity_id: allocator_id,

@@ -651,6 +651,13 @@ describe("POST /api/admin/allocator-approve — allocator.approve emission", () 
             }),
           }),
         }),
+        // B4b: allocator-approve switched to logAuditEventAsUser, which calls
+        // adminClient.rpc("log_audit_event_service"). Wire into STATE.rpcCalls
+        // so waitForAudit("allocator.approve") can find it.
+        rpc: async (name: string, args: Record<string, unknown>) => {
+          STATE.rpcCalls.push({ name, args });
+          return { data: null, error: null };
+        },
       }),
     }));
 
@@ -670,6 +677,12 @@ describe("POST /api/admin/allocator-approve — allocator.approve emission", () 
     expect(res.status).toBe(200);
 
     const audit = await waitForAudit("allocator.approve");
+    // B4b: allocator-approve rides the service path with the explicit
+    // acting-admin id. Pinning the RPC name + p_user_id makes a revert to the
+    // user-JWT logAuditEvent wrapper fail loudly (waitForAudit alone matches
+    // both RPC names).
+    expect(audit.name).toBe("log_audit_event_service");
+    expect(audit.args.p_user_id).toBe(STATE.authUser.id);
     expect(audit.args.p_entity_type).toBe("user");
     expect(audit.args.p_entity_id).toBe(TARGET_USER);
   });

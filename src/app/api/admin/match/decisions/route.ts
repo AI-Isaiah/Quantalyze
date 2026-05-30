@@ -4,7 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 
 type Decision = "thumbs_up" | "thumbs_down" | "snoozed";
 const VALID: Decision[] = ["thumbs_up", "thumbs_down", "snoozed"];
@@ -110,7 +110,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // Supabase pool exhaustion (DoS amplifier) AND widen the TOCTOU
     // window for an admin session revoke landing on an immutable audit
     // row. The earlier code-reviewer C1 fix over-corrected.
-    logAuditEvent(supabase, {
+    logAuditEventAsUser(admin, user.id, {
       action: "match.decision_record",
       entity_type: "match_decision",
       entity_id: inserted.id as string,
@@ -192,8 +192,22 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   // handler — logAuditEvent's internal after() guarantees execution
   // without the DoS-amplifier + TOCTOU widener that awaiting introduces.
   const deletedRows = deleted ?? [];
+
+  // M-0276 (B4b fold): a DELETE that matched zero rows is a no-op — the
+  // (allocator_id, strategy_id, decision) tuple had no decision to remove.
+  // Returning {success:true} (200) misled the founder into believing they
+  // un-did a decision that never existed, with no forensic trail. Surface
+  // the no-op as a 404 so the caller can distinguish "removed" from
+  // "nothing to remove".
+  if (deletedRows.length === 0) {
+    return NextResponse.json(
+      { error: "No matching decision to delete" },
+      { status: 404 },
+    );
+  }
+
   for (const row of deletedRows) {
-    logAuditEvent(supabase, {
+    logAuditEventAsUser(admin, user.id, {
       action: "match.decision_delete",
       entity_type: "match_decision",
       entity_id: row.id as string,

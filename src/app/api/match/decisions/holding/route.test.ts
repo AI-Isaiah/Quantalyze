@@ -108,6 +108,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 
 vi.mock("@/lib/audit", () => ({
   logAuditEvent: vi.fn(),
+  logAuditEventAsUser: vi.fn(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -115,7 +116,7 @@ vi.mock("@/lib/audit", () => ({
 // ---------------------------------------------------------------------------
 
 import { POST } from "./route";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -227,9 +228,13 @@ describe("POST /api/match/decisions/holding — happy path", () => {
       }),
     );
 
-    // Verify audit event emitted with correct action + entity_id
-    expect(logAuditEvent).toHaveBeenCalledWith(
-      expect.anything(), // supabase client
+    // Verify audit event emitted with correct action + entity_id.
+    // B4b: the match_decisions INSERT rides the service-role admin client, so
+    // the audit now emits via logAuditEventAsUser(admin, actingUserId, event)
+    // — JWT-immune, with the explicit actor as the second arg.
+    expect(logAuditEventAsUser).toHaveBeenCalledWith(
+      expect.anything(), // admin (service-role) client
+      "alloc-1", // acting user id (MOCK_USER.id)
       expect.objectContaining({
         action: "match.decision_record",
         entity_id: "new-dec-uuid",

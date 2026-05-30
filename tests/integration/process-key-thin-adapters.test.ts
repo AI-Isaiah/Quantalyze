@@ -58,6 +58,7 @@ vi.mock("@/lib/ratelimit", () => ({
 
 vi.mock("@/lib/audit", () => ({
   logAuditEvent: vi.fn(),
+  logAuditEventAsUser: vi.fn(),
 }));
 
 vi.mock("@/lib/correlation-id", () => ({

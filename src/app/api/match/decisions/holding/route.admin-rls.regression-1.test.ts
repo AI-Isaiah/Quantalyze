@@ -114,6 +114,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 
 vi.mock("@/lib/audit", () => ({
   logAuditEvent: vi.fn(),
+  logAuditEventAsUser: vi.fn(),
 }));
 
 import { POST } from "./route";

@@ -123,7 +123,12 @@ vi.mock("@/lib/csrf", () => ({
 // only cares about the compute-path logic — stub the emission out.
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/audit", () => ({
+  // B4b: both sync.start emits now ride the service path
+  // (log_audit_event_service — JWT-immune) with the explicit acting-user id.
+  // Point the same spy at logAuditEventAsUser; the event object is now the
+  // THIRD arg (admin, actingUserId, event).
   logAuditEvent: mockLogAuditEvent,
+  logAuditEventAsUser: mockLogAuditEvent,
 }));
 
 // Stub the correlation-id helper so we can assert it propagates into
@@ -374,8 +379,10 @@ describe("POST /api/keys/sync", () => {
     expect(res.status).toBe(202);
 
     expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
-    const [, event] = mockLogAuditEvent.mock.calls[0] as [
+    // B4b: logAuditEventAsUser(admin, actingUserId, event) — event is arg[2].
+    const [, actingUserId, event] = mockLogAuditEvent.mock.calls[0] as [
       unknown,
+      string,
       {
         action: string;
         entity_type: string;
@@ -383,6 +390,7 @@ describe("POST /api/keys/sync", () => {
         metadata: Record<string, unknown>;
       },
     ];
+    expect(actingUserId).toBe(TEST_USER.id);
     expect(event.action).toBe("sync.start");
     expect(event.entity_type).toBe("sync");
     expect(event.entity_id).toBe(TEST_STRATEGY_ID);
@@ -396,8 +404,10 @@ describe("POST /api/keys/sync", () => {
     expect(res.status).toBe(202);
 
     expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
-    const [, event] = mockLogAuditEvent.mock.calls[0] as [
+    // B4b: logAuditEventAsUser(admin, actingUserId, event) — event is arg[2].
+    const [, actingUserId, event] = mockLogAuditEvent.mock.calls[0] as [
       unknown,
+      string,
       {
         action: string;
         entity_type: string;
@@ -405,6 +415,7 @@ describe("POST /api/keys/sync", () => {
         metadata: Record<string, unknown>;
       },
     ];
+    expect(actingUserId).toBe(TEST_USER.id);
     expect(event.action).toBe("sync.start");
     expect(event.entity_type).toBe("sync");
     expect(event.entity_id).toBe(TEST_STRATEGY_ID);

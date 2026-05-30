@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withRole, requireAdmin } from "@/lib/auth";
-import { emit, logAuditEvent } from "@/lib/audit";
+import { emit, logAuditEventAsUser } from "@/lib/audit";
 import {
   adminActionLimiter,
   checkLimit,
@@ -59,10 +59,13 @@ import { captureToSentry } from "@/lib/sentry-capture";
  *      logically-rejected request cannot end up with completed_at set.
  *   7. Emit `deletion.request.approve` audit only when the CAS won.
  *
- * Both audit events are emitted through the USER-scoped supabase client
- * supplied by `withRole` via the handler context so that `auth.uid()`
- * inside log_audit_event resolves to the acting admin's id — the
- * audit-trail invariant from ADR-0023.
+ * The two audit events ride different paths (both attribute to the acting
+ * admin per ADR-0023, via different RPCs). `account.sanitize` is emitted
+ * synchronously via `emit` on the USER-scoped supabase client, so `auth.uid()`
+ * inside `log_audit_event` resolves to the acting admin. `deletion.request.approve`
+ * (B4b) is emitted via `logAuditEventAsUser` on the service-role admin client
+ * carrying the explicit acting-admin id (`log_audit_event_service`, migration
+ * 058) — JWT-immune; attribution comes from `p_user_id`, not `auth.uid()`.
  *
  * Idempotency: sanitize_user is itself idempotent (migration 055), so a
  * re-run on the same request is safe. The CAS keeps us from re-emitting
@@ -367,7 +370,7 @@ export const POST = withRole<{ id: string }>("admin")(
     // inline since that row is itself a sanitize target — captures the
     // timing story in one audit row, no post-sanitize join needed).
     if (rowsAffected > 0) {
-      logAuditEvent(supabase, {
+      logAuditEventAsUser(admin, user.id, {
         action: "deletion.request.approve",
         entity_type: "data_deletion_request",
         entity_id: requestId,

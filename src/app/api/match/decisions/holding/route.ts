@@ -16,7 +16,7 @@ import { z } from "zod";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
 import type { User } from "@supabase/supabase-js";
 
@@ -140,7 +140,7 @@ export const POST = withAuth(
     }
 
     // Reuse existing match.decision_record audit kind per D-14 (no new taxonomy)
-    logAuditEvent(supabase, {
+    logAuditEventAsUser(admin, user.id, {
       action: "match.decision_record",
       entity_type: "match_decision",
       entity_id: inserted.id,

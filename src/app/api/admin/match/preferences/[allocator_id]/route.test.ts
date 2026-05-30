@@ -90,6 +90,16 @@ vi.mock("@/lib/audit", () => ({
   ) => {
     state.auditLog(event);
   },
+  // B4b: the admin mandate audit now emits via the service path
+  // (log_audit_event_service — JWT-immune) with the explicit acting-admin id;
+  // forward the event so the existing state.auditLog assertions still hold.
+  logAuditEventAsUser: (
+    _admin: unknown,
+    _actingUserId: string,
+    event: Record<string, unknown>,
+  ) => {
+    state.auditLog(event);
+  },
 }));
 
 function makeReq(body: Record<string, unknown> = {}, headers = VALID_ORIGIN): NextRequest {

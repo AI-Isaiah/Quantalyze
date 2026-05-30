@@ -113,6 +113,26 @@ vi.mock("@/lib/audit", () => ({
       metadata: event.metadata ?? {},
     });
   },
+  // B4b: the re-sign audit now emits via the service path
+  // (log_audit_event_service — JWT-immune) with the explicit acting-user id.
+  // Mirror into auditEmissions so the existing assertions hold.
+  logAuditEventAsUser: (
+    _admin: unknown,
+    _actingUserId: string,
+    event: {
+      action: string;
+      entity_type: string;
+      entity_id: string;
+      metadata?: Record<string, unknown>;
+    },
+  ) => {
+    auditEmissions.push({
+      action: event.action,
+      entity_type: event.entity_type,
+      entity_id: event.entity_id,
+      metadata: event.metadata ?? {},
+    });
+  },
 }));
 
 import { GET } from "./route";

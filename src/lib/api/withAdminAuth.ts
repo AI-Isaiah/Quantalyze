@@ -6,11 +6,15 @@ import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { logAuditEventAsUser } from "@/lib/audit";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { SupabaseClient, User } from "@supabase/supabase-js";
 
 type AdminHandler = (
   body: Record<string, unknown>,
-  admin: SupabaseClient
+  admin: SupabaseClient,
+  // B4b: the verified acting admin. Handlers that mutate via the `admin`
+  // (service-role) client must audit via logAuditEventAsUser(admin, user.id, …)
+  // — JWT-immune — not a user-JWT logAuditEvent that drops in the after() window.
+  user: User,
 ) => Promise<NextResponse>;
 
 export interface WithAdminAuthOptions {
@@ -144,6 +148,6 @@ export function withAdminAuth(
     }
 
     const admin = createAdminClient();
-    return handler(body, admin);
+    return handler(body, admin, user);
   };
 }

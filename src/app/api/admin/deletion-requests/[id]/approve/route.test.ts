@@ -263,6 +263,16 @@ vi.mock("@/lib/audit", () => ({
   ) => {
     state.auditLog(event);
   },
+  // B4b: the deletion.request.approve audit now emits via the service path
+  // (log_audit_event_service — JWT-immune) with the explicit acting-admin id.
+  // Forward the event so the existing state.auditLog assertions still hold.
+  logAuditEventAsUser: (
+    _admin: unknown,
+    _actingUserId: string,
+    event: { action: string; entity_id: string; metadata?: unknown },
+  ) => {
+    state.auditLog(event);
+  },
   // red-team-MED (fire-and-forget-loses-destructive-audit): the route
   // now calls `emit` synchronously (with await + try/catch) for
   // account.sanitize. Mirror auditLog's recorder so race / metadata

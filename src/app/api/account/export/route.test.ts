@@ -171,6 +171,11 @@ const auditEmissions: Array<{
   metadata: Record<string, unknown>;
 }> = [];
 
+// B4b: the four post-mutation export audits emit via the service path
+// (log_audit_event_service — JWT-immune) with an explicit acting-user id.
+// Captured here so a test can assert attribution rides that path.
+const auditServiceActors: Array<{ actingUserId: string; action: string }> = [];
+
 vi.mock("@/lib/audit", () => ({
   logAuditEvent: (
     _client: unknown,
@@ -181,6 +186,27 @@ vi.mock("@/lib/audit", () => ({
       metadata?: Record<string, unknown>;
     },
   ) => {
+    auditEmissions.push({
+      action: event.action,
+      entity_type: event.entity_type,
+      entity_id: event.entity_id,
+      metadata: event.metadata ?? {},
+    });
+  },
+  // B4b: 4 of the 5 export audits switched to the service path. Mirror into
+  // auditEmissions so the existing action/metadata assertions hold, and
+  // record the actor so the B4b attribution test can assert it.
+  logAuditEventAsUser: (
+    _admin: unknown,
+    actingUserId: string,
+    event: {
+      action: string;
+      entity_type: string;
+      entity_id: string;
+      metadata?: Record<string, unknown>;
+    },
+  ) => {
+    auditServiceActors.push({ actingUserId, action: event.action });
     auditEmissions.push({
       action: event.action,
       entity_type: event.entity_type,
@@ -292,6 +318,14 @@ describe("POST /api/account/export — audit-2026-05-07 cluster A", () => {
     );
     expect(refused).toBeTruthy();
     expect(refused?.metadata.reason).toBe("upload_failed");
+    // B4b: the refused-export audit rides the service path with the explicit
+    // acting-user id. A revert to the user-JWT logAuditEvent wrapper leaves
+    // auditServiceActors empty and fails here.
+    expect(
+      auditServiceActors.some(
+        (a) => a.action === "account.export_refused" && a.actingUserId === USER_ID,
+      ),
+    ).toBe(true);
   });
 
   it("C-0028 #5 / H-0201 sign-fail: 500 + orphan cleanup + audit", async () => {
@@ -310,6 +344,12 @@ describe("POST /api/account/export — audit-2026-05-07 cluster A", () => {
     );
     expect(refused).toBeTruthy();
     expect(refused?.metadata.object_key_sha256).toMatch(/^[0-9a-f]{64}$/);
+    // B4b: service-path attribution guard (see upload-fail test above).
+    expect(
+      auditServiceActors.some(
+        (a) => a.action === "account.export_refused" && a.actingUserId === USER_ID,
+      ),
+    ).toBe(true);
   });
 
   it("C-0028 #7 / H-0200 happy-path: 200 + account.export audit with ip + user_agent + object_key_sha256", async () => {
@@ -334,6 +374,14 @@ describe("POST /api/account/export — audit-2026-05-07 cluster A", () => {
     // H-0200: ip + user_agent must be present.
     expect(exportEvent?.metadata.ip).toBe("203.0.113.7");
     expect(exportEvent?.metadata.user_agent).toBe("Mozilla/5.0 test");
+    // B4b: the success export audit now rides the service path
+    // (log_audit_event_service — JWT-immune) with the explicit acting-user
+    // id, not the user-JWT after() path that could drop on post-flush expiry.
+    expect(
+      auditServiceActors.some(
+        (a) => a.action === "account.export" && a.actingUserId === USER_ID,
+      ),
+    ).toBe(true);
   });
 
   it("red-team R8: upload-fail refunds the 1/day rate-limit token", async () => {

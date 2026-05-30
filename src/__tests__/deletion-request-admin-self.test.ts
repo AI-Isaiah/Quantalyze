@@ -341,14 +341,17 @@ describe("POST /api/admin/deletion-requests/[id]/approve — self-action guard (
       expect(
         logAuditRpcMock.mock.calls.find(
           (c) =>
-            c[0] === "log_audit_event" &&
+            // B4b: deletion.request.approve now emits via the service path
+            // (logAuditEventAsUser → log_audit_event_service). account.sanitize
+            // below stays on the user-path emit() (log_audit_event).
+            c[0] === "log_audit_event_service" &&
             c[1]?.p_action === "deletion.request.approve",
         ),
       ).toBeDefined(),
     );
 
     const approveAudit = logAuditRpcMock.mock.calls.find(
-      (c) => c[0] === "log_audit_event" && c[1]?.p_action === "deletion.request.approve",
+      (c) => c[0] === "log_audit_event_service" && c[1]?.p_action === "deletion.request.approve",
     );
     expect(approveAudit).toBeDefined();
     expect(approveAudit![1]).toMatchObject({

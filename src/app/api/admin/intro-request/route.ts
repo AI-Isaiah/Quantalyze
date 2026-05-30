@@ -5,7 +5,7 @@ import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { notifyAllocatorIntroStatus } from "@/lib/email";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 import { captureToSentry } from "@/lib/sentry-capture";
 
 const VALID_STATUSES = ["pending", "intro_made", "completed", "declined"] as const;
@@ -127,15 +127,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Sprint 6 Task 7.1b — audit the admin-driven status transition. We need a
-  // USER-scoped client for log_audit_event (derives acting admin from
-  // auth.uid()); admin client is service-role.
+  // Sprint 6 Task 7.1b — audit the admin-driven status transition. B4b: the
+  // status UPDATE above rides the service-role `admin` client (RLS-bypassing),
+  // so the audit emits via the service path with the explicit acting-admin id
+  // (log_audit_event_service) — JWT-immune, not the user-JWT auth.uid() path
+  // which can drop in the post-response after() window.
   //
   // audit-2026-05-07 H-0240: pre-fix the metadata recorded only
   // `new_status / has_note`. Add prior_status, note_length, and the
   // acting admin's user id so a forensic reader can reconstruct the
   // transition without joining contact_requests history.
-  logAuditEvent(supabase, {
+  logAuditEventAsUser(admin, user.id, {
     action: "contact_request.status_change",
     entity_type: "contact_request",
     entity_id: id as string,

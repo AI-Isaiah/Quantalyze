@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.23] - 2026-05-30
+### Changed — service-role admin/account routes now audit through the JWT-immune service path (cross-cutting refactor B4b)
+
+B4b converts every API route that mutates through a service-role admin client from the user-JWT audit wrapper (`logAuditEvent`) to the service-role wrapper (`logAuditEventAsUser`), closing the documented C28-06 anti-pattern across the complete surface. The user-JWT audit path runs inside Vercel's `after()` window — after the response flushes — so a just-expired admin JWT silently dropped the forensic row even though the write itself rode service-role. The service path attributes via an explicit acting-user id (`log_audit_event_service`), so the audit trail no longer depends on a live JWT.
+
+- **12 routes converted, 2 deliberately kept.** account/export (4 sites), account/export/latest, admin/allocator-approve, admin/manager-approve, admin/deletion-requests/[id]/approve, admin/intro-request, admin/match/decisions, admin/match/preferences, admin/for-quants-leads/process, keys/sync, match/decisions/holding, and trades/upload now audit through the service path with the explicit acting-user id. `bridge/outcome` and `intro` KEEP the user-JWT wrapper — their audited writes genuinely ride the user-scoped (RLS-enforced) client, so converting would be wrong.
+- **Closed by construction:** NEW-C28-06 (all converted routes), M-0357 (trades/upload's throwaway user-JWT client deleted — it existed only to feed the audit emit), and the JWT-expiry-drop half of M-1157 / H-0278.
+- **M-0276 folded.** `DELETE /api/admin/match/decisions` that matched zero rows used to return `{success:true}` (200) — a no-op un-decide that lied to the operator. It now returns 404, with a regression test.
+- **Stale non-repudiation comments corrected.** allocator/manager-approve carried a PR #266 comment claiming `await logAuditEvent` surfaced an audit failure as a 500; the wrapper returns void, so the `await` was always a no-op and that guard never existed. The comments now describe the fire-and-forget + Sentry-reported reality.
+- **`withAdminAuth` plumbs the acting admin.** The wrapper now passes the verified `user` to its handler so `for-quants-leads/process` can attribute via the service path; the wrapper already self-used `logAuditEventAsUser` for its access-denied audit.
+- **Verified:** tsc 0, lint 0 errors, full vitest 5500 pass (incl. 5 cross-cutting integration suites re-pointed to the service RPC). A map+adversarial-verify workflow corrected 3 mis-triages before any edit, and a 5-dimension specialist review surfaced 6 findings — all fixed, including the helper-indirect `for-quants-leads/process` route the route-file grep missed, plus test hardening so a revert to the user-JWT wrapper now fails loudly.
+
 ## [0.24.15.22] - 2026-05-30
 ### Changed — admin role grant/revoke is now one atomic SECURITY DEFINER RPC (cross-cutting refactor B4a)
 

@@ -4,7 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getClientIp } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 
 /**
  * GET /api/account/export/latest — Audit-2026-05-07 C-0025 closeout.
@@ -147,7 +147,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // "did the controller decrypt/aggregate this user's data" from "did
   // someone re-download an existing bundle" must be able to filter on
   // action name.
-  logAuditEvent(supabase, {
+  logAuditEventAsUser(admin, user.id, {
     action: "account.export_resigned",
     entity_type: "user",
     entity_id: user.id,

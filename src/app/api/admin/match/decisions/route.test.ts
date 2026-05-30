@@ -21,6 +21,12 @@ const userState = vi.hoisted<{ current: { id: string } | null }>(() => ({
 
 const adminFlag = vi.hoisted(() => ({ isAdmin: false }));
 
+// M-0276: rows returned by the DELETE .match().select() — empty array models
+// a no-op un-decide (nothing matched the composite filter).
+const deleteState = vi.hoisted<{ rows: Array<{ id: string }> }>(() => ({
+  rows: [],
+}));
+
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: {
@@ -54,7 +60,7 @@ vi.mock("@/lib/supabase/admin", () => ({
       }),
       delete: () => ({
         match: () => ({
-          select: async () => ({ data: [], error: null }),
+          select: async () => ({ data: deleteState.rows, error: null }),
         }),
       }),
     }),
@@ -169,5 +175,35 @@ describe("DELETE /api/admin/match/decisions — 401 vs 403 (P444)", () => {
     const { DELETE } = await import("./route");
     const res = await DELETE(makeDeleteReq());
     expect(res.status).toBe(403);
+  });
+});
+
+describe("DELETE /api/admin/match/decisions — M-0276 no-op vs match", () => {
+  beforeEach(() => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    deleteState.rows = [];
+    vi.resetModules();
+  });
+
+  it("M-0276: a DELETE matching zero rows returns 404, not a misleading 200", async () => {
+    // No decision matched the (allocator_id, strategy_id, decision) tuple.
+    deleteState.rows = [];
+    const { DELETE } = await import("./route");
+    const res = await DELETE(makeDeleteReq());
+    // Pre-fix this returned { success: true } (200) for a no-op un-decide —
+    // the founder believed they removed a decision that never existed.
+    expect(res.status).toBe(404);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.error).toBe("No matching decision to delete");
+  });
+
+  it("a DELETE that removes a real decision still returns 200 success", async () => {
+    deleteState.rows = [{ id: "dec-1" }];
+    const { DELETE } = await import("./route");
+    const res = await DELETE(makeDeleteReq());
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json).toMatchObject({ success: true });
   });
 });
