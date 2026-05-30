@@ -27,7 +27,7 @@ export interface WidgetProps {
   /**
    * pr189-followup M14 (type-design-analyzer MED/8): widen-but-typed —
    * intentionally `any` because callers in this dashboard register
-   * heterogeneous widgets (ConcentrationRisk, NotesWidget, RegimeDetector,
+   * heterogeneous widgets (RegimeDetector, TailRisk, AlphaBetaDecomposition,
    * etc.) and each destructures a different payload shape. Tightening
    * requires either:
    *   (a) a per-widget-id payload union indexed at the WIDGET_COMPONENTS

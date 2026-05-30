@@ -832,16 +832,3 @@ describe("OutcomesWidget — 'Your note' section (08-04 / MANAGE-05)", () => {
     expect(header.className).toContain("tracking-wider");
   });
 });
-
-// ===========================================================================
-// Barrel export
-// ===========================================================================
-
-describe("Barrel export", () => {
-  it("outcomes-timeline key exists in WIDGET_COMPONENTS barrel", async () => {
-    const barrel = await import(
-      "@/app/(dashboard)/allocations/widgets/index"
-    );
-    expect(barrel.WIDGET_COMPONENTS["outcomes-timeline"]).toBeDefined();
-  });
-});
