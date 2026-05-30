@@ -9,6 +9,7 @@ import type {
 import { DELTA_UNITS } from "@/lib/api/simulatorSchema";
 import type { SimulatorResponseOk } from "@/lib/api/simulatorSchema";
 import { dateMapStrict } from "@/lib/keys";
+import { parseRetryAfterSeconds } from "@/lib/retry";
 
 interface PortfolioImpactPanelProps {
   portfolioId: string;
@@ -56,13 +57,17 @@ export function PortfolioImpactPanel({
           .json()
           .catch(() => ({ error: "Simulation failed" }));
         if (res.status === 429) {
-          const headerRetry = Number(res.headers.get("Retry-After"));
+          // B20: the route's own body.retryAfter takes precedence; otherwise parse
+          // the Retry-After header through the shared primitive. This adds HTTP-date
+          // handling — the old raw `Number()` produced NaN for a date-form header,
+          // left the Retry button ENABLED, and a re-click just re-429'd. This value
+          // is ADVISORY (disables the Retry button + drives the countdown), so it is
+          // intentionally NOT clamped — a 42-minute server wait must show as 42 min.
+          const headerSec = parseRetryAfterSeconds(res.headers);
           const retryAfter =
             typeof body.retryAfter === "number"
               ? body.retryAfter
-              : Number.isFinite(headerRetry) && headerRetry > 0
-                ? headerRetry
-                : undefined;
+              : (headerSec ?? undefined);
           if (!controller.signal.aborted) {
             setState({
               kind: "error",

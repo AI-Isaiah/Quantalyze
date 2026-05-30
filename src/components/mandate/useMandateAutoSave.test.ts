@@ -28,9 +28,17 @@ function okResponse(body: unknown = { success: true }): Response {
   } as unknown as Response;
 }
 
-function errorResponse(status: number, body: unknown, retryAfter?: string): Response {
+function errorResponse(
+  status: number,
+  body: unknown,
+  retryAfter?: string,
+  dateHeader?: string,
+): Response {
   const headers = new Headers();
   if (retryAfter !== undefined) headers.set("Retry-After", retryAfter);
+  // Optional Date header — the base the HTTP-date Retry-After form resolves
+  // against (server clock). Needed to exercise the date-delta parse path.
+  if (dateHeader !== undefined) headers.set("Date", dateHeader);
   return {
     ok: false,
     status,
@@ -321,6 +329,41 @@ describe("useMandateAutoSave", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(result.current.saveState).toBe("saved");
     expect(result.current.fieldErrors.max_weight).toBeUndefined();
+  });
+
+  // B20 regression: an HTTP-date Retry-After in the PAST, WITH a Date header,
+  // now resolves to the 5s default (parseRetryAfterSeconds returns null for a
+  // non-positive delta → `?? 5`). Pre-B20 the inline `Math.max(1, Math.ceil(...))`
+  // floored a past-date delta to 1s. This pins the new 5s value THROUGH the hook
+  // (the primitive-level past-date→null is unit-tested separately); a revert to
+  // the old 1s floor would fire the retry at 1000ms and fail the mid-wait assert.
+  it("B20 past HTTP-date Retry-After (with Date header) waits the 5s default, not 1s", async () => {
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(
+        errorResponse(
+          429,
+          { error: "Too many" },
+          "Wed, 21 Oct 2026 07:28:00 GMT", // Retry-After: 10s in the PAST
+          "Wed, 21 Oct 2026 07:28:10 GMT", // Date (server clock) base
+        ),
+      )
+      .mockResolvedValueOnce(okResponse());
+
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    await act(async () => {
+      const promise = result.current.save("max_weight", 0.25);
+      // At 1s the retry must NOT have fired — the old 1s floor would already
+      // show fetch #2 here; the new 5s default keeps it at a single call.
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      // Cross the 5s boundary — the retry now fires and succeeds.
+      await vi.advanceTimersByTimeAsync(4000);
+      await promise;
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(result.current.saveState).toBe("saved");
   });
 
   // NEW-C05-03 regression: a concurrent save() that bumps the generation
