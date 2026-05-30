@@ -50,9 +50,16 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
   if (authResult instanceof NextResponse) return authResult;
   const userId = authResult.userId;
 
+  const { id } = await ctx.params;
+  if (!id || typeof id !== "string") {
+    return NextResponse.json({ error: "id required" }, { status: 400 });
+  }
+
   // audit-2026-05-07 H-0253 follow-up (PR-2 2026-05-28): per-surface key.
   // Was `strategies-draft-get:${userId}`, shared with the list GET in the
   // sibling /strategies/draft/route.ts. Split to :by-id.
+  // B15 (2026-05-30): consume the limiter AFTER input validation so a
+  // malformed request rejected with 400 above never burns a token.
   const rl = await checkLimit(userActionLimiter, `strategies-draft-get-by-id:${userId}`);
   if (!rl.success) {
     if (isRateLimitMisconfigured(rl)) {
@@ -65,11 +72,6 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
       { error: "Too many requests" },
       { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
-  }
-
-  const { id } = await ctx.params;
-  if (!id || typeof id !== "string") {
-    return NextResponse.json({ error: "id required" }, { status: 400 });
   }
 
   const supabase = await createClient();
@@ -116,6 +118,13 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
   if (authResult instanceof NextResponse) return authResult;
   const userId = authResult.userId;
 
+  const { id } = await ctx.params;
+  if (!id || typeof id !== "string") {
+    return NextResponse.json({ error: "id required" }, { status: 400 });
+  }
+
+  // B15 (2026-05-30): consume the limiter AFTER input validation so a
+  // malformed request rejected with 400 above never burns a token.
   const rl = await checkLimit(
     userActionLimiter,
     `strategies-draft-delete:${userId}`,
@@ -131,11 +140,6 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
       { error: "Too many requests" },
       { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
-  }
-
-  const { id } = await ctx.params;
-  if (!id || typeof id !== "string") {
-    return NextResponse.json({ error: "id required" }, { status: 400 });
   }
 
   const supabase = await createClient();

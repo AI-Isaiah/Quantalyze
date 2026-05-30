@@ -58,20 +58,6 @@ function csvErrorEnvelope(
 }
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
-  const rl = await checkLimit(
-    csvValidateLimiter,
-    `strategies-csv-validate:${user.id}`,
-  );
-  if (!rl.success) {
-    return csvErrorEnvelope(
-      "CSV_RATE_LIMIT",
-      "Too many requests. Wait a minute and try again.",
-      {},
-      429,
-      { headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
   // Adversarial-review fix 2026-05-02: short-circuit oversize uploads on
   // Content-Length BEFORE req.formData() buffers the entire body. The
   // file.size check at line 73 fires only after the multipart parser
@@ -132,6 +118,24 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     return csvErrorEnvelope(
       "CSV_INVALID_FORMAT",
       "wizard_session_id must be a valid UUID.",
+    );
+  }
+
+  // B15 limiter-ordering: consume the rate-limit token only AFTER all pure
+  // input validation (Content-Length cap, multipart parse, file
+  // presence/size, fmt enum, wizard_session_id UUID) so a malformed request
+  // is rejected with 400 without burning one of the caller's own tokens.
+  const rl = await checkLimit(
+    csvValidateLimiter,
+    `strategies-csv-validate:${user.id}`,
+  );
+  if (!rl.success) {
+    return csvErrorEnvelope(
+      "CSV_RATE_LIMIT",
+      "Too many requests. Wait a minute and try again.",
+      {},
+      429,
+      { headers: { "Retry-After": String(rl.retryAfter) } },
     );
   }
 

@@ -45,19 +45,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Cross-lambda rate limit on sensitive identity-write actions. Falls open
-  // when Upstash env vars are missing (local dev). See src/lib/ratelimit.ts.
-  const rl = await checkLimit(userActionLimiter, `attestation:${user.id}`);
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "Rate limit exceeded" },
-      {
-        status: 429,
-        headers: { "Retry-After": String(rl.retryAfter) },
-      },
-    );
-  }
-
   let body: { accepted?: boolean };
   try {
     body = await req.json();
@@ -69,6 +56,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json(
       { error: "Attestation must be explicitly accepted" },
       { status: 400 },
+    );
+  }
+
+  // Cross-lambda rate limit on sensitive identity-write actions. Falls open
+  // when Upstash env vars are missing (local dev). See src/lib/ratelimit.ts.
+  // Consumed AFTER input validation so a malformed/invalid request rejected
+  // with 400 never burns one of the caller's own rate-limit tokens.
+  const rl = await checkLimit(userActionLimiter, `attestation:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded" },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
     );
   }
 

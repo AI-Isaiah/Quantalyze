@@ -51,19 +51,19 @@ import type { User } from "@supabase/supabase-js";
 export const maxDuration = 300;
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
+  const body = await req.json();
+  const { strategy_id } = body;
+
+  if (!strategy_id || typeof strategy_id !== "string") {
+    return NextResponse.json({ error: "Missing strategy_id" }, { status: 400 });
+  }
+
   const rl = await checkLimit(userActionLimiter, `keys-sync:${user.id}`);
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },
       { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
-  }
-
-  const body = await req.json();
-  const { strategy_id } = body;
-
-  if (!strategy_id || typeof strategy_id !== "string") {
-    return NextResponse.json({ error: "Missing strategy_id" }, { status: 400 });
   }
 
   // Verify ownership via the user-scoped client so we get a clean

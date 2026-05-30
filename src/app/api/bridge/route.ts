@@ -27,6 +27,24 @@ export async function POST(req: NextRequest) {
   const denied = await assertProfileApproved(supabase, user.id);
   if (denied) return denied;
 
+  let body: { portfolio_id?: string; underperformer_strategy_id?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  const { portfolio_id, underperformer_strategy_id } = body;
+  if (!portfolio_id || !underperformer_strategy_id) {
+    return NextResponse.json(
+      { error: "portfolio_id and underperformer_strategy_id are required" },
+      { status: 400 },
+    );
+  }
+
+  // B15 limiter-ordering: consume the rate-limit token only AFTER input
+  // validation so a malformed/invalid request rejected with 400 above does
+  // not burn one of the caller's own tokens.
   const rl = await checkLimit(userActionLimiter, `bridge:${user.id}`);
   if (!rl.success) {
     // G15-046: surface limiter misconfiguration as 503 so canary alerts
@@ -53,21 +71,6 @@ export async function POST(req: NextRequest) {
         status: 429,
         headers: { "Retry-After": String(rl.retryAfter) },
       },
-    );
-  }
-
-  let body: { portfolio_id?: string; underperformer_strategy_id?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
-
-  const { portfolio_id, underperformer_strategy_id } = body;
-  if (!portfolio_id || !underperformer_strategy_id) {
-    return NextResponse.json(
-      { error: "portfolio_id and underperformer_strategy_id are required" },
-      { status: 400 },
     );
   }
 

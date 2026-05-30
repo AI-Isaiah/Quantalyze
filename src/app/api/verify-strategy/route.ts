@@ -18,7 +18,10 @@ function isValidEmail(email: string): boolean {
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
-  // IP rate limit before any DB or Railway work
+  // IP rate limit before any DB or Railway work.
+  // B15 limit-first: public/unauthenticated per-IP surface — rate-limit BEFORE
+  // body validation is intentional (reject a scraper/flood cheaply before
+  // parsing). See limiter-ordering.test.ts PUBLIC_IP_EXCEPTION.
   const ip = getClientIp(req.headers);
   const rl = await checkLimit(publicIpLimiter, `verify-strategy:${ip}`);
   if (!rl.success) {

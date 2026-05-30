@@ -3,8 +3,8 @@ import { z } from "zod";
 import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { withAuthLimited } from "@/lib/api/withAuthLimited";
+import { userActionLimiter } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { REJECTION_REASONS } from "@/lib/bridge-outcome-schema";
 
@@ -96,24 +96,23 @@ const BODY_SCHEMA = z
     }
   });
 
-export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextResponse> => {
+// B15 (audit-2026-05-07): withAuthLimited enforces auth -> validate -> limit,
+// so an invalid outcome payload (bad uuid, superRefine failure, oversized note)
+// 400s WITHOUT burning a userActionLimiter token. Pre-B15 the limiter ran
+// before BODY_SCHEMA.safeParse, so a malformed body spent one of the user's
+// shared 5/min sensitive-POST tokens before rejection.
+export const POST = withAuthLimited(
+  {
+    limiter: userActionLimiter,
+    key: (user) => `bridge_outcome:${user.id}`,
+    schema: BODY_SCHEMA,
+  },
+  async (
+    _req: NextRequest,
+    user: User,
+    parsed: z.infer<typeof BODY_SCHEMA>,
+  ): Promise<NextResponse> => {
   const supabase = await createClient();
-
-  const rl = await checkLimit(userActionLimiter, `bridge_outcome:${user.id}`);
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
-  const parsed = BODY_SCHEMA.safeParse(await req.json().catch(() => null));
-  if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Invalid request body", issues: parsed.error.issues },
-      { status: 400 },
-    );
-  }
 
   // match_decisions has no allocator-self-SELECT RLS policy, so this check
   // runs through the admin client. The .eq("allocator_id", user.id) is the
@@ -123,7 +122,7 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
     .from("match_decisions")
     .select("id")
     .eq("allocator_id", user.id)
-    .eq("strategy_id", parsed.data.strategy_id)
+    .eq("strategy_id", parsed.strategy_id)
     .eq("decision", "sent_as_intro")
     .maybeSingle();
   if (!decision) {
@@ -141,13 +140,13 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
     .upsert(
       {
         allocator_id: user.id,
-        strategy_id: parsed.data.strategy_id,
+        strategy_id: parsed.strategy_id,
         match_decision_id: decision.id,
-        kind: parsed.data.kind,
-        percent_allocated: parsed.data.percent_allocated ?? null,
-        allocated_at: parsed.data.allocated_at ?? null,
-        rejection_reason: parsed.data.rejection_reason ?? null,
-        note: parsed.data.note ?? null,
+        kind: parsed.kind,
+        percent_allocated: parsed.percent_allocated ?? null,
+        allocated_at: parsed.allocated_at ?? null,
+        rejection_reason: parsed.rejection_reason ?? null,
+        note: parsed.note ?? null,
         needs_recompute: true,
       },
       { onConflict: "allocator_id,strategy_id" },
@@ -181,10 +180,10 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
     entity_type: "bridge_outcome",
     entity_id: inserted.id as string,
     metadata: {
-      strategy_id: parsed.data.strategy_id,
-      kind: parsed.data.kind,
-      percent_allocated: parsed.data.percent_allocated ?? null,
-      rejection_reason: parsed.data.rejection_reason ?? null,
+      strategy_id: parsed.strategy_id,
+      kind: parsed.kind,
+      percent_allocated: parsed.percent_allocated ?? null,
+      rejection_reason: parsed.rejection_reason ?? null,
     },
   });
 

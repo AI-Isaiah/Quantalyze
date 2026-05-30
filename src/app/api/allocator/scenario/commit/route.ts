@@ -319,26 +319,6 @@ function scheduleBackground(task: () => Promise<void>): void {
 }
 
 export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUser): Promise<NextResponse> => {
-  const rl = await checkLimit(userActionLimiter, `scenario_commit:${user.id}`);
-  if (!rl.success) {
-    if (isRateLimitMisconfigured(rl)) {
-      return NextResponse.json(
-        { error: "Rate limiter unavailable" },
-        {
-          status: 503,
-          headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
-        },
-      );
-    }
-    return NextResponse.json(
-      { error: "Too many requests" },
-      {
-        status: 429,
-        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
-      },
-    );
-  }
-
   // Read the raw body bytes once. The bytes drive (a) JSON parse + zod
   // validation and (b) the SHA-256 request_hash used to bind Idempotency-Key
   // cache rows to the exact body. Earlier implementations only matched on
@@ -469,6 +449,34 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
     } else {
       normalisedDiffs.push(d);
     }
+  }
+
+  // B15 limiter-ordering: consume the rate-limit token only AFTER all pure
+  // input validation has passed (body read, JSON parse, CommitBodySchema,
+  // Idempotency-Key regex, voluntary_modify percent-encoding). A malformed /
+  // invalid request now returns 400 WITHOUT burning one of the caller's own
+  // tokens — the token is reserved for requests that reach the side-effecting
+  // RPC below. Canonical order: auth -> input-validation -> rate-limit ->
+  // handler. The limiter variable, key string, and 503/429 deny shape are
+  // unchanged from the original top-of-handler block.
+  const rl = await checkLimit(userActionLimiter, `scenario_commit:${user.id}`);
+  if (!rl.success) {
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Rate limiter unavailable" },
+        {
+          status: 503,
+          headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+        },
+      );
+    }
+    return NextResponse.json(
+      { error: "Too many requests" },
+      {
+        status: 429,
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+      },
+    );
   }
 
   const supabase = await createClient();

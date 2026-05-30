@@ -36,6 +36,27 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  let rawBody: unknown;
+  try {
+    rawBody = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  const parsed = SimulatorRequestSchema.safeParse(rawBody);
+  if (!parsed.success) {
+    return NextResponse.json(
+      {
+        error:
+          "portfolio_id and candidate_strategy_id are required and must be valid UUIDs",
+      },
+      { status: 400 },
+    );
+  }
+
+  // B15: rate-limit AFTER input validation so a malformed/invalid request
+  // (400) does not burn one of the caller's own rate-limit tokens. The
+  // limiter still runs before any side-effecting work below.
   const rl = await checkLimit(simulatorLimiter, `simulator:${user.id}`);
   if (!rl.success) {
     // G15-046: limiter-misconfigured fail-CLOSED returns 503 so the
@@ -63,24 +84,6 @@ export async function POST(req: NextRequest) {
         status: 429,
         headers: { "Retry-After": String(rl.retryAfter) },
       },
-    );
-  }
-
-  let rawBody: unknown;
-  try {
-    rawBody = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
-
-  const parsed = SimulatorRequestSchema.safeParse(rawBody);
-  if (!parsed.success) {
-    return NextResponse.json(
-      {
-        error:
-          "portfolio_id and candidate_strategy_id are required and must be valid UUIDs",
-      },
-      { status: 400 },
     );
   }
 

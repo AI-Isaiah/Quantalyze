@@ -89,14 +89,6 @@ export async function POST(req: NextRequest) {
   const denied = await assertProfileApproved(supabase, user.id);
   if (denied) return denied;
 
-  const rl = await checkLimit(userActionLimiter, `intro:${user.id}`);
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
   // Defense-in-depth: verify the user has an allocator role before allowing
   // intro requests. RLS on contact_requests is the DB-layer gate, but a broken
   // policy would silently let any authenticated user insert rows.
@@ -119,6 +111,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       { error: "Invalid request body", issues: parsed.error.issues },
       { status: 400 },
+    );
+  }
+
+  const rl = await checkLimit(userActionLimiter, `intro:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
   }
 

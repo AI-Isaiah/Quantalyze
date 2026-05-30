@@ -46,18 +46,6 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  // 30/min per user — matches the watchlist toggle rate (the closest
-  // sibling allocator-write surface). Aligns the alias rename surface
-  // with the convention the rest of the dashboard's mutating self-
-  // actions follow (audit-2026-05-07 G8.B.7).
-  const rl = await checkLimit(mandateAutoSaveLimiter, `alias:${user.id}`);
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
   let body: AliasBody;
   try {
     body = (await req.json()) as AliasBody;
@@ -98,6 +86,20 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json(
       { error: "alias must be a string or null" },
       { status: 400 },
+    );
+  }
+
+  // 30/min per user — matches the watchlist toggle rate (the closest
+  // sibling allocator-write surface). Aligns the alias rename surface
+  // with the convention the rest of the dashboard's mutating self-
+  // actions follow (audit-2026-05-07 G8.B.7). Consumed AFTER input
+  // validation so a malformed/invalid request rejected with 400 does
+  // not burn one of the caller's own rate-limit tokens (B15).
+  const rl = await checkLimit(mandateAutoSaveLimiter, `alias:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
   }
 

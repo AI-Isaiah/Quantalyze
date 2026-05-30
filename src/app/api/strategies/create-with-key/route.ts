@@ -25,17 +25,6 @@ function pickPlaceholderCodename(): string {
 }
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
-  const rl = await checkLimit(
-    userActionLimiter,
-    `strategies-create-with-key:${user.id}`,
-  );
-  if (!rl.success) {
-    return NextResponse.json(
-      { code: "KEY_RATE_LIMIT", error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== "object") {
     return NextResponse.json(
@@ -107,6 +96,20 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "Label too long" },
       { status: 400 },
+    );
+  }
+
+  // Rate-limit consumed only AFTER all input validation passes, so a
+  // malformed request (rejected above with 400) does not burn one of the
+  // caller's own tokens (B15 limiter-ordering: auth -> validate -> limit).
+  const rl = await checkLimit(
+    userActionLimiter,
+    `strategies-create-with-key:${user.id}`,
+  );
+  if (!rl.success) {
+    return NextResponse.json(
+      { code: "KEY_RATE_LIMIT", error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
   }
 

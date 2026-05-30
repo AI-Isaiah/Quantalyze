@@ -90,7 +90,14 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
   if (authResult instanceof NextResponse) return authResult;
   const userId = authResult.userId;
 
+  const { id } = await ctx.params;
+  if (!id || typeof id !== "string") {
+    return NextResponse.json({ error: "id required" }, { status: 400 });
+  }
+
   // Voice-D10: dedicated limiter; does not share budget with userActionLimiter.
+  // B15: consume the token AFTER input validation so a malformed request
+  // rejected with 400 never burns one of the caller's own rate-limit tokens.
   const rl = await checkLimit(
     bridgeOutcomeCurvesLimiter,
     `bridge_outcome_curves:${userId}`,
@@ -100,11 +107,6 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
       { error: "Too many requests" },
       { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
-  }
-
-  const { id } = await ctx.params;
-  if (!id || typeof id !== "string") {
-    return NextResponse.json({ error: "id required" }, { status: 400 });
   }
 
   // Step 1: ownership gate via user-scoped client (RLS enforces allocator_id=auth.uid()).

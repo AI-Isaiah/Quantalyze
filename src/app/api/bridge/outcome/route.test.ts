@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 /**
  * Tests for POST /api/bridge/outcome
@@ -102,6 +102,20 @@ vi.mock("@/lib/supabase/admin", () => ({
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: null,
   checkLimit: async () => STATE.checkLimitResult,
+  // B15: route now uses withAuthLimited, which denies via rateLimitDenyJson.
+  rateLimitDenyJson: (rl: { retryAfter: number; reason?: string }) =>
+    NextResponse.json(
+      {
+        error:
+          rl.reason === "ratelimit_misconfigured"
+            ? "Rate limiter unavailable"
+            : "Too many requests",
+      },
+      {
+        status: rl.reason === "ratelimit_misconfigured" ? 503 : 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
+    ),
 }));
 
 // UUIDs with RFC 4122 v4 format for Zod strict uuid() validation

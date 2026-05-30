@@ -31,6 +31,26 @@ export async function POST(req: NextRequest) {
   const denied = await assertProfileApproved(supabase, user.id);
   if (denied) return denied;
 
+  let body: { portfolio_id?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const portfolioId = body.portfolio_id;
+  if (!portfolioId) {
+    return NextResponse.json(
+      { error: "portfolio_id is required" },
+      { status: 400 },
+    );
+  }
+
+  // B15 limiter-ordering: consume the rate-limit token AFTER input
+  // validation (body parse 400 + portfolio_id presence 400) so a malformed
+  // request is rejected without burning one of the caller's own tokens.
+  // Authorization (assertPortfolioOwnership 403 below) and the analytics
+  // round-trip stay after the limiter.
   // Audit-2026-05-07 C-0107 (api-contract c8): apply userActionLimiter
   // per ADR-0004. The optimizer fires a 15s Python round-trip on every
   // call; pre-fix any auth user could hammer it. The 5/min/user cap is
@@ -65,21 +85,6 @@ export async function POST(req: NextRequest) {
       );
     }
   };
-
-  let body: { portfolio_id?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-
-  const portfolioId = body.portfolio_id;
-  if (!portfolioId) {
-    return NextResponse.json(
-      { error: "portfolio_id is required" },
-      { status: 400 },
-    );
-  }
 
   // Audit-2026-05-07 C-0108 (red-team c5): assertPortfolioOwnership is
   // verified to perform an explicit `.eq('id', portfolioId).eq('user_id',

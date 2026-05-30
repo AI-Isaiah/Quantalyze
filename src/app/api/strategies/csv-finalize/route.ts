@@ -751,23 +751,6 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // piece for csv-finalize specifically.
   const correlation_id = crypto.randomUUID();
 
-  const rl = await checkLimit(
-    csvValidateLimiter,
-    `strategies-csv-finalize:${user.id}`,
-  );
-  if (!rl.success) {
-    return NextResponse.json(
-      {
-        ok: false,
-        code: "CSV_RATE_LIMIT",
-        human_message: "Too many requests. Wait a minute and try again.",
-        debug_context: {},
-        correlation_id,
-      },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== "object") {
     return NextResponse.json(
@@ -937,6 +920,30 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         correlation_id,
       },
       { status: 400 },
+    );
+  }
+
+  // B15 (2026-05-30): rate-limit consumption runs AFTER all pure input
+  // validation (body parse, wizard_session_id/fmt, daily_returns_series incl
+  // the 5000-row cap, strategy_name, metadata) and BEFORE any side-effecting
+  // work (the unified /process-key dispatch and the finalize_csv_strategy
+  // RPC). Pre-fix this checkLimit ran first, so a malformed request burned one
+  // of the caller's own tokens before being rejected with a 400. The limiter,
+  // key string, and inline 429 envelope are unchanged — only position moved.
+  const rl = await checkLimit(
+    csvValidateLimiter,
+    `strategies-csv-finalize:${user.id}`,
+  );
+  if (!rl.success) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_RATE_LIMIT",
+        human_message: "Too many requests. Wait a minute and try again.",
+        debug_context: {},
+        correlation_id,
+      },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
   }
 
