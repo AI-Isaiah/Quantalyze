@@ -16,7 +16,24 @@ import type { WidgetProps } from "../lib/types";
 
 type LazyWidget = React.LazyExoticComponent<ComponentType<WidgetProps>>;
 
-export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
+/**
+ * The canonical set of live widget ids (H-0157 / M-1096). `WIDGET_COMPONENTS` is
+ * typed `Record<WidgetId, LazyWidget>`, so a missing entry or a typo'd key is a
+ * COMPILE error rather than a silent runtime "Unknown widget" fallback — the
+ * compiler enforces 1:1 coverage. (The legacy `WIDGET_REGISTRY` this finding
+ * referenced was deleted in B7b; `WidgetId` is now the single source of truth,
+ * and `RiskTabPanel.RISK_WIDGETS` is typed against it so the panel can only
+ * mount ids that exist here.)
+ */
+export type WidgetId =
+  | "var-expected-shortfall"
+  | "tail-risk"
+  | "risk-decomposition"
+  | "correlation-matrix"
+  | "alpha-beta-decomposition"
+  | "regime-detector";
+
+export const WIDGET_COMPONENTS: Record<WidgetId, LazyWidget> = {
   // ── Risk (RiskTabPanel) ─────────────────────────────────────────────
   "var-expected-shortfall": lazy(() =>
     import("./risk/VarExpectedShortfall").then((m) => ({ default: m.VarExpectedShortfall })),

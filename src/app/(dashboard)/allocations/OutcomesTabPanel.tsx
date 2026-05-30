@@ -16,8 +16,9 @@ export function OutcomesTabPanel(props: MyAllocationDashboardPayload) {
   return (
     <div data-tab-panel="outcomes">
       <OutcomesWidget
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        data={props as any}
+        // B21: `data` is `unknown` on WidgetProps; OutcomesWidget validates it
+        // through outcomesWidgetDataSchema, so the whole payload passes as-is.
+        data={props}
         timeframe="1YTD"
         width={0}
         height={0}

@@ -25,8 +25,12 @@ describe("<WidgetState>", () => {
     expect(pulse).not.toBeNull();
   });
 
-  it("Test 2: mode='empty' with no empty prop renders a centered Card without error styling", () => {
-    const { container } = render(<WidgetState mode="empty" />);
+  it("Test 2: mode='empty' renders a centered Card without error styling", () => {
+    // H-1223: `empty` is now a required payload on the empty variant (the
+    // permissive no-payload form is unrepresentable), so supply a minimal one.
+    const { container } = render(
+      <WidgetState mode="empty" empty={{ title: "Nothing yet" }} />,
+    );
     // No role='alert' — empty is presentational, not an alert.
     expect(container.querySelector("[role='alert']")).toBeNull();
     // Centered Card chrome reused from EmptyState pattern.

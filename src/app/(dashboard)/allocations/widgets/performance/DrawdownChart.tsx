@@ -4,6 +4,7 @@ import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { deriveSnapshotDrawdowns } from "../../lib/drawdown";
 import { buildCompositeReturns } from "../lib/composite-returns";
+import { riskWidgetDataSchema } from "../lib/widget-data";
 import { useMemo, useState } from "react";
 import {
   Area,
@@ -69,7 +70,18 @@ export default function DrawdownChart({
       return deriveSnapshotDrawdowns(equityDailyPoints);
     }
 
-    const composite: DailyPoint[] = data?.compositeReturns ?? buildCompositeReturns(data?.strategies ?? []);
+    // B21: validate `data` against the shared risk-widget contract before it
+    // feeds the composite / cumulative-equity math. This widget cannot use the
+    // `withWidgetBoundary` HOC (it returns ComponentType<WidgetProps> and would
+    // drop the `equityDailyPoints`/`scenarioDailyPoints` parallel props that
+    // drive the only live mount, ScenarioComposer); inline `safeParse` is the
+    // equivalent. At that mount `data` is `{}` and this branch is dead (the
+    // `equityDailyPoints !== undefined` early-return above fires first), so the
+    // safeParse only guards a future non-parallel-prop mount — closing the class.
+    const parsed = riskWidgetDataSchema.safeParse(data);
+    if (!parsed.success) return [];
+    const composite: DailyPoint[] =
+      parsed.data.compositeReturns ?? buildCompositeReturns(parsed.data.strategies);
     if (composite.length === 0) return [];
 
     // Compute cumulative equity, then drawdown from peak

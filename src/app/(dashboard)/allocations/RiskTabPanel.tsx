@@ -2,7 +2,7 @@
 
 import { Suspense } from "react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
-import { WIDGET_COMPONENTS } from "./widgets";
+import { WIDGET_COMPONENTS, type WidgetId } from "./widgets";
 
 /**
  * Phase 09.1 D-06 — Risk tab body (Plan 10).
@@ -15,7 +15,10 @@ import { WIDGET_COMPONENTS } from "./widgets";
  * analytics for Risk-tab widgets too.
  */
 
-const RISK_WIDGETS = [
+// H-0157 / M-1096: typed against WidgetId, so the panel can only list ids that
+// exist in WIDGET_COMPONENTS — a typo or a registry/panel divergence is a
+// compile error, not a silent runtime "Widget unavailable" tile.
+const RISK_WIDGETS: readonly WidgetId[] = [
   "var-expected-shortfall",
   "tail-risk",
   "risk-decomposition",
@@ -55,8 +58,10 @@ export function RiskTabPanel(props: MyAllocationDashboardPayload) {
               }
             >
               <Component
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                data={props as any}
+                // B21: `data` is `unknown` on WidgetProps; each widget validates
+                // it through its own schema, so the whole payload passes as-is
+                // (no `as any` escape hatch).
+                data={props}
                 timeframe="1YTD"
                 width={0}
                 height={0}
