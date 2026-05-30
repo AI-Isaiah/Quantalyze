@@ -415,6 +415,43 @@ describe("StarToggle", () => {
     vi.useRealTimers();
   });
 
+  it("does NOT hot-retry on Retry-After: 0 — falls back to the 600ms default (B20 / NEW-C05-01)", async () => {
+    // Pre-B20 the parser accepted `sec >= 0`, so `Retry-After: 0` → `min(0,30s)`
+    // = 0ms delay → the retry fired on the next tick, hammering the still-
+    // throttled endpoint (the hot-retry class). The shared parser rejects 0
+    // (returns null) → the 600ms DEFAULT_RETRY_DELAY_MS applies. A regression to
+    // the 0ms hot-retry would call fetchMock the 2nd time at ~0ms.
+    vi.useFakeTimers();
+    const onToggle = vi.fn();
+    const headers = new Headers({ "Retry-After": "0" });
+    fetchMock.mockResolvedValue({ ok: false, status: 429, headers } as unknown as Response);
+
+    render(
+      <StarToggle
+        strategyId={STRATEGY_ID}
+        name={STRATEGY_NAME}
+        starred={false}
+        onToggle={onToggle}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+
+    // Drain microtasks so the first fetch resolves and the retry timer is scheduled.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Just under the 600ms default — second fetch MUST NOT have fired. A 0ms
+    // hot-retry regression would already show 2 calls here.
+    await vi.advanceTimersByTimeAsync(599);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Cross the 600ms boundary — the retry fires.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+  });
+
   it("uses the network-specific hint when fetch rejects (no response)", async () => {
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
 

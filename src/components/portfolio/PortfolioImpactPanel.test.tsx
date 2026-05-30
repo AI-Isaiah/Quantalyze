@@ -266,6 +266,36 @@ describe("<PortfolioImpactPanel>", () => {
     expect(screen.getByText(/Try again in 42 min/)).toBeInTheDocument();
   });
 
+  it("B20: honors an HTTP-date Retry-After header (no body.retryAfter) — disables retry", async () => {
+    // Pre-B20 the header was parsed with raw Number(), so an RFC 9110 HTTP-date
+    // form (which Vercel edge / Upstash may emit) → NaN → retryAfter undefined →
+    // the Retry button stayed ENABLED and a re-click just re-429'd. The shared
+    // parser resolves the date against the response's own Date header.
+    mockFetch(async () =>
+      new Response(JSON.stringify({ error: "Too many simulations." }), {
+        status: 429,
+        headers: {
+          "Content-Type": "application/json",
+          Date: "Wed, 21 Oct 2026 07:28:00 GMT",
+          "Retry-After": "Wed, 21 Oct 2026 07:30:00 GMT", // +120s
+        },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="HTTP-date limited"
+        onClose={() => {}}
+      />,
+    );
+
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).toBeDisabled();
+    expect(screen.getByText(/Try again in 2 min/)).toBeInTheDocument();
+  });
+
   it("renders the insufficient_data empty state", async () => {
     mockFetch(async () =>
       new Response(

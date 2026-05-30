@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useTransition } from "react";
+import { parseRetryAfterSeconds } from "@/lib/retry";
 
 interface StarToggleProps {
   strategyId: string;
@@ -68,14 +69,13 @@ export function StarToggle({
       return { ok: false, status: null };
     }
     if (res.ok) return { ok: true };
-    let retryAfterMs: number | undefined;
-    const ra = res.headers?.get?.("Retry-After");
-    if (ra) {
-      const sec = Number(ra);
-      if (Number.isFinite(sec) && sec >= 0) {
-        retryAfterMs = Math.min(sec * 1000, MAX_RETRY_DELAY_MS);
-      }
-    }
+    // B20: parse Retry-After through the shared primitive — it never returns
+    // 0/NaN/negative (the old `sec >= 0` admitted `Retry-After: 0` → a 0ms hot-
+    // retry) and handles the HTTP-date form. `null` → undefined → the caller's
+    // DEFAULT_RETRY_DELAY_MS (600ms) fallback. Cap the wait at MAX_RETRY_DELAY_MS.
+    const sec = parseRetryAfterSeconds(res.headers);
+    const retryAfterMs =
+      sec !== null ? Math.min(sec * 1000, MAX_RETRY_DELAY_MS) : undefined;
     return { ok: false, status: res.status, retryAfterMs };
   }
 

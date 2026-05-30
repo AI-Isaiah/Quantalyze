@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AllocatorPreferences } from "@/lib/preferences";
 import { SELF_EDITABLE_PREFERENCE_FIELDS } from "@/lib/preferences";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { parseRetryAfterSeconds, abortableWait, RateLimitGate } from "@/lib/retry";
 
 export type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -81,13 +82,13 @@ export function useMandateAutoSave(
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(initialLastSavedAt);
   const [savingFields, setSavingFields] = useState<Set<MandateField>>(new Set());
 
-  // NEW-C05-07: shared rate-limit gate across all concurrent field saves.
-  // When ANY field save receives a 429, all subsequent saves for the same
-  // component instance await this timestamp before attempting a fetch. This
-  // prevents the N-field thundering herd (each field reads the same
-  // Retry-After, sleeps identically, and retries simultaneously) from
-  // re-tripping the limiter on the very next attempt.
-  const rateLimitedUntilRef = useRef<number>(0);
+  // NEW-C05-07: shared rate-limit gate across all concurrent field saves (B20
+  // RateLimitGate primitive). When ANY field save receives a 429 it blocks the
+  // gate; all subsequent saves for the same component instance wait out that
+  // window before attempting a fetch. This prevents the N-field thundering herd
+  // (each field reads the same Retry-After, sleeps identically, and retries
+  // simultaneously) from re-tripping the limiter on the very next attempt.
+  const gateRef = useRef(new RateLimitGate());
 
   // 2s fade-timer for "saved" -> "idle" transition (WizardChrome toast shape).
   // NEW-C05-05: gate the idle transition on savingFields.size === 0 so a
@@ -224,18 +225,16 @@ export function useMandateAutoSave(
         }
 
         // NEW-C05-07: honor the shared rate-limit gate. If another concurrent
-        // field save received a 429 and set rateLimitedUntilRef, wait until
-        // that timestamp before sending this request. This prevents N concurrent
-        // fields from all re-hitting the limiter on the same retry window.
-        const rateLimitedUntil = rateLimitedUntilRef.current;
-        // IMP-2: snapshot once so the guard and the sleep duration use the
-        // same timestamp — a second Date.now() call could return a slightly
-        // smaller value under heavy load and produce a near-zero or negative
-        // waitMs (benign for wait(), but misleading about what fired).
+        // field save received a 429 and blocked the gate, wait out that window
+        // before sending this request. This prevents N concurrent fields from
+        // all re-hitting the limiter on the same retry window.
+        // IMP-2: snapshot Date.now() once so the guard and the sleep duration use
+        // the same instant — a second Date.now() under heavy load could yield a
+        // near-zero/negative wait (benign, but misleading about what fired).
         const nowBeforeRateWait = Date.now();
-        if (rateLimitedUntil > nowBeforeRateWait) {
-          const waitMs = rateLimitedUntil - nowBeforeRateWait;
-          await wait(waitMs, mountAbortRef.current.signal);
+        const gateWaitMs = gateRef.current.remainingMs(nowBeforeRateWait);
+        if (gateWaitMs > 0) {
+          await abortableWait(gateWaitMs, mountAbortRef.current.signal);
           if (mountAbortRef.current.signal.aborted) {
             return { ok: false, reason: "cancelled", message: "Cancelled." };
           }
@@ -304,7 +303,7 @@ export function useMandateAutoSave(
           // server, so retry with exponential backoff is safe.
           // mount-abort + timeout are handled above and never reach here.
           if (attempt < MAX_ATTEMPTS) {
-            await wait(1000 * Math.pow(2, attempt - 1), mountAbortRef.current.signal);
+            await abortableWait(1000 * Math.pow(2, attempt - 1), mountAbortRef.current.signal);
             if (mountAbortRef.current.signal.aborted) {
               return { ok: false, reason: "cancelled", message: "Cancelled." };
             }
@@ -340,33 +339,20 @@ export function useMandateAutoSave(
         }
 
         if (res.status === 429) {
-          // NEW-C05-01: parse Retry-After safely. The header may be an integer
-          // seconds count OR an HTTP-date string. Number("Mon, 26 May…") = NaN.
-          // Fall back to 5s on NaN/negative; clamp to [1, 30] so a hostile
-          // server cannot pin this hook for minutes.
-          const rawRetryAfter = res.headers.get("Retry-After");
-          let retryAfterSec = rawRetryAfter !== null ? Number(rawRetryAfter) : NaN;
-          if (!Number.isFinite(retryAfterSec) || retryAfterSec <= 0) {
-            // HTTP-date or invalid value: derive seconds from the Date header
-            // if available, otherwise default to 5s.
-            const dateHeader = res.headers.get("Date");
-            const retryDateMs = rawRetryAfter ? Date.parse(rawRetryAfter) : NaN;
-            const baseDateMs = dateHeader ? Date.parse(dateHeader) : NaN;
-            if (Number.isFinite(retryDateMs) && Number.isFinite(baseDateMs)) {
-              retryAfterSec = Math.max(1, Math.ceil((retryDateMs - baseDateMs) / 1000));
-            } else {
-              retryAfterSec = 5;
-            }
-          }
-          retryAfterSec = Math.min(Math.max(retryAfterSec, 1), 30);
-
-          // NEW-C05-07: update the shared rate-limit gate so all concurrent
-          // field saves for this component also wait out the limiter window
-          // before retrying, preventing the N-field thundering herd.
-          rateLimitedUntilRef.current = Math.max(
-            rateLimitedUntilRef.current,
-            Date.now() + retryAfterSec * 1000,
+          // NEW-C05-01 (B20): parse Retry-After through the shared primitive,
+          // which handles both RFC 9110 forms (delta-seconds + HTTP-date, the
+          // latter resolved against the response's Date header) and NEVER returns
+          // NaN/0/negative. Default to 5s when unparseable; clamp to [1, 30] so a
+          // hostile server cannot pin this hook for minutes.
+          const retryAfterSec = Math.min(
+            Math.max(parseRetryAfterSeconds(res.headers) ?? 5, 1),
+            30,
           );
+
+          // NEW-C05-07: block the shared rate-limit gate so all concurrent field
+          // saves for this component also wait out the limiter window before
+          // retrying, preventing the N-field thundering herd.
+          gateRef.current.blockUntil(Date.now() + retryAfterSec * 1000);
 
           // Budget exhausted: terminate cleanly. Falling through the loop would
           // leave the field pinned in savingFields and a message falsely
@@ -398,8 +384,8 @@ export function useMandateAutoSave(
             setSaveState("error");
           }
           // Cap a hostile/huge Retry-After so the hook can't be pinned for
-          // minutes; the abort-aware wait() also resolves immediately on unmount.
-          await wait(retryAfterSec * 1000, mountAbortRef.current.signal);
+          // minutes; abortableWait() also resolves immediately on unmount.
+          await abortableWait(retryAfterSec * 1000, mountAbortRef.current.signal);
           if (mountAbortRef.current.signal.aborted) {
             return { ok: false, reason: "cancelled", message: "Cancelled." };
           }
@@ -429,7 +415,7 @@ export function useMandateAutoSave(
 
         // 5xx or other unexpected status — exponential backoff if attempts remain.
         if (attempt < MAX_ATTEMPTS) {
-          await wait(1000 * Math.pow(2, attempt - 1), mountAbortRef.current.signal);
+          await abortableWait(1000 * Math.pow(2, attempt - 1), mountAbortRef.current.signal);
           if (mountAbortRef.current.signal.aborted) {
             return { ok: false, reason: "cancelled", message: "Cancelled." };
           }
@@ -451,32 +437,4 @@ export function useMandateAutoSave(
   );
 
   return { saveState, fieldErrors, lastSavedAt, savingFields, save, clearError };
-}
-
-/**
- * Sleep for `ms`, resolving early (and clearing the timer) if `signal` aborts —
- * so an unmount during a backoff/retry-after sleep does not pin the coroutine
- * (and its captured state setters) alive until the timer fires. Resolves rather
- * than rejects on abort so callers' existing post-wait `signal.aborted` checks
- * handle the cancellation uniformly.
- */
-function wait(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    const onAbort = () => resolve();
-    setTimeout(() => {
-      // Normal timer-fire: detach the abort listener so it cannot accumulate on
-      // the component-lifetime signal across repeated backoff sleeps ({ once:
-      // true } only auto-removes it if `abort` actually fires).
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    // On abort, onAbort resolves immediately — freeing the awaiting save() so its
-    // post-wait `signal.aborted` check returns — and { once: true } detaches the
-    // listener. The pending timer then fires harmlessly into the settled promise.
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
 }
