@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 
@@ -458,14 +458,26 @@ describe("Critical regression guards", () => {
   // fails locally + in CI BEFORE any workflow runs, catching the
   // exact regressions a future PR could silently land.
   describe("[CRITICAL-C0293] CI hardening invariants (PR #179)", () => {
-    const WORKFLOW_FILES = [
-      ".github/workflows/ci.yml",
-      ".github/workflows/nightly.yml",
-      ".github/workflows/phase-19-stability.yml",
-      ".github/workflows/supabase-migrate.yml",
-      ".github/workflows/migration-policy.yml",
-      ".github/workflows/migration-policy-self-test.yml",
-    ];
+    // B24 (workflow-security parity): discover EVERY workflow under
+    // .github/workflows/ dynamically rather than enumerating a fixed list.
+    // The prior hardcoded 6-file list silently omitted cassette-refresh.yml
+    // (added after the list was written) — so its two unpinned actions went
+    // unchecked until B24 caught them by hand. A static list is itself the
+    // gap: a new workflow escapes every invariant below. Dynamic discovery
+    // closes the class by construction — any future workflow is automatically
+    // held to the SHA-pin / permissions / concurrency / persist-credentials
+    // baseline.
+    const WORKFLOW_DIR = ".github/workflows";
+    const WORKFLOW_FILES = readdirSync(join(REPO_ROOT, WORKFLOW_DIR))
+      .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
+      .sort()
+      .map((f) => `${WORKFLOW_DIR}/${f}`);
+
+    // Push-capable workflows legitimately KEEP the persisted GITHUB_TOKEN
+    // credential: peter-evans/create-pull-request needs it to `git push` the
+    // auto-PR branch. They are EXEMPT from the persist-credentials:false rule
+    // ONLY — still held to SHA-pin, permissions, and concurrency invariants.
+    const PERSIST_CRED_EXEMPT = new Set([`${WORKFLOW_DIR}/cassette-refresh.yml`]);
 
     // Test helpers — collapse the repeated regex-assertion pattern below.
     function expectMatch(haystack: string, re: RegExp, msg: string): void {
@@ -481,6 +493,28 @@ describe("Critical regression guards", () => {
       expect(m, msg).not.toBeNull();
       return m![1] ?? m![0];
     }
+
+    // B24: fail loud if dynamic discovery breaks (empty glob) or a
+    // known-critical workflow is deleted — a silently-empty WORKFLOW_FILES
+    // would make every per-file loop below vacuously pass, recreating the
+    // exact silent gap B24 exists to close.
+    it("discovers every workflow file dynamically (no silent omissions)", () => {
+      expect(
+        WORKFLOW_FILES.length,
+        "WORKFLOW_FILES is empty/short — readdirSync glob over .github/workflows broke",
+      ).toBeGreaterThanOrEqual(8);
+      for (const required of [
+        `${WORKFLOW_DIR}/cassette-refresh.yml`,
+        `${WORKFLOW_DIR}/migration-drift-check.yml`,
+        `${WORKFLOW_DIR}/ci.yml`,
+        `${WORKFLOW_DIR}/supabase-migrate.yml`,
+      ]) {
+        expect(
+          WORKFLOW_FILES,
+          `${required} missing from discovered workflow set — discovery broke or the file is gone`,
+        ).toContain(required);
+      }
+    });
 
     // retro-PR179-H2: SHA-pin policy. Every `uses:` must reference a
     // 40-character lowercase hex SHA — never a mutable tag (vN, main,
@@ -802,17 +836,19 @@ describe("Critical regression guards", () => {
     });
 
     // retro-PR188-F3 (pr-test-analyzer #42, red-team #39/#42, HIGH/9):
-    // every actions/checkout invocation across all 4 workflow files
-    // MUST set `persist-credentials: false`. Without it, GITHUB_TOKEN
+    // every actions/checkout invocation across the discovered workflow
+    // files MUST set `persist-credentials: false`. Without it, GITHUB_TOKEN
     // is written to .git/config and stays readable to every subsequent
     // step in the same job — including pinned third-party actions
     // (gitleaks-action, lycheeverse/lychee-action, supabase/setup-cli)
     // whose SHAs could in principle be compromised. The PR-188 fix
-    // applied the flag at all 15 sites; this test prevents a future
+    // applied the flag at all sites; this test prevents a future
     // PR from quietly dropping it from a new checkout site or an
-    // existing one.
+    // existing one. PERSIST_CRED_EXEMPT workflows (which push via
+    // create-pull-request and need the credential) are excluded here but
+    // remain bound to every other invariant in this block.
     describe("persist-credentials policy: every actions/checkout sets persist-credentials: false", () => {
-      for (const rel of WORKFLOW_FILES) {
+      for (const rel of WORKFLOW_FILES.filter((r) => !PERSIST_CRED_EXEMPT.has(r))) {
         it(`${rel} — every actions/checkout invocation sets persist-credentials: false`, () => {
           const src = readText(rel);
           // Find each `uses: actions/checkout@...` and the immediate
@@ -944,6 +980,133 @@ describe("Critical regression guards", () => {
           ).toBe(1);
         });
       }
+    });
+
+    // B24 — concurrency on merge-path workflows. A workflow triggered by
+    // `pull_request` or `push` MUST declare a top-level `concurrency:` group
+    // so overlapping runs on the same ref cancel/serialize instead of
+    // racing — wasted CI minutes, and on supabase-migrate two racing
+    // `db push` runs are a real correctness hazard. Schedule- /
+    // workflow_dispatch-only workflows (nightly, phase-19-stability) are
+    // exempt: overlapping scheduled runs are rare and their jobs (issue
+    // dedup, probes) are idempotent.
+    describe("concurrency: PR/push-triggered workflows declare a concurrency group", () => {
+      // Extract the top-level `on:` value (block body OR inline value). The
+      // parser must be robust to: the quoted key (`"on":` / `'on':` — YAML
+      // 1.1's "Norway problem", since bare `on` is the boolean true), blank
+      // lines inside the block, the inline-array (`on: [push]`) and inline
+      // flow-map (`on: {push: …}`) forms, and the single-string form
+      // (`on: push`). A brittle parser here lets a PR/push workflow silently
+      // escape the concurrency invariant — the one rule whose enforcement
+      // keys off parsing `on:` (B24 review finding + red-team).
+      const onValue = (src: string): string => {
+        const lines = src.split("\n");
+        const startRe = /^(?:on|"on"|'on'):(.*)$/;
+        const i = lines.findIndex((l) => startRe.test(l));
+        if (i < 0) return "";
+        const inlineVal = lines[i].match(startRe)![1].trim();
+        if (inlineVal) return inlineVal; // inline: string / [array] / {flow-map}
+        // Block form: collect indented AND blank lines until the next
+        // column-0 key (a non-indented, non-blank line ends the block).
+        const body: string[] = [];
+        for (let j = i + 1; j < lines.length; j++) {
+          const line = lines[j];
+          if (line.trim() === "" || /^[ \t]/.test(line)) {
+            body.push(line);
+            continue;
+          }
+          break;
+        }
+        return body.join("\n");
+      };
+      // pull_request_target listed first so its `pull_request` substring
+      // doesn't shadow it; all four are merge-path / write-class triggers.
+      const MERGE_TRIGGERS = "(pull_request_target|pull_request|push|merge_group)";
+      const isMergePathTriggered = (src: string): boolean => {
+        const val = onValue(src);
+        if (!val) return false;
+        // Inline form (single line): `on: push` | `on: [push, pr]` | `on: {push: …}`
+        if (!val.includes("\n")) return new RegExp(`\\b${MERGE_TRIGGERS}\\b`).test(val);
+        // Block form: an event key at indent, e.g. `  push:` / `  pull_request:`
+        return new RegExp(`^[ \\t]+${MERGE_TRIGGERS}:`, "m").test(val);
+      };
+      const mergePathWorkflows = WORKFLOW_FILES.filter((rel) =>
+        isMergePathTriggered(readText(rel)),
+      );
+      // Pin the EXACT merge-path set by name — if the parser silently
+      // under-detects (a quoted-`on:` / blank-line regression drops a
+      // workflow) or a new PR/push workflow is added, this fails and forces a
+      // conscious update rather than a silent gap.
+      it("classifies exactly the known PR/push-triggered workflows", () => {
+        expect([...mergePathWorkflows].sort()).toEqual([
+          `${WORKFLOW_DIR}/ci.yml`,
+          `${WORKFLOW_DIR}/migration-drift-check.yml`,
+          `${WORKFLOW_DIR}/migration-policy-self-test.yml`,
+          `${WORKFLOW_DIR}/migration-policy.yml`,
+          `${WORKFLOW_DIR}/supabase-migrate.yml`,
+        ]);
+      });
+      // Parser robustness — synthetic fixtures proving the `on:` classifier
+      // is not spelling-/whitespace-sensitive (B24 review + red-team).
+      it("isMergePathTriggered handles quoted, blank-line, inline, and string on: forms", () => {
+        const T = isMergePathTriggered;
+        // quoted key ("Norway problem")
+        expect(T(`"on":\n  pull_request:\n    branches: [main]\n`)).toBe(true);
+        expect(T(`'on':\n  push:\n`)).toBe(true);
+        // a blank line inside the on: block must not truncate detection
+        expect(T(`on:\n  workflow_dispatch:\n\n  push:\n    branches: [main]\n`)).toBe(true);
+        // inline array / flow-map / single-string forms
+        expect(T(`on: [push, pull_request]\n`)).toBe(true);
+        expect(T(`on: {push: {branches: [main]}}\n`)).toBe(true);
+        expect(T(`on: push\n`)).toBe(true);
+        // merge_group + pull_request_target are merge-path / write-class
+        expect(T(`on:\n  merge_group:\n`)).toBe(true);
+        expect(T(`on:\n  pull_request_target:\n`)).toBe(true);
+        // schedule/dispatch-only must NOT be classified merge-path
+        expect(T(`on:\n  schedule:\n    - cron: "0 8 * * *"\n  workflow_dispatch:\n`)).toBe(false);
+      });
+      for (const rel of mergePathWorkflows) {
+        it(`${rel} — declares a top-level concurrency: group`, () => {
+          const src = readText(rel);
+          expect(
+            /^concurrency:/m.test(src),
+            `${rel} is pull_request/push-triggered but has no top-level concurrency: group — overlapping runs on the same ref race/waste CI (B24 workflow-security baseline)`,
+          ).toBe(true);
+        });
+      }
+    });
+
+    // B24 — nightly fail-loud canary guard (H-1026 / B23 M-0849). The
+    // demo-pdf probe's missing-DEMO_PDF_SECRET branch must `::error::` +
+    // `exit 1` so the `if: failure()` issue path fires. A silent `exit 0`
+    // there re-opens the regression this workflow exists to catch (a
+    // rotated/lost secret silently disabling the cold-start canary). Pin the
+    // fail-loud contract at the source-text level so a rebase can't quietly
+    // revert it.
+    describe("nightly demo-pdf canary fails loud on missing DEMO_PDF_SECRET", () => {
+      it("nightly.yml missing-secret guard emits ::error:: + exit 1, never exit 0", () => {
+        const src = readText(".github/workflows/nightly.yml");
+        const guard = findOrFail(
+          src,
+          /if \[ -z "\$DEMO_PDF_SECRET" \]; then([\s\S]*?)\n\s*fi/m,
+          "nightly.yml: DEMO_PDF_SECRET missing-secret guard block not found",
+        );
+        expectMatch(
+          guard,
+          /::error::/,
+          "nightly DEMO_PDF_SECRET guard must emit ::error:: (fail loud, not ::warning::)",
+        );
+        expectMatch(
+          guard,
+          /exit 1/,
+          "nightly DEMO_PDF_SECRET guard must `exit 1` so the if: failure() issue path fires",
+        );
+        expectNoMatch(
+          guard,
+          /exit 0/,
+          "nightly DEMO_PDF_SECRET guard must NOT `exit 0` — silent-green regression (H-1026 / M-0849)",
+        );
+      });
     });
 
     // retro-PR193-M-4 (migration-reviewer MEDIUM/8): the

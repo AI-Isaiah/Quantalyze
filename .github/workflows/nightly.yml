@@ -80,12 +80,18 @@ jobs:
           PLAYWRIGHT_BASE_URL: ${{ vars.STAGING_BASE_URL }}
           DEMO_PDF_SECRET: ${{ secrets.DEMO_PDF_SECRET }}
         run: |
-          # Secondary guard: bail early with a clear message if the secret
-          # is missing, so the workflow doesn't burn a Playwright run on a
-          # 401 that will always fire.
+          # A missing DEMO_PDF_SECRET while the canary is ENABLED
+          # (STAGING_BASE_URL is set, so the preflight gate already passed)
+          # is a misconfiguration, NOT a reason to skip silently. The prior
+          # `::warning::` + `exit 0` greened the job and skipped the
+          # `if: failure()` issue path below — so a rotated/lost secret
+          # silently disabled the cold-start canary, exactly the regression
+          # class this workflow exists to catch (H-1026 / M-0849). Fail loud:
+          # the step goes red, the dedup'd issue step fires, and a maintainer
+          # is paged to re-add the secret.
           if [ -z "$DEMO_PDF_SECRET" ]; then
-            echo "::warning::DEMO_PDF_SECRET not set — skipping PDF probe."
-            exit 0
+            echo "::error::DEMO_PDF_SECRET is not set but the demo-PDF canary is enabled (STAGING_BASE_URL is configured). The cold-start probe cannot authenticate — this is almost always a rotated or lost secret. Re-add DEMO_PDF_SECRET in repo secrets. Failing loud so the nightly-canary-failure issue is filed."
+            exit 1
           fi
           npx playwright test e2e/portfolio-pdf-demo.spec.ts --grep @nightly
       # retro-PR179-H1 (twin) — REMOVED: the demo-PDF probe runs against
