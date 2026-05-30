@@ -201,6 +201,7 @@ function findMutations(file: string, src: string): Mutation[] {
  *     answer (internal state machine, not user-visible).
  */
 const MUTATING_RPC_NAMES: readonly string[] = [
+  "admin_role_mutate",
   "enqueue_compute_job",
   "sanitize_user",
   "send_intro_with_decision",

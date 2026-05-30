@@ -455,15 +455,18 @@ export async function requireRole(
  * the second half of the defense-in-depth: even if a race slips this
  * TS check, the RPC refuses to fire without an admin context.
  *
- * CSRF (audit-2026-05-07 red-team, MED conf 8): when `req` is
- * supplied, mutating-method calls (POST/PUT/PATCH/DELETE) also pass
- * through `assertSameOrigin` — closing the gap where a future caller
- * uses `requireAdmin` STANDALONE inside a mutating route (without
- * going through `withRole` / `withAdminAuth`) and inherits no CSRF
- * defense. The `req` parameter is OPTIONAL only to keep the
- * sub-resource TOCTOU-close call sites (which already ran CSRF in the
- * outer wrapper) source-compatible; new mutating call sites MUST pass
- * `req` so the CSRF gate fires.
+ * CSRF (audit-2026-05-07 red-team, MED conf 8): mutating-method calls
+ * (POST/PUT/PATCH/DELETE) also pass through `assertSameOrigin` — closing
+ * the gap where a future caller uses `requireAdmin` STANDALONE inside a
+ * mutating route (without going through `withRole` / `withAdminAuth`) and
+ * inherits no CSRF defense.
+ *
+ * NEW-C36-01 (B4): `req` is now REQUIRED (was optional). Every mutating
+ * call site MUST thread the NextRequest so the CSRF gate cannot be silently
+ * skipped — omitting it is a compile error, which structurally closes the
+ * standalone-no-CSRF class. All current call sites already pass `req`; GET
+ * sub-resource re-checks pass their handler's request and skip the origin
+ * check via the safe-method branch below.
  *
  * Defense-in-depth (call sites are encouraged to pass `req` even
  * inside a withRole-wrapped handler): an attacker who somehow lands a
@@ -474,18 +477,16 @@ export async function requireRole(
 export async function requireAdmin(
   supabase: SupabaseClient,
   user: User | null,
-  req?: NextRequest,
+  req: NextRequest,
 ): Promise<NextResponse | null> {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  // CSRF defense-in-depth on mutating requests. GET/HEAD/OPTIONS are
-  // safe methods and skip the origin check. We only run the check if
-  // a request object was supplied; older call sites that did not pass
-  // `req` remain compatible (they are all inside withRole/withAdminAuth
-  // wrappers that already ran CSRF). audit-2026-05-07 red-team MED.
+  // CSRF defense-in-depth on mutating requests. GET/HEAD/OPTIONS are safe
+  // methods and skip the origin check. NEW-C36-01 (B4): `req` is required, so
+  // the gate can never be skipped by an omitted argument — a standalone
+  // mutating call site that forgets it fails to compile.
   if (
-    req &&
     req.method !== "GET" &&
     req.method !== "HEAD" &&
     req.method !== "OPTIONS"

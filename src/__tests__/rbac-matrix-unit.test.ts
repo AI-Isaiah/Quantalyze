@@ -39,6 +39,7 @@ const {
   afterSpy,
   logAuditRpcMock,
   createAdminClientMock,
+  adminRoleMutateMock,
 } = vi.hoisted(() => ({
   getUserMock: vi.fn(),
   assertSameOriginMock: vi.fn<(r: unknown) => Response | null>(() => null),
@@ -67,6 +68,9 @@ const {
   }),
   logAuditRpcMock: vi.fn(),
   createAdminClientMock: vi.fn(),
+  // B4: the POST handler routes the grant/revoke mutation through the
+  // admin_role_mutate RPC on the service-role client.
+  adminRoleMutateMock: vi.fn(),
 }));
 
 // Shared supabase client factory used by both `withRole` (via createClient)
@@ -180,6 +184,8 @@ function makeAdminClient() {
         }),
       };
     },
+    // B4: POST routes the grant/revoke mutation through admin_role_mutate.
+    rpc: (name: string, args: unknown) => adminRoleMutateMock(name, args),
   };
 }
 
@@ -325,6 +331,20 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     vi.clearAllMocks();
     assertSameOriginMock.mockReturnValue(null);
     logAuditRpcMock.mockResolvedValue({ data: null, error: null });
+    // B4: default admin_role_mutate result — a successful grant. Tests that
+    // exercise revoke / no-op / error paths override this locally.
+    adminRoleMutateMock.mockResolvedValue({
+      data: {
+        outcome: "granted",
+        was_new_grant: true,
+        removed_rows: 1,
+        is_admin_changed: false,
+        holds_role: true,
+        took_effect: true,
+        roles: [],
+      },
+      error: null,
+    });
     userAppRolesInsertMock.mockResolvedValue({ data: null, error: null });
     userAppRolesDeleteMock.mockResolvedValue({
       data: null,
@@ -366,37 +386,41 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     );
   }
 
-  it("grants a role, calls upsert, emits an audit event", async () => {
-    // P462 — post-grant role set the route should echo back to the caller.
-    adminUserAppRolesSelectMock.mockResolvedValue({
-      data: [{ role: "allocator" }],
+  it("grants a role via admin_role_mutate, emits an audit event", async () => {
+    adminRoleMutateMock.mockResolvedValue({
+      data: {
+        outcome: "granted",
+        was_new_grant: true,
+        removed_rows: 1,
+        is_admin_changed: false,
+        holds_role: true,
+        took_effect: true,
+        roles: ["allocator"],
+      },
       error: null,
     });
     const { POST } = await loadRoute();
     const req = makeRequest({ action: "grant", role: "allocator" });
     const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
     expect(res.status).toBe(200);
-    // P462 (audit-2026-05-07) — unified envelope across GET / grant / revoke:
-    // `{ user_id, roles: AppRole[] }`. The pre-P462 `{ success, action, role }`
-    // shape is gone — same single parser drives the UI now.
+    // P462 — unified envelope across GET / grant / revoke: `{ user_id, roles[] }`.
     expect(await res.json()).toEqual({
       user_id: "target-user-id",
       roles: ["allocator"],
     });
-    expect(userAppRolesInsertMock).toHaveBeenCalledTimes(1);
-    const [row, opts] = userAppRolesInsertMock.mock.calls[0];
-    expect(row).toMatchObject({
-      user_id: "target-user-id",
-      role: "allocator",
-      granted_by: "admin-user-id",
+    // B4 — the mutation is ONE atomic RPC call (no upsert/delete chains).
+    expect(adminRoleMutateMock).toHaveBeenCalledTimes(1);
+    const [rpcName, rpcArgs] = adminRoleMutateMock.mock.calls[0];
+    expect(rpcName).toBe("admin_role_mutate");
+    expect(rpcArgs).toMatchObject({
+      p_actor_id: "admin-user-id",
+      p_target_id: "target-user-id",
+      p_role: "allocator",
+      p_action: "grant",
     });
-    expect(opts).toMatchObject({ onConflict: "user_id,role" });
 
-    // Audit emission — wait for the microtask deferred by `after()` to
-    // settle. vi.waitFor polls a predicate with a bounded timeout and
-    // fails loudly if the call never lands (unlike a triple
-    // Promise.resolve chain that would silently green on an async
-    // emission regression).
+    // Audit emission stays in TS (awaited, user-scoped). vi.waitFor fails loudly
+    // if the call never lands rather than silently greening on a regression.
     await vi.waitFor(() => expect(logAuditRpcMock).toHaveBeenCalled());
     expect(logAuditRpcMock).toHaveBeenCalledWith(
       "log_audit_event",
@@ -412,27 +436,32 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     );
   });
 
-  it("revokes a role, calls delete, emits an audit event", async () => {
-    // P462 — post-revoke role set is empty for this target.
-    adminUserAppRolesSelectMock.mockResolvedValue({
-      data: [],
+  it("revokes a role via admin_role_mutate, emits an audit event", async () => {
+    adminRoleMutateMock.mockResolvedValue({
+      data: {
+        outcome: "revoked",
+        was_new_grant: false,
+        removed_rows: 1,
+        is_admin_changed: false,
+        holds_role: false,
+        took_effect: true,
+        roles: [],
+      },
       error: null,
     });
     const { POST } = await loadRoute();
     const req = makeRequest({ action: "revoke", role: "analyst" });
     const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
     expect(res.status).toBe(200);
-    const body = await res.json();
-    // P462 — unified `{ user_id, roles[] }` envelope; pre-fix shape
-    // `{ success, action, role, removed_rows }` is gone.
-    expect(body).toEqual({
+    expect(await res.json()).toEqual({
       user_id: "target-user-id",
       roles: [],
     });
-    expect(userAppRolesDeleteMock).toHaveBeenCalledTimes(1);
-    expect(userAppRolesDeleteMock.mock.calls[0][0]).toMatchObject({
-      userId: "target-user-id",
-      role: "analyst",
+    expect(adminRoleMutateMock).toHaveBeenCalledTimes(1);
+    expect(adminRoleMutateMock.mock.calls[0][1]).toMatchObject({
+      p_target_id: "target-user-id",
+      p_role: "analyst",
+      p_action: "revoke",
     });
 
     await vi.waitFor(() => expect(logAuditRpcMock).toHaveBeenCalled());
@@ -450,12 +479,18 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     );
   });
 
-  it("blocks self-revoke of own admin role with 403 (C-0066)", async () => {
-    // audit-2026-05-07 fix C-0066 (api-contract conf-7): self-action
-    // rejection standardized on 403 across admin routes (matches
-    // deletion-requests/[id]/_shared.ts:84-94). Pre-fix this returned
-    // 400 — but the request is well-formed, the action is just
-    // forbidden, so 403 is the correct semantic.
+  it("blocks self-revoke of own admin role with 403 (C-0066 / NEW-C17-03, via RPC 42501)", async () => {
+    // The self-revoke rail now lives in admin_role_mutate (server-side canonical
+    // UUID compare): the RPC raises 42501 with hint=self_revoke_forbidden, which
+    // the route maps to 403 "another admin must act".
+    adminRoleMutateMock.mockResolvedValue({
+      data: null,
+      error: {
+        code: "42501",
+        hint: "self_revoke_forbidden",
+        message: "an admin cannot revoke their own admin role",
+      },
+    });
     const { POST } = await loadRoute();
     const req = makeRequest(
       { action: "revoke", role: "admin" },
@@ -464,7 +499,10 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     const res = await POST(req, makeParamsCtx({ id: "admin-user-id" }));
     expect(res.status).toBe(403);
     expect((await res.json()).error).toMatch(/another admin must act/i);
-    expect(userAppRolesDeleteMock).not.toHaveBeenCalled();
+    // The RPC IS invoked (the guard is server-side now), with actor === target.
+    expect(adminRoleMutateMock).toHaveBeenCalledTimes(1);
+    const args = adminRoleMutateMock.mock.calls[0][1] as Record<string, unknown>;
+    expect(args.p_actor_id).toBe(args.p_target_id);
   });
 
   it("rejects non-admin callers with 403 (withRole gate)", async () => {
@@ -476,7 +514,7 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     const req = makeRequest({ action: "grant", role: "analyst" });
     const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
     expect(res.status).toBe(403);
-    expect(userAppRolesInsertMock).not.toHaveBeenCalled();
+    expect(adminRoleMutateMock).not.toHaveBeenCalled();
   });
 
   it("rejects invalid body with 400 (Zod)", async () => {
@@ -484,7 +522,7 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     const req = makeRequest({ action: "grant", role: "super_admin" });
     const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
     expect(res.status).toBe(400);
-    expect(userAppRolesInsertMock).not.toHaveBeenCalled();
+    expect(adminRoleMutateMock).not.toHaveBeenCalled();
   });
 
   // M-0016 — the single `role: "super_admin"` case above only exercises ONE
@@ -537,8 +575,8 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
       const req = makeRequest(body);
       const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
       expect(res.status).toBe(400);
-      expect(userAppRolesInsertMock).not.toHaveBeenCalled();
-      expect(userAppRolesDeleteMock).not.toHaveBeenCalled();
+      // Zod rejects BEFORE the mutation — the RPC is never reached.
+      expect(adminRoleMutateMock).not.toHaveBeenCalled();
     },
   );
 
@@ -549,8 +587,16 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
   // (lenient) behavior so a future tightening to .strict() is a deliberate,
   // test-visible change rather than an accidental 400 regression.
   it("M-0016: tolerates and strips an extra unknown field (non-strict object), still grants", async () => {
-    adminUserAppRolesSelectMock.mockResolvedValue({
-      data: [{ role: "allocator" }],
+    adminRoleMutateMock.mockResolvedValue({
+      data: {
+        outcome: "granted",
+        was_new_grant: true,
+        removed_rows: 1,
+        is_admin_changed: false,
+        holds_role: true,
+        took_effect: true,
+        roles: ["allocator"],
+      },
       error: null,
     });
     const { POST } = await loadRoute();
@@ -561,14 +607,11 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     });
     const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
     expect(res.status).toBe(200);
-    expect(userAppRolesInsertMock).toHaveBeenCalledTimes(1);
-    const [row] = userAppRolesInsertMock.mock.calls[0];
-    // The stripped extra must NOT be persisted on the row.
-    expect(row).not.toHaveProperty("injected_extra");
-    expect(row).toMatchObject({
-      user_id: "target-user-id",
-      role: "allocator",
-    });
+    expect(adminRoleMutateMock).toHaveBeenCalledTimes(1);
+    // Only action + role reach the RPC; the stripped extra never does.
+    const args = adminRoleMutateMock.mock.calls[0][1] as Record<string, unknown>;
+    expect(args).not.toHaveProperty("injected_extra");
+    expect(args).toMatchObject({ p_role: "allocator", p_action: "grant" });
   });
 
   it("rejects missing target user id with 400", async () => {
@@ -582,7 +625,7 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     );
     const res = await POST(req, makeParamsCtx({ id: "" }));
     expect(res.status).toBe(400);
-    expect(userAppRolesInsertMock).not.toHaveBeenCalled();
+    expect(adminRoleMutateMock).not.toHaveBeenCalled();
   });
 });
 
