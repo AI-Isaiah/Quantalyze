@@ -8,7 +8,7 @@ import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategyDetail } from "@/lib/queries";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { createClient } from "@/lib/supabase/server";
-import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
+import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { notFound, redirect } from "next/navigation";
@@ -58,18 +58,12 @@ export default async function StrategyDetailPage({
     analyticsRow?.returns_series,
   );
 
-  // Derive ingestSource using the same logic as fetchAndBuildPayload in
-  // factsheet/[id]/v2/page.tsx: daily_returns populated = CSV path; null/
-  // undefined = analytics-service (api) path. Without this, buildFactsheetPayload
-  // defaults to "csv" and all gated panels (PeerPercentile, AllocatorSection,
-  // Signatures) are permanently suppressed for API strategies on the discovery
-  // surface. (RED-TEAM-H1)
-  const ingestSource: IngestSource =
-    Array.isArray(dailyRaw)
-      ? "csv"
-      : typeof dailyRaw === "object" && dailyRaw !== null
-        ? "csv"
-        : "api";
+  // Derive ingestSource through the SHARED deriveIngestSource (same source of
+  // truth as factsheet/[id]/v2/page.tsx). Without an explicit source,
+  // buildFactsheetPayload defaults to "csv" and all gated panels (PeerPercentile,
+  // AllocatorSection, Signatures) are permanently suppressed for API strategies
+  // on the discovery surface. (RED-TEAM-H1)
+  const ingestSource: IngestSource = deriveIngestSource(dailyRaw);
 
   // RED-TEAM-H2: Never fall back to "now" for a missing computed_at — that
   // would make FreshnessChip show a green "fresh" badge for a strategy with

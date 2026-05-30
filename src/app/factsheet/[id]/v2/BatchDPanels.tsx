@@ -77,9 +77,11 @@ export function StyleDriftPanel() {
 
 export function PeerPercentilePanel() {
   const payload = usePayload();
-  // peerPercentile is null for csv-ingested strategies; this component is
-  // only rendered when ingestSource === "api" so this guard is a type-safety
-  // check, not a runtime branch. (RED-TEAM-M2)
+  // B6 — the synthesized panels live only on the "api" arm of the discriminated
+  // FactsheetPayload; narrowing ingestSource unlocks peerPercentile (and a csv
+  // read is a compile error). The parent already gates this component on
+  // ingestSource === "api", so this is type-safety, not a runtime branch. (RED-TEAM-M2)
+  if (payload.ingestSource !== "api") return null;
   const p = payload.peerPercentile;
   if (!p) return null;
   return (
@@ -121,10 +123,11 @@ function PercentileBar({ label, pct }: { label: string; pct: number }) {
 
 export function AllocatorSection() {
   const payload = usePayload();
-  // allocatorPortfolios is null for csv-ingested strategies; this component is
-  // only rendered when ingestSource === "api" so this guard is a type-safety
-  // check, not a runtime branch. (RED-TEAM-M2)
-  const portfolios = payload.allocatorPortfolios;
+  // B6 — allocatorPortfolios lives only on the "api" arm; narrow INLINE (not an
+  // early return — the useState below must stay unconditional per rules-of-hooks)
+  // so a csv payload yields null and a csv field-read is a compile error. The
+  // parent already gates this on ingestSource === "api". (RED-TEAM-M2)
+  const portfolios = payload.ingestSource === "api" ? payload.allocatorPortfolios : null;
   const [active, setActive] = useState(portfolios?.[0]?.key ?? "");
   if (!portfolios || portfolios.length === 0) return null;
   const p = portfolios.find(x => x.key === active) ?? portfolios[0];

@@ -36,8 +36,10 @@ const TRACE_LEN = WINDOW * 2 + 1;
 export function SignaturesSection() {
   const payload = usePayload();
   const { block: cmp } = useActiveComparator();
-  // eventSignatures is null for csv-ingested strategies; this component is
-  // only rendered when ingestSource === "api" so this guard is type-safety. (RED-TEAM-M3)
+  // B6 — eventSignatures lives only on the "api" arm; narrowing ingestSource
+  // unlocks it (a csv read is a compile error). The parent gates this on
+  // ingestSource === "api", so this is type-safety, not a runtime branch. (RED-TEAM-M3)
+  if (payload.ingestSource !== "api") return null;
   const sigs = payload.eventSignatures;
   if (!sigs) return null;
   return (

@@ -1,4 +1,4 @@
-import type { CorrelationRow, DailyReturn, FactsheetPayload, AllocatorPortfolioPayload, QuantilePayload, TrustTierKind, IngestSource } from "./types";
+import type { CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, QuantilePayload, TrustTierKind, IngestSource } from "./types";
 import { alignReturns } from "./align";
 import { compute, cumEq, worstDrawdowns } from "./compute";
 import { rollingVol, rollingSharpe, rollingSortino, pickRollingWindow, ROLL_WINDOW_90D, ROLL_WINDOW_30D } from "./rolling";
@@ -19,6 +19,30 @@ import { bootstrapCI } from "./bootstrap";
 import { monthlyReturnsMatrix, dailyReturnsByYear } from "./period-buckets";
 import { computeEventSignatures } from "./event-signatures";
 import { computeStressWindows } from "./stress-windows";
+
+/**
+ * Classify a strategy's ingest source from its raw `strategy_analytics.daily_returns`
+ * column value. The CSV ingester writes `daily_returns` (an array — possibly empty — or a
+ * legacy object dict); the analytics-service (live API) path leaves it null/undefined and
+ * writes `returns_series` instead.
+ *
+ * CRITICAL (FINDING-1): an EMPTY array means the CSV ingester ran but produced zero rows —
+ * that is STILL a CSV strategy. Only null/undefined classifies as "api". Mis-classifying a
+ * CSV strategy as "api" would unlock the synthesized demo panels (PeerPercentile /
+ * AllocatorSection / Signatures) the no-invented-data contract forbids for CSV.
+ *
+ * SINGLE SOURCE OF TRUTH (B6): both the factsheet page (`factsheet/[id]/v2/page.tsx`) and the
+ * discovery detail page derive `ingestSource` through THIS function — the derivation turns
+ * raw `unknown` DB data into the discriminant BEFORE the typed FactsheetPayload exists, so it
+ * is the one no-invented-data gate the discriminated union can't backstop at compile time.
+ * `audit-c20.test.ts` (RED-TEAM-H1) tests this exact function, so a branch flip fails the
+ * test instead of silently diverging across the two surfaces.
+ */
+export function deriveIngestSource(dailyRaw: unknown): IngestSource {
+  if (Array.isArray(dailyRaw)) return "csv"; // any array, empty or not = CSV path touched this strategy
+  if (typeof dailyRaw === "object" && dailyRaw !== null) return "csv"; // object dict = CSV attempted
+  return "api"; // null/undefined = only the analytics-service path wrote a series
+}
 
 /**
  * Build the full FactsheetPayload from a strategy's daily-return rows.
@@ -115,37 +139,12 @@ export function buildFactsheetPayload(
   const iefRet = alignReturns(IEF_DAILY, dates);
 
   const styleDrift = computeStyleDrift(stratRet, dates);
-  // Synthesized/demo data: only compute + ship when ingestSource === "api".
-  // For CSV strategies, null these out so they are absent from the RSC
-  // payload blob — prevents synthesized figures from being scraped from
-  // __RSC_PAYLOAD__ / network devtools even though the rendered UI already
-  // gates them. No-invented-data contract applies at the data layer too.
-  // (RED-TEAM-M2, RED-TEAM-M3)
-  const isApiSource = (strategy.ingestSource ?? "csv") === "api";
-  const peer = isApiSource
-    ? computePeerPercentile(strategyMetrics.sharpe, strategyMetrics.sortino, strategyMetrics.max_dd)
-    : null;
-
-  const allocator: AllocatorPortfolioPayload[] | null = isApiSource ? [
-    {
-      key: "sixty_forty",
-      name: "60/40 Stocks/Bonds",
-      composition: "60% S&P 500 · 40% IEF (US 10y Treasury)",
-      ...buildAllocatorMetrics(blend([0.6, 0.4], [spxRet, iefRet]), stratRet),
-    },
-    {
-      key: "multi_asset",
-      name: "Multi-Asset Risk Parity",
-      composition: "25% S&P 500 · 25% Gold · 25% IEF · 25% BTC",
-      ...buildAllocatorMetrics(blend([0.25, 0.25, 0.25, 0.25], [spxRet, gldRet, iefRet, btcRet]), stratRet),
-    },
-    {
-      key: "crypto_book",
-      name: "Diversified Crypto Book",
-      composition: "70% BTC · 30% ETH",
-      ...buildAllocatorMetrics(blend([0.7, 0.3], [btcRet, ethRet]), stratRet),
-    },
-  ] : null;
+  // Default to "csv" (conservative) when the caller doesn't specify — avoids
+  // exposing non-derivable panels for strategies whose source isn't explicitly
+  // known. The synthesized demo panels (peer cohort, allocator portfolios,
+  // event signatures) are computed + attached ONLY on the "api" arm below.
+  // (NEW-C20-01)
+  const ingestSource: IngestSource = strategy.ingestSource ?? "csv";
 
   const correlations: CorrelationRow[] = [
     { name: "BTC", rho: pearsonCorr(stratRet, btcRet) },
@@ -172,13 +171,11 @@ export function buildFactsheetPayload(
 
   const quantiles = quantileSummary(stratRet);
 
-  return {
+  // Fields shared by both ingest arms. The discriminated FactsheetPayload (B6)
+  // appends the synthesized api-only panels onto this for "api" strategies.
+  const common: FactsheetCommon = {
     strategyId: strategy.id,
     strategyName: strategy.name,
-    // Default to "csv" (conservative) when the caller doesn't specify —
-    // avoids rendering non-derivable panels for strategies whose source
-    // isn't explicitly known. (NEW-C20-01)
-    ingestSource: strategy.ingestSource ?? "csv",
     strategyTypes: strategy.types,
     markets: strategy.markets,
     computedAt: strategy.computedAt,
@@ -210,15 +207,6 @@ export function buildFactsheetPayload(
       none: noneComparatorBlock,
     },
     styleDrift,
-    peerPercentile: peer
-      ? {
-          cohortSize: peer.cohort.length,
-          sharpe: peer.sharpe,
-          sortino: peer.sortino,
-          max_dd: peer.max_dd,
-        }
-      : null,
-    allocatorPortfolios: allocator,
     streaks: (() => {
       const { wins, losses } = streakLengths(stratRet);
       const MAX_LEN = 14;
@@ -238,14 +226,55 @@ export function buildFactsheetPayload(
     dailyHeatmap: dailyReturnsByYear(stratRet, dates),
     correlations,
     correlationMatrix: { labels, matrix },
-    // Only compute + serialize event-signature data for api-source strategies.
-    // CSV-strategy signatures are zero-population arrays that add payload weight
-    // and expose computed-but-invisible data in the RSC blob. (RED-TEAM-M3)
-    eventSignatures: isApiSource ? computeEventSignatures(stratRet, btcRet, stratEquity) : null,
-    benchEventSignatures: isApiSource ? computeEventSignatures(btcRet, btcRet, cumEq(btcRet)) : null,
     stressWindows: computeStressWindows(dates, stratRet, btcRet, "BTC", strategy.markets),
     quantiles,
   };
+
+  // No-invented-data contract (NEW-C20-01, RED-TEAM-M2/M3, B6): the synthesized
+  // demo panels are NOT derivable from a bare daily-return series, so they are
+  // computed + attached ONLY on the "api" arm. For csv strategies they are
+  // absent from the returned object entirely — never serialized into the RSC
+  // blob — so the discriminated union makes a csv consumer physically unable to
+  // read them, and zero-population csv signatures never add payload weight.
+  if (ingestSource === "api") {
+    const peer = computePeerPercentile(strategyMetrics.sharpe, strategyMetrics.sortino, strategyMetrics.max_dd);
+    return {
+      ...common,
+      ingestSource: "api",
+      peerPercentile: peer
+        ? {
+            cohortSize: peer.cohort.length,
+            sharpe: peer.sharpe,
+            sortino: peer.sortino,
+            max_dd: peer.max_dd,
+          }
+        : null,
+      allocatorPortfolios: [
+        {
+          key: "sixty_forty",
+          name: "60/40 Stocks/Bonds",
+          composition: "60% S&P 500 · 40% IEF (US 10y Treasury)",
+          ...buildAllocatorMetrics(blend([0.6, 0.4], [spxRet, iefRet]), stratRet),
+        },
+        {
+          key: "multi_asset",
+          name: "Multi-Asset Risk Parity",
+          composition: "25% S&P 500 · 25% Gold · 25% IEF · 25% BTC",
+          ...buildAllocatorMetrics(blend([0.25, 0.25, 0.25, 0.25], [spxRet, gldRet, iefRet, btcRet]), stratRet),
+        },
+        {
+          key: "crypto_book",
+          name: "Diversified Crypto Book",
+          composition: "70% BTC · 30% ETH",
+          ...buildAllocatorMetrics(blend([0.7, 0.3], [btcRet, ethRet]), stratRet),
+        },
+      ],
+      eventSignatures: computeEventSignatures(stratRet, btcRet, stratEquity),
+      benchEventSignatures: computeEventSignatures(btcRet, btcRet, cumEq(btcRet)),
+    };
+  }
+
+  return { ...common, ingestSource: "csv" };
 }
 
 function pearsonCorr(a: number[], b: number[]): number {

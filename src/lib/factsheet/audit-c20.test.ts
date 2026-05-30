@@ -5,7 +5,7 @@
  * verifies the fix. Tests fail without the fix and pass with it.
  */
 import { describe, it, expect } from "vitest";
-import { buildFactsheetPayload } from "./build-payload";
+import { buildFactsheetPayload, deriveIngestSource } from "./build-payload";
 
 /** Minimal 40-day daily-return series for tests that don't need statistical depth. */
 function makeReturns(n = 40): Array<{ date: string; value: number }> {
@@ -354,63 +354,102 @@ describe("IMPORTANT-2: ingestSource='csv' payload contract for panel suppression
 });
 
 // ---------------------------------------------------------------------------
-// RED-TEAM-M2 / RED-TEAM-M3 — synthesized data absent from RSC payload for csv
-// Verifies that peerPercentile, allocatorPortfolios, eventSignatures,
-// benchEventSignatures are null for csv-ingested strategies so they are not
-// serialized into the RSC payload blob.
+// RED-TEAM-M2 / RED-TEAM-M3 + B6 — synthesized panels are STRUCTURALLY ABSENT
+// from the payload for csv strategies (not merely null). The B6 discriminated
+// union (FactsheetApiPayload | FactsheetCsvPayload) omits peerPercentile /
+// allocatorPortfolios / eventSignatures / benchEventSignatures on the csv arm,
+// so they never reach the RSC payload blob AND a csv consumer cannot read them
+// (an unnarrowed field access is a compile error — see the type-level block).
 // ---------------------------------------------------------------------------
-describe("RED-TEAM-M2/M3: synthesized payload fields null for csv strategies", () => {
-  it("csv strategy: peerPercentile is null (not serialized to RSC payload)", () => {
+const SYNTH_FIELDS = [
+  "peerPercentile",
+  "allocatorPortfolios",
+  "eventSignatures",
+  "benchEventSignatures",
+] as const;
+
+describe("RED-TEAM-M2/M3 + B6: synthesized panels absent from csv payloads", () => {
+  it("csv strategy: the four synthesized fields are absent from the object (stronger than null)", () => {
     const payload = buildFactsheetPayload(
       makeStrategy({ ingestSource: "csv" }),
       makeReturns(),
     );
     expect(payload).not.toBeNull();
-    expect(payload!.peerPercentile).toBeNull();
+    expect(payload!.ingestSource).toBe("csv");
+    for (const f of SYNTH_FIELDS) {
+      // `in` proves the KEY is absent — so it is never serialized into the RSC
+      // blob, and JSON.stringify(payload) cannot leak a synthesized figure.
+      expect(f in payload!, `${f} must be absent on a csv payload`).toBe(false);
+    }
   });
 
-  it("csv strategy: allocatorPortfolios is null (not serialized to RSC payload)", () => {
-    const payload = buildFactsheetPayload(
-      makeStrategy({ ingestSource: "csv" }),
-      makeReturns(),
-    );
-    expect(payload!.allocatorPortfolios).toBeNull();
-  });
-
-  it("csv strategy: eventSignatures is null (not serialized to RSC payload)", () => {
-    const payload = buildFactsheetPayload(
-      makeStrategy({ ingestSource: "csv" }),
-      makeReturns(),
-    );
-    expect(payload!.eventSignatures).toBeNull();
-  });
-
-  it("csv strategy: benchEventSignatures is null (not serialized to RSC payload)", () => {
-    const payload = buildFactsheetPayload(
-      makeStrategy({ ingestSource: "csv" }),
-      makeReturns(),
-    );
-    expect(payload!.benchEventSignatures).toBeNull();
-  });
-
-  it("csv default (no ingestSource): all four synthesized fields are null", () => {
-    // Conservative default — caller omits ingestSource → treated as csv
+  it("csv default (no ingestSource): the four synthesized fields are absent", () => {
+    // Conservative default — caller omits ingestSource → treated as csv.
     const payload = buildFactsheetPayload(makeStrategy(), makeReturns());
-    expect(payload!.peerPercentile).toBeNull();
-    expect(payload!.allocatorPortfolios).toBeNull();
-    expect(payload!.eventSignatures).toBeNull();
-    expect(payload!.benchEventSignatures).toBeNull();
+    expect(payload!.ingestSource).toBe("csv");
+    for (const f of SYNTH_FIELDS) {
+      expect(f in payload!, `${f} must be absent on the default csv payload`).toBe(false);
+    }
   });
 
-  it("api strategy: all four synthesized fields are non-null", () => {
+  it("api strategy: all four synthesized fields are present and non-null", () => {
     const payload = buildFactsheetPayload(
       makeStrategy({ ingestSource: "api" }),
       makeReturns(),
     );
-    expect(payload!.peerPercentile).not.toBeNull();
-    expect(payload!.allocatorPortfolios).not.toBeNull();
-    expect(payload!.eventSignatures).not.toBeNull();
-    expect(payload!.benchEventSignatures).not.toBeNull();
+    expect(payload).not.toBeNull();
+    const p = payload!;
+    // Narrow to the api arm so the synthesized fields are type-accessible (B6).
+    if (p.ingestSource !== "api") throw new Error("expected the api arm");
+    expect(p.peerPercentile).not.toBeNull();
+    expect(p.allocatorPortfolios).not.toBeNull();
+    expect(p.eventSignatures).not.toBeNull();
+    expect(p.benchEventSignatures).not.toBeNull();
+    for (const f of SYNTH_FIELDS) {
+      expect(f in p, `${f} must be present on an api payload`).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B6 — FactsheetPayload discriminated-union contract (TYPE-LEVEL).
+// Compile-time (tsc) assertions enforced by `npm run typecheck`: the synthesized
+// panels exist ONLY on the "api" arm, so reading one off the bare union is a
+// type error. A regression that flattens the union back to a single `X | null`
+// shape turns each @ts-expect-error into an "unused directive" → tsc fails. This
+// is the by-construction backstop for the no-invented-data contract.
+// ---------------------------------------------------------------------------
+describe("B6: FactsheetPayload discriminated-union contract (type-level)", () => {
+  it("synthesized panels are unreadable until ingestSource is narrowed to 'api'", () => {
+    const payload = buildFactsheetPayload(
+      makeStrategy({ ingestSource: "api" }),
+      makeReturns(),
+    );
+    expect(payload).not.toBeNull();
+    const p = payload!;
+
+    // Before narrowing: each access is a compile error (field absent on the csv
+    // arm of the union). Each @ts-expect-error is load-bearing — flatten the
+    // union and tsc fails on the now-unused directive.
+    // @ts-expect-error B6: peerPercentile is api-arm-only; unreadable on the union.
+    void p.peerPercentile;
+    // @ts-expect-error B6: allocatorPortfolios is api-arm-only; unreadable on the union.
+    void p.allocatorPortfolios;
+    // @ts-expect-error B6: eventSignatures is api-arm-only; unreadable on the union.
+    void p.eventSignatures;
+    // @ts-expect-error B6: benchEventSignatures is api-arm-only; unreadable on the union.
+    void p.benchEventSignatures;
+
+    if (p.ingestSource === "api") {
+      // After narrowing: all four compile (NO @ts-expect-error — these lines
+      // MUST type-check, proving the api arm carries the fields).
+      void p.peerPercentile;
+      void p.allocatorPortfolios;
+      void p.eventSignatures;
+      void p.benchEventSignatures;
+    }
+
+    expect(p.ingestSource).toBe("api");
   });
 });
 
@@ -455,15 +494,12 @@ describe("RED-TEAM-M4: epoch sentinel detected and hidden from rendered date", (
 // copied to both pages — if this test fails without the fix, the discovery
 // page defaulted every strategy to "csv").
 // ---------------------------------------------------------------------------
-describe("RED-TEAM-H1: ingestSource derivation logic for discovery page", () => {
-  // The same ternary used in both fetchAndBuildPayload and the discovery page
-  function deriveIngestSource(dailyRaw: unknown): "api" | "csv" {
-    return Array.isArray(dailyRaw)
-      ? "csv"
-      : typeof dailyRaw === "object" && dailyRaw !== null
-        ? "csv"
-        : "api";
-  }
+describe("RED-TEAM-H1: ingestSource derivation — the shared deriveIngestSource (single source of truth)", () => {
+  // Imports the PRODUCTION deriveIngestSource (build-payload.ts) that BOTH
+  // factsheet/[id]/v2/page.tsx and the discovery detail page call. A branch flip
+  // in the real derivation now fails these assertions instead of silently
+  // diverging across surfaces — the prior local copy of this ternary could not
+  // catch that (Rule 9: a test against a copy can't fail when the code changes). (B6)
 
   it("null dailyRaw (api-only strategy) → 'api'", () => {
     expect(deriveIngestSource(null)).toBe("api");
