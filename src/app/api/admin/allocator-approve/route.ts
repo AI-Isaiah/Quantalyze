@@ -28,20 +28,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const rl = await checkLimit(
-    adminActionLimiter,
-    `admin:${user.id}:allocator-approve`,
-  );
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      {
-        status: 429,
-        headers: { "Retry-After": String(rl.retryAfter) },
-      },
-    );
-  }
-
   let body: Record<string, unknown>;
   try {
     const parsed = await req.json();
@@ -56,12 +42,29 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const admin = createAdminClient();
-
   const { id } = body;
   if (!id) {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
+
+  // B15b (audit-2026-05-07): rate-limit AFTER input validation so a
+  // malformed/invalid body (rejected 400 above) never consumes one of the
+  // admin's adminActionLimiter tokens.
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin:${user.id}:allocator-approve`,
+  );
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
+    );
+  }
+
+  const admin = createAdminClient();
 
   const { error } = await admin
     .from("profiles")

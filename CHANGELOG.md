@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.15.28] - 2026-05-30
+### Changed — admin-cluster routes validate input before consuming a token (cross-cutting refactor B15b)
+
+B15b finishes the "limit-before-validate" closure B15a started, extending the canonical order **auth → validate → rate-limit → handler** across the admin cluster — the 14 routes B15a deferred to the enforcement test's `PENDING_B15B` set. A malformed/invalid admin request now returns 400 without burning one of the admin's own `adminActionLimiter` (20/min) tokens.
+
+- **`withAdminAuth` becomes a canonical-order primitive** (`src/lib/api/withAdminAuth.ts`). Added an optional generic `schema<T>` and reordered the wrapper to **parse → schema-validate → limit → handler(typed body)** (was: limit → parse). Its sole `rateLimitKey` invoker, `admin/for-quants-leads/process`, now passes a Zod schema so a non-UUID `id` is rejected before the limiter (the in-handler `isUuid` guard is now redundant and was removed). Backward-compatible: schema-less callers still get the object-guard 400s and a `Record<string,unknown>` body.
+- **13 inline-`checkLimit` admin routes reordered in-place** to validate-then-limit (allocator-approve, manager-approve, intro-request, strategy-review, notify-submission, match/{decisions [POST+DELETE], kill-switch, preferences/[allocator_id], recompute, send-intro}, deletion-requests/[id]/reject, users/[id]/roles) — exact rate-limit key, deny shape (plain 429 / `rateLimitDenyJson` / 503-misconfig split), CSRF, and audit behavior preserved; only ordering changed. GET read paths legitimately keep limit-first.
+- **partner-import raw-body byte cap** (the lone remaining bounded-inputs gap): a `Content-Length` + buffered `Buffer.byteLength` check (4 MB) rejects an oversized body with 413 before `JSON.parse`, mirroring send-intro's guard. `MAX_IMPORT_ROWS` (500) still caps the createUser fan-out.
+- **Enforcement test** (`src/lib/api/limiter-ordering.test.ts`): the 13 routes move to `CANONICAL` (checked per-method for validate-before-limit), `for-quants-leads/process` to a new `WRAPPER_ADMIN` bucket (order guaranteed by the wrapper + its unit test), and `PENDING_B15B` is deleted — the admin cluster is fully closed.
+- **Tests:** `withAdminAuth.test.ts` gains the load-bearing invariant (schema-invalid body → 400, `checkLimit` never called); co-located regression guards added for the two paths the grep test cannot cover — the params-only `decisions` DELETE (token not burned on an invalid query) and `notify-submission` (malformed body → 400, not an uncaught 500). Both were verified to fail without their fix.
+
+Adversarial review (5-dimension Claude fan-out, each finding independently verified, no Grok) surfaced 6 confirmed findings: the two regression-guard gaps above were fixed, the `WRAPPER_ADMIN` schema assertion was bound to the `withAdminAuth(` call, and three were accepted as documented (send-intro's cheap kill-switch read now sits ahead of the limiter — deliberate and optimal for token conservation since a disabled-engine request returns 503 without a token; an enforcement-test working-tree read; a defense-in-depth grep). tsc 0, lint 0 errors; full vitest 5560 passing.
+
 ## [0.24.15.27] - 2026-05-30
 ### Changed — rate-limited routes validate input before consuming a token (cross-cutting refactor B15a)
 

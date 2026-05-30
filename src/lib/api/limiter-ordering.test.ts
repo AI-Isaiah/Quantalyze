@@ -28,9 +28,11 @@
  *                       abuse defense. limit-FIRST is the intended design here
  *                       (reject cheaply before doing DB/puppeteer/parse work
  *                       for an attacker); see the `B15 limit-first:` markers.
- *  - PENDING_B15B     — admin cluster, still limit-then-validate. Scheduled for
- *                       the B15b PR; documented, not yet fixed. MUST shrink to
- *                       empty when B15b lands.
+ *  - WRAPPER_ADMIN    — admin routes rate-limited via `withAdminAuth({ rateLimitKey })`;
+ *                       the wrapper validates-then-limits by construction (B15b),
+ *                       like WRAPPER. The limiter lives in the wrapper, not the
+ *                       route file, so these are excluded from the per-method
+ *                       ordering check (verified in withAdminAuth.test.ts).
  */
 
 import { describe, it, expect } from "vitest";
@@ -67,6 +69,22 @@ const CANONICAL = new Set([
   "strategies/finalize-wizard/route.ts",
   "trades/upload/route.ts",
   "watchlist/[strategyId]/route.ts",
+  // B15b (audit-2026-05-07): admin cluster — reordered from PENDING_B15B to
+  // validate-then-limit. The inline checkLimit moved below body parse + field
+  // validation (and below URL-param validation for the params-only methods).
+  "admin/allocator-approve/route.ts",
+  "admin/deletion-requests/[id]/reject/route.ts",
+  "admin/intro-request/route.ts",
+  "admin/manager-approve/route.ts",
+  "admin/match/decisions/route.ts",
+  "admin/match/kill-switch/route.ts",
+  "admin/match/preferences/[allocator_id]/route.ts",
+  "admin/match/recompute/route.ts",
+  "admin/match/send-intro/route.ts",
+  "admin/notify-submission/route.ts",
+  "admin/partner-import/route.ts",
+  "admin/strategy-review/route.ts",
+  "admin/users/[id]/roles/route.ts",
 ]);
 
 const NO_INPUT = new Set([
@@ -91,27 +109,14 @@ const PUBLIC_IP_EXCEPTION = new Set([
   "verify-strategy/route.ts",
 ]);
 
-// Admin cluster — still limit-then-validate; fixed in the B15b PR. Each entry
-// here is a KNOWN violator deliberately deferred. This set MUST become empty
-// when B15b lands (move each to CANONICAL after its reorder).
-const PENDING_B15B = new Set([
-  "admin/allocator-approve/route.ts",
-  "admin/deletion-requests/[id]/reject/route.ts",
-  "admin/intro-request/route.ts",
-  "admin/manager-approve/route.ts",
-  "admin/match/decisions/route.ts",
-  "admin/match/kill-switch/route.ts",
-  "admin/match/preferences/[allocator_id]/route.ts",
-  "admin/match/recompute/route.ts",
-  "admin/match/send-intro/route.ts",
-  "admin/notify-submission/route.ts",
-  "admin/partner-import/route.ts",
-  "admin/strategy-review/route.ts",
-  "admin/users/[id]/roles/route.ts",
-  // Rate-limited via withAdminAuth({ rateLimitKey }) — the wrapper consumes the
-  // token BEFORE request.json() (withAdminAuth.ts), so this is limit-before-
-  // validate too. B15b fixes it by reordering withAdminAuth itself (validate
-  // before the wrapper's limiter), which clears every rateLimitKey route.
+// Admin routes rate-limited via `withAdminAuth({ rateLimitKey })`: the wrapper
+// consumes the token, so there is no inline checkLimit in the route file. As of
+// B15b the wrapper parses + schema-validates the body BEFORE the limiter
+// (withAdminAuth.ts), so the canonical validate→limit order is guaranteed by
+// construction — the same way WRAPPER (withAuthLimited) routes are. Verified in
+// src/lib/api/withAdminAuth.test.ts. Excluded from the per-method body-marker
+// ordering + helper-extraction checks below (the limiter is not in the file).
+const WRAPPER_ADMIN = new Set([
   "admin/for-quants-leads/process/route.ts",
 ]);
 
@@ -175,7 +180,7 @@ describe("B15 — limiter ordering enforcement", () => {
       ...CANONICAL,
       ...NO_INPUT,
       ...PUBLIC_IP_EXCEPTION,
-      ...PENDING_B15B,
+      ...WRAPPER_ADMIN,
     ]);
     const unclassified = limiterRoutes.filter((f) => !classified.has(f));
     // A new rate-limited route landed without a B15 ordering decision. Add it
@@ -191,7 +196,7 @@ describe("B15 — limiter ordering enforcement", () => {
       ...CANONICAL,
       ...NO_INPUT,
       ...PUBLIC_IP_EXCEPTION,
-      ...PENDING_B15B,
+      ...WRAPPER_ADMIN,
     ];
     const stale = classified.filter((f) => !limiterRoutes.includes(f));
     expect(stale).toEqual([]);
@@ -243,14 +248,31 @@ describe("B15 — limiter ordering enforcement", () => {
     expect(unchecked).toEqual([]);
   });
 
-  it("PENDING_B15B is documented and bounded (admin cluster, fixed in B15b)", () => {
-    // This deliberately asserts the known-pending set is exactly the admin
-    // cluster (13 inline-checkLimit routes + 1 withAdminAuth-rateLimitKey
-    // route). When B15b reorders these, move each to CANONICAL and this count
-    // drops to 0 — at which point delete this assertion.
-    expect(PENDING_B15B.size).toBe(14);
-    for (const f of PENDING_B15B) {
-      expect(f.startsWith("admin/"), `${f} should be an admin route`).toBe(true);
+  it("WRAPPER_ADMIN routes use withAdminAuth({ rateLimitKey }) + a schema and do not inline checkLimit", () => {
+    // These routes rate-limit through the wrapper, which (B15b) parses +
+    // schema-validates the body BEFORE consuming the token — so the canonical
+    // validate→limit order holds by construction, asserted in
+    // src/lib/api/withAdminAuth.test.ts. The schema requirement is load-bearing:
+    // without it the wrapper only object-guards the body, so a schema-invalid
+    // (but well-formed-object) request would still burn a token.
+    for (const f of WRAPPER_ADMIN) {
+      const src = readFileSync(join(API_ROOT, f), "utf8");
+      expect(src, f).toMatch(/withAdminAuth\s*\(/);
+      expect(
+        src,
+        `${f} should opt into the wrapper limiter via rateLimitKey`,
+      ).toMatch(/rateLimitKey\s*:/);
+      expect(
+        src,
+        `${f} should pass a schema to withAdminAuth so it validates before limiting`,
+        // Bound to the withAdminAuth(...) call, not a free-floating `schema:`
+        // token — so a future edit that drops the real option but leaves a
+        // `schema:` in a comment/unrelated object can't pass this vacuously.
+      ).toMatch(/withAdminAuth\s*\([\s\S]*?schema\s*:/);
+      expect(
+        CHECK_LIMIT.test(src),
+        `${f} should not inline checkLimit (limiter lives in withAdminAuth)`,
+      ).toBe(false);
     }
   });
 });

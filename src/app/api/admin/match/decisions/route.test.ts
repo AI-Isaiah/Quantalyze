@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 /**
  * audit-2026-05-07 P444 — route-level coverage for the RFC 7235 split
@@ -65,6 +65,21 @@ vi.mock("@/lib/supabase/admin", () => ({
       }),
     }),
   }),
+}));
+
+// B15b: spy on checkLimit so the validate-before-limit ordering of the
+// params-only DELETE (which the body-marker grep test in limiter-ordering.test.ts
+// cannot cover) has a real regression guard. Returns success by default so the
+// existing happy-path tests are unaffected.
+const rlState = vi.hoisted(() => ({ calls: 0 }));
+vi.mock("@/lib/ratelimit", () => ({
+  adminActionLimiter: { __mock: "adminActionLimiter" },
+  checkLimit: async () => {
+    rlState.calls += 1;
+    return { success: true, retryAfter: 0 };
+  },
+  rateLimitDenyJson: () =>
+    NextResponse.json({ error: "Too many requests" }, { status: 429 }),
 }));
 
 function makePostReq(): NextRequest {
@@ -205,5 +220,39 @@ describe("DELETE /api/admin/match/decisions — M-0276 no-op vs match", () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as Record<string, unknown>;
     expect(json).toMatchObject({ success: true });
+  });
+});
+
+describe("DELETE /api/admin/match/decisions — B15b validate-before-limit", () => {
+  beforeEach(() => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    deleteState.rows = [{ id: "dec-1" }];
+    rlState.calls = 0;
+    vi.resetModules();
+  });
+
+  it("missing searchParam → 400 and checkLimit is NOT called (no token burned)", async () => {
+    // B15b moved the DELETE limiter BELOW the URL-param validation. A request
+    // with no query params fails the `allocator_id is required` 400 before the
+    // limiter runs. The body-marker grep ordering test cannot cover a params-
+    // only method (no req.json/safeParse marker), so this co-located spy is the
+    // regression guard: reverting the limiter above the param checks makes
+    // rlState.calls === 1 and fails this test.
+    const { DELETE } = await import("./route");
+    const req = new NextRequest(
+      "http://localhost:3000/api/admin/match/decisions",
+      { method: "DELETE", headers: VALID_ORIGIN },
+    );
+    const res = await DELETE(req);
+    expect(res.status).toBe(400);
+    expect(rlState.calls).toBe(0);
+  });
+
+  it("valid DELETE consumes exactly one token (the limiter still fires after validation)", async () => {
+    const { DELETE } = await import("./route");
+    const res = await DELETE(makeDeleteReq());
+    expect(res.status).toBe(200);
+    expect(rlState.calls).toBe(1);
   });
 });

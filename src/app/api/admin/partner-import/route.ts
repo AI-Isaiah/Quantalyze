@@ -122,6 +122,15 @@ class StrategyTierConflictError extends Error {
 // deliberate resource exhaustion.
 const MAX_IMPORT_ROWS = 500;
 
+// B15b (audit-2026-05-07) — raw request-body byte cap. partner-import was the
+// one admin bulk route with no hard cap on the buffered body before parse:
+// MAX_IMPORT_ROWS bounds the createUser fan-out, but a multi-MB JSON blob could
+// still pin the parser. ~8x headroom over a worst-case 500-row CSV (a 500-row
+// import is realistically well under 500 KB), so this never rejects a valid
+// import while bounding parse-buffer memory. Mirrors send-intro's MAX_JSON_
+// BODY_BYTES guard.
+const MAX_JSON_BODY_BYTES = 4_000_000;
+
 interface ManagerRow {
   manager_email: string;
   strategy_name: string;
@@ -379,23 +388,6 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const rl = await checkLimit(adminActionLimiter, `partner-import:${user.id}`);
-  if (!rl.success) {
-    // silent-failure-hunter HIGH (review Finding 6): mirror the roles route —
-    // distinguish Upstash misconfiguration (503) from genuine quota exhaustion
-    // (429) so an Upstash outage isn't silently collapsed into normal throttling.
-    if (isRateLimitMisconfigured(rl)) {
-      return NextResponse.json(
-        { error: "Rate limiter unavailable", code: "ratelimit_misconfigured" },
-        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
-      );
-    }
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
   // Contract v2 (C-0052): resolve the with_header flag from the URL
   // BEFORE parsing the JSON body. Three states:
   //   * absent → default to `true` and log a deprecation warning so we
@@ -430,13 +422,31 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
   }
 
+  // B15b (audit-2026-05-07): cap the raw body BEFORE parsing. Content-Length
+  // is advisory (attacker-controlled; Number("bogus") === NaN, NaN > MAX is
+  // false), so we also check the actual buffered UTF-8 byte length before
+  // JSON.parse — an attacker sending a bogus/absent Content-Length still hits
+  // the hard cap. Mirrors send-intro's M-0284 guard.
+  const contentLength = Number(request.headers.get("content-length") ?? "");
+  if (contentLength > MAX_JSON_BODY_BYTES) {
+    return NextResponse.json({ error: "Request body too large" }, { status: 413 });
+  }
+  let bodyText: string;
+  try {
+    bodyText = await request.text();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  if (Buffer.byteLength(bodyText, "utf8") > MAX_JSON_BODY_BYTES) {
+    return NextResponse.json({ error: "Request body too large" }, { status: 413 });
+  }
   let body: {
     partner_tag?: unknown;
     managers_csv?: unknown;
     allocators_csv?: unknown;
   };
   try {
-    body = await request.json();
+    body = bodyText.length === 0 ? {} : JSON.parse(bodyText);
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
@@ -449,6 +459,28 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json(
       { error: "partner_tag must match ^[a-z0-9-]+$" },
       { status: 400 },
+    );
+  }
+
+  // audit-2026-05-07: per-admin rate limit. B15b (audit-2026-05-07): consumed
+  // AFTER with_header validation, the raw-byte cap, JSON parse, and partner_tag
+  // validation above — so a malformed/oversized/invalid request never burns one
+  // of the admin's tokens — but BEFORE the expensive CSV parse + per-row
+  // createUser fan-out below, which the token gates.
+  const rl = await checkLimit(adminActionLimiter, `partner-import:${user.id}`);
+  if (!rl.success) {
+    // silent-failure-hunter HIGH (review Finding 6): mirror the roles route —
+    // distinguish Upstash misconfiguration (503) from genuine quota exhaustion
+    // (429) so an Upstash outage isn't silently collapsed into normal throttling.
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Rate limiter unavailable", code: "ratelimit_misconfigured" },
+        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+      );
+    }
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
   }
 

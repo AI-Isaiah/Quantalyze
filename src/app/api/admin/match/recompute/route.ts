@@ -20,14 +20,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const rl = await checkLimit(adminActionLimiter, `match-recompute:${user!.id}`);
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
   let body: { allocator_id?: string; force?: boolean };
   try {
     body = await req.json();
@@ -37,6 +29,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   if (!body.allocator_id || typeof body.allocator_id !== "string") {
     return NextResponse.json({ error: "allocator_id is required" }, { status: 400 });
+  }
+
+  // B15b (audit-2026-05-07): rate-limit AFTER validating allocator_id so an
+  // invalid body never consumes one of the admin's tokens.
+  const rl = await checkLimit(adminActionLimiter, `match-recompute:${user!.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
   }
 
   try {

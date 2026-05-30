@@ -30,16 +30,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  // audit-2026-05-07 (PR-2 2026-05-28): rate-limit on admin match decisions.
-  // Single per-admin bucket (no per-allocator scoping today — body parse
-  // would be required to add it, and the 20/min admin budget is generous
-  // enough that contention is not the bottleneck).
-  const rl = await checkLimit(
-    adminActionLimiter,
-    `admin-match-decision:${user.id}`,
-  );
-  if (!rl.success) return rateLimitDenyJson(rl);
-
   let body: {
     allocator_id?: string;
     strategy_id?: string;
@@ -67,6 +57,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!body.decision || !VALID.includes(body.decision as Decision)) {
     return NextResponse.json({ error: "decision must be thumbs_up|thumbs_down|snoozed" }, { status: 400 });
   }
+
+  // audit-2026-05-07 (PR-2 2026-05-28): rate-limit on admin match decisions.
+  // Per-admin bucket (the 20/min admin budget is generous enough that
+  // per-allocator scoping isn't needed). B15b (audit-2026-05-07): consumed
+  // AFTER the body parses + validates above, so a malformed/invalid request
+  // never burns one of the admin's tokens.
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin-match-decision:${user.id}`,
+  );
+  if (!rl.success) return rateLimitDenyJson(rl);
 
   const admin = createAdminClient();
   // audit-2026-05-07 H-0960: kind must be set explicitly. Migration
@@ -143,14 +144,6 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  // audit-2026-05-07 (PR-2 2026-05-28): mirror the POST-path rate-limit on
-  // DELETE so an admin un-deciding in a loop is also capped.
-  const rl = await checkLimit(
-    adminActionLimiter,
-    `admin-match-decision:${user.id}`,
-  );
-  if (!rl.success) return rateLimitDenyJson(rl);
-
   const url = new URL(req.url);
   const allocator_id = url.searchParams.get("allocator_id");
   const strategy_id = url.searchParams.get("strategy_id");
@@ -171,6 +164,16 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   if (!VALID.includes(decision as Decision)) {
     return NextResponse.json({ error: "decision must be thumbs_up|thumbs_down|snoozed" }, { status: 400 });
   }
+
+  // audit-2026-05-07 (PR-2 2026-05-28): mirror the POST-path rate-limit on
+  // DELETE so an admin un-deciding in a loop is also capped. B15b
+  // (audit-2026-05-07): consumed AFTER validating the URL params so an
+  // invalid query never burns one of the admin's tokens.
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin-match-decision:${user.id}`,
+  );
+  if (!rl.success) return rateLimitDenyJson(rl);
 
   const admin = createAdminClient();
   const { data: deleted, error } = await admin

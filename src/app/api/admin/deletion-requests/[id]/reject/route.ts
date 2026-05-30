@@ -81,6 +81,22 @@ export const POST = withRole<{ id: string }>("admin")(
     const adminGuard = await requireAdmin(supabase, user, req);
     if (adminGuard) return adminGuard;
 
+    // B15b (audit-2026-05-07): validate the request body BEFORE consuming a
+    // rate-limit token. A malformed body or an over-long `reason` (rejected
+    // 400 here) must not burn one of the admin's del-reject tokens — a buggy
+    // client retrying on 400 would otherwise 429 the admin's next legitimate
+    // reject. requireAdmin still runs first (above) and the limiter still
+    // gates the destructive write (below); only body-validate moved ahead.
+    const rawBody = await req.json().catch(() => ({}));
+    const parsed = BODY_SCHEMA.safeParse(rawBody);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: "Invalid request body", issues: parsed.error.issues },
+        { status: 400 },
+      );
+    }
+    const { reason } = parsed.data;
+
     // audit-2026-05-07 red-team-HIGH (reject-asymmetry-vs-approve-hardening):
     // Rate-limit BEFORE the destructive rejected_at write. Mirrors
     // approve's Cluster-K C-0032 — a stolen admin session must not be
@@ -111,16 +127,6 @@ export const POST = withRole<{ id: string }>("admin")(
         },
       );
     }
-
-    const rawBody = await req.json().catch(() => ({}));
-    const parsed = BODY_SCHEMA.safeParse(rawBody);
-    if (!parsed.success) {
-      return NextResponse.json(
-        { error: "Invalid request body", issues: parsed.error.issues },
-        { status: 400 },
-      );
-    }
-    const { reason } = parsed.data;
 
     const admin = createAdminClient();
 

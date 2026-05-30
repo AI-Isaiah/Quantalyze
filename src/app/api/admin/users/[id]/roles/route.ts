@@ -181,27 +181,6 @@ export const GET = withRole<{ id: string }>("admin")(
 
 export const POST = withRole<{ id: string }>("admin")(
   async (req: NextRequest, { user, supabase, params }) => {
-    // audit-2026-05-07 review fix I4 (red-team conf 9): withRole runs CSRF + the
-    // admin gate but no rate limit. adminActionLimiter (20/min/user) caps a
-    // compromised admin session. Keyed on the verified admin id, AFTER auth — no
-    // timing oracle on admin status. The admin-csrf-ratelimit grep gate requires
-    // this checkLimit call to stay present on this route.
-    const rl = await checkLimit(adminActionLimiter, `admin:${user.id}:users-roles`);
-    if (!rl.success) {
-      // silent-failure-hunter HIGH conf-9: translate the misconfigured-limiter
-      // variant to 503 (Upstash outage) instead of masking it as an ordinary 429.
-      if (isRateLimitMisconfigured(rl)) {
-        return NextResponse.json(
-          { error: "Rate limiter unavailable", code: "ratelimit_misconfigured" },
-          { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
-        );
-      }
-      return NextResponse.json(
-        { error: "Too many requests" },
-        { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-      );
-    }
-
     const rawTargetUserId = params?.id;
     if (!rawTargetUserId) {
       return NextResponse.json(
@@ -224,6 +203,30 @@ export const POST = withRole<{ id: string }>("admin")(
       );
     }
     const { action, role } = parsed.data;
+
+    // audit-2026-05-07 review fix I4 (red-team conf 9): withRole runs CSRF + the
+    // admin gate but no rate limit. adminActionLimiter (20/min/user) caps a
+    // compromised admin session. Keyed on the verified admin id, AFTER auth — no
+    // timing oracle on admin status. The admin-csrf-ratelimit grep gate requires
+    // this checkLimit call to stay present on this route.
+    // B15b (audit-2026-05-07): consumed AFTER the path param + body validate
+    // above, so a missing target id or malformed/invalid body never burns one
+    // of the admin's tokens.
+    const rl = await checkLimit(adminActionLimiter, `admin:${user.id}:users-roles`);
+    if (!rl.success) {
+      // silent-failure-hunter HIGH conf-9: translate the misconfigured-limiter
+      // variant to 503 (Upstash outage) instead of masking it as an ordinary 429.
+      if (isRateLimitMisconfigured(rl)) {
+        return NextResponse.json(
+          { error: "Rate limiter unavailable", code: "ratelimit_misconfigured" },
+          { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+        );
+      }
+      return NextResponse.json(
+        { error: "Too many requests" },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      );
+    }
 
     // ── The entire mutation, atomically (B4 / admin_role_mutate) ─────────────
     // Dual-store write + dedup-UNION last-admin guard + per-target advisory lock

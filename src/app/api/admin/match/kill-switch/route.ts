@@ -79,17 +79,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  // audit-2026-05-07 (PR-2 2026-05-28): kill-switch is the most-sensitive
-  // admin mutator (flips the global match engine on/off). A buggy admin
-  // client flipping in a loop would write N audit rows AND fan out N
-  // downstream re-recommend triggers; per-admin rate-limit caps that
-  // blast radius at the source.
-  const rl = await checkLimit(
-    adminActionLimiter,
-    `admin-killswitch:${user.id}`,
-  );
-  if (!rl.success) return rateLimitDenyJson(rl);
-
   let body: { enabled?: boolean };
   try {
     body = await req.json();
@@ -100,6 +89,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (typeof body.enabled !== "boolean") {
     return NextResponse.json({ error: "enabled (boolean) required" }, { status: 400 });
   }
+
+  // audit-2026-05-07 (PR-2 2026-05-28): kill-switch is the most-sensitive
+  // admin mutator (flips the global match engine on/off). A buggy admin
+  // client flipping in a loop would write N audit rows AND fan out N
+  // downstream re-recommend triggers; per-admin rate-limit caps that
+  // blast radius at the source.
+  //
+  // B15b (audit-2026-05-07): consumed AFTER validating the body so a
+  // non-boolean `enabled` (rejected 400 above) never burns a token.
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin-killswitch:${user.id}`,
+  );
+  if (!rl.success) return rateLimitDenyJson(rl);
 
   const admin = createAdminClient();
   const { error } = await admin
