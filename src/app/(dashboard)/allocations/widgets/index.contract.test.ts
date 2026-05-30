@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { ComponentType } from "react";
 
-import { WIDGET_COMPONENTS } from "./index";
+import { WIDGET_COMPONENTS, type WidgetId } from "./index";
 
 // ---------------------------------------------------------------------------
 // M-0171 — Lazy-import barrel contract.
@@ -44,7 +44,9 @@ function loaderOf(
 }
 
 describe("M-0171 — WIDGET_COMPONENTS lazy barrel resolves to real default exports", () => {
-  const ids = Object.keys(WIDGET_COMPONENTS);
+  // Keys of a `Record<WidgetId, …>` are WidgetId by construction; cast so the
+  // per-id `WIDGET_COMPONENTS[id]` index below stays typed (H-0157/M-1096).
+  const ids = Object.keys(WIDGET_COMPONENTS) as WidgetId[];
 
   it("registers a non-empty set of widget ids", () => {
     // Guards against an accidental barrel wipe that would make the per-id
