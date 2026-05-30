@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.31] - 2026-05-30
+### Changed — GDPR export coverage gate reads the typed manifest, not a source-text regex (cross-cutting refactor B13)
+
+B13 closes the brittle coupling between the GDPR Art. 15 export manifest and its CI coverage gate. The manifest (`USER_EXPORT_TABLES` plus its types, cross-party redaction projections, and per-spec order columns) moves out of `src/lib/gdpr-export.ts` — which imports `server-only` and therefore cannot be imported by the `tsx` coverage hook — into a new `server-only`-free module. The hook now imports the SAME typed array the runtime uses instead of regex-scraping the `USER_EXPORT_TABLES` literal out of the source text. Drift between the gate and the real manifest is now impossible by construction.
+
+- **New manifest module** (`src/lib/gdpr-export-manifest.ts`): holds `PublicTable`/`PublicRow`, the `DirectUserTable`/`IndirectUserTable`/`ProjectedUserTable`/`UserExportTable` types, the four redaction projections (`redactAuditLogForUser`, `redactContactRequestForUser`, `redactAllocatorMatchForUser`, `redactApiKeysForUser`), `USER_EXPORT_TABLES`, and `ORDER_COLUMN_OVERRIDES`/`getOrderColumn`. Its only dependencies are a type-only `Database` import (erased by tsx) and the lazy-Sentry `captureToSentry` helper — so it imports cleanly under tsx with no `server-only` crash (enforced by the existing `no-server-only-leak` gate).
+- **Runtime re-exports for back-compat** (`gdpr-export.ts`): keeps the bundle-assembly engine (`collectUserExportBundle`, `encodeExportBundle`, `rowsForTable`, the fetch/size-cap logic) and `export *`s the manifest surface, so every `@/lib/gdpr-export` consumer (the export route + the gdpr tests) is unchanged.
+- **Coverage hook imports the typed array** (`scripts/check-gdpr-export-coverage.ts`): the four helpers that previously sliced the `USER_EXPORT_TABLES` literal out of source text with a `/…as const;/` regex (`extractManifestTables`, `extractManifestTablesForParity`, `extractProjectedEntries`, `extractManifestEntries`) now iterate the imported typed array. The brittle source-text scrape and the `MANIFEST_FILE` read are gone; the migration `CREATE TABLE` SQL parsing (legitimately text) is untouched.
+- **P698 by-construction test** (`gdpr-export-coverage-hook.test.ts`): a new CI-running assertion that EVERY manifest entry declares a user-scoping filter column (direct/projected → `user_column`, indirect → `parent_user_column`), derived over the live typed `USER_EXPORT_TABLES` — the single contractual guarantee that a service-role SELECT cannot leak cross-tenant rows. The subprocess hook tests were reworked to sandbox the manifest MODULE + `sentry-capture` + a `@/`-resolving `tsconfig.json` so the `tsx` hook loads the (possibly mutated) typed manifest rather than a now-inert text file.
+
+**Verified:** tsc 0, lint 0 errors; full vitest 5582 passed; the real coverage gate `npx tsx scripts/check-gdpr-export-coverage.ts` exits 0 ("covers all 20 declared user-owned tables") via the typed import; the `no-server-only-leak` gate passes (manifest stays tsx-loadable); an adversarial review found 0 issues introduced by B13 (the two confirmed findings are pre-existing LOW nits outside the diff). The re-exported surface keeps the export route + all gdpr tests byte-compatible.
+
 ## [0.24.15.30] - 2026-05-30
 ### Changed — the public factsheet can no longer render invented data (cross-cutting refactor B6)
 
