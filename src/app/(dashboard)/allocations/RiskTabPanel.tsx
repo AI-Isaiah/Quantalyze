@@ -61,10 +61,9 @@ export function RiskTabPanel(props: MyAllocationDashboardPayload) {
                 // B21: `data` is `unknown` on WidgetProps; each widget validates
                 // it through its own schema, so the whole payload passes as-is
                 // (no `as any` escape hatch).
+                // H-0076: width/height omitted — widgets size via ResponsiveContainer.
                 data={props}
                 timeframe="1YTD"
-                width={0}
-                height={0}
               />
             </Suspense>
           </div>

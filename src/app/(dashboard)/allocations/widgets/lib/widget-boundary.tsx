@@ -34,8 +34,9 @@ import type { WidgetProps } from "../../lib/types";
 /** The non-`data` props every widget receives from its mount. */
 export interface BaseWidgetProps {
   timeframe: WidgetProps["timeframe"];
-  width: number;
-  height: number;
+  // H-0076: optional, mirroring WidgetProps — widgets size via ResponsiveContainer.
+  width?: WidgetProps["width"];
+  height?: WidgetProps["height"];
 }
 
 // Module-scoped dedup so a long hover / Tweaks session can't saturate the
