@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.29] - 2026-05-30
+### Changed — workflow-security posture is now enforced by construction (B24)
+
+The GitHub Actions security baseline (SHA-pinned actions, least-privilege `permissions:`, `persist-credentials: false`, concurrency) was already asserted in `critical-regressions.test.ts` — but over a **hardcoded list of six workflow files**. `cassette-refresh.yml` was added after that list was written and never appended, so its two unpinned actions slipped through. The static list was itself the gap.
+
+- **Dynamic discovery.** The `[CRITICAL-C0293]` guard now derives the workflow set from `readdirSync('.github/workflows')`, so every current and future workflow is automatically held to the full baseline. A fail-loud sentinel asserts the glob returns ≥ 8 files and includes the known-critical workflows, so a broken glob can't make the per-file loops vacuously pass.
+- **New concurrency invariant.** Every `pull_request`/`push`-triggered workflow must declare a top-level `concurrency:` group (schedule/dispatch-only workflows exempt). The `on:` classifier is robust to quoted (`"on":`), blank-line, inline-array/flow-map, single-string, and `merge_group`/`pull_request_target` forms, with an exact-merge-path-set tripwire + parser fixtures.
+- **Pinned the two stragglers** in `cassette-refresh.yml`: `actions/checkout@v4` → `34e11487… # v4.3.1`, `peter-evans/create-pull-request@v7` → `22a90890… # v7.0.11` (surgical pin, no version bump). `cassette-refresh.yml` is added to `PERSIST_CRED_EXEMPT` — it must retain the persisted token to push its auto-PR branch.
+- **Fail-loud nightly canary (H-1026 / B23 M-0849).** A missing `DEMO_PDF_SECRET` while the canary is enabled previously `::warning::`d and `exit 0`d, greening the job and skipping the `if: failure()` issue path — a rotated secret silently disabled the cold-start probe. Now it `::error::` + `exit 1`s so the dedup'd issue is filed, pinned by a source-text guard.
+
+**Verified:** tsc 0, lint 0 errors; `critical-regressions.test.ts` 101/101 green; full vitest 5570 passed. Rule-9 proof: transiently un-pinning the cassette-refresh checkout makes the SHA-pin assertion fail *on cassette-refresh* — the file the old hardcoded list omitted. Specialist + Claude red-team pass hardened the `on:` parser (quoted/blank-line/inline forms) and added the nightly source-text guard. Baseline documented in `docs/runbooks/workflow-security-baseline-b24.md`. Deferred with rationale: M-1017 (destructive-migration rollback-pair guard — own batch). Reverify-closed (not re-fixed): M-0852/M-0854 (C-0294), mig-03 (retro-PR193-M-3), mig-04 (self-test + retro-PR193-M-4), M-1015 (C-0331).
+
 ## [0.24.15.28] - 2026-05-30
 ### Changed — admin-cluster routes validate input before consuming a token (cross-cutting refactor B15b)
 
