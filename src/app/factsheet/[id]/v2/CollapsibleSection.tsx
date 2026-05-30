@@ -1,8 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { useCrossTabStorage } from "@/lib/storage/cross-tab";
+import { rawStringCodec } from "@/lib/storage/codecs";
 import { trackFactsheetEvent } from "./factsheet-analytics";
+
+type OpenState = "open" | "closed";
 
 /**
  * Broadcast on `window` to ask every CollapsibleSection in the tree to
@@ -36,46 +40,65 @@ export function CollapsibleSection({
   storageKey?: string;
   children: ReactNode;
 }) {
+  // B7 — open/closed persistence routes through the cross-tab primitive
+  // (SSR-safe deferred hydration so server HTML matches the first client
+  // render, cross-tab StorageEvent sync, fail-loud read/write). The codec is a
+  // `rawStringCodec` that stores the literal "open"/"closed" string (no JSON
+  // envelope) — byte-compatible with the pre-B7 `setItem(storageKey, "open")`
+  // write, so existing stored section states survive. The key is the raw
+  // `storageKey` prop unchanged (e.g. `factsheet-collapse:${id}:perf`).
+  //
+  // The codec is built from `defaultOpen` via useMemo so an ABSENT key
+  // (raw === null) yields the section's own default; only the literal "closed"
+  // (or "open") overrides it. Disabled when no storageKey is provided so a
+  // section without persistence never touches localStorage (and never reads a
+  // prefix-only key).
+  const codec = useMemo(
+    () =>
+      rawStringCodec<OpenState>({
+        parse: (raw) =>
+          raw === "closed" ? "closed" : raw === "open" ? "open" : defaultOpen ? "open" : "closed",
+        serialize: (v) => v,
+      }),
+    [defaultOpen],
+  );
+  const {
+    value: persistedOpen,
+    setValue: setPersistedOpen,
+    isHydrated: hydrated,
+  } = useCrossTabStorage<OpenState>({
+    key: storageKey ?? "factsheet-collapse:__unused__",
+    initial: defaultOpen ? "open" : "closed",
+    codec,
+    enabled: Boolean(storageKey),
+    sentryArea: "factsheet.section",
+  });
+
   const [open, setOpen] = useState(defaultOpen);
-  const [hydrated, setHydrated] = useState(false);
 
-  // Two-pass mount: SSR renders the default; on hydration we read the user's
-  // last choice from localStorage if a storageKey was provided. setState in
-  // this effect is intentional — we cannot read localStorage at SSR time, so
-  // the hydration sync runs once on mount.
+  // After the primitive's deferred load completes, adopt the persisted (or
+  // cross-tab-synced) open/closed state into the local `open` flag that drives
+  // the <details> element. setState in this effect is the standard hydration
+  // pattern — we cannot read localStorage at SSR time.
   useEffect(() => {
-    if (!storageKey) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setHydrated(true);
-      return;
-    }
-    try {
-      const raw = window.localStorage.getItem(storageKey);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (raw === "open") setOpen(true);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      else if (raw === "closed") setOpen(false);
-    } catch { /* private mode / quota */ }
+    if (!hydrated) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setHydrated(true);
-  }, [storageKey]);
-
-  useEffect(() => {
-    if (!hydrated || !storageKey) return;
-    try {
-      window.localStorage.setItem(storageKey, open ? "open" : "closed");
-    } catch { /* private mode / quota */ }
-  }, [open, storageKey, hydrated]);
+    setOpen(persistedOpen === "open");
+  }, [hydrated, persistedOpen]);
 
   // "Reset view" broadcasts FACTSHEET_OPEN_ALL_EVENT so every collapsed
   // section pops back open. We listen here rather than in a parent so
-  // sections that were rendered conditionally still register cleanly.
+  // sections that were rendered conditionally still register cleanly. Persist
+  // the pop-open so the restored layout survives a reload.
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const handler = () => setOpen(true);
+    const handler = () => {
+      setOpen(true);
+      setPersistedOpen("open");
+    };
     window.addEventListener(FACTSHEET_OPEN_ALL_EVENT, handler);
     return () => window.removeEventListener(FACTSHEET_OPEN_ALL_EVENT, handler);
-  }, []);
+  }, [setPersistedOpen]);
 
   return (
     <details
@@ -89,6 +112,10 @@ export function CollapsibleSection({
           trackFactsheetEvent("factsheet_v2_section_toggle", { section: id, open: nextOpen });
         }
         setOpen(nextOpen);
+        // Persist the user's choice (no-op when disabled / readOnly inside the
+        // primitive). Skip pre-hydration toggles so the mount-time
+        // default-vs-stored reconciliation never re-persists.
+        if (hydrated) setPersistedOpen(nextOpen ? "open" : "closed");
       }}
       className="group"
     >

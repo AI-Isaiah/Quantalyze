@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState, useEffect, useCallback } from "react";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import { createClient } from "@/lib/supabase/client";
+import { captureToSentry } from "@/lib/sentry-capture";
 import type { CtaLocation } from "@/lib/analytics";
 import { RequestCallModal } from "./RequestCallModal";
 
@@ -30,7 +31,7 @@ import { RequestCallModal } from "./RequestCallModal";
  *
  * Auth-aware routing:
  *   - Unauthenticated → /signup?role=manager
- *   - Authenticated → /strategies/new (update when the wizard lands)
+ *   - Authenticated → /strategies/new/wizard (the Connect Your Strategy wizard)
  */
 const LOGGED_OUT_CTA_HREF = "/signup?role=manager";
 // Task 1.2 shipped the Connect Your Strategy wizard. Logged-in managers
@@ -47,6 +48,14 @@ const VIEW_EVENT_SESSION_KEY = "for_quants_view_fired_v1";
  * fire-once guard when sessionStorage is unavailable (Safari private,
  * SSR, etc.).
  */
+// B7 sanctioned-exception: this is an ephemeral fire-once *sessionStorage*
+// view-event guard (same class as `useSessionStorageBoolean`). Tab isolation is
+// the intent — exactly one view event per browser-tab visit — so cross-tab sync
+// is explicitly NOT wanted (sharing the marker would suppress a legitimate
+// second-tab view). The `useCrossTabStorage` primitive is localStorage +
+// cross-tab by design; routing this through it would be semantically wrong.
+// Stays on a guarded raw sessionStorage read/write. (B25 lint ban: allowlist
+// with this justification.)
 function hasViewEventFiredThisTab(): boolean {
   if (typeof window === "undefined") return false;
   try {
@@ -111,11 +120,20 @@ export function ForQuantsCtas({ location }: ForQuantsCtasProps) {
         if (cancelled) return;
         setIsLoggedIn(Boolean(data.session));
       })
-      .catch(() => {
+      .catch((err) => {
+        if (cancelled) return;
         // Auth probe failed — keep the optimistic logged-out CTA. The
         // logged-out CTA still works for authenticated users (it just
         // routes them through /signup which the proxy will redirect to
-        // their actual destination).
+        // their actual destination). Fail-loud rather than swallow: this is a
+        // real getSession throw (NOT the no-session success path above), it is
+        // rare, and it correlates with an authenticated user being shown the
+        // logged-out CTA — leave a breadcrumb so the funnel drop-off is
+        // diagnosable instead of invisible.
+        if (typeof console !== "undefined") {
+          console.warn("[for-quants] auth probe failed; keeping logged-out CTA", err);
+        }
+        captureToSentry(err, { tags: { area: "for-quants.auth-probe" } });
       });
     return () => {
       cancelled = true;

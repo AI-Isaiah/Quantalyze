@@ -53,6 +53,14 @@ export function isWidgetStateV2Enabled(opts?: WidgetStateV2Options): boolean {
     return false;
   }
 
+  // B7 sanctioned-exception: this is a non-React pure module-level function (a
+  // developer feature-flag reader called synchronously during render by many
+  // call sites, with a URL override taking precedence). Wrapping it in the
+  // `useCrossTabStorage` React hook would defeat its use as a synchronous
+  // function and force every caller into a component. No cross-tab sync is
+  // wanted — a flag flip is per-tab developer intent, not shared state. Stays
+  // on a guarded raw read. (B25 raw-localStorage lint ban: allowlist with this
+  // justification.)
   // Fall through to localStorage (default OFF — RISK-1 mitigation).
   try {
     const raw = window.localStorage.getItem(WIDGET_STATE_V2_STORAGE_KEY);

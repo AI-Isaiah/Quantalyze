@@ -3,6 +3,12 @@
 import { createContext, startTransition, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
+import {
+  useCrossTabStorage,
+  type DecodeResult,
+  type StorageCodec,
+} from "@/lib/storage/cross-tab";
+import { stripPoisonKeys } from "@/lib/storage/codecs";
 
 type ComparatorKey = FactsheetPayload["activeComparator"];
 
@@ -70,12 +76,99 @@ const DisplayContext = createContext<DisplayContextValue | null>(null);
 
 const MIN_VISIBLE_SAMPLES = 5;
 
+/**
+ * The persisted factsheet view-state shape. Both the URL query string and the
+ * localStorage blob carry these five fields:
+ *   range  — `"${startIdx}-${endIdx}"` (the x-axis window; absent ⇒ full range)
+ *   cmp    — the active comparator key ("btc" | "spx" | "none")
+ *   cb     — colorblind toggle: the string "1" when on (or `true` from a URL
+ *            param's bare presence), absent when off
+ *   reg    — regimes overlay toggle: same "1"/`true`/absent domain as `cb`
+ *   dark   — dark-mode toggle: same "1"/`true`/absent domain as `cb`
+ */
 type PersistedState = {
   range?: string;
   cmp?: ComparatorKey;
   cb?: string | true;
   reg?: string | true;
   dark?: string | true;
+};
+
+const COMPARATOR_VALUES: ReadonlySet<ComparatorKey> = new Set([
+  "btc",
+  "spx",
+  "none",
+]);
+
+/**
+ * Per-field coercion of an already-poison-stripped plain record into a
+ * `PersistedState`. Each field independently drops to "absent" (undefined)
+ * when the persisted value is missing or outside its domain, so a single
+ * drifted field (a rolled-back comparator key, a hand-edited blob) folds away
+ * while every valid field survives. Unknown extra keys are dropped (the
+ * projection only reads the five known fields).
+ *
+ * `cb`/`reg`/`dark` are stored as the literal string "1" (the write effect
+ * below only ever writes "1"); we keep `=== true` too so a URL param's bare
+ * presence (`?cb`) read back from a prior URL-only session still coerces. Any
+ * other value folds to undefined (off).
+ */
+function parsePersistedFields(r: Record<string, unknown>): PersistedState {
+  const out: PersistedState = {};
+  if (typeof r.range === "string") out.range = r.range;
+  if (typeof r.cmp === "string" && (COMPARATOR_VALUES as ReadonlySet<string>).has(r.cmp)) {
+    out.cmp = r.cmp as ComparatorKey;
+  }
+  if (r.cb === "1" || r.cb === true) out.cb = r.cb;
+  if (r.reg === "1" || r.reg === true) out.reg = r.reg;
+  if (r.dark === "1" || r.dark === true) out.dark = r.dark;
+  return out;
+}
+
+/**
+ * B7 — UNVERSIONED cross-tab storage codec for the `factsheet-v2:${strategyId}`
+ * blob. The cross-tab primitive owns the localStorage mechanics; this codec
+ * owns parse + per-field validate + serialize. The persisted shape is the bare
+ * `JSON.stringify(state)` the pre-B7 hand-rolled persist effect wrote (no
+ * version envelope), so {@link factsheetViewStateCodec.encode} is a plain
+ * `JSON.stringify` — a round-trip is byte-identical and existing users' saved
+ * factsheet views load unchanged (the byte-compat gate; adding a version field
+ * would reset every stored view exactly once). Mirrors `tweakStateCodec`.
+ *
+ * MUST be pure / side-effect free (the StorageCodec contract): decode runs on
+ * every cross-tab StorageEvent and during render under "lazy" hydration. Decode
+ * salvages field-by-field rather than resetting the whole blob on one drifted
+ * field; a hard failure (non-JSON ⇒ "parse_failed", or a non-object top level
+ * ⇒ "not_object") returns the empty default with a "reset" outcome so the
+ * primitive emits its fail-loud console + Sentry breadcrumb.
+ */
+const EMPTY_PERSISTED: PersistedState = {};
+
+export const factsheetViewStateCodec: StorageCodec<PersistedState> = {
+  decode(raw: string | null): DecodeResult<PersistedState> {
+    if (raw == null) return { value: EMPTY_PERSISTED, outcome: "ok", reason: null };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { value: EMPTY_PERSISTED, outcome: "reset", reason: "parse_failed" };
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { value: EMPTY_PERSISTED, outcome: "reset", reason: "not_object" };
+    }
+    // Strip prototype-poison own keys before reading r.range / r.cmp so a
+    // hand-edited `{"__proto__":{...}}` blob cannot surface a value through the
+    // prototype chain.
+    const r = stripPoisonKeys(parsed) as Record<string, unknown>;
+    return { value: parsePersistedFields(r), outcome: "ok", reason: null };
+  },
+  encode(value: PersistedState): string {
+    // Byte-compatible with the pre-B7 `JSON.stringify(state)` write — no
+    // version envelope, so a round-trip is byte-identical and existing blobs
+    // survive. The write effect below constructs `state` with the same field
+    // order (range, cmp, cb, reg, dark) the pre-B7 effect used.
+    return JSON.stringify(value);
+  },
 };
 
 export function FactsheetProvider({
@@ -116,23 +209,56 @@ export function FactsheetProvider({
   // debounce when a user pans then immediately resets.
   const resetXRange = useCallback(() => setXRangeRaw(fullRange), [fullRange]);
 
-  // URL + localStorage persistence — read once on mount (client-only so SSR
-  // stays deterministic), then write back on every change (debounced 250ms).
+  // B7 — the localStorage half of view-state persistence now routes through the
+  // cross-tab primitive + `factsheetViewStateCodec` (SSR-safe deferred
+  // hydration, the dirtyRef observe-without-rewrite guard, fail-loud console +
+  // Sentry on a corrupt/failed read or write, and sign-out-purge coverage via
+  // the registered `factsheet-v2:` prefix). The URL query-string half stays a
+  // `history.replaceState` write below — the primitive only owns localStorage.
+  // The 250ms debounce that preserved the pre-B7 write cadence lives on the
+  // OUTER write effect (it has to, because it also debounces the URL
+  // replaceState); the primitive itself writes synchronously (debounceMs:0) when
+  // that already-debounced effect fires `setStoredView`, so the total
+  // localStorage cadence stays ~250ms rather than stacking two debounces.
+  //
+  // crossTab:false — unlike the discovery/scenario/tweaks consumers, factsheet
+  // view-state is ALSO mirrored in the URL query string (the co-source-of-truth
+  // for link-sharing), and hydration is intentionally one-shot: the read effect
+  // below latches on `hydrated.current` and reconciles URL-wins-over-storage
+  // exactly once. Live-adopting a cross-tab StorageEvent into the already-mounted
+  // view would have to re-reconcile against the URL and the five split view
+  // states without clobbering an in-progress pan — complexity with no real payoff
+  // for two tabs of the same factsheet. So this consumer takes the primitive's
+  // hardened persist + fail-loud + SSR-safe load and opts OUT of the live
+  // listener (rather than wiring an inert one whose events nothing consumes).
+  //
+  // The key stays `factsheet-v2:${strategyId}` with the UNVERSIONED
+  // `JSON.stringify(state)` shape so existing stored views survive byte-for-byte.
+  const { value: storedView, setValue: setStoredView, isHydrated: storageHydrated } =
+    useCrossTabStorage<PersistedState>({
+      key: `factsheet-v2:${payload.strategyId}`,
+      initial: EMPTY_PERSISTED,
+      codec: factsheetViewStateCodec,
+      debounceMs: 0,
+      crossTab: false,
+      hydration: "deferred",
+      sentryArea: "factsheet.view",
+    });
+
+  // URL + localStorage hydration — read once after the primitive's deferred
+  // load completes (client-only so SSR stays deterministic). URL params win
+  // over the stored blob (link-sharing precedence), matching the pre-B7 `get`.
   const hydrated = useRef(false);
-  // SSR-safe URL/localStorage hydration. setState in this effect is the
-  // standard hydration pattern — we can't read window state during render.
+  // SSR-safe URL/storage hydration. setState in this effect is the standard
+  // hydration pattern — we can't read window/storage state during render, and
+  // we must wait for the primitive's deferred load (storageHydrated) so
+  // `storedView` carries the persisted blob rather than the empty initial.
   useEffect(() => {
-    if (typeof window === "undefined" || hydrated.current) return;
+    if (typeof window === "undefined" || hydrated.current || !storageHydrated) return;
     hydrated.current = true;
     const params = new URLSearchParams(window.location.search);
-    const storageKey = `factsheet-v2:${payload.strategyId}`;
-    const stored = (() => {
-      try {
-        const raw = window.localStorage.getItem(storageKey);
-        return raw ? (JSON.parse(raw) as Partial<PersistedState>) : null;
-      } catch { return null; }
-    })();
-    const get = (k: string) => params.get(k) ?? stored?.[k as keyof PersistedState];
+    const get = (k: keyof PersistedState) =>
+      params.get(k) ?? storedView[k];
     const maxIdx = payload.dates.length - 1;
 
     const rangeRaw = get("range");
@@ -145,26 +271,24 @@ export function FactsheetProvider({
     }
     const cmpRaw = get("cmp");
     if (cmpRaw === "btc" || cmpRaw === "spx" || cmpRaw === "none") {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setComparator(cmpRaw);
     }
     const cbRaw = get("cb");
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (cbRaw === "1" || cbRaw === true) setColorblind(true);
     const regRaw = get("reg");
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (regRaw === "1" || regRaw === true) setRegimes(true);
     const darkRaw = get("dark");
     if (darkRaw === "1" || darkRaw === true) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDarkMode(true);
     }
     // Display defaults to "everything off" — no system-preference inference
     // for dark mode. The user opts in explicitly via the Display popover.
-  }, [payload.strategyId, payload.dates.length]);
+  }, [payload.strategyId, payload.dates.length, storageHydrated, storedView]);
 
   // Debounced write-back — only fires after hydration so we don't blow away
-  // URL state before we've read it.
+  // URL/stored state before we've read it. The URL half is a synchronous
+  // `replaceState` here; the localStorage half is delegated to the primitive's
+  // own debounced persist via `setStoredView`.
   const writeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (typeof window === "undefined" || !hydrated.current) return;
@@ -189,15 +313,14 @@ export function FactsheetProvider({
       const qs = params.toString();
       const next = `${window.location.pathname}${qs ? `?${qs}` : ""}`;
       window.history.replaceState(null, "", next);
-      const storageKey = `factsheet-v2:${payload.strategyId}`;
-      try {
-        window.localStorage.setItem(storageKey, JSON.stringify(state));
-      } catch { /* private mode / quota */ }
+      // localStorage persist routes through the primitive (its own debounce +
+      // cross-tab flush). Byte-compat: encode is a bare JSON.stringify(state).
+      setStoredView(state);
     }, 250);
     return () => {
       if (writeTimer.current) clearTimeout(writeTimer.current);
     };
-  }, [xRange, comparator, colorblind, regimes, darkMode, payload.strategyId, payload.dates.length, payload.activeComparator]);
+  }, [xRange, comparator, colorblind, regimes, darkMode, payload.strategyId, payload.dates.length, payload.activeComparator, setStoredView]);
 
   // Identity-stable value objects so each context only re-emits when its
   // own slice changes. The lower-churn contexts can stay shallow-equal

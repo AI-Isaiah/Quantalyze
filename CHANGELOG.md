@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.15.21] - 2026-05-30
+### Changed — the last localStorage consumers move onto the cross-tab primitive (cross-cutting refactor B7c — B7 CLOSED)
+
+B7c migrates the final real `localStorage` consumers onto the `useCrossTabStorage` primitive and formally documents the handful of sites that stay on raw storage — closing the cross-tab / cross-version storage-safety topic (B7) across the complete surface. Every persistent client-state site is now either on the hardened primitive or a documented sanctioned exception, which is the precondition for the planned B25 raw-`localStorage` lint ban.
+
+- **Factsheet view-state onto the primitive.** `factsheet-context.tsx` persists the per-strategy view blob (`factsheet-v2:${id}`) through an UNVERSIONED `factsheetViewStateCodec` (`encode` is a bare `JSON.stringify` — byte-identical to the pre-B7 write, so existing saved views load unchanged), with per-field salvage + prototype-poison stripping at decode. `CollapsibleSection.tsx` persists each section's open/closed state through a `defaultOpen`-aware `rawStringCodec` at the unchanged raw key. Both keep the URL query string as the co-source-of-truth; the factsheet hook opts out of the live cross-tab listener (`crossTab: false`) because hydration is one-shot and URL-reconciled.
+- **Admin compute-jobs auto-refresh onto the primitive.** `ComputeJobsTable.tsx` persists the `admin-compute-jobs-auto-refresh` boolean through a `rawStringCodec` with SSR-safe deferred hydration (replacing a lazy `localStorage` read in the `useState` initializer).
+- **Sign-out purge gap closed.** `factsheet-v2:` and `factsheet-collapse:` are added to `APP_NAMESPACED_PREFIXES` — both factsheet key families were NOT purged on a shared-device sign-out before (their template-literal keys slipped past the registry). Net-new privacy fix.
+- **Three sanctioned exceptions documented (not migrated).** The `widget_state_v2` URL-override flag (a non-React pure module function), the `/for-quants` fire-once **sessionStorage** view guard (tab isolation is the intent), and the wizard's async Web-Crypto HMAC-signed envelope + per-tab nonce (the synchronous codec interface cannot express `await crypto.subtle.sign`) each carry a greppable `B7 sanctioned-exception:` rationale so the future lint ban can allowlist them with justification.
+- **Folded audit findings.** ForQuantsCtas H-0348 (stale "update when the wizard lands" docstring) and M-0368 (the empty auth-probe `catch` now leaves a fail-loud `console.warn` + Sentry breadcrumb) are fixed in passing; M-0369 (a module-scope view-event guard) was already closed by the existing sessionStorage guard.
+- **New coverage.** A `FactsheetProvider` integration test (deferred-load adoption, URL-wins-over-storage precedence, write-path byte-compat with no version envelope), a `CollapsibleSection` no-clobber-on-hydration assertion, and the `SignOutButton` purge inventory extended with the two factsheet key families.
+- **Verified end-to-end:** tsc 0, lint 0 errors, full vitest 5497 pass. 5-lens adversarial review + comment-analyzer clean (no C/H/M findings; all storage invariants — byte-compat, fail-loud, SSR-safety, no hydration race — hold).
+
 ## [0.24.15.20] - 2026-05-30
 ### Removed — the orphaned widget-grid renderers (cross-cutting refactor B7b-2)
 
