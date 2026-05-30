@@ -65,6 +65,12 @@ function makeUserClient() {
 
 function makeAdminClient() {
   return {
+    // B4b: the post-mutation export audits (account.export / export_refused)
+    // now emit via the service path (log_audit_event_service) through this
+    // admin client. Point its rpc at the same spy so the capture-based
+    // assertions observe them. (account.export_rate_limited still rides the
+    // user client's log_audit_event — site 297 is a pre-mutation reject.)
+    rpc: logAuditRpcMock,
     storage: {
       from: () => ({
         upload: (key: string, body: unknown, opts: unknown) =>
@@ -514,7 +520,7 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     await Promise.resolve();
     const refusedCall = logAuditRpcMock.mock.calls.find(
       (c) =>
-        c[0] === "log_audit_event" && c[1]?.p_action === "account.export_refused",
+        c[0] === "log_audit_event_service" && c[1]?.p_action === "account.export_refused",
     );
     expect(refusedCall).toBeDefined();
     const md = (refusedCall![1] as Record<string, unknown>)
@@ -612,7 +618,7 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
 
     expect(logAuditRpcMock).toHaveBeenCalled();
     const call = logAuditRpcMock.mock.calls.find(
-      (c) => c[0] === "log_audit_event" && c[1]?.p_action === "account.export",
+      (c) => c[0] === "log_audit_event_service" && c[1]?.p_action === "account.export",
     );
     expect(call).toBeDefined();
     const args = call![1] as Record<string, unknown>;
@@ -908,12 +914,12 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
     await Promise.resolve();
     await Promise.resolve();
     const exportCall = logAuditRpcMock.mock.calls.find(
-      (c) => c[0] === "log_audit_event" && c[1]?.p_action === "account.export",
+      (c) => c[0] === "log_audit_event_service" && c[1]?.p_action === "account.export",
     );
     expect(exportCall).toBeUndefined();
     const refusedCall = logAuditRpcMock.mock.calls.find(
       (c) =>
-        c[0] === "log_audit_event" && c[1]?.p_action === "account.export_refused",
+        c[0] === "log_audit_event_service" && c[1]?.p_action === "account.export_refused",
     );
     expect(refusedCall).toBeDefined();
 
@@ -921,7 +927,8 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
     // audit metadata MUST NOT contain table-name lists (schema
     // reconnaissance), only the per-mode booleans and aggregate
     // counts. Pin this on the partial path AND the truncated path —
-    // both feed audit_log via the same logAuditEvent call.
+    // both feed audit_log via the same log_audit_event_service emit
+    // (logAuditEventAsUser).
     const refusedMd = (refusedCall![1] as Record<string, unknown>)
       .p_metadata as Record<string, unknown>;
     expect(refusedMd.failed_table_count).toBe(1);

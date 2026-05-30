@@ -39,15 +39,16 @@ const authUser = vi.hoisted(() => ({
 const supabaseState = vi.hoisted(
   (): {
     insertedBatches: Array<Record<string, unknown>[]>;
-    // C-0121: capture log_audit_event RPC calls so the rollup contract
-    // (one event per upload, NOT one per batch) is observable.
+    // C-0121: capture log_audit_event_service RPC calls so the rollup contract
+    // (one event per upload, NOT one per batch) is observable. B4b: the audit
+    // rides the service path on the admin client.
     rpcCalls: Array<{ name: string; args: Record<string, unknown> }>;
     // M-0356(d): error returned on the Nth (0-indexed) trades.insert call.
     // -1 = never error. Lets a test fail the SECOND batch after the first
     // succeeds, exercising the partial-`inserted`-count 500 branch.
     insertErrorOnBatch: number;
-    // M-0356(e): when true, the log_audit_event RPC throws (transient infra
-    // blip) — proving the fire-and-forget audit never fails the 200.
+    // M-0356(e): when true, the log_audit_event_service RPC throws (transient
+    // infra blip) — proving the fire-and-forget audit never fails the 200.
     auditRpcThrows: boolean;
   } => ({
     insertedBatches: [],
@@ -73,15 +74,13 @@ vi.mock("@/lib/supabase/server", () => ({
         error: null,
       }),
     },
-    // log_audit_event RPC capture — record every audit emission so the
-    // rollup contract (C-0121: ONE event per upload, not one per batch)
-    // is asserted, not just stubbed.
+    // B4b: the rollup audit moved to the service path (log_audit_event_service)
+    // on the ADMIN client (see that mock for the capture + transient-throw
+    // toggle). This user client no longer emits audit — withAuth only uses its
+    // .auth.getUser(). Keep a generic rpc passthrough (harmless; nothing on
+    // this client calls it now).
     rpc: async (name: string, args: Record<string, unknown>) => {
       supabaseState.rpcCalls.push({ name, args });
-      if (name === "log_audit_event" && supabaseState.auditRpcThrows) {
-        // Transient-class failure — emit() swallows it (no rethrow).
-        throw new TypeError("fetch failed");
-      }
       return { data: null, error: null };
     },
   }),
@@ -122,6 +121,19 @@ vi.mock("@/lib/supabase/admin", () => ({
         };
       }
       return {};
+    },
+    // B4b: the rollup audit now emits via the service path
+    // (log_audit_event_service) through THIS service-role client — the route
+    // no longer spins up a throwaway user-JWT client just to emit. Capture
+    // the call for the C-0121 rollup contract + honor the transient-throw
+    // toggle (M-0356(e)).
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      supabaseState.rpcCalls.push({ name, args });
+      if (name === "log_audit_event_service" && supabaseState.auditRpcThrows) {
+        // Transient-class failure — the fire-and-forget emit swallows it.
+        throw new TypeError("fetch failed");
+      }
+      return { data: null, error: null };
     },
   }),
 }));
@@ -314,7 +326,7 @@ describe("POST /api/trades/upload — cross-user write protection", () => {
     expect(body.error).toMatch(/Insert failed at row 500/);
     // No rollup audit on a failed upload (the emit is below the loop).
     expect(
-      supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event"),
+      supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event_service"),
     ).toHaveLength(0);
   });
 
@@ -333,9 +345,9 @@ describe("POST /api/trades/upload — cross-user write protection", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.inserted).toBe(1);
-    // The audit emission WAS attempted (and threw inside emit()).
+    // The audit emission WAS attempted (and threw inside emitAsUser()).
     expect(
-      supabaseState.rpcCalls.some((c) => c.name === "log_audit_event"),
+      supabaseState.rpcCalls.some((c) => c.name === "log_audit_event_service"),
     ).toBe(true);
   });
 
@@ -363,7 +375,7 @@ describe("POST /api/trades/upload — cross-user write protection", () => {
 // The route batches inserts at batchSize=500 (route.ts:105). The audit
 // emission contract is one ROLLUP event per upload call (not one per
 // batch) — this is the explicit @audit-skip rationale in route.ts:110-112
-// (per-batch insert) + the single logAuditEvent call after the loop.
+// (per-batch insert) + the single logAuditEventAsUser call after the loop.
 // A regression that moved the emission INSIDE the batch loop would
 // O(N) the audit table for large uploads — a 5,000-row upload at the
 // max cap would write 10 audit rows. These tests pin the rollup
@@ -380,8 +392,8 @@ describe("POST /api/trades/upload — C-0121 rollup audit emission", () => {
 
   it("emits exactly ONE trades.upload audit row regardless of batch count", async () => {
     // 1,500 rows → 3 batches at batchSize=500. If the audit emission
-    // moved inside the loop, we'd see 3 log_audit_event RPC calls; the
-    // rollup contract requires exactly 1.
+    // moved inside the loop, we'd see 3 log_audit_event_service RPC calls;
+    // the rollup contract requires exactly 1.
     const trades = Array.from({ length: 1500 }, (_, i) => ({
       timestamp: new Date(2024, 0, 1 + (i % 28)).toISOString(),
       symbol: "BTC",
@@ -403,12 +415,14 @@ describe("POST /api/trades/upload — C-0121 rollup audit emission", () => {
 
     // Exactly ONE audit emission for the entire upload.
     const auditCalls = supabaseState.rpcCalls.filter(
-      (c) => c.name === "log_audit_event",
+      (c) => c.name === "log_audit_event_service",
     );
     expect(auditCalls).toHaveLength(1);
 
     // Shape pinned: action, entity_type, entity_id, metadata.{inserted,batches}.
+    // B4b: the service path also carries the explicit acting-user id.
     const event = auditCalls[0].args;
+    expect(event.p_user_id).toBe(authUser.id);
     expect(event.p_action).toBe("trades.upload");
     expect(event.p_entity_type).toBe("strategy");
     expect(event.p_entity_id).toBe(ownedStrategyId);
@@ -434,8 +448,11 @@ describe("POST /api/trades/upload — C-0121 rollup audit emission", () => {
     );
     expect(res.status).toBe(403);
 
+    // B4b: the rollup audit rides log_audit_event_service. Filtering on the
+    // service RPC keeps this a real guard — filtering on log_audit_event would
+    // pass trivially (the route never emits that RPC anymore).
     const auditCalls = supabaseState.rpcCalls.filter(
-      (c) => c.name === "log_audit_event",
+      (c) => c.name === "log_audit_event_service",
     );
     expect(auditCalls).toHaveLength(0);
   });

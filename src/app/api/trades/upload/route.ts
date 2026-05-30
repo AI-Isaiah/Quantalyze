@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/lib/api/withAuth";
-import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -122,8 +121,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   // Sprint 6 Task 7.1b — one rollup audit event per upload call.
   // entity_id pins to the strategy the trades were uploaded against.
-  const auditSupabase = await createClient();
-  logAuditEvent(auditSupabase, {
+  // B4b: the trades INSERT above rides the service-role `supabase`
+  // (createAdminClient) client, so the audit emits via the service path with
+  // the explicit acting-user id (log_audit_event_service) — JWT-immune. This
+  // also removes the throwaway user-JWT client that existed only to feed the
+  // audit emit.
+  logAuditEventAsUser(supabase, user.id, {
     action: "trades.upload",
     entity_type: "strategy",
     entity_id: strategy_id,

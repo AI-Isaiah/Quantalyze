@@ -4,7 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 import { notifyUserSignupApproved } from "@/lib/email";
 
 /**
@@ -84,9 +84,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
 
-  // PR #266 red-team: `await` instead of fire-and-forget so a failed audit
-  // insert surfaces as a 500 rather than a silent drop.
-  await logAuditEvent(supabase, {
+  // B4b: the manager-status UPDATE above rides the service-role `admin`
+  // client, so the audit emits via the service path with the explicit
+  // acting-admin id (log_audit_event_service) — JWT-immune. Fire-and-forget:
+  // it runs in after() AFTER the response flushes and does NOT gate the HTTP
+  // status. (The prior PR #266 `await logAuditEvent` implied a 500-on-failure
+  // guard, but the wrapper returns void so the await was a no-op — that guard
+  // never existed; failures are Sentry-reported. Hard gating via
+  // `await emitAsUser` is a separate decision.)
+  logAuditEventAsUser(admin, user.id, {
     action: "manager.approve",
     entity_type: "user",
     entity_id: id,

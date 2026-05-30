@@ -4,7 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
-import { logAuditEvent } from "@/lib/audit";
+import { logAuditEventAsUser } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
@@ -198,7 +198,7 @@ async function legacyKeysSyncHandler(args: {
   strategy_id: string;
   userId: string;
 }): Promise<NextResponse> {
-  const { supabase, strategy_id } = args;
+  const { strategy_id } = args;
 
   // ── Queue path (USE_COMPUTE_JOBS_QUEUE=true) ──────────────────────
   if (process.env.USE_COMPUTE_JOBS_QUEUE === "true") {
@@ -232,7 +232,7 @@ async function legacyKeysSyncHandler(args: {
       `[keys/sync] enqueued sync_trades job=${rpcData} for strategy=${strategy_id}`,
     );
 
-    logAuditEvent(supabase, {
+    logAuditEventAsUser(admin, args.userId, {
       action: "sync.start",
       entity_type: "sync",
       entity_id: strategy_id,
@@ -273,7 +273,7 @@ async function legacyKeysSyncHandler(args: {
     );
   }
 
-  logAuditEvent(supabase, {
+  logAuditEventAsUser(admin, args.userId, {
     action: "sync.start",
     entity_type: "sync",
     entity_id: strategy_id,
