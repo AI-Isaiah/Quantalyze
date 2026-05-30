@@ -1,10 +1,11 @@
 "use client";
 
 import { useMemo } from "react";
-import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { buildCompositeReturns } from "../lib/composite-returns";
 import { computeVaR, computeExpectedShortfall } from "@/lib/portfolio-stats";
+import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
+import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 import { formatPercent } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -29,10 +30,10 @@ const ZONE_COLORS = {
   red: "#DC2626",
 } as const;
 
-export function VarExpectedShortfall({ data }: WidgetProps) {
+function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
   const { var95, var99, es95, zone } = useMemo(() => {
     // Use weighted composite returns instead of unweighted concatenation
-    const composite: DailyPoint[] = data?.compositeReturns ?? buildCompositeReturns(data?.strategies ?? []);
+    const composite: DailyPoint[] = data.compositeReturns ?? buildCompositeReturns(data.strategies);
     const allReturns = composite.map((d) => d.value);
 
     if (allReturns.length < 10) {
@@ -136,3 +137,10 @@ export function VarExpectedShortfall({ data }: WidgetProps) {
     </div>
   );
 }
+
+// B21: validate `data` against the shared risk-widget contract + contain throws.
+export const VarExpectedShortfall = withWidgetBoundary(
+  riskWidgetDataSchema,
+  VarExpectedShortfallInner,
+  { area: "var-expected-shortfall" },
+);

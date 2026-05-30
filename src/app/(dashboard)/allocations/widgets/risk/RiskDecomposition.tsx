@@ -10,8 +10,9 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import type { WidgetProps } from "../../lib/types";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
+import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 import { mean } from "@/lib/portfolio-math-utils";
 import { computeRiskDecomposition } from "@/lib/portfolio-stats";
 
@@ -72,7 +73,7 @@ interface StrategyData {
   returns: number[];
 }
 
-export function RiskDecomposition({ data }: WidgetProps) {
+function RiskDecompositionInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
   const chartData = useMemo(() => {
     const strategies: StrategyData[] = [];
     if (data?.strategies && Array.isArray(data.strategies)) {
@@ -187,3 +188,10 @@ export function RiskDecomposition({ data }: WidgetProps) {
     </div>
   );
 }
+
+// B21: validate `data` against the shared risk-widget contract + contain throws.
+export const RiskDecomposition = withWidgetBoundary(
+  riskWidgetDataSchema,
+  RiskDecompositionInner,
+  { area: "risk-decomposition" },
+);

@@ -1,17 +1,10 @@
 "use client";
 
 import { useMemo } from "react";
-import type { WidgetProps } from "../../lib/types";
 import { detectRegimeChanges } from "@/lib/portfolio-stats";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
-
-interface StrategyRow {
-  strategy: {
-    strategy_analytics: {
-      daily_returns: unknown;
-    } | null;
-  };
-}
+import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
+import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 
 const REGIME_CONFIG = {
   bullish: { label: "Bull Market", color: "#15803D", bg: "rgba(21,128,61,0.08)" },
@@ -25,9 +18,9 @@ function daysBetween(a: string, b: string): number {
   );
 }
 
-export function RegimeDetector({ data }: WidgetProps) {
+function RegimeDetectorInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
   const regime = useMemo(() => {
-    const strategies: StrategyRow[] = data?.strategies ?? [];
+    const strategies = data.strategies;
 
     // Build composite daily returns from all strategies
     const allReturnsMap = new Map<string, { sum: number; count: number }>();
@@ -69,7 +62,7 @@ export function RegimeDetector({ data }: WidgetProps) {
       startDate: last.date,
       endDate: composite[composite.length - 1].date,
     };
-  }, [data?.strategies]);
+  }, [data.strategies]);
 
   if (!regime) {
     return (
@@ -122,3 +115,10 @@ export function RegimeDetector({ data }: WidgetProps) {
     </div>
   );
 }
+
+// B21: validate `data` against the shared risk-widget contract + contain throws.
+export const RegimeDetector = withWidgetBoundary(
+  riskWidgetDataSchema,
+  RegimeDetectorInner,
+  { area: "regime-detector" },
+);

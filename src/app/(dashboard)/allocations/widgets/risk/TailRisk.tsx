@@ -10,9 +10,10 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from "recharts";
-import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { buildCompositeReturns } from "../lib/composite-returns";
+import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
+import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 
 // ---------------------------------------------------------------------------
 // Tail Risk Widget
@@ -34,10 +35,10 @@ function quantile(sorted: number[], q: number): number {
   return sorted[lower] + (pos - lower) * (sorted[upper] - sorted[lower]);
 }
 
-export function TailRisk({ data }: WidgetProps) {
+function TailRiskInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
   const { histogram, p5, p1, tailCount } = useMemo(() => {
     // Use weighted composite returns instead of unweighted concatenation
-    const composite: DailyPoint[] = data?.compositeReturns ?? buildCompositeReturns(data?.strategies ?? []);
+    const composite: DailyPoint[] = data.compositeReturns ?? buildCompositeReturns(data.strategies);
     const allReturns = composite.map((d) => d.value);
 
     // Filter to tail events (below -2%)
@@ -164,3 +165,10 @@ export function TailRisk({ data }: WidgetProps) {
     </div>
   );
 }
+
+// B21: validate `data` against the shared risk-widget contract and contain any
+// render throw before it reaches the tab. The registry imports `m.TailRisk`,
+// which is now the boundaried component.
+export const TailRisk = withWidgetBoundary(riskWidgetDataSchema, TailRiskInner, {
+  area: "tail-risk",
+});

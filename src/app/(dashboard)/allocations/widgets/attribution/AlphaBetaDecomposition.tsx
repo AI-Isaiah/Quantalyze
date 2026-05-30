@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo } from "react";
-import type { WidgetProps } from "../../lib/types";
 import { normalizeDailyReturns, compound } from "@/lib/portfolio-math-utils";
 import { computeAlphaBeta } from "@/lib/portfolio-stats";
 import {
@@ -13,16 +12,8 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
-
-interface StrategyRow {
-  strategy_id: string;
-  current_weight: number | null;
-  strategy: {
-    strategy_analytics: {
-      daily_returns: unknown;
-    } | null;
-  };
-}
+import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
+import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 
 /**
  * Alpha/Beta Decomposition — decomposes portfolio returns into
@@ -31,10 +22,10 @@ interface StrategyRow {
  * Uses computeAlphaBeta() with portfolio daily returns vs an
  * equal-weight benchmark of all strategies.
  */
-export default function AlphaBetaDecomposition({ data }: WidgetProps) {
+function AlphaBetaDecompositionInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
   const result = useMemo(() => {
-    const strategies = data?.strategies as StrategyRow[] | undefined;
-    if (!strategies?.length) return null;
+    const strategies = data.strategies;
+    if (!strategies.length) return null;
 
     // Gather daily returns per strategy
     const allDailys = strategies.map((s) =>
@@ -191,3 +182,11 @@ export default function AlphaBetaDecomposition({ data }: WidgetProps) {
     </div>
   );
 }
+
+// B21: validate `data` against the shared risk-widget contract + contain throws.
+// Default export — the registry imports this module's default directly.
+export default withWidgetBoundary(
+  riskWidgetDataSchema,
+  AlphaBetaDecompositionInner,
+  { area: "alpha-beta-decomposition" },
+);

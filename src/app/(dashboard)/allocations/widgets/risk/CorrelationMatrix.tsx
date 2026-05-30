@@ -1,9 +1,10 @@
 "use client";
 
 import { useMemo } from "react";
-import type { WidgetProps } from "../../lib/types";
 import { normalizeDailyReturns, type DailyPoint } from "@/lib/portfolio-math-utils";
 import { mean } from "@/lib/portfolio-math-utils";
+import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
+import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 
 // ---------------------------------------------------------------------------
 // Correlation Matrix Widget
@@ -64,10 +65,10 @@ interface StrategyReturns {
   values: number[];
 }
 
-export function CorrelationMatrix({ data }: WidgetProps) {
+function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
   const { names, matrix } = useMemo(() => {
     // Try pre-computed correlation matrix
-    const precomputed = data?.analytics?.correlation_matrix;
+    const precomputed = data.analytics?.correlation_matrix;
     if (precomputed && typeof precomputed === "object") {
       const keys = Object.keys(precomputed);
       if (keys.length > 0) {
@@ -84,7 +85,7 @@ export function CorrelationMatrix({ data }: WidgetProps) {
             const id = s?.strategy_id ?? s?.strategy?.id;
             const name =
               s?.alias ?? s?.strategy?.codename ?? s?.strategy?.name ?? id;
-            if (id) nameMap[id] = name;
+            if (id && name) nameMap[id] = name;
           }
         }
         const n = keys.map((k) => (nameMap[k] ?? k).slice(0, 10));
@@ -202,3 +203,10 @@ export function CorrelationMatrix({ data }: WidgetProps) {
     </div>
   );
 }
+
+// B21: validate `data` against the shared risk-widget contract + contain throws.
+export const CorrelationMatrix = withWidgetBoundary(
+  riskWidgetDataSchema,
+  CorrelationMatrixInner,
+  { area: "correlation-matrix" },
+);
