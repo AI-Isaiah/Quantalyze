@@ -77,8 +77,14 @@ const WIDGET_PROPS_BASE = {
 };
 
 function renderWidget(outcomes: MockOutcome[] | undefined) {
-  const data =
-    outcomes === undefined ? undefined : { outcomes };
+  // B21: the production mount (OutcomesTabPanel) ALWAYS passes a full
+  // MyAllocationDashboardPayload object; "loading" is that object present with
+  // `outcomes` not yet populated (→ the widget's <LoadingState/>). Model the
+  // loading case as `{ outcomes: undefined }` (an object that PASSES the
+  // validation boundary because `outcomes` is optional) rather than a bare
+  // `undefined` payload, which never occurs in production and which the boundary
+  // correctly treats as "couldn't load".
+  const data = { outcomes };
   return render(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     <OutcomesWidget data={data as any} {...WIDGET_PROPS_BASE} />,

@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { CustomRangePicker } from "../../components/CustomRangePicker";
 import { useTweakValue } from "../../context/TweaksContext";
@@ -9,6 +8,11 @@ import { WidgetState } from "../../components/WidgetState";
 import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 import { formatRelativeTime } from "@/lib/utils";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
+import {
+  equityChartWidgetDataSchema,
+  type EquityChartWidgetData,
+} from "../lib/widget-data";
 
 // PR-3+4 silent-failure H1 (audit-2026-05-07): the chart's defensive
 // guards previously degraded via `console.warn` only — invisible in
@@ -1880,50 +1884,17 @@ function TooltipRow({
 // versions of those rows collapse.
 // ---------------------------------------------------------------------------
 
-interface EquityChartWidgetData {
-  equityDailyPoints?: DailyPoint[];
-  btcBenchmark?: DailyPoint[];
-  equityOverlays?: OverlaySeries[];
-  allKeysStale?: boolean;
-  /**
-   * ADVERSARIAL-EQ-6 — most recent successful API key sync timestamp,
-   * forwarded from the dashboard payload (`MyAllocationDashboardPayload
-   * .lastSyncAt`). Surfaced in the stale-dimmer overlay copy and
-   * (when non-stale) in the card-header sync stamp so the allocator
-   * can answer "when did this last refresh?" without leaving the
-   * widget. ISO-8601 string or null when no successful sync exists.
-   */
-  lastSyncAt?: string | null;
-}
-
-// NEW-C04-05: type guard so malformed/wrong-shape payloads fall to the
-// warm-up empty state rather than flowing into anchor/SVG math unchecked.
-function isEquityChartWidgetData(v: unknown): v is EquityChartWidgetData {
-  if (v == null || typeof v !== "object") return false;
-  const obj = v as Record<string, unknown>;
-  // Core field: equityDailyPoints must be an array if present.
-  if ("equityDailyPoints" in obj && !Array.isArray(obj.equityDailyPoints)) return false;
-  if ("btcBenchmark" in obj && obj.btcBenchmark != null && !Array.isArray(obj.btcBenchmark)) return false;
-  if ("equityOverlays" in obj && obj.equityOverlays != null && !Array.isArray(obj.equityOverlays)) return false;
-  return true;
-}
-
-export default function EquityChartWidget({ data }: WidgetProps) {
-  // SF-5 fix: log when a non-null payload fails the shape guard so engineering
-  // sees server API / schema drift before it becomes a silent "warming up" state
-  // that never resolves. The actual fallback to {} (empty state) is correct and
-  // unchanged — we just make the failure visible.
-  const d: EquityChartWidgetData = isEquityChartWidgetData(data)
-    ? data
-    : (() => {
-        if (data != null && typeof console !== "undefined") {
-          console.warn(
-            "[EquityChartWidget] received malformed data payload; rendering empty state",
-            { data },
-          );
-        }
-        return {} as EquityChartWidgetData;
-      })();
+// B21: `EquityChartWidgetData` + the shape's runtime validation now live in
+// widget-data.ts (`equityChartWidgetDataSchema`), consumed by the
+// `withWidgetBoundary` wrapper at the bottom of this file. The boundary
+// validates `data` against the schema (replacing the old inline
+// `isEquityChartWidgetData` guard — NEW-C04-05) and, on a non-null malformed
+// payload, renders the warm-up empty state + fires ONE deduped Sentry
+// breadcrumb (strictly better than the previous console.warn-only path). So the
+// inner adapter receives `data` already narrowed to `EquityChartWidgetData`.
+function EquityChartWidgetInner({
+  data: d,
+}: { data: EquityChartWidgetData } & BaseWidgetProps) {
   const showBench = useTweakValue("showBench");
 
   // Stabilize the array reference so downstream useMemo deps (minDate,
@@ -1934,14 +1905,21 @@ export default function EquityChartWidget({ data }: WidgetProps) {
     () => d.equityDailyPoints ?? [],
     [d.equityDailyPoints],
   );
-  const benchmark = d.btcBenchmark;
+  // Schema types btcBenchmark as nullable; the inner chart wants
+  // `DailyPoint[] | undefined`. The element shape is structurally identical
+  // ({date,value}), so only null needs coercing.
+  const benchmark = d.btcBenchmark ?? undefined;
   // Stabilize the array reference (mirrors `equityDailyPoints` above):
   // a bare `?? []` allocates a fresh array each render, bypassing the
   // EquityChart `EMPTY_OVERLAYS` stable-default and churning the
   // enrichedOverlays → overlaySeries → projection memos whenever this
   // wrapper re-renders (e.g. the gated minute tick).
-  const overlays = useMemo(
-    () => d.equityOverlays ?? [],
+  // The boundary's `equityChartWidgetDataSchema` has already validated each
+  // overlay to the `{ id, label, color, points: { date, value }[] }` shape, so
+  // the cast to the local nominal `OverlaySeries` is sound — it bridges zod's
+  // structurally-loose inferred element type to the inner chart's prop type.
+  const overlays = useMemo<OverlaySeries[]>(
+    () => (d.equityOverlays ?? []) as OverlaySeries[],
     [d.equityOverlays],
   );
   const stale = d.allKeysStale ?? false;
@@ -2267,3 +2245,20 @@ function HeaderLegendSwatch({
     </span>
   );
 }
+
+// B21: validate the dashboard payload against the equity-chart contract and
+// contain any render throw before it reaches the factsheet Overview shell.
+// AllocationDashboardV2 imports this module's default directly. `onInvalid:
+// "empty"` — a structurally-malformed/warming payload reads as "Equity data
+// warming up" (matching the prior isEquityChartWidgetData → {} fallback), not an
+// error card; an empty `equityDailyPoints: []` still PASSES the schema and flows
+// to the inner adapter, so the real first-connect warm-up keeps its full card.
+export default withWidgetBoundary(
+  equityChartWidgetDataSchema,
+  EquityChartWidgetInner,
+  {
+    area: "equity-chart",
+    onInvalid: "empty",
+    empty: { title: "Equity data warming up" },
+  },
+);

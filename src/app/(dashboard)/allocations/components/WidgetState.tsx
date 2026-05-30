@@ -40,18 +40,26 @@ import { Skeleton } from "@/components/ui/Skeleton";
 
 export type WidgetStateMode = "loading" | "empty" | "partial" | "error" | "success";
 
-export interface WidgetStateProps {
-  mode: WidgetStateMode;
-  children?: ReactNode;
-  partial?: { pill: string; children: ReactNode };
-  error?: { message: string; onRetry?: () => void };
-  empty?: {
-    title: string;
-    description?: string;
-    ctaHref?: string;
-    ctaLabel?: string;
-  };
-}
+// H-1223: discriminated union so the mode and its payload can't drift apart.
+// Each mode carries exactly the payload it renders — `<WidgetState mode="error" />`
+// without an `error` prop, or `mode="empty"` with an `error` prop, no longer
+// compile. This removes the silent `?? "Something went wrong."` fallback (the
+// error message is now compile-required) and every optional-chain in the
+// renderer below.
+export type WidgetStateProps =
+  | { mode: "loading" }
+  | {
+      mode: "empty";
+      empty: {
+        title: string;
+        description?: string;
+        ctaHref?: string;
+        ctaLabel?: string;
+      };
+    }
+  | { mode: "partial"; partial: { pill: string; children: ReactNode } }
+  | { mode: "error"; error: { message: string; onRetry?: () => void } }
+  | { mode: "success"; children?: ReactNode };
 
 export function WidgetState(props: WidgetStateProps) {
   if (props.mode === "loading") {
@@ -64,20 +72,22 @@ export function WidgetState(props: WidgetStateProps) {
   }
 
   if (props.mode === "empty") {
+    // H-1223: `empty` is a required payload on this variant (title required;
+    // description/cta optional) — no more `?.` on `empty` itself.
     const empty = props.empty;
     return (
       <Card className="text-center py-8">
-        {empty?.title && (
+        {empty.title && (
           <h3 className="text-lg font-semibold text-text-primary mb-2">
             {empty.title}
           </h3>
         )}
-        {empty?.description && (
+        {empty.description && (
           <p className="text-sm text-text-secondary max-w-md mx-auto mb-4">
             {empty.description}
           </p>
         )}
-        {empty?.ctaHref && empty?.ctaLabel && (
+        {empty.ctaHref && empty.ctaLabel && (
           <Link
             href={empty.ctaHref}
             className="inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
@@ -90,10 +100,11 @@ export function WidgetState(props: WidgetStateProps) {
   }
 
   if (props.mode === "partial") {
+    // H-1223: `partial` is a required payload on this variant.
     const partial = props.partial;
     return (
       <div className="relative">
-        {partial?.pill && (
+        {partial.pill && (
           <>
             <span
               aria-hidden="true"
@@ -104,12 +115,15 @@ export function WidgetState(props: WidgetStateProps) {
             <span className="sr-only">State: {partial.pill}</span>
           </>
         )}
-        {partial?.children}
+        {partial.children}
       </div>
     );
   }
 
   if (props.mode === "error") {
+    // H-1223: `error` is now a required payload on the error variant, so the
+    // message is always present — the silent `?? "Something went wrong."`
+    // fallback (which masked a call site that forgot the message) is gone.
     const error = props.error;
     return (
       <Card
@@ -118,9 +132,9 @@ export function WidgetState(props: WidgetStateProps) {
         className="border-negative/30 bg-negative/5"
       >
         <p className="text-sm text-text-primary mb-2">
-          {error?.message ?? "Something went wrong."}
+          {error.message}
         </p>
-        {error?.onRetry && (
+        {error.onRetry && (
           <button
             type="button"
             onClick={error.onRetry}

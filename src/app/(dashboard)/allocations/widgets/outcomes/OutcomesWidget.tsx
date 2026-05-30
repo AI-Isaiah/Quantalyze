@@ -2,11 +2,12 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Line, LineChart, ResponsiveContainer } from "recharts";
-import type { WidgetProps } from "../../lib/types";
-import type {
-  MyAllocationDashboardPayload,
-  OutcomeRow,
-} from "@/lib/queries";
+import type { OutcomeRow } from "@/lib/queries";
+import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
+import {
+  outcomesWidgetDataSchema,
+  type OutcomesWidgetData,
+} from "../lib/widget-data";
 import { formatPercent } from "@/lib/utils";
 import { computeOutcomeKPIs, type OutcomeKPIs } from "@/lib/outcomes-kpi";
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
@@ -76,6 +77,11 @@ function addDaysISO(iso: string, days: number): string {
 
 function formatDate(iso: string): string {
   const d = new Date(iso + "T00:00:00Z");
+  // M-0189: a malformed/empty date string yields an Invalid Date whose
+  // toLocaleDateString prints "Invalid Date". The schema guarantees the field
+  // is a string but not a valid date string — guard so a bad row reads "—"
+  // rather than leaking "Invalid Date" into the timeline.
+  if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
@@ -366,6 +372,14 @@ function ExpandedPanel({
         );
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = (await res.json()) as CurveData;
+        // M-0196: the curve response is an untrusted network read (separate from
+        // the widget's validated `data` prop). Guard that both series are arrays
+        // before caching/rendering, so a malformed response surfaces as the
+        // widget's error state instead of crashing the sparkline .filter/.map.
+        if (!Array.isArray(data?.original) || !Array.isArray(data?.replacement)) {
+          if (!cancelled) setError("Failed to load curves");
+          return;
+        }
         if (!cancelled) {
           curvesCache.current.set(outcome.id, data);
           setCurve(data);
@@ -713,7 +727,12 @@ function TimelineRow({
   );
 }
 
-// Voice-D5 — truncation footer rendered when received outcomes count === 200.
+// L-0008: the most-recent cap is set by the dashboard query (queries.ts —
+// "capped at 200 most-recent"). Bind the truncation trigger (line ~986) and the
+// footer copy to ONE constant so the number can't drift between the two sites.
+const OUTCOMES_QUERY_CAP = 200;
+
+// Voice-D5 — truncation footer rendered when received outcomes count === cap.
 function TruncationFooter() {
   return (
     <div
@@ -721,7 +740,7 @@ function TruncationFooter() {
       style={{ backgroundColor: "var(--color-page)" }}
     >
       <span className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
-        Showing most recent 200 — reach out if you need historical export
+        {`Showing most recent ${OUTCOMES_QUERY_CAP} — reach out if you need historical export`}
       </span>
     </div>
   );
@@ -763,16 +782,20 @@ function LoadingState() {
 
 // ---------------------------------------------------- top-level default export
 
-export default function OutcomesWidget({ data }: WidgetProps) {
-  // Error state: widget consumer may pass `{ __error: true }` on an upstream
-  // fetch failure. Keeps error copy inside the widget bounds rather than
-  // failing the whole /allocations page.
-  const hasError = Boolean(
-    data && typeof data === "object" && (data as { __error?: unknown }).__error,
-  );
+function OutcomesWidgetInner({
+  data,
+}: { data: OutcomesWidgetData } & BaseWidgetProps) {
+  // `{ __error: true }` sentinel: a consumer may splice it in on an upstream
+  // fetch failure. Keeps error copy inside the widget bounds rather than failing
+  // the whole /allocations page. `data` is the boundary-validated payload (always
+  // a present object inside Inner), so the prior `data && typeof data` guard +
+  // `data as MyAllocationDashboardPayload` cast (H-0160 / M-0187) collapse away.
+  const hasError = Boolean(data.__error);
 
-  const payload = data as MyAllocationDashboardPayload | undefined;
-  const outcomes: OutcomeRow[] | undefined = payload?.outcomes;
+  // `.loose()` validated the row leaves the widget reads; the cast bridges that
+  // narrower inferred element to the richer OutcomeRow that computeOutcomeKPIs /
+  // TimelineRow consume (sound — the extra fields survive at runtime).
+  const outcomes = data.outcomes as OutcomeRow[] | undefined;
 
   const curvesCache = useRef<Map<string, CurveData>>(new Map());
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -965,7 +988,7 @@ export default function OutcomesWidget({ data }: WidgetProps) {
           </tbody>
         </table>
       </div>
-      {outcomes.length === 200 && <TruncationFooter />}
+      {outcomes.length === OUTCOMES_QUERY_CAP && <TruncationFooter />}
       {/* NEW-C27-04: disclose that the headline hit rate / alpha KPIs exclude
           sub-1% positions and rejected decisions. The table shows ALL rows
           (including those filtered by the D-08 rule), so without this note
@@ -989,3 +1012,15 @@ export default function OutcomesWidget({ data }: WidgetProps) {
   }
   return populated;
 }
+
+// B21: validate `data` (the MyAllocationDashboardPayload slice the widget reads)
+// and contain any render throw before it reaches the Outcomes tab. Direct-mount:
+// OutcomesTabPanel imports this module's default. onInvalid defaults to "error";
+// `outcomes` is optional in the schema, so a still-loading payload passes and
+// reaches the widget's own <LoadingState/> — the boundary fires only on genuine
+// drift (a non-array outcomes, or a row with a bad kind/delta).
+export default withWidgetBoundary(
+  outcomesWidgetDataSchema,
+  OutcomesWidgetInner,
+  { area: "outcomes" },
+);
