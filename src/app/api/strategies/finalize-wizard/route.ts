@@ -346,24 +346,6 @@ async function runScopeBroadeningProbe(
 }
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
-  const rl = await checkLimit(
-    userActionLimiter,
-    `strategies-finalize-wizard:${user.id}`,
-  );
-  if (!rl.success) {
-    // PR-2 full-file reviewer #5 (2026-05-28): 503 on rate-limit misconfig.
-    if (isRateLimitMisconfigured(rl)) {
-      return NextResponse.json(
-        { error: "Rate limiter unavailable" },
-        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
-      );
-    }
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
   // PR-2 silent-failure-hunter F5 (2026-05-28): explicit try/catch around
   // req.json() so the parse/transport error class is logged. req.json()
   // collapses transport read failures and JSON-parse errors into one
@@ -382,6 +364,30 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const validation = validatePayload(body as Record<string, unknown> | null);
   if (!validation.ok) return validation.response;
   const fields = validation.fields;
+
+  // B15 limiter-ordering — consume the rate-limit token AFTER input
+  // validation (body parse + validatePayload), not before. A malformed /
+  // invalid request now gets rejected with 400 WITHOUT burning one of the
+  // caller's own tokens. Canonical order: auth → input-validation →
+  // rate-limit → handler. The deny shape (503 misconfig split + 429) and
+  // the exact key string are preserved verbatim.
+  const rl = await checkLimit(
+    userActionLimiter,
+    `strategies-finalize-wizard:${user.id}`,
+  );
+  if (!rl.success) {
+    // PR-2 full-file reviewer #5 (2026-05-28): 503 on rate-limit misconfig.
+    if (isRateLimitMisconfigured(rl)) {
+      return NextResponse.json(
+        { error: "Rate limiter unavailable" },
+        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+      );
+    }
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
+  }
 
   const supabase = await createClient();
 

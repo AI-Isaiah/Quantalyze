@@ -36,6 +36,9 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  // B15 limit-first: public per-IP PDF scrape surface — rate-limit BEFORE the
+  // id allowlist / HMAC-token checks is intentional (reject a scraper cheaply
+  // before any work). See limiter-ordering.test.ts PUBLIC_IP_EXCEPTION.
   const ip = getClientIp(req.headers);
   const rl = await checkLimit(publicIpLimiter, `demo-pdf:${ip}`);
   if (!rl.success) {

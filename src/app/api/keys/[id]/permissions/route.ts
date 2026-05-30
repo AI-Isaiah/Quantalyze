@@ -96,6 +96,15 @@ function makeCachedFetcher(keyId: string) {
 
 export const GET = withAuth(
   async (req: NextRequest, user: User): Promise<NextResponse> => {
+    // Extract :id from the URL path. Next 16 prefers searching the URL over
+    // a `params` arg in this old route helper; we keep this compatible by
+    // parsing the segment directly.
+    const segments = new URL(req.url).pathname.split("/");
+    const keyId = segments[segments.indexOf("keys") + 1];
+    if (!keyId) {
+      return NextResponse.json({ error: "Missing key id" }, { status: 400 });
+    }
+
     // Per-user rate limit on this route as well — defense in depth on top
     // of the Python per-key bucket. A malicious authed user shouldn't be
     // able to grind requests through the Next layer.
@@ -105,15 +114,6 @@ export const GET = withAuth(
         { error: "Too many requests" },
         { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
       );
-    }
-
-    // Extract :id from the URL path. Next 16 prefers searching the URL over
-    // a `params` arg in this old route helper; we keep this compatible by
-    // parsing the segment directly.
-    const segments = new URL(req.url).pathname.split("/");
-    const keyId = segments[segments.indexOf("keys") + 1];
-    if (!keyId) {
-      return NextResponse.json({ error: "Missing key id" }, { status: 400 });
     }
 
     // Ownership check — reads via the user-scoped client so RLS applies.

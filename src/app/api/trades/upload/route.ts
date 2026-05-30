@@ -55,14 +55,6 @@ function sanitizeTradeRow(
 }
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
-  const rl = await checkLimit(userActionLimiter, `trades-upload:${user.id}`);
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
   const body = await req.json();
   const { strategy_id, trades } = body;
 
@@ -98,6 +90,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       );
     }
     sanitized.push(clean);
+  }
+
+  // Rate-limit AFTER all input validation (body parse, presence guard,
+  // 5,000-row cap, per-row sanitize) so a malformed/invalid request that
+  // gets rejected with 400 does NOT burn one of the caller's tokens. The
+  // limiter still runs BEFORE the side-effecting batch inserts below.
+  const rl = await checkLimit(userActionLimiter, `trades-upload:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
   }
 
   // Insert trades in batches using service-role client (bypasses RLS)

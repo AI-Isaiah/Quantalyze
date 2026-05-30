@@ -121,6 +121,9 @@ export async function GET(req: NextRequest) {
   // Per-IP rate limit on GET as well — Outlook Safe Links and other
   // preloaders can hammer this URL on every email scan, and rendering
   // the confirm page still costs a DB roundtrip per call.
+  // B15 limit-first: public per-IP email-ack surface — rate-limit BEFORE the
+  // HMAC-token/replay/state guards is intentional (reject a forged-link flood
+  // cheaply). See limiter-ordering.test.ts PUBLIC_IP_EXCEPTION.
   const ip = getClientIp(req.headers);
   const rl = await checkLimit(publicIpLimiter, `alerts-ack-get:${ip}`);
   if (!rl.success) {
@@ -215,6 +218,7 @@ export async function POST(req: NextRequest) {
   // Per-IP rate limit (5/min via publicIpLimiter). Bucket key is prefixed
   // so this limiter doesn't share a window with the PDF route.
   const ip = getClientIp(req.headers);
+  // B15 limit-first: public per-IP email-ack surface (see GET above).
   const rl = await checkLimit(publicIpLimiter, `alerts-ack:${ip}`);
   if (!rl.success) {
     return NextResponse.json(

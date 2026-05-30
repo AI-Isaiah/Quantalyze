@@ -136,6 +136,9 @@ export async function GET(
   const ip = getClientIp(req.headers);
   // audit-2026-05-07 H-0253 follow-up (PR-2 2026-05-28): per-surface key
   // prefix. Was `pdf:${ip}`, shared with portfolio-pdf + factsheet/pdf.
+  // B15 limit-first: public per-IP PDF scrape surface — rate-limit BEFORE the
+  // isUuid(id) param check is intentional (reject a scraper cheaply before any
+  // DB/puppeteer work). See limiter-ordering.test.ts PUBLIC_IP_EXCEPTION.
   const rl = await checkLimit(publicIpLimiter, `tearsheet-pdf:${ip}`);
   if (!rl.success) {
     if (isRateLimitMisconfigured(rl)) {

@@ -37,16 +37,6 @@ export async function PUT(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // 30/min per user. Toggle bursts can legitimately exceed the global
-  // userActionLimiter's 5/min cap.
-  const rl = await checkLimit(mandateAutoSaveLimiter, `watchlist:${user.id}`);
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
   let body: { action?: unknown };
   try {
     body = await req.json();
@@ -55,6 +45,16 @@ export async function PUT(
   }
   if (body.action !== "add" && body.action !== "remove") {
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+  }
+
+  // 30/min per user. Toggle bursts can legitimately exceed the global
+  // userActionLimiter's 5/min cap.
+  const rl = await checkLimit(mandateAutoSaveLimiter, `watchlist:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
   }
 
   if (body.action === "add") {

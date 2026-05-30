@@ -228,6 +228,10 @@ export async function POST(req: NextRequest) {
     ip === "unknown"
       ? `for-quants-lead:unknown:${hashUserAgent(req.headers.get("user-agent"))}`
       : `for-quants-lead:${ip}`;
+  // B15 limit-first: public/unauthenticated lead-form per-IP surface —
+  // rate-limit (+ the unknown-IP aggregate cap below) BEFORE the body-size/Zod
+  // validation is intentional (reject a flood cheaply before parsing). See
+  // limiter-ordering.test.ts PUBLIC_IP_EXCEPTION.
   const rl = await checkLimit(publicIpLimiter, rateLimitKey);
   if (!rl.success) {
     return NextResponse.json(

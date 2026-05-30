@@ -15,19 +15,19 @@ const ANALYTICS_URL =
   process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
+  const body = await req.json();
+  const { exchange, api_key, api_secret, passphrase } = body;
+
+  if (!exchange || !api_key || !api_secret) {
+    return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+  }
+
   const rl = await checkLimit(userActionLimiter, `keys-validate-encrypt:${user.id}`);
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },
       { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
-  }
-
-  const body = await req.json();
-  const { exchange, api_key, api_secret, passphrase } = body;
-
-  if (!exchange || !api_key || !api_secret) {
-    return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
   }
 
   // Phase 19 / API-2 — DO NOT delegate to /process-key for validate-and-encrypt.

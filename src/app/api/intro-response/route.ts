@@ -60,20 +60,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const rl = await checkLimit(userActionLimiter, `intro-response:${user.id}`);
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
-
   const rawBody = await req.json().catch(() => null);
   const parsed = RESPONSE_SCHEMA.safeParse(rawBody);
   if (!parsed.success) {
     return NextResponse.json(
       { error: "Invalid request body", issues: parsed.error.issues },
       { status: 400 },
+    );
+  }
+
+  const rl = await checkLimit(userActionLimiter, `intro-response:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
     );
   }
 
