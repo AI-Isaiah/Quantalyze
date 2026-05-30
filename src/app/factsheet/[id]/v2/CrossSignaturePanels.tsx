@@ -30,9 +30,11 @@ const TRACE_LEN = WINDOW * 2 + 1;
 export function CrossSignaturesSection() {
   const payload = usePayload();
   const { block: cmp } = useActiveComparator();
-  // eventSignatures / benchEventSignatures are null for csv-ingested strategies;
-  // this component is only rendered when ingestSource === "api" so these guards
-  // are type-safety checks, not runtime branches. (RED-TEAM-M3)
+  // B6 — eventSignatures / benchEventSignatures live only on the "api" arm;
+  // narrowing ingestSource unlocks them (a csv read is a compile error). The
+  // parent gates this on ingestSource === "api", so these are type-safety
+  // checks, not runtime branches. (RED-TEAM-M3)
+  if (payload.ingestSource !== "api") return null;
   if (!payload.eventSignatures || !payload.benchEventSignatures) return null;
   return (
     <section className="flex flex-col gap-10">

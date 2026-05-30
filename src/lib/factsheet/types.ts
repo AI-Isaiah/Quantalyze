@@ -322,17 +322,14 @@ export type RollWindowPick = {
   enough: boolean;
 };
 
-/** Top-level payload built server-side and passed to the client view. */
-export type FactsheetPayload = {
+/**
+ * Fields shared by every factsheet payload regardless of ingest source.
+ * The discriminated {@link FactsheetPayload} adds `ingestSource` plus the
+ * api-only synthesized panels on top of this base.
+ */
+export type FactsheetCommon = {
   strategyId: string;
   strategyName: string;
-  /**
-   * Origin of the daily-return series. "api" = live-ingested trade data;
-   * "csv" = user-uploaded daily-return CSV. Drives panel-gating in the view
-   * so non-derivable panels (PeerPercentile, AllocatorPortfolios) are
-   * suppressed for CSV strategies per the no-invented-data contract. (NEW-C20-01)
-   */
-  ingestSource: IngestSource;
   strategyTypes: string[];
   markets: string[];
   computedAt: string;
@@ -391,15 +388,6 @@ export type FactsheetPayload = {
   };
   /** Batch D — style drift (real data, 50/50 split + KS test). */
   styleDrift: StyleDriftPayload | null;
-  /** Batch D — peer percentile (synthesized demo cohort, badge in UI).
-   *  null for csv-ingested strategies — not serialized to avoid RSC payload
-   *  exposure of synthesized figures. Only non-null when ingestSource==="api".
-   *  (RED-TEAM-M2) */
-  peerPercentile: PeerPercentilePayload | null;
-  /** Batch D — allocator portfolio analysis (demo portfolios, badge in UI).
-   *  null for csv-ingested strategies (same RSC payload contract as peerPercentile).
-   *  (RED-TEAM-M2) */
-  allocatorPortfolios: AllocatorPortfolioPayload[] | null;
   /** Consecutive winning/losing day streaks. */
   streaks: StreakPayload;
   /** Per-year Calmar table. */
@@ -414,16 +402,48 @@ export type FactsheetPayload = {
   correlations: CorrelationRow[];
   /** Full pairwise correlation matrix across strategy + all benchmarks. */
   correlationMatrix: CorrelationMatrixPayload;
-  /** Event-study signatures (1d and 7d horizons) driven by STRATEGY events.
-   *  null for csv-ingested strategies — not serialized to avoid RSC payload
-   *  exposure of computed-but-invisible data. Only non-null when ingestSource==="api".
-   *  (RED-TEAM-M3) */
-  eventSignatures: EventSignaturesPayload | null;
-  /** Same shape, driven by BENCHMARK events — feeds the Cross Signatures overlay.
-   *  null for csv-ingested strategies (same contract as eventSignatures). (RED-TEAM-M3) */
-  benchEventSignatures: EventSignaturesPayload | null;
   /** Strategy + benchmark behavior during named market-stress windows. */
   stressWindows: StressWindowPayload;
   /** Quantile box-plot summary on the strategy's daily-return distribution. */
   quantiles: QuantilePayload;
 };
+
+/**
+ * Synthesized / demo analytical panels NOT derivable from a bare daily-return
+ * series — peer cohort, allocator portfolios, event-study signatures. Per the
+ * no-invented-data contract (NEW-C20-01, RED-TEAM-M2/M3, B6) these exist ONLY
+ * on the "api" arm: for csv-ingested strategies they are ABSENT from the
+ * payload entirely (never serialized into the RSC blob), so a consumer cannot
+ * read them without first narrowing `ingestSource === "api"`, and a future
+ * synthesized panel added here physically cannot render for a CSV strategy.
+ */
+export type FactsheetApiPayload = FactsheetCommon & {
+  ingestSource: "api";
+  /** Peer percentile (synthesized demo cohort). null when the cohort can't be computed. */
+  peerPercentile: PeerPercentilePayload | null;
+  /** Allocator portfolio analysis (demo portfolios). */
+  allocatorPortfolios: AllocatorPortfolioPayload[] | null;
+  /** Event-study signatures (1d + 7d horizons) driven by STRATEGY events. */
+  eventSignatures: EventSignaturesPayload | null;
+  /** Same shape, driven by BENCHMARK events — feeds the Cross Signatures overlay. */
+  benchEventSignatures: EventSignaturesPayload | null;
+};
+
+/**
+ * The csv arm: a strategy whose daily-return series was uploaded as a CSV.
+ * The synthesized api-only panels are absent by construction (no-invented-data).
+ */
+export type FactsheetCsvPayload = FactsheetCommon & {
+  ingestSource: "csv";
+};
+
+/**
+ * Top-level payload built server-side and passed to the client view.
+ *
+ * Discriminated on {@link IngestSource}: "api" = live-ingested trade data
+ * (carries the synthesized demo panels); "csv" = user-uploaded daily-return CSV
+ * (synthesized panels absent). Drives panel-gating in the view so non-derivable
+ * panels (PeerPercentile, AllocatorPortfolios, event signatures) are
+ * unrepresentable for CSV strategies by construction. (NEW-C20-01, B6)
+ */
+export type FactsheetPayload = FactsheetApiPayload | FactsheetCsvPayload;

@@ -5,7 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
-import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
+import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
@@ -63,22 +63,12 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
   // Both gates have to fall before we render the "still computing"
   // placeholder.
   const dailyReturns = resolveDailyReturnSeries(dailyRaw, analytics?.returns_series);
-  // Ingest source: daily_returns populated by CSV ingest; returns_series by
-  // the analytics-service (live API). If daily_returns resolved we have a
-  // CSV strategy; otherwise it came from the live-data path. (NEW-C20-01)
-  //
-  // CRITICAL: An empty array ([] length 0) means the CSV ingester ran but
-  // produced no rows. That is STILL a CSV strategy — classifying it as "api"
-  // would unlock PeerPercentile and AllocatorSection panels that must not
-  // render for CSV strategies (no-invented-data contract). Reserve "api" only
-  // for null/undefined (column was never written by the CSV ingester).
-  // (FINDING-1 — b06-silentfailure)
-  const ingestSource: IngestSource =
-    Array.isArray(dailyRaw)
-      ? "csv"                              // any array, empty or not = CSV path touched this strategy
-      : typeof dailyRaw === "object" && dailyRaw !== null
-        ? "csv"                            // object dict = CSV attempted
-        : "api";                           // null/undefined = only analytics-service path
+  // Ingest source classifies daily_returns (CSV path) vs returns_series-only
+  // (live API path). The empty-array-is-csv invariant (FINDING-1) + the
+  // no-invented-data rationale (NEW-C20-01) live in deriveIngestSource — the
+  // single source of truth shared with the discovery page and pinned by
+  // audit-c20's RED-TEAM-H1.
+  const ingestSource: IngestSource = deriveIngestSource(dailyRaw);
   // Warn when both daily_returns (CSV indicator) and returns_series (API
   // indicator) are populated — ambiguous provenance may mis-classify an
   // api-verified strategy as csv if the ingester later back-fills the column.
@@ -353,6 +343,11 @@ export default async function FactsheetV2Page({
     rawTrustTier === "api_verified" || rawTrustTier === "csv_uploaded" || rawTrustTier === "self_reported"
       ? rawTrustTier
       : null;
+  // Trust tier is overlaid post-build (per-request, not cached with the payload).
+  // Object-spread distributes over the discriminated union and PRESERVES the
+  // `ingestSource` discriminant, so the result stays a valid FactsheetApiPayload |
+  // FactsheetCsvPayload — both narrowing and the no-invented-data compile error
+  // survive the spread (verified: tsc 0).
   const payloadWithTrust: FactsheetPayload = { ...payload, trustTier };
 
   // JSON-LD FinancialProduct schema — helps Google + LLMs identify the page
