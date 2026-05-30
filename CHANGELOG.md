@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.15.27] - 2026-05-30
+### Changed — rate-limited routes validate input before consuming a token (cross-cutting refactor B15a)
+
+B15 closes the "limit-before-validate" class across the authenticated API surface. Before this change 39 of 51 rate-limited routes consumed their per-user rate-limit token BEFORE parsing/validating the request body, so a malformed or invalid request burned one of the caller's own tokens and then returned 400 — a buggy client that retries on 400 (or a double-submit) could 429 the user's next *legitimate* action on a shared bucket. The `preferences` PUT route already fixed this inline (NEW-C07-04); B15a propagates the canonical order — **auth → validate → rate-limit → handler** — across the surface.
+
+- **New `withAuthLimited` primitive** (`src/lib/api/withAuthLimited.ts`) composes auth + approval-gate + body validation + the limiter in the canonical order *by construction* — a route using it cannot consume a token on an invalid request. `bridge/outcome` and `bridge/outcome/dismiss` adopt it.
+- **19 user-cluster routes reordered in-place** to validate-then-limit (attestation, intro, intro-response, bridge, keys/*, portfolio-optimizer, simulator, scenario/commit, strategies/csv-validate, csv-finalize, finalize-wizard, trades/upload, watchlist, etc.) — exact rate-limit key, deny response, CSRF, and token-refund behavior preserved; only ordering changed.
+- **Enforcement test** (`src/lib/api/limiter-ordering.test.ts`) is the closed-by-construction backstop: every rate-limited route must be classified, every authenticated route is checked per-method for validate-before-limit, and a new unclassified limiter route fails CI.
+- **Public/unauthenticated per-IP routes** (PDF scrape surfaces, lead form, verify-strategy, email-ack) keep limit-first by design (reject a scraper cheaply before doing work) and are documented as `B15 limit-first:` sanctioned exceptions.
+- **Bounded inputs** already cap every bulk endpoint (partner-import 500 rows, csv 10 MB, trades 5000 rows, scenario 50 diffs); B15a adds an accurate byte-cap helper for B15b.
+
+The admin cluster (13 inline routes + 1 `withAdminAuth({rateLimitKey})` route whose wrapper limits before body-parse) is deferred to B15b and tracked in the enforcement test's `PENDING_B15B` set. tsc 0, lint 0 errors; full vitest suite passing.
+
 ## [0.24.15.26] - 2026-05-30
 ### Changed — close the 2 remaining HIGH widget findings from the B21 residual (B21 follow-up)
 
