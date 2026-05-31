@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.35] - 2026-05-31
+### Changed — equity DQ merge: collapse the third hand-written copy onto the canonical reducer (cross-cutting refactor B22, part 2)
+
+B22 part 1 landed the `merge_dq_flags` reducer and migrated `position_reconstruction.py`'s two duplicated merges onto it. Part 2 closes the remaining duplication: `analytics_runner._merge_into_top_level_flags` — which lifts inner `data_quality_flags` into the top-level `strategy_analytics.data_quality_flags` column the dashboard reads — carried a **third** hand-written copy of the bool-OR / int-sum / else-replace rule, a *more defensive* variant (it guards a non-numeric prior to `0` instead of coercing/raising).
+
+- **`merge_dq_flags` upgraded to the defensive form** (`services/equity/fallback.py`): the int branch now sums onto a numeric prior only (a non-numeric or `bool` `existing` is treated as `0`), and the bool branch casts `bool(existing) or v`. This is a strict **superset** of the simpler position-reconstruction rule — for the type-consistent keys both engines actually emit (a key is always bool / always an int counter / always a list) the result is identical, so the position engine's behaviour is preserved while `analytics_runner` can route through the same function.
+- **`analytics_runner._merge_into_top_level_flags` delegates to `merge_dq_flags`** — its inline per-key loop is replaced by a call, keeping only the `None`-preserving target semantics around it. The rule that lived in three places now lives in one; the copies can no longer diverge.
+- Three new defensive-edge-case tests pin the superset behaviour (non-numeric prior → `0`; bool prior under an int counter → `0`; truthy non-bool prior in the bool branch → real `True`).
+
+**Verified:** full analytics suite green except the pre-existing `test_simulator_router` ordering flake (passes isolated, fails on the clean base too — unrelated); `merge_dq_flags` is `mypy --strict` clean and the CI lint gate (`mypy --strict --follow-imports=silent services/ingestion/`) passes; `analytics_runner` carries the same 17 pre-existing pandas-stub/env mypy notes before and after this change (zero added). `strategy_analytics.data_quality_flags` output is byte-identical for all type-consistent keys (the only keys produced).
+
 ## [0.24.15.34] - 2026-05-31
 ### Changed — unified equity-replay data-quality channel: one primitive, position engine adopts it (cross-cutting refactor B22, part 1)
 

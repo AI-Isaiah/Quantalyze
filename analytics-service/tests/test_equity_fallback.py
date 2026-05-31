@@ -94,12 +94,39 @@ class TestMergeDqFlags:
         out = merge_dq_flags(base, {"a": 1})
         assert out is base
 
-    def test_matches_legacy_position_reconstruction_rule(self):
-        # Exact parity with the two hand-written merges this replaces:
-        #   bool -> get(k, False) or v ; int/float -> get(k, 0) + v ; else -> v
+    def test_matches_legacy_merge_rule_for_type_consistent_keys(self):
+        # For the type-consistent keys both engines actually emit (a key is
+        # always bool / always int / always list), the canonical defensive rule
+        # is identical to BOTH legacy forms it unified — position_reconstruction
+        # (bool: get(k,False) or v ; int: get(k,0)+v) and analytics_runner's
+        # _merge_into_top_level_flags (defensive). This is the diff-zero contract.
         base = {"b": False, "n": 1, "s": "old"}
         merge_dq_flags(base, {"b": True, "n": 4, "s": "new", "fresh": 7})
         assert base == {"b": True, "n": 5, "s": "new", "fresh": 7}
+
+    def test_defensive_non_numeric_existing_treated_as_zero(self):
+        # The defensive superset: summing an int onto a non-numeric prior must
+        # NOT raise (the simpler `existing + v` would TypeError). A corrupt
+        # non-numeric prior is treated as 0 — matching analytics_runner's
+        # _merge_into_top_level_flags, the form this unified onto.
+        base = {"n": "corrupt"}
+        merge_dq_flags(base, {"n": 3})
+        assert base["n"] == 3
+
+    def test_defensive_bool_prior_in_int_branch_treated_as_zero(self):
+        # bool subclasses int; a bool prior under an int counter must not be
+        # summed as 1 — it is excluded by the `not isinstance(existing, bool)`
+        # guard and treated as 0.
+        base = {"n": True}
+        merge_dq_flags(base, {"n": 3})
+        assert base["n"] == 3
+
+    def test_defensive_bool_existing_cast_in_bool_branch(self):
+        # bool branch casts existing via bool(...) so a truthy non-bool prior
+        # OR-merges to a real bool True rather than leaking the prior value.
+        base = {"flag": 5}  # truthy non-bool prior
+        merge_dq_flags(base, {"flag": False})
+        assert base["flag"] is True
 
 
 class TestMergeOutcomes:

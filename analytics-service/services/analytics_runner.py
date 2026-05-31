@@ -51,6 +51,7 @@ from services.db import (
     paginated_select,
 )
 from services.metrics import _safe_float, compute_all_metrics
+from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
 from services.transforms import trades_to_daily_returns_with_status
 
@@ -254,16 +255,12 @@ def _merge_into_top_level_flags(
     if not source:
         return target
     merged = target if target is not None else {}
-    for k, v in source.items():
-        existing = merged.get(k)
-        if isinstance(v, bool):
-            merged[k] = bool(existing) or v
-        elif isinstance(v, (int, float)) and not isinstance(v, bool):
-            base = existing if isinstance(existing, (int, float)) and not isinstance(existing, bool) else 0
-            merged[k] = base + v
-        else:
-            merged[k] = v
-    return merged
+    # B22: the per-key bool-OR / int-sum / else-replace rule (with the
+    # non-numeric-prior-as-0 type guards) is the canonical reducer in
+    # services.equity.fallback — the same function the position engine routes
+    # through. This wrapper keeps the None-preserving target semantics above
+    # and delegates the merge so the (formerly three) copies cannot diverge.
+    return merge_dq_flags(merged, source)
 
 
 async def _load_position_time_series(
