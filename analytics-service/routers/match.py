@@ -43,7 +43,7 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from services.db import get_supabase
+from services.db import chunked_in_query, get_supabase
 from services.equity_reconstruction import reconstruct_symbol_returns
 from services.match_engine import (
     ENGINE_VERSION,
@@ -398,10 +398,15 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
     # truncation, missing strategies received analytics={} → None Sharpe/DD/
     # returns, still emitted as candidates, scored on defaults (preference_fit
     # 0.5) — a silent universe contamination indistinguishable from healthy.
-    analytics_rows: list[dict[str, Any]] = []
-    for _page_start in range(0, len(strategy_ids), _ANALYTICS_IN_LIST_PAGE_SIZE):
-        _chunk = strategy_ids[_page_start:_page_start + _ANALYTICS_IN_LIST_PAGE_SIZE]
-        _page = (
+    # NEW-C08-02 / B19: bound the analytics IN-list through the one
+    # chunked_in_query primitive (every executed IN-list <= page_size ids, so a
+    # 414 / silent PostgREST filter-truncation is unrepresentable) and read its
+    # uniform coverage counts. On a gap, missing strategies receive analytics={}
+    # → None Sharpe/DD/returns, still emitted as candidates, scored on defaults
+    # (preference_fit 0.5) — a silent universe contamination indistinguishable
+    # from healthy unless this coverage check fires.
+    _analytics = chunked_in_query(
+        lambda _chunk: (
             supabase.table("strategy_analytics")
             # M-0605: select ONLY the fields the engine consumes. The previous
             # query also pulled cumulative_return, cagr, and volatility, none of
@@ -410,31 +415,37 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             # the engine actually uses (sharpe, max_drawdown, returns_series).
             .select("strategy_id, returns_series, sharpe, max_drawdown")
             .in_("strategy_id", _chunk)
-            .execute()
-        )
-        analytics_rows.extend(_page.data or [])
-    if len(analytics_rows) < len(strategy_ids):
+        ),
+        strategy_ids,
+        id_field="strategy_id",
+        page_size=_ANALYTICS_IN_LIST_PAGE_SIZE,
+    )
+    analytics_rows = _analytics.rows
+    if _analytics.truncated:
         # A3-04: escalate to ERROR when the gap exceeds a meaningful fraction
         # (>10% of universe, min 10 strategies). A handful of new listings
-        # legitimately have no analytics row; a large gap almost certainly
-        # indicates IN-list truncation (HTTP 414 / PostgREST silent filter).
-        # ERROR surfaces to Sentry; WARNING is low-level noise for normal growth.
-        _gap = len(strategy_ids) - len(analytics_rows)
-        _gap_threshold = max(10, len(strategy_ids) * 0.10)
-        if _gap > _gap_threshold:
+        # legitimately have no analytics row; a large gap is a real coverage
+        # anomaly (historically IN-list truncation — now bounded away — or a
+        # stalled analytics pipeline). ERROR surfaces to Sentry; WARNING is
+        # low-level noise for normal growth. The >10% policy lives HERE, not in
+        # chunked_in_query, so the helper stays a pure detection primitive.
+        if _analytics.gap > max(10, _analytics.requested_count * 0.10):
             logger.error(
                 "match: universe analytics coverage %d/%d — gap of %d (%.0f%%) "
-                "exceeds threshold (>10%% or >10); likely IN-list truncation, "
-                "not new-strategy lag",
-                len(analytics_rows), len(strategy_ids), _gap,
-                100.0 * _gap / len(strategy_ids),
+                "exceeds threshold (>10%% or >10); the analytics pipeline is "
+                "likely stalled or backfilled incompletely (the IN-list is now "
+                "bounded by chunked_in_query, so truncation is not the cause)",
+                _analytics.returned_count, _analytics.requested_count,
+                _analytics.gap, 100.0 * _analytics.gap_fraction,
             )
         else:
             logger.warning(
                 "match: universe analytics coverage %d/%d — %d strategies have "
-                "no analytics row (expected for new strategies; log rate > 0 on "
-                "a full platform likely indicates IN-list truncation)",
-                len(analytics_rows), len(strategy_ids), _gap,
+                "no analytics row (expected as new-strategy lag; a sustained "
+                "nonzero rate on a full platform indicates a stalled analytics "
+                "pipeline, not IN-list truncation)",
+                _analytics.returned_count, _analytics.requested_count,
+                _analytics.gap,
             )
     analytics_by_sid = {row["strategy_id"]: row for row in analytics_rows}
 
@@ -691,18 +702,26 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         # ratio (truncated inputs vs. truncated outputs) and the scoring would
         # silently proceed against a partial book — the same M-0675 exposure
         # but at a higher layer where no warning fires.
-        ps_rows: list[dict[str, Any]] = []
-        for _ps_start in range(0, len(portfolio_ids), _ANALYTICS_IN_LIST_PAGE_SIZE):
-            _ps_chunk = portfolio_ids[_ps_start:_ps_start + _ANALYTICS_IN_LIST_PAGE_SIZE]
-            _ps_page = (
+        # B19: route the portfolio_id IN-list through chunked_in_query (every
+        # executed IN-list <= page_size, so the URL-overflow truncation this
+        # comment warns about is unrepresentable). No coverage WARNING on the
+        # returned flag here: the IN key is portfolio_id and a portfolio with no
+        # portfolio_strategies rows is a legitimate empty book, so a portfolio_id
+        # gap would be dominated by empty portfolios rather than truncation
+        # (which the bounding already prevents). The meaningful coverage signal
+        # fires one layer down on strategy_id (NEW-C08-03, below).
+        ps_rows = chunked_in_query(
+            lambda _ps_chunk: (
                 supabase.table("portfolio_strategies")
                 .select("strategy_id, current_weight, portfolio_id, allocated_amount")
                 .in_("portfolio_id", _ps_chunk)
                 .order("portfolio_id", desc=False)
                 .order("strategy_id", desc=False)
-                .execute()
-            )
-            ps_rows.extend(_ps_page.data or [])
+            ),
+            portfolio_ids,
+            id_field="portfolio_id",
+            page_size=_ANALYTICS_IN_LIST_PAGE_SIZE,
+        ).rows
 
         # sorted() (not list(set(...))): a bare set has non-deterministic
         # iteration order, and the match engine this feeds promises
@@ -718,22 +737,30 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         # finding M-0675 angle but query-caused, no log distinguishing "no
         # analytics yet" from "silently truncated").
         if strategy_ids:
-            sa_rows: list[dict[str, Any]] = []
-            for _page_start in range(0, len(strategy_ids), _ANALYTICS_IN_LIST_PAGE_SIZE):
-                _chunk = strategy_ids[_page_start:_page_start + _ANALYTICS_IN_LIST_PAGE_SIZE]
-                _page = (
+            # NEW-C08-03 / B19: bound the portfolio analytics IN-list through
+            # chunked_in_query. A coverage gap here is the meaningful signal
+            # (a strategy in the book with no analytics row → portfolio_returns
+            # incomplete → _compute_portfolio_fit_components scores a partial
+            # book). WARNING-only (not the universe-path's >10% ERROR): this is
+            # the allocator's own book, where missing analytics is more often
+            # new-strategy lag than a systemic anomaly.
+            _sa = chunked_in_query(
+                lambda _chunk: (
                     supabase.table("strategy_analytics")
                     .select("strategy_id, returns_series")
                     .in_("strategy_id", _chunk)
-                    .execute()
-                )
-                sa_rows.extend(_page.data or [])
-            if len(sa_rows) < len(strategy_ids):
+                ),
+                strategy_ids,
+                id_field="strategy_id",
+                page_size=_ANALYTICS_IN_LIST_PAGE_SIZE,
+            )
+            sa_rows = _sa.rows
+            if _sa.truncated:
                 logger.warning(
                     "match: portfolio analytics coverage %d/%d for allocator %s "
                     "— %d strategies lack analytics rows",
-                    len(sa_rows), len(strategy_ids), allocator_id,
-                    len(strategy_ids) - len(sa_rows),
+                    _sa.returned_count, _sa.requested_count, allocator_id,
+                    _sa.gap,
                 )
             analytics_by_sid = {row["strategy_id"]: row for row in sa_rows}
         else:

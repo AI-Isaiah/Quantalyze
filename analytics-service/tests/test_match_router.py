@@ -2737,6 +2737,35 @@ class TestUniverseAnalyticsCoverageEscalation:
             f"got levels: {[r.levelname for r in gap_records]}"
         )
 
+    def test_multichunk_gap_aggregates_coverage_and_logs_error(
+        self, monkeypatch, caplog
+    ):
+        """B19: with more strategies than one IN-list page, the coverage gap must
+        aggregate across chunks before the ERROR/WARNING decision. 250 strategies
+        / 100 analytics spans two _ANALYTICS_IN_LIST_PAGE_SIZE(200) chunks and is a
+        60% gap → must still ERROR. Guards against a regression that counts only
+        the last chunk (which would see a 0/50 chunk and mis-bucket), proving the
+        escalation reads chunked_in_query's aggregated counts, not per-page state."""
+        from routers import match as match_mod
+
+        assert 250 > match_mod._ANALYTICS_IN_LIST_PAGE_SIZE, (
+            "test must span >1 chunk to exercise cross-chunk aggregation"
+        )
+        self._make_universe_sb(monkeypatch, 250, 100)
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            match_mod._load_candidate_universe()
+
+        assert any(
+            rec.levelname == "ERROR" and "gap" in rec.getMessage().lower()
+            # 250 requested vs 100 returned → the aggregated coverage numbers.
+            and "100/250" in rec.getMessage()
+            for rec in caplog.records
+        ), (
+            "multi-chunk 60%% gap must log ERROR with aggregated coverage 100/250 "
+            f"(B19); got: {[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # A3-05 — portfolio_strategies IN-list is paginated in _load_allocator_context

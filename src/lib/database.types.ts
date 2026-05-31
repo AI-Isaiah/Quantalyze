@@ -3239,6 +3239,34 @@ export type Database = {
           strategy_name: string
         }[]
       }
+      get_latest_portfolio_analytics_for_user: {
+        Args: { p_user_id: string }
+        Returns: {
+          attribution_breakdown: Json | null
+          avg_pairwise_correlation: number | null
+          benchmark_comparison: Json | null
+          computation_error: string | null
+          computation_status: string | null
+          computed_at: string | null
+          correlation_matrix: Json | null
+          id: string
+          narrative_summary: string | null
+          optimizer_suggestions: Json | null
+          portfolio_equity_curve: Json | null
+          portfolio_id: string
+          portfolio_max_drawdown: number | null
+          portfolio_sharpe: number | null
+          portfolio_volatility: number | null
+          return_24h: number | null
+          return_mtd: number | null
+          return_ytd: number | null
+          risk_decomposition: Json | null
+          rolling_correlation: Json | null
+          total_aum: number | null
+          total_return_mwr: number | null
+          total_return_twr: number | null
+        }[]
+      }
       get_user_compute_jobs: {
         Args: { p_limit?: number; p_strategy_id?: string }
         Returns: {

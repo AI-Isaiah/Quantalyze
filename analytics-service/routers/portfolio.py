@@ -24,7 +24,7 @@ from models.schemas import (
 )
 from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
-from services.db import get_supabase
+from services.db import chunked_in_query, get_supabase
 from services.exchange import create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions
 from services.metrics import _safe_float, sanitize_metrics
 from services.portfolio_metrics import compute_twr, compute_mwr, compute_period_returns
@@ -1394,13 +1394,30 @@ def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
             seen.add(sid)
             latest.append(row)
 
-        # Strategy names for the sentence
+        # Strategy names for the sentence. B19: route the strategies IN-list
+        # through chunked_in_query — strategy_ids derives from weight_snapshots,
+        # NOT portfolio_strategies, so it is NOT bounded by the
+        # MAX_PORTFOLIO_STRATEGIES cap and an unbounded IN-list could 414. A
+        # coverage gap means some names didn't resolve (the sentence then falls
+        # back to the raw strategy id via name_by_id.get default below), so
+        # surface it rather than silently degrade the alert text.
         strategy_ids = [row["strategy_id"] for row in latest]
-        strat_rows = supabase.table("strategies").select(
-            "id, name"
-        ).in_("id", strategy_ids).execute()
+        _names = chunked_in_query(
+            lambda _chunk: (
+                supabase.table("strategies").select("id, name").in_("id", _chunk)
+            ),
+            strategy_ids,
+            id_field="id",
+        )
+        if _names.truncated:
+            logger.warning(
+                "rebalance-drift alert: strategy-name lookup coverage %d/%d for "
+                "portfolio %s — %d names unresolved (sentence falls back to id)",
+                _names.returned_count, _names.requested_count, portfolio_id,
+                _names.gap,
+            )
         name_by_id = {
-            r["id"]: r.get("name") or r["id"] for r in (strat_rows.data or [])
+            r["id"]: r.get("name") or r["id"] for r in _names.rows
         }
 
         # Find worst-drift strategy with both values present

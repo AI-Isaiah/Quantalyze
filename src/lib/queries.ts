@@ -1342,58 +1342,37 @@ export async function getAllocatorAggregates(userId: string) {
   }
   if (!portfolios?.length) return { portfolios: [], analytics: [] };
 
-  const portfolioIds = portfolios.map((p) => p.id);
-  // NEW-C03-11: collapse to latest analytics row per portfolio to avoid
-  // unbounded result sets when portfolio_analytics accumulates historical
-  // snapshots.  The .order+.limit bounds the DB scan; the Map dedup keeps
-  // only the freshest row per portfolio_id in application code.
-  //
-  // code-review M: use a fixed cap (500) instead of portfolioIds.length * 10.
-  // The formula can be defeated by one data-heavy portfolio (e.g. 1 portfolio
-  // with 11+ analytics rows silently cuts off other portfolios). 500 is
-  // generous for any realistic user (<<50 portfolios × <10 relevant rows each).
-  const { data: analyticsRaw, error: analyticsError } = await supabase
-    .from("portfolio_analytics")
-    .select("*")
-    .in("portfolio_id", portfolioIds)
-    .order("computed_at", { ascending: false })
-    .limit(500);
+  // B19 (Internal Query Bounding): the latest-analytics-row-per-portfolio
+  // selection now lives in a single SECURITY DEFINER RPC
+  // (get_latest_portfolio_analytics_for_user, migration 20260531120000) that
+  // does the DISTINCT ON in the DB and enforces ownership in SQL. This removes
+  // three problems of the previous `.in("portfolio_id", portfolioIds)
+  // .order("computed_at", desc).limit(500)` + app-side Map dedup:
+  //   - limit(500) could truncate (one data-heavy portfolio starving others) —
+  //     DISTINCT ON returns exactly one row per portfolio, so the cap is gone
+  //     and the old F-08 truncation-vs-new-portfolio ambiguity is structurally
+  //     eliminated;
+  //   - the latest-per-portfolio dedup is no longer hand-rolled in app code;
+  //   - scope is now enforced in SQL (portfolios.user_id = p_user_id), not by
+  //     the two-query shape.
+  // F-05 parity: throw on RPC error. The old analytics path only console.error'd
+  // a failure, making a real DB error look like "analytics not yet computed".
+  const { data: analytics, error: analyticsError } = await supabase.rpc(
+    "get_latest_portfolio_analytics_for_user",
+    { p_user_id: userId },
+  );
 
   if (analyticsError) {
     console.error(
-      "[queries.getAllocatorAggregates] portfolio_analytics fetch failed:",
+      "[queries.getAllocatorAggregates] portfolio_analytics rpc failed:",
       analyticsError.message ?? analyticsError,
     );
-  }
-
-  // Deduplicate: first occurrence per portfolio_id is the latest (DESC order).
-  const seen = new Set<string>();
-  const analytics = (analyticsRaw ?? []).filter((row) => {
-    if (seen.has(row.portfolio_id)) return false;
-    seen.add(row.portfolio_id);
-    return true;
-  });
-
-  // F-08: warn when the dedup result is smaller than the requested set.
-  // Two causes: (a) limit(500) truncated the result and some portfolios have
-  // no latest-row in the window (genuine data loss); (b) a portfolio was
-  // recently created and the analytics job has not yet run (no rows exist).
-  // Include both counts so ops can distinguish truncation from "new portfolio."
-  if (seen.size < portfolioIds.length) {
-    const missingCount = portfolioIds.length - seen.size;
-    console.warn(
-      "[queries.getAllocatorAggregates] some portfolios have no analytics row " +
-        "(new portfolios with no job run yet, or limit(500) truncation)",
-      {
-        requested: portfolioIds.length,
-        resolved: seen.size,
-        missing: missingCount,
-        rawRowCount: (analyticsRaw ?? []).length,
-      },
+    throw new Error(
+      `getAllocatorAggregates analytics failed: ${analyticsError.message ?? "unknown supabase error"}`,
     );
   }
 
-  return { portfolios, analytics: analytics as PortfolioAnalytics[] };
+  return { portfolios, analytics: (analytics ?? []) as PortfolioAnalytics[] };
 }
 
 // =========================================================================
