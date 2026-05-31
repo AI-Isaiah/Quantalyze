@@ -462,3 +462,100 @@ class TestGenerateRebalanceDriftAlert:
         )
         _generate_rebalance_drift_alert(sb, "portfolio-1")
         sb.table("portfolio_alerts").insert.assert_not_called()
+
+
+class TestRebalanceDriftStrategyNameChunking:
+    """B19: the strategy-name lookup IN-list (`strategies.id`) must be bounded.
+    `strategy_ids` here derives from `weight_snapshots`, NOT `portfolio_strategies`,
+    so it is NOT capped by `MAX_PORTFOLIO_STRATEGIES` — an unbounded IN-list could
+    overflow the PostgREST URL (HTTP 414). Also pins the coverage WARNING that
+    surfaces an unresolved name (the sentence then falls back to the raw id)."""
+
+    def _make_sb(self, snapshots, strategies_rows, chunks_out):
+        """Supabase mock that RECORDS each `strategies.in_("id", chunk)` call into
+        chunks_out so the test can assert the IN-list was actually chunked."""
+        sb = MagicMock()
+
+        portfolios_t = MagicMock()
+        portfolios_t.select.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(
+            data={"created_at": "2026-01-01T00:00:00+00:00"}  # old → past honeymoon
+        )
+
+        ws_t = MagicMock()
+        ws_t.select.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(
+            data=snapshots
+        )
+
+        rows_by_id = {r["id"]: r for r in strategies_rows}
+
+        class _StratSelect:
+            def in_(self, _col, ids):
+                chunks_out.append(list(ids))
+                matched = [rows_by_id[i] for i in ids if i in rows_by_id]
+                return MagicMock(execute=lambda: MagicMock(data=matched))
+
+        strat_t = MagicMock()
+        strat_t.select.return_value = _StratSelect()
+
+        pa_t = MagicMock()
+        pa_t.select.return_value.eq.return_value.eq.return_value.eq.return_value.is_.return_value.gte.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[]  # no existing weekly alert → not deduped
+        )
+        pa_t.insert.return_value.execute.return_value = MagicMock(data=[{"id": "new"}])
+
+        tables = {
+            "portfolios": portfolios_t,
+            "weight_snapshots": ws_t,
+            "strategies": strat_t,
+            "portfolio_alerts": pa_t,
+        }
+        sb.table.side_effect = lambda name: tables.setdefault(name, MagicMock())
+        return sb
+
+    def test_strategy_name_lookup_is_chunked(self):
+        from routers.portfolio import _generate_rebalance_drift_alert
+
+        n = 250  # > chunked_in_query's default page_size (200) → forces ≥2 chunks
+        snaps = [
+            {"strategy_id": f"s{i}", "target_weight": 0.10, "actual_weight": 0.30,
+             "snapshot_date": "2026-04-10"}
+            for i in range(n)
+        ]
+        strat_rows = [{"id": f"s{i}", "name": f"Strat {i}"} for i in range(n)]
+        chunks: list[list[str]] = []
+
+        _generate_rebalance_drift_alert(self._make_sb(snaps, strat_rows, chunks), "p-1")
+
+        assert len(chunks) >= 2, (
+            f"strategy-name IN-list must be chunked for {n} strategies; got "
+            f"{len(chunks)} chunk(s)"
+        )
+        assert all(len(c) <= 200 for c in chunks), (
+            f"each chunk must be <= 200 ids; got {[len(c) for c in chunks]}"
+        )
+        assert sum(len(c) for c in chunks) == n  # every id queried exactly once
+
+    def test_unresolved_name_logs_coverage_warning_and_falls_back_to_id(self, caplog):
+        from routers.portfolio import _generate_rebalance_drift_alert
+
+        # One drifting strategy, but the strategies lookup returns NO row for it
+        # (e.g. a coverage gap) → WARNING must fire and the alert sentence must
+        # fall back to the raw strategy id rather than silently dropping it.
+        snaps = [{"strategy_id": "s-missing", "target_weight": 0.10,
+                  "actual_weight": 0.40, "snapshot_date": "2026-04-10"}]
+        chunks: list[list[str]] = []
+        sb = self._make_sb(snaps, strategies_rows=[], chunks_out=chunks)
+
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            _generate_rebalance_drift_alert(sb, "p-1")
+
+        assert any(
+            r.levelname == "WARNING" and "strategy-name lookup coverage" in r.getMessage()
+            for r in caplog.records
+        ), (
+            "an unresolved strategy name must log a coverage WARNING (B19); got "
+            f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+        inserted = sb.table("portfolio_alerts").insert.call_args[0][0]
+        assert inserted["strategy_id"] == "s-missing"
+        assert "s-missing" in inserted["message"]  # sentence fell back to the id

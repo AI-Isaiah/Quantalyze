@@ -380,6 +380,10 @@ async def _sync_single_key(
         ]
         if stale_strategy_ids:
             try:
+                # B19 deferred: this is an UPDATE ... WHERE IN (...), not a
+                # SELECT-IN. services.db.chunked_in_query returns SELECT-row
+                # coverage, which is meaningless for an UPDATE — out of scope
+                # (same exclusion as the retention DELETE-IN at match.py:1442).
                 supabase.table("strategy_analytics").update(
                     {"computation_status": "stale"}
                 ).in_("strategy_id", stale_strategy_ids).execute()
@@ -663,6 +667,19 @@ async def cron_sync():
             # can exceed the PostgREST URL limit (HTTP 414 / silent truncation),
             # silently dropping affected portfolios from the recompute cascade.
             # match.py:L1126 already documents this hazard; same fix here.
+            #
+            # B19 deferred: these two loops are NOT routed through
+            # services.db.chunked_in_query. The helper does the whole walk
+            # internally and propagates a chunk failure, hiding the partial
+            # accumulator — but the A3-03 / L-1 blast-radius contract requires
+            # the except block below to log `_ps_collected = len(ps_data)` (how
+            # many portfolio_ids were collected before a mid-walk DB blip). That
+            # per-chunk-error-context shape is a deliberately different pattern
+            # the all-or-nothing coverage helper does not model (Rule 7); forcing
+            # it would either regress A3-03/L-1 or bloat the helper with a
+            # single-caller partial-on-error type. The IN-list is already bounded
+            # at _CRON_IN_LIST_PAGE_SIZE here, so the 414 risk is closed; only the
+            # uniform coverage flag is forgone.
             ps_data: list[dict] = []
             for _page_start in range(0, len(synced_strategy_ids), _CRON_IN_LIST_PAGE_SIZE):
                 _chunk = synced_strategy_ids[_page_start:_page_start + _CRON_IN_LIST_PAGE_SIZE]

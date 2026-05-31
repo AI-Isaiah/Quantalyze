@@ -995,6 +995,16 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 if fill_id and exch:
                     incoming_by_exchange.setdefault(exch, []).append(fill_id)
 
+            # B19 deferred: this per-exchange amendment probe is NOT routed
+            # through services.db.chunked_in_query. It diverges from the helper's
+            # single-list, sync, row-returning contract on three axes: it chunks
+            # within per-exchange groups, it runs each chunk via `await
+            # db_execute(...)` (async, off the event loop), and it accumulates a
+            # set of (exchange, fill_id) tuples — and the enclosing except is
+            # explicitly best-effort (DEBUG, never blocks the upsert), so a
+            # coverage gap is already tolerated. Forcing the sync coverage helper
+            # here would change those semantics (Rule 7). The IN-list is bounded
+            # at 100 ids, so the 414 risk is already closed.
             for exch, fill_ids in incoming_by_exchange.items():
                 for offset in range(0, len(fill_ids), 100):
                     chunk = fill_ids[offset:offset + 100]

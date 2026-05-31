@@ -212,3 +212,195 @@ def test_db_execute_saturation_warning_emits_at_threshold() -> None:
         "thread pool near saturation" in r.getMessage()
         for r in records
     ), f"Expected saturation warning at 90% load, got: {[r.getMessage() for r in records]}"
+
+
+# ---------------------------------------------------------------------------
+# B19: chunked_in_query — the bounded SELECT-IN coverage primitive
+# ---------------------------------------------------------------------------
+#
+# These pin the CONTRACT the three former hand-rolled IN-list loops
+# (match.py's >10% ERROR escalation, the warning-only variant, cron's
+# no-signal) now route through. The load-bearing properties:
+#   - it NEVER raises on a coverage gap and NEVER decides severity — the caller
+#     layers its own policy on `gap`/`gap_fraction` (so A3-04's ERROR-vs-WARNING
+#     bucketing stays caller-side and a regression that buried the error in the
+#     helper would be caught by the match-router tests);
+#   - it bounds every executed IN-list to <= page_size ids (the by-construction
+#     414 / silent-filter-truncation guarantee);
+#   - it surfaces coverage so under-fetch can never be silent again.
+
+from services.db import ChunkedInResult, PaginatedSelectTruncated, chunked_in_query
+
+
+class _FakeExec:
+    """A stand-in for a built PostgREST query: `.execute().data`."""
+
+    def __init__(self, rows: list[dict] | None, raises: Exception | None = None) -> None:
+        self._rows = rows
+        self._raises = raises
+
+    def execute(self) -> MagicMock:
+        if self._raises is not None:
+            raise self._raises
+        return MagicMock(data=self._rows)
+
+
+def _recording_builder(rows_for_chunk, calls: list[list[str]]):
+    """Build a `build_chunk_query` closure that records each chunk it is asked
+    to build and returns a fake whose `.execute().data` is `rows_for_chunk(chunk)`."""
+
+    def _build(chunk: list[str]) -> _FakeExec:
+        calls.append(list(chunk))
+        return _FakeExec(rows_for_chunk(chunk))
+
+    return _build
+
+
+def _row(sid: str) -> dict:
+    return {"strategy_id": sid, "v": 1}
+
+
+def test_chunked_in_query_full_coverage_not_truncated() -> None:
+    """Every requested id returns a row → truncated False, gap 0, fraction 0.0,
+    and the returned rows are every id's row in input order."""
+    calls: list[list[str]] = []
+    ids = [f"s{i}" for i in range(5)]
+    build = _recording_builder(lambda chunk: [_row(s) for s in chunk], calls)
+
+    res = chunked_in_query(build, ids, id_field="strategy_id", page_size=200)
+
+    assert isinstance(res, ChunkedInResult)
+    assert res.requested_count == 5
+    assert res.returned_count == 5
+    assert res.truncated is False
+    assert res.gap == 0
+    assert res.gap_fraction == 0.0
+    assert [r["strategy_id"] for r in res.rows] == ids
+    # Single chunk for 5 ids under a 200 page size.
+    assert calls == [ids]
+
+
+def test_chunked_in_query_short_return_is_truncated_with_gap() -> None:
+    """When the query returns rows for only some requested ids, the result must
+    report the coverage gap precisely — this is the signal each migrated caller
+    reads instead of recomputing `len(rows) < len(ids)` itself."""
+    calls: list[list[str]] = []
+    ids = [f"s{i}" for i in range(100)]
+    # Only the first 50 ids have a row (mirrors A3-04's 100/50 large-gap case).
+    build = _recording_builder(
+        lambda chunk: [_row(s) for s in chunk if int(s[1:]) < 50], calls
+    )
+
+    res = chunked_in_query(build, ids, id_field="strategy_id", page_size=200)
+
+    assert res.requested_count == 100
+    assert res.returned_count == 50
+    assert res.truncated is True
+    assert res.gap == 50
+    assert res.gap_fraction == 0.5
+    # The helper decides NOTHING about severity — it neither logs nor raises.
+    # (A3-04's >10% ERROR bucketing is a caller-side policy on this `gap`.)
+
+
+def test_chunked_in_query_bounds_every_in_list_to_page_size() -> None:
+    """The by-construction 414 guarantee: with more ids than one page, the
+    helper issues multiple chunks, each <= page_size, whose union is exactly the
+    (de-duplicated) requested set — no caller can defeat the bound."""
+    calls: list[list[str]] = []
+    ids = [f"s{i}" for i in range(450)]
+    build = _recording_builder(lambda chunk: [_row(s) for s in chunk], calls)
+
+    res = chunked_in_query(build, ids, id_field="strategy_id", page_size=200)
+
+    assert [len(c) for c in calls] == [200, 200, 50]
+    assert all(len(c) <= 200 for c in calls)
+    # Every requested id was queried exactly once, in order.
+    assert [s for c in calls for s in c] == ids
+    assert res.returned_count == 450 and res.truncated is False
+
+
+def test_chunked_in_query_exact_page_size_boundary() -> None:
+    """A dataset whose size is an exact multiple of page_size must split on the
+    boundary with no empty trailing chunk."""
+    calls: list[list[str]] = []
+    ids = [f"s{i}" for i in range(400)]
+    build = _recording_builder(lambda chunk: [_row(s) for s in chunk], calls)
+
+    chunked_in_query(build, ids, id_field="strategy_id", page_size=200)
+
+    assert [len(c) for c in calls] == [200, 200]  # no third empty chunk
+
+
+def test_chunked_in_query_empty_input_issues_no_query() -> None:
+    """An empty id list short-circuits to a clean zero result WITHOUT building or
+    executing any query (matching the old `range(0, 0, size)` no-op loops)."""
+    calls: list[list[str]] = []
+    build = _recording_builder(lambda chunk: [_row(s) for s in chunk], calls)
+
+    res = chunked_in_query(build, [], id_field="strategy_id", page_size=200)
+
+    assert calls == []
+    assert res.rows == []
+    assert res.requested_count == 0
+    assert res.returned_count == 0
+    assert res.truncated is False
+    assert res.gap == 0
+    assert res.gap_fraction == 0.0
+
+
+def test_chunked_in_query_deduplicates_requested_ids_first_seen() -> None:
+    """Duplicate requested ids are collapsed (first-seen order) before chunking,
+    so requested_count is DISTINCT ids and a dup can't inflate the gap into a
+    false truncation."""
+    calls: list[list[str]] = []
+    ids = ["a", "b", "a", "c", "b"]
+    build = _recording_builder(lambda chunk: [_row(s) for s in chunk], calls)
+
+    res = chunked_in_query(build, ids, id_field="strategy_id", page_size=200)
+
+    assert calls == [["a", "b", "c"]]  # deduped, order preserved
+    assert res.requested_count == 3
+    assert res.returned_count == 3
+    assert res.truncated is False
+
+
+def test_chunked_in_query_returned_count_is_distinct_by_id_field() -> None:
+    """returned_count counts DISTINCT id_field values, not raw rows — so a table
+    with multiple rows per id can't make returned_count exceed requested_count
+    (and a coverage gap stays meaningful)."""
+    calls: list[list[str]] = []
+    ids = ["a", "b", "c"]
+    # 'a' comes back twice (e.g. historical rows); 'c' is missing.
+    build = _recording_builder(
+        lambda chunk: [_row("a"), _row("a"), _row("b")], calls
+    )
+
+    res = chunked_in_query(build, ids, id_field="strategy_id", page_size=200)
+
+    assert len(res.rows) == 3          # raw rows preserved
+    assert res.returned_count == 2     # distinct ids: a, b
+    assert res.gap == 1                # c missing
+    assert res.truncated is True
+
+
+def test_chunked_in_query_propagates_paginated_select_truncated_unchanged() -> None:
+    """A per-chunk page-cap overflow (PaginatedSelectTruncated) is a DIFFERENT
+    failure mode from a coverage gap and must propagate unchanged — the helper
+    must never swallow a chunk failure into a partial result (Rule 7: the two
+    truncation primitives stay orthogonal)."""
+    err = PaginatedSelectTruncated(page_count=1000, page_size=1000, hint="probe")
+
+    def _build(chunk: list[str]) -> _FakeExec:
+        return _FakeExec(None, raises=err)
+
+    with pytest.raises(PaginatedSelectTruncated) as exc_info:
+        chunked_in_query(_build, ["a", "b"], id_field="strategy_id", page_size=200)
+    assert exc_info.value is err  # unchanged, not wrapped
+
+
+def test_chunked_in_query_rejects_nonpositive_page_size() -> None:
+    """page_size <= 0 fails loud (a zero would make range() raise a cryptic
+    error and a negative would never chunk) — defends the bounding guarantee."""
+    build = _recording_builder(lambda chunk: [], [])
+    with pytest.raises(ValueError, match="page_size must be positive"):
+        chunked_in_query(build, ["a"], id_field="strategy_id", page_size=0)

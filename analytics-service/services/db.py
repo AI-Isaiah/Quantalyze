@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import os
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
@@ -206,4 +208,86 @@ def paginated_select(
         page_count=hard_cap_pages,
         page_size=page_size,
         hint=truncation_hint,
+    )
+
+
+@dataclass(frozen=True)
+class ChunkedInResult:
+    """Outcome of a bounded ``WHERE <id_field> IN (...)`` SELECT — see
+    :func:`chunked_in_query`.
+
+    ``truncated`` is a COVERAGE gap (``returned_count < requested_count``: some
+    requested ids had no row), NOT the page-cap row overflow that
+    :class:`PaginatedSelectTruncated` signals. The two are orthogonal: a chunk
+    that itself overflows the 1M-row cap still raises
+    ``PaginatedSelectTruncated`` (propagated unchanged), while ``truncated``
+    only ever means missing-id coverage.
+
+    The result carries ``gap`` / ``gap_fraction`` so the CALLER can layer its
+    own severity policy (e.g. match's ">10%% of the universe → ERROR, else
+    WARNING") on uniform counts. This helper never decides severity and never
+    raises on a coverage gap — that separation is what lets the three former
+    hand-rolled schemes (match's ERROR escalation, the warning-only variant,
+    cron's no-signal) be expressed as one detection primitive + per-site policy
+    without any of them regressing.
+    """
+
+    rows: list[dict[str, Any]]
+    requested_count: int
+    returned_count: int
+    truncated: bool
+    gap: int
+    gap_fraction: float
+
+
+def chunked_in_query(
+    build_chunk_query: Callable[[list[str]], Any],
+    ids: Iterable[str],
+    *,
+    id_field: str,
+    page_size: int = 200,
+) -> ChunkedInResult:
+    """Run ``SELECT ... WHERE <id_field> IN (:ids)`` over an arbitrarily long
+    id list by splitting it into ``<= page_size`` chunks.
+
+    The by-construction guarantee: no caller can pass an id list long enough to
+    overflow the PostgREST/nginx URL ceiling (HTTP 414) or be silently
+    filter-truncated, because every executed IN-list is at most ``page_size``
+    ids. And because the helper always compares requested vs returned ids, a
+    coverage gap can never again be silent (the failure mode behind
+    NEW-C08-02 / NEW-C08-03 / NEW-C32-01).
+
+    ``build_chunk_query(chunk)`` returns a fresh PostgREST builder for ONE
+    chunk — it owns the table, the column projection, ``.in_(id_field, chunk)``,
+    and any ``.eq(...)`` / ``.order(...)``. The helper calls ``.execute()`` on
+    it, concatenates ``.data`` across chunks (preserving chunk order), and
+    counts coverage distinct-by-``id_field`` (matching how the migrated call
+    sites dedup today).
+
+    Requested ids are de-duplicated (first-seen order preserved) before
+    chunking, so ``requested_count`` is the count of DISTINCT ids asked for and
+    an empty input short-circuits to a clean zero result with no query issued.
+    Exceptions from any chunk's ``.execute()`` — including
+    :class:`PaginatedSelectTruncated` when a closure drains via
+    :func:`paginated_select` — propagate unchanged; this helper never swallows
+    a chunk failure into a partial result.
+    """
+    if page_size <= 0:
+        raise ValueError(f"chunked_in_query: page_size must be positive, got {page_size}")
+    unique_ids = list(dict.fromkeys(ids))
+    requested_count = len(unique_ids)
+    rows: list[dict[str, Any]] = []
+    for _start in range(0, requested_count, page_size):
+        _chunk = unique_ids[_start:_start + page_size]
+        _page = build_chunk_query(_chunk).execute()
+        rows.extend(_page.data or [])
+    returned_count = len({row[id_field] for row in rows if id_field in row})
+    gap = requested_count - returned_count
+    return ChunkedInResult(
+        rows=rows,
+        requested_count=requested_count,
+        returned_count=returned_count,
+        truncated=gap > 0,
+        gap=gap,
+        gap_fraction=(gap / requested_count) if requested_count else 0.0,
     )
