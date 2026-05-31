@@ -90,24 +90,40 @@ def merge_dq_flags(
 ) -> dict[str, Any]:
     """Merge ``incoming`` DQ flags into ``base`` (mutated in place) and return it.
 
-    The canonical rule, previously hand-duplicated in
-    ``position_reconstruction.py`` (the per-position aggregation AND the FIFO
-    drop-counter merge):
+    The single canonical rule that previously existed as THREE hand-written
+    copies — the per-position aggregation AND the FIFO drop-counter merge in
+    ``position_reconstruction.py`` (a simpler form) plus
+    ``_merge_into_top_level_flags`` in ``analytics_runner.py`` (this defensive
+    form):
 
-    * **booleans** OR-merge — any ``True`` wins;
-    * **ints / floats** sum — counters accumulate;
-    * **everything else** (lists, strings) replaces.
+    * **booleans** OR-merge — any ``True`` wins (``bool(existing) or v``);
+    * **ints / floats** sum — counters accumulate, but only onto a numeric
+      prior (a non-numeric / bool ``existing`` is treated as ``0`` rather than
+      coercing or raising);
+    * **everything else** (lists, strings) replaces (last write wins).
 
-    ``bool`` is checked before ``int`` because ``bool`` is a subclass of
-    ``int`` in Python — a ``True`` must OR-merge, not sum to ``2``. Centralising
-    the rule here is the by-construction guarantee the two former copies were
-    only *commented* into agreement.
+    ``bool`` is checked before ``int`` because ``bool`` subclasses ``int`` — a
+    ``True`` must OR-merge, not sum to ``2``. The type guards make this a safe
+    SUPERSET of the simpler position-reconstruction form: for the
+    type-consistent keys both engines actually emit (a key is always a bool, or
+    always an int counter, or always a list) the two produce identical results,
+    so routing the position engine through it is behaviour-preserving while
+    ``analytics_runner`` (which already used this defensive form) can adopt the
+    same function. Centralising the rule is the by-construction guarantee the
+    three former copies were only *commented* into agreement.
     """
     for k, v in incoming.items():
+        existing = base.get(k)
         if isinstance(v, bool):
-            base[k] = base.get(k, False) or v
-        elif isinstance(v, (int, float)):
-            base[k] = base.get(k, 0) + v
+            base[k] = bool(existing) or v
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            prior = (
+                existing
+                if isinstance(existing, (int, float))
+                and not isinstance(existing, bool)
+                else 0
+            )
+            base[k] = prior + v
         else:
             base[k] = v
     return base
