@@ -24,6 +24,7 @@ from uuid import UUID
 
 from services.closed_sets import PositionSide, TRADE_SIDES
 from services.db import db_execute
+from services.equity.fallback import merge_dq_flags
 
 # Audit-2026-05-07 M-0935: Sentry capture is best-effort. The sentry_sdk
 # import is guarded so a stripped-down test/CI environment without sentry
@@ -421,21 +422,13 @@ async def _reconstruct_positions_inner(
             pos["exchange"] = _exchange
         # Audit G12.C.4: collect transient data_quality_flags from
         # in-memory position dicts BEFORE we strip them for DB persistence.
+        # B22: route through the one canonical reducer (bool-OR / int-sum /
+        # else-replace) in services.equity.fallback so this merge and the
+        # FIFO-drop merge below can no longer diverge.
         for pos in positions:
             flags = pos.get("data_quality_flags")
             if isinstance(flags, dict):
-                for k, v in flags.items():
-                    # OR-merge booleans / counters: any True wins, ints sum.
-                    if isinstance(v, bool):
-                        aggregated_data_quality_flags[k] = (
-                            aggregated_data_quality_flags.get(k, False) or v
-                        )
-                    elif isinstance(v, (int, float)):
-                        aggregated_data_quality_flags[k] = (
-                            aggregated_data_quality_flags.get(k, 0) + v
-                        )
-                    else:
-                        aggregated_data_quality_flags[k] = v
+                merge_dq_flags(aggregated_data_quality_flags, flags)
         all_positions.extend(positions)
 
     if fills_dropped_no_symbol:
@@ -444,21 +437,11 @@ async def _reconstruct_positions_inner(
         )
 
     # Audit H-0812: merge FIFO drop counters (e.g. zero_entry_price_dropped)
-    # into the strategy-level flags, using the SAME bool-OR / int-sum / else-
-    # replace rule as the per-position aggregation above so the two merges
-    # cannot diverge (review). Only int counters flow through today, but the
-    # mirrored shape future-proofs a bool drop-flag against a mis-merge.
-    for k, v in fifo_dropped_flags.items():
-        if isinstance(v, bool):
-            aggregated_data_quality_flags[k] = (
-                aggregated_data_quality_flags.get(k, False) or v
-            )
-        elif isinstance(v, (int, float)):
-            aggregated_data_quality_flags[k] = (
-                aggregated_data_quality_flags.get(k, 0) + v
-            )
-        else:
-            aggregated_data_quality_flags[k] = v
+    # into the strategy-level flags. B22: the SAME canonical reducer as the
+    # per-position aggregation above — the two merges are now one function, so
+    # they cannot drift apart (previously hand-mirrored copies kept in sync by
+    # comment alone).
+    merge_dq_flags(aggregated_data_quality_flags, fifo_dropped_flags)
 
     await _attribute_funding(
         strategy_id, all_positions, supabase, aggregated_data_quality_flags
