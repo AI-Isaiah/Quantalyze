@@ -38,6 +38,7 @@ from services.closed_sets import (
     TRADE_SIDES,
     perp_quote,
 )
+from services.dateday import epoch_ms_to_iso_day, sort_events_stable
 from services.db import db_execute, get_supabase
 from services.job_worker import (
     DispatchOutcome,
@@ -782,8 +783,7 @@ async def _fetch_coingecko_daily_closes(
             ts_ms, price = row[0], row[1]
         except (IndexError, TypeError):
             continue
-        d = datetime.fromtimestamp(int(ts_ms) / 1000.0, tz=timezone.utc).date()
-        iso = d.isoformat()
+        iso = epoch_ms_to_iso_day(ts_ms)  # B12: single-sourced epoch-ms → UTC day
         if iso in seen_dates:
             continue
         seen_dates.add(iso)
@@ -907,10 +907,12 @@ def _compute_daily_equity(
         if ts_ms is None:
             return None
         try:
-            d = datetime.fromtimestamp(int(ts_ms) / 1000.0, tz=timezone.utc).date()
+            # B12: the epoch-ms → UTC calendar-day conversion is single-sourced
+            # in dateday; this wrapper keeps the None / un-coercible → None
+            # tolerance the event bucketing relies on.
+            return epoch_ms_to_iso_day(ts_ms)
         except (TypeError, ValueError, OSError):
             return None
-        return d.isoformat()
 
     for t in trades:
         iso = _event_date(t.get("timestamp"))
@@ -930,22 +932,11 @@ def _compute_daily_equity(
 
     # Preserve chronological ordering within a single date. Opens must land
     # before closes so position state is correct when a round trip spans a
-    # handful of minutes inside the same day.
-    # NEW-C01-18: add an enumerate-based secondary key so same-ms events
-    # keep their insertion order (open before close for same-day round trips).
-    # ts==0/None events are placed last within their day (sentinel 0 sorts
-    # before valid fills; moving them to int.max avoids inverting same-day
-    # open-close ordering for fills with real timestamps).
+    # handful of minutes inside the same day. NEW-C01-18 (B12): the stable
+    # intra-day sort — missing/zero timestamp sorts LAST (not epoch-0 first),
+    # same-timestamp events keep insertion order — is single-sourced in dateday.
     for iso_key in events_by_date:
-        events_by_date[iso_key] = [
-            e for _, e in sorted(
-                enumerate(events_by_date[iso_key]),
-                key=lambda ie: (
-                    int(ie[1].get("timestamp") or 0) or (10 ** 18),
-                    ie[0],
-                ),
-            )
-        ]
+        events_by_date[iso_key] = sort_events_stable(events_by_date[iso_key])
 
     # Running per-symbol quantities (spot side + realised perp PnL in quote)
     quantities: dict[str, float] = {}
@@ -1759,7 +1750,7 @@ async def _fetch_and_price_window(
             raw = await _fetch_ohlcv_daily(exchange, f"{sym}/USDT", start_ms, end_ms)
             return sym, [
                 (
-                    datetime.fromtimestamp(int(r[0]) / 1000.0, tz=timezone.utc).date().isoformat(),
+                    epoch_ms_to_iso_day(r[0]),  # B12: single-sourced epoch-ms → UTC day
                     float(r[4]),
                 )
                 for r in raw
