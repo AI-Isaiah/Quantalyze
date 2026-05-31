@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.15.34] - 2026-05-31
+### Changed — unified equity-replay data-quality channel: one primitive, position engine adopts it (cross-cutting refactor B22, part 1)
+
+B22 unifies how the equity-replay path emits data-quality (DQ) signals. Before, DQ was emitted four incompatible ways — a hand-assembled telemetry dict + a per-row boolean in `equity_reconstruction.py`, a `data_quality_flags` aggregation whose bool-OR / int-sum / else-replace merge rule was **hand-duplicated twice** in `position_reconstruction.py` (kept in sync by comment alone), and an `EquityCurveBuilder` path that only *logged* missing mark prices without ever returning a flag. Part 1 lands the unifying primitive and migrates the position engine onto it; part 2 (a follow-up PR) carries the `EquityCurveBuilder` behaviour delta + the `equity_reconstruction.py` telemetry-key single-sourcing, which need a golden-telemetry snapshot + a `strategy_analytics` before/after diff to land safely.
+
+- **New `analytics-service/services/equity/fallback.py`** — the single source of truth:
+  - `EquityDQ` — a closed `str`-enum registry of every equity-valuation DQ flag KEY. Each value is the exact `strategy_analytics.data_quality_flags` JSONB key the allocator dashboard + admin health card already read, so the persisted shape is unchanged; a typo'd key at a call site is now a name that diffs against this registry.
+  - `FallbackOutcome(value, dq_flags, affected_symbols)` — a frozen result so a value substitution carries WHY it happened and which symbols it touched ("substitute without recording a flag" stops being the easy path).
+  - `merge_dq_flags()` — the ONE reducer (bool-OR, int/float-sum, else-replace; `bool` checked before `int` since it subclasses `int`) + a `merge()` combinator over `FallbackOutcome`s.
+- **`position_reconstruction.py` adopts the reducer** — the two hand-mirrored merge loops (per-position aggregation + FIFO drop-counter merge) collapse onto `merge_dq_flags`, so they can no longer drift apart. Byte-for-byte behaviour-preserving (a parity test pins the exact legacy rule).
+
+**Verified:** new helper unit-tested (13 tests pinning the persisted-key contract + the merge semantics incl. bool-before-int); `position_reconstruction` + equity + reconstruction suites green (361 passed); mypy clean on both touched modules. A pre-existing full-suite test-ordering flake (`test_simulator_router.py::...returns_413_before_corr_matmul`, passes isolated, fails on the clean base too — unrelated to B22) is the only red and is not introduced here.
+
 ## [0.24.15.33] - 2026-05-31
 ### Changed — divergent calendar-day parsing unified into one branded `IsoDay` module (cross-cutting refactor B12)
 
