@@ -8,6 +8,13 @@ import { WidgetState } from "../../components/WidgetState";
 import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 import { formatRelativeTime } from "@/lib/utils";
 import { captureToSentry } from "@/lib/sentry-capture";
+import {
+  isMonotonicByDay,
+  localMidnightFromIsoString,
+  localMidnightToday,
+  sortByDayAscending,
+  utcEpochFromIsoString,
+} from "@/lib/dateday";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
 import {
   equityChartWidgetDataSchema,
@@ -266,13 +273,12 @@ const DAY_MS = 86_400_000;
 // warning bounded (one warn per offending input string per session).
 const parseISOWarnedRef = new Set<string>();
 export function parseISO(s: string): number {
-  // YYYY-MM-DD → epoch ms (UTC midnight). Falls back to Date constructor
-  // for any non-ISO inputs so we never throw.
-  const [y, m, d] = s.split("-").map(Number);
-  if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
-    return Date.UTC(y, m - 1, d);
-  }
-  const t = new Date(s).getTime();
+  // YYYY-MM-DD → epoch ms (UTC midnight) via the shared dateday primitive
+  // (B12). `utcEpochFromIsoString` is the canonical lenient data-plane parse —
+  // byte-identical to the previous inline body (Date.UTC for finite parts,
+  // `new Date(s)` fallback) so the chart trusts its producer exactly as before
+  // and never throws. The deduped malformed-input breadcrumb stays here.
+  const t = utcEpochFromIsoString(s);
   if (!Number.isFinite(t) && typeof console !== "undefined") {
     if (!parseISOWarnedRef.has(s)) {
       parseISOWarnedRef.add(s);
@@ -422,10 +428,12 @@ function sliceByPeriod(
 // (CI passes because it runs in UTC). Build the picker bound in the SAME
 // local-midnight convention the picker uses so the two never disagree.
 export function localDateFromISO(s: string): Date {
-  const [y, m, d] = s.split("-").map(Number);
-  if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
-    return new Date(y, m - 1, d);
-  }
+  // B12: the LOCAL-midnight parse now lives in dateday's `localMidnightFromIsoString`
+  // (byte-identical valid path — `new Date(y, m-1, d)` for finite parts), the
+  // local sibling of `parseISO`'s UTC `utcEpochFromIsoString`. Co-locating the
+  // two conversions in dateday is what stops the H-1224 mistake from recurring.
+  const local = localMidnightFromIsoString(s);
+  if (local) return local;
   // Non-ISO fallback — defer to the Date constructor (mirrors parseISO).
   // SF-10 fix: warn when the fallback is triggered, mirroring parseISO's
   // deduped-warn pattern. A malformed date here silently produces an Invalid
@@ -443,16 +451,9 @@ export function localDateFromISO(s: string): Date {
   return fallback;
 }
 
-/**
- * NEW-C23-02: local today-midnight — use instead of `new Date()` for the
- * CustomRangePicker `max` bound. `new Date()` carries the current wall-clock
- * time, which mixed with a local-midnight `min` produces time-of-day-dependent
- * day counts and disabled-cell math near the rounding seam.
- */
-export function localMidnightToday(): Date {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
-}
+// NEW-C23-02: the CustomRangePicker `max` bound is local today-midnight (NOT
+// `new Date()`, whose wall-clock time mixed with a local-midnight `min`
+// produced time-of-day-dependent day counts) — now imported from dateday (B12).
 
 function firstDate(points: DailyPoint[]): Date {
   if (points.length === 0) return new Date();
@@ -550,15 +551,13 @@ export function EquityChart({
   // surfaces in dev without requiring a breakpoint.
   const sortedEquityPoints = useMemo(() => {
     if (equityDailyPoints.length < 2) return equityDailyPoints;
-    // Fast monotonicity check before allocating a sorted copy.
-    let monotonic = true;
-    for (let i = 1; i < equityDailyPoints.length; i++) {
-      if (equityDailyPoints[i].date < equityDailyPoints[i - 1].date) {
-        monotonic = false;
-        break;
-      }
-    }
-    if (monotonic) return equityDailyPoints;
+    // NEW-C04-07 (B12): enforce ascending-by-day before anchoring/slicing via
+    // dateday's shared monotonic check + defensive sort. `isMonotonicByDay` is
+    // the same fast O(n) "no later date is strictly smaller" scan as before
+    // (allocates nothing on the happy path); `sortByDayAscending` is the same
+    // stable lexicographic copy-sort. Behaviour is byte-identical — only the
+    // implementation is now single-sourced.
+    if (isMonotonicByDay(equityDailyPoints)) return equityDailyPoints;
     // PR-3+4 silent-failure H1 (audit-2026-05-07): this is the ONLY
     // signal of a buggy data pipeline that still renders successfully.
     // The defensive sort hides the producer bug from the user (good),
@@ -576,7 +575,7 @@ export function EquityChart({
       lastDate: equityDailyPoints[equityDailyPoints.length - 1].date,
       length: equityDailyPoints.length,
     });
-    return [...equityDailyPoints].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    return sortByDayAscending(equityDailyPoints);
   }, [equityDailyPoints]);
 
   const composite = useMemo(

@@ -8,6 +8,8 @@ import {
   type CSSProperties,
 } from "react";
 
+import { diffDays, isoDayFromDate, localMidnight, parseIsoDay } from "@/lib/dateday";
+
 // ---------------------------------------------------------------------------
 // PR3 (HANDOFF G6) — CustomRangePicker dual-month + presets rail
 //
@@ -42,36 +44,19 @@ type Props = {
   initialRange?: { start: string; end: string } | null;
 };
 
-const DAY_MS = 86_400_000;
-
+// B12: the local-midnight Date ↔ canonical "YYYY-MM-DD" convention lives in the
+// shared `dateday` module so this picker and EquityChart can never disagree on
+// it (the H-1224 off-by-one came from two files diverging). `toISODate` reads a
+// local-time Date's fields; `parseISODate` rejects rollover-prone garbage
+// (2024-13-01, 2024-02-31 — H-1231) via dateday's strict `parseIsoDay`, then
+// rebuilds the local-midnight Date the grid compares against.
 function toISODate(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  return isoDayFromDate(d);
 }
 
 function parseISODate(s: string): Date | null {
-  const [y, m, d] = s.split("-").map(Number);
-  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
-  // Reject semantically out-of-range components up front; the Date
-  // constructor would otherwise silently roll them over (`new Date(2024, 12, 1)`
-  // → Jan 2025, `new Date(2024, 0, 99)` → Apr 8 2024) and hand back a date
-  // nobody supplied (H-1231).
-  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
-  const parsed = new Date(y, m - 1, d);
-  // Round-trip check catches rollovers that survive the range gate — e.g. a
-  // non-existent calendar day like Feb 31 (→ Mar 2) or Apr 31 (→ May 1). If
-  // the constructed date doesn't echo the requested components, the input was
-  // invalid.
-  if (
-    parsed.getFullYear() !== y ||
-    parsed.getMonth() !== m - 1 ||
-    parsed.getDate() !== d
-  ) {
-    return null;
-  }
-  return parsed;
+  const day = parseIsoDay(s);
+  return day ? localMidnight(day) : null;
 }
 
 function startOfMonth(d: Date): Date {
@@ -160,22 +145,12 @@ export function CustomRangePicker({
   const startIso = toISODate(start);
   const endIso = toISODate(end);
   const invalid = start > end;
-  // NEW-C23-02: compute day count from ISO date strings (calendar-day diff)
-  // instead of raw millisecond arithmetic. The ms approach mixes a
-  // local-midnight start with a wall-clock-now end + TZ skew, producing
-  // off-by-one near the rounding seam and time-of-day-dependent results.
-  // ISO string subtraction is time-of-day immune and TZ-agnostic.
-  const dayCount = (() => {
-    const sISO = toISODate(start);
-    const eISO = toISODate(end);
-    // Fast calendar-day diff: both strings are YYYY-MM-DD so lexicographic
-    // diff maps to epoch diff. Use UTC midnight for the subtraction so the
-    // result is always an integer number of days.
-    const [sy, sm, sd] = sISO.split("-").map(Number);
-    const [ey, em, ed] = eISO.split("-").map(Number);
-    const diffMs = Date.UTC(ey, em - 1, ed) - Date.UTC(sy, sm - 1, sd);
-    return Math.max(1, Math.round(diffMs / DAY_MS) + 1);
-  })();
+  // NEW-C23-02: inclusive calendar-day count via dateday's `diffDays` (a
+  // time-of-day-immune, TZ-agnostic UTC-midnight diff) instead of raw
+  // millisecond arithmetic that mixed a local-midnight start with a
+  // wall-clock-now end. `+ 1` makes the count inclusive; clamp at 1 so a
+  // collapsed/degenerate range still reads "1 day".
+  const dayCount = Math.max(1, diffDays(isoDayFromDate(start), isoDayFromDate(end)) + 1);
   const rangeLabel = `${startIso} → ${endIso}`;
 
   // Day cells for both months; computed via useMemo because the cell
