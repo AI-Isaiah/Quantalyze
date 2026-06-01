@@ -122,6 +122,38 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     expect(result.stdout).toContain("manifest covers all");
   }, 30_000);
 
+  it("B10 #8: exits 1 via the class guard when an EXCLUDED_TABLES entry has an unrecognised class", () => {
+    // Excluding a table from the Art. 15 export must be an opt-in decision with
+    // a CHECKED rationale class. The hook's `ExclusionClass` type makes a bad
+    // class a tsc error, but `tsx` does NOT typecheck — so the RUNTIME guard in
+    // runCoverageCheck() is the real CI gate (ci.yml runs the hook via `npx tsx`).
+    //
+    // We corrupt the class of cron_runs — an EXISTING, migration-declared entry
+    // — rather than injecting a phantom key. A phantom key would ALSO trip the
+    // independent staleExcludedKeys guard (no migration declares it), keeping
+    // exit=1 even with the class check removed, so exit-1 wouldn't prove the
+    // class guard fired. cron_runs IS declared, so the unrecognised-class guard
+    // is the ONLY remaining failure path: delete that guard and this drops to
+    // exit 0 — i.e. the assertions below are genuinely mutation-discriminating.
+    const originalHook = readFileSync(HOOK_SCRIPT, "utf8");
+    const mutatedHook = originalHook.replace(
+      '  cron_runs: {\n    class: "system",',
+      '  cron_runs: {\n    class: "not-a-real-class",',
+    );
+    expect(mutatedHook).not.toBe(originalHook);
+    const scratch = setupScratchRepo("gdpr-b10-class-test-", {
+      hook: mutatedHook,
+    });
+    const result = spawnSync(
+      "npx",
+      ["tsx", "scripts/check-gdpr-export-coverage.ts"],
+      { encoding: "utf8", cwd: scratch },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("unrecognised exclusion class");
+    expect(result.stderr).toContain("cron_runs");
+  }, 30_000);
+
   it("H-0455/H-0457: exits 1 when a manifest entry has no matching sanitize_user policy", () => {
     // Add a brand-new manifest entry whose name does NOT appear in
     // the sanitize_user matrix or DELETE/UPDATE body — and is NOT in

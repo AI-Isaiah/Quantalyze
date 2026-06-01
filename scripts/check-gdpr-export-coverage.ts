@@ -95,60 +95,108 @@ const MIGRATIONS_DIR = join(REPO_ROOT, "supabase", "migrations");
  * detection in `runCoverageCheck()` catches entries that reference a
  * no-longer-existing table.
  */
-export const EXCLUDED_TABLES: Record<string, { reason: string }> = {
+
+/**
+ * B10 — typed exclusion classes. Every EXCLUDED_TABLES entry must declare WHY
+ * it is excluded as one of these enumerated classes, not free text, so an
+ * exclusion is an opt-in decision with a CHECKED rationale (plan test #8):
+ * `runCoverageCheck()` fails loudly on any entry whose class is missing or
+ * unrecognised, and the `ExclusionClass` type makes a typo a tsc error too.
+ *
+ *   - `scoped`      — indirect-owned via a user-FK parent; appears in
+ *                     USER_EXPORT_TABLES as an IndirectUserTable (the direct
+ *                     `user_id` regex sweep skips it because its FK is e.g.
+ *                     `strategy_id`). The data IS exported, just not directly.
+ *   - `ephemeral`   — short-lived server-side cache / idempotency / dedup
+ *                     ledger, CASCADE-erased on profile deletion. Server
+ *                     state, not user-owned content.
+ *   - `system`      — system / observability / infrastructure / reference
+ *                     data with no per-user, row-level ownership.
+ *   - `cross-party` — multi-owner surface where the subject is one party;
+ *                     sanitize-time PURGE/anonymize handles the one-sided PII.
+ *   - `pre-auth`    — pre-authentication landing intake keyed by email/hash
+ *                     with no user FK; PII handled by sanitize email-match.
+ */
+export const EXCLUSION_CLASSES = [
+  "scoped",
+  "ephemeral",
+  "system",
+  "cross-party",
+  "pre-auth",
+] as const;
+export type ExclusionClass = (typeof EXCLUSION_CLASSES)[number];
+
+export const EXCLUDED_TABLES: Record<
+  string,
+  { class: ExclusionClass; reason: string }
+> = {
   // Cross-party / internal-only tables that don't need direct user scoping.
   organization_invites: {
+    class: "cross-party",
     reason:
       "Cross-party invite state (sent BY a user TO an email). Sanitize-time PURGE by invited_by covers the one-sided PII. Inviter's email deleted by profiles anonymize.",
   },
   organizations: {
+    class: "cross-party",
     reason:
       "Cross-party org entity. Anonymize sets created_by=NULL; other members retain access. The org itself is not user-owned data to export.",
   },
   relationship_documents: {
+    class: "cross-party",
     reason:
       "Cross-party uploads (allocator-manager). Reachable indirectly via contact_requests in the export; not directly user-scoped.",
   },
   for_quants_leads: {
+    class: "pre-auth",
     reason:
       "Public-landing-page lead capture; keyed by email_hash with no user FK. Pre-authenticated data, out of scope for user exports.",
   },
   key_permission_audit: {
+    class: "system",
     reason:
       "Internal audit trail of key-permission probes (staff-authored). Not user-owned data.",
   },
   trades: {
+    class: "scoped",
     reason:
       "Indirect-owned via strategies — appears in the manifest as an IndirectUserTable. Excluded from direct-column regex sweep because its FK is strategy_id, not user_id.",
   },
   // Legacy landing-page intake — keyed by email, not user_id.
   verification_requests: {
+    class: "pre-auth",
     reason:
       "Legacy pre-auth landing-page intake. Keyed by `email` TEXT, no user FK. Sanitize-time PURGE by email-match handles PII; not exportable.",
   },
   // System / observability tables with no per-user data to export.
   cron_runs: {
+    class: "system",
     reason: "System observability (cron heartbeat). No user data.",
   },
   notification_dispatches: {
+    class: "system",
     reason:
       "Outbound email ledger with recipient_email PII, but it's a system-authored audit trail — not user-owned. Retention policy (ADR-0024) purges at 180d.",
   },
   scenario_commit_idempotency: {
+    class: "ephemeral",
     reason:
       "Short-lived server-side dedup cache for the Idempotency-Key contract on POST /api/allocator/scenario/commit. Rows carry a body-hash + cached response payload pointing to match_decisions / bridge_outcomes that ARE exported via those tables. ON DELETE CASCADE to profiles(id) handles right-to-erasure; the cache itself is server state, not user-owned content. Equivalent treatment to notification_dispatches.",
   },
   compute_jobs: {
+    class: "system",
     reason: "System job queue. No user-owned row-level data.",
   },
   compute_job_kinds: {
+    class: "system",
     reason: "Queue metadata lookup. System-level; no user data.",
   },
   reconciliation_reports: {
+    class: "scoped",
     reason:
       "Indirect-owned via strategies. Present in the manifest as an IndirectUserTable; direct regex excludes because FK is strategy_id.",
   },
   system_flags: {
+    class: "system",
     reason: "Feature-flag / ops switches. No user data.",
   },
   // Audit C-0291: `sync_checkpoints` was previously listed here but
@@ -168,24 +216,30 @@ export const EXCLUDED_TABLES: Record<string, { reason: string }> = {
   // by the existing `positions`/`position_snapshots | PRESERVE` rows in
   // the sanitize_user matrix. Do NOT re-add them here.
   used_ack_tokens: {
+    class: "ephemeral",
     reason:
       "Idempotency guard for alert-ack tokens. System bookkeeping; no user PII.",
   },
   funding_fees: {
+    class: "scoped",
     reason:
       "Strategy-scoped historical. Present in manifest as IndirectUserTable; direct regex excludes because FK is strategy_id.",
   },
   benchmark_prices: {
+    class: "system",
     reason: "Reference-data time-series. System-owned; no user data.",
   },
   discovery_categories: {
+    class: "system",
     reason: "Admin-curated discovery taxonomy. No user-owned data.",
   },
   decks: {
+    class: "system",
     reason:
       "System-curated admin content. Migration 005 declares no user_id/created_by column. If a future migration adds a user FK, REMOVE this entry and add the table to USER_EXPORT_TABLES.",
   },
   deck_strategies: {
+    class: "system",
     reason:
       "Link table between system-curated decks and strategies. Inherits decks' no-user-FK posture.",
   },
@@ -902,10 +956,25 @@ export function runCoverageCheck(opts: {
       staleExcludedKeys.push(key);
     }
   }
+  // B10 (plan test #8): every EXCLUDED_TABLES entry must carry a recognised
+  // exclusion class — excluding a table from the GDPR export is an opt-in
+  // decision with a CHECKED rationale, not free text. The `ExclusionClass`
+  // type makes a typo a tsc error; this runtime guard catches a class cast
+  // away (or a hand-edited entry) and fails CI loudly rather than silently
+  // widening the set of tables omitted from a data-subject's Art. 15 export.
+  const invalidExclusionClasses: string[] = [];
+  for (const [key, meta] of Object.entries(EXCLUDED_TABLES)) {
+    if (!(EXCLUSION_CLASSES as readonly string[]).includes(meta.class)) {
+      invalidExclusionClasses.push(
+        `${key} (class: ${JSON.stringify(meta.class)})`,
+      );
+    }
+  }
   if (
     projectionParityGaps.length > 0 ||
     staleAllowlistKeys.length > 0 ||
-    staleExcludedKeys.length > 0
+    staleExcludedKeys.length > 0 ||
+    invalidExclusionClasses.length > 0
   ) {
     errorLog(
       "[check-gdpr-export-coverage] FAIL (audit-2026-05-07 red-team #9 / C-0291) - " +
@@ -925,6 +994,14 @@ export function runCoverageCheck(opts: {
           `this table. Either the table was renamed/dropped (remove this entry) ` +
           `or the migration's CREATE TABLE doesn't match the parser's regex ` +
           `(escalate to a SQL parser; see CHAIN-8 audit note).`,
+      );
+    }
+    for (const e of invalidExclusionClasses) {
+      errorLog(
+        `  - EXCLUDED_TABLES entry "${e}" has an unrecognised exclusion class ` +
+          `— must be one of: ${EXCLUSION_CLASSES.join(", ")}. Pick the class ` +
+          `that matches WHY the table is excluded (see the ExclusionClass ` +
+          `docblock) so the exclusion stays an auditable, opt-in decision.`,
       );
     }
     errorLog(

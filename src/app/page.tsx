@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
+import { withPublishedOnly } from "@/lib/visibility";
 import { EXCHANGES } from "@/lib/constants";
 import { VerificationSection } from "@/components/landing/VerificationSection";
 
@@ -8,9 +9,9 @@ async function getSocialProofStats() {
   try {
     const supabase = await createClient();
     const [{ count: strategyCount }, { count: introCount }, { data: aumData }] = await Promise.all([
-      supabase.from("strategies").select("*", { count: "exact", head: true }).eq("status", "published"),
+      withPublishedOnly(supabase.from("strategies").select("*", { count: "exact", head: true })),
       supabase.from("contact_requests").select("*", { count: "exact", head: true }),
-      supabase.from("strategies").select("aum").eq("status", "published").not("aum", "is", null),
+      withPublishedOnly(supabase.from("strategies").select("aum")).not("aum", "is", null),
     ]);
     const totalAum = aumData?.reduce((sum, s) => sum + (s.aum ?? 0), 0) ?? 0;
     return {

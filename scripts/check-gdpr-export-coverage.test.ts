@@ -24,6 +24,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EXCLUDED_TABLES,
+  EXCLUSION_CLASSES,
   SANITIZE_PARITY_ALLOWLIST,
   collectAllDeclaredTables,
   extractAllDeclaredTablesFromContent,
@@ -487,6 +488,54 @@ describe("real-repo integration smoke", () => {
       expect(entry).not.toHaveProperty("addedIn");
       expect((entry as { reason: string }).reason.length).toBeGreaterThan(0);
       expect(key).toMatch(/^[a-z0-9_]+$/);
+    }
+  });
+
+  // B10 (plan test #8): excluding a table from the Art. 15 export is an
+  // opt-in decision with a CHECKED rationale class, not free text.
+  it("every EXCLUDED_TABLES entry declares a recognised exclusion class (B10 #8)", () => {
+    const allowed = EXCLUSION_CLASSES as readonly string[];
+    for (const [key, entry] of Object.entries(EXCLUDED_TABLES)) {
+      expect(
+        allowed.includes(entry.class),
+        `${key} has class "${entry.class}" — must be one of: ${EXCLUSION_CLASSES.join(", ")}`,
+      ).toBe(true);
+    }
+  });
+
+  it("runCoverageCheck() FAILS ONLY via the class guard when an entry has an unknown class (B10 #8)", () => {
+    const errors: string[] = [];
+    // Corrupt the class of an EXISTING entry (cron_runs) and stub every OTHER
+    // check to pass cleanly — no stale-allowlist (readManifestForParity ⊇ the
+    // allowlist keys), no stale-excluded (scanAllDeclaredTables ⊇ all excluded
+    // keys), no projection-parity gap (no projected entries). The unrecognised-
+    // class guard is then the SOLE failure path, so exit-1 is genuinely
+    // guard-dependent: remove the EXCLUSION_CLASSES.includes() check and this
+    // returns 0. (A phantom key would ALSO trip staleExcludedKeys and mask it.)
+    const originalClass = EXCLUDED_TABLES.cron_runs.class;
+    (EXCLUDED_TABLES.cron_runs as { class: string }).class = "not-a-real-class";
+    try {
+      const code = runCoverageCheck({
+        readManifest: () => new Set(["profiles"]),
+        readManifestForParity: () =>
+          new Set(["profiles", ...Object.keys(SANITIZE_PARITY_ALLOWLIST)]),
+        readManifestEntries: () => [
+          { table: "profiles", kind: "direct", hasUserFilter: true },
+        ],
+        readProjectedEntries: () => [],
+        scanMigrations: () => new Map([["profiles", "20260101_init.sql"]]),
+        scanSanitize: () => new Set(["profiles"]),
+        scanAllDeclaredTables: () =>
+          new Set([...Object.keys(EXCLUDED_TABLES), "profiles"]),
+        errorLog: (m: string) => errors.push(m),
+        log: () => {},
+      });
+      expect(code).toBe(1);
+      const blob = errors.join("\n");
+      expect(blob).toMatch(/unrecognised exclusion class/);
+      expect(blob).toContain("cron_runs");
+    } finally {
+      (EXCLUDED_TABLES.cron_runs as { class: string }).class = originalClass;
     }
   });
 });

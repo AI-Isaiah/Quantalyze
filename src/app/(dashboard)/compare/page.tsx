@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { withPublishedOnly } from "@/lib/visibility";
 import { EMPTY_ANALYTICS } from "@/lib/queries";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -44,11 +45,12 @@ export default async function ComparePage({
 
   const [strategiesRes, holdingItemsRes] = await Promise.all([
     strategyIds.length > 0
-      ? supabase
-          .from("strategies")
-          .select("*, strategy_analytics (*)")
-          .in("id", strategyIds)
-          .eq("status", "published")
+      ? withPublishedOnly(
+          supabase
+            .from("strategies")
+            .select("*, strategy_analytics (*)")
+            .in("id", strategyIds),
+        )
       : Promise.resolve({ data: [], error: null }),
     Promise.all(
       holdingIds.map((hid) =>

@@ -1,5 +1,6 @@
 import { ImageResponse } from "next/og";
 import { createClient } from "@/lib/supabase/server";
+import { withPublishedOnly } from "@/lib/visibility";
 
 /**
  * Dynamic OG card for the v2 factsheet. Renders strategy name + headline
@@ -25,13 +26,14 @@ export async function GET(
   } | null = null;
   try {
     const supabase = await createClient();
-    const res = await supabase
-      .from("strategies")
-      .select(
-        "id, name, codename, description, strategy_analytics ( daily_returns )",
-      )
-      .eq("id", id)
-      .eq("status", "published")
+    const res = await withPublishedOnly(
+      supabase
+        .from("strategies")
+        .select(
+          "id, name, codename, description, strategy_analytics ( daily_returns )",
+        )
+        .eq("id", id),
+    )
       .maybeSingle();
     data = res.data ?? null;
   } catch (err) {
