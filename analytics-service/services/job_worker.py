@@ -565,7 +565,7 @@ class _ExchangeContext:
     supabase: object
     strategy_row: dict
     key_row: dict
-    exchange: object
+    exchange: ccxt.Exchange
 
 
 async def _exchange_preflight(

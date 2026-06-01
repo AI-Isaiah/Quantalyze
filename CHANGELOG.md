@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.50] - 2026-06-01
+### Changed — `mypy --strict` type floor: `equity_reconstruction.py` → 0 errors (cross-cutting refactor B-mypy, part f-2)
+
+Part f-2 brings `analytics-service/services/equity_reconstruction.py` (allocator historical equity / holdings reconstruction — financial code) to **0 `mypy --strict` errors** (53 → 0). Cardinal rule held: no `cast()`, no `# type: ignore`, no `Any`-laundering, no `or 0.0` fabrication; 100% behavior-preserving (verified by a fresh-context adversarial pass that traced the money path input-by-input).
+
+- **Money path (px/src)**: the spot + perp marking loops changed `px, src = _price_on(...)` (which returns `tuple[float | None, str | None]`) to a `maybe_px` temp with the existing `is None` guard, then `px = maybe_px` once narrowed — so a missing OHLCV price still skips the symbol (and records it in `skipped_symbols`) **exactly** as before; a `None` can never reach `qty * px` or `pos.mark(px)`. `src` retains its exact value (including `None`). Pure type-narrowing, no value change.
+- **`ccxt.NotSupported` subclass-Any**: `DeribitNotSupportedError` now uses a `TYPE_CHECKING` base alias (`Exception` for the type-checker, `ccxt.NotSupported` at runtime — ccxt ships no `py.typed`, so subclassing it tripped `disallow_subclassing_any`). Verified `issubclass(DeribitNotSupportedError, ccxt.NotSupported)` is still `True` at runtime, so the `except ccxt.NotSupported` feature-detection handlers still catch it. (Reusable pattern — `allocator_positions.py` has the same shape, to be fixed in a later part.)
+- **Shared `_ExchangeContext.exchange`** (`job_worker.py`): retyped `object → ccxt.Exchange` (the field always holds a ccxt exchange). Type-only (ccxt resolves to `Any`), no runtime change — and it incidentally cleared 5 pre-existing job_worker strict errors (the `ctx.exchange.close()`/`fetch_*` calls), 103 → 98, ahead of f-3.
+- The rest is honest annotation backfill: CoinGecko httpx `params: dict[str, str | int]`, the nested db-helper closures `-> Any` (their `supabase` arg is `Any`, so the builder chain genuinely is), `_parse_dt(value: object) -> datetime | None`, and bare `dict`/`list` → loosest-parameterized forms.
+- Verified: `mypy services/equity_reconstruction.py --strict` 0; 332 equity/reconstruction/position tests pass; full analytics suite 2520 passed (the one `test_simulator_router` full-suite failure is the pre-existing ordering flake, confirmed passing in isolation and untouched by this diff).
+
 ## [0.24.15.49] - 2026-06-01
 ### Fixed — `compute_analytics` mixed-precision timestamp crash (dashboard KPIs never refreshed)
 
