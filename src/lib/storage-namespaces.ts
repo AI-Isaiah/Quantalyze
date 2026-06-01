@@ -34,6 +34,13 @@ export const APP_NAMESPACED_PREFIXES: readonly string[] = [
  *
  * Runs synchronously before `supabase.auth.signOut()` so the keys are gone
  * regardless of whether the auth call resolves. No-op outside the browser.
+ *
+ * B7 sanctioned-exception: this is the cross-account purge walker — it
+ * enumerates ALL localStorage keys and removes the namespaced ones. It cannot
+ * route through `useCrossTabStorage` (a single typed key+codec hook); operating
+ * over the whole keyspace IS its job. Exempts the file from the B25
+ * `no-raw-localstorage` rule (it is the storage-layer infrastructure the rule
+ * points other code toward, not drift).
  */
 export function purgeAppNamespacedStorage(): void {
   if (typeof window === "undefined") return;

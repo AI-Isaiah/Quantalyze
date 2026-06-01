@@ -38,6 +38,10 @@ export default defineConfig({
       // both globs share the `tests/integration/` directory so a single
       // `vitest run` invocation picks them up alongside the unit suite.
       "tests/integration/**/*.test.ts",
+      // B25 — RuleTester fixtures for the local eslint-plugin-quantalyze rules
+      // live next to the rules they exercise (plugin self-containment) and are
+      // run as part of the normal vitest suite.
+      "tools/eslint-plugin-quantalyze/tests/**/*.test.ts",
     ],
     setupFiles: ["src/test-setup.ts"],
     // Coverage tracking — measurement only, NOT a CI gate yet.

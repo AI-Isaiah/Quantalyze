@@ -72,6 +72,7 @@ import { getCorrelationId } from "@/lib/correlation-id";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { checkFounderStrategyReadiness } from "@/lib/founder-lp/readiness";
 import { getPlatformName, getPlatformEmail } from "@/lib/platform";
+import { parseRetryAfterSeconds } from "@/lib/retry";
 import {
   renderSuccessEmailHtml,
   renderFailureAlertHtml,
@@ -336,12 +337,14 @@ async function fetchFactsheetPdfWithRetry(
   };
   const first = await fetch(url, buildOptions());
   if (first.status !== 503) return first;
-  const retryAfterRaw = first.headers.get("retry-after") ?? String(DEFAULT_RETRY_AFTER_S);
-  const parsed = Number.parseInt(retryAfterRaw, 10);
-  const retryAfterSec = Math.min(
-    MAX_RETRY_AFTER_S,
-    Math.max(1, Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_RETRY_AFTER_S),
-  );
+  // B20 — the shared parser owns both RFC-9110 forms (delta-seconds AND
+  // HTTP-date, resolved against the response's own Date header) and never
+  // returns NaN/0/negative; `null` (absent/unparseable/non-positive) falls back
+  // to the default. Replaces a raw `Number.parseInt(get("retry-after"))` that
+  // silently dropped an HTTP-date Retry-After to the default. Clamp to
+  // [1, MAX] as before.
+  const parsed = parseRetryAfterSeconds(first.headers) ?? DEFAULT_RETRY_AFTER_S;
+  const retryAfterSec = Math.min(MAX_RETRY_AFTER_S, Math.max(1, parsed));
   await new Promise((resolve) => setTimeout(resolve, retryAfterSec * 1000));
   return await fetch(url, buildOptions());
 }

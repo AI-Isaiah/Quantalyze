@@ -1,0 +1,8 @@
+{
+  "name": "eslint-plugin-quantalyze",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "description": "Local ESLint rules enforcing quantalyze by-construction invariants (B25 lint-consolidation capstone). Each rule is the edit-time backstop for a finding-class the cross-cutting refactor program closed via a single source of truth; see .planning/audit-2026-05-07/B25-PLAN.md."
+}

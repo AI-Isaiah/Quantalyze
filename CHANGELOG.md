@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.45] - 2026-06-01
+### Added — `eslint-plugin-quantalyze` lint-enforcement capstone + contracts registry (cross-cutting refactor B25)
+
+B25 is the capstone of the B1–B24 program: ONE committed-and-CI-gated enforcement layer so a closed finding-class can't be silently reintroduced. The first step was an **honesty-gate inventory** — skip anything already enforced. Most closed classes are guarded by a **type brand / discriminated union / SECDEF RPC** (strictly stronger than a bypassable lint rule), so they get **no rule**: B1 money-unit brands, B6 factsheet union, B8 closed-sets `satisfies`, B4c audit-pairing union, B19 (Python). B9/B14/B17 are deferred — they ship their runtime halves *after* B25 and add their rules into the plugin this batch creates.
+
+- **`tools/eslint-plugin-quantalyze/`** (ESM) with the genuine AST-rule delta — the rules a grep test can't do well, whose runtime SoT is already shipped:
+  - `no-raw-localstorage` (B7) → `useCrossTabStorage` (`@/lib/storage`). Catches `localStorage` and `window`/`globalThis`/`self`.`localStorage` (incl. computed `["localStorage"]`); leaves `typeof` probes and `sessionStorage` (a separate sanctioned class) alone.
+  - `no-raw-published-predicate` (B10) → `withPublishedOnly` (`@/lib/visibility`). Bans `.eq("status","published")` (formatting-blind); complements the existing `visibility.test.ts` grep sweep with edit-time enforcement.
+  - `no-raw-retry-after-parse` (B20) → `parseRetryAfterSeconds` (`@/lib/retry`). Bans `Number()`/`parseInt()`/`parseFloat()` **and the `Number.parseInt`/`Number.parseFloat` member form** parsing a Retry-After header.
+- **Wired at `"error"`** (not `"warn"`) in `eslint.config.mjs` — the recon-verified clean baseline means these fail `frontend-lint` CI by construction on a future raw offender. Directory exemptions (`src/lib/storage/**`, `src/lib/retry/**`) + a test-file exemption (mirroring the grep tests) + a greppable, batch-tagged `B<n> sanctioned-exception:` / `B10 visibility:` per-file marker as the auditable escape hatch.
+- **Closed the complete B20 surface (root-cause, not a marker):** migrated the last un-migrated Retry-After consumer — the `founder-lp-report` cron's `Number.parseInt(get("retry-after"))` holdout — through `parseRetryAfterSeconds`, gaining RFC-9110 HTTP-date support (previously NaN → silent default). All four consumer sites now route through the shared parser. Three pre-existing back-compat/infra `localStorage` sites (`scenario-state.ts`, `discovery-prefs.ts` `safeRead`, `storage-namespaces.ts` purge walker) got `B7 sanctioned-exception:` markers.
+- **`src/__tests__/contracts/`** — `REGISTRY.md` (the human-readable invariant registry + honesty-gate table) + `contracts-registry.test.ts`, the fail-loud guard: every registered invariant guard (24 tests + 2 check scripts) must still exist (delete/rename → red CI), the plugin must export exactly the expected rule set, and each rule must **resolve** to `"error"` for a representative src file (catches a silent over-broad-`off` neuter, not just a config substring).
+- **`.github/workflows/contracts.yml`** — a B24-parity CI surface (least-priv `permissions`, SHA-pinned actions, `persist-credentials: false`, `concurrency`) running the contracts + lint; `critical-regressions.test.ts`'s dynamic workflow-security policy was updated to cover it. Reviewed via a 6-dimension Claude pass, each finding adversarially verified (5 confirmed → fixed + mutation-verified: the B20 member-form gap + live offender, the B7 `globalThis`/`self`/computed gap, and the resolved-severity wiring assertion).
+
 ## [0.24.15.44] - 2026-06-01
 ### Changed — enforce the scenario-commit holdings fingerprint server-side: optimistic-concurrency fence against stale-draft lost-updates (cross-cutting refactor B11, NEW-C18-10)
 
