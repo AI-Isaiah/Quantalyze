@@ -170,8 +170,15 @@ def _table_router(sb: MagicMock, *, portfolio_data, candidate_data,
     )
 
     strategies_table = MagicMock()
-    strategies_table.select.return_value.eq.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
-        data=candidate_data
+    # postgrest `.maybe_single().execute()` returns a LITERAL None (not a
+    # response object with data=None) when 0 rows match — i.e. for a missing OR
+    # unpublished candidate. Mirror that faithfully: a MagicMock(data=None) here
+    # would mask the pre-migration `candidate_row.data` AttributeError → HTTP 500
+    # that the one() routing was added to convert into the intended 404. With the
+    # real None, the candidate-not-found test exercises one(None) → 404 and would
+    # have surfaced the 500 against the pre-one() code.
+    strategies_table.select.return_value.eq.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+        MagicMock(data=candidate_data) if candidate_data is not None else None
     )
 
     ps_table = MagicMock()

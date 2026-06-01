@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.46] - 2026-06-01
+### Changed — `mypy --strict` type-safety floor: migrate `analytics-service/routers/` onto `rows()`/`one()` (cross-cutting refactor B-mypy, part e)
+
+Part e of the B-mypy program closes the entire `analytics-service/routers/` layer to **0 `mypy --strict` errors** (159 → 0; whole-package strict surface 525 → 366). All eight routers (`analytics`, `csv`, `internal`, `debug_key_flow`, `exchange`, `simulator`, `cron`, `process_key`) now route every PostgREST `.data` read through the central typed primitives in `services/db.py` (`rows()` / `one()`), eliminating the `.data` JSON-union splatter at the seam. Cardinal rule held: **no `cast()`, no `# type: ignore`, no `Any`-laundering, no fabricated fallbacks** — every change is a real narrow.
+
+- **Genuine fixes surfaced by the type floor (not mechanical):**
+  - `services/audit.py` + `src/lib/audit.ts`: added `"simulator.run.failed"` to the `AuditAction` taxonomy. The failure-path audit in `routers/simulator.py` already emits it (the `action` column is free-text `TEXT`, so the row was being written in prod) — it was simply absent from the Python `Literal` and the TS union. Mirrored into both to satisfy the cross-runtime `test_audit.py::test_action_literal_matches_ts_union` sync test, including the exhaustive `AUDIT_ACTION_ENTITY_TYPE_MAP` entry (`→ "simulator_run"`).
+  - `routers/process_key.py`: `_ProcessKeyBody.flow_type`/`source` retyped from `str` + `Field(pattern=...)` to the canonical `FlowType`/`Source` `Literal` aliases (regex ≡ literal membership — behavior-equivalent, and feeds `KeySubmissionRequest` with no cast); `response_model=None` on the route (it legitimately returns `dict | JSONResponse`); a typed `_trade_to_dict()` helper replaces the inline dataclass/dict comprehension (behavior-preserving `asdict`/passthrough); validator `info: ValidationInfo`.
+  - `routers/cron.py`: explicit `validation: dict[str, Any]` annotation (resolves a comparison-overlap on `error_code`); `per_strategy_stored.get(strategy_id, 0)` guarded for `strategy_id is None`; the `sync_trades` rpc result renamed `result → rpc_result` (the trailing result dict was a no-redef).
+  - `routers/simulator.py`: the candidate-not-found read now routes through `one()`, which converts a latent uncaught `AttributeError` (`maybe_single().execute()` returns literal `None` on 0 rows → the old `if not candidate_row.data` raised → **HTTP 500**) into the intended **HTTP 404** ("Candidate strategy not found or not published"). Pinned with a faithful `None` mock in `test_simulator_router.py` (now a true regression test: old code → 500, new → 404). The sibling `internal.py`/`process_key.py` `maybe_single()` reads were already `None`-safe; `exchange.py` uses `.single()` (raises identically) — no behavior change there.
+- Verified: full analytics-service suite `2516 passed` (identical to the pre-change baseline; the one `test_simulator_router` full-suite failure is a pre-existing ordering flake, confirmed against baseline and passing in isolation); `test_audit.py` 23/23; frontend `tsc --noEmit` 0 errors; a 3-lens adversarial red-team (behavior-preservation / cardinal-rule / semantic-correctness) cleared with every finding independently verified.
+
 ## [0.24.15.45] - 2026-06-01
 ### Added — `eslint-plugin-quantalyze` lint-enforcement capstone + contracts registry (cross-cutting refactor B25)
 

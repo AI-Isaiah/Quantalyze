@@ -11,6 +11,8 @@ and asserts auth.uid() = p_user_id; a service-role echo here would have
 been dead code.
 """
 import logging
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -58,7 +60,7 @@ async def csv_validate(
     file: UploadFile = File(...),
     fmt: str = Form(...),
     wizard_session_id: str = Form(...),
-):
+) -> dict[str, Any]:
     """Validate a CSV upload. Returns preview + pandera errors envelope.
 
     Thin HTTP wrapper. All work lives in services.csv_validator.validate_csv

@@ -1,12 +1,13 @@
 import logging
 from datetime import datetime, timezone
+from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
 from services.exchange import create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
-from services.db import get_supabase, db_execute
+from services.db import get_supabase, db_execute, one, rows
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api", tags=["exchange"])
@@ -23,7 +24,7 @@ class EncryptKeyRequest(BaseModel):
 
 @router.post("/validate-key")
 @limiter.limit("100/hour")
-async def validate_key(request: Request, req: ValidateKeyRequest):
+async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, Any]:
     """Validate that an API key is read-only and functional.
 
     Phase 18 / observability: the swallowed ccxt exception classes are
@@ -73,7 +74,7 @@ async def validate_key(request: Request, req: ValidateKeyRequest):
 
 @router.post("/encrypt-key")
 @limiter.limit("100/hour")
-async def encrypt_key(request: Request, req: EncryptKeyRequest):
+async def encrypt_key(request: Request, req: EncryptKeyRequest) -> dict[str, Any]:
     """Encrypt exchange credentials for storage. Returns encrypted fields to store in Supabase."""
     try:
         kek = get_kek()
@@ -86,7 +87,7 @@ async def encrypt_key(request: Request, req: EncryptKeyRequest):
 
 @router.post("/fetch-trades")
 @limiter.limit("10/hour")
-async def fetch_trades(request: Request, req: FetchTradesRequest):
+async def fetch_trades(request: Request, req: FetchTradesRequest) -> dict[str, Any]:
     """Fetch trades from exchange for a strategy using stored encrypted API key."""
     try:
         kek = get_kek()
@@ -96,11 +97,11 @@ async def fetch_trades(request: Request, req: FetchTradesRequest):
     supabase = get_supabase()
 
     # Look up strategy
-    strategy_result = supabase.table("strategies").select("id, user_id, api_key_id").eq(
+    strategy_result = one(supabase.table("strategies").select("id, user_id, api_key_id").eq(
         "id", req.strategy_id
-    ).single().execute()
+    ).single().execute())
 
-    if not strategy_result.data or not strategy_result.data.get("api_key_id"):
+    if not strategy_result or not strategy_result.get("api_key_id"):
         raise HTTPException(status_code=400, detail="Strategy has no connected API key")
 
     # Fetch encrypted API key and verify ownership.
@@ -111,18 +112,18 @@ async def fetch_trades(request: Request, req: FetchTradesRequest):
     # paper-only control. .single() returns no row when the filter rejects,
     # and the existing 404 below fires with an operator-safe message
     # (doesn't disclose that the key exists but is deactivated).
-    api_key_row = supabase.table("api_keys").select("*").eq(
-        "id", strategy_result.data["api_key_id"]
-    ).eq("is_active", True).single().execute()
+    api_key_row = one(supabase.table("api_keys").select("*").eq(
+        "id", strategy_result["api_key_id"]
+    ).eq("is_active", True).single().execute())
 
-    if not api_key_row.data:
+    if not api_key_row:
         raise HTTPException(status_code=404, detail="API key not found")
 
     # Verify the API key belongs to the same user as the strategy
-    if api_key_row.data.get("user_id") != strategy_result.data.get("user_id"):
+    if api_key_row.get("user_id") != strategy_result.get("user_id"):
         raise HTTPException(status_code=403, detail="API key does not belong to strategy owner")
 
-    key_data = api_key_row.data
+    key_data = api_key_row
 
     # Decrypt credentials
     try:
@@ -161,8 +162,10 @@ async def fetch_trades(request: Request, req: FetchTradesRequest):
                 .limit(1)
                 .execute()
             )
-            earliest = span.data[0]["timestamp"] if span.data else None
-            latest = span_max.data[0]["timestamp"] if span_max.data else None
+            _span_rows = rows(span)
+            _span_max_rows = rows(span_max)
+            earliest = _span_rows[0]["timestamp"] if _span_rows else None
+            latest = _span_max_rows[0]["timestamp"] if _span_max_rows else None
             if earliest and latest:
                 from datetime import datetime as _dt
 
@@ -207,7 +210,7 @@ async def fetch_trades(request: Request, req: FetchTradesRequest):
         logger.info("Synced %s trades for strategy %s (atomic)", result.data, req.strategy_id)
 
     # Always advance the sync cursor (even when no new trades) to avoid re-fetching the same window
-    update_data: dict = {"last_sync_at": datetime.now(timezone.utc).isoformat()}
+    update_data: dict[str, Any] = {"last_sync_at": datetime.now(timezone.utc).isoformat()}
     if account_balance is not None:
         update_data["account_balance_usdt"] = account_balance
     supabase.table("api_keys").update(update_data).eq("id", key_data["id"]).execute()

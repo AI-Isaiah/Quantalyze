@@ -405,6 +405,10 @@ export type AuditAction =
   // --- 7.1b Python cross-service (via log_audit_event_service) --------
   | "bridge.score_candidates"
   | "simulator.run"
+  // Python-only failure-path emit from analytics-service routers/simulator.py
+  // (no TS call site). Kept here so the Python and TS AuditAction taxonomies
+  // stay in sync, enforced by test_audit.py test_action_literal_matches_ts_union.
+  | "simulator.run.failed"
   | "optimizer.run"
   | "reconcile.compare"
   // --- Bridge outcome tracker -----------------------
@@ -573,6 +577,9 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   // 7.1b Python cross-service
   "bridge.score_candidates": "bridge_run",
   "simulator.run": "simulator_run",
+  // Python-only (routers/simulator.py failure path); anchors on the same
+  // simulator_run entity as the happy-path action. No TS runtime caller.
+  "simulator.run.failed": "simulator_run",
   "optimizer.run": "optimizer_run",
   "reconcile.compare": "reconcile_run",
   // Bridge outcome tracker

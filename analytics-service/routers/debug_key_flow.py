@@ -29,8 +29,9 @@ import logging
 import os
 import secrets
 import time
-from typing import Literal
+from typing import Any, Literal
 
+import ccxt
 import structlog
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
@@ -60,7 +61,7 @@ def _verify_internal_token(token: str | None) -> None:
 Broker = Literal["okx", "binance", "bybit"]
 
 
-def _maybe_enable_sandbox(exchange) -> None:
+def _maybe_enable_sandbox(exchange: ccxt.Exchange) -> None:
     """Switch the exchange to its testnet endpoint by default.
 
     DEBUG_KEY_FLOW_<BROKER>_* env vars hold testnet-only credentials. Sent at
@@ -105,8 +106,8 @@ class StepResponse(BaseModel):
     step: str
     status: Literal["ok", "error"]
     duration_ms: int
-    detail: dict | None = None
-    error: dict | None = None
+    detail: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
 
 
 @router.post("/validate", response_model=StepResponse)
