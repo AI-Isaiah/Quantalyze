@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.15.49] - 2026-06-01
+### Fixed — `compute_analytics` mixed-precision timestamp crash (dashboard KPIs never refreshed)
+
+`compute_analytics` was failing terminally for ~63% of strategies (45/71 jobs `failed_final`), freezing their dashboard KPIs even when fresh trades were present. Root cause: `analytics-service/services/transforms.py` parsed the trade-`timestamp` column with a bare `pd.to_datetime(df["timestamp"])`. Pandas ≥2.0 infers the datetime format from the first element and then applies it strictly to the rest — so a series that mixes microsecond-precision raw fills (`...T12:34:56.123456+00:00`) with whole-second daily-PnL summary rows (`...T00:00:00+00:00`) raises `time data "..." doesn't match format "%Y-%m-%dT%H:%M:%S.%f%z" at position N` and aborts the whole computation. Real accumulated trade history routinely mixes both precisions (and the v0.24.15.47 `sync_trades` fix now persists *more* whole-second daily-PnL rows), so the failure was widespread.
+
+Fix: parse each value independently with `pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)` (pandas ≥2.0 handles variable ISO precision; `utc=True` normalizes the already-`+00:00` inputs to a tz-aware UTC column — no shift). Covers every caller (`trades_to_daily_returns` delegates to `trades_to_daily_returns_with_status`). Regression test `test_mixed_precision_timestamps_do_not_raise` reproduces the exact prod error (mutation-verified: reverting the fix re-raises). 21/21 transforms tests pass; `services/transforms.py` net-zero new mypy errors.
+
+Follow-ups (tracked, not in this PR): (1) cron.py writes an illegal `computation_status='stale'` and never enqueues `compute_analytics` — replace with `enqueue_compute_job(..., 'compute_analytics')` (closes QUANTALYZE-P + wires the cron-sync recompute trigger); (2) `claim_compute_jobs_with_priority` drops `failed_retry` jobs (orphans them) — migration to add `failed_retry` + the C39 in-flight guard.
+
 ## [0.24.15.48] - 2026-06-01
 ### Fixed — close the allocator equity/holdings audit-taxonomy gap (Python + TS) — B-mypy part f groundwork
 
