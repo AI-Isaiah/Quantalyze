@@ -198,6 +198,21 @@ AuditAction = Literal[
     "allocator.holdings.sync_requested",
     "allocator.holdings.sync_completed",
     "allocator.holdings.sync_failed",
+    "allocator.holdings.persist_failed",
+    # --- Allocator equity reconstruction / refresh (services.equity_reconstruction,
+    # emitted via job_worker._emit_audit; api_key-anchored, free-text TEXT action
+    # column so already written in prod — these were simply absent from the
+    # taxonomy. Python-emit-only; the TS mirror carries them for sync parity.) --
+    "allocator.equity.reconstruct_started",
+    "allocator.equity.reconstruct_complete",
+    "allocator.equity.reconstruct_failed",
+    "allocator.equity.reconstruct_no_data",
+    "allocator.equity.reconstruct_partial_unsupported",
+    "allocator.equity.reconstruct_unexpected_noop",
+    "allocator.equity.refresh_complete",
+    "allocator.equity.refresh_failed",
+    "allocator.equity.sibling_lookup_failed",
+    "allocator.equity.perp_upnl_missing",
     # --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ----------
     "debug_key_flow.invoke",
     # --- audit-2026-05-07 P700: break-glass ADMIN_EMAIL fallback grant ------

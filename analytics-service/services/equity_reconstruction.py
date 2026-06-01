@@ -41,6 +41,7 @@ from services.closed_sets import (
 from services.dateday import epoch_ms_to_iso_day, sort_events_stable
 from services.db import db_execute, get_supabase
 from services.job_worker import (
+    AllocatorEquityAction,
     DispatchOutcome,
     DispatchResult,
     _allocator_key_preflight,
@@ -2342,6 +2343,7 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
             round(float((r.get("value_usd") or 0.0)), 2) == 0.0 for r in rows
         )
     )
+    audit_kind: AllocatorEquityAction
     if count == 0 and rows and not sibling_check.has_siblings:
         audit_kind = "allocator.equity.reconstruct_unexpected_noop"
     elif count == 0 and not rows:
