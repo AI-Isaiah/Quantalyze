@@ -34,6 +34,7 @@ this contract; tracked as a defense-in-depth backlog item.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, TypedDict
@@ -863,7 +864,7 @@ def serialize_funding_row(row: "FundingFeeRow | dict[str, Any]") -> dict[str, An
 
 async def upsert_funding_rows(
     supabase,
-    rows: list[dict],
+    rows: Sequence[FundingFeeRow | dict[str, Any]],
     batch_size: int = FUNDING_UPSERT_BATCH_SIZE,
 ) -> dict:
     """Upsert funding rows into funding_fees in batches.

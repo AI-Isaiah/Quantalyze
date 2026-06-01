@@ -54,6 +54,12 @@ from typing import Any, Final, Literal
 import ccxt
 from cryptography.fernet import InvalidToken
 from fastapi import HTTPException
+# APIResponse is the documented return type of a PostgREST builder's
+# `.execute()`; CountMethod is the StrEnum the `.select(count=...)` kwarg expects
+# (a bare "exact" string is rejected under --strict). Both are re-exported at the
+# postgrest package root.
+from postgrest import APIResponse, CountMethod
+from supabase import Client
 
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
@@ -61,7 +67,7 @@ from services.closed_sets import (  # B8b: single-sourced closed sets, re-export
     PositionDirection as PositionDirection,
     Side as Side,
 )
-from services.db import db_execute, get_supabase
+from services.db import db_execute, get_supabase, one, rows
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
     create_exchange,
@@ -366,14 +372,14 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
 # ---------------------------------------------------------------------------
 
 async def _load_strategy_and_key(
-    supabase, strategy_id: str
-) -> tuple[dict | None, dict | None, str | None]:
+    supabase: Client, strategy_id: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
     """Load strategy row and its api_key row. Returns (strategy, key_row, error_msg).
 
     On success, error_msg is None. On failure, strategy and key_row may be
     None and error_msg explains why.
     """
-    def _load_strategy() -> dict | None:
+    def _load_strategy() -> dict[str, Any] | None:
         res = (
             supabase.table("strategies")
             .select("id, user_id, api_key_id")
@@ -381,13 +387,13 @@ async def _load_strategy_and_key(
             .maybe_single()
             .execute()
         )
-        return res.data
+        return one(res)
 
     strategy_row = await db_execute(_load_strategy)
     if not strategy_row or not strategy_row.get("api_key_id"):
         return None, None, "Strategy has no connected API key"
 
-    def _load_key() -> dict | None:
+    def _load_key() -> dict[str, Any] | None:
         res = (
             supabase.table("api_keys")
             .select("*")
@@ -395,7 +401,7 @@ async def _load_strategy_and_key(
             .maybe_single()
             .execute()
         )
-        return res.data
+        return one(res)
 
     key_row = await db_execute(_load_key)
     if not key_row:
@@ -428,7 +434,7 @@ def _defer_lost_ownership(exc: Exception) -> bool:
 
 
 async def _check_circuit_breaker(
-    supabase, job: dict, key_row: dict
+    supabase: Client, job: dict[str, Any], key_row: dict[str, Any]
 ) -> DispatchResult | None:
     """Check circuit breaker: if api_key has a recent 429, defer the job.
 
@@ -457,7 +463,7 @@ async def _check_circuit_breaker(
     exchange_name = key_row.get("exchange", "")
     cooldown = EXCHANGE_COOLDOWNS.get(exchange_name, 120)
 
-    def _cooldown_remaining():
+    def _cooldown_remaining() -> APIResponse:
         return supabase.rpc("api_key_cooldown_remaining", {
             "p_api_key_id": key_row["id"],
             "p_cooldown_seconds": cooldown,
@@ -465,7 +471,12 @@ async def _check_circuit_breaker(
 
     try:
         res = await db_execute(_cooldown_remaining)
-        remaining = int(res.data) if res is not None and res.data is not None else 0
+        # api_key_cooldown_remaining is declared to return an integer count of
+        # remaining seconds; PostgREST surfaces that scalar on res.data. Narrow
+        # via isinstance (a non-int means SQL contract drift — fall through to 0,
+        # the same "no cooldown, proceed" outcome the old `res.data is None`
+        # guard produced).
+        remaining = res.data if isinstance(res.data, int) else 0
     except asyncio.CancelledError:
         raise  # never swallow cancellation — propagate to worker shutdown
     except Exception as _cd_exc:  # noqa: BLE001
@@ -485,7 +496,7 @@ async def _check_circuit_breaker(
 
     defer_seconds = remaining + 5  # small buffer
 
-    def _defer():
+    def _defer() -> None:
         supabase.rpc("defer_compute_job", {
             "p_job_id": job["id"],
             "p_defer_seconds": defer_seconds,
@@ -527,7 +538,7 @@ async def _check_circuit_breaker(
     return DispatchResult(outcome=DispatchOutcome.DEFERRED)
 
 
-async def _stamp_429(supabase, key_row: dict) -> None:
+async def _stamp_429(supabase: Client, key_row: dict[str, Any]) -> None:
     """Stamp api_keys.last_429_at on a 429 response.
 
     Called before classify_exception returns, so subsequent jobs for the
@@ -541,7 +552,7 @@ async def _stamp_429(supabase, key_row: dict) -> None:
     drift apart. A direct table().update() with datetime.now() would
     re-introduce the cross-container skew this RPC exists to remove.
     """
-    def _stamp():
+    def _stamp() -> None:
         supabase.rpc("stamp_api_key_429", {
             "p_api_key_id": key_row["id"],
         }).execute()
@@ -562,14 +573,16 @@ async def _stamp_429(supabase, key_row: dict) -> None:
 @dataclass
 class _ExchangeContext:
     """Holds the shared state produced by pre-flight for exchange handlers."""
-    supabase: object
-    strategy_row: dict
-    key_row: dict
+    supabase: Client
+    # strategy_row is None on the allocator path (_allocator_key_preflight),
+    # which owns no strategy — only the strategy-side preflight populates it.
+    strategy_row: dict[str, Any] | None
+    key_row: dict[str, Any]
     exchange: ccxt.Exchange
 
 
 async def _exchange_preflight(
-    job: dict, handler_name: str
+    job: dict[str, Any], handler_name: str
 ) -> DispatchResult | _ExchangeContext:
     """Shared pre-flight for handlers that connect to an exchange.
 
@@ -592,10 +605,14 @@ async def _exchange_preflight(
     strategy_row, key_row, error_msg = await _load_strategy_and_key(
         supabase, strategy_id
     )
-    if error_msg:
+    # _load_strategy_and_key's contract: error_msg is None iff both rows are
+    # non-None. The `key_row is None` disjunct never fires independently of
+    # error_msg at runtime — it is the type-level proof that lets key_row narrow
+    # to dict below; the fallback message is unreachable in practice.
+    if error_msg or key_row is None:
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
-            error_message=error_msg,
+            error_message=error_msg or "preflight: API key row missing",
             error_kind="permanent",
         )
 
@@ -634,7 +651,7 @@ async def _exchange_preflight(
 
 
 async def _allocator_key_preflight(
-    job: dict, handler_name: str
+    job: dict[str, Any], handler_name: str
 ) -> DispatchResult | _ExchangeContext:
     """D-05: Allocator worker preflight — skips the strategy hop.
 
@@ -654,7 +671,7 @@ async def _allocator_key_preflight(
     kek = get_kek()
     supabase = get_supabase()
 
-    def _load_key() -> dict | None:
+    def _load_key() -> dict[str, Any] | None:
         res = (
             supabase.table("api_keys")
             .select("*")
@@ -662,7 +679,7 @@ async def _allocator_key_preflight(
             .maybe_single()
             .execute()
         )
-        return res.data
+        return one(res)
 
     key_row = await db_execute(_load_key)
     if not key_row:
@@ -735,7 +752,7 @@ def _emit_audit(
     allocator_id: str,
     api_key_id: str,
     action: AllocatorHoldingsAction | AllocatorEquityAction,
-    metadata: dict | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     """f7 — Route allocator.holdings.sync_* audit events through
     services.audit.log_audit_event (NOT a local no-op).
@@ -774,7 +791,7 @@ def _emit_audit(
 # Per-kind handlers
 # ---------------------------------------------------------------------------
 
-async def run_sync_trades_job(job: dict) -> DispatchResult:
+async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     """Decrypt the strategy's API key, fetch daily PnL from the exchange,
     and persist via the sync_trades RPC.
 
@@ -796,7 +813,7 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         preferred=ctx.key_row.get("last_fetched_trade_timestamp"),
     )
 
-    raw_fills: list = []
+    raw_fills: list[dict[str, Any]] = []
     # Audit-2026-05-07 red-team CRITICAL conf=9 — ``fetch_all_trades`` /
     # ``fetch_daily_pnl`` can write DQ flags into the per-task buffer
     # (historically ``bybit_daily_pnl_includes_funding`` pre-C-0319;
@@ -940,7 +957,10 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 "sync_trades",
                 {"p_strategy_id": strategy_id, "p_trades": trades},
             ).execute()
-            return int(res.data or 0)
+            # sync_trades returns the integer inserted-row count on res.data;
+            # narrow via isinstance (a non-int means SQL contract drift → 0, the
+            # same value the old `res.data or 0` produced for a falsy/absent count).
+            return res.data if isinstance(res.data, int) else 0
 
         try:
             inserted = await db_execute(_sync)
@@ -1043,9 +1063,10 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                             .execute()
                         )
                         return {
-                            (row.get("exchange"), row.get("exchange_fill_id"))
-                            for row in (res.data or [])
-                            if row.get("exchange") and row.get("exchange_fill_id")
+                            (exch_val, fill_id_val)
+                            for row in rows(res)
+                            if (exch_val := row.get("exchange"))
+                            and (fill_id_val := row.get("exchange_fill_id"))
                         }
 
                     existing_pairs |= await db_execute(_select_existing)
@@ -1061,9 +1082,9 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         try:
             for i in range(0, len(raw_fills), 100):
                 batch = raw_fills[i:i + 100]
-                def _insert_fills(rows=batch):
+                def _insert_fills(batch_rows: list[dict[str, Any]] = batch) -> None:
                     ctx.supabase.table("trades").upsert(
-                        [{"strategy_id": strategy_id, **fill} for fill in rows],
+                        [{"strategy_id": strategy_id, **fill} for fill in batch_rows],
                         on_conflict="strategy_id,exchange,exchange_fill_id",
                         ignore_duplicates=True,
                     ).execute()
@@ -1138,7 +1159,7 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # the admin health card (it has no pre-existing path for daily-PnL failures).
     needs_flag_write = phase2_failed or phase2_success or phase1_failed
     if needs_flag_write:
-        def _load_existing_flags() -> dict:
+        def _load_existing_flags() -> dict[str, Any]:
             res = (
                 ctx.supabase.table("strategy_analytics")
                 .select("data_quality_flags")
@@ -1146,7 +1167,18 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 .maybe_single()
                 .execute()
             )
-            row = res.data or {}
+            # one() yields {} when no strategy_analytics row exists yet (a fresh
+            # strategy's first sync): maybe_single().execute() returns literal None
+            # there, which the prior `res.data or {}` hit as an AttributeError
+            # caught by the try/except below — which set flag_load_failed=True and,
+            # on a clean Phase-2 run, wrote a spurious phase2_fill_ingestion_failed=
+            # False "recovery" marker for a strategy that never failed. Routing
+            # through one() makes this the intended empty-flags path (flag_load_failed
+            # stays False, no spurious write) — what the author wrote `res.data or {}`
+            # to mean, and what test_sync_trades_feature_flag_on already asserts (skip
+            # the upsert). Deliberate latent-bug fix; only reachable when
+            # USE_RAW_TRADE_INGESTION is on (off by default in prod).
+            row = one(res) or {}
             return dict(row.get("data_quality_flags") or {})
 
         flag_load_failed = False
@@ -1296,7 +1328,7 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # Advance sync cursor (skip last_sync_at when Phase-1 persisted nothing
     # so the next run re-fetches the failed daily-PnL window — NEW-C12-02).
     def _update_cursor() -> None:
-        update_data: dict = {}
+        update_data: dict[str, Any] = {}
         _new_sync_ts = datetime.now(timezone.utc).isoformat()
         if not phase1_failed:
             # NEW-C12-02: only advance last_sync_at when Phase-1 actually
@@ -1427,7 +1459,7 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     )
 
 
-async def run_compute_analytics_job(job: dict) -> DispatchResult:
+async def run_compute_analytics_job(job: dict[str, Any]) -> DispatchResult:
     """Run the full strategy analytics pipeline. Delegates to
     services.analytics_runner.run_strategy_analytics — the same helper the
     HTTP /api/compute-analytics endpoint uses. See the module docstring on
@@ -1448,7 +1480,7 @@ async def run_compute_analytics_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
-async def run_compute_analytics_from_csv_job(job: dict) -> DispatchResult:
+async def run_compute_analytics_from_csv_job(job: dict[str, Any]) -> DispatchResult:
     """Phase 19.1 / CSV → analytics pipeline Plan 02 Task 3. Worker
     handler for the compute_analytics_from_csv kind. Delegates to
     services.analytics_runner.run_csv_strategy_analytics, which reads
@@ -1474,7 +1506,7 @@ async def run_compute_analytics_from_csv_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
-async def run_compute_portfolio_job(job: dict) -> DispatchResult:
+async def run_compute_portfolio_job(job: dict[str, Any]) -> DispatchResult:
     """Run portfolio analytics via the existing routers.portfolio helper.
 
     _compute_portfolio_analytics is imported lazily — routers/portfolio.py
@@ -1496,7 +1528,7 @@ async def run_compute_portfolio_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
-async def run_sync_funding_job(job: dict) -> DispatchResult:
+async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
     """Fetch funding fees from the exchange and UPSERT into funding_fees.
 
     Uses services.funding_fetch to normalize Binance/OKX/Bybit funding
@@ -1581,7 +1613,7 @@ async def run_sync_funding_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
-async def run_poll_positions_job(job: dict) -> DispatchResult:
+async def run_poll_positions_job(job: dict[str, Any]) -> DispatchResult:
     """Fetch open positions from the exchange and persist as snapshots.
 
     Pre-flight: load API key, check circuit breaker (defer if 429 cooldown
@@ -1620,7 +1652,7 @@ async def run_poll_positions_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
-async def run_poll_allocator_positions_job(job: dict) -> DispatchResult:
+async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResult:
     """INGEST-03: poll allocator holdings (spot + derivatives) via CCXT
     and upsert into allocator_holdings.
 
@@ -1662,7 +1694,7 @@ async def run_poll_allocator_positions_job(job: dict) -> DispatchResult:
             error_kind, msg = classify_exception(exc)
             sanitized = msg[:500]
 
-            def _update_rate_limited():
+            def _update_rate_limited() -> APIResponse:
                 return (
                     ctx.supabase.table("api_keys")
                     .update({"sync_status": "rate_limited", "sync_error": sanitized})
@@ -1692,7 +1724,7 @@ async def run_poll_allocator_positions_job(job: dict) -> DispatchResult:
             sanitized = msg[:500]
             status_target = _map_exception_to_sync_status(exc)
 
-            def _update_err():
+            def _update_err() -> APIResponse:
                 return (
                     ctx.supabase.table("api_keys")
                     .update({"sync_status": status_target, "sync_error": sanitized})
@@ -1739,7 +1771,7 @@ async def run_poll_allocator_positions_job(job: dict) -> DispatchResult:
 
         final_status = "complete_with_warnings" if warning else "complete"
 
-        def _update_ok():
+        def _update_ok() -> APIResponse:
             return (
                 ctx.supabase.table("api_keys")
                 .update({
@@ -1765,7 +1797,7 @@ async def run_poll_allocator_positions_job(job: dict) -> DispatchResult:
         )
         # Best-effort: stamp sync_status so the UI exits the spinner.
         try:
-            def _update_persist_err():
+            def _update_persist_err() -> None:
                 ctx.supabase.table("api_keys").update(
                     {"sync_status": "error", "sync_error": sanitized_persist}
                 ).eq("id", api_key_id).execute()
@@ -1804,7 +1836,7 @@ async def run_poll_allocator_positions_job(job: dict) -> DispatchResult:
     # Non-blocking: a stamp failure must not affect the compute job. The
     # RPC failure path is logged via logger.warning per the analytics-service
     # convention (services/audit.py error handling).
-    def _stamp_first_sync():
+    def _stamp_first_sync() -> APIResponse:
         return (
             ctx.supabase.rpc(
                 "stamp_first_sync_success",
@@ -1830,7 +1862,7 @@ async def run_poll_allocator_positions_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
-async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
+async def run_reconcile_strategy_job(job: dict[str, Any]) -> DispatchResult:
     """Compare live exchange fills against stored `trades` rows for the past 24h.
 
     Pre-flight: same as sync_trades (strategy + api_key load, circuit
@@ -1938,7 +1970,7 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
     # columns that diff_strategy_fills actually reads (verified against
     # services/reconciliation.py:_summarize + matcher key extraction).
     # Hard cap at 50k rows so a runaway-strategy can't OOM the worker.
-    def _load_db_fills() -> list[dict]:
+    def _load_db_fills() -> list[dict[str, Any]]:
         res = (
             ctx.supabase.table("trades")
             .select(
@@ -1950,7 +1982,7 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
             .limit(50_000)
             .execute()
         )
-        return list(res.data or [])
+        return rows(res)
 
     db_fills = await db_execute(_load_db_fills)
 
@@ -1994,10 +2026,16 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
     # exist with no alerts and no audit row. Wrap the owner lookup itself
     # so the "best-effort" contract in the comment matches the code.
     #
-    # When owner_id is unresolvable (deleted strategy, transient blip),
-    # emit a logger.warning with an `audit_owner_lookup_failed=true` tag
-    # so on-call has a searchable signature; the alerting fan-out below
-    # still runs so the report is not lost.
+    # When owner_id is unresolvable, the alerting fan-out below still runs so
+    # the report is not lost. Two sub-cases, both searchable:
+    #   - deleted strategy (no row): one() returns None → owner_id None → the
+    #     M-0669 `else` warning ("reconcile.compare audit dropped … owner_id=None")
+    #     fires. (Pre-B-mypy this no-row path raised AttributeError on
+    #     `res.data`, caught below as `audit_owner_lookup_failed=true`; routing
+    #     through one() makes the deleted-strategy case the graceful None the
+    #     epilogue already handles.)
+    #   - transient blip (503/RLS): the SELECT still raises → caught below →
+    #     `audit_owner_lookup_failed=true` warning.
     def _load_strategy_owner() -> str | None:
         res = (
             ctx.supabase.table("strategies")
@@ -2006,7 +2044,8 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
             .maybe_single()
             .execute()
         )
-        return (res.data or {}).get("user_id") if res.data else None
+        row = one(res)
+        return row.get("user_id") if row else None
 
     owner_id: str | None = None
     try:
@@ -2071,7 +2110,13 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
             .maybe_single()
             .execute()
         )
-        return (res.data or {}).get("name") or "Strategy"
+        # one() yields {} (→ "Strategy") if the strategy was deleted between
+        # preflight and here. This call is not try/except-wrapped, so pre-B-mypy
+        # the no-row path raised AttributeError on `res.data`, failing+retrying
+        # the whole reconcile job; one() degrades it to the existing "Strategy"
+        # fallback so the sync_failure alert fan-out still completes (a deleted
+        # strategy should not perma-retry a reconcile).
+        return (one(res) or {}).get("name") or "Strategy"
 
     def _load_portfolio_ids() -> list[str]:
         res = (
@@ -2080,7 +2125,7 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
             .eq("strategy_id", strategy_id)
             .execute()
         )
-        return [r["portfolio_id"] for r in (res.data or []) if r.get("portfolio_id")]
+        return [r["portfolio_id"] for r in rows(res) if r.get("portfolio_id")]
 
     strategy_name = await db_execute(_load_strategy_name)
     portfolio_ids = await db_execute(_load_portfolio_ids)
@@ -2104,7 +2149,7 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
     # loops one UPDATE per row because PostgREST can't express N different
     # update payloads in a single statement; in practice escalations are
     # rare so the per-row UPDATE is acceptable.
-    def _load_existing_alerts() -> dict[str, dict]:
+    def _load_existing_alerts() -> dict[str, dict[str, Any]]:
         res = (
             ctx.supabase.table("portfolio_alerts")
             .select("id, portfolio_id, severity")
@@ -2113,7 +2158,7 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
             .is_("acknowledged_at", "null")
             .execute()
         )
-        return {r["portfolio_id"]: r for r in (res.data or [])}
+        return {r["portfolio_id"]: r for r in rows(res)}
 
     existing_by_portfolio = await db_execute(_load_existing_alerts)
 
@@ -2125,8 +2170,8 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
         "status": report.status,
     }
 
-    inserts: list[dict] = []
-    escalations: list[dict] = []
+    inserts: list[dict[str, Any]] = []
+    escalations: list[dict[str, Any]] = []
     for portfolio_id in portfolio_ids:
         existing = existing_by_portfolio.get(portfolio_id)
         if existing is None:
@@ -2174,7 +2219,7 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
             "triggered_at": triggered_at,
         }
         for row in escalations:
-            def _update(rid=row["id"]) -> None:
+            def _update(rid: str = row["id"]) -> None:
                 ctx.supabase.table("portfolio_alerts").update(
                     update_payload
                 ).eq("id", rid).execute()
@@ -2183,7 +2228,7 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
-async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
+async def run_compute_intro_snapshot_job(job: dict[str, Any]) -> DispatchResult:
     """Compute the allocator-portfolio snapshot for a contact_request.
 
     Triggered by /api/intro when its 2s synchronous budget expires: the
@@ -2217,7 +2262,7 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
 
     supabase = get_supabase()
 
-    def _load_contact_request() -> dict | None:
+    def _load_contact_request() -> dict[str, Any] | None:
         res = (
             supabase.table("contact_requests")
             .select("id, allocator_id, strategy_id")
@@ -2225,7 +2270,7 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
             .maybe_single()
             .execute()
         )
-        return res.data
+        return one(res)
 
     cr = await db_execute(_load_contact_request)
     if not cr:
@@ -2240,7 +2285,7 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
     allocator_id = cr["allocator_id"]
 
     # Primary portfolio = most recently created for this allocator.
-    def _load_portfolio() -> dict | None:
+    def _load_portfolio() -> dict[str, Any] | None:
         res = (
             supabase.table("portfolios")
             .select("id")
@@ -2249,12 +2294,12 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
             .limit(1)
             .execute()
         )
-        rows = res.data or []
-        return rows[0] if rows else None
+        data = rows(res)
+        return data[0] if data else None
 
     portfolio = await db_execute(_load_portfolio)
 
-    snapshot: dict = {
+    snapshot: dict[str, Any] = {
         "sharpe": None,
         "max_drawdown": None,
         "concentration": None,
@@ -2266,7 +2311,7 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
     if portfolio:
         portfolio_id = portfolio["id"]
 
-        def _load_portfolio_analytics() -> dict | None:
+        def _load_portfolio_analytics() -> dict[str, Any] | None:
             res = (
                 supabase.table("portfolio_analytics")
                 .select("portfolio_sharpe, portfolio_max_drawdown")
@@ -2275,8 +2320,8 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
                 .limit(1)
                 .execute()
             )
-            rows = res.data or []
-            return rows[0] if rows else None
+            data = rows(res)
+            return data[0] if data else None
 
         analytics = await db_execute(_load_portfolio_analytics)
         if analytics:
@@ -2284,7 +2329,7 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
             snapshot["max_drawdown"] = analytics.get("portfolio_max_drawdown")
 
         # Strategy links + names
-        def _load_links() -> list[dict]:
+        def _load_links() -> list[dict[str, Any]]:
             res = (
                 supabase.table("portfolio_strategies")
                 .select(
@@ -2294,7 +2339,7 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
                 .eq("portfolio_id", portfolio_id)
                 .execute()
             )
-            return list(res.data or [])
+            return rows(res)
 
         links = await db_execute(_load_links)
 
@@ -2302,14 +2347,14 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
         strategy_ids = [link["strategy_id"] for link in links if link.get("strategy_id")]
         sharpe_map: dict[str, float | None] = {}
         if strategy_ids:
-            def _load_strategy_sharpes() -> list[dict]:
+            def _load_strategy_sharpes() -> list[dict[str, Any]]:
                 res = (
                     supabase.table("strategy_analytics")
                     .select("strategy_id, sharpe")
                     .in_("strategy_id", strategy_ids)
                     .execute()
                 )
-                return list(res.data or [])
+                return rows(res)
 
             sharpe_rows = await db_execute(_load_strategy_sharpes)
             for row in sharpe_rows:
@@ -2317,8 +2362,8 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
 
         # Concentration (HHI): prefer current_weight, fall back to allocated_amount.
         weights = [
-            link.get("current_weight") for link in links
-            if isinstance(link.get("current_weight"), (int, float))
+            w for link in links
+            if isinstance((w := link.get("current_weight")), (int, float))
         ]
         if len(weights) == len(links) and len(weights) > 0:
             total = sum(weights)
@@ -2326,9 +2371,9 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
                 snapshot["concentration"] = sum((w / total) ** 2 for w in weights)
         else:
             amounts = [
-                link.get("allocated_amount") for link in links
-                if isinstance(link.get("allocated_amount"), (int, float))
-                and link.get("allocated_amount") > 0
+                a for link in links
+                if isinstance((a := link.get("allocated_amount")), (int, float))
+                and a > 0
             ]
             if amounts:
                 total = sum(amounts)
@@ -2341,7 +2386,10 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
             sid = link.get("strategy_id")
             strat = link.get("strategies") or {}
             name = strat.get("name") if isinstance(strat, dict) else None
-            sh = sharpe_map.get(sid)
+            # sid is Any | None (link.get); sharpe_map.get needs a str key. A
+            # None sid can't match any sharpe key anyway, so map it to None —
+            # identical to the prior dict.get(None) → None lookup.
+            sh = sharpe_map.get(sid) if sid is not None else None
             if sh is not None:
                 ranked.append({
                     "strategy_id": sid,
@@ -2362,7 +2410,7 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
         def _count_alerts() -> int:
             res = (
                 supabase.table("portfolio_alerts")
-                .select("id", count="exact")
+                .select("id", count=CountMethod.exact)
                 .eq("portfolio_id", portfolio_id)
                 .gte("triggered_at", seven_days_ago)
                 .execute()
@@ -2387,7 +2435,7 @@ async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
-async def _mark_intro_snapshot_failed(job: dict) -> None:
+async def _mark_intro_snapshot_failed(job: dict[str, Any]) -> None:
     """On permanent handler failure, set snapshot_status='failed' so the
     admin UI doesn't show a stale 'pending' forever. Best-effort; if
     this itself fails we log and move on."""
@@ -2411,7 +2459,7 @@ async def _mark_intro_snapshot_failed(job: dict) -> None:
         )
 
 
-async def run_rescore_allocator_job(job: dict) -> DispatchResult:
+async def run_rescore_allocator_job(job: dict[str, Any]) -> DispatchResult:
     """Phase 3 / D-12 Option B — Dispatch handler for allocator-scoped
     rescore jobs enqueued by update_allocator_mandates RPC. Calls
     _score_one_allocator to produce a fresh v2.0.0 batch.
@@ -2556,7 +2604,7 @@ async def run_rescore_allocator_job(job: dict) -> DispatchResult:
 # ---------------------------------------------------------------------------
 
 
-async def dispatch(job: dict) -> DispatchResult:
+async def dispatch(job: dict[str, Any]) -> DispatchResult:
     """Route a claimed job to its per-kind handler, wrap in timeout, classify.
 
     After the handler resolves (or raises) and before returning, strategy-
@@ -2569,7 +2617,10 @@ async def dispatch(job: dict) -> DispatchResult:
     correctly (a dict captures references at import time, defeating mocks).
     """
     kind = job.get("kind")
-    timeout = TIMEOUT_PER_KIND.get(kind, 5 * 60)
+    # kind is Any | None (job.get); TIMEOUT_PER_KIND is str-keyed. A non-str /
+    # None kind has no entry, so it falls to the 5-minute default — identical to
+    # the prior dict.get(kind, 5 * 60) for any non-matching key.
+    timeout = TIMEOUT_PER_KIND.get(kind, 5 * 60) if isinstance(kind, str) else 5 * 60
 
     if kind == "sync_trades":
         handler = run_sync_trades_job
