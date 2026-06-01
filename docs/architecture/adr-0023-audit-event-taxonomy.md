@@ -117,10 +117,22 @@ action doesn't belong in audit_log — it belongs in product analytics
 
 ### 4. Action → entity_type mapping (Sprint 6 closeout pilot + RBAC + GDPR + 7.1b fanout)
 
+> **B4c / H-0423 (2026-06-01):** the authoritative, type-ENFORCED copy of this
+> mapping now lives in `AUDIT_ACTION_ENTITY_TYPE_MAP` in `src/lib/audit.ts`. The
+> `AuditEvent` payload is a discriminated union derived from that map, so a call
+> site pairing the wrong `entity_type` with an `action` is a compile error — not
+> a silent JSONB drift. This table is the prose companion; when the two disagree
+> the code map wins (it is the one tsc checks). In B4c three map entries were
+> reconciled to remove definition-site drift (the map had `trades_upload` /
+> `allocation` / `contact_request` for `trades.upload` / `allocator.holdings.*` /
+> `intro.send_failed`; the call sites + this table already used `strategy` /
+> `api_key` / `strategy`, so the reconciliation changed no emission).
+
 | Action | entity_type | entity_id source | Metadata keys |
 |--------|-------------|------------------|---------------|
 | `api_key.decrypt` | `api_key` | `api_keys.id` (the key whose ciphertext was decrypted) | route, reason |
 | `intro.send` | `contact_request` | `contact_requests.id` (the newly inserted intro row) | source, strategy_id, replacement_for |
+| `intro.send_failed` | `strategy` | `strategies.id` — the FAILURE path has no `contact_request` row yet (the RPC that would create it failed), so the forensic row anchors to the stable `strategy_id` rather than a non-existent contact_request id (B4c reconciliation; entity_type pairs with entity_id) | path, allocator_id, error_code, reason |
 | `deletion.request.create` | `data_deletion_request` | `data_deletion_requests.id` (the intake row) | — |
 | `role.grant` | `user_app_role` | target user's `auth.users.id` (NOT a user_app_roles row id — the (user_id, role) composite PK has no standalone UUID) | role, granted_by |
 | `role.revoke` | `user_app_role` | target user's `auth.users.id` | role, revoked_by, removed_rows |

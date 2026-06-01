@@ -65,13 +65,17 @@ import type { AuditEvent } from "./audit";
 const DUMMY_USER = "00000000-0000-0000-0000-000000000001";
 const DUMMY_ENTITY = "00000000-0000-0000-0000-0000000000a0";
 
+// B4c: AuditEvent is a discriminated union now; a `Partial<AuditEvent>` spread
+// can't be reconciled to a single arm. Test-only factory that builds arbitrary
+// events for runtime-behaviour assertions, so it casts. (Production call sites
+// keep the full by-construction action↔entity_type pairing check.)
 function event(overrides: Partial<AuditEvent> = {}): AuditEvent {
   return {
     action: "intro.send",
     entity_type: "contact_request",
     entity_id: DUMMY_ENTITY,
     ...overrides,
-  };
+  } as AuditEvent;
 }
 
 // ---------------------------------------------------------------------------

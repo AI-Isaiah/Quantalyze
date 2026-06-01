@@ -39,6 +39,13 @@ import {
 const DUMMY_USER = "00000000-0000-0000-0000-000000000001";
 const DUMMY_ENTITY = "00000000-0000-0000-0000-0000000000a0";
 
+// B4c: AuditEvent is now a discriminated union (entity_type pinned per action
+// arm), so a `Partial<AuditEvent>` spread cannot be statically reconciled to a
+// single arm. This is a TEST factory that deliberately builds arbitrary events
+// — including intentionally map-violating pairings — to exercise runtime emit
+// behaviour, so it casts. Production call sites still get the full
+// by-construction action↔entity_type pairing check; this escape hatch is
+// test-only.
 function event(overrides: Partial<AuditEvent> = {}): AuditEvent {
   return {
     action: "intro.send",
@@ -46,7 +53,7 @@ function event(overrides: Partial<AuditEvent> = {}): AuditEvent {
     entity_id: DUMMY_ENTITY,
     metadata: { source: "test" },
     ...overrides,
-  };
+  } as AuditEvent;
 }
 
 /**
@@ -85,6 +92,33 @@ describe("logAuditEvent — fire-and-forget contract (orthogonal invariants)", (
       event(),
     );
     expect(result).toBeUndefined();
+  });
+
+  it("swallows a HARD emit rejection (42501) inside after() so it never surfaces as an unhandled rejection — B4c tier-1 drop-tolerance contract (H-0278/M-1157)", async () => {
+    // A 42501 makes emit() classify permission_denied and RE-THROW (verified in
+    // audit-emit-typed-dispatch.test.ts). The fire-and-forget tier wraps that
+    // throw in `after(() => emit(...).catch(() => {}))`, so the scheduled
+    // callback MUST resolve — the re-throw is reported to Sentry/console but is
+    // never propagated to the after() scheduler (where it would become an
+    // unhandled rejection that pollutes the runtime). This pins the documented
+    // drop-tolerance contract. Mutation check: delete the `.catch(() => {})` in
+    // logAuditEvent and the scheduled() promise rejects → this test fails.
+    const rpc = vi.fn().mockResolvedValue({
+      error: { code: "42501", message: "permission denied for table audit_log" },
+    });
+    const client = { rpc };
+
+    const result = logAuditEvent(
+      client as unknown as Parameters<typeof logAuditEvent>[0],
+      event({ action: "role.grant", entity_type: "user_app_role" }),
+    );
+    // Caller observes nothing (void, not awaitable).
+    expect(result).toBeUndefined();
+
+    // The scheduled after() callback resolves despite emit() rejecting under it.
+    const scheduled = afterSpy.mock.calls.at(-1)?.[0] as () => Promise<void>;
+    expect(scheduled).toBeTypeOf("function");
+    await expect(Promise.resolve(scheduled())).resolves.toBeUndefined();
   });
 
   it("invokes the RPC with the expected argument shape", async () => {
