@@ -847,10 +847,14 @@ async def _okx_bills_fetch_with_backoff(
     """Fetch one OKX bills page, retrying transient 429s with backoff+jitter.
 
     Only ``RateLimitExceeded``/``DDoSProtection`` are retried; every other
-    exception (and a 429 that survives all retries) propagates unchanged so the
-    caller's NEW-C13-04 guard still rejects a genuinely incomplete series
-    rather than treating a truncated fetch as canonical daily PnL. Jitter
-    spreads the concurrent keys' retries so they don't thunder back in lockstep.
+    exception (and a 429 that survives all retries) is re-raised. It then hits
+    ``fetch_daily_pnl``'s outer ``except`` (which records the
+    ``daily_pnl_fetch_error`` DQ flag and returns the as-yet-unaggregated —
+    i.e. empty — series), so a persistent 429 yields NO data, never a silently
+    truncated one. This helper does NOT change that downstream behaviour; it
+    only adds recovery for the *transient* burst case so the common 429 stops
+    zeroing out the whole fetch. Jitter spreads the concurrent keys' retries so
+    they don't thunder back in lockstep.
     """
     method = getattr(exchange, method_name)
     for attempt in range(OKX_BILLS_MAX_RETRIES):
